@@ -98,6 +98,7 @@ pub struct CompileRequest {
     reason = "One bounded worker slot retains the captured save snapshot inline without per-job boxing"
 )]
 pub enum Work {
+    PrepareAnalysisFastener(super::analysis::FaceRequest),
     PrepareAnalysisFace(super::analysis::FaceRequest),
     RunAnalysis(spiling_analysis::run::RunCapture),
     GetAnalysisResult(Arc<spiling_core::AnalysisResultAsset>),
@@ -228,6 +229,7 @@ pub struct Imported {
     reason = "The single native worker returns bounded products without extra heap indirection"
 )]
 pub enum Product {
+    AnalysisFastenerPrepared(spiling_contracts::analysis::fastener::AnalysisFastenerPreparation),
     AnalysisFacePrepared(spiling_contracts::analysis::load::AnalysisFacePreparation),
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     StorageMaintained(super::storage::MaintenanceProduct),
@@ -370,6 +372,13 @@ fn run(
         let report = |stage: String| *progress.lock() = Some((job, stage));
         let mut display_work = GeometryWorkBudget::query();
         let result = match work {
+            Work::PrepareAnalysisFastener(request) => definitions
+                .get(&request.reference.definition_id)
+                .ok_or_else(|| JobError::from(super::unknown()))
+                .and_then(|resident| {
+                    super::analysis::prepare_fastener(&resident.definition, request, &cancel)
+                })
+                .map(Product::AnalysisFastenerPrepared),
             Work::PrepareAnalysisFace(request) => definitions
                 .get(&request.reference.definition_id)
                 .ok_or_else(|| JobError::from(super::unknown()))
@@ -1137,6 +1146,18 @@ fn validate_analysis_targets(
             for load in &record.case.loads {
                 super::analysis::validate_contact(definition, load, cancel)?;
             }
+            for fastener in &record.case.fasteners {
+                super::analysis::validate_fastener(definition, fastener, cancel)?;
+            }
+        }
+    }
+    for asset in loaded.analysis_results.values() {
+        if &asset.summary.case.case.definition_id == definition.id() {
+            super::analysis::validate_mesh_profile(
+                definition,
+                &asset.summary.mesh_geometry,
+                cancel,
+            )?;
         }
     }
     Ok(())

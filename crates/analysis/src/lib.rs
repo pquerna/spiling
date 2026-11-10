@@ -3,7 +3,10 @@
 // Licensed under the Open Software License version 3.0
 
 //! Print-aware numerical model consumers; native source authority stays in geometry.
+mod connector;
+mod curved;
 mod element;
+mod mapped;
 mod mesh;
 pub mod native;
 pub mod run;

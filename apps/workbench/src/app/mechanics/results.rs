@@ -153,7 +153,13 @@ impl Workbench {
                 .ok()
                 .filter(|settings| settings.validate().is_ok());
             if parsed.is_none() {
-                self.primary_button(ui, Action::LoadAnalysisModel);
+                ui.weak("Choose an explicit assumed-material model.");
+                if ui::primary(ui, "Use assumed reference", None)
+                    && let Err(error) = self.mechanics.select_reference_model()
+                {
+                    self.local_problem = Some(error);
+                }
+                ui.weak("6 walls · 30% infill · 0.25 mm layers · uncalibrated");
                 ui.separator();
                 return;
             }
@@ -161,8 +167,8 @@ impl Workbench {
                 Some("Wait for the current operation")
             } else if stale {
                 Some("Project changed; reselect the case")
-            } else if parsed.is_none() {
-                Some("Choose a compatible assumed-material model")
+            } else if draft.value.mode == AnalysisMode::Enhanced {
+                Some("Enhanced execution is unavailable in this macro backend; choose Basic")
             } else {
                 None
             };
@@ -240,6 +246,14 @@ impl Workbench {
                 .max_height(540.0).vscroll(true).show(ui.ctx(), |ui| {
                     ui.strong("Assumed directional wall / skin / effective core");
                     ui.label("Tied interfaces. Not calibrated strength, resolved roads or qualified Basic/Enhanced. Algebraic checks do not establish discretization or material accuracy.");
+                    connection_evidence(ui);
+                    ui.label(match &summary.mesh_geometry {
+                        spiling_contracts::analysis::fastener::AnalysisMeshGeometry::AffineHex27 {} => "Affine Hex27 · native orthogonal construction",
+                        spiling_contracts::analysis::fastener::AnalysisMeshGeometry::RationalBoredPlate { .. } => "Rational Hex27 · native circular bore retained",
+                    });
+                    for response in &summary.fastener_responses {
+                        ui.label(format!("Fastener {} · {:.3} mm² · reaction {:?} N · source-origin moment {:?} N·mm · constraint error {:.3e} mm", response.fastener_id, response.area_mm2, response.reaction_force_n, response.reaction_moment_n_mm, response.maximum_constraint_error_mm));
+                    }
                     ui.label(format!("{} cells · {} DOFs · CPU FP64", summary.elements, summary.dofs));
                     ui.label("The 3D surface displays constant cell-centroid values on the exterior finite-element faces. No stress smoothing, road maxima or deformed geometry is inferred. Hover a cell to inspect its sample. Layer-normal stress is signed.");
                     ui.label(format!("Concentration radius {:.3} mm; nominal deposited-volume normalization", summary.concentration_radius_mm));
@@ -268,7 +282,14 @@ impl Workbench {
     }
 
     pub(super) fn mechanics_model(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("Model", |ui| {
+        ui.collapsing("Model · assumed materials", |ui| {
+            ui.weak("Reference: 6 walls · 30% infill · 0.25 mm layers");
+            if ui.button("Use assumed reference").clicked()
+                && let Err(error) = self.mechanics.select_reference_model()
+            {
+                self.local_problem = Some(error);
+            }
+            ui.weak("Explicit uncalibrated wall, skin and effective-core laws.");
             if let Ok(mut settings) =
                 serde_json::from_str::<AnalysisRunSettings>(&self.mechanics.settings_json)
             {
@@ -293,9 +314,9 @@ impl Workbench {
             } else {
                 ui.weak("No valid model selected");
             }
-            self.button(ui, Action::LoadAnalysisModel);
         });
         ui.collapsing("Advanced model data", |ui| {
+            self.button(ui, Action::LoadAnalysisModel);
             if ui
                 .add(
                     egui::TextEdit::multiline(&mut self.mechanics.settings_json)
@@ -311,4 +332,10 @@ impl Workbench {
             }
         });
     }
+}
+
+pub(super) fn connection_evidence(ui: &mut egui::Ui) {
+    ui.strong("Ideal connection");
+    ui.label("Connections couple finite native regions to a fixed reference. Fastener failure is excluded; the printed material retains its stress and stiffness response. No reinforcement is added.");
+    ui.label("Clamp assumes an ideal annular seat without preload or friction qualification. Threaded attachment declares bonded engagement; thread geometry, pull-out strength and thread failure are not qualified. Pin slide/spin freedoms may require another support.");
 }

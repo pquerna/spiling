@@ -160,6 +160,7 @@ message NativeOperationResult {
     AnalysisCompletedResult analysis_completed = 19;
     AnalysisResultPrepared analysis_result_prepared = 20;
     AnalysisFacePreparation analysis_face_prepared = 21;
+    AnalysisFastenerPreparation analysis_fastener_prepared = 22;
   }
 }
 

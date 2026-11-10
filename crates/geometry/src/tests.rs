@@ -760,3 +760,194 @@ fn arbitrary_native_rim_subdivisions_preserve_full_face_but_short_steps_refuse()
         }
     }
 }
+
+#[test]
+fn bored_plate_split_frozen_native_capture() {
+    assert_bored_plate_capture("through-hole.step", &[57, 64]);
+}
+#[test]
+fn bored_plate_occt_frozen_native_capture() {
+    assert_bored_plate_capture("independent-exporters/occt-through-hole-mm.step", &[402]);
+}
+fn assert_bored_plate_capture(name: &str, expected_bores: &[u64]) {
+    let definition = load(name);
+    let before = (
+        definition.id().clone(),
+        definition.bounds_mm(),
+        definition.retained_query_proof_bytes(),
+    );
+    let mut work = GeometryWorkBudget::query();
+    let receipt = definition
+        .bored_plate_with_work(&mut work, &AtomicBool::new(false))
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    eprintln!("bored-plate {name}: {receipt:?}");
+    assert_eq!(
+        receipt.bore_faces(),
+        expected_bores
+            .iter()
+            .map(|&id| FaceId::from_step_entity(id).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(receipt.center_mm(), [10.0, 10.0]);
+    assert_eq!(receipt.outer_xy_mm(), [[0.0, 0.0], [20.0, 20.0]]);
+    let (caps, outer) = if expected_bores.len() == 2 {
+        ([18, 71], [50, 36, 29, 43])
+    } else {
+        ([342, 213], [17, 395, 137, 293])
+    };
+    assert_eq!(
+        receipt.cap_faces(),
+        &caps.map(|id| FaceId::from_step_entity(id).unwrap())
+    );
+    assert_eq!(
+        receipt.outer_faces(),
+        &outer.map(|id| FaceId::from_step_entity(id).unwrap())
+    );
+    for owner in receipt.bore_face_angles() {
+        let owned: f64 = owner.intervals_radians.iter().map(|[a, b]| b - a).sum();
+        close(
+            owned,
+            std::f64::consts::TAU / expected_bores.len() as f64,
+            1e-10,
+        );
+    }
+    assert_eq!(
+        definition
+            .bored_plate_with_work(&mut GeometryWorkBudget::new(0), &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    close(receipt.radius_mm(), 3.0, 1e-7);
+    close(receipt.height_mm()[0], 0.0, 1e-7);
+    close(receipt.height_mm()[1], 8.0, 1e-7);
+    let angular: f64 = receipt
+        .bore_face_angles()
+        .iter()
+        .flat_map(|a| &a.intervals_radians)
+        .map(|[a, b]| b - a)
+        .sum();
+    close(angular, std::f64::consts::TAU, 1e-10);
+    assert_eq!(receipt, definition.bored_plate().unwrap());
+    assert_eq!(
+        definition
+            .bored_plate_with_work(&mut work, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::Cancelled
+    );
+    assert_eq!(
+        before,
+        (
+            definition.id().clone(),
+            definition.bounds_mm(),
+            definition.retained_query_proof_bytes()
+        )
+    );
+}
+#[test]
+fn bored_plate_blind_outward_and_solid_refusals() {
+    for name in [
+        "independent-exporters/occt-rounded-housing-mm.step",
+        "cylinder.step",
+        "independent-exporters/occt-cylinder-mm.step",
+        "box-mm.step",
+        "retained-sources/native-parity-blind-pocket.step",
+        "certificates/stepped-periodic-cylinder-rim-3.step",
+    ] {
+        let definition = load(name);
+        let error = definition.bored_plate().unwrap_err();
+        eprintln!("bored-plate refusal {name}: {error:?}");
+        assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry, "{name}");
+    }
+}
+
+#[test]
+fn bored_plate_whole_closed_slab_source_leaf_capture() {
+    use spiling_contracts::geometry::{OccurrenceId, RigidPoseMm};
+    let cancel = AtomicBool::new(false);
+    let mut successes = 0;
+    for name in [
+        "through-hole.step",
+        "independent-exporters/occt-through-hole-mm.step",
+    ] {
+        let definition = load(name);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let result = (|| -> Result<_, GeometryError> {
+            let prepared =
+                prepare_solid(&definition, MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)?;
+            let slab = prepared.analyze_placed_slab(
+                &PlacedSlabRequest {
+                    pose: RigidPoseMm::IDENTITY,
+                    world_height_interval_mm: [0.0, 8.0],
+                    sample_world_z_mm: 4.0,
+                    native_shape_error_mm: 0.02,
+                },
+                MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel,
+            )?;
+            let leaf = certify_native_source_leaf(
+                &SourceLeafRequest {
+                    source: &prepared,
+                    occurrence_id: &OccurrenceId::new(1).unwrap(),
+                    pose: RigidPoseMm::IDENTITY,
+                    analysis: &slab,
+                    actual_used_source_loops: &slab.section().loops,
+                    policy: NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
+                },
+                &mut work,
+                &cancel,
+            )?;
+            Ok((leaf.proof_kind(), leaf.closed_shape_error_mm()))
+        })();
+        eprintln!(
+            "whole CLOSED slab/source-leaf {name}, Z=[0,8], sample=4, shape=0.02: {result:?}"
+        );
+        if matches!(result, Ok((NativeSourceLeafProofKind::ClosedSlab, Some(_)))) {
+            successes += 1;
+        }
+    }
+    assert_eq!(
+        successes, 2,
+        "both unchanged sources require actual whole CLOSED-slab leaves"
+    );
+}
+
+#[test]
+fn bored_plate_refuses_inconsistent_source_identity_coefficients_and_material_sense() {
+    let mut definition = load("through-hole.step");
+    let index = definition
+        .faces
+        .iter()
+        .position(|f| f.face_id == FaceId::from_step_entity(57).unwrap())
+        .unwrap();
+    if let Some(AnalyticSurfaceDescription::Cylinder { radius_mm, .. }) =
+        &mut definition.faces[index].geometry.analytic
+    {
+        *radius_mm += 0.5;
+    }
+    assert_eq!(
+        definition.bored_plate().unwrap_err().code,
+        GeometryErrorCode::KernelFailure
+    );
+    let mut definition = load("through-hole.step");
+    definition.faces[index].orientation = true;
+    assert_eq!(
+        definition.bored_plate().unwrap_err().code,
+        GeometryErrorCode::UnsupportedGeometry
+    );
+    let mut definition = load("through-hole.step");
+    let index = definition
+        .faces
+        .iter()
+        .position(|f| f.face_id == FaceId::from_step_entity(18).unwrap())
+        .unwrap();
+    definition.faces[index].surface_face_entity = "99999".to_string();
+    assert_eq!(
+        definition.bored_plate().unwrap_err().code,
+        GeometryErrorCode::KernelFailure
+    );
+}

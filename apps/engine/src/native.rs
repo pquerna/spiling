@@ -556,6 +556,7 @@ fn publish_terminal(
             | geometry::JobResult::LayoutPrepared { .. }
             | geometry::JobResult::BedPosePrepared { .. }
             | geometry::JobResult::AnalysisFacePrepared { .. }
+            | geometry::JobResult::AnalysisFastenerPrepared { .. }
             | geometry::JobResult::OpticalConstructionApplied { .. }
             | geometry::JobResult::ProjectStorageMaintained { .. }
     ) {
@@ -798,6 +799,9 @@ fn public_result(
         geometry::JobResult::LayoutPrepared { proposal } => Public::LayoutPrepared { proposal },
         geometry::JobResult::BedPosePrepared { preparation } => {
             Public::BedPosePrepared { preparation }
+        }
+        geometry::JobResult::AnalysisFastenerPrepared { preparation } => {
+            Public::AnalysisFastenerPrepared { preparation }
         }
         geometry::JobResult::AnalysisFacePrepared { preparation } => {
             Public::AnalysisFacePrepared { preparation }

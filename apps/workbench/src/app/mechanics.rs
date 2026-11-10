@@ -6,6 +6,7 @@ use spiling_contracts::{
     analysis::*,
     project::{ProjectCommand, ProjectId, ProjectRevision},
 };
+mod fastener;
 mod load;
 mod results;
 mod tool;
@@ -13,6 +14,7 @@ mod tool;
 #[derive(Default)]
 pub(super) struct MechanicsUi {
     tool: tool::Tool,
+    fastener: fastener::Tool,
     apply_requested: bool,
     controls: std::collections::BTreeMap<FaceId, load::Control>,
     settings_json: String,
@@ -46,6 +48,13 @@ impl Draft {
     }
 }
 impl MechanicsUi {
+    fn select_reference_model(&mut self) -> Result<(), String> {
+        self.settings_json = serde_json::to_string_pretty(&crate::mechanics::reference_model()?)
+            .map_err(|error| error.to_string())?;
+        self.settings_initialized = true;
+        Ok(())
+    }
+
     fn hydrate_settings(
         &mut self,
         settings: &spiling_contracts::analysis::mechanics::AnalysisRunSettings,
@@ -91,6 +100,7 @@ impl Workbench {
         };
         self.mechanics.controls.clear();
         self.mechanics.tool = Default::default();
+        self.mechanics.fastener.reset_selection();
         if self.subject_drafts() {
             self.navigation = Some(navigation::Navigation::AnalysisCase(id));
             return;
@@ -125,6 +135,7 @@ impl Workbench {
     }
     pub(super) fn reconcile_mechanics(&mut self) {
         self.finish_force_placement();
+        self.reconcile_fastener();
         let adopted = self
             .state
             .mechanics
@@ -296,7 +307,12 @@ impl Workbench {
                 draft.project == capture.project && draft.value.id == capture.summary.case.case.id
             })
         });
-        if has_result && (self.mechanics.tool.selected.is_some() || self.mechanics.tool.armed) {
+        if has_result
+            && (self.mechanics.tool.selected.is_some()
+                || self.mechanics.tool.armed
+                || self.mechanics.fastener.selected.is_some()
+                || self.mechanics.fastener.armed)
+        {
             ui.collapsing("Result · assumed materials", |ui| {
                 self.mechanics_results(ui, ready)
             });
@@ -306,6 +322,7 @@ impl Workbench {
         if can_create && create_case {
             self.mechanics.controls.clear();
             self.mechanics.tool = Default::default();
+            self.mechanics.fastener.reset_selection();
             let (occurrence, definition) = subject.expect("selected native subject");
             let name = (1..=MAX_ANALYSIS_CASES + 1)
                 .map(|index| format!("Load case {index}"))
@@ -327,6 +344,7 @@ impl Workbench {
                     source_hash: definition.provenance.source_hash,
                     mode: AnalysisMode::Basic,
                     loads: vec![],
+                    fasteners: vec![],
                     restraints: vec![],
                 },
             });
@@ -340,14 +358,25 @@ impl Workbench {
             || draft.session != hello.session_id
             || draft.value.layout_id != project.layout_id;
         let stale = draft.base != project.revision || invalid_context;
+        self.fastener_inspector(
+            ui,
+            ready && !project.read_only && !stale && draft.submitted.is_none(),
+        );
         ui.push_id("mechanics-case-body", |ui| {
             let draft = self.mechanics.draft.as_mut().expect("case draft");
             ui.add_enabled_ui(
                 ready && !project.read_only && !stale && draft.submitted.is_none(),
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.toggle_value(&mut self.mechanics.tool.armed, "Apply force")
-                            .on_hover_text("Click a face to place a force");
+                        if ui
+                            .toggle_value(&mut self.mechanics.tool.armed, "Apply force")
+                            .on_hover_text("Click a face to place a force")
+                            .changed()
+                            && self.mechanics.tool.armed
+                        {
+                            self.mechanics.fastener.cancel();
+                            self.mechanics.fastener.selected = None;
+                        }
                         if self.mechanics.tool.armed && ui.small_button("Cancel").clicked() {
                             self.mechanics.tool.armed = false;
                             self.mechanics.tool.pending = None;
@@ -452,6 +481,8 @@ impl Workbench {
                                     .clicked()
                                 {
                                     self.mechanics.tool.selected = Some(load.face_id.clone());
+                                    self.mechanics.fastener.cancel();
+                                    self.mechanics.fastener.selected = None;
                                     if let Some(scene) = &self.state.scene {
                                         self.queued_project =
                                             Some(ProjectCommand::PrepareAnalysisFace {
@@ -637,6 +668,22 @@ impl Workbench {
 mod tests {
     use super::*;
     #[test]
+    fn fastener_reference_model_requires_explicit_selection_and_preserves_its_assumptions() {
+        let mut ui = MechanicsUi::default();
+        assert!(ui.settings_json.is_empty());
+        assert!(!ui.settings_initialized);
+        ui.select_reference_model().unwrap();
+        let selected: spiling_contracts::analysis::mechanics::AnalysisRunSettings =
+            serde_json::from_str(&ui.settings_json).unwrap();
+        selected.validate().unwrap();
+        assert_eq!(selected, crate::mechanics::reference_model().unwrap());
+        assert_eq!(selected.recipe.infill_fraction, 0.3);
+        assert!(!selected.laws.justification.is_empty());
+        let mut incompatible = selected;
+        incompatible.recipe.infill_fraction = 0.6;
+        assert!(incompatible.validate().is_err());
+    }
+    #[test]
     fn captured_settings_hydrate_once_and_preserve_deliberately_empty_drafts() {
         let settings = serde_json::from_str(include_str!(
             "../../../../fixtures/analysis/hook-assumptions.json"
@@ -678,6 +725,7 @@ mod tests {
                 source_hash: SourceHash::from_digest(&[42; 32]),
                 mode: AnalysisMode::Basic,
                 loads: vec![],
+                fasteners: vec![],
                 restraints: vec![],
             },
         }

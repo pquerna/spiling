@@ -117,6 +117,7 @@ impl Artifact {
     }
 }
 enum Purpose {
+    PrepareAnalysisFastener,
     PrepareAnalysisFace,
     GetAnalysisResult,
     RunAnalysis {
@@ -158,6 +159,7 @@ struct Publication {
     reason = "Single-writer bounded publication values stay inline without extra heap indirection"
 )]
 enum PublicationKind {
+    AnalysisFastenerPrepared(spiling_contracts::analysis::fastener::AnalysisFastenerPreparation),
     AnalysisFacePrepared(spiling_contracts::analysis::load::AnalysisFacePreparation),
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     Import {
@@ -225,6 +227,8 @@ struct Active {
 /// Native values exist exclusively on Worker; publication is a two-phase ACK boundary.
 pub struct Runtime {
     prepared_analysis_faces: Vec<spiling_contracts::analysis::load::AnalysisFacePreparation>,
+    prepared_analysis_fasteners:
+        Vec<spiling_contracts::analysis::fastener::AnalysisFastenerPreparation>,
     analysis_publication: Option<(JobId, Arc<spiling_analysis::run::RunProduct>)>,
     analysis_candidate: Option<Arc<spiling_analysis::run::RunProduct>>,
     pub session_id: SessionId,
@@ -270,6 +274,7 @@ impl Runtime {
             analysis_publication: None,
             analysis_candidate: None,
             prepared_analysis_faces: Vec::new(),
+            prepared_analysis_fasteners: Vec::new(),
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
@@ -467,6 +472,7 @@ impl Runtime {
                                 | Purpose::RunAnalysis { .. }
                                 | Purpose::GetAnalysisResult
                                 | Purpose::PrepareAnalysisFace
+                                | Purpose::PrepareAnalysisFastener
                                 | Purpose::GetAppearanceReport
                                 | Purpose::CompareOptical
                                 | Purpose::MatchStock
@@ -806,6 +812,17 @@ impl Runtime {
                             self.layout_proposal = Some(proposal.clone());
                             Some(JobResult::LayoutPrepared { proposal })
                         }
+                        PublicationKind::AnalysisFastenerPrepared(preparation) => {
+                            self.prepared_analysis_fasteners
+                                .retain(|face| face.reference != preparation.reference);
+                            if self.prepared_analysis_fasteners.len()
+                                >= spiling_contracts::analysis::MAX_ANALYSIS_PATCHES * 2
+                            {
+                                self.prepared_analysis_fasteners.remove(0);
+                            }
+                            self.prepared_analysis_fasteners.push(preparation.clone());
+                            Some(JobResult::AnalysisFastenerPrepared { preparation })
+                        }
                         PublicationKind::AnalysisFacePrepared(preparation) => {
                             self.prepared_analysis_faces
                                 .retain(|face| face.reference != preparation.reference);
@@ -882,6 +899,20 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::PrepareAnalysisFastener, Product::AnalysisFastenerPrepared(preparation)) => {
+                preparation.validate()?;
+                if preparation.reference.session_id != self.session_id
+                    || preparation.reference.scene_revision != active.base
+                    || preparation.project_revision != active.project_base
+                    || preparation.project_id != self.project.info().project_id
+                {
+                    return Err(stale().into());
+                }
+                Ok(Publication {
+                    kind: PublicationKind::AnalysisFastenerPrepared(preparation),
+                    artifact: None,
+                })
+            }
             (Purpose::PrepareAnalysisFace, Product::AnalysisFacePrepared(preparation)) => {
                 preparation.validate()?;
                 if preparation.reference.session_id != self.session_id
@@ -2236,6 +2267,11 @@ impl Runtime {
                 base_revision,
                 input_hash,
             } => self.attach_analysis_result(&session_id, base_revision, &input_hash),
+            ProjectCommand::PrepareAnalysisFastener {
+                session_id,
+                base_revision,
+                reference,
+            } => self.prepare_analysis_fastener(&session_id, base_revision, reference),
             ProjectCommand::PrepareAnalysisFace {
                 session_id,
                 base_revision,
@@ -2358,6 +2394,45 @@ impl Runtime {
                         let prepared = self.prepared_analysis_faces.iter().find(|face| face.project_id == self.project.info().project_id && face.source_hash == case.source_hash && face.reference.session_id == self.session_id && face.reference.scene_revision == self.revision && face.reference.definition_id == case.definition_id && face.reference.occurrence_id == case.occurrence_id && face.reference.face_id == load.face_id)
                             .ok_or_else(|| project_error(ProjectErrorCode::InvalidProject, "prepare the native analysis face before assigning a new contact footprint"))?;
                         prepared.contact(&load.footprint)?;
+                    }
+                    for fastener in &case.fasteners {
+                        let prepared =
+                            self.prepared_analysis_fasteners.iter().find(|preparation| {
+                                preparation.project_id == self.project.info().project_id
+                                    && preparation.source_hash == case.source_hash
+                                    && preparation.reference.session_id == self.session_id
+                                    && preparation.reference.scene_revision == self.revision
+                                    && preparation.reference.definition_id == case.definition_id
+                                    && preparation.reference.occurrence_id == case.occurrence_id
+                                    && preparation.hole == fastener.hole
+                            });
+                        let retained =
+                            self.project.snapshot().analysis.cases.iter().any(|record| {
+                                record.case.definition_id == case.definition_id
+                                    && record.case.source_hash == case.source_hash
+                                    && record
+                                        .case
+                                        .fasteners
+                                        .iter()
+                                        .any(|old| old.hole == fastener.hole)
+                            });
+                        if prepared.is_none() && !retained {
+                            return Err(project_error(
+                                ProjectErrorCode::InvalidProject,
+                                "select and prepare the complete native mounting hole before attaching a fastener",
+                            ));
+                        }
+                        if let Some(preparation) = prepared {
+                            if let spiling_contracts::analysis::fastener::FastenerAttachment::Clamp { washer_diameter_mm, .. } = fastener.attachment
+                                && washer_diameter_mm > preparation.washer_limit_mm() {
+                                return Err(project_error(ProjectErrorCode::InvalidProject, "washer extends beyond the mounting face; reduce its diameter"));
+                            }
+                        } else if let spiling_contracts::analysis::fastener::FastenerAttachment::Clamp { washer_diameter_mm, .. } = fastener.attachment {
+                            let old_limit = self.project.snapshot().analysis.cases.iter().flat_map(|record| &record.case.fasteners).find(|old| old.hole == fastener.hole).and_then(|old| match old.attachment {spiling_contracts::analysis::fastener::FastenerAttachment::Clamp {washer_diameter_mm, ..} => Some(washer_diameter_mm), _ => None});
+                            if old_limit.is_none_or(|limit| washer_diameter_mm > limit) {
+                                return Err(project_error(ProjectErrorCode::InvalidProject, "prepare the native hole again before enlarging its washer"));
+                            }
+                        }
                     }
                 }
                 self.commit_metadata_edit(Edit::Analysis { edit })
@@ -2606,6 +2681,7 @@ impl Runtime {
         let stage = match &purpose {
             Purpose::RunAnalysis { .. } => "solving_assumed_printed_equilibrium",
             Purpose::PrepareAnalysisFace => "preparing_native_load_face",
+            Purpose::PrepareAnalysisFastener => "preparing_native_mounting_hole",
             Purpose::GetAnalysisResult => "reading_portable_analysis_fields",
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
@@ -2749,6 +2825,7 @@ fn cancelled(purpose: &Purpose) -> JobError {
         | Purpose::GetSurfaceImage
         | Purpose::GetAnalysisResult
         | Purpose::PrepareAnalysisFace
+        | Purpose::PrepareAnalysisFastener
         | Purpose::ApplyOpticalConstruction => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",

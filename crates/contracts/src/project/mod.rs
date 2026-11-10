@@ -442,6 +442,11 @@ pub enum ProjectCommand {
         base_revision: ProjectRevision,
         input_hash: SourceHash,
     },
+    PrepareAnalysisFastener {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: FaceRef,
+    },
     PrepareAnalysisFace {
         session_id: SessionId,
         base_revision: ProjectRevision,

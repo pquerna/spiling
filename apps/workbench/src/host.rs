@@ -86,6 +86,8 @@ pub struct ProcessEditReceipt {
 }
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub analysis_fasteners:
+        Vec<Arc<spiling_contracts::analysis::fastener::AnalysisFastenerPreparation>>,
     pub analysis_faces: Vec<Arc<spiling_contracts::analysis::load::AnalysisFacePreparation>>,
     pub analysis_model: Option<Arc<spiling_contracts::analysis::mechanics::AnalysisRunSettings>>,
     pub mechanics_previous: Option<Arc<crate::assets::MechanicsCapture>>,
@@ -127,6 +129,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            analysis_fasteners: Vec::new(),
             analysis_faces: Vec::new(),
             analysis_model: None,
             mechanics_previous: None,
@@ -1316,6 +1319,16 @@ impl Actor {
                         && scene.revision == face.reference.scene_revision
                 })
         });
+        self.state.analysis_fasteners.retain(|prepared| {
+            self.state
+                .project
+                .as_ref()
+                .is_some_and(|project| project.project_id == prepared.project_id)
+                && self.state.scene.as_ref().is_some_and(|scene| {
+                    scene.session_id == prepared.reference.session_id
+                        && scene.revision == prepared.reference.scene_revision
+                })
+        });
         self.state.layout_overview = Some(Arc::new(overview));
         self.schedule_display();
         self.restore_mechanics();
@@ -1970,6 +1983,7 @@ impl Actor {
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
                 self.state.analysis_model = None;
                 self.state.analysis_faces.clear();
+                self.state.analysis_fasteners.clear();
                 self.mechanics_restore_key = None;
                 self.state.mechanics = None;
                 self.state.mechanics_previous = None;
@@ -2049,6 +2063,31 @@ impl Actor {
                     | JobResult::OpticalConstructionApplied { .. },
                 ),
             ) if completed => {}
+            (Receipt::Project, Some(JobResult::AnalysisFastenerPrepared { preparation }))
+                if completed =>
+            {
+                self.refresh_after_failure().await;
+                if preparation.validate().is_ok()
+                    && self.state.project.as_ref().is_some_and(|project| {
+                        project.project_id == preparation.project_id
+                            && project.revision == preparation.project_revision
+                    })
+                    && self.state.scene.as_ref().is_some_and(|scene| {
+                        scene.session_id == preparation.reference.session_id
+                            && scene.revision == preparation.reference.scene_revision
+                    })
+                {
+                    self.state
+                        .analysis_fasteners
+                        .retain(|old| old.reference != preparation.reference);
+                    if self.state.analysis_fasteners.len() >= 256 {
+                        self.state.analysis_fasteners.remove(0);
+                    }
+                    self.state
+                        .analysis_fasteners
+                        .push(Arc::new(preparation.clone()));
+                }
+            }
             (Receipt::Project, Some(JobResult::AnalysisFacePrepared { preparation }))
                 if completed =>
             {

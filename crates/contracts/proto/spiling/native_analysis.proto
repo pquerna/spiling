@@ -12,6 +12,27 @@ message ForceDisk { Vec3 center_mm = 1; double diameter_mm = 2; }
 message ForceFootprint { oneof kind { bool whole_face = 1; ForceDisk disk = 2; } }
 message AnalysisFaceLoad { string face_id = 1; repeated double force_n = 2; repeated double moment_n_mm = 3; ForceFootprint footprint = 4; }
 message AnalysisFaceRestraint { string face_id = 1; repeated bool fixed_translation = 2; }
+message AnalysisHole { repeated string bore_faces = 1; repeated string cap_faces = 2; Vec3 center_mm = 3; double radius_mm = 4; double depth_mm = 5; }
+enum HoleEnd { HOLE_END_UNSPECIFIED = 0; HOLE_END_START = 1; HOLE_END_END = 2; }
+message FastenerClamp { HoleEnd end = 1; double washer_diameter_mm = 2; }
+message FastenerPin { bool allow_axial_slide = 1; bool allow_spin = 2; }
+message FastenerEngagement { HoleEnd end = 1; double engagement_mm = 2; }
+message AnalysisFastener {
+ uint32 id = 1;
+ string name = 2;
+ AnalysisHole hole = 3;
+ oneof attachment { FastenerClamp clamp = 4; FastenerPin pin = 5; FastenerEngagement bonded_engagement = 6; }
+}
+message PrepareAnalysisFastenerRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; FaceRef reference = 4; }
+message AnalysisFastenerPreparation {
+ string project_id = 1;
+ uint32 project_revision = 2;
+ FaceRef reference = 3;
+ string source_hash = 4;
+ RigidPoseMm pose = 5;
+ AnalysisHole hole = 6;
+ repeated double outer_xy_mm = 7;
+}
 message AnalysisCase {
  string id = 1;
  string name = 2;
@@ -22,6 +43,7 @@ message AnalysisCase {
  AnalysisMode mode = 7;
  repeated AnalysisFaceLoad loads = 8;
  repeated AnalysisFaceRestraint restraints = 9;
+ repeated AnalysisFastener fasteners = 10;
 }
 message AnalysisCaseRecord { AnalysisCase case = 1; uint32 edited_revision = 2; }
 message AnalysisResultRecord { string case_id = 1; string hash = 2; uint32 byte_count = 3; string input_hash = 4; uint32 captured_revision = 5; }

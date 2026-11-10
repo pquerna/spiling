@@ -185,7 +185,7 @@ impl Workbench {
         })
     }
 
-    fn publish_force_gesture(&mut self, clean: bool) {
+    pub(super) fn publish_force_gesture(&mut self, clean: bool) {
         let Some(draft) = self.mechanics.draft.as_mut() else {
             return;
         };

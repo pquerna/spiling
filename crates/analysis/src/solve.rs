@@ -4,6 +4,7 @@
 
 use crate::{
     Budget,
+    connector::{self, Connectors},
     element::{self, Tensor},
     mesh::{self, Mesh},
     native::NativePrism,
@@ -29,10 +30,12 @@ pub struct PreparedOperator {
         spiling_contracts::geometry::DefinitionId,
         spiling_contracts::geometry::SourceHash,
         Vec<spiling_contracts::analysis::AnalysisFaceRestraint>,
+        Vec<spiling_contracts::analysis::fastener::AnalysisFastener>,
     ),
     pub mesh: Mesh,
     pub tensors: [Tensor; 3],
     pub fixed: Vec<bool>,
+    pub(crate) connectors: Connectors,
     free: Vec<usize>,
     symbolic: SymbolicCholesky<usize>,
     factors: Vec<f64>,
@@ -42,6 +45,7 @@ pub struct PreparedOperator {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchSample {
+    pub element_index: u32,
     pub patch_index: u32,
     pub point_mm: [f64; 3],
     pub area_mm2: f64,
@@ -57,6 +61,7 @@ pub struct ElementField {
     pub concentration: f64,
 }
 pub struct Solution {
+    pub fastener_responses: Vec<spiling_contracts::analysis::fastener::AnalysisFastenerResponse>,
     pub applied_force_n: Vec<[f64; 3]>,
     pub displacement_mm: Vec<[f64; 3]>,
     pub fields: Vec<ElementField>,
@@ -134,7 +139,7 @@ pub fn prepare(
     case.validate().map_err(|error| error.to_string())?;
     if case.mode != spiling_contracts::analysis::AnalysisMode::Basic
         || case.loads.is_empty()
-        || case.restraints.is_empty()
+        || (case.restraints.is_empty() && case.fasteners.is_empty())
     {
         return Err("UnsupportedModel: this assumed-law macro consumer requires a complete Basic case; Enhanced does not silently fall back".into());
     }
@@ -169,6 +174,7 @@ pub fn prepare(
             );
         }
     }
+    let mut connectors = Connectors::prepare(&mesh, case, budget)?;
     let mut bounds = vec![[[f64::INFINITY, f64::NEG_INFINITY]; 3]; mesh.components];
     for hex in &mesh.elements {
         for &node in &hex.nodes {
@@ -219,10 +225,41 @@ pub fn prepare(
             }
         }
     }
+    let mut node_components = vec![0; mesh.nodes.len()];
+    for hex in &mesh.elements {
+        for &node in &hex.nodes {
+            node_components[node] = hex.component;
+        }
+    }
+    for constraint in &connectors.rows {
+        let mut rows = vec![[0.0; 6]; mesh.components];
+        for &(dof, coefficient) in &constraint.values {
+            let node = dof / 3;
+            let axis = dof % 3;
+            let component = node_components[node];
+            rows[component][axis] += coefficient;
+            let centered = std::array::from_fn(|direction| {
+                mesh.nodes[node][direction] - centers[component][direction]
+            });
+            for rotation in 0..3 {
+                let unit =
+                    std::array::from_fn(|direction| if direction == rotation { 1.0 } else { 0.0 });
+                rows[component][3 + rotation] +=
+                    coefficient * cross(unit, centered)[axis] / scales[component];
+            }
+        }
+        for (component, row) in rows.iter().enumerate() {
+            for i in 0..6 {
+                for j in 0..6 {
+                    grams[component][i][j] += row[i] * row[j];
+                }
+            }
+        }
+    }
     let ranks = grams.into_iter().map(rank).collect::<Vec<_>>();
     if ranks.iter().any(|value| *value != 6) {
         return Err(format!(
-            "DisconnectedOrMechanism: rigid restraint ranks {ranks:?}, six required per component; no artificial pins"
+            "DisconnectedOrMechanism: part can still move; add another support or turn off the pin axial slide/spin (rigid restraint ranks {ranks:?}, six required per component; no artificial pins)"
         ));
     }
     let construction_ms = elapsed(started);
@@ -248,6 +285,7 @@ pub fn prepare(
         mapped[dof] = index;
     }
     let mut kernels = BTreeMap::new();
+    let mut original_diagonal = vec![0.0; free.len()];
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(mesh.elements.len() * 3321)
@@ -255,9 +293,19 @@ pub fn prepare(
     for hex in &mesh.elements {
         budget.check()?;
         let key = (hex.size.map(f64::to_bits), hex.role);
-        let matrix = kernels
-            .entry(key)
-            .or_insert_with(|| element::stiffness(hex.size, &tensors[hex.role]));
+        let curved_matrix;
+        let matrix = if hex.midpoint_weight == 1.0 {
+            kernels
+                .entry(key)
+                .or_insert_with(|| element::stiffness(hex.size, &tensors[hex.role]))
+        } else {
+            curved_matrix = crate::mapped::stiffness(
+                &hex.nodes.map(|node| mesh.nodes[node]),
+                hex.midpoint_weight,
+                &tensors[hex.role],
+            )?;
+            &curved_matrix
+        };
         for local_row in 0..81 {
             let row = mapped[3 * hex.nodes[local_row / 3] + local_row % 3];
             if row == usize::MAX {
@@ -268,11 +316,68 @@ pub fn prepare(
                 if column == usize::MAX {
                     continue;
                 }
+                if row == column {
+                    original_diagonal[row] += matrix[81 * local_row + local_column];
+                }
                 entries.push(Triplet::new(
                     row.max(column),
                     row.min(column),
                     matrix[81 * local_row + local_column],
                 ));
+            }
+        }
+    }
+    // This scale is numerical augmentation only. Exact Schur elimination below
+    // enforces C u = 0 and all final checks use the original K, not this A.
+    if !connectors.rows.is_empty() {
+        let maximum_diagonal = original_diagonal.iter().copied().fold(0.0, f64::max);
+        let maximum_row_norm = connectors
+            .rows
+            .iter()
+            .map(|row| {
+                row.values
+                    .iter()
+                    .filter(|(dof, _)| !fixed[*dof])
+                    .map(|(_, c)| c * c)
+                    .sum::<f64>()
+            })
+            .fold(0.0, f64::max);
+        connectors.alpha = maximum_diagonal / maximum_row_norm;
+        if !connectors.alpha.is_finite() || connectors.alpha <= 0.0 {
+            return Err("DisconnectedOrMechanism: no independent free attachment motion".into());
+        }
+        let additional = connectors
+            .rows
+            .iter()
+            .map(|row| {
+                let n = row.values.iter().filter(|(dof, _)| !fixed[*dof]).count();
+                n.saturating_mul(n + 1) / 2
+            })
+            .sum::<usize>();
+        if entries
+            .len()
+            .saturating_add(additional)
+            .saturating_mul(std::mem::size_of::<Triplet<usize, usize, f64>>())
+            > 512 * 1024 * 1024
+        {
+            return Err(
+                "ResourceLimit: exact distributing augmentation assembly exceeds 512 MiB".into(),
+            );
+        }
+        entries
+            .try_reserve_exact(additional)
+            .map_err(|_| "ResourceLimit: attachment augmentation reservation")?;
+        for constraint in &connectors.rows {
+            budget.check()?;
+            let row = constraint
+                .values
+                .iter()
+                .filter_map(|&(dof, c)| (!fixed[dof]).then_some((mapped[dof], c)))
+                .collect::<Vec<_>>();
+            for (i, &(a, ca)) in row.iter().enumerate() {
+                for &(b, cb) in &row[..=i] {
+                    entries.push(Triplet::new(a.max(b), a.min(b), connectors.alpha * ca * cb));
+                }
             }
         }
     }
@@ -305,7 +410,42 @@ pub fn prepare(
         dynamic_regularization_delta: 0.0,
         dynamic_regularization_epsilon: 0.0,
     };
-    symbolic.factorize_numeric_llt(&mut factors,matrix.as_ref(),Side::Lower,regularization,Par::Seq,MemStack::new(&mut scratch),Default::default()).map_err(|error|format!("DisconnectedOrMechanism: original stiffness factorization refused, no regularization: {error:?}"))?;
+    symbolic.factorize_numeric_llt(&mut factors,matrix.as_ref(),Side::Lower,regularization,Par::Seq,MemStack::new(&mut scratch),Default::default()).map_err(|error|format!("DisconnectedOrMechanism: admitted stiffness factorization refused, no regularization: {error:?}"))?;
+    budget.check()?;
+    if !connectors.rows.is_empty() {
+        let count = connectors.rows.len();
+        if free.len().saturating_mul(count).saturating_mul(16) > 128 * 1024 * 1024 {
+            return Err("ResourceLimit: exact constraint inverse columns exceed 128 MiB".into());
+        }
+        let mut columns = Mat::zeros(free.len(), count);
+        for (column, row) in connectors.rows.iter().enumerate() {
+            for &(dof, value) in &row.values {
+                if !fixed[dof] {
+                    columns[(mapped[dof], column)] = value;
+                }
+            }
+        }
+        factor_solve(&symbolic, &factors, &mut columns)?;
+        connectors.inverse_columns = (0..count)
+            .map(|column| (0..free.len()).map(|i| columns[(i, column)]).collect())
+            .collect();
+        connectors.schur = connectors
+            .rows
+            .iter()
+            .map(|row| {
+                (0..count)
+                    .map(|column| {
+                        row.values
+                            .iter()
+                            .filter(|(dof, _)| !fixed[*dof])
+                            .map(|&(dof, c)| c * columns[(mapped[dof], column)])
+                            .sum()
+                    })
+                    .collect()
+            })
+            .collect();
+        connector::dense_solve(&connectors.schur, &vec![0.0; count])?;
+    }
     budget.check()?;
     Ok(PreparedOperator {
         settings: settings.clone(),
@@ -313,10 +453,12 @@ pub fn prepare(
             case.definition_id.clone(),
             case.source_hash.clone(),
             case.restraints.clone(),
+            case.fasteners.clone(),
         ),
         mesh,
         tensors,
         fixed,
+        connectors,
         free,
         symbolic,
         factors,
@@ -326,22 +468,62 @@ pub fn prepare(
     })
 }
 
+pub(crate) fn evaluate(
+    mesh: &Mesh,
+    hex: &mesh::Hex,
+    point: [f64; 3],
+) -> Result<spiling_contracts::analysis::chart::MappedPoint, String> {
+    if hex.midpoint_weight != 1.0 {
+        return spiling_contracts::analysis::chart::mapped(
+            &hex.nodes.map(|node| mesh.nodes[node]),
+            hex.midpoint_weight,
+            point,
+        )
+        .map_err(str::to_string);
+    }
+    let (values, gradients) = element::basis(point, hex.size);
+    Ok(spiling_contracts::analysis::chart::MappedPoint {
+        position: std::array::from_fn(|axis| {
+            hex.lower[axis] + 0.5 * (point[axis] + 1.0) * hex.size[axis]
+        }),
+        values,
+        gradients,
+        tangents: std::array::from_fn(|axis| {
+            std::array::from_fn(|coordinate| {
+                if coordinate == axis {
+                    0.5 * hex.size[axis]
+                } else {
+                    0.0
+                }
+            })
+        }),
+        determinant: hex.size.iter().product::<f64>() / 8.0,
+    })
+}
+
 fn surface_quadrature(
     mesh: &Mesh,
     facet: &mesh::Facet,
     footprint: &spiling_contracts::analysis::load::ForceFootprint,
     mut visit: impl FnMut([f64; 3], f64, [f64; 27]),
-) {
+) -> Result<(), String> {
     let hex = &mesh.elements[facet.element];
-    let center = std::array::from_fn(|axis| hex.lower[axis] + hex.size[axis] * 0.5);
-    for (point, weight) in spiling_contracts::analysis::load::surface_samples(
-        footprint, center, hex.size, facet.axis, facet.side,
-    ) {
-        let local = std::array::from_fn(|axis| {
-            2.0 * (point[axis] - hex.lower[axis]) / hex.size[axis] - 1.0
-        });
-        visit(point, weight, element::basis(local, hex.size).0);
+    let nodes = hex.nodes.map(|node| mesh.nodes[node]);
+    let (axis, center, size) =
+        spiling_contracts::analysis::chart::rectangle_facet(&nodes, facet.axis, facet.side)
+            .map_err(str::to_string)?;
+    for (point, weight) in
+        spiling_contracts::analysis::load::surface_samples(footprint, center, size, axis, 1)
+    {
+        let local = spiling_contracts::analysis::chart::locate(&nodes, hex.midpoint_weight, point)
+            .map_err(str::to_string)?;
+        visit(
+            point,
+            weight,
+            spiling_contracts::analysis::chart::reference(local, hex.midpoint_weight).0,
+        );
     }
+    Ok(())
 }
 fn solve_three(mut matrix: [[f64; 3]; 3], mut rhs: [f64; 3]) -> Result<[f64; 3], String> {
     for column in 0..3 {
@@ -388,12 +570,17 @@ pub fn solve(
         return Err("UnsupportedModel: macro solve requires nonempty Basic loads".into());
     }
     if settings != &operator.settings
-        || (&case.definition_id, &case.source_hash, &case.restraints)
-            != (
-                &operator.subject.0,
-                &operator.subject.1,
-                &operator.subject.2,
-            )
+        || (
+            &case.definition_id,
+            &case.source_hash,
+            &case.restraints,
+            &case.fasteners,
+        ) != (
+            &operator.subject.0,
+            &operator.subject.1,
+            &operator.subject.2,
+            &operator.subject.3,
+        )
     {
         return Err("StaleOperator: construction, laws, source or restraints differ from the original operator".into());
     }
@@ -424,15 +611,20 @@ pub fn solve(
         {
             let on_face = facets.iter().any(|facet| {
                 let hex = &mesh.elements[facet.element];
-                (center_mm[facet.axis]
-                    - hex.lower[facet.axis]
-                    - facet.side as f64 * hex.size[facet.axis])
-                    .abs()
-                    <= 1e-7
-                    && (0..3).filter(|axis| *axis != facet.axis).all(|axis| {
-                        center_mm[axis] >= hex.lower[axis] - 1e-7
-                            && center_mm[axis] <= hex.lower[axis] + hex.size[axis] + 1e-7
-                    })
+                let Ok((axis, center, size)) = spiling_contracts::analysis::chart::rectangle_facet(
+                    &hex.nodes.map(|node| mesh.nodes[node]),
+                    facet.axis,
+                    facet.side,
+                ) else {
+                    return false;
+                };
+                (center_mm[axis] - center[axis] - 0.5).abs() <= 1e-7
+                    && (0..3)
+                        .filter(|direction| *direction != axis)
+                        .all(|direction| {
+                            (center_mm[direction] - center[direction]).abs()
+                                <= 0.5 * size[direction] + 1e-7
+                        })
             });
             if !on_face {
                 return Err(
@@ -448,7 +640,7 @@ pub fn solve(
                 for axis in 0..3 {
                     center[axis] += weight * point[axis];
                 }
-            });
+            })?;
         }
         if area <= 1e-12 || !area.is_finite() {
             return Err("UnmappedLoad: contact has no finite positive area".into());
@@ -468,7 +660,7 @@ pub fn solve(
                                 - offset[row] * offset[column]);
                     }
                 }
-            });
+            })?;
         }
         let arm = cross(center, load.force_n);
         let couple = std::array::from_fn(|axis| load.moment_n_mm[axis] - arm[axis]);
@@ -487,12 +679,13 @@ pub fn solve(
                     }
                 }
                 patches.push(PatchSample {
+                    element_index: facet.element as u32,
                     patch_index: patch_index as u32,
                     point_mm: point,
                     area_mm2: weight,
                     traction_mpa: traction,
                 });
-            });
+            })?;
         }
         let nodal_force: [f64; 3] =
             std::array::from_fn(|axis| contribution.iter().map(|force| force[axis]).sum());
@@ -585,18 +778,58 @@ pub fn solve(
     let mut rhs = Mat::from_fn(operator.free.len(), 1, |index, _| {
         loads[operator.free[index] / 3][operator.free[index] % 3]
     });
-    let mut scratch =
-        MemBuffer::try_new(operator.symbolic.solve_in_place_scratch::<f64>(1, Par::Seq))
-            .map_err(|_| "ResourceLimit: solve scratch")?;
-    LltRef::new(&operator.symbolic, &operator.factors).solve_in_place_with_conj(
-        Conj::No,
-        rhs.as_mut(),
-        Par::Seq,
-        MemStack::new(&mut scratch),
-    );
+    factor_solve(&operator.symbolic, &operator.factors, &mut rhs)?;
     let mut displacement_mm = vec![[0.0; 3]; mesh.nodes.len()];
     for (index, &dof) in operator.free.iter().enumerate() {
         displacement_mm[dof / 3][dof % 3] = rhs[(index, 0)];
+    }
+    let mut multipliers = connector::dense_solve(
+        &operator.connectors.schur,
+        &operator.connectors.constraint_values(&displacement_mm),
+    )?;
+    for (index, &dof) in operator.free.iter().enumerate() {
+        for (column, &multiplier) in multipliers.iter().enumerate() {
+            displacement_mm[dof / 3][dof % 3] -=
+                operator.connectors.inverse_columns[column][index] * multiplier;
+        }
+    }
+    // Refine the ORIGINAL coefficient saddle equations, including nonzero Cu
+    // from rounding. No point pin, numerical spring or regularization remains.
+    if !multipliers.is_empty() {
+        for _ in 0..3 {
+            budget.check()?;
+            let internal = original_action(operator, &displacement_mm, budget)?;
+            let reaction = operator.connectors.forces(&multipliers, mesh.nodes.len());
+            let constraint = operator.connectors.constraint_values(&displacement_mm);
+            let mut residual = Mat::from_fn(operator.free.len(), 1, |i, _| {
+                let dof = operator.free[i];
+                loads[dof / 3][dof % 3] + reaction[dof / 3][dof % 3] - internal[dof / 3][dof % 3]
+            });
+            factor_solve(&operator.symbolic, &operator.factors, &mut residual)?;
+            let mut correction = vec![[0.0; 3]; mesh.nodes.len()];
+            for (i, &dof) in operator.free.iter().enumerate() {
+                correction[dof / 3][dof % 3] = residual[(i, 0)];
+            }
+            let cy = operator.connectors.constraint_values(&correction);
+            let dual = connector::dense_solve(
+                &operator.connectors.schur,
+                &cy.iter()
+                    .zip(&constraint)
+                    .map(|(cy, c)| cy + c)
+                    .collect::<Vec<_>>(),
+            )?;
+            for (i, &dof) in operator.free.iter().enumerate() {
+                displacement_mm[dof / 3][dof % 3] += residual[(i, 0)]
+                    - dual
+                        .iter()
+                        .enumerate()
+                        .map(|(j, mu)| operator.connectors.inverse_columns[j][i] * mu)
+                        .sum::<f64>();
+            }
+            for j in 0..multipliers.len() {
+                multipliers[j] += dual[j] - operator.connectors.alpha * constraint[j];
+            }
+        }
     }
     let solve_ms = elapsed(started);
     let started = Instant::now();
@@ -609,38 +842,52 @@ pub fn solve(
     for hex in &mesh.elements {
         budget.check()?;
         let local = hex.nodes.map(|node| displacement_mm[node]);
-        let volume = hex.size.iter().product::<f64>();
+        let mut volume = 0.0;
         let mut element_energy = 0.0;
-        element::quadrature(|point, weight| {
-            let (_, gradients) = element::basis(point, hex.size);
-            let (strain, stress) = element::state(&gradients, &local, &operator.tensors[hex.role]);
+        let mut mapping_error = None;
+        spiling_contracts::analysis::chart::quadrature(hex.midpoint_weight, |point, weight| {
+            let mapped = match evaluate(mesh, hex, point) {
+                Ok(mapped) => mapped,
+                Err(reason) => {
+                    mapping_error = Some(reason);
+                    return;
+                }
+            };
+            let physical_weight = weight * mapped.determinant;
+            volume += physical_weight;
+            let (strain, stress) =
+                element::state(&mapped.gradients, &local, &operator.tensors[hex.role]);
             let density = 0.5
                 * (0..6)
                     .map(|index| strain[index] * stress[index])
                     .sum::<f64>();
-            element_energy += density * volume * weight;
+            element_energy += density * physical_weight;
             for local in 0..27 {
-                let force = element::force(gradients[local], stress);
+                let force = element::force(mapped.gradients[local], stress);
                 for axis in 0..3 {
-                    internal[hex.nodes[local]][axis] += force[axis] * volume * weight;
+                    internal[hex.nodes[local]][axis] += force[axis] * physical_weight;
                 }
             }
-            let position: [f64; 3] = std::array::from_fn(|axis| {
-                hex.lower[axis] + 0.5 * (point[axis] + 1.0) * hex.size[axis]
-            });
             let fraction = if hex.role == 2 {
                 settings.recipe.infill_fraction
             } else {
                 1.0
             };
-            samples.push((position, volume * weight * fraction, density / fraction));
+            samples.push((
+                mapped.position,
+                physical_weight * fraction,
+                density / fraction,
+            ));
         });
+        if let Some(reason) = mapping_error {
+            return Err(reason);
+        }
         energy[hex.role] += element_energy;
         volumes[hex.role] += volume;
-        let (_, gradients) = element::basis([0.0; 3], hex.size);
-        let (_, stress) = element::state(&gradients, &local, &operator.tensors[hex.role]);
+        let center = evaluate(mesh, hex, [0.0; 3])?;
+        let (_, stress) = element::state(&center.gradients, &local, &operator.tensors[hex.role]);
         fields.push(ElementField {
-            center_mm: std::array::from_fn(|axis| hex.lower[axis] + 0.5 * hex.size[axis]),
+            center_mm: center.position,
             role: hex.role as u32,
             volume_mm3: volume,
             stress_mpa: stress,
@@ -648,28 +895,32 @@ pub fn solve(
             concentration: 0.0,
         });
     }
-    let free_residual_n = norm(
-        operator
-            .free
-            .iter()
-            .map(|dof| internal[dof / 3][dof % 3] - loads[dof / 3][dof % 3]),
-    );
+    let connector_forces = operator.connectors.forces(&multipliers, mesh.nodes.len());
+    let free_residual_n = norm(operator.free.iter().map(|dof| {
+        internal[dof / 3][dof % 3] - loads[dof / 3][dof % 3] - connector_forces[dof / 3][dof % 3]
+    }));
     let rhs_norm_n = norm(operator.free.iter().map(|dof| loads[dof / 3][dof % 3]));
     let reaction_force = std::array::from_fn::<_, 3, _>(|axis| {
         (0..mesh.nodes.len())
             .filter(|node| operator.fixed[3 * node + axis])
-            .map(|node| internal[node][axis] - loads[node][axis])
+            .map(|node| internal[node][axis] - loads[node][axis] - connector_forces[node][axis])
             .sum::<f64>()
+            + connector_forces
+                .iter()
+                .map(|force| force[axis])
+                .sum::<f64>()
     });
     let reaction_moment = std::array::from_fn::<_, 3, _>(|axis| {
         (0..mesh.nodes.len())
             .map(|node| {
                 let reaction = std::array::from_fn(|component| {
-                    if operator.fixed[3 * node + component] {
-                        internal[node][component] - loads[node][component]
+                    (if operator.fixed[3 * node + component] {
+                        internal[node][component]
+                            - loads[node][component]
+                            - connector_forces[node][component]
                     } else {
                         0.0
-                    }
+                    }) + connector_forces[node][component]
                 });
                 cross(mesh.nodes[node], reaction)[axis]
             })
@@ -684,6 +935,65 @@ pub fn solve(
         .sum::<f64>();
     let total_energy = energy.iter().sum::<f64>();
     let work_energy_relative_error = (work - 2.0 * total_energy).abs() / work.abs().max(1e-30);
+    let mut fastener_responses = Vec::new();
+    let mut constraint_work = 0.0;
+    for (index, connection) in operator.connectors.connections.iter().enumerate() {
+        let motions = connection.coupling.motions(&displacement_mm);
+        let lambda = operator.connectors.multipliers(index, &multipliers);
+        let maximum_constraint_error_mm = (0..6)
+            .filter(|&i| connection.constrained[i])
+            .map(|i| motions[i].abs())
+            .fold(0.0, f64::max);
+        constraint_work += (0..6).map(|i| (lambda[i] * motions[i]).abs()).sum::<f64>();
+        let mut force = [0.0; 3];
+        let mut moment = [0.0; 3];
+        for sample in &connection.samples {
+            let traction = connection.coupling.traction(lambda, sample.point_mm);
+            let arm = cross(sample.point_mm, traction);
+            for axis in 0..3 {
+                force[axis] += sample.area_mm2 * traction[axis];
+                moment[axis] += sample.area_mm2 * arm[axis];
+            }
+            patches.push(PatchSample {
+                element_index: sample.element_index,
+                patch_index: (case.loads.len() + index) as u32,
+                point_mm: sample.point_mm,
+                area_mm2: sample.area_mm2,
+                traction_mpa: traction,
+            });
+        }
+        // Independently compare physical traction resultants with C^T lambda.
+        let mut nodal = vec![[0.0; 3]; mesh.nodes.len()];
+        for (motion, multiplier) in lambda.iter().enumerate() {
+            for &(dof, coefficient) in &connection.coupling.rows[motion] {
+                nodal[dof / 3][dof % 3] += coefficient * multiplier;
+            }
+        }
+        let nodal_force: [f64; 3] = std::array::from_fn(|axis| nodal.iter().map(|f| f[axis]).sum());
+        let nodal_moment: [f64; 3] = std::array::from_fn(|axis| {
+            mesh.nodes
+                .iter()
+                .zip(&nodal)
+                .map(|(&p, &f)| cross(p, f)[axis])
+                .sum()
+        });
+        if maximum_constraint_error_mm > 1e-7
+            || norm((0..3).map(|axis| force[axis] - nodal_force[axis])) > 1e-8 * (1.0 + norm(force))
+            || norm((0..3).map(|axis| moment[axis] - nodal_moment[axis]))
+                > 1e-8 * (1.0 + norm(moment))
+        {
+            return Err("NonConverged: ideal attachment constraint or independent physical reaction wrench check failed".into());
+        }
+        fastener_responses.push(
+            spiling_contracts::analysis::fastener::AnalysisFastenerResponse {
+                fastener_id: case.fasteners[index].id,
+                area_mm2: connection.coupling.area_mm2,
+                reaction_force_n: force,
+                reaction_moment_n_mm: moment,
+                maximum_constraint_error_mm,
+            },
+        );
+    }
     if !total_energy.is_finite()
         || total_energy <= 0.0
         || displacement_mm
@@ -693,6 +1003,7 @@ pub fn solve(
         || free_residual_n > 1e-8 + 1e-8 * rhs_norm_n
         || force_imbalance_n > 1e-6 * (1.0 + norm(requested_force))
         || moment_imbalance_n_mm > 1e-6 * (1.0 + norm(requested_moment))
+        || constraint_work.abs() > 1e-7 * work.abs().max(1e-30)
         || work_energy_relative_error > 1e-7
     {
         return Err(format!(
@@ -736,6 +1047,7 @@ pub fn solve(
         field.concentration = local_energy / local_volume / global;
     }
     Ok(Solution {
+        fastener_responses,
         applied_force_n: loads,
         displacement_mm,
         fields,
@@ -748,4 +1060,56 @@ pub fn solve(
         assessment_ms,
         fields_ms: elapsed(started),
     })
+}
+
+fn factor_solve(
+    symbolic: &SymbolicCholesky<usize>,
+    factors: &[f64],
+    rhs: &mut Mat<f64>,
+) -> Result<(), String> {
+    let mut scratch =
+        MemBuffer::try_new(symbolic.solve_in_place_scratch::<f64>(rhs.ncols(), Par::Seq))
+            .map_err(|_| "ResourceLimit: exact constrained solve scratch")?;
+    LltRef::new(symbolic, factors).solve_in_place_with_conj(
+        Conj::No,
+        rhs.as_mut(),
+        Par::Seq,
+        MemStack::new(&mut scratch),
+    );
+    Ok(())
+}
+
+fn original_action(
+    operator: &PreparedOperator,
+    displacement: &[[f64; 3]],
+    budget: &Budget,
+) -> Result<Vec<[f64; 3]>, String> {
+    let mesh = &operator.mesh;
+    let mut internal = vec![[0.0; 3]; mesh.nodes.len()];
+    for hex in &mesh.elements {
+        budget.check()?;
+        let local = hex.nodes.map(|node| displacement[node]);
+        let mut error = None;
+        spiling_contracts::analysis::chart::quadrature(hex.midpoint_weight, |point, weight| {
+            let mapped = match evaluate(mesh, hex, point) {
+                Ok(mapped) => mapped,
+                Err(reason) => {
+                    error = Some(reason);
+                    return;
+                }
+            };
+            let (_, stress) =
+                element::state(&mapped.gradients, &local, &operator.tensors[hex.role]);
+            for node in 0..27 {
+                let force = element::force(mapped.gradients[node], stress);
+                for axis in 0..3 {
+                    internal[hex.nodes[node]][axis] += weight * mapped.determinant * force[axis];
+                }
+            }
+        });
+        if let Some(reason) = error {
+            return Err(reason);
+        }
+    }
+    Ok(internal)
 }

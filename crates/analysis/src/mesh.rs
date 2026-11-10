@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]
 pub struct Hex {
+    pub midpoint_weight: f64,
     pub nodes: [usize; 27],
     pub lower: [f64; 3],
     pub size: [f64; 3],
@@ -25,6 +26,7 @@ pub struct Facet {
     pub face: Option<FaceId>,
 }
 pub struct Mesh {
+    pub geometry: spiling_contracts::analysis::fastener::AnalysisMeshGeometry,
     pub nodes: Vec<[f64; 3]>,
     pub elements: Vec<Hex>,
     pub facets: Vec<Facet>,
@@ -84,6 +86,12 @@ pub fn build(
                 .total_cmp(&service_to_print[2][*second].abs())
         })
         .unwrap();
+    if let Some(bore) = &prism.bore {
+        if layer_axis != 2 {
+            return Err("UnsupportedModel: the curved-hole construction currently needs print layers normal to its bore axis; loads are not rotated to make it fit".into());
+        }
+        return crate::curved::build(bore, settings, service_to_print, budget);
+    }
     let mut cuts = [Vec::new(), Vec::new(), prism.height.to_vec()];
     for edge in &prism.edges {
         for point in edge.ends {
@@ -192,6 +200,7 @@ pub fn build(
                 }
                 cells.insert(cell, elements.len());
                 elements.push(Hex {
+                    midpoint_weight: 1.0,
                     nodes: element_nodes,
                     lower,
                     size,
@@ -307,6 +316,7 @@ pub fn build(
         }
     }
     Ok(Mesh {
+        geometry: spiling_contracts::analysis::fastener::AnalysisMeshGeometry::AffineHex27 {},
         nodes,
         elements,
         facets,

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
+pub mod attachment;
+pub mod chart;
+pub mod fastener;
 pub mod fields;
 pub mod load;
 pub mod mechanics;
@@ -117,6 +120,8 @@ pub struct AnalysisCase {
     pub loads: Vec<AnalysisFaceLoad>,
     #[serde(deserialize_with = "bounded::<_, _, MAX_ANALYSIS_PATCHES>")]
     pub restraints: Vec<AnalysisFaceRestraint>,
+    #[serde(deserialize_with = "bounded::<_, _, {fastener::MAX_ANALYSIS_FASTENERS}>")]
+    pub fasteners: Vec<fastener::AnalysisFastener>,
 }
 impl AnalysisCase {
     pub fn validate(&self) -> Result<(), ProjectError> {
@@ -129,7 +134,10 @@ impl AnalysisCase {
                 "analysis case name must be 1..80 trimmed bytes without controls",
             ));
         }
-        if self.loads.len() > MAX_ANALYSIS_PATCHES || self.restraints.len() > MAX_ANALYSIS_PATCHES {
+        if self.loads.len() > MAX_ANALYSIS_PATCHES
+            || self.restraints.len() > MAX_ANALYSIS_PATCHES
+            || self.fasteners.len() > fastener::MAX_ANALYSIS_FASTENERS
+        {
             return Err(ProjectError::new(
                 ProjectErrorCode::ResourceLimit,
                 "analysis patch budget exceeded",
@@ -166,6 +174,22 @@ impl AnalysisCase {
                 ));
             }
         }
+        let mut identities = BTreeSet::new();
+        let mut bores = BTreeSet::new();
+        for fastener in &self.fasteners {
+            fastener.validate()?;
+            if !identities.insert(fastener.id)
+                || fastener
+                    .hole
+                    .bore_faces
+                    .iter()
+                    .any(|face| !bores.insert(face))
+            {
+                return Err(invalid(
+                    "fasteners need unique identities and disjoint native bore ownership",
+                ));
+            }
+        }
         Ok(())
     }
     pub fn patch_faces(&self) -> impl Iterator<Item = &FaceId> {
@@ -173,12 +197,25 @@ impl AnalysisCase {
             .iter()
             .map(|load| &load.face_id)
             .chain(self.restraints.iter().map(|restraint| &restraint.face_id))
+            .chain(self.fasteners.iter().flat_map(|fastener| {
+                fastener
+                    .hole
+                    .bore_faces
+                    .iter()
+                    .chain(&fastener.hole.cap_faces)
+            }))
     }
     pub fn allocated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.name.capacity()
             + self.loads.capacity() * std::mem::size_of::<AnalysisFaceLoad>()
             + self.restraints.capacity() * std::mem::size_of::<AnalysisFaceRestraint>()
+            + self.fasteners.capacity() * std::mem::size_of::<fastener::AnalysisFastener>()
+            + self
+                .fasteners
+                .iter()
+                .map(fastener::AnalysisFastener::allocated_bytes)
+                .sum::<usize>()
             + self
                 .patch_faces()
                 .map(FaceId::allocated_bytes)

@@ -14,10 +14,11 @@ The shared Rust client launches `spiling-engine --store PATH`. The parent sends 
 
 Readiness requires the exact shared `ENGINE_BUILD_ID` from `crates/contracts/src/lib.rs` and declared format/feature capabilities, including `ptac_projects_v1`, `manufacturing_schema11`, `fixed_dual_material_routing_v1`, `whole_occurrence_layer_cycles_v1`, `source_bound_surface_color_construction_v1`, `source_bound_process_v3`, `appearance_palette_study_c1a`, `optical_construction_reference_study_v1`, native trimmed-source/query/bed and existing finish/image capabilities. The retired project-storage capability is rejected; there is no compatibility negotiation. Executable client requirements are authoritative. These identify a coordinated semantic generation, not exact Git attestation, physical printer support or optical calibration.
 
-The `analysis4` semantic generation includes native prepared contact rectangles,
+The `analysis5` semantic generation includes native prepared contact rectangles,
 required whole-face/disk footprints, conservative finite-contact transfer and typed assumed-law whole-part
 numerical studies, checked SPLA fields and explicit portable Core result
-attachment. `AnalysisResultPrepared` binds a read revision separately from the
+attachment, complete native bore preparation, ideal distributing fasteners and
+rational Hex27 SPLA2 fields. `AnalysisResultPrepared` binds a read revision separately from the
 original capture; `AnalysisCompleted` retains exact completed-capture equality.
 It does not identify a qualified Basic/Enhanced product or physical calibration;
 [Analyze contracts](analysis.md) define the admitted model and evidence limits.

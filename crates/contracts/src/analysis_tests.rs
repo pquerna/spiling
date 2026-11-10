@@ -19,6 +19,7 @@ fn case() -> AnalysisCase {
             force_n: [0.0, -12.0, 0.0],
             moment_n_mm: [20.0, 0.0, 0.0],
         }],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: FaceId::from_step_entity(11).unwrap(),
             fixed_translation: [true; 3],
@@ -72,7 +73,7 @@ fn analysis_native_adapters_reject_missing_components_and_unknown_modes() {
 fn analysis_json_is_strict_and_bounded_without_compatibility_defaults() {
     let value = case();
     let mut json = serde_json::to_value(&value).unwrap();
-    for field in ["loads", "restraints", "mode", "source_hash"] {
+    for field in ["loads", "restraints", "fasteners", "mode", "source_hash"] {
         let mut missing = json.clone();
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<AnalysisCase>(missing).is_err());
@@ -96,6 +97,107 @@ fn analysis_json_is_strict_and_bounded_without_compatibility_defaults() {
     };
     let json = serde_json::json!({"cases": vec![record; MAX_ANALYSIS_CASES + 1], "results": []});
     assert!(serde_json::from_value::<AnalysisDocument>(json).is_err());
+}
+
+#[test]
+fn ideal_fastener_contracts_keep_native_ownership_and_motion_explicit() {
+    use crate::analysis::fastener::*;
+    let mut fastener = AnalysisFastener {
+        id: 1,
+        name: "Mount screw".into(),
+        hole: AnalysisHole {
+            bore_faces: vec![
+                FaceId::from_step_entity(57).unwrap(),
+                FaceId::from_step_entity(64).unwrap(),
+            ],
+            cap_faces: [
+                FaceId::from_step_entity(100).unwrap(),
+                FaceId::from_step_entity(101).unwrap(),
+            ],
+            center_mm: [10.0, 10.0, 0.0],
+            radius_mm: 3.0,
+            depth_mm: 8.0,
+        },
+        attachment: FastenerAttachment::Clamp {
+            end: HoleEnd::End,
+            washer_diameter_mm: 10.0,
+        },
+    };
+    for attachment in [
+        FastenerAttachment::Clamp {
+            end: HoleEnd::Start,
+            washer_diameter_mm: 10.0,
+        },
+        FastenerAttachment::Pin {
+            allow_axial_slide: true,
+            allow_spin: true,
+        },
+        FastenerAttachment::BondedEngagement {
+            end: HoleEnd::End,
+            engagement_mm: 3.0,
+        },
+    ] {
+        fastener.attachment = attachment;
+        let wire: rpc::AnalysisFastener = fastener.clone().try_into().unwrap();
+        assert_eq!(AnalysisFastener::try_from(wire).unwrap(), fastener);
+        assert_eq!(
+            serde_json::from_value::<AnalysisFastener>(serde_json::to_value(&fastener).unwrap())
+                .unwrap(),
+            fastener
+        );
+    }
+    let mut value = case();
+    value.fasteners.push(fastener.clone());
+    value.validate().unwrap();
+    value.fasteners.push(fastener.clone());
+    assert!(value.validate().is_err());
+    fastener.attachment = FastenerAttachment::Pin {
+        allow_axial_slide: true,
+        allow_spin: true,
+    };
+    assert_eq!(
+        fastener.constrained_motions(),
+        [true, true, false, true, true, false]
+    );
+    for attachment in [
+        FastenerAttachment::Clamp {
+            end: HoleEnd::Start,
+            washer_diameter_mm: 6.0,
+        },
+        FastenerAttachment::Clamp {
+            end: HoleEnd::Start,
+            washer_diameter_mm: f64::NAN,
+        },
+        FastenerAttachment::BondedEngagement {
+            end: HoleEnd::End,
+            engagement_mm: 8.1,
+        },
+        FastenerAttachment::BondedEngagement {
+            end: HoleEnd::End,
+            engagement_mm: 0.0,
+        },
+    ] {
+        fastener.attachment = attachment;
+        assert!(fastener.validate().is_err());
+    }
+    fastener.attachment = FastenerAttachment::Pin {
+        allow_axial_slide: false,
+        allow_spin: false,
+    };
+    let mut missing = serde_json::to_value(&fastener).unwrap();
+    missing["attachment"]
+        .as_object_mut()
+        .unwrap()
+        .remove("allow_spin");
+    assert!(serde_json::from_value::<AnalysisFastener>(missing).is_err());
+    let mut wire: rpc::AnalysisFastener = fastener.clone().try_into().unwrap();
+    wire.attachment = None;
+    assert!(AnalysisFastener::try_from(wire).is_err());
+    fastener
+        .hole
+        .bore_faces
+        .push(fastener.hole.cap_faces[0].clone());
+    assert!(fastener.validate().is_err());
 }
 #[test]
 fn retained_analysis_descriptors_are_required_bounded_and_case_bound() {

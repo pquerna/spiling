@@ -53,6 +53,7 @@ pub fn execute(
             &capture.case.case.source_hash,
             capture.pose,
             &capture.case.case.restraints,
+            &capture.case.case.fasteners,
             &capture.settings,
         ))
         .map_err(|error| error.to_string())?,
@@ -118,6 +119,8 @@ pub fn execute(
         operator_reused: reused,
     };
     let summary = AnalysisRunSummary {
+        mesh_geometry: operator.mesh.geometry.clone(),
+        fastener_responses: solution.fastener_responses.clone(),
         project_id: capture.project_id.clone(),
         kernel_revision: spiling_geometry::KERNEL_REVISION.into(),
         native_sample_hash: cached.native_sample_hash,
@@ -177,6 +180,7 @@ pub fn execute(
         .iter()
         .zip(&solution.fields)
         .map(|(hex, field)| AnalysisElement {
+            midpoint_weight: hex.midpoint_weight,
             nodes: hex.nodes.map(|node| node as u32),
             center_mm: field.center_mm,
             size_mm: hex.size,
@@ -191,6 +195,7 @@ pub fn execute(
         .patches
         .iter()
         .map(|patch| AnalysisPatchSample {
+            element_index: patch.element_index,
             point_mm: patch.point_mm,
             area_mm2: patch.area_mm2,
             traction_mpa: patch.traction_mpa,

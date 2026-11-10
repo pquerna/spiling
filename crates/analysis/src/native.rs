@@ -14,6 +14,7 @@ pub struct Edge {
 }
 #[derive(Debug, Clone)]
 pub struct NativePrism {
+    pub(crate) bore: Option<spiling_geometry::BoredPlate>,
     pub(crate) loops: Vec<Vec<[f64; 2]>>,
     pub(crate) edges: Vec<Edge>,
     pub(crate) height: [f64; 2],
@@ -27,6 +28,14 @@ pub fn capture(
     cancel: &AtomicBool,
 ) -> Result<NativePrism, String> {
     let mut work = GeometryWorkBudget::query();
+    if definition.faces().iter().any(|face| {
+        !matches!(
+            face.geometry.analytic,
+            Some(AnalyticSurfaceDescription::Plane { .. })
+        )
+    }) {
+        return capture_bored(definition, occurrence, &mut work, cancel);
+    }
     let mut endpoints = Vec::new();
     let mut rectangles = std::collections::BTreeMap::new();
     for face in definition.faces() {
@@ -228,9 +237,97 @@ pub fn capture(
         loops.push(points);
     }
     Ok(NativePrism {
+        bore: None,
         loops,
         edges,
         height: [endpoints[0], endpoints[1]],
+        shape_error_mm,
+        native_sample_hash: *leaf.native_sample_sha256(),
+    })
+}
+
+fn capture_bored(
+    definition: &Definition,
+    occurrence: OccurrenceId,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativePrism, String> {
+    let bore = definition
+        .bored_plate_with_work(work, cancel)
+        .map_err(|error| format!("UnmappedFastener: complete native hole/plate: {error:?}"))?;
+    let source = spiling_geometry::prepare_solid(definition, 32 * 1024 * 1024, work, cancel)
+        .map_err(|error| format!("native preparation: {error:?}"))?;
+    let height = bore.height_mm();
+    let slab = source
+        .analyze_placed_slab(
+            &PlacedSlabRequest {
+                pose: RigidPoseMm::IDENTITY,
+                world_height_interval_mm: height,
+                sample_world_z_mm: height[0].midpoint(height[1]),
+                native_shape_error_mm: 0.02,
+            },
+            32 * 1024 * 1024,
+            work,
+            cancel,
+        )
+        .map_err(|error| format!("complete bored-plate native slab: {error:?}"))?;
+    let used = slab
+        .section()
+        .loops()
+        .iter()
+        .map(|boundary| SectionLoopMm {
+            is_hole: boundary.is_hole,
+            points_mm: boundary.points_mm.clone(),
+        })
+        .collect::<Vec<_>>();
+    let leaf = spiling_geometry::certify_native_source_leaf(
+        &spiling_geometry::SourceLeafRequest {
+            source: &source,
+            occurrence_id: &occurrence,
+            pose: RigidPoseMm::IDENTITY,
+            analysis: &slab,
+            actual_used_source_loops: &used,
+            policy: spiling_geometry::NativeUnionPolicy {
+                candidate_coordinate_error_mm: 1e-7,
+            },
+        },
+        work,
+        cancel,
+    )
+    .map_err(|error| format!("whole closed bored-plate source leaf: {error:?}"))?;
+    let shape_error_mm = leaf.closed_shape_error_mm().filter(|error| *error <= 0.001)
+        .ok_or("UnsupportedModel: whole closed bored-plate source receipt exceeds the unchanged 0.001 mm allowance")?;
+    if !leaf.is_positive() {
+        return Err("UnsupportedModel: empty bored-plate material".into());
+    }
+    let bounds = bore.outer_xy_mm();
+    let corners = [
+        [bounds[0][0], bounds[0][1]],
+        [bounds[1][0], bounds[0][1]],
+        [bounds[1][0], bounds[1][1]],
+        [bounds[0][0], bounds[1][1]],
+    ];
+    let owners = [2, 1, 3, 0];
+    let edges = (0..4)
+        .map(|edge| Edge {
+            ends: [corners[edge], corners[(edge + 1) % 4]],
+            face: bore.outer_faces()[owners[edge]].clone(),
+        })
+        .collect();
+    Ok(NativePrism {
+        bore: Some(bore),
+        loops: used
+            .iter()
+            .map(|boundary| {
+                boundary
+                    .points_mm
+                    .iter()
+                    .map(|point| [point[0], point[1]])
+                    .collect()
+            })
+            .collect(),
+        edges,
+        height,
         shape_error_mm,
         native_sample_hash: *leaf.native_sample_sha256(),
     })

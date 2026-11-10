@@ -13,6 +13,9 @@ pub(super) enum Action {
     Case(String, OccurrenceId, AnalysisMode),
     Load(String, AnalysisFaceLoad),
     Contact(String, FaceId, [f64; 3], f64, [f64; 3]),
+    PrepareFastener(String, FaceId, fastener::FastenerAttachment),
+    Fastener(String, fastener::AnalysisFastener),
+    RemoveFastener(String, u32),
     Fix(String, FaceId),
     Edit(AnalysisEdit),
 }
@@ -22,6 +25,55 @@ pub(super) fn parse(
     args: &mut impl Iterator<Item = OsString>,
 ) -> Result<Action, Error> {
     Ok(match flag {
+        "--analysis-clamp" | "--analysis-engagement" => {
+            let name = text(args, "analysis case name")?;
+            let face = FaceId::parse(text(args, "native bore face")?)?;
+            let end = match text(args, "hole end: start or end")?.as_str() {
+                "start" => fastener::HoleEnd::Start,
+                "end" => fastener::HoleEnd::End,
+                _ => return Err("hole end must be start or end in source +Z".into()),
+            };
+            let dimension: f64 =
+                text(args, "washer diameter or engagement depth in mm")?.parse()?;
+            if !dimension.is_finite() || dimension <= 0.0 {
+                return Err("fastener dimension must be finite and positive".into());
+            }
+            let attachment = if flag == "--analysis-clamp" {
+                fastener::FastenerAttachment::Clamp {
+                    end,
+                    washer_diameter_mm: dimension,
+                }
+            } else {
+                fastener::FastenerAttachment::BondedEngagement {
+                    end,
+                    engagement_mm: dimension,
+                }
+            };
+            Action::PrepareFastener(name, face, attachment)
+        }
+        "--analysis-pin" => {
+            let name = text(args, "analysis case name")?;
+            let face = FaceId::parse(text(args, "native bore face")?)?;
+            let mut freedom = || -> Result<bool, Error> {
+                match text(args, "pin motion: free or fixed")?.as_str() {
+                    "free" => Ok(true),
+                    "fixed" => Ok(false),
+                    _ => Err("pin axial/spin motion must each be free or fixed".into()),
+                }
+            };
+            Action::PrepareFastener(
+                name,
+                face,
+                fastener::FastenerAttachment::Pin {
+                    allow_axial_slide: freedom()?,
+                    allow_spin: freedom()?,
+                },
+            )
+        }
+        "--analysis-unfasten" => Action::RemoveFastener(
+            text(args, "analysis case name")?,
+            text(args, "case-local fastener id")?.parse()?,
+        ),
         "--analysis-contact" => {
             let name = text(args, "analysis case name")?;
             let face = FaceId::parse(text(args, "native contact face")?)?;
@@ -118,6 +170,70 @@ pub(super) async fn execute(
     action: Action,
 ) -> Result<Option<serde_json::Value>, Error> {
     let captured = info(client).await?;
+    let action = if let Action::PrepareFastener(name, face_id, attachment) = action {
+        let case = &captured
+            .analysis
+            .cases
+            .iter()
+            .find(|record| record.case.layout_id == captured.layout_id && record.case.name == name)
+            .ok_or("analysis case is absent from selected plate")?
+            .case;
+        let GeometryResponse::Scene { summary } = client
+            .geometry(GeometryCommand::GetScene {
+                session_id: session.clone(),
+            })
+            .await?
+        else {
+            return Err("native scene expected".into());
+        };
+        let reference = FaceRef {
+            session_id: session.clone(),
+            scene_revision: summary.revision,
+            occurrence_id: case.occurrence_id,
+            definition_id: case.definition_id.clone(),
+            face_id,
+        };
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::PrepareAnalysisFastener {
+                session_id: session.clone(),
+                base_revision: captured.revision,
+                reference,
+            })
+            .await?
+        else {
+            return Err("native hole preparation expected".into());
+        };
+        let JobResult::AnalysisFastenerPrepared { preparation } =
+            geometry::wait_operation(client, session, operation).await?
+        else {
+            return Err("complete native hole expected".into());
+        };
+        let id = match case
+            .fasteners
+            .iter()
+            .find(|fastener| fastener.hole.bore_faces == preparation.hole.bore_faces)
+        {
+            Some(existing) => existing.id,
+            None => case
+                .fasteners
+                .iter()
+                .map(|fastener| fastener.id)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or("fastener identity exhausted")?,
+        };
+        let fastener = fastener::AnalysisFastener {
+            id,
+            name: format!("Fastener {id}"),
+            hole: preparation.hole,
+            attachment,
+        };
+        fastener.validate()?;
+        Action::Fastener(name, fastener)
+    } else {
+        action
+    };
     let action = if let Action::Contact(name, face_id, center_mm, diameter_mm, force_n) = action {
         let case = &captured
             .analysis
@@ -280,6 +396,7 @@ pub(super) async fn execute(
                     source_hash: definition.provenance.source_hash.clone(),
                     mode,
                     loads: vec![],
+                    fasteners: vec![],
                     restraints: vec![],
                 });
             if case.occurrence_id != occurrence_id {
@@ -290,12 +407,32 @@ pub(super) async fn execute(
         }
         action => {
             let name = match &action {
-                Action::Load(name, _) | Action::Fix(name, _) => name,
+                Action::Load(name, _)
+                | Action::Fix(name, _)
+                | Action::Fastener(name, _)
+                | Action::RemoveFastener(name, _) => name,
                 _ => unreachable!(),
             };
             let mut case = captured.analysis.cases.iter().find(|record| record.case.layout_id == captured.layout_id && record.case.name == *name)
                 .ok_or("analysis case is absent from the selected print layout; use --analysis-case first")?.case.clone();
             match action {
+                Action::Fastener(_, fastener) => {
+                    if let Some(existing) = case
+                        .fasteners
+                        .iter_mut()
+                        .find(|existing| existing.id == fastener.id)
+                    {
+                        *existing = fastener;
+                    } else {
+                        case.fasteners.push(fastener);
+                    }
+                }
+                Action::RemoveFastener(_, id) => {
+                    if !case.fasteners.iter().any(|fastener| fastener.id == id) {
+                        return Err("fastener id is absent from this case".into());
+                    }
+                    case.fasteners.retain(|fastener| fastener.id != id);
+                }
                 Action::Load(_, load) => {
                     if let Some(existing) = case
                         .loads

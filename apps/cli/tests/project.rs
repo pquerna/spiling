@@ -8,6 +8,9 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
+#[path = "project/fastener.rs"]
+mod fastener;
+
 fn engine() -> PathBuf {
     std::env::var_os("SPILING_TEST_ENGINE")
         .map(PathBuf::from)

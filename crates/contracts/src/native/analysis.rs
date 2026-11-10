@@ -3,8 +3,194 @@
 // Licensed under the Open Software License version 3.0
 use super::required;
 use super::{request_id, session_parent};
+use crate::analysis::fastener::*;
 use crate::analysis::mechanics::*;
 use crate::{analysis::*, geometry::*, project::*, rpc};
+
+impl TryFrom<rpc::PrepareAnalysisFastenerRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::PrepareAnalysisFastenerRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        let session_id = session_parent(&value.parent)?;
+        let reference: FaceRef = required(value.reference, "native bore reference")?.try_into()?;
+        if session_id != reference.session_id {
+            return Err("bore reference belongs to another session".into());
+        }
+        Ok(Self::PrepareAnalysisFastener {
+            session_id,
+            base_revision: ProjectRevision(value.base_revision),
+            reference,
+        })
+    }
+}
+impl TryFrom<rpc::AnalysisFastenerPreparation> for AnalysisFastenerPreparation {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisFastenerPreparation) -> Result<Self, String> {
+        if value.outer_xy_mm.len() != 4 {
+            return Err("plate XY envelope needs four values".into());
+        }
+        let preparation = Self {
+            project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
+            project_revision: ProjectRevision(value.project_revision),
+            reference: required(value.reference, "native bore reference")?.try_into()?,
+            source_hash: SourceHash::parse(value.source_hash).map_err(|error| error.to_string())?,
+            pose: required(value.pose, "native bore pose")?.try_into()?,
+            hole: required(value.hole, "complete native bore")?.try_into()?,
+            outer_xy_mm: [
+                [value.outer_xy_mm[0], value.outer_xy_mm[1]],
+                [value.outer_xy_mm[2], value.outer_xy_mm[3]],
+            ],
+        };
+        preparation.validate().map_err(|error| error.to_string())?;
+        Ok(preparation)
+    }
+}
+impl TryFrom<AnalysisFastenerPreparation> for rpc::AnalysisFastenerPreparation {
+    type Error = String;
+    fn try_from(value: AnalysisFastenerPreparation) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            project_id: value.project_id.as_str().into(),
+            project_revision: value.project_revision.0,
+            reference: Some(value.reference.try_into()?),
+            source_hash: value.source_hash.as_str().into(),
+            pose: Some(value.pose.try_into()?),
+            hole: Some(value.hole.try_into()?),
+            outer_xy_mm: value.outer_xy_mm.into_iter().flatten().collect(),
+        })
+    }
+}
+
+impl TryFrom<rpc::AnalysisHole> for AnalysisHole {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisHole) -> Result<Self, String> {
+        if value.bore_faces.len() > MAX_BORE_FACES || value.cap_faces.len() != 2 {
+            return Err("native hole face count differs".into());
+        }
+        let caps = value
+            .cap_faces
+            .into_iter()
+            .map(FaceId::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let hole = Self {
+            bore_faces: value
+                .bore_faces
+                .into_iter()
+                .map(FaceId::parse)
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?,
+            cap_faces: caps
+                .try_into()
+                .map_err(|_| "hole needs two aperture cap faces")?,
+            center_mm: required(value.center_mm, "hole center")?.try_into()?,
+            radius_mm: value.radius_mm,
+            depth_mm: value.depth_mm,
+        };
+        hole.validate().map_err(|error| error.to_string())?;
+        Ok(hole)
+    }
+}
+impl TryFrom<AnalysisHole> for rpc::AnalysisHole {
+    type Error = String;
+    fn try_from(value: AnalysisHole) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            bore_faces: value
+                .bore_faces
+                .into_iter()
+                .map(|face| face.as_str().into())
+                .collect(),
+            cap_faces: value
+                .cap_faces
+                .into_iter()
+                .map(|face| face.as_str().into())
+                .collect(),
+            center_mm: Some(value.center_mm.try_into()?),
+            radius_mm: value.radius_mm,
+            depth_mm: value.depth_mm,
+        })
+    }
+}
+impl TryFrom<i32> for HoleEnd {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match rpc::HoleEnd::try_from(value) {
+            Ok(rpc::HoleEnd::Start) => Ok(Self::Start),
+            Ok(rpc::HoleEnd::End) => Ok(Self::End),
+            _ => Err("fastener end is unspecified or unknown".into()),
+        }
+    }
+}
+impl From<HoleEnd> for rpc::HoleEnd {
+    fn from(value: HoleEnd) -> Self {
+        match value {
+            HoleEnd::Start => Self::Start,
+            HoleEnd::End => Self::End,
+        }
+    }
+}
+impl TryFrom<rpc::AnalysisFastener> for AnalysisFastener {
+    type Error = String;
+    fn try_from(value: rpc::AnalysisFastener) -> Result<Self, String> {
+        let fastener = Self {
+            id: value.id,
+            name: value.name,
+            hole: required(value.hole, "native fastener hole")?.try_into()?,
+            attachment: match required(value.attachment, "fastener attachment")? {
+                rpc::analysis_fastener::Attachment::Clamp(clamp) => FastenerAttachment::Clamp {
+                    end: clamp.end.try_into()?,
+                    washer_diameter_mm: clamp.washer_diameter_mm,
+                },
+                rpc::analysis_fastener::Attachment::Pin(pin) => FastenerAttachment::Pin {
+                    allow_axial_slide: pin.allow_axial_slide,
+                    allow_spin: pin.allow_spin,
+                },
+                rpc::analysis_fastener::Attachment::BondedEngagement(engagement) => {
+                    FastenerAttachment::BondedEngagement {
+                        end: engagement.end.try_into()?,
+                        engagement_mm: engagement.engagement_mm,
+                    }
+                }
+            },
+        };
+        fastener.validate().map_err(|error| error.to_string())?;
+        Ok(fastener)
+    }
+}
+impl TryFrom<AnalysisFastener> for rpc::AnalysisFastener {
+    type Error = String;
+    fn try_from(value: AnalysisFastener) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            id: value.id,
+            name: value.name,
+            hole: Some(value.hole.try_into()?),
+            attachment: Some(match value.attachment {
+                FastenerAttachment::Clamp {
+                    end,
+                    washer_diameter_mm,
+                } => rpc::analysis_fastener::Attachment::Clamp(rpc::FastenerClamp {
+                    end: rpc::HoleEnd::from(end) as i32,
+                    washer_diameter_mm,
+                }),
+                FastenerAttachment::Pin {
+                    allow_axial_slide,
+                    allow_spin,
+                } => rpc::analysis_fastener::Attachment::Pin(rpc::FastenerPin {
+                    allow_axial_slide,
+                    allow_spin,
+                }),
+                FastenerAttachment::BondedEngagement { end, engagement_mm } => {
+                    rpc::analysis_fastener::Attachment::BondedEngagement(rpc::FastenerEngagement {
+                        end: rpc::HoleEnd::from(end) as i32,
+                        engagement_mm,
+                    })
+                }
+            }),
+        })
+    }
+}
 
 impl TryFrom<rpc::ForceFootprint> for load::ForceFootprint {
     type Error = String;
@@ -247,6 +433,11 @@ impl TryFrom<rpc::AnalysisCase> for AnalysisCase {
                     })
                 })
                 .collect::<Result<_, String>>()?,
+            fasteners: value
+                .fasteners
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, String>>()?,
             restraints: value
                 .restraints
                 .into_iter()
@@ -292,6 +483,11 @@ impl TryFrom<AnalysisCase> for rpc::AnalysisCase {
                         moment_n_mm: load.moment_n_mm.to_vec(),
                     })
                 })
+                .collect::<Result<_, String>>()?,
+            fasteners: value
+                .fasteners
+                .into_iter()
+                .map(TryInto::try_into)
                 .collect::<Result<_, String>>()?,
             restraints: value
                 .restraints

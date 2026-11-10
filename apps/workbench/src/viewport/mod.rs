@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod beads;
+pub mod fastener;
 mod focus;
 pub mod force;
 pub mod mechanics;
@@ -87,6 +88,7 @@ struct Resources {
 
 pub struct Input<'a> {
     pub force: Option<&'a mut force::Canvas>,
+    pub fastener: Option<&'a mut fastener::Canvas>,
     pub mechanics: Option<mechanics::Input>,
     pub inspection: Option<Arc<crate::inspection::Area>>,
     pub project_id: Option<spiling_contracts::project::ProjectId>,
@@ -121,6 +123,7 @@ impl CameraState {
 }
 pub struct Viewport {
     force_interaction: force::Interaction,
+    fastener_ghosts: fastener::Ghosts,
     mechanics_annotations: mechanics::Annotations,
     yaw: f64,
     pitch: f64,
@@ -148,6 +151,7 @@ impl Default for Viewport {
     fn default() -> Self {
         Self {
             force_interaction: Default::default(),
+            fastener_ghosts: Default::default(),
             mechanics_annotations: Default::default(),
             yaw: -0.8,
             pitch: 0.7,
@@ -661,6 +665,7 @@ impl Viewport {
     ) -> Option<FaceRef> {
         let Input {
             mut force,
+            mut fastener,
             mechanics,
             inspection,
             project_id,
@@ -1077,7 +1082,9 @@ impl Viewport {
         if interactive
             && view.source
             && !force_owns_pointer
-            && let Some(canvas) = force.as_mut().filter(|canvas| canvas.armed)
+            && !ui.ctx().text_edit_focused()
+            && (force.as_ref().is_some_and(|canvas| canvas.armed)
+                || fastener.as_ref().is_some_and(|canvas| canvas.armed))
             && response.hovered()
             && let (Some(scene), Some(pointer)) =
                 (&scene, ui.input(|input| input.pointer.hover_pos()))
@@ -1095,13 +1102,24 @@ impl Viewport {
                 plane,
                 scope,
             ) {
-                canvas.event = Some(force::Event::Point {
-                    reference,
-                    seed_mm,
-                    place: response.clicked(),
-                });
+                if let Some(canvas) = fastener.as_mut().filter(|canvas| canvas.armed) {
+                    canvas.event = Some(fastener::Event::Point {
+                        reference,
+                        place: response.clicked(),
+                    });
+                } else if let Some(canvas) = force.as_mut() {
+                    canvas.event = Some(force::Event::Point {
+                        reference,
+                        seed_mm,
+                        place: response.clicked(),
+                    });
+                }
             } else {
-                canvas.event = Some(force::Event::Leave);
+                if let Some(canvas) = fastener.as_mut().filter(|canvas| canvas.armed) {
+                    canvas.event = Some(fastener::Event::Leave);
+                } else if let Some(canvas) = force.as_mut() {
+                    canvas.event = Some(force::Event::Leave);
+                }
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
@@ -1109,6 +1127,7 @@ impl Viewport {
             && view.source
             && !force_owns_pointer
             && !force.as_ref().is_some_and(|canvas| canvas.armed)
+            && !fastener.as_ref().is_some_and(|canvas| canvas.armed)
             && response.clicked()
             && let (Some(scene), Some(pointer)) = (&scene, response.interact_pointer_pos())
         {
@@ -1238,6 +1257,14 @@ impl Viewport {
                 },
             },
         ));
+        if view.source
+            && let (Some(canvas), Some(scene)) = (&fastener, &scene)
+        {
+            self.fastener_ghosts
+                .paint(ui, canvas, scene, matrix, center, rect);
+        } else {
+            self.fastener_ghosts = Default::default();
+        }
         if let (Some(mechanics), Some(scene)) = (&mechanics, &scene) {
             mechanics.paint_ui(
                 ui,

@@ -202,6 +202,59 @@ pub struct VerticalCylinderFace {
     pub max_z_mm: f64,
 }
 
+/// Source +X/right-handed +Z angular ownership, in increasing radians.
+/// Each interval may cross 2π; its length is the physical owned arc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoreFaceAngles {
+    pub face_id: FaceId,
+    pub intervals_radians: Vec<[f64; 2]>,
+}
+
+/// Geometry-owned rectangular source-Z plate with exactly one circular through
+/// bore. This value is constructed only by native coefficient/trim/incidence
+/// qualification; it grants no mechanical, manufacturing or calibration claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoredPlate {
+    center_mm: [f64; 2],
+    radius_mm: f64,
+    height_mm: [f64; 2],
+    outer_xy_mm: [[f64; 2]; 2],
+    bore_faces: Vec<FaceId>,
+    cap_faces: [FaceId; 2],
+    outer_faces: [FaceId; 4],
+    bore_face_angles: Vec<BoreFaceAngles>,
+}
+
+impl BoredPlate {
+    pub fn center_mm(&self) -> [f64; 2] {
+        self.center_mm
+    }
+    pub fn radius_mm(&self) -> f64 {
+        self.radius_mm
+    }
+    pub fn height_mm(&self) -> [f64; 2] {
+        self.height_mm
+    }
+    /// [[minX, minY], [maxX, maxY]].
+    pub fn outer_xy_mm(&self) -> [[f64; 2]; 2] {
+        self.outer_xy_mm
+    }
+    pub fn bore_faces(&self) -> &[FaceId] {
+        &self.bore_faces
+    }
+    /// Bottom, top.
+    pub fn cap_faces(&self) -> &[FaceId; 2] {
+        &self.cap_faces
+    }
+    /// minX, maxX, minY, maxY.
+    pub fn outer_faces(&self) -> &[FaceId; 4] {
+        &self.outer_faces
+    }
+    pub fn bore_face_angles(&self) -> &[BoreFaceAngles] {
+        &self.bore_face_angles
+    }
+}
+
 impl PreparedSectionSource<'_> {
     /// Intersect the actual placed native source with an arbitrary world plane.
     /// The query allowance excludes every retained source and other coexisting

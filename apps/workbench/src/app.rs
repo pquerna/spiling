@@ -436,7 +436,7 @@ impl Workbench {
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            if self.cancel_force_tool() {
+            if self.cancel_fastener_tool(ctx) || self.cancel_force_tool() {
                 ctx.request_repaint();
             } else if self.mechanics.evidence_open {
                 self.mechanics.evidence_open = false;
@@ -1065,6 +1065,7 @@ impl eframe::App for Workbench {
                     let mut picked = None;
                     let mechanics = self.mechanics_view();
                     let mut force_canvas = self.force_canvas();
+                    let mut fastener_canvas = self.fastener_canvas();
                     let inspection = self
                         .interface_overlay(self.state.display.clone().as_ref(), review.as_ref());
                     ui.horizontal_top(|ui| {
@@ -1081,6 +1082,7 @@ impl eframe::App for Workbench {
                                     ui,
                                     crate::viewport::Input {
                                         force: force_canvas.as_mut(),
+                                        fastener: fastener_canvas.as_mut(),
                                         mechanics: mechanics.clone(),
                                         inspection: inspection.clone(),
                                         project_id: self
@@ -1147,8 +1149,12 @@ impl eframe::App for Workbench {
                         self.analysis.view.offset_mm = analysis.offset_mm;
                     }
                     if let Some(reference) = picked {
+                        self.select_fastener_face(&reference);
                         self.select_force_face(&reference);
                         self.select_face(reference);
+                    }
+                    if let Some(event) = fastener_canvas.and_then(|canvas| canvas.event) {
+                        self.fastener_event(event);
                     }
                     if let Some(event) = force_canvas.and_then(|canvas| canvas.event) {
                         self.force_event(event);

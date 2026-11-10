@@ -13,6 +13,8 @@ use std::{
 };
 use tokio::{process::Command, time::timeout};
 
+#[path = "project/fastener.rs"]
+mod fastener;
 mod support;
 use support::{copy_project, manifest, write_manifest};
 
@@ -121,6 +123,7 @@ async fn force_tool_check() {
                 )
                 .unwrap(),
         ],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: edge_at(0, 0.0),
             fixed_translation: [true; 3],
@@ -318,6 +321,7 @@ fn whole_hook_native_closed_slab_admission() {
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
         }],
+        fasteners: vec![],
         restraints: vec![spiling_contracts::analysis::AnalysisFaceRestraint {
             face_id: edge_at(0, 0.0),
             fixed_translation: [true; 3],
@@ -428,6 +432,7 @@ async fn whole_hook_service_check() {
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
         }],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: edge_at(0, 0.0),
             fixed_translation: [true; 3],
@@ -969,7 +974,7 @@ async fn whole_hook_service_check() {
                 let node_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
                 let element_count = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
                 let element_offset = node_offset + 72 * node_count;
-                let patch_offset = element_offset + 232 * element_count;
+                let patch_offset = element_offset + 240 * element_count;
                 if let Some((offset, value)) = match variant {
                     4 => Some((node_offset, 123.0f64)),
                     9 => Some((patch_offset + 24, 123.0f64)),
@@ -1130,6 +1135,7 @@ async fn analysis_cases_check_native_patches_and_survive_history_source_absent_r
             force_n: [0.0, -12.0, 0.0],
             moment_n_mm: [15.0, 0.0, 0.0],
         }],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: native_faces[1].face_id.clone(),
             fixed_translation: [true; 3],

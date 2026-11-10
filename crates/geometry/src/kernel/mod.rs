@@ -6,6 +6,7 @@ pub(crate) mod source;
 pub(crate) mod source_operand;
 
 mod cylinder;
+mod hole;
 pub(crate) mod trim;
 mod wall;
 pub(crate) use trim::{

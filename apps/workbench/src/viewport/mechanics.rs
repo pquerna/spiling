@@ -361,7 +361,7 @@ impl Input {
     }
 }
 
-fn patch_edges(
+pub(super) fn patch_edges(
     scene: &Scene,
     reference: &FaceRef,
     remaining: &mut usize,

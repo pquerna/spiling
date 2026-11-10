@@ -57,6 +57,9 @@ impl JobStatus {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
+    AnalysisFastenerPrepared {
+        preparation: spiling_contracts::analysis::fastener::AnalysisFastenerPreparation,
+    },
     AnalysisFacePrepared {
         preparation: spiling_contracts::analysis::load::AnalysisFacePreparation,
     },

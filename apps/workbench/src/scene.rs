@@ -74,7 +74,8 @@ fn check(cancel: &AtomicBool) -> Result<(), ClientError> {
 /// separately. This pool is reserved beside every source/section/replay load.
 pub const CONTEXT_DISPLAY_RESERVE_BYTES: usize = 4 * 1024 * 1024
     + crate::inspection::INSPECTION_RESERVE_BYTES
-    + crate::mechanics::DISPLAY_RESERVE_BYTES;
+    + crate::mechanics::DISPLAY_RESERVE_BYTES
+    + crate::viewport::fastener::DISPLAY_RESERVE_BYTES;
 pub const MAX_INSTANCE_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Fetch one checked chunk at a time. Reuse immutable definitions on pose-only revisions.

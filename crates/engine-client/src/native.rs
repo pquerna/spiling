@@ -372,6 +372,7 @@ impl EngineRpc {
             | ProjectCommand::CompareAppearance { .. }
             | ProjectCommand::RunAnalysis { .. }
             | ProjectCommand::PrepareAnalysisFace { .. }
+            | ProjectCommand::PrepareAnalysisFastener { .. }
             | ProjectCommand::GetAnalysisResult { .. }
             | ProjectCommand::AttachAnalysisResult { .. }
             | ProjectCommand::AcceptAppearanceReport { .. }
@@ -471,6 +472,17 @@ impl EngineRpc {
             ProjectCall::ImportAppearancePalette(request) => {
                 let operation = client
                     .import_appearance_palette(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::PrepareAnalysisFastener(request) => {
+                let operation = client
+                    .prepare_analysis_fastener(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();

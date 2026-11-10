@@ -507,6 +507,32 @@ impl projects_server::Projects for Service {
                 .await?,
         ))
     }
+    async fn prepare_analysis_fastener(
+        &self,
+        req: Request<PrepareAnalysisFastenerRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.PrepareAnalysisFastener", &req);
+        let command = req.try_into().map_err(|error: String| {
+            request_error(spiling_contracts::native::project_request_status(&error))
+        })?;
+        Ok(Response::new(
+            self.jobs
+                .start_native(
+                    self.native.clone(),
+                    jobs::NativeAdmission {
+                        parent,
+                        request_id: id,
+                        digest,
+                        command: Control::Project(command),
+                        reservation: 0,
+                    },
+                )
+                .await?,
+        ))
+    }
     async fn prepare_analysis_face(
         &self,
         req: Request<PrepareAnalysisFaceRequest>,

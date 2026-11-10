@@ -45,6 +45,119 @@ pub(super) fn validate_contact(
     Ok(())
 }
 
+pub(super) fn prepare_fastener(
+    definition: &spiling_geometry::Definition,
+    request: FaceRequest,
+    cancel: &AtomicBool,
+) -> Result<fastener::AnalysisFastenerPreparation, JobError> {
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
+    let plate = definition.bored_plate_with_work(&mut work, cancel)?;
+    let bounds = plate.outer_xy_mm();
+    let preparation = fastener::AnalysisFastenerPreparation {
+        project_id: request.project_id,
+        project_revision: request.project_revision,
+        reference: request.reference,
+        source_hash: request.source_hash,
+        pose: request.pose,
+        hole: fastener::AnalysisHole {
+            bore_faces: plate.bore_faces().to_vec(),
+            cap_faces: plate.cap_faces().clone(),
+            center_mm: [
+                plate.center_mm()[0],
+                plate.center_mm()[1],
+                plate.height_mm()[0],
+            ],
+            radius_mm: plate.radius_mm(),
+            depth_mm: plate.height_mm()[1] - plate.height_mm()[0],
+        },
+        outer_xy_mm: [[bounds[0][0], bounds[1][0]], [bounds[0][1], bounds[1][1]]],
+    };
+    preparation.validate()?;
+    Ok(preparation)
+}
+
+pub(super) fn validate_fastener(
+    definition: &spiling_geometry::Definition,
+    fastener: &fastener::AnalysisFastener,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
+    let plate = definition
+        .bored_plate_with_work(&mut work, cancel)
+        .map_err(project_geometry_error)?;
+    let hole = &fastener.hole;
+    let same = hole.bore_faces.as_slice() == plate.bore_faces()
+        && &hole.cap_faces == plate.cap_faces()
+        && hole.center_mm
+            == [
+                plate.center_mm()[0],
+                plate.center_mm()[1],
+                plate.height_mm()[0],
+            ]
+        && hole.radius_mm == plate.radius_mm()
+        && hole.depth_mm == plate.height_mm()[1] - plate.height_mm()[0];
+    if !same {
+        return Err(project_error(
+            ProjectErrorCode::InvalidProject,
+            "stored fastener does not match its complete authoritative native hole",
+        ));
+    }
+    if let fastener::FastenerAttachment::Clamp {
+        washer_diameter_mm, ..
+    } = fastener.attachment
+    {
+        let bounds = plate.outer_xy_mm();
+        let radius = washer_diameter_mm * 0.5;
+        if (0..2).any(|axis| {
+            hole.center_mm[axis] - radius < bounds[0][axis]
+                || hole.center_mm[axis] + radius > bounds[1][axis]
+        }) {
+            return Err(project_error(
+                ProjectErrorCode::InvalidProject,
+                "washer extends beyond the native mounting face; reduce its diameter",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_mesh_profile(
+    definition: &spiling_geometry::Definition,
+    geometry: &fastener::AnalysisMeshGeometry,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    let fastener::AnalysisMeshGeometry::RationalBoredPlate { profile } = geometry else {
+        return Ok(());
+    };
+    let mut work = spiling_geometry::GeometryWorkBudget::query();
+    let plate = definition
+        .bored_plate_with_work(&mut work, cancel)
+        .map_err(project_geometry_error)?;
+    let bounds = plate.outer_xy_mm();
+    let expected = fastener::AnalysisBoreProfile {
+        hole: fastener::AnalysisHole {
+            bore_faces: plate.bore_faces().to_vec(),
+            cap_faces: plate.cap_faces().clone(),
+            center_mm: [
+                plate.center_mm()[0],
+                plate.center_mm()[1],
+                plate.height_mm()[0],
+            ],
+            radius_mm: plate.radius_mm(),
+            depth_mm: plate.height_mm()[1] - plate.height_mm()[0],
+        },
+        outer_xy_mm: [[bounds[0][0], bounds[1][0]], [bounds[0][1], bounds[1][1]]],
+        outer_faces: plate.outer_faces().clone(),
+    };
+    if profile != &expected {
+        return Err(project_error(
+            ProjectErrorCode::InvalidProject,
+            "retained curved analysis profile differs from authoritative native source ownership",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_face(
     definition: &spiling_geometry::Definition,
     request: FaceRequest,
@@ -80,6 +193,32 @@ pub(super) fn prepare_face(
 }
 
 impl Runtime {
+    pub(super) fn prepare_analysis_fastener(
+        &mut self,
+        session: &SessionId,
+        base: ProjectRevision,
+        reference: FaceRef,
+    ) -> Result<Reply, ProjectError> {
+        self.appearance_base(session, base)?;
+        self.live_surface_target(&reference)?;
+        let snapshot = self.project.snapshot();
+        let occurrence = &snapshot.occurrences[&reference.occurrence_id];
+        let request = FaceRequest {
+            project_id: self.project.info().project_id,
+            project_revision: base,
+            source_hash: self.definitions[&reference.definition_id]
+                .record
+                .provenance
+                .source_hash
+                .clone(),
+            pose: occurrence.pose,
+            reference,
+        };
+        self.start(Purpose::PrepareAnalysisFastener, 0, move |_, _, _| {
+            Work::PrepareAnalysisFastener(request)
+        })
+        .map_err(project_geometry_error)
+    }
     pub(super) fn prepare_analysis_face(
         &mut self,
         session: &SessionId,
@@ -225,7 +364,9 @@ impl Runtime {
                 "assumed source-only construction does not admit surface additions or regional process layers; nothing is silently dropped",
             ));
         }
-        if case.case.loads.is_empty() || case.case.restraints.is_empty() {
+        if case.case.loads.is_empty()
+            || (case.case.restraints.is_empty() && case.case.fasteners.is_empty())
+        {
             return Err(project_error(
                 ProjectErrorCode::InvalidProject,
                 "mechanical execution requires explicit finite loads and restraints",

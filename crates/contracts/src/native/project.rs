@@ -72,6 +72,7 @@ impl TryFrom<ManufacturingOptionInfo> for rpc::ManufacturingOptionInfo {
     reason = "Bounded typed native request values stay inline without a per-call heap allocation"
 )]
 pub enum ProjectCall {
+    PrepareAnalysisFastener(rpc::PrepareAnalysisFastenerRequest),
     PrepareAnalysisFace(rpc::PrepareAnalysisFaceRequest),
     GetAnalysisResult(rpc::GetAnalysisResultRequest),
     RunAnalysis(rpc::RunAnalysisRequest),
@@ -93,6 +94,23 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::PrepareAnalysisFastener {
+            session_id,
+            base_revision,
+            reference,
+        } => {
+            if session_id != reference.session_id {
+                return Err("analysis face session mismatch".into());
+            }
+            return Ok(ProjectCall::PrepareAnalysisFastener(
+                rpc::PrepareAnalysisFastenerRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    reference: Some(reference.try_into()?),
+                },
+            ));
+        }
         ProjectCommand::PrepareAnalysisFace {
             session_id,
             base_revision,

@@ -14,6 +14,18 @@ pub const FIELD_NAMES: [&str; 4] = [
     "Energy concentration · ×",
 ];
 
+/// An explicit user choice, never a material/catalog-derived default.
+pub fn reference_model()
+-> Result<spiling_contracts::analysis::mechanics::AnalysisRunSettings, String> {
+    let settings: spiling_contracts::analysis::mechanics::AnalysisRunSettings =
+        serde_json::from_str(include_str!(
+            "../../../fixtures/analysis/hook-assumptions.json"
+        ))
+        .map_err(|error| error.to_string())?;
+    settings.validate().map_err(|error| error.to_string())?;
+    Ok(settings)
+}
+
 pub fn read_model(
     path: &spiling_contracts::geometry::NativePath,
 ) -> Result<spiling_contracts::analysis::mechanics::AnalysisRunSettings, String> {
@@ -96,6 +108,47 @@ fn insert_faces(
     Ok(())
 }
 
+fn load_contacts(
+    load_count: usize,
+    patch_count: usize,
+    sample_at: impl Fn(usize) -> Option<spiling_contracts::analysis::fields::AnalysisPatchSample>,
+) -> Result<Vec<(DVec3, Vec<DVec3>)>, String> {
+    let mut contacts = vec![(DVec3::ZERO, Vec::new()); load_count];
+    let mut areas = vec![0.0; contacts.len()];
+    let mut counts = vec![0_usize; contacts.len()];
+    for index in 0..patch_count {
+        let sample = sample_at(index).ok_or("Missing contact sample")?;
+        if let Some(count) = counts.get_mut(sample.patch_index as usize) {
+            *count += 1;
+        }
+    }
+    let mut seen = vec![0_usize; contacts.len()];
+    for index in 0..patch_count {
+        let sample = sample_at(index).ok_or("Missing contact sample")?;
+        // SPLA2 retains connector reaction samples after the load patches.
+        // They remain in the physical packet, never in load-contact averages.
+        let Some(contact) = contacts.get_mut(sample.patch_index as usize) else {
+            continue;
+        };
+        let point = DVec3::from_array(sample.point_mm);
+        contact.0 += point * sample.area_mm2;
+        if seen[sample.patch_index as usize]
+            .is_multiple_of(counts[sample.patch_index as usize].div_ceil(128))
+        {
+            contact.1.push(point);
+        }
+        seen[sample.patch_index as usize] += 1;
+        areas[sample.patch_index as usize] += sample.area_mm2;
+    }
+    for (contact, area) in contacts.iter_mut().zip(areas) {
+        if area <= 0.0 {
+            return Err("Mechanical contact has no retained area".into());
+        }
+        contact.0 /= area;
+    }
+    Ok(contacts)
+}
+
 impl Display {
     pub fn new(fields: &AnalysisFields<'_>) -> Result<Self, String> {
         let mut faces = BTreeMap::<[u32; 9], Option<Surface>>::new();
@@ -135,35 +188,11 @@ impl Display {
                 DVec3::from_array(fields.node(node as usize).unwrap().position_mm)
             })?;
         }
-        let mut contacts = vec![(DVec3::ZERO, Vec::new()); fields.summary.case.case.loads.len()];
-        let mut areas = vec![0.0; contacts.len()];
-        let mut counts = vec![0_usize; contacts.len()];
-        for index in 0..fields.patch_count {
-            counts[fields
-                .patch(index)
-                .ok_or("Missing contact sample")?
-                .patch_index as usize] += 1;
-        }
-        let mut seen = vec![0_usize; contacts.len()];
-        for index in 0..fields.patch_count {
-            let sample = fields.patch(index).ok_or("Missing contact sample")?;
-            let contact = &mut contacts[sample.patch_index as usize];
-            let point = DVec3::from_array(sample.point_mm);
-            contact.0 += point * sample.area_mm2;
-            if seen[sample.patch_index as usize]
-                .is_multiple_of(counts[sample.patch_index as usize].div_ceil(128))
-            {
-                contact.1.push(point);
-            }
-            seen[sample.patch_index as usize] += 1;
-            areas[sample.patch_index as usize] += sample.area_mm2;
-        }
-        for (contact, area) in contacts.iter_mut().zip(areas) {
-            if area <= 0.0 {
-                return Err("Mechanical contact has no retained area".into());
-            }
-            contact.0 /= area;
-        }
+        let contacts = load_contacts(
+            fields.summary.case.case.loads.len(),
+            fields.patch_count,
+            |index| fields.patch(index),
+        )?;
         Ok(Self {
             contacts,
             surfaces: faces.into_values().flatten().collect(),
@@ -295,6 +324,39 @@ pub fn color(value: f64, range: [f64; 2]) -> [f32; 3] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fastener_reaction_samples_do_not_index_or_bias_load_contacts() {
+        use spiling_contracts::analysis::fields::AnalysisPatchSample;
+        let samples = [
+            AnalysisPatchSample {
+                element_index: 0,
+                patch_index: 0,
+                point_mm: [1.0, 2.0, 3.0],
+                area_mm2: 2.0,
+                traction_mpa: [0.0; 3],
+            },
+            AnalysisPatchSample {
+                element_index: 1,
+                patch_index: 1,
+                point_mm: [100.0; 3],
+                area_mm2: 1000.0,
+                traction_mpa: [-10.0; 3],
+            },
+            AnalysisPatchSample {
+                element_index: 0,
+                patch_index: 0,
+                point_mm: [3.0, 2.0, 3.0],
+                area_mm2: 2.0,
+                traction_mpa: [0.0; 3],
+            },
+        ];
+        let contacts =
+            load_contacts(1, samples.len(), |index| samples.get(index).cloned()).unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].0, DVec3::new(2.0, 2.0, 3.0));
+        assert_eq!(contacts[0].1.len(), 2);
+        assert_eq!(samples[1].traction_mpa, [-10.0; 3]);
+    }
     #[test]
     fn shared_reserve_covers_retained_pending_and_renderer_field_data() {
         use spiling_contracts::analysis::mechanics::{

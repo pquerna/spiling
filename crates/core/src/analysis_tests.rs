@@ -22,6 +22,7 @@ fn case(project: &Project) -> AnalysisCase {
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [1.0, 2.0, 3.0],
         }],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: FaceId::from_step_entity(11).unwrap(),
             fixed_translation: [true; 3],

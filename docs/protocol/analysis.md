@@ -9,7 +9,7 @@ Licensed under the Open Software License version 3.0
 Analyze currently authors and persists FDM boundary intent through the same
 Core, Projects service, engine-client, CLI and native workbench as Prepare and
 Review. An initial CPU FP64 mechanical consumer also solves an admitted complete
-native orthogonal prism from a saved Basic case under explicitly assumed printed
+native orthogonal prism or native single-bore rectangular plate from a saved Basic case under explicitly assumed printed
 wall/skin/effective-core laws. This is an **assumed-law numerical study**, not the
 qualified Basic release or an actual-deposition reconstruction. Saving a case
 alone remains authoring, not a numerical result. Empty load/restraint lists are
@@ -25,7 +25,7 @@ unreleased project format counter or adding a compatibility reader.
 
 Each case has a canonical nonnil UUID `id`, trimmed control-free 1–80-byte
 `name`, explicit `layout_id`, `occurrence_id`, immutable `definition_id` and
-original `source_hash`, `mode`, `loads` and `restraints`. Names are unique within
+original `source_hash`, `mode`, `loads`, `restraints` and required `fasteners`. Names are unique within
 a layout. Identity-bearing source/occurrence bindings cannot be replaced under
 an existing case ID. Create another case rather than guessing face remapping.
 Moving the same occurrence to another layout carries its case and advances its
@@ -56,6 +56,62 @@ or surface intent, or the manufacturing input fingerprint/artifact. Mechanical
 operator reuse distinguishes load-only changes from construction, restraint,
 source, pose, resolution and law changes; preserving a manufacturing artifact is
 not proof of an existing FE cache.
+
+## Attach fastener
+
+Attach fastener means an **ideal connection to ground**, not infinitely strong
+printed material. The steel screw/pin is not solved and its failure is excluded;
+the surrounding wall, skins and effective core still deform and carry stress.
+No pretension, friction, clearance, separation, bearing yield, thread pullout or
+calibrated failure load is inferred. A connection is shared Basic/Enhanced intent;
+the current numerical consumer still refuses Enhanced execution.
+
+`Projects.PrepareAnalysisFastener` is a read-only standard operation on a live
+FaceRef. The native owner recognizes the complete inward cylindrical face group,
+cap ownership, center, radius and physical trim depth. A complementary split bore
+is one hole, not two screws. The first consumer admits a rectangular plate with
+one circular source-Z through-hole, independently closed native caps/outer faces
+and a complete placed CLOSED-slab/source-leaf receipt. Blind, partial, exterior,
+ambiguous and unsupported multi-hole shapes refuse; descriptive cylinders and
+display meshes never establish hole authority. Explicit helical thread faces
+are unsupported. A smooth bore may represent a **declared** ideal threaded
+engagement, without pretending threads were detected.
+
+Each fastener has a case-local nonzero ID, concise name, complete native hole
+capture and one attachment:
+
+- **Clamp:** selected entry end and washer outer diameter. A finite annulus on
+  that native cap distributes all six fixed generalized motions. The complete
+  annulus must fit the plate; reducing the washer is explicit, never clipping it
+  silently. This is an ideal clamp, not a preload/contact simulation.
+- **Pin:** the bore distributes transverse translation and tilt constraints.
+  Axial sliding and spin are explicit independent freedoms. A freely spinning
+  single pin is a mechanism unless another authored support removes that mode;
+  the engine refuses rather than silently grounding it.
+- **Threaded:** selected entry end and positive engagement depth within the bore.
+  A tied finite axial band distributes all six generalized constraints. This is
+  ideal bonded engagement, not a thread-strength or pullout model.
+
+The exact distributing constraint projects physical contact displacement onto
+six rigid-motion averages; local surface deformation remains free. A scaled
+augmentation makes the factor invertible, then an exact Schur projection removes
+its contribution. Acceptance assesses the original stiffness, constrained
+motions, reaction work, force and source-origin moments. It is not a finite
+penalty spring or fixed-bore-node substitution. Force-only edits reuse the
+prepared factor/projection; attachment, construction or law edits invalidate it.
+
+Native Analyze provides one Attach fastener placement tool and a compact inspector.
+Hover prepares a whole hole, click places once, Escape cancels. The shaft,
+washer/engagement band and allowed-motion indicators are checked display data.
+Inspector and canvas share one draft; Apply is one Core history edit, never a
+solve on pointer motion. Selection supports editing and removal. The assumption
+badge stays visible; reactions and detailed limitations belong in Evidence.
+
+Ordered CLI equivalents are `--analysis-clamp NAME FACE start|end DIAMETER_MM`,
+`--analysis-pin NAME FACE free|fixed free|fixed` (axial, then spin),
+`--analysis-engagement NAME FACE start|end DEPTH_MM` and
+`--analysis-unfasten NAME ID`. They prepare native ownership through the same
+typed service before committing the case.
 
 ## Finite patches, units and frames
 
@@ -146,8 +202,9 @@ exterior-wall proof, whose original affine, full-height and supporting-plane
 obligations remain unchanged. Display triangles never supply material or face
 authority.
 Native holes and all disconnected paths remain in the model; no cropped source,
-soft void material or removed cells can rescue admission. General curved/nonprism
-parts, cap patches, non-axis-aligned print rotations, unequal top/bottom skins
+soft void material or removed cells can rescue admission. Outside the separately
+admitted single-bore plate, general curved/nonprism parts refuse. Applied cap
+loads, non-axis-aligned print rotations, unequal top/bottom skins
 and projects with regional process/surface additions currently refuse. These are
 explicit coverage limits, not replacements for the full native product scope.
 
@@ -162,6 +219,16 @@ thin region or gap. Each component
 requires six independent restrained rigid modes. The original sparse stiffness
 is factored without regularization by the exact-pinned CPU numerical library.
 There is no hidden reduced integration or artificial pinning.
+
+The bored-plate path uses conforming rational Hex27 charts, preserving the
+circular bore rather than replacing it by a filled/soft polygon. Whole-cell
+outward-rounded Bernstein bounds must prove positive Jacobians, not merely
+positive values at quadrature points. Full 5×5×3 quadrature integrates curved
+cells; independent original-coefficient evaluation assesses them. Physical cap
+skins take precedence, bore/outer perimeter bands occupy the remaining height,
+and core fills the residual once. This path requires source-Z print layers;
+other print axes refuse rather than misclassify the construction. Clamps use
+cap-annulus contacts, not the applied cap-load path.
 
 Whole-face loads use 3×3 facet quadrature. Disk loads use clipped physical
 disk/rectangle quadrature, partitioned at circle/rectangle intersections with
@@ -195,7 +262,7 @@ on CPU FP64, not CubeCL or a backend-name-only GPU implementation.
 
 Successful Operations return `AnalysisCompleted` with captured project revision,
 input hash and an immutable ByteStream `application/x-spiling-analysis-fields`
-artifact. Producer `assumed-printed-hex27-3`, model scope
+artifact. Producer `assumed-printed-hex27-4`, model scope
 `planned_assumed_tied_macro` and `accuracy_evidence: unqualified` are explicit.
 An explicitly retained local Operations store retains successful fields across
 engine restart (CLI `--store DIRECTORY`; the default CLI store is temporary).
@@ -239,15 +306,19 @@ latest read revision. Failed attempts remain retryable on subsequent refresh.
 Captured settings hydrate an uninitialized form once; later edits, including an
 empty settings draft, survive reconciliation until explicit discard or adoption.
 
-SPLA1 is explicit little-endian packed data, never Rust memory layout. Its
-32-byte header is magic `SPLA`, u32 version 1, u32 JSON-metadata length (≤48 KiB),
+SPLA2 is explicit little-endian packed data, never Rust memory layout. Its
+32-byte header is magic `SPLA`, u32 version 2, u32 JSON-metadata length (≤48 KiB),
 node/element/patch counts, and two zero reserved u32s. Strict bounded metadata
 precedes fixed records: 72-byte nodes (source position mm, displacement mm,
-applied force N; each three f64s); 232-byte elements (27 u32 nodes, center and size
+applied force N; each three f64s); 240-byte elements (27 u32 nodes, center and size
 in mm as six f64s, u32 role wall=0/skin=1/core=2, f64 envelope volume mm³, six f64
-centroid macro stresses MPa, energy N·mm, dimensionless concentration); 64-byte
+centroid macro stresses MPa, energy N·mm, dimensionless concentration, f64 rational
+angular midpoint weight at byte 232); 64-byte
 patch samples (three f64 source coordinates mm, f64 area mm², three f64 tractions
-MPa, u32 authored load index, zero reserved u32). Checked decode validates exact
+MPa, u32 patch index, u32 owning element index). Applied-load indices precede
+fastener reaction indices in case order. Required metadata distinguishes affine
+Hex27 from rational bored-plate charts and retains complete native boundary
+ownership and connector reaction summaries. Checked decode validates exact
 length/counts, finite values, connectivity, units-bearing metadata and producer
 before bounded index-based partial inspection. Semantic admission also checks
 unique used nodes, affine Hex27 charts, disjoint element volumes, face incidence,
@@ -257,7 +328,12 @@ reassembled nodal loads and each patch's integrated resultant/source-origin
 moment must match the retained nodes and authored wrenches. These are integrity
 checks; retained nodal force/displacement work must also agree with twice the
 strain energy and the stored work/energy assessment. They are not a new
-discretization or physical-accuracy receipt. Client retrieval binds hash,
+discretization or physical-accuracy receipt. Curved admission additionally checks
+whole-cell positive Jacobians, exact rational bore boundaries, plate-minus-hole
+volume, original-coefficient stress/energy/internal forces, canonical finite
+attachment samples and distributing-law reactions/constraints. Native open
+rechecks historical captured profiles against authoritative source ownership.
+Client retrieval binds hash,
 size, MIME, input identity and captured revision.
 SPLA currently has Rust consumers only; no TypeScript packed decoder or
 cross-language binary interoperability qualification is claimed.

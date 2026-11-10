@@ -1229,6 +1229,7 @@ fn whole_hook_host_check() {
             force_n: [0.0, -10.0, 0.0],
             moment_n_mm: [30.0, 0.0, -360.0],
         }],
+        fasteners: vec![],
         restraints: vec![AnalysisFaceRestraint {
             face_id: restraint.unwrap(),
             fixed_translation: [true; 3],

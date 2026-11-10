@@ -5,7 +5,7 @@
 use super::*;
 use crate::manufacturing::PlanarPrintRecipe;
 
-pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-3";
+pub const ANALYSIS_PRODUCER: &str = "assumed-printed-hex27-4";
 pub const MAX_MECHANICAL_ELEMENTS: usize = 768;
 pub const MAX_MECHANICAL_DOFS: usize = 16_000;
 pub const MAX_MECHANICAL_FIELD_BYTES: usize = 4 * 1024 * 1024;
@@ -158,6 +158,8 @@ pub struct AnalysisNumericalAssessment {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisRunSummary {
+    pub mesh_geometry: fastener::AnalysisMeshGeometry,
+    pub fastener_responses: Vec<fastener::AnalysisFastenerResponse>,
     pub project_id: ProjectId,
     pub kernel_revision: String,
     pub native_sample_hash: [u8; 32],
@@ -197,6 +199,7 @@ impl AnalysisRunSummary {
                 &self.case.case.source_hash,
                 self.pose,
                 &self.case.case.restraints,
+                &self.case.case.fasteners,
                 &self.settings,
             ))
             .map_err(|error| invalid(&error.to_string()))?,
@@ -220,12 +223,54 @@ impl AnalysisRunSummary {
     pub fn validate(&self) -> Result<(), ProjectError> {
         self.settings.validate()?;
         self.case.case.validate()?;
+        if let fastener::AnalysisMeshGeometry::RationalBoredPlate { profile } = &self.mesh_geometry
+        {
+            profile.validate()?;
+            if self
+                .case
+                .case
+                .fasteners
+                .iter()
+                .any(|fastener| fastener.hole != profile.hole)
+            {
+                return Err(invalid(
+                    "captured fastener does not belong to the admitted native bored plate",
+                ));
+            }
+        } else if !self.case.case.fasteners.is_empty() {
+            return Err(invalid(
+                "fastener result requires an admitted native hole mesh",
+            ));
+        }
+        if self.fastener_responses.len() != self.case.case.fasteners.len()
+            || self
+                .fastener_responses
+                .iter()
+                .zip(&self.case.case.fasteners)
+                .any(|(response, fastener)| {
+                    response.fastener_id != fastener.id
+                        || !response.area_mm2.is_finite()
+                        || response.area_mm2 <= 0.0
+                        || !response.maximum_constraint_error_mm.is_finite()
+                        || response.maximum_constraint_error_mm > 1e-7
+                        || response.maximum_constraint_error_mm < 0.0
+                        || response
+                            .reaction_force_n
+                            .iter()
+                            .chain(&response.reaction_moment_n_mm)
+                            .any(|value| !value.is_finite())
+                })
+        {
+            return Err(invalid(
+                "fastener response, finite contact or constraint assessment differs from its captured attachment",
+            ));
+        }
         self.pose
             .validate()
             .map_err(|error| invalid(&error.to_string()))?;
         if self.producer != ANALYSIS_PRODUCER
             || self.case.case.loads.is_empty()
-            || self.case.case.restraints.is_empty()
+            || (self.case.case.restraints.is_empty() && self.case.case.fasteners.is_empty())
             || self.kernel_revision.is_empty()
             || self.kernel_revision.len() > 80
             || self.operator_hash != self.expected_operator_hash()?
