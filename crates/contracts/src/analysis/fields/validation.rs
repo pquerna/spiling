@@ -586,6 +586,20 @@ impl AnalysisFields<'_> {
         let mut connector_forces = vec![[0.0; 3]; nodes.len()];
         for (index, fastener) in self.summary.case.case.fasteners.iter().enumerate() {
             let expected = attachment::samples(fastener, &facets)?;
+            let exact: BTreeMap<_, _> = expected
+                .iter()
+                .enumerate()
+                .map(|(ordinal, candidate)| {
+                    (
+                        (
+                            candidate.element_index,
+                            candidate.point_mm.map(f64::to_bits),
+                            candidate.area_mm2.to_bits(),
+                        ),
+                        ordinal,
+                    )
+                })
+                .collect();
             let coupling = attachment::coupling(fastener, &expected, nodes.len())?;
             let samples = &reactions[index];
             if expected.len() != samples.len() {
@@ -599,13 +613,39 @@ impl AnalysisFields<'_> {
             let mut force = [0.0; 3];
             let mut moment = [0.0; 3];
             for sample in samples {
-                let Some(ordinal) = expected.iter().position(|candidate| {
-                    candidate.element_index == sample.element_index
-                        && (0..3).all(|axis| {
-                            close(candidate.point_mm[axis] - sample.point_mm[axis], 0.0)
+                let identity = (
+                    sample.element_index,
+                    sample.point_mm.map(f64::to_bits),
+                    sample.area_mm2.to_bits(),
+                );
+                let ordinal = exact.get(&identity).copied().or_else(|| {
+                    expected
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, candidate)| {
+                            candidate.element_index == sample.element_index
+                                && (0..3).all(|axis| {
+                                    close(candidate.point_mm[axis] - sample.point_mm[axis], 0.0)
+                                })
+                                && close(candidate.area_mm2, sample.area_mm2)
                         })
-                        && close(candidate.area_mm2, sample.area_mm2)
-                }) else {
+                        .min_by(|(_, first), (_, second)| {
+                            let distance = |candidate: &attachment::AttachmentSample| {
+                                (0..3)
+                                    .map(|axis| {
+                                        (candidate.point_mm[axis] - sample.point_mm[axis]).powi(2)
+                                    })
+                                    .sum::<f64>()
+                            };
+                            distance(first).total_cmp(&distance(second)).then_with(|| {
+                                (first.area_mm2 - sample.area_mm2)
+                                    .abs()
+                                    .total_cmp(&(second.area_mm2 - sample.area_mm2).abs())
+                            })
+                        })
+                        .map(|(ordinal, _)| ordinal)
+                });
+                let Some(ordinal) = ordinal else {
                     return Err(fail(
                         "SPLA fastener sample does not belong to its native washer/bore/engagement footprint",
                     ));
