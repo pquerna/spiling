@@ -53,7 +53,7 @@ def axial_reference(data, bounds, material):
     )
 
 
-def selected(captures, fraction):
+def selected(captures, fraction, rib_depth=None):
     result = {}
     for capture in captures:
         capture_spec, rows = native_rows(capture)
@@ -61,7 +61,7 @@ def selected(captures, fraction):
             c = row["candidate"]
             if (row["status"] != "ok" or c["pattern"] != "web_roof"
                     or c["fraction"] != fraction or c.get("web_opening")
-                    or c.get("pier_rib_depth_mm")):
+                    or c.get("pier_rib_depth_mm") != rib_depth):
                 continue
             name = row["specimen"]
             if name in result:
@@ -81,8 +81,8 @@ def pack(args):
             or not 0 < args.control_fraction < 1 or not 0 < args.candidate_fraction < 1
             or not 0 < args.seconds <= 86400):
         raise ValueError("finite positive frozen study parameters required")
-    controls = selected(args.control, args.control_fraction)
-    candidates = selected(args.candidate, args.candidate_fraction)
+    controls = selected(args.control, args.control_fraction, args.control_rib_depth_mm)
+    candidates = selected(args.candidate, args.candidate_fraction, args.candidate_rib_depth_mm)
     args.output.mkdir(parents=True, exist_ok=False)
     material = Material(z_ratio=.25)
     judge_files = REFERENCE_JUDGE if args.backend == "reference" else QUADRATIC_JUDGE
@@ -96,16 +96,17 @@ def pack(args):
             raise ValueError("paired source bytes differ")
         if control[2]["size_mm"] != candidate[2]["size_mm"]:
             raise ValueError("paired specimen dimensions differ")
-        settings = [{k: v for k, v in item[0]["candidate"].items() if k != "fraction"}
+        settings = [{k: v for k, v in item[0]["candidate"].items() if k not in {"fraction", "pier_rib_depth_mm"}}
                     for item in (control, candidate)]
         if settings[0] != settings[1]:
-            raise ValueError("paired construction settings differ beyond density")
+            raise ValueError("paired construction settings differ beyond declared density/ribs")
         if control[3]["intent"] != candidate[3]["intent"]:
             raise ValueError("paired base recipes differ")
         bounds = fixture(candidate[2], args.half_width)
         # A shifted crop is a separate physical cohort, never pooled silently.
         width = next(r["width"] for r in candidate[2]["roads"] if r["kind"] == 5)
-        if abs(args.shift_mm) > args.half_width - 3.5 * width:
+        reach = max(item[0]["candidate"].get("pier_rib_depth_mm", 3. * width) for item in (control, candidate))
+        if abs(args.shift_mm) + reach + width / 2 > args.half_width:
             raise ValueError("shift clips the full automatic flange envelope")
         bounds = [[v + args.shift_mm if a < 2 else v for a, v in enumerate(p)] for p in bounds]
         for variant, (row, folder, data, identity) in (("control", control), ("candidate", candidate)):
@@ -235,6 +236,54 @@ def collect(args):
                             independent_formulation_qualified=False))
 
 
+def compare_formulations(first, second):
+    """Independent element agreement on the same admitted native/physical panel."""
+    def native_identity(report):
+        identities = {(r["specimen"], r["variant"]): (r["source_sha256"], r["roads_sha256"], r["binaries"])
+                      for r in report["costs"]}
+        expected = {(r["specimen"], r["variant"]) for r in report["rows"]}
+        if not identities or len(identities) != len(report["costs"]) or identities.keys() != expected:
+            raise ValueError("incomplete or duplicated native capture inventory")
+        return identities
+    if native_identity(first) != native_identity(second):
+        raise ValueError("formulations do not consume the same native captures")
+    if not first["numerical_gate_passed"] or not second["numerical_gate_passed"]:
+        return dict(independent_formulation_qualified=False, reason="required_refinement_or_response_unknown", comparisons=[])
+    def finest(report):
+        if any(r["status"] != "ok" for r in report["rows"]):
+            raise ValueError("qualified panel contains unknown responses")
+        result = {}
+        for r in report["rows"]:
+            key = (r["specimen"], r["variant"], r["case"])
+            if key not in result or r["max_xy"] < result[key]["max_xy"]:
+                result[key] = r
+        return result
+    a, b = finest(first), finest(second)
+    if not a or a.keys() != b.keys():
+        raise ValueError("formulation fixture inventories differ")
+    for name, variant in native_identity(first):
+        if {case for n, v, case in a if (n, v) == (name, variant)} != set(CASES):
+            raise ValueError("formulation panel omits a required duty")
+    comparisons = []
+    for key in sorted(a):
+        x, y = a[key], b[key]
+        sx, sy = x["scenario"], y["scenario"]
+        if (sx["element"] == sy["element"] or x["image"] != y["image"]
+                or any(sx[k] != sy[k] for k in ("bounds", "case", "material"))
+                or sx["refinement"].get("cap_segments", 32) != sy["refinement"].get("cap_segments", 32)):
+            raise ValueError("changed physical geometry/law/image or identical formulation")
+        if any(not math.isfinite(r["stiffness_n_mm"]) or r["stiffness_n_mm"] <= 0 for r in (x, y)):
+            raise ValueError("invalid independent response")
+        difference = abs(y["stiffness_n_mm"]/x["stiffness_n_mm"]-1)
+        if not math.isfinite(difference):
+            raise ValueError("invalid independent response")
+        comparisons.append(dict(specimen=key[0], variant=key[1], case=key[2],
+                                first_element=sx["element"], second_element=sy["element"],
+                                relative_difference=difference, passed=difference <= .05))
+    return dict(scope="matched_native_finite_bay_formulation_agreement_not_strength",
+                independent_formulation_qualified=all(r["passed"] for r in comparisons), comparisons=comparisons)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="action", required=True)
@@ -243,6 +292,8 @@ def main():
     q.add_argument("--candidate", type=Path, nargs="+", required=True)
     q.add_argument("--control-fraction", type=float, default=.05)
     q.add_argument("--candidate-fraction", type=float, default=.05)
+    q.add_argument("--control-rib-depth-mm", type=float)
+    q.add_argument("--candidate-rib-depth-mm", type=float)
     q.add_argument("--context", type=Path, required=True)
     q.add_argument("--output", type=Path, required=True)
     q.add_argument("--specimens", nargs="+", default=["cube48", "beam80", "panel48", "tube32"])
@@ -257,8 +308,14 @@ def main():
     q = sub.add_parser("collect")
     for name in ("inputs", "results", "image", "output"):
         q.add_argument("--"+name, type=Path, required=True)
+    q = sub.add_parser("compare")
+    for name in ("first", "second", "output"):
+        q.add_argument("--"+name, type=Path, required=True)
     args = p.parse_args()
-    (pack if args.action == "pack" else collect)(args)
+    if args.action == "compare":
+        write(args.output, compare_formulations(json.loads(args.first.read_text()), json.loads(args.second.read_text())))
+    else:
+        (pack if args.action == "pack" else collect)(args)
 
 
 if __name__ == "__main__":

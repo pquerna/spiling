@@ -138,3 +138,27 @@ def test_source_prism_budget_is_explicit_and_does_not_relax_connectivity(
     for invalid in (True, 0, 1_000_001):
         with pytest.raises(ValueError, match="resource bound"):
             t.remesh(mesh, [], [], tmp_path / "mesh", max_source_prisms=invalid)
+
+
+def test_exact_coplanar_diagonal_changes_and_interior_boundary_nodes_preserve_material():
+    # A square pyramid: two source base triangles, or four through a new exact
+    # planar node. Volume, orientation, edge identity and material all agree.
+    p = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[.5,.5,1.]], float)
+    source, volume = oriented_cells(p, np.array([[0,1,2,4],[0,2,3,4]]))
+    alternate, _ = oriented_cells(p, np.array([[0,1,3,4],[1,2,3,4]]))
+    boundary = boundary_inventory(source)
+    assert conserve_boundary(p,boundary,p,alternate) == 'exact_oriented_planar_chains'
+    added = np.r_[p, [[.5,.5,0.]]]
+    cells, _ = oriented_cells(added, np.array([[0,1,5,4],[1,2,5,4],[2,3,5,4],[3,0,5,4]]))
+    assert conserve_boundary(p,boundary,added,cells) == 'exact_oriented_planar_chains'
+    assert face_mesh(added,cells,expected_volume=volume).components == 1
+
+
+def test_subnormal_nonplanar_changes_refuse_even_when_float_volume_cannot_detect_them():
+    p = np.array([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[.5,.5,1.]], float)
+    source, volume = oriented_cells(p,np.array([[0,1,2,4],[0,2,3,4]]))
+    changed = np.r_[p, [[.5,.5,np.nextafter(0.,-1.)]]]
+    cells, same_rounded_volume = oriented_cells(changed,np.array([[0,1,5,4],[1,2,5,4],[2,3,5,4],[3,0,5,4]]))
+    assert same_rounded_volume == volume
+    with pytest.raises(ValueError,match='oriented source boundary'):
+        conserve_boundary(p,boundary_inventory(source),changed,cells)

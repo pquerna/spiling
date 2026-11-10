@@ -66,7 +66,8 @@ Promotion requires the reviewed Rust implementation, appropriate producer identi
 
 `reinforcement_study.py` compares two complete native capture panels without
 editing their roads. Both retain the same original source and base recipe;
-density may differ explicitly for a material-budget alternative. Historical
+density or an explicitly selected existing pier-rib depth may differ for a
+material-budget alternative (`--control-rib-depth-mm` / `--candidate-rib-depth-mm`). Historical
 controls retain their original producer and return-evidence fields. Candidate
 binaries, full-object deposition and decoded motion bounds remain in the report.
 
@@ -94,5 +95,14 @@ establish independent-formulation qualification or whole-part strength; ratios
 remain provisional. `--backend quadratic` packs the same physical fixtures for
 in-process parity; `--element C3D15 --mesh-method prisms` supplies a distinct
 quadratic reference formulation. Keep those panels separate and compare the
-matched responses explicitly before a policy decision. No minimum useful-gain
-threshold applies.
+matched responses explicitly before a policy decision:
+
+```sh
+python tools/infill-lab/reinforcement_study.py compare \
+  --first TET_REPORT_JSON --second WEDGE_REPORT_JSON --output AGREEMENT_JSON
+```
+
+The comparison requires complete per-panel refinement, the same native captures,
+physical fixtures, law, cap resolution and scientific image, and distinct element
+formulations. Every duty must agree; a favorable mean cannot hide a weak direction.
+No minimum useful-gain threshold applies.

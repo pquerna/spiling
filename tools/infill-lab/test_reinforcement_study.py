@@ -80,3 +80,25 @@ def test_changed_roads_and_changed_scenario_cannot_supply_a_response(tmp_path):
     (args.results/job['id']/'trials.jsonl').write_text(json.dumps(row)+'\n')
     with pytest.raises(ValueError, match='scenario'):
         read_row(args.inputs,args.results,job,'reference','frozen')
+
+
+def test_independent_agreement_requires_every_duty_and_identical_native_physics():
+    from reinforcement_study import compare_formulations
+    def panel(element):
+        return dict(numerical_gate_passed=True,
+                    costs=[dict(specimen='cube48',variant=v,source_sha256='source',roads_sha256=v,binaries={'engine':'same'}) for v in ['control','candidate']],
+                    rows=[dict(specimen='cube48',variant=v,case=c,max_xy=1.,status='ok',image='frozen',stiffness_n_mm=100.,
+                               scenario=dict(element=element,bounds=[[0,0,0],[1,1,1]],case=c,material={'z_ratio':.25},refinement={}))
+                          for v in ['control','candidate'] for c in CASES])
+    first,second=panel('C3D10'),panel('C3D15')
+    assert compare_formulations(first,second)['independent_formulation_qualified']
+    second['rows'][0]['stiffness_n_mm']=90.
+    assert not compare_formulations(first,second)['independent_formulation_qualified']
+    second=panel('C3D15');second['costs'][0]['roads_sha256']='different'
+    with pytest.raises(ValueError,match='native captures'):
+        compare_formulations(first,second)
+    second=panel('C3D15');second['rows'][0]['scenario']['bounds'][1][0]=2
+    with pytest.raises(ValueError,match='physical'):
+        compare_formulations(first,second)
+    second=panel('C3D15');second['numerical_gate_passed']=False
+    assert not compare_formulations(first,second)['independent_formulation_qualified']
