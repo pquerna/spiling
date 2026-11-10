@@ -23,6 +23,13 @@ geo.workspace = true
 i_overlay.workspace = true
 boostvoronoi.workspace = true
 
+[features]
+roof-research = []
+
+[[example]]
+name = "roof_support"
+required-features = ["roof-research"]
+
 [[bench]]
 name = "pipeline"
 harness = false

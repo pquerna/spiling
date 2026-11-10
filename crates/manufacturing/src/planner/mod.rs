@@ -3788,6 +3788,32 @@ fn physical_neighbor(
     }
 }
 
+#[cfg(feature = "roof-research")]
+pub struct CathedralResearchColumns {
+    pub roots: [Vec<f64>; 2],
+    pub joints: Vec<(usize, f64, f64, f64)>,
+}
+
+#[cfg(feature = "roof-research")]
+pub fn cathedral_research_columns(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    cancel: &AtomicBool,
+) -> Result<Option<CathedralResearchColumns>, ManufacturingError> {
+    region::web_roof::synthesize(
+        &plan.layers,
+        recipe,
+        layer_payload_bytes(&plan.layers)?,
+        cancel,
+    )
+    .map(|columns| {
+        columns.map(|columns| CathedralResearchColumns {
+            roots: columns.roots,
+            joints: columns.joints,
+        })
+    })
+}
+
 fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         web_roof_domains: Vec::new(),

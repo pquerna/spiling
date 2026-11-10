@@ -7,6 +7,53 @@ Candidate deposition comes from **Spiling's Rust planner**, through the ordinary
 
 ## Source-edit experiments
 
+### Roof-support subset research
+
+`roof_support.py` is a separate, explicitly derived research lane. Its opt-in
+Rust `roof_support` example reads the production generator's complete shared
+seed/joint columns to freeze mandatory versus optional roads. Editable Rust
+`examples/roof_support/policy.rs` selects unique immutable baseline IDs; Python
+never generates or modifies deposition. Whole merged roads containing a web or
+joint remain protected. The shipping engine does not enable `roof-research`.
+
+`roof_support_judge.py` freezes analytic capsule intervals against actual prior
+physical-height deposition, endpoint overlap, complete skin/corbel obligations
+and inherited process roles. Every fixed stroke is checked, including lower
+ceilings and roads dependent on removed material. New unlicensed bridges,
+floating short strokes and enlarged inherited warning intervals refuse.
+The native baseline completes source/intent-absent saved return and identical
+four-file exports; a changed subset **does not inherit native replay success**.
+Production adoption requires a separately reviewed construction contract and
+complete engine/emitter/verifier journey, not a changed research badge.
+
+```sh
+cargo build --locked -p spiling-manufacturing --example roof_support --features roof-research
+python tools/infill-lab/roof_support.py --root "$COHORT" capture --bin target/debug
+python tools/infill-lab/roof_support.py --root "$COHORT" freeze
+python tools/infill-lab/roof_support.py --root "$COHORT" trial material-v1 \
+  --policy '{"family":"material","seed":1,"bridge_limit_mm":10}' \
+  --hypothesis 'Remove highest-dose redundant corbels in descending physical height'
+python tools/infill-lab/roof_support_report.py "$COHORT"
+```
+
+Freeze the mixed-roof panel, judge, build settings and fixed sources before any
+scored trial. Keep every hypothesis, parent, Rust snapshot and failed outcome.
+Search material- and start-led pruning, directional canopies, physical-height
+phase/bundle edits and backwards demand; retained support/process floors are
+hard gates, not scalar penalties. Compare complete-object actual E8 material,
+commanded-feed deposition time, explicitly modeled filtered-order travel and
+starts separately. Acceleration, lifecycle, pressure and structural strength
+are not inferred. `roof_support_report.py` writes the nondominated archive and
+self-contained chart from the append-only records; reserve final shapes from
+search and do not tune after their single final audit.
+
+The campaign adapts pi-autoresearch's frozen measurement, parentage, learning
+and backpressure discipline, not automatic shared-checkout commits/reverts or
+single-scalar acceptance. Baobab motivates demand-led canopy work and separate
+permanent roots; this independently authored selector is not an upstream port.
+
+### Native generator source edits
+
 `algorithm_loop.py` freezes the specimen/recipe panel, Rust compiler and all public source outside its explicit Rust-generator allowlist. During scored iterations edit only:
 
 - `crates/manufacturing/src/planner/region/web_roof.rs`

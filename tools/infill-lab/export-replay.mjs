@@ -39,6 +39,8 @@ for (let i = 0; i < replay.eventCount; ++i) {
           owner: a.regionalOwner,
           layer: replay.layer(i),
           extrusion: replay.extrusion(i),
+          feed_mm_s: replay.feed(i) / 60,
+          extruded_filament_mm: replay.extrusion(i) - previousE,
         });
     }
   }
