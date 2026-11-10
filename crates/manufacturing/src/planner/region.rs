@@ -762,6 +762,23 @@ pub(super) struct Roof<'a> {
     pub frame_mm: [[f64; 2]; 2],
     /// Lower ceilings above this layer, within the corbel growth horizon.
     pub ceilings: &'a [Ceiling],
+    pub columns: Option<&'a WebColumns>,
+}
+
+#[derive(Debug)]
+pub(super) struct WebColumns {
+    pub roots: [Vec<f64>; 2],
+    pub joints: Vec<(usize, f64, f64, f64)>,
+}
+
+impl WebColumns {
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.roots
+            .iter()
+            .map(|roots| roots.capacity() * std::mem::size_of::<f64>())
+            .sum::<usize>()
+            + self.joints.capacity() * std::mem::size_of::<(usize, f64, f64, f64)>()
+    }
 }
 
 pub(super) struct HatchLayer<'a> {
@@ -804,7 +821,7 @@ impl OrdinaryHatchPhase {
     }
 }
 
-mod web_roof;
+pub(super) mod web_roof;
 
 // Fill endpoints belong to the eroded interior boundary, half a bead from
 // the final wall center. No wall-extension strokes or duplicate outlines.

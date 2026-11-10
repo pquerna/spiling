@@ -8,7 +8,70 @@
 use super::*;
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 mod architecture;
+mod columns;
 mod joints;
+pub(in crate::planner) use columns::{decode, synthesize};
+
+struct HatchMemory {
+    outside: usize,
+    nested: usize,
+}
+
+impl HatchMemory {
+    fn new(paths: &Vec<DepositionPath>, outside: usize) -> Self {
+        Self {
+            outside,
+            nested: super::super::bonds::path_bytes(paths)
+                .saturating_sub(paths.capacity() * std::mem::size_of::<DepositionPath>()),
+        }
+    }
+
+    fn append(
+        &mut self,
+        hits: &[f64],
+        coordinate: f64,
+        layer: &HatchLayer<'_>,
+        reverse: bool,
+        paths: &mut Vec<DepositionPath>,
+        segments: &mut usize,
+    ) -> Result<(), ManufacturingError> {
+        let count = hits.len() / 2;
+        let required = paths.len().saturating_add(count);
+        let capacity = if required > paths.capacity() {
+            paths.capacity().saturating_mul(2).max(4).max(required)
+        } else {
+            paths.capacity()
+        };
+        let metadata = capacity
+            .saturating_add(if required > paths.capacity() {
+                paths.capacity()
+            } else {
+                0
+            })
+            .saturating_mul(std::mem::size_of::<DepositionPath>());
+        super::super::remaining_geometry_units(
+            0,
+            self.outside
+                .saturating_add(self.nested)
+                .saturating_add(metadata)
+                .saturating_add(count.saturating_mul(2 * std::mem::size_of::<[f64; 3]>())),
+        )?;
+        let before = paths.len();
+        append_hatch_row(
+            hits,
+            coordinate,
+            DepositionKind::SparseFill,
+            layer,
+            reverse,
+            paths,
+            segments,
+        )?;
+        self.nested = self.nested.saturating_add(
+            (paths.len() - before).saturating_mul(2 * std::mem::size_of::<[f64; 3]>()),
+        );
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Lattice {
@@ -149,7 +212,7 @@ fn reach(root: f64, limit: f64, roof_z: f64, z: f64, lowered: &[[f64; 3]]) -> f6
     extent.min(span)
 }
 
-pub(super) fn hatch(
+pub(in crate::planner) fn hatch(
     fill: &MultiPolygon<f64>,
     fraction: f64,
     layer: &HatchLayer<'_>,
@@ -157,7 +220,20 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    hatch_with_budget(fill, fraction, layer, paths, segments, cancel, 0)
+}
+
+pub(in crate::planner) fn hatch_with_budget(
+    fill: &MultiPolygon<f64>,
+    fraction: f64,
+    layer: &HatchLayer<'_>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+    owned_bytes: usize,
+) -> Result<(), ManufacturingError> {
     let first_path = paths.len();
+    let mut memory = HatchMemory::new(paths, owned_bytes);
     let roof = layer
         .roof
         .ok_or_else(|| unsupported("web + roof lacks its physical roof horizon"))?;
@@ -175,13 +251,19 @@ pub(super) fn hatch(
     ];
     for polygon in &fill.0 {
         check_cancel(cancel)?;
-        let web_roots = seed_webs(polygon, lattices, layer, &mut work, cancel)?;
+        let local_roots;
+        let web_roots = if let Some(columns) = roof.columns {
+            &columns.roots
+        } else {
+            local_roots = seed_webs(polygon, lattices, layer, &mut work, cancel)?;
+            &local_roots
+        };
         let architecture = match layer.recipe.sparse_infill {
             SparseInfillPolicy::WebRoof { architecture, .. } => architecture,
             _ => None,
         };
         if let Some(a) = architecture {
-            architecture::admit(a, &web_roots, &lattices, roof.z_mm, layer)?;
+            architecture::admit(a, web_roots, &lattices, roof.z_mm, layer)?;
         }
         let edges = std::iter::once(polygon.exterior())
             .chain(polygon.interiors())
@@ -204,15 +286,7 @@ pub(super) fn hatch(
                         cancel,
                     )?;
                 }
-                append_hatch_row(
-                    &hits,
-                    coordinate,
-                    DepositionKind::SparseFill,
-                    &active,
-                    false,
-                    paths,
-                    segments,
-                )?;
+                memory.append(&hits, coordinate, &active, false, paths, segments)?;
             }
             for gap in 0..=lattice.count {
                 charge(&mut work, 1, cancel)?;
@@ -288,10 +362,9 @@ pub(super) fn hatch(
                                     previous[1] = previous[1].max(stop);
                                     continue;
                                 }
-                                append_hatch_row(
+                                memory.append(
                                     previous,
                                     coordinate,
-                                    DepositionKind::SparseFill,
                                     &active,
                                     contact % 2 == 1,
                                     paths,
@@ -301,10 +374,9 @@ pub(super) fn hatch(
                             pending = Some([start, stop]);
                         }
                         if let Some(interval) = pending {
-                            append_hatch_row(
+                            memory.append(
                                 &interval,
                                 coordinate,
-                                DepositionKind::SparseFill,
                                 &active,
                                 contact % 2 == 1,
                                 paths,
@@ -317,14 +389,46 @@ pub(super) fn hatch(
         }
         if let Some(depth) = architecture.and_then(|a| a.pier_rib_depth_mm) {
             architecture::ribs(
-                polygon, &web_roots, depth, layer, paths, segments, &mut work, cancel,
+                polygon, web_roots, depth, layer, paths, segments, &mut work, cancel,
             )?;
+        } else if let Some(columns) = roof.columns {
+            for &(fixed, coordinate, start, stop) in &columns.joints {
+                charge(&mut work, edges, cancel)?;
+                let active = HatchLayer {
+                    axis: if fixed == 0 {
+                        HatchAxis::Y
+                    } else {
+                        HatchAxis::X
+                    },
+                    ..*layer
+                };
+                hits.clear();
+                row_intersections(polygon, coordinate, active.axis, &mut hits, cancel)?;
+                for chord in hits.as_chunks::<2>().0 {
+                    let interval = [start.max(chord[0]), stop.min(chord[1])];
+                    if interval[1] - interval[0] >= MIN_DEPOSITION_COMMAND_MM {
+                        memory.append(&interval, coordinate, &active, false, paths, segments)?;
+                    }
+                }
+            }
         } else if architecture.is_none() {
             joints::append(
-                polygon, &web_roots, &lattices, layer, paths, segments, &mut work, cancel,
+                polygon,
+                web_roots,
+                &lattices,
+                layer,
+                paths,
+                segments,
+                &mut work,
+                cancel,
+                &mut memory,
             )?;
         }
     }
+    super::super::remaining_geometry_units(
+        0,
+        owned_bytes.saturating_add(super::super::bonds::path_bytes(paths).saturating_mul(3)),
+    )?;
     architecture::merge(paths, first_path, layer, segments, &mut work, cancel)?;
     Ok(())
 }
@@ -342,6 +446,7 @@ mod tests {
                 [bounds.max().x, bounds.max().y],
             ],
             ceilings: &[],
+            columns: None,
         }
     }
     fn paths(z: f64, height: f64) -> Vec<DepositionPath> {
@@ -376,6 +481,30 @@ mod tests {
         .unwrap();
         result
     }
+    #[test]
+    fn hatch_memory_refuses_before_staging_an_unfunded_road() {
+        let recipe = super::super::super::tests::recipe(0.08);
+        let layer = HatchLayer {
+            roof: None,
+            width_mm: 0.45,
+            z: 0.2,
+            lower_z: 0.0,
+            height: 0.2,
+            axis: HatchAxis::X,
+            top_axis: HatchAxis::X,
+            recipe: &recipe,
+        };
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        let mut memory = HatchMemory::new(&paths, MAX_MANUFACTURING_RETAINED_BYTES as usize - 1);
+        let failure = memory
+            .append(&[0.0, 10.0], 0.0, &layer, false, &mut paths, &mut segments)
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert!(paths.is_empty());
+        assert_eq!(segments, 0);
+    }
+
     #[test]
     fn physical_roof_growth_keeps_webs_and_never_doubles_a_collinear_road() {
         let low = paths(1.0, 0.2);

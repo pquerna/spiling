@@ -9,6 +9,7 @@ use super::{cancelled, failed, project_xyz6_point_mm};
 use spiling_contracts::manufacturing::*;
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 mod architecture;
+mod columns;
 mod joints;
 
 type Road = [u64; 4];
@@ -111,6 +112,16 @@ pub(super) fn verify(
     let mut spans = Vec::new();
     let mut lowered: Vec<[f64; 3]> = Vec::new();
     let mut frame = None;
+    let columns = columns::reconstruct(
+        plan.layers
+            .iter()
+            .rev()
+            .flat_map(|layer| &layer.region_coverage.web_roof_domains),
+        recipe,
+        pitch,
+        work,
+        cancel,
+    )?;
     for layer in &plan.layers {
         cancelled(cancel)?;
         let coverage = &layer.region_coverage;
@@ -190,73 +201,21 @@ pub(super) fn verify(
                         "web + roof reconstructed base lattice budget exceeded",
                     ));
                 }
-                let mut web_coordinates: [Vec<f64>; 2] = std::array::from_fn(|axis| {
-                    (0..count[axis])
-                        .map(|i| first[axis] + i as f64 * pitch)
-                        .collect()
-                });
-                for fixed in 0..2 {
-                    for gap in 0..=count[fixed] {
-                        let lo = if gap == 0 {
-                            min[fixed]
-                        } else {
-                            first[fixed] + (gap - 1) as f64 * pitch
-                        };
-                        let hi = if gap == count[fixed] {
-                            max[fixed]
-                        } else {
-                            first[fixed] + gap as f64 * pitch
-                        };
-                        let n = ((hi - lo) / recipe.web_roof_spacing_mm()).ceil().max(1.);
-                        if !n.is_finite() || n > MAX_DEPOSITION_SEGMENTS as f64 {
-                            return Err(failed(
-                                "web + roof reconstructed seed contact budget exceeded",
-                            ));
-                        }
-                        for i in 1..n as usize {
-                            crossing_intervals(
-                                polygon,
-                                fixed,
-                                lo + (hi - lo) * i as f64 / n,
-                                &mut hits,
-                                work,
-                                cancel,
-                            )?;
-                            for chord in hits.as_chunks::<2>().0 {
-                                charge_many(work, web_coordinates[1 - fixed].len(), cancel)?;
-                                if chord[1] - chord[0] > recipe.web_roof_spacing_mm()
-                                    && !web_coordinates[1 - fixed]
-                                        .iter()
-                                        .any(|v| chord[0] <= *v && *v <= chord[1])
-                                {
-                                    let seed = (chord[0] + chord[1]) * 0.5;
-                                    if web_coordinates[1 - fixed]
-                                        .iter()
-                                        .any(|v| (seed - v).abs() < recipe.bead_width_mm)
-                                    {
-                                        continue;
-                                    }
-                                    if web_coordinates[0].len() + web_coordinates[1].len()
-                                        >= MAX_DEPOSITION_SEGMENTS as usize
-                                    {
-                                        return Err(failed(
-                                            "web + roof reconstructed seed budget exceeded",
-                                        ));
-                                    }
-                                    web_coordinates[1 - fixed].push(seed);
-                                    web_coordinates[1 - fixed].sort_unstable_by(f64::total_cmp);
-                                }
-                            }
-                        }
-                    }
-                }
+                let local_coordinates;
+                let web_coordinates = if let Some(columns) = &columns {
+                    &columns.roots
+                } else {
+                    local_coordinates =
+                        columns::seeds(polygon, domain.frame_mm, pitch, recipe, work, cancel)?;
+                    &local_coordinates
+                };
                 let a = match recipe.sparse_infill {
                     SparseInfillPolicy::WebRoof { architecture, .. } => architecture,
                     _ => None,
                 };
                 architecture::admit(
                     a,
-                    &web_coordinates,
+                    web_coordinates,
                     min,
                     max,
                     roof_z,
@@ -381,17 +340,32 @@ pub(super) fn verify(
                 if let Some(depth) = a.and_then(|v| v.pier_rib_depth_mm) {
                     architecture::pier_roads(
                         polygon,
-                        &web_coordinates,
+                        web_coordinates,
                         depth,
                         recipe.bead_width_mm,
                         &mut expected,
                         work,
                         cancel,
                     )?;
+                } else if let Some(columns) = &columns {
+                    for &(fixed, coordinate, start, stop) in &columns.joints {
+                        crossing_intervals(polygon, fixed, coordinate, &mut hits, work, cancel)?;
+                        for chord in hits.as_chunks::<2>().0 {
+                            let (start, stop) = (start.max(chord[0]), stop.min(chord[1]));
+                            if stop - start >= program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                                if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                                    return Err(failed(
+                                        "Cathedral clipped joint inventory budget exceeded",
+                                    ));
+                                }
+                                expected.push((fixed, coordinate, start, stop));
+                            }
+                        }
+                    }
                 } else if a.is_none() {
                     joints::reconstruct(
                         polygon,
-                        &web_coordinates,
+                        web_coordinates,
                         min,
                         max,
                         recipe.bead_width_mm,

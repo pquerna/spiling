@@ -9,6 +9,36 @@ use spiling_contracts::{
 pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     let report = &review.capture.report;
     let summary = &review.capture.record.summary;
+    let unsupported = || {
+        review
+            .bundle
+            .plan
+            .layers
+            .iter()
+            .filter(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
+    };
+    let count = unsupported().count();
+    if count > 0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("Unsupported deposition · {count} layers"),
+        );
+        ui.weak("Supports are disabled. Verification checks commands, not printability; inspect these spans before printing. Each row records the first unsupported span found on that layer, not its worst span.");
+        ui.collapsing("Unsupported layers", |ui| {
+            let row_height = ui.text_style_height(&egui::TextStyle::Body);
+            egui::ScrollArea::vertical()
+                .id_salt("unsupported-layers")
+                .max_height(180.0)
+                .show_rows(ui, row_height, count, |ui, rows| {
+                    for layer in unsupported().skip(rows.start).take(rows.len()) {
+                        ui.label(format!(
+                            "Layer {} · Z {:.3} mm · recorded span {:.3} mm",
+                            layer.index, layer.z_mm, layer.region_coverage.unsupported_overhang_mm
+                        ));
+                    }
+                });
+        });
+    }
     if let Some(selection) = &review.bundle.plan.interior_selection
         && let (JobWorkflow::FixedDualMarlin { job }, InteriorCandidateOutcome::Qualified { work }) = (
             &review.bundle.provenance.intent.printer.workflow,
@@ -216,6 +246,15 @@ pub(super) fn assessment(ui: &mut egui::Ui, label: &str, value: &OpticalAssessme
 }
 pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
     let r = &layer.region_coverage;
+    if r.unsupported_overhang_mm > 0.0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Unsupported deposition · first recorded span {:.3} mm",
+                r.unsupported_overhang_mm
+            ),
+        );
+    }
     ui.label(format!(
         "Source {:.4} + added {:.4} = realized {:.4} mm²",
         r.source_section_area_mm2, r.surface_added_area_mm2, r.section_area_mm2

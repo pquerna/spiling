@@ -1160,7 +1160,7 @@ fn admit_schedule<'model>(
         }
     }
     // Cathedral on any part: one lattice frame and each layer's ceilings.
-    let web_roof = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+    let mut web_roof = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
         let covered = sections.last().map_or(0, |span| span.end as usize);
         let materials: Vec<&Arc<MultiPolygon<f64>>> = (0..schedule.len().min(covered))
             .map(|index| &sections[span_at(&sections, index as u32)].material)
@@ -2006,8 +2006,20 @@ fn admit_schedule<'model>(
             resolution_allocated_bytes,
             &[None, None],
         )?;
-        let support_native_owned_bytes =
+        let mut support_native_owned_bytes =
             skin_retained_bytes(support_outside_bytes, &neighborhoods, &[])?;
+
+        if let Some(field) = &mut web_roof {
+            field.stabilize(
+                &mut layers,
+                recipe,
+                &mut segments,
+                support_native_owned_bytes,
+                cancel,
+            )?;
+            support_native_owned_bytes =
+                geometry_bytes(&[support_native_owned_bytes, field.column_bytes()])?;
+        }
 
         support_work.planar = *neighborhoods.work_mut();
         let support_admission = support::realize(

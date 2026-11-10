@@ -59,8 +59,8 @@ def engine_peak(proc):
 
 def run_cli(args, cwd):
     started = time.time()
-    err_path = os.path.join(cwd, "stderr.txt")
-    with open(os.path.join(cwd, "stdout.json"), "w") as out, open(err_path, "w") as err:
+    err_path = os.path.join(cwd, f"{args[0]}.stderr.txt")
+    with open(os.path.join(cwd, f"{args[0]}.stdout.json"), "w") as out, open(err_path, "w") as err:
         proc = subprocess.Popen(
             [os.path.join(R, "spiling-cli"), "project", *args, "--engine", os.path.join(R, "spiling-engine")],
             cwd=cwd, stdout=out, stderr=err)
@@ -127,7 +127,7 @@ def main():
                 ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
                 record["spiling_return"] = ret
                 if ret["ok"]:
-                    stdout = open(os.path.join(cwd, "stdout.json")).read()
+                    stdout = open(os.path.join(cwd, "open.stdout.json")).read()
                     m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
                     record["deposition_segments"] = int(m.group(1)) if m else None
                     m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)

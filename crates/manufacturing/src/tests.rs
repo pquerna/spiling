@@ -3326,6 +3326,34 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
 }
 
 #[test]
+fn fresh_report_retains_overhang_warnings_without_claiming_a_worst_span_inventory() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let mut requested = intent();
+    requested.recipe.infill_fraction = 1.0;
+    requested.recipe.supports = SupportPolicy::Disabled;
+    let bundle = scene.compile(&requested).unwrap();
+    let original = verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
+    assert!(
+        !original
+            .limitations
+            .iter()
+            .any(|message| message.starts_with("Unsupported deposition reported"))
+    );
+    let mut changed = bundle.plan.clone();
+    changed.layers[2].region_coverage.unsupported_overhang_mm = 2.5;
+    changed.layers[4].region_coverage.unsupported_overhang_mm = 1.5;
+    let actual = backend::emit(&changed, &requested, &AtomicBool::new(false)).unwrap();
+    let report =
+        verifier::verify_actual(&actual, &changed, &requested, &AtomicBool::new(false), None)
+            .unwrap();
+    assert!(report.verified);
+    assert_eq!(report.limitations.len(), original.limitations.len() + 1);
+    assert!(report.limitations[0].contains("2 layers"));
+    assert!(report.limitations[0].contains("2.500 mm"));
+    assert!(report.limitations[0].contains("not a worst-span inventory"));
+}
+
+#[test]
 fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
     let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
     let mut requested = intent();
@@ -3656,7 +3684,7 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
                 .iter()
                 .position(|l| !l.region_coverage.web_roof_domains.is_empty())
                 .unwrap();
-            for attack in 0..4 {
+            for attack in 0..5 {
                 let mut altered = bundle.plan.clone();
                 let layer = &mut altered.layers[index];
                 match attack {
@@ -3679,13 +3707,21 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
                             .clone();
                         layer.paths.push(road);
                     }
-                    _ => {
+                    3 => {
                         layer
                             .paths
                             .iter_mut()
                             .find(|p| p.kind == DepositionKind::SparseFill)
                             .unwrap()
                             .kind = DepositionKind::Bridge;
+                    }
+                    _ => {
+                        let road = layer
+                            .paths
+                            .iter()
+                            .position(|path| path.kind == DepositionKind::SparseFill)
+                            .unwrap();
+                        layer.paths.remove(road);
                     }
                 }
                 let error = if attack == 0 {

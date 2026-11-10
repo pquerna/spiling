@@ -25,6 +25,16 @@ pub(super) fn prepared(value: &ManufacturingIntent) -> Result<ManufacturingInten
     result.validate().map_err(|e| e.to_string())?;
     Ok(result)
 }
+
+fn select_infill(recipe: &mut PlanarPrintRecipe, policy: SparseInfillPolicy) {
+    if matches!(policy, SparseInfillPolicy::WebRoof { .. })
+        && !(0.0 < recipe.infill_fraction && recipe.infill_fraction < 1.0)
+    {
+        recipe.infill_fraction = 0.08;
+    }
+    recipe.sparse_infill = policy;
+}
+
 pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     egui::CollapsingHeader::new(format!("Wall limits · {:.2}–{:.2} mm", intent.printer.deposition_limits.min_bead_width_mm, intent.printer.deposition_limits.max_bead_width_mm)).id_salt("wall-limits").show(ui,|ui|{
         ui.add_enabled_ui(intent.material_profile.is_none(), |ui| { ui::number(ui,"Filament diameter (mm)",&mut intent.recipe.filament_diameter_mm,0.01); });
@@ -58,17 +68,14 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
                     ui.selectable_value(&mut pattern, 2, "Cathedral")
-                        .on_hover_text("Continuous chamber webs with automatic joint ribs and retained roof branches. Base density sets web spacing; joints and roof branches add material. One upright analytic extrusion, including qualified holes and curves. Single tool; no finishes, process modifiers or breakaway supports. Strength is unqualified.");
+                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes, process modifiers or breakaway supports. Strength and physical printability are unqualified.");
                 });
             if pattern != original {
-                if pattern == 2 && !(0.0 < intent.recipe.infill_fraction && intent.recipe.infill_fraction < 1.0) {
-                    intent.recipe.infill_fraction = 0.16;
-                }
-                intent.recipe.sparse_infill = match pattern {
+                select_infill(&mut intent.recipe, match pattern {
                     1 => SparseInfillPolicy::Grid,
                     2 => SparseInfillPolicy::web_roof(),
                     _ => SparseInfillPolicy::Fine,
-                };
+                });
             }
             if pattern == 2 {
                 let automatic_spacing = intent.recipe.automatic_web_roof_spacing_mm();
@@ -273,6 +280,46 @@ pub(super) fn process_fields(ui: &mut egui::Ui, p: &mut ProcessPolicy) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cathedral_selection_retains_authored_density_and_uses_a_sparse_start_when_needed() {
+        let mut original: ManufacturingIntent = serde_json::from_str(include_str!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        ))
+        .unwrap();
+        original.recipe.supports = SupportPolicy::Disabled;
+        for fraction in [0.0, 0.05, 0.08, 0.16, 0.8, 1.0] {
+            let mut requested = original.clone();
+            requested.recipe.infill_fraction = fraction;
+            let mut expected = requested.clone();
+            expected.recipe.sparse_infill = SparseInfillPolicy::web_roof();
+            if fraction == 0.0 || fraction == 1.0 {
+                expected.recipe.infill_fraction = 0.08;
+            }
+            select_infill(&mut requested.recipe, SparseInfillPolicy::web_roof());
+            assert_eq!(requested, expected);
+            prepared(&requested).unwrap();
+            select_infill(&mut requested.recipe, SparseInfillPolicy::Grid);
+            assert_eq!(
+                requested.recipe.infill_fraction,
+                expected.recipe.infill_fraction
+            );
+        }
+    }
+
+    #[test]
+    fn cathedral_selection_does_not_silently_disable_authored_supports() {
+        let mut requested: ManufacturingIntent = serde_json::from_str(include_str!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        ))
+        .unwrap();
+        let supports = requested.recipe.supports.clone();
+        assert!(!matches!(supports, SupportPolicy::Disabled));
+        select_infill(&mut requested.recipe, SparseInfillPolicy::web_roof());
+        assert_eq!(requested.recipe.supports, supports);
+        assert!(prepared(&requested).is_err());
+    }
+
     #[test]
     fn applying_a_direction_preserves_every_other_declared_field() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

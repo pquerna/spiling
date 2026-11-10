@@ -2292,14 +2292,6 @@ fn coalesce_bridge_rows<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
-    // Grid and Cathedral are whole constructions replayed road for road; their
-    // rows are never joined or extended into bridge rows.
-    if matches!(
-        context.recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
-    ) {
-        return Ok(false);
-    }
     let mut joined = false;
     for axis in [context.axis, context.axis.orthogonal()] {
         let fixed = usize::from(axis == region::HatchAxis::X);
@@ -2444,11 +2436,31 @@ fn coalesce_bridge_rows_on_axis<'a>(
             }
         }
     }
+    let construction = matches!(
+        recipe.sparse_infill,
+        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+    );
+    let retained_infill = |path: &DepositionPath| {
+        construction
+            && (path.kind == DepositionKind::SparseFill
+                || path.kind == DepositionKind::Bridge
+                    && matches!(path.owner, Some(DepositionOwner::Regional { .. })))
+    };
+    if construction {
+        for &(_, _, _, index) in &pieces {
+            if retained_infill(&candidate.paths[index]) {
+                ownership[index] = Ownership::Frozen;
+            }
+        }
+    }
     let mut joined = false;
     for mut row in candidate.whole_rows.extract_if(.., |row| {
         row.points_mm.len() == 2 && row.points_mm[0][fixed] == row.points_mm[1][fixed]
     }) {
         check_cancel(cancel)?;
+        if retained_infill(&row) {
+            continue;
+        }
         let key = grid(row.points_mm[0][fixed])?;
         let lo = grid(row.points_mm[0][along])?.min(grid(row.points_mm[1][along])?);
         let hi = grid(row.points_mm[0][along])?.max(grid(row.points_mm[1][along])?);
@@ -3237,6 +3249,117 @@ mod tests {
             candidate.paths[0].points_mm,
             [[1.0, 0.0, 0.8], [9.0, 0.0, 0.8]]
         );
+    }
+
+    #[test]
+    fn structured_infill_keeps_roads_while_skin_rows_join() {
+        for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+            let mut sparse = row(DepositionKind::SparseFill, 12.0, 15.0, 0.8);
+            sparse.owner = Some(DepositionOwner::Regional { region_index: 0 });
+            let mut sparse_row = sparse.clone();
+            sparse_row.kind = DepositionKind::Bridge;
+            let mut candidate = RasterCandidate {
+                skin_command_fits: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                paths: vec![
+                    row(DepositionKind::SolidFill, 1.0, 3.0, 0.8),
+                    row(DepositionKind::BottomSkin, 3.0, 7.0, 0.8),
+                    row(DepositionKind::SolidFill, 7.0, 9.0, 0.8),
+                    sparse.clone(),
+                ],
+                whole_rows: vec![row(DepositionKind::Bridge, 1.0, 9.0, 0.8), sparse_row],
+                process_interfaces: Vec::new(),
+            };
+            let previous = [
+                row(DepositionKind::SolidFill, 0.0, 3.0, 0.4),
+                row(DepositionKind::SolidFill, 7.0, 16.0, 0.4),
+            ];
+            let mut recipe = crate::planner::tests::recipe(0.08);
+            recipe.sparse_infill = policy;
+            assert!(
+                coalesce_bridge_rows(
+                    &mut candidate,
+                    BridgeRowContext {
+                        axis: region::HatchAxis::X,
+                        demanded_reorientation: false,
+                        retained_points: 0,
+                        owned_bytes: 0,
+                        recipe: &recipe,
+                    },
+                    previous.iter(),
+                    std::iter::empty(),
+                    &mut AnchorWorkspace::default(),
+                    &mut 0,
+                    &AtomicBool::new(false),
+                )
+                .unwrap()
+            );
+            assert_eq!(candidate.paths.len(), 2);
+            assert!(candidate.paths.contains(&sparse));
+            let bridge = candidate
+                .paths
+                .iter()
+                .find(|path| path.kind == DepositionKind::Bridge)
+                .unwrap();
+            assert_eq!(bridge.points_mm, [[1.0, 0.0, 0.8], [9.0, 0.0, 0.8]]);
+        }
+    }
+
+    #[test]
+    fn structured_infill_is_a_barrier_to_skin_row_joining() {
+        for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+            let mut sparse = row(DepositionKind::SparseFill, 3.0, 7.0, 0.8);
+            sparse.owner = Some(DepositionOwner::Regional { region_index: 0 });
+            let mut candidate = RasterCandidate {
+                skin_command_fits: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                paths: vec![
+                    row(DepositionKind::BottomSkin, 1.0, 3.0, 0.8),
+                    sparse.clone(),
+                    row(DepositionKind::BottomSkin, 7.0, 9.0, 0.8),
+                ],
+                whole_rows: vec![row(DepositionKind::Bridge, 1.0, 9.0, 0.8)],
+                process_interfaces: Vec::new(),
+            };
+            let previous = [
+                row(DepositionKind::SolidFill, 0.0, 1.2, 0.4),
+                row(DepositionKind::SolidFill, 2.8, 7.2, 0.4),
+                row(DepositionKind::SolidFill, 8.8, 10.0, 0.4),
+            ];
+            let mut recipe = crate::planner::tests::recipe(0.08);
+            recipe.sparse_infill = policy;
+            assert!(
+                !coalesce_bridge_rows(
+                    &mut candidate,
+                    BridgeRowContext {
+                        axis: region::HatchAxis::X,
+                        demanded_reorientation: false,
+                        retained_points: 0,
+                        owned_bytes: 0,
+                        recipe: &recipe,
+                    },
+                    previous.iter(),
+                    std::iter::empty(),
+                    &mut AnchorWorkspace::default(),
+                    &mut 0,
+                    &AtomicBool::new(false),
+                )
+                .unwrap()
+            );
+            assert!(candidate.paths.contains(&sparse));
+            assert_eq!(candidate.paths.len(), 3);
+            assert!(
+                candidate
+                    .paths
+                    .iter()
+                    .filter(|path| path.kind == DepositionKind::Bridge)
+                    .all(|path| {
+                        let start = path.points_mm[0][0].min(path.points_mm[1][0]);
+                        let stop = path.points_mm[0][0].max(path.points_mm[1][0]);
+                        stop <= 3.0 || start >= 7.0
+                    })
+            );
+        }
     }
 
     #[test]

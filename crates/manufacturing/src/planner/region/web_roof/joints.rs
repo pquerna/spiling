@@ -24,6 +24,7 @@ pub(super) fn append(
     segments: &mut usize,
     work: &mut usize,
     cancel: &AtomicBool,
+    memory: &mut HatchMemory,
 ) -> Result<(), ManufacturingError> {
     let edges = std::iter::once(polygon.exterior())
         .chain(polygon.interiors())
@@ -75,15 +76,7 @@ pub(super) fn append(
                             .iter()
                             .any(|p| p[0] <= span[0] && span[1] <= p[1])
                         {
-                            append_hatch_row(
-                                &span,
-                                coordinate,
-                                DepositionKind::SparseFill,
-                                &active,
-                                false,
-                                paths,
-                                segments,
-                            )?;
+                            memory.append(&span, coordinate, &active, false, paths, segments)?;
                             break;
                         }
                     }
@@ -110,6 +103,7 @@ mod tests {
                 z_mm: 48.,
                 frame_mm: [[0., 0.], [48., 48.]],
                 ceilings: &[],
+                columns: None,
             }),
             width_mm: width,
             z,
@@ -120,6 +114,7 @@ mod tests {
             recipe: &recipe,
         };
         let mut result = Vec::new();
+        let mut memory = HatchMemory::new(&result, 0);
         append(
             &polygon,
             &[vec![8., 24., 40.], vec![8., 24., 40.]],
@@ -129,6 +124,7 @@ mod tests {
             &mut 0,
             &mut 0,
             &AtomicBool::new(false),
+            &mut memory,
         )
         .unwrap();
         result

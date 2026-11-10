@@ -18,14 +18,124 @@ pub(super) struct Field {
     frame_mm: [[f64; 2]; 2],
     /// Layers whose ceilings did not change share one list.
     layers: Vec<Arc<Vec<Ceiling>>>,
+    columns: Option<super::region::WebColumns>,
 }
 
 impl Field {
+    pub(super) fn column_bytes(&self) -> usize {
+        self.columns
+            .as_ref()
+            .map_or(0, super::region::WebColumns::allocated_bytes)
+    }
+
+    pub(super) fn stabilize(
+        &mut self,
+        layers: &mut [PrintLayer],
+        recipe: &PlanarPrintRecipe,
+        segments: &mut usize,
+        owned_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        self.columns = None;
+        self.columns = super::region::web_roof::synthesize(
+            layers,
+            recipe,
+            owned_bytes.saturating_add(super::layer_payload_bytes(layers)?),
+            cancel,
+        )?;
+        if self.columns.is_none() {
+            return Ok(());
+        }
+        let retained_road = |path: &DepositionPath| {
+            matches!(
+                path.kind,
+                DepositionKind::SparseFill | DepositionKind::Bridge
+            ) && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
+        };
+        for index in 0..layers.len() {
+            check_cancel(cancel)?;
+            let outside = owned_bytes
+                .saturating_add(super::layer_payload_bytes(layers)?)
+                .saturating_add(self.column_bytes());
+            let layer = &mut layers[index];
+            let removed = layer
+                .paths
+                .iter()
+                .filter(|path| retained_road(path))
+                .map(|path| path.points_mm.len().saturating_sub(1))
+                .sum::<usize>();
+            let mut staged_segments = segments.checked_sub(removed).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "Cathedral column segment accounting underflow",
+                )
+            })?;
+            let mut replacement = Vec::new();
+            for domain in &layer.region_coverage.web_roof_domains {
+                let scratch = domain.allocated_bytes().saturating_mul(2);
+                super::remaining_geometry_units(
+                    0,
+                    outside
+                        .saturating_add(scratch)
+                        .saturating_add(super::bonds::path_bytes(&replacement)),
+                )?;
+                let fill = MultiPolygon(
+                    domain
+                        .extent
+                        .iter()
+                        .map(super::region::web_roof::decode)
+                        .collect(),
+                );
+                let first = replacement.len();
+                super::region::web_roof::hatch_with_budget(
+                    &fill,
+                    recipe.infill_fraction,
+                    &super::region::HatchLayer {
+                        roof: Some(self.roof(index)),
+                        width_mm: recipe.bead_width_mm,
+                        z: layer.z_mm,
+                        lower_z: layer.lower_z_mm,
+                        height: layer.height_mm,
+                        axis: super::region::HatchAxis::X,
+                        top_axis: super::region::HatchAxis::X,
+                        recipe,
+                    },
+                    &mut replacement,
+                    &mut staged_segments,
+                    cancel,
+                    outside.saturating_add(scratch),
+                )?;
+                for path in &mut replacement[first..] {
+                    path.owner = Some(DepositionOwner::Regional {
+                        region_index: domain.region_index,
+                    });
+                }
+                super::remaining_geometry_units(
+                    0,
+                    outside
+                        .saturating_add(scratch)
+                        .saturating_add(super::bonds::path_bytes(&replacement)),
+                )?;
+            }
+            layer.paths.retain(|path| !retained_road(path));
+            layer.paths.append(&mut replacement);
+            *segments = staged_segments;
+            super::remaining_geometry_units(
+                0,
+                owned_bytes
+                    .saturating_add(super::layer_payload_bytes(layers)?)
+                    .saturating_add(self.column_bytes()),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn roof(&self, layer: usize) -> Roof<'_> {
         Roof {
             z_mm: self.roof_z_mm,
             frame_mm: self.frame_mm,
             ceilings: self.layers.get(layer).map_or(&[], |c| c.as_slice()),
+            columns: self.columns.as_ref(),
         }
     }
 
@@ -174,6 +284,7 @@ pub(super) fn field(
         roof_z_mm,
         frame_mm: frame,
         layers,
+        columns: None,
     })
 }
 

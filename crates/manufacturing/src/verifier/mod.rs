@@ -1268,7 +1268,7 @@ pub(crate) fn verify_actual(
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
     }
-    let report = VerificationReport {
+    let mut report = VerificationReport {
         job_time: time.map(cost::JobTimeBuilder::finish).transpose()?,
         layer_height: LayerHeightAssessment::from_plan(intent, &plan.layers)?,
         verified: true,
@@ -1326,6 +1326,19 @@ pub(crate) fn verify_actual(
         retracted_filament_mm,
         routing,
     };
+    let mut unsupported_layers = 0usize;
+    let mut largest_recorded_span = 0.0_f64;
+    for layer in &plan.layers {
+        cancelled(cancel)?;
+        let span = layer.region_coverage.unsupported_overhang_mm;
+        if span > 0.0 {
+            unsupported_layers += 1;
+            largest_recorded_span = largest_recorded_span.max(span);
+        }
+    }
+    if unsupported_layers > 0 {
+        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers with supports disabled; largest recorded first-offending span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
+    }
     report.validate()?;
     if let Some(selection) = &plan.interior_selection {
         selection.validate_current(&SourceHash::from_digest(program.digest()), &report)?;
