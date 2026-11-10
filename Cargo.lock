@@ -6798,6 +6798,10 @@ dependencies = [
 [[package]]
 name = "spiling-deposition-routing"
 version = "0.1.0"
+dependencies = [
+ "spiling-compute",
+ "spiling-contracts",
+]
 
 [[package]]
 name = "spiling-e2e-tests"

@@ -5,12 +5,13 @@ use crate::*;
 pub(crate) fn path(
     problem: &Problem,
     built: &[BoundsMm],
+    built_top_mm: f64,
     from: PointMm,
     to: PointMm,
     portals: &[PointMm],
     meter: &mut Meter<'_>,
 ) -> Result<Option<Vec<PointMm>>, Error> {
-    if clearance::clear(problem, built, from, to, meter)? {
+    if clearance::clear(problem, built, built_top_mm, from, to, meter)? {
         return Ok(Some(if from == to {
             vec![from]
         } else {
@@ -59,7 +60,9 @@ pub(crate) fn path(
         visited[i] = true;
         for j in 0..n {
             meter.charge(1)?;
-            if !visited[j] && clearance::clear(problem, built, nodes[i], nodes[j], meter)? {
+            if !visited[j]
+                && clearance::clear(problem, built, built_top_mm, nodes[i], nodes[j], meter)?
+            {
                 let proposed = cost[i] + nodes[i].distance(nodes[j]);
                 if proposed < cost[j] {
                     cost[j] = proposed;

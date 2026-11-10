@@ -1,8 +1,13 @@
 # Deposition routing
 
-A dependency-free Rust route-planning library, separately compiled for algorithm
-research and a future manufacturing adapter. Production manufacturing does not
-call it yet. No kernel, project writer, G-code, storage or renderer belongs here.
+A Rust route-planning library for algorithm research and a future manufacturing
+adapter. Production manufacturing does not call it yet. It depends on contracts
+and `spiling-compute`, the shared CubeCL accelerator; no kernel, project writer,
+G-code, storage or renderer belongs here. Algorithms may use compute batches
+(for example exact `box_overlaps` masks) to screen candidates. A batch that
+declines or fails falls back to the CPU path, and every returned step is still
+checked by frozen replay and the independent judge. The matrix configures the
+backend from `SPILING_COMPUTE_BACKEND` (`cpu` by default) and reports its device.
 
 `plan` consumes immutable identified planar strokes, per-edge widths, occupied Z
 intervals, process keys, direction/seam permissions and earlier-work dependencies.
@@ -19,11 +24,21 @@ local repair; it need not use the prepared choices. `src/search/` may contain ne
 changed or removed Rust helper modules. A fresh frozen replay checks every returned
 step before the independently implemented matrix judge checks it again.
 
+The retained search constructs the lowest unfinished physical band first, with
+bounded backtracking when that construction stalls. It then improves visit order
+with band-local relocation, reversal and iterated local search. A second stage
+proposes cross-band moves; only a complete checked rebuild with less travel and
+no additional starts replaces the incumbent. Optional search exhaustion preserves
+the admitted incumbent; cancellation still aborts. The objective is travel, with
+starts as a guard; nominal time remains a separate matrix metric.
+
 The frozen input-order control uses bounded depth-first recovery and local-height
 portals. It is a reproducible reference, not an optimal or complete solver. Travel
 primitives use a checked visibility graph over caller and candidate portals plus a
 high plane proposal. Continuous FP64 intersection uses Minkowski-expanded declared
 head/obstacle boxes and earlier bead boxes. Boundary-only contact is permitted.
+Two exact shortcuts skip material that cannot matter: a segment at or above the
+top of all earlier material, and disjoint segment/box bounds.
 These are conservative nominal boxes, not native material authority, a certified
 predicate, calibrated head geometry, physical collision freedom or machine
 readiness. Supplied dependencies are not inferred deposition-anchor proofs.
@@ -46,7 +61,11 @@ Run `cargo test -p spiling-deposition-routing --all-targets` or
 `cargo run -p spiling-deposition-routing --example route_matrix --release`.
 The matrix and independent judge live under `examples/matrix/`; they reconstruct
 inventory, permissions, dependencies, travel binding and complete segment/head
-clearance independently of planner helpers. They are declared Rust route fixtures,
-not accepted BREP imports. [The research harness](../../tools/route-lab/README.md)
+clearance independently of planner helpers. Cases are declared Rust route fixtures
+plus `captured/` layers converted from PrusaSlicer G-code of project-authored
+shapes; neither is an accepted BREP import or Spiling deposition. The judge also
+reports two sound lower bounds (trail cover for starts, spanning tree for travel)
+and a declared nominal machine time. `route_matrix --sealed SEED` regenerates
+seeded families and applies an isometry to every case. [The research harness](../../tools/route-lab/README.md)
 freezes these files and permits edits only to `src/search.rs` and Rust modules
 under `src/search/`.

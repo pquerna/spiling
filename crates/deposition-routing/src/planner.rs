@@ -102,6 +102,7 @@ fn validate(p: &Problem, limits: Limits, meter: &mut Meter<'_>) -> Result<(), Er
 pub(crate) struct State {
     steps: Vec<Step>,
     built: Vec<BoundsMm>,
+    built_top_mm: f64,
     done: Vec<bool>,
     pub position: PointMm,
     pub travel_mm: f64,
@@ -154,6 +155,7 @@ impl<'a> Session<'a> {
         State {
             steps: vec![],
             built: vec![],
+            built_top_mm: f64::NEG_INFINITY,
             done: vec![false; self.problem.strokes.len()],
             position: self.problem.start_mm,
             travel_mm: 0.,
@@ -162,7 +164,14 @@ impl<'a> Session<'a> {
     }
     pub fn clear(&mut self, state: &State, a: PointMm, b: PointMm) -> Result<bool, Error> {
         self.charge(1)?;
-        clearance::clear(self.problem, &state.built, a, b, &mut self.meter)
+        clearance::clear(
+            self.problem,
+            &state.built,
+            state.built_top_mm,
+            a,
+            b,
+            &mut self.meter,
+        )
     }
     pub fn travel(
         &mut self,
@@ -186,6 +195,7 @@ impl<'a> Session<'a> {
         travel::path(
             self.problem,
             &state.built,
+            state.built_top_mm,
             state.position,
             to,
             portals,
@@ -223,7 +233,14 @@ impl<'a> Session<'a> {
         let mut earlier = Vec::new();
         for &(a, b, width) in edges {
             if !self.clear(state, a, b)?
-                || !clearance::clear(self.problem, &earlier, a, b, &mut self.meter)?
+                || !clearance::clear(
+                    self.problem,
+                    &earlier,
+                    source.physical_z_mm[1],
+                    a,
+                    b,
+                    &mut self.meter,
+                )?
             {
                 return Ok(false);
             }
@@ -275,6 +292,7 @@ impl<'a> Session<'a> {
         state.position = edges.last().unwrap().1;
         state.done[step.stroke] = true;
         state.built.extend(bead_boxes(s));
+        state.built_top_mm = state.built_top_mm.max(s.physical_z_mm[1]);
         state.steps.push(step);
         Ok(())
     }

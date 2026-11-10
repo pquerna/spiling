@@ -7,3 +7,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+# Shared CubeCL accelerator. Its batches are numeric screens; the frozen replay
+# and independent judge keep route admission on the CPU.
+spiling-compute.workspace = true
+spiling-contracts.workspace = true
