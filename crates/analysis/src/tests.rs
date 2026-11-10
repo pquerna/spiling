@@ -1015,3 +1015,34 @@ fn ideal_washer_quadrature_crosses_radial_bands_on_both_caps() {
         assert_eq!(bands, [true; 3]);
     }
 }
+
+#[test]
+fn ideal_washer_band_tangencies_have_unique_physical_samples() {
+    use spiling_contracts::analysis::{attachment, fastener::*};
+    let cancel = AtomicBool::new(false);
+    let (prism, mut case, settings) = attachment_native_plate(&cancel);
+    let budget = Budget::new(&cancel, 60);
+    let operator = prepare(&prism, &settings, RigidPoseMm::IDENTITY, &case, &budget).unwrap();
+    let facets = attachment_facets(&operator.mesh);
+    for diameter in [8.0, 10.8, 11.9999, 12.0, 12.0001, 16.0, 19.6, 20.0] {
+        case.fasteners[0].attachment = FastenerAttachment::Clamp {
+            end: HoleEnd::End,
+            washer_diameter_mm: diameter,
+        };
+        let samples = attachment::samples(&case.fasteners[0], &facets).unwrap();
+        let mut seen = std::collections::BTreeMap::new();
+        for sample in samples {
+            let key = (sample.element_index, sample.point_mm.map(f64::to_bits));
+            assert!(
+                seen.insert(key, (sample.local_point, sample.area_mm2))
+                    .is_none(),
+                "diameter={diameter} element={} local={:?} point={:?} area={} previous={:?}",
+                sample.element_index,
+                sample.local_point,
+                sample.point_mm,
+                sample.area_mm2,
+                seen.get(&key),
+            );
+        }
+    }
+}

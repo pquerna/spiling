@@ -353,6 +353,27 @@ async fn fastener_service_check() {
             assert_eq!(info(&mut client).await.analysis.cases[0].case, case);
         }
     }
+    for diameter in [12.0, 19.6, 20.0] {
+        case.fasteners[0].attachment = FastenerAttachment::Clamp {
+            end: HoleEnd::End,
+            washer_diameter_mm: diameter,
+        };
+        put(&mut client, &case).await;
+        let operation = run(&mut client, &case).await;
+        let bytes = fields(&mut client, &operation).await;
+        check_reactions(&bytes, &case);
+        assert!(
+            (AnalysisFields::decode(&bytes)
+                .unwrap()
+                .summary
+                .fastener_responses[0]
+                .area_mm2
+                / (std::f64::consts::PI * (0.25 * diameter * diameter - 9.0))
+                - 1.0)
+                .abs()
+                < 1e-9
+        );
+    }
     client.shutdown().await.unwrap();
     std::fs::remove_file(&source).unwrap();
     std::fs::remove_file(&solid_source).unwrap();

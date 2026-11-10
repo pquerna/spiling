@@ -182,7 +182,21 @@ fn radial_interval(
     ];
     let aa = chart::dot(d, d);
     let bb = chart::dot(p, d);
-    let cc = chart::dot(p, p) - radius * radius;
+    let squared_radius = radius * radius;
+    let coordinate_scale = facet
+        .positions
+        .iter()
+        .chain(std::iter::once(&fastener.hole.center_mm))
+        .flat_map(|point| [point[0].abs(), point[1].abs()])
+        .fold(0.0, f64::max);
+    let radial_roundoff =
+        64.0 * f64::EPSILON * (chart::dot(p, p) + squared_radius + coordinate_scale * radius);
+    let residual = chart::dot(p, p) - squared_radius;
+    let cc = if residual.abs() <= radial_roundoff {
+        0.0
+    } else {
+        residual
+    };
     let discriminant = bb * bb - aa * cc;
     if aa <= 0.0 || !discriminant.is_finite() {
         return Err(invalid("attachment radial chart is degenerate"));
@@ -198,7 +212,16 @@ fn radial_interval(
         (q / aa, cc / q)
     };
     let lower = r0.min(r1).max(0.0);
-    let upper = r0.max(r1).min(1.0);
+    let endpoint = [
+        b[0] - fastener.hole.center_mm[0],
+        b[1] - fastener.hole.center_mm[1],
+        0.0,
+    ];
+    let upper = if (chart::dot(endpoint, endpoint) - squared_radius).abs() <= radial_roundoff {
+        1.0
+    } else {
+        r0.max(r1).min(1.0)
+    };
     Ok((upper > lower).then_some([2.0 * lower - 1.0, 2.0 * upper - 1.0]))
 }
 fn strip(
