@@ -297,8 +297,11 @@ impl Iterator for Expected<'_> {
                         return Some(Err(error));
                     }
                 };
-                if next.is_none_or(|tool| tool >= self.groups_started) {
-                    let tool = self.groups_started;
+                let order = self.plan.routing_tool_orders[self.layer];
+                if self.groups_started == 0
+                    || next.is_none_or(|tool| tool == order[self.groups_started as usize])
+                {
+                    let tool = order[self.groups_started as usize];
                     self.groups_started += 1;
                     self.position = Some(job.waste_end_mm(tool, self.plan.layers[self.layer].z_mm));
                     self.previous_group = Some((self.layer as u16, tool));

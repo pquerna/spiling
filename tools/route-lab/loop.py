@@ -28,8 +28,10 @@ ROUTING = 'crates/deposition-routing/'
 # Frozen local dependency closure of the routing crate. Its third-party
 # packages come from the repository lockfile and the offline Cargo cache.
 MEMBERS = ('crates/deposition-routing', 'crates/compute', 'crates/contracts')
-SURFACE = 'workspace-route-rust-v5'
+SURFACE = 'workspace-schedule-rust-v6'
 QUALITY = ('travel_mm', 'starts', 'machine_time_s')
+# Families regenerated from the sealed seed; an isometry comparison does not apply.
+SEEDED = ('lattice', 'dual-carriage', 'changer-three')
 
 
 def editable(name):
@@ -52,7 +54,10 @@ def overlay_algorithm(source, destination):
 
 BUILD_ENV = ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_TARGET',
              'CARGO_PROFILE_RELEASE_OPT_LEVEL', 'CARGO_PROFILE_RELEASE_LTO',
-             'CARGO_PROFILE_RELEASE_CODEGEN_UNITS', 'CARGO_INCREMENTAL',
+             'CARGO_PROFILE_RELEASE_CODEGEN_UNITS',
+             'CARGO_PROFILE_DEV_OPT_LEVEL', 'CARGO_PROFILE_DEV_DEBUG',
+             'CARGO_PROFILE_DEV_LTO', 'CARGO_PROFILE_DEV_CODEGEN_UNITS',
+             'CARGO_PROFILE_DEV_INCREMENTAL', 'CARGO_INCREMENTAL',
              'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER')
 
 
@@ -139,7 +144,7 @@ def rows(text, require_valid=True, expected=None):
             raise ValueError('required validity unknown/failed')
         if r['status'] not in ('ok','expected_refusal','no_route','resource','cancelled','invalid_route','invalid_input','unexpected_success'):
             raise ValueError('unknown matrix status')
-        for n in ('travel_mm', 'starts', 'deposition_mm', 'longest_chain_mm', 'waypoints', 'motion_lower_bound_s', 'machine_time_s', 'starts_bound', 'travel_bound_mm', 'work', 'planning_us'):
+        for n in ('travel_mm', 'starts', 'deposition_mm', 'selections', 'motion_lower_bound_s', 'machine_time_s', 'starts_bound', 'travel_bound_mm', 'work', 'planning_us'):
             r[n] = float(r[n])
             if not math.isfinite(r[n]) or r[n] < 0:
                 raise ValueError('invalid finite metric')
@@ -196,12 +201,14 @@ def run_logged(command, log, env, seconds):
     return run
 
 
-def cargo_commands(cohort, workspace, json_tests=False):
+def cargo_commands(cohort, workspace):
+    if cohort.get('cargo_profile') != 'dev':
+        raise ValueError('use a fresh dev-profile cohort')
     cargo=['rustup','run',cohort['toolchain'],'cargo']
     manifest=['--offline','--locked','--manifest-path',str(workspace/'Cargo.toml'),'-p','spiling-deposition-routing']
     return [cargo+['fmt','--manifest-path',str(workspace/ROUTING/'Cargo.toml'),'--','--check'],
             cargo+['test',*manifest,'--all-targets','--message-format=json-render-diagnostics'],
-            cargo+['build',*manifest,'--release','--example','route_matrix','--message-format=json-render-diagnostics']]
+            cargo+['build',*manifest,'--example','route_matrix','--message-format=json-render-diagnostics']]
 
 
 def freeze(root, seconds=1800):
@@ -214,7 +221,7 @@ def freeze(root, seconds=1800):
     if not case_inventory or len(set(n for n,_ in case_inventory))!=len(case_inventory):
         raise ValueError('cannot freeze case inventory')
     repository=workspace_inventory(REPO)
-    cohort=dict(surface=SURFACE, case_inventory=case_inventory, repository=repository, toolchain=toolchain,
+    cohort=dict(surface=SURFACE, cargo_profile='dev', case_inventory=case_inventory, repository=repository, toolchain=toolchain,
                 rustc=rustc, runner_sha256=sha(__file__), build_env={k:os.environ.get(k) for k in BUILD_ENV},
                 compute_backend=os.environ.get('SPILING_COMPUTE_BACKEND','cpu'),
                 public_base=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip())
@@ -374,7 +381,7 @@ def sealed(args):
             visible={r['case']:r for r in receipt['rows'] if r['algorithm']=='candidate' and r['status']=='ok'}
             drift={r['case']:r['travel_mm']/visible[r['case']]['travel_mm'] for r in panel
                    if r['algorithm']=='candidate' and r['status']=='ok' and r['case'] in visible
-                   and not r['case'].startswith('lattice') and visible[r['case']]['travel_mm']>0}
+                   and not r['case'].startswith(SEEDED) and visible[r['case']]['travel_mm']>0}
             entry['isometry_travel_drift']=dict(worst=max(drift.values()),best=min(drift.values()),
                 changed=sorted(n for n,v in drift.items() if abs(v-1)>1e-6))
         report['trials'][name]=entry

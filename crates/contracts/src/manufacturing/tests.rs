@@ -1781,6 +1781,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
+        routing_tool_orders: Vec::new(),
         interior_selection: None,
         functional_material_frame: None,
         material_frames: Vec::new(),

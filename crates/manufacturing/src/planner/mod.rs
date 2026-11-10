@@ -2601,6 +2601,14 @@ fn admit_schedule<'model>(
             ));
         }
         let mut result = NormalizedPrintPlan {
+            routing_tool_orders: if matches!(
+                input.intent.printer.workflow,
+                JobWorkflow::FixedDualMarlin { .. }
+            ) {
+                vec![[0, 1]; layers.len()]
+            } else {
+                Vec::new()
+            },
             interior_selection: None,
             functional_material_frame: construction.functional_frame.take(),
             material_frames: std::mem::take(&mut construction.frames),

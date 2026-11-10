@@ -1684,11 +1684,22 @@ fn native_surface_pose_holes_and_other_occurrence_exclusion_preserve_authority()
             .find(|p| {
                 p.kind == path.kind
                     && p.points_mm.len() == path.points_mm.len()
-                    && (p.points_mm[0][0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
-                    && (p.points_mm[0][1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
+                    && p.points_mm.iter().any(|q| {
+                        (q[0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
+                            && (q[1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
+                    })
             })
             .unwrap();
-        for (a, b) in path.points_mm.iter().zip(&counterpart.points_mm) {
+        let n = path.points_mm.len() - 1;
+        let seam = counterpart.points_mm[..n]
+            .iter()
+            .position(|q| {
+                (q[0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
+                    && (q[1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
+            })
+            .unwrap();
+        for (i, a) in path.points_mm[..n].iter().enumerate() {
+            let b = counterpart.points_mm[(i + seam) % n];
             assert!((a[0] - (b[0] - 23.0)).abs() < 1e-5 && (a[1] - (b[1] - 17.0)).abs() < 1e-5);
         }
     }
@@ -4627,12 +4638,25 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
             fine.region_coverage.protected_hole_area_mm2
         );
         let walls = |layer: &PrintLayer| {
-            layer
+            let mut edges = layer
                 .paths
                 .iter()
                 .filter(|p| p.owner == Some(DepositionOwner::Wall))
-                .cloned()
-                .collect::<Vec<_>>()
+                .flat_map(|p| {
+                    p.checked_edges().unwrap().map(|e| {
+                        (
+                            [
+                                e.points_mm[0].map(f64::to_bits),
+                                e.points_mm[1].map(f64::to_bits),
+                            ],
+                            e.width_mm.to_bits(),
+                            p.physical_z_mm.map(f64::to_bits),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            edges.sort_unstable();
+            edges
         };
         assert_eq!(
             walls(actual),
@@ -4701,7 +4725,14 @@ fn mixed_tool_coarse_intervals_retain_fine_landing_and_exact_bore() {
     ))
     .unwrap();
     let cancel = AtomicBool::new(false);
-    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    // Qualify the grouped construction itself. Automatic selection may prefer
+    // the now better-routed fine candidate; it is tested independently.
+    let bundle = crate::compile_exact(
+        scene.input(&intent),
+        &cancel,
+        &mut spiling_geometry::GeometryWorkBudget::compile(),
+    )
+    .unwrap();
     let time = bundle
         .verification
         .job_time
@@ -4814,7 +4845,13 @@ fn mixed_tool_coarse_work_consumes_non_grid_fine_intervals_without_erasing_top()
     .unwrap();
     intent.recipe.layer_height_mm = 0.19;
     intent.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
-    let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
+    // This is the explicit grouped-construction positive, not a speed vote.
+    let bundle = crate::compile_exact(
+        scene.input(&intent),
+        &AtomicBool::new(false),
+        &mut spiling_geometry::GeometryWorkBudget::compile(),
+    )
+    .unwrap();
     assert!(
         bundle
             .plan
@@ -4896,7 +4933,7 @@ fn automatic_interior_retains_primary_for_slow_bulk_and_unknown_timing() {
                 .iter()
                 .all(|tool| tool.waste_deposition_segments == bundle.plan.layers.len() as u32)
         );
-        assert_eq!(route.selection_count, bundle.plan.layers.len() as u32 * 2);
+        assert_eq!(route.selection_count, bundle.plan.routing_selection_count());
         visit_fresh_replayed_object_segments(&bundle, |_, _| {});
     }
 }

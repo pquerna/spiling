@@ -991,6 +991,7 @@ fn native_face_color_cycle_keeps_waste_only_groups_and_physical_partial_interval
             .contains("missing or overlapping")
     );
 
+    let mut active_tool = 0;
     for layer in &bundle.plan.layers {
         let active = layer
             .paths
@@ -1000,12 +1001,17 @@ fn native_face_color_cycle_keeps_waste_only_groups_and_physical_partial_interval
         if !active.contains(&0) {
             empty_groups += 1;
         }
+        let mut selections = usize::from(layer.index == 0); // setup T0 epoch
+        for &tool in &bundle.plan.routing_tool_orders[layer.index as usize] {
+            selections += usize::from(tool != active_tool);
+            active_tool = tool;
+        }
         assert_eq!(
             motion
                 .iter()
                 .filter(|(kind, index, _)| *kind == 14 && *index == layer.index)
                 .count(),
-            2
+            selections
         );
         assert_eq!(
             motion
@@ -1041,9 +1047,10 @@ fn native_face_color_cycle_keeps_waste_only_groups_and_physical_partial_interval
     );
     let routed = bundle.verification.routing.as_ref().unwrap();
     assert_eq!(
-        routed.selection_count as usize,
-        bundle.plan.layers.len() * 2
+        routed.selection_count,
+        bundle.plan.routing_selection_count()
     );
+    assert!((routed.selection_count as usize) < bundle.plan.layers.len() * 2);
     for tool in &routed.tools {
         assert_eq!(
             tool.waste_deposition_segments as usize,
@@ -1948,6 +1955,20 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
     ))
     .unwrap();
     let bundle = scene.compile(&recipe).unwrap();
+    // Attachment receipts must restore the required order even when all input
+    // roles and their wall/skin/separator strokes arrive in reverse order.
+    let mut permuted = bundle.plan.clone();
+    for layer in &mut permuted.layers {
+        layer.paths.reverse();
+    }
+    let cancel = AtomicBool::new(false);
+    realization::canonicalize(&mut permuted, &recipe, &cancel).unwrap();
+    let program = backend::emit(&permuted, &recipe, &cancel).unwrap();
+    assert!(
+        verifier::verify_actual(&program, &permuted, &recipe, &cancel, None)
+            .unwrap()
+            .verified
+    );
     let motion = actual_motion(&bundle);
     for (window, fraction) in [
         ([[2., 6.], [2., 16.], [2.2, 3.]], 0.60),
@@ -2094,8 +2115,9 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
             }
         })
         .unwrap();
-    path.points_mm[0][0] = c - 1.;
-    path.points_mm[1][0] = c + 1.;
+    let row_axis = usize::from(path.points_mm[0][0] == path.points_mm[1][0]);
+    path.points_mm[0][row_axis] = c - 1.;
+    path.points_mm[1][row_axis] = c + 1.;
     let changed = [
         [path.points_mm[0][0], path.points_mm[0][1]],
         [path.points_mm[1][0], path.points_mm[1][1]],
@@ -2506,14 +2528,26 @@ fn preferred_seams_use_build_sides_and_keep_actual_protected_holes() {
         intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [x, 0.0] };
         let bundle = scene.compile(&intent).unwrap();
         let motion = actual_motion(&bundle);
-        let first_wall = &bundle.plan.layers[0].paths[0];
-        let extremum = first_wall
-            .points_mm
+        for wall in bundle.plan.layers[0]
+            .paths
             .iter()
-            .map(|p| p[0] * x)
-            .fold(f64::NEG_INFINITY, f64::max);
-        assert!((motion[0].2[0] * x - extremum).abs() <= 0.0000005);
-        assert_eq!(motion[0].0, 0);
+            .filter(|path| path.owner == Some(DepositionOwner::Wall))
+        {
+            let extremum = wall
+                .points_mm
+                .iter()
+                .map(|p| p[0] * x)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!((wall.points_mm[0][0] * x - extremum).abs() <= 0.0000005);
+            // The first routed path need not be a wall. Find this wall's actual
+            // entry, retaining the byte-derived seam assertion for both rings.
+            assert!(motion.windows(2).any(|pair| {
+                pair[1].0 == 1
+                    && pair[1].1 == 0
+                    && (pair[0].2[0] - wall.points_mm[0][0]).abs() <= 0.0000005
+                    && (pair[0].2[1] - wall.points_mm[0][1]).abs() <= 0.0000005
+            }));
+        }
         for pair in motion.windows(2) {
             if !matches!(pair[1].0, 1..=5 | 8) {
                 continue;

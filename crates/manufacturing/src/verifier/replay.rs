@@ -55,8 +55,9 @@ impl ReplaySink {
                 let groups = plan.layers.len() * 2;
                 deposition += groups;
                 travels = paths * 3 + groups * 3;
-                process = groups * 2 - 2;
-                (2, groups)
+                let selections = plan.routing_selection_count() as usize;
+                process = selections * 2 - 2;
+                (2, selections)
             }
             JobWorkflow::DiagnosticBodyOnly => (0, 0),
         };

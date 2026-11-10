@@ -6,9 +6,15 @@ mod cases;
 mod judge;
 use spiling_deposition_routing::*;
 use std::{sync::atomic::AtomicBool, time::Instant};
+
+/// Frozen research allowance; production sizes its own.
+const BUDGET: Budget = Budget {
+    work: 2_000_000_000,
+};
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tlongest_chain_mm\twaypoints\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us"
+        "case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tselections\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us"
     );
     // Machine-local accelerator policy, recorded so receipts name their device.
     let backend = match std::env::var("SPILING_COMPUTE_BACKEND").as_deref() {
@@ -22,8 +28,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fea_backend: None,
     })?;
     eprintln!("compute\t{:?}", status.default_device);
-    let cancel = AtomicBool::new(false);
-    let mut failed = false;
     // `--sealed SEED` runs the regenerated/transformed promotion panel.
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let seed = match arguments.as_slice() {
@@ -31,71 +35,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [flag, value] if flag == "--sealed" => value.parse::<u64>()?.max(1),
         _ => return Err("usage: route_matrix [--sealed SEED]".into()),
     };
+    let cancel = AtomicBool::new(false);
+    let mut failed = false;
     for case in cases::panel(seed) {
-        let bound = judge::bounds(&case.problem);
-        for (name, router) in [
-            (
-                "baseline",
-                plan_input_order as fn(&Problem, Limits, &AtomicBool) -> Result<Route, Error>,
-            ),
-            ("candidate", plan),
-        ] {
+        let tasks = case.tasks();
+        let bound = judge::bounds(&case);
+        for name in ["baseline", "candidate"] {
             let start = Instant::now();
-            let result = router(&case.problem, limits(&case.problem), &cancel);
+            let result = if name == "baseline" {
+                schedule_input_order(&tasks, &case.machine, &cancel)
+            } else {
+                schedule(&tasks, &case.machine, case.order, BUDGET, &cancel)
+            };
             let us = start.elapsed().as_micros();
+            let blank = |status: &str, work: u64| {
+                println!(
+                    "{}\t{}\t{name}\t{status}\t0\t0\t0\t0\t0\t0\t0\t0\t{work}\t{us}",
+                    case.name, case.split
+                );
+            };
             match result {
-                Ok(route) if case.feasible => {
-                    let score = match judge::inspect(&case.problem, &route) {
+                Ok(schedule) if case.feasible => {
+                    let judged = judge::inspect(&case, &schedule);
+                    let score = match judged {
                         Ok(score) => score,
                         Err(why) => {
                             eprintln!("{} {name}: {why}", case.name);
-                            println!(
-                                "{}\t{}\t{name}\tinvalid_route\t0\t0\t0\t0\t0\t0\t0\t0\t0\t{}\t{us}",
-                                case.name, case.split, route.work
-                            );
+                            blank("invalid_route", schedule.work);
                             failed = true;
                             continue;
                         }
                     };
                     if score.starts < bound.starts || score.travel_mm < bound.travel_mm - 1e-6 {
                         return Err(
-                            "a judged route beat a lower bound; judge or bound is wrong".into()
+                            "a judged schedule beat a lower bound; judge or bound is wrong".into(),
                         );
                     }
                     println!(
-                        "{}\t{}\t{name}\tok\t{:.9}\t{}\t{:.9}\t{:.9}\t{}\t{:.9}\t{:.9}\t{}\t{:.9}\t{}\t{}",
+                        "{}\t{}\t{name}\tok\t{:.9}\t{}\t{:.9}\t{}\t{:.9}\t{:.9}\t{}\t{:.9}\t{}\t{}",
                         case.name,
                         case.split,
                         score.travel_mm,
                         score.starts,
                         score.deposition_mm,
-                        score.longest_chain_mm,
-                        score.intermediate_waypoints,
+                        score.selections,
                         score.motion_lower_bound_s,
                         score.machine_time_s,
                         bound.starts,
                         bound.travel_mm,
-                        route.work,
+                        schedule.work,
                         us
                     );
                 }
-                Err(Error::NoRoute) if !case.feasible => println!(
-                    "{}\t{}\t{name}\texpected_refusal\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t{us}",
-                    case.name, case.split
-                ),
+                Err(Error::Inconsistent) if !case.feasible => blank("expected_refusal", 0),
                 other => {
                     let status = match &other {
-                        Err(Error::NoRoute) => "no_route",
-                        Err(Error::Resource) => "resource",
+                        Err(Error::Inconsistent) => "no_route",
                         Err(Error::Cancelled) => "cancelled",
-                        Err(Error::InvalidInput) => "invalid_input",
+                        Err(Error::InvalidInput(_)) => "invalid_input",
+                        Err(Error::Rejected(_)) => "invalid_route",
                         Ok(_) => "unexpected_success",
                     };
                     eprintln!("{} {name}: {status}", case.name);
-                    println!(
-                        "{}\t{}\t{name}\t{status}\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t{us}",
-                        case.name, case.split
-                    );
+                    blank(status, 0);
                     failed = true;
                 }
             }
@@ -107,189 +109,193 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 }
-/// Caller-sized research allowances scaled to the declared inventory.
-fn limits(p: &Problem) -> Limits {
-    let points: usize = p.strokes.iter().map(|s| s.points_mm.len()).sum();
-    Limits {
-        work: 200_000_000_000,
-        edges: 100_000,
-        waypoints: 512.max(points * 8),
-        frontier_states: 128.max(p.strokes.len() + 64),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn run(case: &cases::Case) -> Result<Schedule, Error> {
+        schedule(
+            &case.tasks(),
+            &case.machine,
+            case.order,
+            BUDGET,
+            &AtomicBool::new(false),
+        )
+    }
+    fn named(name: &str) -> cases::Case {
+        cases::matrix()
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap()
+    }
     #[test]
-    fn complete_matrix_and_inaccessible_boundary() {
+    fn whole_panel_is_judged_valid_within_bounds_and_preserves_deposition() {
         for case in cases::matrix() {
-            let result = plan_input_order(
-                &case.problem,
-                limits(&case.problem),
-                &AtomicBool::new(false),
-            );
-            if case.feasible {
-                let score = judge::inspect(&case.problem, &result.unwrap()).unwrap();
-                let bound = judge::bounds(&case.problem);
-                assert!(score.starts >= bound.starts, "{}", case.name);
-                assert!(score.travel_mm >= bound.travel_mm - 1e-6, "{}", case.name);
-                assert!(score.machine_time_s >= score.motion_lower_bound_s);
-            } else {
-                assert!(matches!(result, Err(Error::NoRoute)));
+            let tasks = case.tasks();
+            let control = schedule_input_order(&tasks, &case.machine, &AtomicBool::new(false));
+            let routed = run(&case);
+            if !case.feasible {
+                assert_eq!(routed.unwrap_err(), Error::Inconsistent, "{}", case.name);
+                assert_eq!(control.unwrap_err(), Error::Inconsistent);
+                continue;
             }
+            let score = judge::inspect(&case, &routed.unwrap())
+                .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+            let bound = judge::bounds(&case);
+            assert!(score.starts >= bound.starts, "{}", case.name);
+            assert!(score.travel_mm >= bound.travel_mm - 1e-6, "{}", case.name);
+            assert!(score.machine_time_s >= score.motion_lower_bound_s - 1e-9);
+            let control = judge::inspect(&case, &control.unwrap()).unwrap();
+            assert!((score.deposition_mm - control.deposition_mm).abs() < 1e-9);
         }
     }
     #[test]
-    fn bounds_are_exact_on_known_graphs_and_sealed_panels_stay_judged() {
-        let cases = cases::matrix();
-        let bound =
-            |name: &str| judge::bounds(&cases.iter().find(|c| c.name == name).unwrap().problem);
-        // One 12-edge path is one trail; twelve separate islands need twelve.
-        assert_eq!(bound("chain").starts, 1);
-        assert_eq!(bound("islands").starts, 12);
-        // A cycle with one leaf has two odd vertices: one trail.
-        assert_eq!(bound("junction-cycle").starts, 1);
-        assert_eq!(bound("chain").travel_mm, 4f64.hypot(4.).hypot(0.8));
+    fn bounds_are_exact_on_known_graphs() {
+        assert_eq!(judge::bounds(&named("chain")).starts, 1);
+        assert_eq!(judge::bounds(&named("islands")).starts, 12);
+        assert_eq!(judge::bounds(&named("locked-cycle")).starts, 1);
+        assert_eq!(judge::bounds(&named("nested-loops")).starts, 3);
+        assert_eq!(judge::bounds(&named("chain")).travel_mm, 0.);
+    }
+    #[test]
+    fn multi_tool_machines_keep_service_and_reduce_selections() {
+        for name in ["dual-carriage", "changer-three"] {
+            let case = named(name);
+            let tasks = case.tasks();
+            let free = judge::inspect(&case, &run(&case).unwrap()).unwrap();
+            let fixed = schedule(
+                &tasks,
+                &case.machine,
+                ToolOrder::Fixed,
+                BUDGET,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(free.selections < fixed.cost.selections as usize, "{name}");
+        }
+        let case = named("dual-carriage");
+        let routed = run(&case).unwrap();
+        let barriers = case.strokes.iter().map(|s| s.barrier).max().unwrap() as usize + 1;
+        assert_eq!(
+            routed.groups.len(),
+            barriers * 2,
+            "every tool serviced on every layer"
+        );
+        assert!(routed.groups.iter().any(|g| g.visits.is_empty()));
+        let case = named("changer-three");
+        let routed = run(&case).unwrap();
+        assert!(
+            routed
+                .groups
+                .iter()
+                .all(|g| g.selected == g.prewarm_at_s.is_some())
+        );
+    }
+    #[test]
+    fn judge_rejects_each_mutation_independently() {
+        let case = named("dual-carriage");
+        let good = run(&case).unwrap();
+        judge::inspect(&case, &good).unwrap();
+        let refuse = |edit: &dyn Fn(&mut Schedule)| {
+            let mut bad = good.clone();
+            edit(&mut bad);
+            judge::inspect(&case, &bad).unwrap_err()
+        };
+        assert_eq!(
+            refuse(&|s| {
+                s.visits.pop();
+            }),
+            "incomplete inventory"
+        );
+        assert_eq!(refuse(&|s| s.visits[1] = s.visits[0]), "duplicate task");
+        assert_eq!(refuse(&|s| s.visits[0].seam = 1), "locked seam");
+        let empty = good
+            .groups
+            .iter()
+            .position(|g| g.visits.is_empty())
+            .unwrap();
+        assert_eq!(
+            refuse(&|s| {
+                s.groups.remove(empty);
+            }),
+            "a required service group is missing"
+        );
+        assert_eq!(
+            refuse(&|s| s.cost.selections -= 1),
+            "reported cost differs from independent evaluation"
+        );
+        assert_eq!(
+            refuse(&|s| s.cost.total_s -= 1.),
+            "reported cost differs from independent evaluation"
+        );
+        assert_eq!(
+            refuse(&|s| s.groups[0].selected = !s.groups[0].selected),
+            "tool transition clock annotation differs"
+        );
+        assert_eq!(
+            refuse(&|s| s.groups[0].begins_at_s += 1.),
+            "tool transition clock annotation differs"
+        );
+        let changer = named("changer-three");
+        let mut late = run(&changer).unwrap();
+        late.groups
+            .iter_mut()
+            .find(|g| g.prewarm_at_s.is_some())
+            .unwrap()
+            .prewarm_at_s = Some(999.);
+        assert_eq!(
+            judge::inspect(&changer, &late).unwrap_err(),
+            "tool transition clock annotation differs"
+        );
+        let last = good.visits.len() - 1;
+        assert_eq!(
+            refuse(&|s| s.visits.swap(0, last)),
+            "task outside its tool group or barrier"
+        );
+        let locked = named("locked-cycle");
+        let mut bad = run(&locked).unwrap();
+        bad.visits[0].reverse = true;
+        assert_eq!(
+            judge::inspect(&locked, &bad).unwrap_err(),
+            "locked direction"
+        );
+        let stack = named("slicer-pin-stack");
+        let mut bad = run(&stack).unwrap();
+        let dependent = stack
+            .strokes
+            .iter()
+            .position(|s| !s.prerequisites.is_empty())
+            .unwrap() as u32;
+        let (a, b) = (
+            bad.visits.iter().position(|v| v.task == dependent).unwrap(),
+            bad.visits
+                .iter()
+                .position(|v| v.task == stack.strokes[dependent as usize].prerequisites[0])
+                .unwrap(),
+        );
+        bad.visits.swap(a, b);
+        assert!(judge::inspect(&stack, &bad).is_err());
+    }
+    #[test]
+    fn sealed_panels_keep_inventory_and_stay_judged() {
+        let visible = cases::matrix();
         for seed in [3, 6] {
             let sealed = cases::panel(seed);
-            assert_eq!(sealed.len(), cases.len());
-            for (case, original) in sealed.iter().zip(&cases) {
-                if case.problem.strokes.len() > 80 {
-                    continue;
-                }
-                let result = plan_input_order(
-                    &case.problem,
-                    limits(&case.problem),
-                    &AtomicBool::new(false),
-                );
-                if case.feasible {
-                    let score = judge::inspect(&case.problem, &result.unwrap()).unwrap();
-                    if !case.name.starts_with("lattice") {
-                        let plain = plan_input_order(
-                            &original.problem,
-                            limits(&original.problem),
-                            &AtomicBool::new(false),
-                        )
-                        .unwrap();
-                        let plain = judge::inspect(&original.problem, &plain).unwrap();
-                        assert_eq!(score.starts, plain.starts, "{}", case.name);
-                        assert!((score.deposition_mm - plain.deposition_mm).abs() < 1e-6);
-                    }
-                } else {
-                    assert!(matches!(result, Err(Error::NoRoute)));
+            assert_eq!(sealed.len(), visible.len());
+            for (case, original) in sealed.iter().zip(&visible).filter(|(c, _)| c.feasible) {
+                let score = judge::inspect(case, &run(case).unwrap()).unwrap();
+                if !["lattice", "dual", "changer"]
+                    .iter()
+                    .any(|p| case.name.starts_with(p))
+                {
+                    let plain = judge::inspect(original, &run(original).unwrap()).unwrap();
+                    assert!(
+                        (score.deposition_mm - plain.deposition_mm).abs() < 1e-6,
+                        "{}",
+                        case.name
+                    );
                 }
             }
         }
-    }
-    #[test]
-    fn judge_rejects_deleted_duplicate_locked_and_false_continuation() {
-        let cases = cases::matrix();
-        let p = &cases.iter().find(|c| c.name == "chain").unwrap().problem;
-        let valid = plan_input_order(p, limits(p), &AtomicBool::new(false)).unwrap();
-        let mut bad = valid.clone();
-        bad.steps.pop();
-        assert!(judge::inspect(p, &bad).is_err());
-        let mut bad = valid.clone();
-        bad.steps[1] = bad.steps[0].clone();
-        assert!(judge::inspect(p, &bad).is_err());
-        let mut bad = valid;
-        bad.steps[0].continuous = true;
-        assert!(judge::inspect(p, &bad).is_err());
-        let p = &cases
-            .iter()
-            .find(|c| c.name == "nested-walls")
-            .unwrap()
-            .problem;
-        let mut bad = plan_input_order(p, limits(p), &AtomicBool::new(false)).unwrap();
-        bad.steps[0].reverse = true;
-        assert!(judge::inspect(p, &bad).is_err());
-    }
-    #[test]
-    fn judge_rejects_clear_endpoints_crossing_and_wrong_band_precedence() {
-        let cases = cases::matrix();
-        let p = &cases
-            .iter()
-            .find(|c| c.name == "obstacle-lift")
-            .unwrap()
-            .problem;
-        let mut bad = plan_input_order(p, limits(p), &AtomicBool::new(false)).unwrap();
-        let step = &mut bad.steps[0];
-        step.travel_mm = vec![step.travel_mm[0], *step.travel_mm.last().unwrap()];
-        assert_eq!(
-            judge::inspect(p, &bad).unwrap_err(),
-            "travel collision/envelope"
-        );
-        let p = &cases
-            .iter()
-            .find(|c| c.name == "fine-coarse")
-            .unwrap()
-            .problem;
-        let mut bad = plan_input_order(p, limits(p), &AtomicBool::new(false)).unwrap();
-        let coarse = bad
-            .steps
-            .iter()
-            .position(|s| !p.strokes[s.stroke].prerequisites.is_empty())
-            .unwrap();
-        bad.steps.swap(0, coarse);
-        assert_eq!(
-            judge::inspect(p, &bad).unwrap_err(),
-            "missing earlier prerequisite"
-        );
-    }
-    #[test]
-    fn invalid_dimensions_coordinates_and_identity_refuse() {
-        let p = cases::matrix().remove(0).problem;
-        let cancel = AtomicBool::new(false);
-        let mut invalid = p.clone();
-        invalid.strokes[0].widths_mm[0] = f64::NAN;
-        assert!(matches!(
-            plan(&invalid, limits(&invalid), &cancel),
-            Err(Error::InvalidInput)
-        ));
-        let mut invalid = p.clone();
-        invalid.strokes[0].points_mm[0].0[0] = f64::INFINITY;
-        assert!(matches!(
-            plan(&invalid, limits(&invalid), &cancel),
-            Err(Error::InvalidInput)
-        ));
-        let mut invalid = p.clone();
-        invalid.strokes[0].prerequisites.push(StrokeId(u64::MAX));
-        assert!(matches!(
-            plan(&invalid, limits(&invalid), &cancel),
-            Err(Error::InvalidInput)
-        ));
-        let mut invalid = p;
-        invalid.strokes[1].id = invalid.strokes[0].id;
-        assert!(matches!(
-            plan(&invalid, limits(&invalid), &cancel),
-            Err(Error::InvalidInput)
-        ));
-    }
-
-    #[test]
-    fn resource_cancel_and_cycle_are_not_geometric_refusals() {
-        let mut p = cases::matrix().remove(0).problem;
-        assert!(matches!(
-            plan(&p, limits(&p), &AtomicBool::new(true)),
-            Err(Error::Cancelled)
-        ));
-        assert!(matches!(
-            plan(
-                &p,
-                Limits {
-                    work: 0,
-                    ..limits(&p)
-                },
-                &AtomicBool::new(false)
-            ),
-            Err(Error::Resource)
-        ));
-        p.strokes[0].prerequisites = vec![p.strokes[1].id];
-        p.strokes[1].prerequisites = vec![p.strokes[0].id];
-        assert!(matches!(
-            plan(&p, limits(&p), &AtomicBool::new(false)),
-            Err(Error::InvalidInput)
-        ));
     }
 }

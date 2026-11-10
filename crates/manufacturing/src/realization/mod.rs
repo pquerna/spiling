@@ -9,7 +9,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
-mod row_route;
+mod schedule;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Event {
@@ -24,111 +24,31 @@ pub(crate) enum Event {
     HotendTarget(u8, f64),
     HotendWait(u8, f64),
 }
-fn rank(path: &DepositionPath) -> u8 {
-    if path.owner == Some(DepositionOwner::Wall) {
-        return 2;
-    }
-    match path.kind {
-        DepositionKind::Support => 0,
-        DepositionKind::SupportInterface => 1,
-        DepositionKind::Perimeter => 2,
-        DepositionKind::BottomSkin => 3,
-        DepositionKind::TopSkin => 4,
-        DepositionKind::Bridge => 5,
-        DepositionKind::SeparatorWall => 6,
-        DepositionKind::SolidFill => 7,
-        DepositionKind::SparseFill => 8,
-    }
-}
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
 }
-fn unsigned_zero(value: f64) -> f64 {
-    if value == 0.0 { 0.0 } else { value }
-}
 
-fn xy_compare(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
-    unsigned_zero(a[0])
-        .total_cmp(&unsigned_zero(b[0]))
-        .then_with(|| unsigned_zero(a[1]).total_cmp(&unsigned_zero(b[1])))
-}
-
-/// Compare only existing vertices in command coordinates. Raw coordinates and
-/// cyclic index break exact projected ties without merging nearby candidates.
-fn wall_seam(
-    points: &[[f64; 3]],
-    policy: SeamPolicy,
-    position: Option<[f64; 3]>,
-    recent_starts: &[[f64; 2]],
-    cancel: &AtomicBool,
-) -> Result<usize, ManufacturingError> {
-    let mut seam = 0;
-    let mut best = project_xyz6_point_mm(points[0])?;
-    let score = |point: [f64; 3]| match policy {
-        SeamPolicy::Nearest => 0.0,
-        SeamPolicy::Distributed => recent_starts
-            .iter()
-            .map(|start| (point[0] - start[0]).hypot(point[1] - start[1]))
-            .fold(f64::INFINITY, f64::min),
-        SeamPolicy::PreferredBuildDirection { xy } => {
-            unsigned_zero(point[0] * xy[0] + point[1] * xy[1])
-        }
-    };
-    let mut best_score = score(best);
-    let mut best_distance = None;
-    for index in 1..points.len() - 1 {
-        check_cancel(cancel)?;
-        let candidate = project_xyz6_point_mm(points[index])?;
-        let candidate_score = score(candidate);
-        let preference = best_score.total_cmp(&candidate_score);
-        let mut candidate_distance = None;
-        let order = preference
-            .then_with(|| {
-                position.map_or(std::cmp::Ordering::Equal, |from| {
-                    let candidate =
-                        *candidate_distance.get_or_insert_with(|| distance(from, candidate));
-                    candidate.total_cmp(best_distance.get_or_insert_with(|| distance(from, best)))
-                })
-            })
-            .then_with(|| xy_compare(candidate, best))
-            .then_with(|| xy_compare(points[index], points[seam]))
-            .then_with(|| index.cmp(&seam));
-        if order == std::cmp::Ordering::Less {
-            seam = index;
-            best = candidate;
-            best_score = candidate_score;
-            best_distance = candidate_distance;
-        }
-    }
-    Ok(seam)
-}
-
-fn canonical_order(a: &DepositionPath, b: &DepositionPath) -> std::cmp::Ordering {
-    rank(a)
-        .cmp(&rank(b))
-        .then_with(|| a.points_mm[0][0].total_cmp(&b.points_mm[0][0]))
-        .then_with(|| a.points_mm[0][1].total_cmp(&b.points_mm[0][1]))
-        .then_with(|| a.points_mm.len().cmp(&b.points_mm.len()))
-        .then_with(|| {
-            a.points_mm
-                .iter()
-                .flatten()
-                .zip(b.points_mm.iter().flatten())
-                .find_map(|(a, b)| {
-                    let c = a.total_cmp(b);
-                    (c != std::cmp::Ordering::Equal).then_some(c)
-                })
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-}
-
-/// Canonical geometry traversal is stored in the normalized plan, never hidden
-/// in the emitter. Temporary bounded permutation storage is released before
-/// streaming; no second motion/index stream is retained.
+/// Deposition order is stored in the normalized plan, never hidden in the
+/// emitter. The scheduler's transient decisions are released before streaming;
+/// no second motion/index stream is retained.
 pub(crate) fn canonicalize(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    canonicalize_with_tool_order(
+        plan,
+        intent,
+        cancel,
+        spiling_deposition_routing::ToolOrder::Free,
+    )
+}
+
+pub(crate) fn canonicalize_with_tool_order(
+    plan: &mut NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    order: spiling_deposition_routing::ToolOrder,
 ) -> Result<(), ManufacturingError> {
     plan.validate(intent)?;
     let routed = match &intent.printer.workflow {
@@ -138,102 +58,12 @@ pub(crate) fn canonicalize(
         }
         _ => None,
     };
-    let mut position = match &intent.printer.workflow {
+    let position = match &intent.printer.workflow {
         JobWorkflow::DiagnosticBodyOnly => None,
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
-    let mut recent_starts = [[[0.0; 2]; 8]; 2];
-    let mut recent_counts = [0usize; 2];
-    let mut next_start = [0usize; 2];
-    let mut route_work = row_route::RouteWork::default();
-    for layer in &mut plan.layers {
-        check_cancel(cancel)?;
-        let mut boundary = layer.paths.len();
-        if let Some(job) = routed {
-            let mut index = 0;
-            while index < boundary {
-                check_cancel(cancel)?;
-                if job.tool_for_path(&layer.paths[index])? == 0 {
-                    index += 1;
-                } else {
-                    boundary -= 1;
-                    layer.paths.swap(index, boundary);
-                }
-            }
-        }
-        let (zero, one) = layer.paths.split_at_mut(boundary);
-        zero.sort_unstable_by(canonical_order);
-        one.sort_unstable_by(canonical_order);
-        let row_start = if routed.is_none()
-            && matches!(
-                intent.recipe.sparse_infill,
-                SparseInfillPolicy::WebRoof { .. }
-            ) {
-            layer
-                .paths
-                .iter()
-                .position(|p| p.kind == DepositionKind::SparseFill)
-        } else {
-            None
-        };
-        let mut previous_tool = None;
-        for path_index in 0..layer.paths.len() {
-            if row_start == Some(path_index) {
-                row_route::improve(
-                    &mut layer.paths[path_index..],
-                    position,
-                    &intent.recipe,
-                    &mut route_work,
-                    cancel,
-                )?;
-            }
-            let path = &mut layer.paths[path_index];
-            check_cancel(cancel)?;
-            let tool = routed.map_or(Ok(0), |job| job.tool_for_path(path))?;
-            if let Some(job) = routed
-                && previous_tool != Some(tool)
-            {
-                position = Some(project_xyz6_point_mm(job.waste_end_mm(tool, layer.z_mm))?);
-                previous_tool = Some(tool);
-            }
-            let n = path.points_mm.len();
-            if path.owner == Some(DepositionOwner::Wall)
-                && path.points_mm[0] == path.points_mm[n - 1]
-            {
-                let seam = wall_seam(
-                    &path.points_mm,
-                    intent.recipe.seam_policy,
-                    position.map(project_xyz6_point_mm).transpose()?,
-                    &recent_starts[tool as usize][..recent_counts[tool as usize]],
-                    cancel,
-                )?;
-                path.rotate_closed(seam)?;
-                if intent.recipe.seam_policy == SeamPolicy::Distributed {
-                    let tool = tool as usize;
-                    let start = project_xyz6_point_mm(path.points_mm[0])?;
-                    recent_starts[tool][next_start[tool]] = [start[0], start[1]];
-                    next_start[tool] = (next_start[tool] + 1) % 8;
-                    recent_counts[tool] = (recent_counts[tool] + 1).min(8);
-                }
-            } else if let Some(from) = position {
-                if path.points_mm[0] == path.points_mm[n - 1] {
-                    let mut seam = 0;
-                    for i in 1..n - 1 {
-                        if distance(from, path.points_mm[i]) < distance(from, path.points_mm[seam])
-                        {
-                            seam = i;
-                        }
-                    }
-                    path.rotate_closed(seam)?;
-                } else if distance(from, path.points_mm[n - 1]) < distance(from, path.points_mm[0])
-                {
-                    path.reverse();
-                }
-            }
-            position = path.points_mm.last().copied();
-        }
-    }
+    schedule::apply(plan, intent, routed, position, cancel, order)?;
     Ok(())
 }
 
@@ -255,18 +85,29 @@ pub(crate) fn stream(
         .map(|job| crate::routing::safe_z(plan, job))
         .transpose()?;
     let mut active_tool = 0u8;
-    let mut group_started = false;
     let mut debt = [0.0f64; 2];
     let mut fan = None;
     let mut travels = 0u32;
     let mut process_events = 0u32;
     for layer in &plan.layers {
         check_cancel(cancel)?;
-        for group in 0..if routed.is_some() { 2 } else { 1 } {
+        let order: &[u8] = if routed.is_some() {
+            plan.routing_tool_orders
+                .get(layer.index as usize)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::InvalidSpecification,
+                        "missing scheduled tool order",
+                    )
+                })?
+        } else {
+            &[0]
+        };
+        for &tool in order {
             if let Some(job) = routed {
-                let tool = group as u8;
                 let [start, end] = crate::routing::waste_points(job, tool, layer.z_mm)?;
-                if group_started {
+                let switched = active_tool != tool;
+                if switched {
                     let old = &job.tools[usize::from(active_tool)];
                     emit(Event::Barrier)?;
                     let before = (extrusion * 100_000_000.0).round();
@@ -306,7 +147,7 @@ pub(crate) fn stream(
                 }
                 active_tool = tool;
                 let loaded = &job.tools[usize::from(tool)];
-                if group_started {
+                if switched {
                     emit(Event::HotendWait(tool, loaded.nozzle_temperature_c))?;
                 }
                 let owed = debt[usize::from(tool)];
@@ -315,7 +156,7 @@ pub(crate) fn stream(
                     emit(Event::Extrusion(extrusion, loaded.retract_speed_mm_s))?;
                     debt[usize::from(tool)] = 0.0;
                 }
-                if !group_started {
+                if !switched {
                     emit(Event::Travel(
                         [start[0], start[1], safe_z.unwrap()],
                         recipe.travel_speed_mm_s,
@@ -345,12 +186,11 @@ pub(crate) fn stream(
                 extrusion += length * area / loaded_area;
                 emit(Event::Waste(end, extrusion, speed))?;
                 position = Some(end);
-                group_started = true;
             }
             for path in &layer.paths {
                 check_cancel(cancel)?;
                 if let Some(job) = routed
-                    && usize::from(job.tool_for_path(path)?) != group
+                    && job.tool_for_path(path)? != tool
                 {
                     continue;
                 }
@@ -509,43 +349,4 @@ pub(crate) fn stream(
         }
     }
     Ok((position, extrusion))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn distributed_seam_exact_projected_ties_use_raw_xy_then_cyclic_index() {
-        let mut points = [
-            [1.000_000_4, 1.0, 1.0],
-            [3.0, 3.0, 1.0],
-            [1.000_000_1, 1.0, 1.0],
-            [4.0, 4.0, 1.0],
-            [1.000_000_4, 1.0, 1.0],
-        ];
-        let cancel = AtomicBool::new(false);
-        assert_eq!(
-            wall_seam(&points, SeamPolicy::Distributed, None, &[], &cancel).unwrap(),
-            2
-        );
-        points[0] = points[2];
-        points[4] = points[0];
-        assert_eq!(
-            wall_seam(&points, SeamPolicy::Distributed, None, &[], &cancel).unwrap(),
-            0
-        );
-        assert_eq!(
-            wall_seam(
-                &points,
-                SeamPolicy::Distributed,
-                None,
-                &[],
-                &AtomicBool::new(true)
-            )
-            .unwrap_err()
-            .code,
-            ManufacturingErrorCode::Cancelled
-        );
-    }
 }

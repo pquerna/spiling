@@ -1,71 +1,62 @@
-# Deposition routing
+# Deposition scheduling
 
-A Rust route-planning library for algorithm research and a future manufacturing
-adapter. Production manufacturing does not call it yet. It depends on contracts
-and `spiling-compute`, the shared CubeCL accelerator; no kernel, project writer,
-G-code, storage or renderer belongs here. Algorithms may use compute batches
-(for example exact `box_overlaps` masks) to screen candidates. A batch that
-declines or fails falls back to the CPU path, and every returned step is still
-checked by frozen replay and the independent judge. The matrix configures the
-backend from `SPILING_COMPUTE_BACKEND` (`cpu` by default) and reports its device.
+The shared Rust scheduler used by manufacturing and the offline algorithm-edit
+lab. It chooses task order, permitted entry/direction, authored wall seams and
+per-barrier tool sequence. Manufacturing supplies already admitted deposition;
+the scheduler never adds a connector, splits a path or changes material,
+width, occupied height or construction ownership.
 
-`plan` consumes immutable identified planar strokes, per-edge widths, occupied Z
-intervals, process keys, direction/seam permissions and earlier-work dependencies.
-It returns original stroke references and checked travel waypoints. Required
-geometry is unchanged; it never inserts extrusion across a gap. `continuous`
-means exact compatible endpoints without travel, not calibrated pressure or
-firmware lookahead. Physical Z intervals, not layer numbers, define compatibility.
+`Task` borrows entry vertices and prerequisite indices and retains its actual
+physical Z interval. Barrier indices express caller-supplied precedence; they
+are not layer heights. Today's production adapter retains a barrier per actual
+fine layer, including coarser interior paths ending there. Cross-layer
+production scheduling is not enabled.
 
-The editable algorithm owns a complete route. `Session` exposes immutable scene
-geometry, checked prefixes, ready orientation/seam choices, arbitrary proposed
-travel portals, segment-clearance queries and custom step admission. A candidate
-can build a graph, backtrack, use a beam/frontier, plan pockets or perform bounded
-local repair; it need not use the prepared choices. `src/search/` may contain new,
-changed or removed Rust helper modules. A fresh frozen replay checks every returned
-step before the independently implemented matrix judge checks it again.
+`Machine` declares known start/tool state, travel and retraction estimates,
+station endpoints, mandatory service cadence, modeled selection time and
+optional prewarm lead. `ToolOrder::Free` minimizes selection count over the
+barriers for up to six tools; larger inventories use a deterministic
+prerequisite-respecting order. `Fixed` retains ascending tool groups. Every
+required service group remains present even without model paths. The bounded
+fixed-dual manufacturing backend retains both supported waste strokes per fine
+interval while avoiding a redundant selection between adjacent same-tool
+groups. Other tool changers are synthetic lab models, not enabled printers.
 
-The retained search constructs the lowest unfinished physical band first, with
-bounded backtracking when that construction stalls. It then improves visit order
-with band-local relocation, reversal and iterated local search. A second stage
-proposes cross-band moves; only a complete checked rebuild with less travel and
-no additional starts replaces the incumbent. Optional search exhaustion preserves
-the admitted incumbent; cancellation still aborts. The objective is travel, with
-starts as a guard; nominal time remains a separate matrix metric.
+The editable algorithm lives in `src/search.rs` and `src/search/`. It constructs
+a prerequisite-respecting nearest-entry route, improves it with bounded local
+search, and returns a permutation over the original tasks. Authored nearest,
+preferred-direction and distributed wall seams are selected in the crate using
+actual command coordinates and per-tool history. The frozen checker rejects
+missing/duplicate tasks, forbidden direction/seams, prerequisite/barrier/group
+violations and forged cost/clock annotations. Production independently decodes
+emitted bytes and checks construction and tool/frame/E/debt/thermal/waste state.
 
-The frozen input-order control uses bounded depth-first recovery and local-height
-portals. It is a reproducible reference, not an optimal or complete solver. Travel
-primitives use a checked visibility graph over caller and candidate portals plus a
-high plane proposal. Continuous FP64 intersection uses Minkowski-expanded declared
-head/obstacle boxes and earlier bead boxes. Boundary-only contact is permitted.
-Two exact shortcuts skip material that cannot matter: a segment at or above the
-top of all earlier material, and disjoint segment/box bounds.
-These are conservative nominal boxes, not native material authority, a certified
-predicate, calibrated head geometry, physical collision freedom or machine
-readiness. Supplied dependencies are not inferred deposition-anchor proofs.
-`NoRoute` means the bounded search found no complete route; it is not global
-manufacturing impossibility. Resource/cancel/input errors remain distinct.
+The cost is a declared scheduling estimate: straight travel, modeled lift,
+thresholded retract/recover, supplied deposition duration, service and swap
+seconds. A prewarm lead that cannot fit before selection adds modeled startup
+waiting; its annotation is not a measured temperature or readiness proof.
+Station endpoints establish where model work begins; station approach motion,
+thermal dynamics, acceleration and finalization are not represented by this lab
+model. Use actual-program accounting for product comparisons; do not label the
+lab total as physical print time. Zero-gap starts are a continuity proxy, not
+permission for new extrusion or calibrated pressure behavior.
 
-Caller-sized `Limits` bound charged work, input edges, travel portals and requested
-live search prefixes. Search and final replay each have a `work` allowance; reported
-work includes both, at most twice that allowance. This reserve lets optional search
-return an incumbent after exhausting its own allowance. Cancellation still aborts.
-Candidate code is trusted Rust with process permissions, not a sandbox: external
-memory/tasks/time limits remain mandatory. Prefix clones copy route/occupancy
-metadata but borrow source geometry. Search charges structural work; work units
-are not elapsed CPU instructions or a hard allocation bound. This research
-implementation scans candidates/obstacles directly. Scarf ramps, new extrusion
-connectors, thermal/tool-change realization, helical paths and native integration
-need separate construction/verification contracts.
+The crate has no kernel, storage, renderer, G-code or material authority. It does
+not perform collision or support proof; the former research-only declared-box
+router is removed. Manufacturing retains its existing declared fixed-carriage
+checks and independent actual-program admission. No physical collision freedom,
+printability or machine readiness is established.
 
-Run `cargo test -p spiling-deposition-routing --all-targets` or
-`cargo run -p spiling-deposition-routing --example route_matrix --release`.
-The matrix and independent judge live under `examples/matrix/`; they reconstruct
-inventory, permissions, dependencies, travel binding and complete segment/head
-clearance independently of planner helpers. Cases are declared Rust route fixtures
-plus `captured/` layers converted from PrusaSlicer G-code of project-authored
-shapes; neither is an accepted BREP import or Spiling deposition. The judge also
-reports two sound lower bounds (trail cover for starts, spanning tree for travel)
-and a declared nominal machine time. `route_matrix --sealed SEED` regenerates
-seeded families and applies an isometry to every case. [The research harness](../../tools/route-lab/README.md)
-freezes these files and permits edits only to `src/search.rs` and Rust modules
-under `src/search/`.
+`Budget` limits optional improvement work; a spent allowance retains a complete
+checked schedule. Cancellation aborts. Contradictory barriers/prerequisites
+refuse rather than dropping work. Construction/checking work and retained memory
+must also be bounded by the caller's job supervision. No GPU scheduling kernel
+is enabled; the contracts/compute dependency remains available to experiments.
+
+Run `cargo test --locked -p spiling-deposition-routing --all-targets` and
+`cargo run --locked -p spiling-deposition-routing --example route_matrix`.
+The independent matrix judge checks task inventory, permissions, group/service
+requirements, precedence and timing annotations without calling library checking
+or pricing code. Captured slicer/Cathedral paths are historical routing inputs,
+not current-producer native qualification. See the [lab](../../tools/route-lab/README.md)
+for frozen source-edit cohorts, cached builds and sealed panels.

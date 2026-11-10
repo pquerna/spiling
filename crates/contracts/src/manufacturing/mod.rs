@@ -2624,9 +2624,17 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
     >(d)
 }
 
+fn routing_tool_orders<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[u8; 2]>, D::Error> {
+    bounded_vec::<D, _, { MAX_PRINT_LAYERS as usize }>(d)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
+    /// Both mandatory service groups per actual layer for the bounded dual route.
+    /// Single-tool plans retain an empty table. Entries are permutations of 0,1.
+    #[serde(deserialize_with = "routing_tool_orders")]
+    pub routing_tool_orders: Vec<[u8; 2]>,
     #[serde(deserialize_with = "required_option")]
     pub interior_selection: Option<Arc<InteriorSelection>>,
     #[serde(deserialize_with = "required_option")]
@@ -2676,6 +2684,23 @@ fn prime_intersects_bounds(start: [f64; 3], end: [f64; 3], bounds: PrimeExclusio
 }
 
 impl NormalizedPrintPlan {
+    /// Setup selects tool zero; later selections occur only when the scheduled
+    /// group changes the active tool. Same-tool waste groups still execute.
+    pub fn routing_selection_count(&self) -> u32 {
+        if self.routing_tool_orders.is_empty() {
+            return 0;
+        }
+        let mut active = 0;
+        let mut selections = 1;
+        for &tool in self.routing_tool_orders.iter().flatten() {
+            if active != tool {
+                selections += 1;
+                active = tool;
+            }
+        }
+        selections
+    }
+
     /// Actual retained heap capacity of the distinct minimum-skin proof table.
     pub fn skin_command_fit_bytes(&self) -> Result<usize, ManufacturingError> {
         let mut bytes = 0usize;
@@ -2993,7 +3018,22 @@ impl NormalizedPrintPlan {
             }
             bands::validate_landing_alignment(self, intent, band)?;
         }
+        if !matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. })
+            && !self.routing_tool_orders.is_empty()
+        {
+            return Err(invalid("single-tool plan cannot retain dual tool orders"));
+        }
         if let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow {
+            if self.routing_tool_orders.len() != self.layers.len()
+                || self
+                    .routing_tool_orders
+                    .iter()
+                    .any(|order| *order != [0, 1] && *order != [1, 0])
+            {
+                return Err(invalid(
+                    "each fixed-dual layer requires exactly both scheduled tools",
+                ));
+            }
             if !self.sparse_bands.is_empty() && !job.has_bound_interior() {
                 return Err(invalid(
                     "routed coarse bands require an explicit same-formulation interior tool",
@@ -3005,9 +3045,9 @@ impl NormalizedPrintPlan {
                 .len()
                 .checked_mul(2)
                 .ok_or_else(|| resource("fixed-dual waste count overflow"))?;
-            for layer in &self.layers {
+            for (layer, order) in self.layers.iter().zip(&self.routing_tool_orders) {
                 let mut seen = [false; 2];
-                let mut previous_tool = 0;
+                let mut previous_rank = 0;
                 for path in &layer.paths {
                     if matches!(
                         path.kind,
@@ -3045,12 +3085,13 @@ impl NormalizedPrintPlan {
                             "fixed-dual model and waste share the existing segment budget",
                         ));
                     }
-                    if tool < previous_tool {
+                    let rank = u8::from(tool != order[0]);
+                    if rank < previous_rank {
                         return Err(invalid(
-                            "fixed-dual layer model paths must be grouped tool zero then tool one",
+                            "fixed-dual model groups differ from the captured tool order",
                         ));
                     }
-                    previous_tool = tool;
+                    previous_rank = rank;
                     seen[usize::from(tool)] = true;
                     if matches!(path.owner, Some(DepositionOwner::Regional { .. })) {
                         interior_counts[usize::from(tool)] += (path.points_mm.len() - 1) as u32;
@@ -3676,12 +3717,12 @@ fn validate_routing_totals(
     };
     routing.validate()?;
     if support_segments != 0
-        || !routing.selection_count.is_multiple_of(2)
-        || model_segments < routing.selection_count / 2
-        || routing
-            .tools
-            .iter()
-            .any(|tool| tool.waste_deposition_segments != routing.selection_count / 2)
+        || model_segments < routing.tools[0].waste_deposition_segments
+        || routing.selection_count < routing.tools[0].waste_deposition_segments + 1
+        || routing.selection_count > routing.tools[0].waste_deposition_segments * 2 + 1
+        || routing.tools.iter().any(|tool| {
+            tool.waste_deposition_segments != routing.tools[0].waste_deposition_segments
+        })
         || routing
             .tools
             .iter()
@@ -3762,11 +3803,8 @@ impl VerificationReport {
                         .checked_mul(2)
                         .and_then(|n| n.checked_sub(2))
                 || time.selections_per_tool.iter().sum::<u32>() != route.selection_count
-                || time
-                    .selections_per_tool
-                    .iter()
-                    .zip(&route.tools)
-                    .any(|(count, tool)| *count != tool.waste_deposition_segments)
+                || time.selections_per_tool
+                    != [route.selection_count.div_ceil(2), route.selection_count / 2]
             {
                 return Err(invalid(
                     "job time ledger does not cover the complete verified command inventory",
@@ -3891,7 +3929,8 @@ impl ManufacturingSummary {
             self.support_deposition_segments,
         )?;
         if let Some(routing) = &self.routing
-            && (self.layers.checked_mul(2) != Some(routing.selection_count)
+            && (routing.selection_count < self.layers + 1
+                || routing.selection_count > self.layers.saturating_mul(2).saturating_add(1)
                 || routing.tools.iter().any(|tool| {
                     tool.waste_deposition_segments != self.layers
                         || tool.outstanding_retraction_mm <= 0.0
@@ -4259,7 +4298,7 @@ impl ManufacturingBundle {
                         .layers
                         .iter()
                         .any(|layer| layer.enabled && !layer.operations.is_empty())
-                    || routing.selection_count != self.plan.layers.len() as u32 * 2
+                    || routing.selection_count != self.plan.routing_selection_count()
                 {
                     return Err(invalid(
                         "fixed-dual captured source, finish, process or selection attribution mismatch",

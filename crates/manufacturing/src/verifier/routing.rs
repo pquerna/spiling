@@ -151,10 +151,11 @@ impl<'a> RouteState<'a> {
     ) -> Result<(), ManufacturingError> {
         if self.stage != Stage::Groups
             || self.pending()
-            || u32::from(layer) * 2 + u32::from(tool) != self.group
+            || u32::from(layer) != self.group / 2
+            || self.plan.routing_tool_orders[layer as usize][self.group as usize % 2] != tool
         {
             return Err(failed(
-                "routed model groups must be tool zero then one on every actual layer",
+                "routed model groups must match each captured complete layer tool order",
             ));
         }
         self.clear();
@@ -166,7 +167,8 @@ impl<'a> RouteState<'a> {
         let waste = self.job.tools[tool as usize].waste_line_xy_mm[0];
         let start =
             project_xyz6_point_mm([waste[0], waste[1], self.plan.layers[layer as usize].z_mm])?;
-        if self.group != 0 {
+        let switched = self.active != tool;
+        if switched {
             self.push(Op::Bare(Command::Barrier));
             self.push(Op::Retract);
             self.push(Op::Move([last[0], last[1], self.safe_z], false));
@@ -189,8 +191,6 @@ impl<'a> RouteState<'a> {
             ));
             self.push(Op::Select(tool));
             self.push(Op::Epoch);
-        } else if tool != 0 || self.active != 0 {
-            return Err(failed("first routed group must use selected tool zero"));
         }
         self.push(Op::Scalar(
             Command::WaitNozzle,
@@ -201,7 +201,7 @@ impl<'a> RouteState<'a> {
         if self.debt_ticks[tool as usize] != 0 {
             self.push(Op::Recover);
         }
-        if self.group == 0 {
+        if !switched {
             self.push(Op::Move([last[0], last[1], self.safe_z], false));
             self.push(Op::Move([start[0], start[1], self.safe_z], false));
         }

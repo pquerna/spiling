@@ -142,13 +142,14 @@ impl ReplayDisplayInfo {
                 self.waste_count != 0 || !matches!(self.lifecycle_count, 0 | 4)
             } else {
                 self.lifecycle_count != 2
-                    || self.layer_count.checked_mul(2) != Some(self.tool_epoch_count)
+                    || self.tool_epoch_count < self.layer_count + 1
+                    || self.tool_epoch_count > self.layer_count.saturating_mul(2).saturating_add(1)
                     || self.tool_epoch_count > MAX_TOOL_SELECTIONS
-                    || self.waste_count != self.tool_epoch_count
+                    || self.layer_count.checked_mul(2) != Some(self.waste_count)
                     || self.waste_count >= self.deposition_count
                     || self
-                        .layer_count
-                        .checked_mul(4)
+                        .tool_epoch_count
+                        .checked_mul(2)
                         .and_then(|n| n.checked_sub(2))
                         != Some(self.process_count)
             }
@@ -303,6 +304,8 @@ pub fn validate_replay_display(
     let mut waste = 0u32;
     let mut epoch_waste = false;
     let mut epoch_model = false;
+    let mut layer_waste = [false; 2];
+    let mut layer_model = false;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for (index, record) in bytes[REPLAY_HEADER_BYTES..]
@@ -375,11 +378,25 @@ pub fn validate_replay_display(
             return Err(corrupt("nondeposition has an association"));
         }
         if dual {
+            if kind != 6 && next_layer != layer {
+                if next_layer != layer + 1
+                    || layer_waste != [true; 2]
+                    || !layer_model
+                    || !matches!(kind, 0 | 11 | 14)
+                {
+                    return Err(corrupt("incomplete fixed-dual service layer"));
+                }
+                layer = next_layer;
+                layer_waste = [false; 2];
+                layer_model = false;
+                layer_deposition = false;
+            }
             if kind == 14 {
                 if lifecycle != 0
                     || epochs >= info.tool_epoch_count
-                    || tool != epochs % 2
-                    || next_layer != epochs / 2
+                    || (epochs == 0 && (tool != 0 || next_layer != 0))
+                    || (epochs != 0 && tool as usize == active_tool)
+                    || layer_waste[tool as usize]
                     || e != 0.0
                     || (epochs != 0 && (!epoch_waste || debt[active_tool] <= 0))
                 {
@@ -415,8 +432,6 @@ pub fn validate_replay_display(
                     || kind == 7
                     || next_layer < layer
                     || next_layer > layer + 1
-                    || (next_layer != layer
-                        && !(tool == 1 && epoch_waste && matches!(kind, 0 | 11)))
                 {
                     return Err(corrupt("motion outside fixed-dual tool epoch"));
                 }
@@ -456,8 +471,8 @@ pub fn validate_replay_display(
                             || e <= previous_e
                             || position == previous
                             || debt[active_tool] != 0
-                            || (kind == 15 && (epoch_waste || epoch_model))
-                            || (kind != 15 && !epoch_waste)
+                            || (kind == 15 && layer_waste[active_tool])
+                            || (kind != 15 && !layer_waste[active_tool])
                             || matches!(kind, 9 | 10 | 13)
                         {
                             return Err(corrupt("invalid fixed-dual model or waste deposition"));
@@ -465,8 +480,11 @@ pub fn validate_replay_display(
                         if kind == 15 {
                             waste += 1;
                             epoch_waste = true;
+                            epoch_model = false;
+                            layer_waste[active_tool] = true;
                         } else {
                             epoch_model = true;
+                            layer_model = true;
                         }
                         depositions += 1;
                         layer_deposition = true;
@@ -578,7 +596,9 @@ pub fn validate_replay_display(
         || (dual
             && (epochs != info.tool_epoch_count
                 || waste != info.waste_count
-                || process != info.layer_count * 4 - 2
+                || process != info.tool_epoch_count * 2 - 2
+                || layer_waste != [true; 2]
+                || !layer_model
                 || !epoch_waste
                 || debt.iter().any(|value| *value <= 0)))
         || min != info.bounds_mm.min

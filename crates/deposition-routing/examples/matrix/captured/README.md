@@ -18,7 +18,7 @@ capture checker is an order witness, not an independent full-program verifier.
 Dependencies between captured bands are conservative XY bead-box overlaps with
 the band immediately below, not native anchor proofs.
 
-The Rust matrix declares head geometry and travel behavior separately. These
+The Rust matrix declares scheduling, travel and tool-service behavior separately. These
 fixtures do not reproduce a producer's travel, retraction, pressure, startup or
 whole-part manufacturing behavior. Native captures remain bound to their
 historical producer; production adapter qualification needs current native

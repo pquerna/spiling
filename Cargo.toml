@@ -35,6 +35,7 @@ tempfile = "=3.27.0"
 ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 spiling-contracts = { path = "crates/contracts" }
 spiling-compute = { path = "crates/compute" }
+spiling-deposition-routing = { path = "crates/deposition-routing" }
 cubecl = { version = "=0.11.3", default-features = false, features = ["std", "cpu", "vulkan"] }
 spiling-engine-client = { path = "crates/engine-client" }
 spiling-surface-fields = { path = "crates/surface-fields" }
@@ -69,6 +70,9 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.spiling-manufacturing]
+opt-level = 2
+
+[profile.dev.package.spiling-deposition-routing]
 opt-level = 2
 
 [profile.dev.package.spiling-analysis]

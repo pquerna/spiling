@@ -134,10 +134,11 @@ export async function decodeReplayDisplay(
   const dual = info.tool_epoch_count > 0;
   if (
     dual
-      ? info.tool_epoch_count !== 2 * info.layer_count ||
-        info.waste_count !== info.tool_epoch_count ||
+      ? info.tool_epoch_count < info.layer_count + 1 ||
+        info.tool_epoch_count > 2 * info.layer_count + 1 ||
+        info.waste_count !== 2 * info.layer_count ||
         info.lifecycle_count !== 2 ||
-        info.process_count !== 4 * info.layer_count - 2
+        info.process_count !== 2 * info.tool_epoch_count - 2
       : info.waste_count !== 0
   )
     fail("inconsistent routed counts");
@@ -212,6 +213,8 @@ export async function decodeReplayDisplay(
     waste = 0,
     activeTool = 0;
   const debts: (number | undefined)[] = [undefined, undefined];
+  let layerWaste = [false, false],
+    layerModel = false;
   let epochWaste = 0,
     epochModel = 0;
   for (let index = 0; index < info.event_count; index++) {
@@ -253,20 +256,26 @@ export async function decodeReplayDisplay(
     if (dual && lifecyclePhase !== 0 && kind !== 6) fail("body after final lifecycle");
     if (dual && (kind === 9 || kind === 10 || kind === 13))
       fail("unsupported routed deposition role");
-    if (dual && kind !== 14 && kind !== 6) {
-      const epochLayer = Math.floor((epochs - 1) / 2);
+    if (dual && kind !== 6 && layer !== lastLayer) {
       if (
-        layer !== epochLayer &&
-        !((kind === 0 || kind === 11) && activeTool === 1 && layer === epochLayer + 1)
+        layer !== lastLayer + 1 ||
+        !layerWaste.every(Boolean) ||
+        !layerModel ||
+        ![0, 11, 14].includes(kind)
       )
-        fail("body outside current or outgoing epoch layer");
+        fail("incomplete fixed-dual service layer");
+      lastLayer = layer;
+      layerWaste = [false, false];
+      layerModel = false;
+      layerDepositions = 0;
     }
     if (kind === 14) {
       if (
         !dual ||
         e !== 0 ||
-        tool !== epochs % 2 ||
-        layer !== Math.floor(epochs / 2) ||
+        (epochs === 0 && (tool !== 0 || layer !== 0)) ||
+        (epochs > 0 && tool === activeTool) ||
+        layerWaste[tool] ||
         (epochs > 0 && (epochWaste !== 1 || retractedE === undefined))
       )
         fail("invalid tool epoch");
@@ -387,18 +396,20 @@ export async function decodeReplayDisplay(
         }
         process++;
       } else {
-        if (dual && layer !== Math.floor((epochs - 1) / 2))
-          fail("deposition outside current epoch layer");
+        if (dual && kind !== 15 && !layerWaste[activeTool]) fail("model before layer waste");
         if (index === 0 || !moved || e <= lastE || retractedE !== undefined)
           fail("deposition needs known nonzero movement and recovered increasing extrusion");
         deposition++;
         if (kind === 15) {
-          if (!dual || epochWaste !== 0 || epochModel !== 0) fail("invalid epoch waste");
-          epochWaste++;
+          if (!dual || layerWaste[activeTool]) fail("invalid epoch waste");
+          layerWaste[activeTool] = true;
+          epochWaste = 1;
+          epochModel = 0;
           waste++;
         } else if (dual) {
           if (epochWaste !== 1) fail("model before epoch waste");
           epochModel++;
+          layerModel = true;
         }
         layerDepositions++;
       }
@@ -414,7 +425,11 @@ export async function decodeReplayDisplay(
     epochs !== info.tool_epoch_count ||
     waste !== info.waste_count ||
     (dual && epochWaste !== 1) ||
-    (dual && (debts[0] === undefined || retractedE === undefined)) ||
+    (dual &&
+      (debts[1 - activeTool] === undefined ||
+        retractedE === undefined ||
+        !layerWaste.every(Boolean) ||
+        !layerModel)) ||
     (info.tool_epoch_count === 0 && retractedE !== undefined) ||
     lastLayer + 1 !== info.layer_count ||
     layerDepositions === 0
