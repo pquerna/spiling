@@ -67,7 +67,11 @@ pub struct Review {
     pub bundle: Arc<ManufacturingBundle>,
     pub motion: Option<Arc<[u8]>>,
     pub display: Option<Arc<crate::replay::Replay>>,
+    /// Why a verified result has no toolpath preview, when it has none.
+    pub display_note: Option<String>,
 }
+/// Shown when verified output is too large to preview; export stays available.
+pub const PREVIEW_OMITTED: &str = "Toolpath preview omitted: the actual motion exceeds the display budget. Verification passed and export is available.";
 #[derive(Debug, Clone)]
 pub struct InspectedOption {
     pub project: spiling_contracts::project::ProjectId,
@@ -273,17 +277,22 @@ pub async fn load_checked_review(
         ),
         None => None,
     };
-    let display = match (&motion, &capture.replay) {
-        (Some(bytes), Some(descriptor)) => Some(Arc::new(
-            crate::replay::Replay::project(bytes, descriptor, reserved, origin).map_err(invalid)?,
-        )),
-        _ => None,
+    // A verified result too large to preview still reviews and exports.
+    let (motion, display, display_note) = match (motion, &capture.replay) {
+        (Some(bytes), Some(descriptor)) => {
+            match crate::replay::Replay::project(&bytes, descriptor, reserved, origin) {
+                Ok(display) => (Some(bytes), Some(Arc::new(display)), None),
+                Err(_) => (None, None, Some(PREVIEW_OMITTED.to_owned())),
+            }
+        }
+        _ => (None, None, Some(PREVIEW_OMITTED.to_owned())),
     };
     Ok(Arc::new(Review {
         capture,
         bundle: Arc::new(bundle),
         motion,
         display,
+        display_note,
     }))
 }
 pub struct StagedExport {

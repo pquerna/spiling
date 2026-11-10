@@ -17,11 +17,22 @@ pub(crate) struct ReplaySink {
     epochs: u32,
     active_tool: u32,
     expected_events: u32,
+    /// The actual stream outgrew the display budget. Recording stopped and the
+    /// buffer was released; independent verification still covers the program.
+    omitted: bool,
 }
 impl ReplaySink {
     pub(crate) fn new(
         plan: &NormalizedPrintPlan,
         intent: &ManufacturingIntent,
+    ) -> Result<Self, ManufacturingError> {
+        Self::with_capacity(plan, intent, MAX_REPLAY_EVENTS as usize)
+    }
+    /// A sink admitting at most `capacity` display events.
+    pub(crate) fn with_capacity(
+        plan: &NormalizedPrintPlan,
+        intent: &ManufacturingIntent,
+        capacity: usize,
     ) -> Result<Self, ManufacturingError> {
         plan.validate(intent)?;
         let mut deposition: usize = plan
@@ -58,7 +69,7 @@ impl ReplaySink {
         // The policy gives an upper bound, not the actual retraction count.
         // A long plan can fit when most entries do not retract. Reserve once
         // up to the byte ceiling; reject only actual events exceeding it.
-        let events = events.min(MAX_REPLAY_EVENTS as usize);
+        let events = events.min(capacity).min(MAX_REPLAY_EVENTS as usize);
         let bytes = events
             .checked_mul(REPLAY_RECORD_BYTES)
             .and_then(|n| n.checked_add(REPLAY_HEADER_BYTES))
@@ -101,6 +112,7 @@ impl ReplaySink {
             epochs: 0,
             active_tool: 0,
             expected_events: events as u32,
+            omitted: false,
         })
     }
     pub(super) fn push_epoch(
@@ -135,6 +147,9 @@ impl ReplaySink {
         kind: u8,
         association: Option<super::expected::Association>,
     ) -> Result<(), ManufacturingError> {
+        if self.omitted {
+            return Ok(());
+        }
         let count = match kind {
             0 => self.travels,
             6 | 7 => self.lifecycle,
@@ -160,10 +175,10 @@ impl ReplaySink {
         if self.events >= self.expected_events
             || self.bytes.len() + REPLAY_RECORD_BYTES > self.bytes.capacity()
         {
-            return Err(ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "replay sink exceeds admitted capacity",
-            ));
+            // Too much motion to display: stop recording, keep verifying.
+            self.omitted = true;
+            self.bytes = Vec::new();
+            return Ok(());
         }
         for value in position {
             self.bytes.extend_from_slice(&value.to_le_bytes());
@@ -219,7 +234,17 @@ impl ReplaySink {
         }
         Ok(())
     }
+    /// True when the actual stream exceeded the display budget.
+    pub(crate) fn omitted(&self) -> bool {
+        self.omitted
+    }
     pub(crate) fn finish(mut self) -> Result<(Vec<u8>, AabbMm), ManufacturingError> {
+        if self.omitted {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::ResourceLimit,
+                "actual motion exceeds the replay display budget",
+            ));
+        }
         if self.events == 0 || !self.process.is_multiple_of(2) {
             return Err(super::failed("incomplete replay display"));
         }

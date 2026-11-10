@@ -2719,7 +2719,7 @@ async fn execute(
                 let descriptor = inspection
                     .replay_display
                     .as_ref()
-                    .ok_or("motion inspection completed without its replay descriptor")?;
+                    .ok_or("verified, but the replay display was omitted: actual motion exceeds the display budget; --manufacturing-out still exports the verified program")?;
                 let bytes = client
                     .fetch_replay_display(&inspection.record, descriptor)
                     .await?;

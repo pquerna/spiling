@@ -230,7 +230,8 @@ pub fn inspect_bundle(
         sink.as_mut(),
     )?;
     check_cancel(cancel)?;
-    let replay = if let Some(sink) = sink {
+    // Motion too large to display is omitted, never a verification failure.
+    let replay = if let Some(sink) = sink.filter(|sink| !sink.omitted()) {
         let tool_epoch_count = report
             .routing
             .as_ref()

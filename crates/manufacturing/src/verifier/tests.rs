@@ -3874,3 +3874,35 @@ fn per_tool_profiles_drive_actual_feed_flow_cooling_and_reject_swapped_feed() {
         .max_volumetric_flow_mm3_s = 0.0001;
     assert!(verify(&program, &plan, &intent, &cancel).is_err());
 }
+
+#[test]
+fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
+    let (intent, plan) = fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    let report_only = verify(&program, &plan, &intent, &cancel).unwrap();
+    // Too small to hold the actual stream: recording stops, replay continues.
+    let mut small = ReplaySink::with_capacity(&plan, &intent, 3).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut small)).unwrap();
+    assert_eq!(report, report_only);
+    assert!(report.verified);
+    assert!(small.omitted());
+    assert_eq!(
+        small.finish().unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+    // Omission never hides a real defect: tampered bytes still fail.
+    let tampered = program.replacen("G1 ", "G0 ", 1);
+    let mut small = ReplaySink::with_capacity(&plan, &intent, 3).unwrap();
+    assert!(verify_actual(&tampered, &plan, &intent, &cancel, Some(&mut small)).is_err());
+    // A sufficient capacity still yields a complete, valid display.
+    let mut full = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut full)).unwrap();
+    assert!(!full.omitted());
+    let (bytes, bounds) = full.finish().unwrap();
+    validate_replay_display(
+        &bytes,
+        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+    )
+    .unwrap();
+}

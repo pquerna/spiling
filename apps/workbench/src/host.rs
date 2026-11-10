@@ -809,7 +809,12 @@ impl Actor {
                 result = async {match &mut self.review_task {Some(task)=>task.await,None=>std::future::pending().await}} => {
                     self.review_task=None;
                     match result {
-                        Ok(Ok(review)) if self.capture_current(&review.capture) => {Arc::make_mut(&mut self.state.manufacturing).review=Some(review);},
+                        Ok(Ok(review)) if self.capture_current(&review.capture) => {
+                            if let Some(note) = &review.display_note {
+                                self.state.message = note.clone();
+                            }
+                            Arc::make_mut(&mut self.state.manufacturing).review=Some(review);
+                        },
                         Ok(Ok(_))=>{},Ok(Err(error))=>self.failure(error).await,Err(error)=>self.problem(format!("Review transfer failed: {error}")),
                     }
                 },
