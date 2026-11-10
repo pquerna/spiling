@@ -101,6 +101,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 | `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation               |
 | `crates/appearance/`                           | D65 colorimetry, bounded palette matching and optical reference construction studies     |
 | `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification         |
+| `crates/deposition-routing/`                   | Dependency-free deposition-preserving routing research; production adapter not enabled    |
 | `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies                    |
 | `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                            |
 | `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                                     |
@@ -109,6 +110,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 Dependencies flow inward:
 
 - Analysis consumes contracts and the geometry facade, not Core, persistence, manufacturing, UI or a direct kernel API. The engine captures immutable inputs and runs the numerical consumer off the project writer; Core alone attaches retained fields and owns their PTAC closure.
+- Deposition-routing is an isolated Rust algorithm library exercised by a frozen offline matrix. It has no native material or machine authority; its future manufacturing adapter must bind immutable input identity, release transient routing decisions before emission, and retain independent actual-program verification.
 - Contracts have no desktop runtime, kernel or renderer dependencies.
 - Compute depends on contracts and pinned CubeCL CPU/Vulkan runtimes, not Core, native geometry or the workbench renderer. Machine-local default/FEA policies resolve per engine session; FEA inherits the resolved default unless explicitly overridden. Numeric screening does not replace native material or actual-program verification authority. See [compute policy](docs/protocol/control.md#compute-policy).
 - Core depends on contracts, core-ptac and chunks. Core-ptac owns container bytes and publication, with no domain, engine or kernel dependency; Core owns semantic admission. Chunks depends only on zstd and SHA-256: frames stay in-process, and storage and transfer carry raw bytes. Geometry depends on contracts and SolidCore through its kernel adapter.

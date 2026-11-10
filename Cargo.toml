@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
-default-members = ["crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
+members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
+default-members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
 exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
 
 [workspace.package]
