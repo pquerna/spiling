@@ -139,6 +139,8 @@ representation or field quantity does not reset it. Per-plate snapshots retain
 independent inspection state; overview/library thumbnails remain fixed previews.
 
 The cube snaps to faces, edges and corners; its 3D button selects true Isometric.
+Standard views and Diagonal views in View, plus command search, expose named
+keyboard alternatives for every face, edge and corner target.
 All named snaps select orthographic projection with a stable screen-up, including
 exact Top/Bottom. Orbit permits underneath inspection and preserves projection.
 Projection switching preserves scale at the target plane. Fit changes framing,

@@ -554,3 +554,35 @@ fn section_look_normal_shares_snap_history_and_animation_policy() {
     button.advance_focus(2.0);
     assert!((button.rotation * DVec3::Z + DVec3::Z).length() < 1e-12);
 }
+
+#[test]
+fn every_cube_edge_and_corner_has_a_named_keyboard_search_action() {
+    for label in ["Top", "Bottom", "Front", "Back", "Left", "Right"] {
+        assert_eq!(
+            crate::commands::Action::ALL
+                .iter()
+                .find(|action| action
+                    .label()
+                    .to_lowercase()
+                    .contains(&label.to_lowercase()))
+                .unwrap()
+                .label(),
+            label
+        );
+    }
+    let mut labels = std::collections::HashSet::new();
+    for action in ViewAction::DIAGONALS {
+        assert!(labels.insert(action.label()));
+        assert_ne!(action.label(), "Diagonal view");
+        assert!(crate::commands::Action::ALL.contains(&crate::commands::Action::View(action)));
+        let ViewAction::Direction(axes) = action else {
+            unreachable!()
+        };
+        let expected =
+            DVec3::new(f64::from(axes[0]), f64::from(axes[1]), f64::from(axes[2])).normalize();
+        let mut viewport = Viewport::default();
+        viewport.navigate(action, 0.0, false);
+        assert!((viewport.rotation * DVec3::Z - expected).length() < 1e-12);
+        assert!(viewport.camera().valid());
+    }
+}

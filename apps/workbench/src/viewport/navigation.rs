@@ -63,27 +63,51 @@ pub enum ViewAction {
     Previous,
 }
 impl ViewAction {
-    pub const ALL: [Self; 16] = [
-        Self::Snap(StandardView::Isometric),
-        Self::Snap(StandardView::Top),
-        Self::Snap(StandardView::Bottom),
-        Self::Snap(StandardView::Front),
-        Self::Snap(StandardView::Back),
-        Self::Snap(StandardView::Left),
-        Self::Snap(StandardView::Right),
-        Self::Fit,
-        Self::FitParts,
-        Self::FitPlate,
-        Self::Projection,
-        Self::Normal,
-        Self::OppositeNormal,
-        Self::RollLeft,
-        Self::RollRight,
-        Self::Previous,
+    pub const DIAGONALS: [Self; 20] = [
+        Self::Direction([0, -1, 1]),
+        Self::Direction([0, 1, 1]),
+        Self::Direction([-1, 0, 1]),
+        Self::Direction([1, 0, 1]),
+        Self::Direction([0, -1, -1]),
+        Self::Direction([0, 1, -1]),
+        Self::Direction([-1, 0, -1]),
+        Self::Direction([1, 0, -1]),
+        Self::Direction([-1, -1, 0]),
+        Self::Direction([1, -1, 0]),
+        Self::Direction([-1, 1, 0]),
+        Self::Direction([1, 1, 0]),
+        Self::Direction([-1, -1, 1]),
+        Self::Direction([1, -1, 1]),
+        Self::Direction([-1, 1, 1]),
+        Self::Direction([1, 1, 1]),
+        Self::Direction([-1, -1, -1]),
+        Self::Direction([1, -1, -1]),
+        Self::Direction([-1, 1, -1]),
+        Self::Direction([1, 1, -1]),
     ];
     pub fn label(self) -> &'static str {
         match self {
             Self::Snap(view) => view.label(),
+            Self::Direction([0, -1, 1]) => "Top front",
+            Self::Direction([0, 1, 1]) => "Top back",
+            Self::Direction([-1, 0, 1]) => "Top left",
+            Self::Direction([1, 0, 1]) => "Top right",
+            Self::Direction([0, -1, -1]) => "Bottom front",
+            Self::Direction([0, 1, -1]) => "Bottom back",
+            Self::Direction([-1, 0, -1]) => "Bottom left",
+            Self::Direction([1, 0, -1]) => "Bottom right",
+            Self::Direction([-1, -1, 0]) => "Front left",
+            Self::Direction([1, -1, 0]) => "Front right",
+            Self::Direction([-1, 1, 0]) => "Back left",
+            Self::Direction([1, 1, 0]) => "Back right",
+            Self::Direction([-1, -1, 1]) => "Top front left",
+            Self::Direction([1, -1, 1]) => "Top front right",
+            Self::Direction([-1, 1, 1]) => "Top back left",
+            Self::Direction([1, 1, 1]) => "Top back right",
+            Self::Direction([-1, -1, -1]) => "Bottom front left",
+            Self::Direction([1, -1, -1]) => "Bottom front right",
+            Self::Direction([-1, 1, -1]) => "Bottom back left",
+            Self::Direction([1, 1, -1]) => "Bottom back right",
             Self::Direction(_) => "Diagonal view",
             Self::Fit => "Fit view",
             Self::FitParts => "Fit parts",
@@ -474,6 +498,18 @@ impl Viewport {
             for view in StandardView::ALL {
                 self.navigation_button(ui, ViewAction::Snap(view));
             }
+        });
+        ui.menu_button("Diagonal views", |ui| {
+            ui.menu_button("Edges", |ui| {
+                for action in ViewAction::DIAGONALS.iter().take(12).copied() {
+                    self.navigation_button(ui, action);
+                }
+            });
+            ui.menu_button("Corners", |ui| {
+                for action in ViewAction::DIAGONALS.iter().skip(12).copied() {
+                    self.navigation_button(ui, action);
+                }
+            });
         });
         ui.menu_button("Frame view", |ui| {
             for action in [ViewAction::Fit, ViewAction::FitParts, ViewAction::FitPlate] {
