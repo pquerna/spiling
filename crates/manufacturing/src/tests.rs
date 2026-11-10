@@ -1854,10 +1854,12 @@ fn housing_horizontal_plate_is_supported_permanent_construction_with_exact_actua
             ) && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
         })
         .unwrap();
-    row.points_mm[0][0] = shift[0] + 11.;
-    row.points_mm[1][0] = shift[0] + 13.;
-    row.points_mm[0][1] = shift[1] + 9.;
-    row.points_mm[1][1] = shift[1] + 9.;
+    let along = usize::from(row.points_mm[0][0] == row.points_mm[1][0]);
+    let center = [shift[0] + 12., shift[1] + 9.];
+    row.points_mm[0][along] = center[along] - 1.;
+    row.points_mm[1][along] = center[along] + 1.;
+    row.points_mm[0][1 - along] = center[1 - along];
+    row.points_mm[1][1 - along] = center[1 - along];
     assert_reemitted_interface_refuses(unanchored_upper, &recipe);
     let mut combined_intent = recipe.clone();
     combined_intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible {
@@ -2145,6 +2147,7 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
     assert_reemitted_interface_refuses(island, &recipe);
 }
 
+#[track_caller]
 fn assert_reemitted_interface_refuses(
     mut plan: NormalizedPrintPlan,
     intent: &ManufacturingIntent,
