@@ -26,6 +26,8 @@ const PREFS: &str = "spiling-native-preferences-v1";
 struct Preferences {
     #[serde(default)]
     compute: spiling_contracts::compute::ComputeSettings,
+    #[serde(default)]
+    navigation: crate::viewport::NavigationSettings,
     theme: Theme,
     accepted_osl3: bool,
     #[serde(default)]
@@ -39,6 +41,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             compute: Default::default(),
+            navigation: Default::default(),
             theme: Theme::Graphite,
             accepted_osl3: false,
             library_location: None,
@@ -199,6 +202,16 @@ impl Workbench {
         }
     }
     fn disabled(&self, action: Action) -> Option<&'static str> {
+        if let Action::View(view) = action {
+            if self.state.confirmation.is_some() {
+                return Some("Resolve the discard confirmation first");
+            }
+            return self.viewport.view_disabled(view).or_else(|| {
+                self.state
+                    .picker_open
+                    .then_some("Finish or cancel the native file dialog first")
+            });
+        }
         if matches!(action, Action::FocusSelection | Action::RevealSelection)
             && (!self.display_current()
                 || self.occurrence.is_none()
@@ -257,6 +270,11 @@ impl Workbench {
         if self.disabled(action).is_some() {
             return;
         }
+        if let Action::View(view) = action {
+            self.viewport.queue_view(view);
+            ctx.request_repaint();
+            return;
+        }
         if self.task_action(action, ctx) {
             return;
         }
@@ -276,6 +294,7 @@ impl Workbench {
             }
         }
         match action {
+            Action::View(_) => unreachable!(),
             Action::RevealSelection => {
                 self.reveal_selection();
                 ctx.request_repaint();
@@ -436,7 +455,11 @@ impl Workbench {
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            if self.cancel_fastener_tool(ctx) || self.cancel_force_tool() {
+            if self.viewport.cancel_navigation()
+                || self.viewport.stop_focus()
+                || self.cancel_fastener_tool(ctx)
+                || self.cancel_force_tool()
+            {
                 ctx.request_repaint();
             } else if self.mechanics.evidence_open {
                 self.mechanics.evidence_open = false;
@@ -841,6 +864,14 @@ impl eframe::App for Workbench {
         self.opening_frames
             .observe(&ctx, self.state.display.as_ref());
         let previous_theme = self.prefs.theme;
+        self.viewport.navigation_settings = self.prefs.navigation;
+        if self.show_commands
+            || self.navigation.is_some()
+            || self.state.confirmation.is_some()
+            || self.state.picker_open
+        {
+            self.viewport.suspend_navigation();
+        }
         if !self.prefs.accepted_osl3 {
             ui.heading("Welcome to Spiling");
             ui.label("Native BREP manufacturing workbench · development build");
@@ -1266,6 +1297,7 @@ impl eframe::App for Workbench {
                 self.confirmation = Some((id, false));
             }
         }
+        self.prefs.navigation = self.viewport.navigation_settings;
         if previous_theme != self.prefs.theme {
             self.prefs.theme.apply(&ctx);
         }
@@ -1294,6 +1326,52 @@ impl eframe::App for Workbench {
 mod compute_preferences_tests {
     use super::*;
     use spiling_contracts::compute::{ComputeBackend, ComputeSettings};
+
+    #[test]
+    fn navigation_preferences_survive_invalid_camera_pins_without_project_content() {
+        let prefs = Preferences {
+            navigation: crate::viewport::NavigationSettings {
+                device: crate::viewport::InputDevice::Trackpad,
+                reverse_zoom: true,
+                animate: false,
+            },
+            ..Default::default()
+        };
+        let mut encoded = serde_json::to_value(&prefs).unwrap();
+        encoded["analysis_pins"] = serde_json::json!([{
+            "project":spiling_contracts::project::ProjectId::new(),"layout_id":spiling_contracts::project::PrintLayoutId::new(),
+            "name":"View","view":crate::analysis::SectionView::default(),"occurrence":null,
+            "camera":{"yaw":0.0,"pitch":0.0,"distance":10.0,"pan":[0.0,0.0,0.0],"orthographic":true}
+        }]);
+        let mut decoded: Preferences = serde_json::from_value(encoded.clone()).unwrap();
+        decoded.analysis_pins.retain(|pin| pin.valid());
+        assert_eq!(decoded.navigation, prefs.navigation);
+        assert!(decoded.analysis_pins.is_empty());
+        encoded["analysis_pins"][0]["camera"] =
+            serde_json::to_value(Viewport::default().camera()).unwrap();
+        let pinned: Preferences = serde_json::from_value(encoded).unwrap();
+        let mut storage = MemoryStorage::default();
+        eframe::set_value(&mut storage, PREFS, &pinned);
+        let restored: Preferences = eframe::get_value(&storage, PREFS).unwrap();
+        assert_eq!(restored.navigation, prefs.navigation);
+        assert_eq!(restored.analysis_pins.len(), 1);
+        assert!(restored.analysis_pins[0].valid());
+    }
+
+    #[derive(Default)]
+    struct MemoryStorage(std::collections::HashMap<String, String>);
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
 
     #[test]
     fn machine_compute_preferences_roundtrip_and_default_to_inheritance() {

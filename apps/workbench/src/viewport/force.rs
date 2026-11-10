@@ -99,7 +99,11 @@ impl Interaction {
         ui: &mut egui::Ui,
         projection: &Projection,
         canvas: &mut Canvas,
+        interactive: bool,
     ) -> bool {
+        if !interactive && self.drag.is_some() {
+            canvas.event = self.cancel();
+        }
         let Some(contact) = canvas.active.clone() else {
             self.drag = None;
             return false;
@@ -299,12 +303,16 @@ impl Interaction {
                 .interact(
                     egui::Rect::from_center_size(position, egui::vec2(18.0, 18.0)),
                     egui::Id::unique(("force-handle", face.reference.face_id.as_str(), label)),
-                    egui::Sense::drag(),
+                    if interactive {
+                        egui::Sense::drag()
+                    } else {
+                        egui::Sense::hover()
+                    },
                 )
                 .on_hover_text(label);
             painter.circle_filled(position, 4.5, color);
             hovered |= response.hovered() || response.dragged();
-            if response.drag_started()
+            if response.drag_started_by(egui::PointerButton::Primary)
                 && let Some(pointer) = response.interact_pointer_pos()
             {
                 self.drag = Some(Drag {
@@ -470,7 +478,7 @@ mod tests {
                 egui::Id::unique("force-test-canvas"),
                 egui::Sense::click_and_drag(),
             );
-            interaction.show(ui, projection, canvas);
+            interaction.show(ui, projection, canvas, true);
         });
         output.textures_delta.clear();
     }

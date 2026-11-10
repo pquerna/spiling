@@ -4,9 +4,9 @@
 
 use super::CameraState;
 use crate::scene::FocusTarget;
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
-pub(super) const DURATION_SECONDS: f64 = 0.55;
+pub(super) const DURATION_SECONDS: f64 = 0.18;
 
 pub(super) struct Request {
     pub summary: spiling_contracts::geometry::SceneSummary,
@@ -15,14 +15,6 @@ pub(super) struct Request {
     pub reveal: bool,
     pub started_reveal: bool,
     pub area_applied: bool,
-}
-
-pub(super) fn direction(yaw: f64, pitch: f64) -> DVec3 {
-    DVec3::new(
-        yaw.cos() * pitch.cos(),
-        yaw.sin() * pitch.cos(),
-        pitch.sin(),
-    )
 }
 
 pub(super) fn plan(
@@ -39,7 +31,7 @@ pub(super) fn plan(
     {
         return None;
     }
-    let current_direction = direction(current.yaw, current.pitch);
+    let current_direction = DQuat::from_array(current.rotation) * DVec3::Z;
     let mut view_direction = current_direction;
     if let Some(normal) = target.normal {
         let alignment = current_direction.dot(normal).clamp(-1.0, 1.0);
@@ -51,11 +43,6 @@ pub(super) fn plan(
             view_direction = normal * angle.cos() + tangent * angle.sin();
         }
     }
-    let yaw = if view_direction.truncate().length_squared() < 1e-12 {
-        current.yaw
-    } else {
-        view_direction.y.atan2(view_direction.x)
-    };
     let radius = (DVec3::from_array(target.bounds_mm.max)
         - DVec3::from_array(target.bounds_mm.min))
     .length()
@@ -70,17 +57,16 @@ pub(super) fn plan(
             limiting_angle.sin()
         };
     let camera = CameraState {
-        yaw: current.yaw + shortest_angle(yaw - current.yaw),
-        pitch: view_direction.z.clamp(-1.0, 1.0).asin().clamp(-1.56, 1.56),
+        rotation: if target.normal.is_none() {
+            current.rotation
+        } else {
+            super::navigation::orientation(view_direction).to_array()
+        },
         distance,
         pan: (target.center() - origin).to_array(),
         orthographic: current.orthographic,
     };
     camera.valid().then_some(camera)
-}
-
-fn shortest_angle(angle: f64) -> f64 {
-    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
 pub(super) struct Motion {
@@ -89,8 +75,7 @@ pub(super) struct Motion {
     start: f64,
 }
 impl Motion {
-    pub(super) fn new(from: CameraState, mut to: CameraState, start: f64) -> Self {
-        to.yaw = from.yaw + shortest_angle(to.yaw - from.yaw);
+    pub(super) fn new(from: CameraState, to: CameraState, start: f64) -> Self {
         Self { from, to, start }
     }
     pub(super) fn sample(&self, now: f64) -> (CameraState, bool) {
@@ -99,8 +84,10 @@ impl Motion {
         let blend = |from: f64, to: f64| from * (1.0 - eased) + to * eased;
         (
             CameraState {
-                yaw: blend(self.from.yaw, self.to.yaw),
-                pitch: blend(self.from.pitch, self.to.pitch),
+                rotation: DQuat::from_array(self.from.rotation)
+                    .slerp(DQuat::from_array(self.to.rotation), eased)
+                    .normalize()
+                    .to_array(),
                 distance: blend(self.from.distance.ln(), self.to.distance.ln()).exp(),
                 pan: std::array::from_fn(|axis| blend(self.from.pan[axis], self.to.pan[axis])),
                 orthographic: self.to.orthographic,
@@ -130,19 +117,19 @@ mod tests {
         let current = camera();
         let focused = plan(&current, target(Some(-DVec3::X)), DVec3::ZERO, 1.5).unwrap();
         assert!(
-            (direction(focused.yaw, focused.pitch).dot(-DVec3::X) - 25_f64.to_radians().cos())
-                .abs()
+            ((DQuat::from_array(focused.rotation) * DVec3::Z).dot(-DVec3::X)
+                - 25_f64.to_radians().cos())
+            .abs()
                 < 1e-12
         );
         assert_eq!(focused.pan, [6.0, 4.0, 3.0]);
-        assert!((focused.yaw - current.yaw).abs() <= std::f64::consts::PI);
+        assert!(focused.valid());
     }
     #[test]
     fn no_stable_normal_preserves_the_existing_orientation() {
         let current = camera();
         let focused = plan(&current, target(None), DVec3::new(6.0, 0.0, 0.0), 1.0).unwrap();
-        assert!((focused.yaw - current.yaw).abs() < 1e-12);
-        assert!((focused.pitch - current.pitch).abs() < 1e-12);
+        assert_eq!(focused.rotation, current.rotation);
         assert_eq!(focused.pan, [0.0, 4.0, 3.0]);
     }
     #[test]
@@ -155,8 +142,7 @@ mod tests {
             for aspect in [0.2, 1.0, 3.0] {
                 let focused = plan(&current, target(None), DVec3::ZERO, aspect).unwrap();
                 let viewport = crate::viewport::Viewport {
-                    yaw: focused.yaw,
-                    pitch: focused.pitch,
+                    rotation: DQuat::from_array(focused.rotation),
                     distance: focused.distance,
                     pan: DVec3::from_array(focused.pan),
                     orthographic,
@@ -181,12 +167,22 @@ mod tests {
     #[test]
     fn animation_is_bounded_logarithmic_and_takes_the_short_yaw_arc() {
         let from = CameraState {
-            yaw: 179_f64.to_radians(),
+            rotation: super::super::navigation::orientation(DVec3::new(
+                179_f64.to_radians().cos(),
+                179_f64.to_radians().sin(),
+                0.0,
+            ))
+            .to_array(),
             distance: 10.0,
             ..camera()
         };
         let to = CameraState {
-            yaw: -179_f64.to_radians(),
+            rotation: super::super::navigation::orientation(DVec3::new(
+                (-179_f64).to_radians().cos(),
+                (-179_f64).to_radians().sin(),
+                0.0,
+            ))
+            .to_array(),
             distance: 1000.0,
             ..from.clone()
         };
@@ -194,7 +190,7 @@ mod tests {
         assert_eq!(motion.sample(2.0).0.pan, from.pan);
         let (half, done) = motion.sample(3.0 + DURATION_SECONDS * 0.5);
         assert!(!done);
-        assert!((half.yaw - std::f64::consts::PI).abs() < 1e-12);
+        assert!(((DQuat::from_array(half.rotation) * DVec3::Z) + DVec3::X).length() < 1e-12);
         assert!((half.distance - 100.0).abs() < 1e-10);
         assert!(motion.sample(4.0).1);
         for step in 0..100 {

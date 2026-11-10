@@ -3,8 +3,11 @@
 // Licensed under the Open Software License version 3.0
 
 mod beads;
+mod cube;
 pub mod fastener;
 mod focus;
+mod navigation;
+pub use navigation::{InputDevice, Settings as NavigationSettings, StandardView, ViewAction};
 pub mod force;
 pub mod mechanics;
 pub mod overview;
@@ -104,18 +107,18 @@ pub struct Input<'a> {
     pub plane: PlaneMm,
     pub scope: Option<OccurrenceId>,
 }
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CameraState {
-    yaw: f64,
-    pitch: f64,
+    #[serde(default)]
+    rotation: [f64; 4],
     distance: f64,
     pan: [f64; 3],
     orthographic: bool,
 }
 impl CameraState {
     pub fn valid(&self) -> bool {
-        self.yaw.is_finite()
-            && self.pitch.is_finite()
+        self.rotation.iter().all(|value| value.is_finite())
+            && (DQuat::from_array(self.rotation).length_squared() - 1.0).abs() < 1e-6
             && self.distance.is_finite()
             && self.distance > 0.0
             && self.pan.iter().all(|v| v.is_finite())
@@ -125,8 +128,13 @@ pub struct Viewport {
     force_interaction: force::Interaction,
     fastener_ghosts: fastener::Ghosts,
     mechanics_annotations: mechanics::Annotations,
-    yaw: f64,
-    pitch: f64,
+    rotation: DQuat,
+    navigation: navigation::Input,
+    pub navigation_settings: NavigationSettings,
+    pending_view: Option<ViewAction>,
+    fit_scope: Option<ViewAction>,
+    normal: Option<DVec3>,
+    normal_cache: Option<navigation::NormalTarget>,
     distance: f64,
     pan: DVec3,
     fit: bool,
@@ -140,7 +148,6 @@ pub struct Viewport {
     pending_focus: Option<focus::Request>,
     previous_camera: Option<CameraState>,
     focus_scene: Option<SceneSummary>,
-    smooth_focus: bool,
     focus_problem: Option<&'static str>,
     dim_context: bool,
     reveal: Option<reveal::Reveal>,
@@ -153,8 +160,13 @@ impl Default for Viewport {
             force_interaction: Default::default(),
             fastener_ghosts: Default::default(),
             mechanics_annotations: Default::default(),
-            yaw: -0.8,
-            pitch: 0.7,
+            rotation: navigation::orientation(StandardView::Isometric.direction()),
+            navigation: Default::default(),
+            navigation_settings: Default::default(),
+            pending_view: None,
+            fit_scope: None,
+            normal: None,
+            normal_cache: None,
             distance: 100.0,
             pan: DVec3::ZERO,
             fit: true,
@@ -168,7 +180,6 @@ impl Default for Viewport {
             pending_focus: None,
             previous_camera: None,
             focus_scene: None,
-            smooth_focus: true,
             focus_problem: None,
             dim_context: false,
             reveal: None,
@@ -465,8 +476,7 @@ impl Viewport {
     }
     pub fn camera(&self) -> CameraState {
         CameraState {
-            yaw: self.yaw,
-            pitch: self.pitch,
+            rotation: self.rotation.to_array(),
             distance: self.distance,
             pan: self.pan.to_array(),
             orthographic: self.orthographic,
@@ -483,8 +493,7 @@ impl Viewport {
     }
     fn apply_camera(&mut self, c: &CameraState) {
         if c.valid() {
-            self.yaw = c.yaw;
-            self.pitch = c.pitch;
+            self.rotation = DQuat::from_array(c.rotation).normalize();
             self.distance = c.distance;
             self.pan = DVec3::from_array(c.pan);
             self.orthographic = c.orthographic;
@@ -502,8 +511,7 @@ impl Viewport {
             return;
         };
         self.interrupt_focus();
-        self.yaw = n.y.atan2(n.x);
-        self.pitch = n.z.asin();
+        self.rotation = navigation::orientation(n);
         self.orthographic = true;
     }
     pub fn focus_on(&mut self, scene: &Scene, target: crate::scene::FocusTarget) -> bool {
@@ -607,7 +615,7 @@ impl Viewport {
         active
     }
     fn animate_to(&mut self, camera: CameraState, now: f64, animations_enabled: bool) {
-        if self.smooth_focus && animations_enabled {
+        if self.navigation_settings.animate && animations_enabled {
             self.motion = Some(focus::Motion::new(self.camera(), camera, now));
         } else {
             self.motion = None;
@@ -626,11 +634,7 @@ impl Viewport {
         !done
     }
     fn matrix(&self, aspect: f64, radius: f64) -> DMat4 {
-        let direction = DVec3::new(
-            self.yaw.cos() * self.pitch.cos(),
-            self.yaw.sin() * self.pitch.cos(),
-            self.pitch.sin(),
-        );
+        let direction = self.rotation * DVec3::Z;
         let eye = self.pan + direction * self.distance;
         // Keep depth precision tied to the view, including when distant lifecycle
         // moves enlarge replay bounds. A near plane almost at zero makes fine
@@ -653,7 +657,7 @@ impl Viewport {
         } else {
             glam::dcamera::rh::proj::directx::perspective(45f64.to_radians(), aspect, near, far)
         };
-        let up = direction.cross(DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0));
+        let up = self.rotation * DVec3::Y;
         projection * glam::dcamera::rh::view::look_at_mat4(eye, self.pan, up)
     }
     /// Camera and picking use f64; GPU positions are rebased about native scene bounds.
@@ -699,38 +703,23 @@ impl Viewport {
         if layout_preview {
             ui.label("Layout preview · not applied");
         }
-        let mut fit_source = false;
-        let mut fit_plate = false;
+        self.normal = if let Some(reveal) = &self.reveal {
+            Some(reveal.normal)
+        } else if analysis.enabled {
+            DVec3::from_array(plane.normal)
+                .try_normalize()
+                .map(|normal| normal * if analysis.flipped { -1.0 } else { 1.0 })
+        } else {
+            self.selection_normal(scene.as_ref(), selected, scope)
+        };
         ui.horizontal_wrapped(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if ui.button("Fit").clicked() {
-                self.fit();
-            }
-            if ui.button("Top").clicked() {
-                self.interrupt_focus();
-                self.pitch = 1.56;
-                self.yaw = -std::f64::consts::FRAC_PI_2;
-            }
-            if ui.button("Isometric").clicked() {
-                self.interrupt_focus();
-                self.orthographic = false;
-                self.yaw = -0.8;
-                self.pitch = 0.7;
+                self.queue_view(ViewAction::Fit);
             }
             ui.menu_button("View…", |ui| {
-            if ui
-                .add_enabled(
-                    scene
-                        .as_ref()
-                        .is_some_and(|s| s.summary.bounds_mm.is_some()),
-                    egui::Button::new("Fit parts"),
-                )
-                .clicked()
-            {
-                self.fit();
-                fit_source = true;
-                ui.close();
-            }
+            self.navigation_menu(ui);
+            ui.separator();
             let focus_available = interactive && !layout_preview && view.source
                 && scene.as_ref().is_some_and(|scene| scope.is_some_and(|id| scene.occurrences.iter().any(|item| item.occurrence_id == id)));
             if ui.add_enabled(focus_available, egui::Button::new("Focus on selection")).clicked()
@@ -754,23 +743,7 @@ impl Viewport {
                 ui.close();
             }
             ui.checkbox(&mut self.dim_context,"Dim surroundings");
-            if ui.add_enabled(self.previous_camera.is_some() && self.reveal.is_none(), egui::Button::new("Back to previous view")).clicked()
-                && let Some(previous) = self.previous_camera.take()
-            {
-                self.pending_focus = None;
-                self.animate_to(previous, ui.input(|input| input.time), ui.style().animation_time > 0.0);
-                ui.close();
-            }
-            if ui.checkbox(&mut self.orthographic, "Orthographic").changed() { self.interrupt_focus(); }
-            if ui.checkbox(&mut self.smooth_focus, "Animate focus").changed() && !self.smooth_focus {
-                self.advance_focus(ui.input(|input| input.time) + focus::DURATION_SECONDS);
-            }
-            if (analysis.enabled || self.reveal.is_some()) && ui.button("Normal to section").clicked() {
-                let normal=self.reveal.as_ref().map_or_else(||DVec3::from_array(plane.normal) * if analysis.flipped { -1.0 } else { 1.0 },|reveal|reveal.normal);
-                self.normal_to(normal);
-                ui.close();
-            }
-            crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; right-drag to pan; wheel to zoom. Focus the canvas: arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, G focuses selection, Escape stops focus, 1 selects Top and 0 Isometric. Focus uses display bounds and a stable face normal when available; it does not prove visibility or change the part pose. Turn off Animate focus for immediate navigation.");
+            crate::ui::help(ui, "viewport-navigation", "Viewport navigation", "Drag to orbit; middle-drag orbits even with a tool armed. Right-drag or Shift+middle pans. Wheel zooms. Trackpad mode: two-finger pan, pinch zoom, Option/Alt+drag orbit. The cube snaps to sides, edges and corners. Canvas keys: 0 Isometric; 1 Top; 2 Bottom; 3 Front; 4 Back; 5 Left; 6 Right; F fits; G focuses; P projection; N normal; Shift+N opposite. Hold arrows to orbit, Shift+arrows to pan, plus/minus to zoom. Release stops; Escape cancels the current gesture. View changes never edit the part or run analysis.");
             });
         });
         self.apply_focus_area();
@@ -802,14 +775,13 @@ impl Viewport {
         if let Some(plate) = &plate
             && plate.controls(ui, &mut self.show_height)
         {
-            self.fit();
-            fit_plate = true;
+            self.queue_view(ViewAction::FitPlate);
         }
         let (rect, response) = ui.allocate_exact_size(
             ui.available_size().max(egui::vec2(1.0, 1.0)),
             egui::Sense::click_and_drag(),
         );
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, "3D viewport. Arrows orbit; Shift arrows pan; plus/minus zoom; F fits; G focuses selection; Escape stops focus; 1 top; 0 isometric. Native faces are also available in the model tree."));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, "3D viewport. Arrows orbit; Shift arrows pan; plus/minus zoom; F fits; G focuses; 0 to 6 snap views; P projection; N normal. View menu exposes every view."));
         if response.clicked() {
             response.request_focus();
         }
@@ -820,27 +792,9 @@ impl Viewport {
                 ui.visuals().selection.stroke,
                 egui::StrokeKind::Inside,
             );
-            let (delta, shift, zoom, fit, top, iso, focus, stop) = ui.input_mut(|i| {
-                let delta = egui::vec2(
-                    f32::from(i.key_pressed(egui::Key::ArrowRight) as u8)
-                        - f32::from(i.key_pressed(egui::Key::ArrowLeft) as u8),
-                    f32::from(i.key_pressed(egui::Key::ArrowUp) as u8)
-                        - f32::from(i.key_pressed(egui::Key::ArrowDown) as u8),
-                );
-                (
-                    delta,
-                    i.modifiers.shift,
-                    f64::from(i.key_pressed(egui::Key::Minus) as u8)
-                        - f64::from(i.key_pressed(egui::Key::Plus) as u8),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::F),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num1),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num0),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::G),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                )
-            });
-            if delta != egui::Vec2::ZERO || zoom != 0.0 || fit || top || iso || stop {
-                self.interrupt_focus();
+            let (action, focus) = navigation::keys(ui);
+            if let Some(action) = action {
+                self.queue_view(action);
             }
             if focus
                 && interactive
@@ -850,32 +804,17 @@ impl Viewport {
             {
                 self.focus_on(scene, target);
             }
-            if shift {
-                let right = DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0);
-                let up = right.cross(DVec3::new(
-                    self.yaw.cos() * self.pitch.cos(),
-                    self.yaw.sin() * self.pitch.cos(),
-                    self.pitch.sin(),
-                ));
-                self.pan +=
-                    (right * f64::from(delta.x) + up * f64::from(delta.y)) * self.distance * 0.03;
-            } else {
-                self.yaw += f64::from(delta.x) * 0.1;
-                self.pitch = (self.pitch + f64::from(delta.y) * 0.1).clamp(-1.55, 1.55);
-            }
-            self.distance *= (zoom * 0.1).exp();
-            if fit {
-                self.fit = true;
-            }
-            if top {
-                self.pitch = 1.56;
-                self.yaw = -std::f64::consts::FRAC_PI_2;
-            }
-            if iso {
-                self.pitch = 0.7;
-                self.yaw = -0.8;
-            }
         }
+        if let Some(action) = self.pending_view.take() {
+            self.navigate(
+                action,
+                ui.input(|input| input.time),
+                ui.style().animation_time > 0.0,
+            );
+            response.request_focus();
+        }
+        let fit_source = self.fit_scope == Some(ViewAction::FitParts);
+        let fit_plate = self.fit_scope == Some(ViewAction::FitPlate);
         let bounds = scene.as_ref().and_then(|s| s.summary.bounds_mm);
         let plate_bounds = plate
             .as_ref()
@@ -904,7 +843,7 @@ impl Viewport {
             .max(0.01);
         let replay_bounds = review
             .as_ref()
-            .filter(|_| view.visible)
+            .filter(|_| view.visible && !fit_source)
             .and_then(|r| r.capture.replay.as_ref())
             .map(|r| r.info.bounds_mm);
         let mut display_radius = replay_bounds.map_or(radius, |b| {
@@ -962,6 +901,7 @@ impl Viewport {
             self.distance = radius * 3.2 / aspect.min(1.0);
             self.pan = fit_pan;
             self.fit = false;
+            self.fit_scope = None;
         }
         let now = ui.input(|input| input.time);
         if let Some(request) = self.pending_focus.take()
@@ -989,6 +929,17 @@ impl Viewport {
         if self.advance_focus(now) {
             ui.ctx().request_repaint();
         }
+        self.navigation.begin(ui, rect, cube::bounds(rect));
+        if ui.input(|input| {
+            input.pointer.any_pressed()
+                && input
+                    .pointer
+                    .press_origin()
+                    .is_some_and(|point| rect.contains(point))
+        }) {
+            self.interrupt_focus();
+        }
+        let navigation_claimed = self.navigation.reserves_pointer();
         // A separate handle moves the inspection plane; dragging the surrounding canvas orbits.
         let mut handle = None;
         if analysis.enabled {
@@ -1012,7 +963,11 @@ impl Viewport {
                     .interact(
                         egui::Rect::from_center_size(position, egui::vec2(26.0, 26.0)),
                         response.id.with("section-plane"),
-                        egui::Sense::drag(),
+                        if navigation_claimed {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::drag()
+                        },
                     )
                     .on_hover_text("Drag to move section plane in millimetres");
                 if r.dragged() {
@@ -1044,44 +999,89 @@ impl Viewport {
                     rect,
                 },
                 canvas,
+                !navigation_claimed,
             )
         } else {
             false
         };
-        if response.dragged_by(egui::PointerButton::Primary)
-            && !force_owns_pointer
-            && !handle.is_some_and(|(_, dragging)| dragging)
+        let plane_owns_pointer = handle.is_some_and(|(point, dragging)| {
+            dragging
+                || ui.input(|input| {
+                    input
+                        .pointer
+                        .press_origin()
+                        .is_some_and(|origin| origin.distance(point) < 14.0)
+                })
+        });
+        let navigation_cancelled = self.navigation.suppressed();
+        let pointer_motion = self
+            .navigation
+            .pointer(ui, force_owns_pointer || plane_owns_pointer);
+        let key_motion = self.navigation.keyboard(ui, response.has_focus());
+        if !navigation_cancelled
+            && !self.navigation.owns_tool()
+            && (pointer_motion.orbit != egui::Vec2::ZERO || pointer_motion.pan != egui::Vec2::ZERO)
         {
-            self.interrupt_focus();
-            let d = response.drag_motion();
-            self.yaw -= f64::from(d.x) * 0.007;
-            self.pitch = (self.pitch + f64::from(d.y) * 0.007).clamp(-1.55, 1.55);
+            response.request_focus();
         }
-        if response.dragged_by(egui::PointerButton::Secondary) {
+        self.orbit(pointer_motion.orbit + key_motion.orbit);
+        self.pan_pixels(
+            pointer_motion.pan + key_motion.pan * rect.height(),
+            rect.height(),
+        );
+        let mut zoom = key_motion.zoom;
+        let scroll_allowed = (response.hovered() || force_owns_pointer)
+            && !self.navigation.owns_tool()
+            && !cube::bounds(rect).is_some_and(|cube| {
+                ui.input(|input| {
+                    input
+                        .pointer
+                        .hover_pos()
+                        .is_some_and(|point| cube.contains(point))
+                })
+            });
+        let scroll = navigation::scroll(ui, self.navigation_settings, scroll_allowed);
+        self.pan_pixels(scroll.pan, rect.height());
+        zoom += scroll.zoom;
+        if zoom != 0.0 {
             self.interrupt_focus();
-            let d = response.drag_motion();
-            let right = DVec3::new(-self.yaw.sin(), self.yaw.cos(), 0.0);
-            let up = right.cross(DVec3::new(
-                self.yaw.cos() * self.pitch.cos(),
-                self.yaw.sin() * self.pitch.cos(),
-                self.pitch.sin(),
-            ));
-            self.pan += (-right * f64::from(d.x) + up * f64::from(d.y)) * self.distance
-                / f64::from(rect.height());
-        }
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.interrupt_focus();
-            }
+            let old_matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
+            let anchor = ui
+                .input(|input| input.pointer.hover_pos())
+                .filter(|pointer| rect.contains(*pointer));
+            let zoom_normal = self.rotation * DVec3::Z;
+            let zoom_target = self.pan;
+            let plane_hit = |matrix: DMat4, pointer: egui::Pos2| {
+                let point = DVec3::new(
+                    2.0 * f64::from((pointer.x - rect.left()) / rect.width()) - 1.0,
+                    1.0 - 2.0 * f64::from((pointer.y - rect.top()) / rect.height()),
+                    0.0,
+                );
+                let inverse = matrix.inverse();
+                let near = inverse.project_point3(point);
+                let ray = inverse.project_point3(point + DVec3::Z) - near;
+                near + ray * ((zoom_target - near).dot(zoom_normal) / ray.dot(zoom_normal))
+            };
+            let before = anchor.map(|pointer| plane_hit(old_matrix, pointer));
             self.distance =
-                (self.distance * (-f64::from(scroll) * 0.002).exp()).clamp(0.001, radius * 1000.0);
+                (self.distance * zoom.clamp(-4.0, 4.0).exp()).clamp(0.001, radius * 1000.0);
+            if let (Some(pointer), Some(before)) = (anchor, before) {
+                let after = plane_hit(
+                    self.matrix(f64::from(rect.width() / rect.height()), display_radius),
+                    pointer,
+                );
+                let delta = before - after;
+                if delta.is_finite() {
+                    self.pan += delta;
+                }
+            }
         }
         self.distance = self.distance.clamp(0.001, radius * 1000.0);
         let matrix = self.matrix(f64::from(rect.width() / rect.height()), display_radius);
         if interactive
             && view.source
             && !force_owns_pointer
+            && !pointer_motion.used
             && !ui.ctx().text_edit_focused()
             && (force.as_ref().is_some_and(|canvas| canvas.armed)
                 || fastener.as_ref().is_some_and(|canvas| canvas.armed))
@@ -1126,6 +1126,7 @@ impl Viewport {
         if interactive
             && view.source
             && !force_owns_pointer
+            && !pointer_motion.used
             && !force.as_ref().is_some_and(|canvas| canvas.armed)
             && !fastener.as_ref().is_some_and(|canvas| canvas.armed)
             && response.clicked()
@@ -1301,6 +1302,22 @@ impl Viewport {
                     ui.visuals().text_color(),
                 );
             }
+        }
+        if let Some(direction) =
+            cube::show(ui, rect, self.rotation, plate.is_some()).filter(|_| !navigation_cancelled)
+        {
+            let axes = direction.to_array().map(|value| {
+                if value.abs() < 1e-9 {
+                    0
+                } else if value > 0.0 {
+                    1
+                } else {
+                    -1
+                }
+            });
+            self.queue_view(ViewAction::Direction(axes));
+            response.request_focus();
+            ui.ctx().request_repaint();
         }
         if let Some(state) = frame.wgpu_render_state()
             && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
@@ -2065,8 +2082,7 @@ mod depth_tests {
     fn distant_lifecycle_bounds_do_not_collapse_fine_deposition_depths() {
         let viewport = Viewport {
             distance: 70.0,
-            yaw: 0.0,
-            pitch: 0.0,
+            rotation: navigation::orientation(DVec3::X),
             ..Default::default()
         };
         let matrix = viewport.matrix(1.5, 200.0);

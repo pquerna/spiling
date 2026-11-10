@@ -51,9 +51,9 @@ Properties and Section analysis remain available in all workspaces. Selecting a
 face does not switch workspace. Surface finish is an authoring task within Prepare;
 Color study is a focused page with an explicit return to its invoking task. Plate
 navigation retains workspace/task and compatible inspection state. Background
-completion never activates another workspace. Fit, Top and Isometric remain at the
-canvas; View groups focus, reveal, projection and animation controls. Gesture
-instructions use deliberate help.
+completion never activates another workspace. The shared canvas has Fit, a compact
+View menu and a view cube; the application View menu and command search expose the
+same named camera actions. Gesture instructions use deliberate help.
 
 Analyze separates source-bound case drafts from checked numerical results.
 One pinned primary action applies the draft or runs the saved case; the inspector
@@ -84,7 +84,7 @@ stable; other targets retain the current viewing direction. Navigation chooses a
 nearby readable angle, fits the entire extent in either projection and eases pan,
 shortest-arc orbit and logarithmic zoom. G operates only in the focused canvas;
 face-tree double-click, Properties, View and command search expose the same task.
-Gestures, view commands and Escape interrupt motion. Animate focus can be disabled;
+Gestures, view commands and Escape interrupt motion. Animate navigation can be disabled;
 Back to previous view restores the pre-focus camera. Source/session/plate changes
 discard transient focus history. Focusing does not prove visibility through other
 material, remove an existing section cut or grant geometric/material authority.
@@ -129,6 +129,52 @@ required. The active editor owns Apply, and Review promotes Verify program follo
 by Export plate only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.
+
+## Viewport navigation
+
+`viewport::navigation` owns camera actions and pointer/key ownership;
+`viewport::cube` paints the bounded orientation control. Prepare, Review, Analyze,
+section/reveal and comparison share the same FP64 quaternion camera. Changing
+representation or field quantity does not reset it. Per-plate snapshots retain
+independent inspection state; overview/library thumbnails remain fixed previews.
+
+The cube snaps to faces, edges and corners; its 3D button selects true Isometric.
+All named snaps select orthographic projection with a stable screen-up, including
+exact Top/Bottom. Orbit permits underneath inspection and preserves projection.
+Projection switching preserves scale at the target plane. Fit changes framing,
+not orientation; Fit parts and Fit plate have explicit scopes. Normal inspection
+uses the active section or a stable selected display-face normal, never a new
+geometric authority. View also exposes opposite normal, screen roll and Previous.
+Small canvases omit the cube but retain all named actions. Cube input is separate
+from source picking and load/fastener placement.
+
+| Input | Action |
+| --- | --- |
+| Unclaimed primary drag; middle drag; Alt/Option+primary drag | Orbit |
+| Secondary drag; Shift+middle; Alt/Option+Shift+primary drag | Pan |
+| Mouse wheel; native pinch | Zoom, with one global reverse-zoom preference |
+| Trackpad preference | Two-finger scroll pans; pinch zooms; Option/Alt drag orbits |
+| Canvas 0–6 | Isometric, Top, Bottom, Front, Back, Left, Right |
+| Canvas F / G / P | Fit / Focus selection / Toggle projection |
+| Canvas N / Shift+N | Normal to section or selection / Opposite normal |
+| Canvas arrows / Shift+arrows / plus-or-equal and minus | Orbit / Pan / Zoom |
+
+Active primary handles own their edit until release. Navigation captures its
+button and mode at pointer-down; changing modifiers, leaving the canvas or
+releasing over a part never converts it to placement. A drag is not a snap click.
+Holding navigation keys continues motion independently of OS key-repeat;
+one-shot view commands do not repeat. Release, cancellation, focus loss and modal
+activation stop motion. Escape is routed once through the topmost surface;
+cancelled navigation cannot resume until its buttons/keys are released. Text/IME,
+inspectors, menus and layer sliders keep their input. Mouse/Trackpad, reverse zoom
+and Animate navigation are machine-local preferences, not project content.
+
+The existing target is the orbit pivot; hover does not change it. Zoom anchors on
+the target plane under the pointer. Navigation reuses checked display buffers and
+does not import, tessellate, query native sections, mutate the project, slice or
+solve. Stable selection normals are cached by display/selection identity. Actual
+gesture/platform and frame-time qualification remains device-specific; software
+rendering does not establish a hardware frame-rate claim.
 
 ## Defaults and scoped modifiers
 

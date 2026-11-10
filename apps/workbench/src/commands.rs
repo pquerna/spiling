@@ -40,6 +40,7 @@ pub enum Workspace {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    View(crate::viewport::ViewAction),
     PrepareWorkspace,
     ReviewWorkspace,
     AnalyzeWorkspace,
@@ -84,6 +85,36 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &[Self] = &[
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Isometric,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Top,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Bottom,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Front,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Back,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Left,
+        )),
+        Self::View(crate::viewport::ViewAction::Snap(
+            crate::viewport::StandardView::Right,
+        )),
+        Self::View(crate::viewport::ViewAction::Fit),
+        Self::View(crate::viewport::ViewAction::FitParts),
+        Self::View(crate::viewport::ViewAction::FitPlate),
+        Self::View(crate::viewport::ViewAction::Projection),
+        Self::View(crate::viewport::ViewAction::Normal),
+        Self::View(crate::viewport::ViewAction::OppositeNormal),
+        Self::View(crate::viewport::ViewAction::RollLeft),
+        Self::View(crate::viewport::ViewAction::RollRight),
+        Self::View(crate::viewport::ViewAction::Previous),
         Self::PrepareWorkspace,
         Self::ReviewWorkspace,
         Self::AnalyzeWorkspace,
@@ -128,6 +159,7 @@ impl Action {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::View(action) => action.label(),
             Self::PrepareWorkspace => "Prepare",
             Self::ReviewWorkspace => "Review",
             Self::AnalyzeWorkspace => "Analyze",
@@ -175,6 +207,7 @@ impl Action {
         matches!(
             self,
             Self::PrepareWorkspace
+                | Self::View(_)
                 | Self::ReviewWorkspace
                 | Self::AnalyzeWorkspace
                 | Self::Properties

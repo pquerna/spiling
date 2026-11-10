@@ -29,8 +29,10 @@ impl Viewport {
             }
             self.attention = None;
             self.focus_problem = None;
-            self.motion = None;
-            self.previous_camera = None;
+            if changed {
+                self.motion = None;
+                self.previous_camera = None;
+            }
             self.pending_focus = self.pending_focus.take().filter(|request| {
                 interactive && summary.is_some_and(|current| same(current, &request.summary))
             });
@@ -65,7 +67,7 @@ impl Reveal {
             target,
             normal: target
                 .normal
-                .unwrap_or_else(|| focus::direction(camera.yaw, camera.pitch)),
+                .unwrap_or_else(|| DQuat::from_array(camera.rotation) * DVec3::Z),
             offset_mm: if target.normal.is_some() { 0.002 } else { 0.0 },
             camera,
             dim_context,

@@ -234,6 +234,8 @@ impl Workbench {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    self.viewport.navigation_menu(ui);
+                    ui.separator();
                     for action in [
                         Action::Properties,
                         Action::FocusSelection,

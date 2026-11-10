@@ -736,14 +736,28 @@ The native procedures above use the production window and parented OS pickers.
 `Ctrl/Cmd+K` opens searchable commands; Project/Edit/Manufacturing menus and the
 palette share the same typed dispatcher and disabled reasons. Text fields retain
 text undo and IME ownership. Tab reaches controls and the canvas; with the canvas
-focused, arrows orbit, Shift+arrows pan, plus/minus zoom, F fits, 1 selects Top and
-0 Isometric. The model tree's native face list is the keyboard picking alternative.
+focused, arrows orbit, Shift+arrows pan, plus/minus zoom, F fits and G focuses.
+0–6 select Isometric/Top/Bottom/Front/Back/Left/Right; P changes projection and
+N/Shift+N inspect a section/selected face normal from either side. The cube and
+both View menus use the same actions; the model tree's native face list is the
+keyboard picking alternative. See [viewport navigation](native-interface.md#viewport-navigation)
+for mouse/trackpad and hold/release semantics. Exercise these focused controls with
+`cargo test --locked -p spiling-workbench --lib viewport:: -- --test-threads=1`.
 Narrow windows show either Models or the inspector beside the canvas; the Models
 toggle switches panes. UI layout/camera changes never fetch or mutate geometry.
 
 Choose Graphite/Paper in Help. Exercise narrow/wide windows, pane resize, clipboard, keyboard
 commands and numeric edits. Cancel native pickers and dirty replacement, then
-verify focus and unchanged project identity. Verify save/open/export under owned
+verify focus and unchanged project identity. In each workspace, snap Top/Bottom
+and Isometric through both cube and keys, hold/release orbit/pan/zoom, interrupt
+animations, change projection and return to the previous view. Repeat with Apply
+force and Attach fastener armed: navigation never places or edits an attachment.
+Exercise an actual primary handle, Escape, pointer release outside the canvas,
+layer-slider arrows/wheel and a text/IME field. Change Mouse/Trackpad, reverse zoom
+and animation preferences, restart, and confirm those persist outside the project.
+Retain a real source/actual-program/mechanics-field corpus and separate frame-time
+measurements from geometry/numerical preparation; do not infer GPU performance
+from a headless unit test. Verify save/open/export under owned
 Unicode paths and a fresh user preference root. Native X11, Wayland, Windows and
 macOS input/assistive stacks require separate evidence. Default fonts do not cover
 all CJK glyphs. AccessKit support is enabled, but full IME, mixed-direction text,
