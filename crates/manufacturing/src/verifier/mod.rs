@@ -1144,7 +1144,8 @@ pub(crate) fn verify_actual(
             if let Some(routed) = &mut route {
                 routed.record_model(
                     source_tool.ok_or_else(|| failed("model deposition lost its source tool"))?,
-                    delta_e,
+                    state.extrusion,
+                    next_e,
                 )?;
             }
             state.extrusion = next_e;

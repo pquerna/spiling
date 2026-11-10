@@ -4027,7 +4027,9 @@ fn scheduled_free_tool_order_reduces_actual_selections_and_keeps_all_waste() {
     );
     for (a, b) in before.tools.iter().zip(&after.tools) {
         assert_eq!(a.waste_deposition_segments, b.waste_deposition_segments);
-        assert!((a.model_volume_mm3 - b.model_volume_mm3).abs() < 1e-8);
-        assert!((a.waste_volume_mm3 - b.waste_volume_mm3).abs() < 1e-8);
+        assert_eq!(a.model_filament_length_mm, b.model_filament_length_mm);
+        assert_eq!(a.model_volume_mm3, b.model_volume_mm3);
+        assert_eq!(a.waste_filament_length_mm, b.waste_filament_length_mm);
+        assert_eq!(a.waste_volume_mm3, b.waste_volume_mm3);
     }
 }

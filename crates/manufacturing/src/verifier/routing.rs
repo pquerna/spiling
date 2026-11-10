@@ -35,6 +35,8 @@ pub(super) struct RouteState<'a> {
     stage: Stage,
     active: u8,
     debt_ticks: [i64; 2],
+    model_ticks: [i64; 2],
+    waste_ticks: [i64; 2],
     ready: [bool; 2],
     group: u32,
     layer: u16,
@@ -57,6 +59,16 @@ fn ticks(value: f64) -> Result<i64, ManufacturingError> {
         ));
     }
     Ok(scaled as i64)
+}
+
+fn accumulate_dose(total: &mut i64, previous: f64, next: f64) -> Result<(), ManufacturingError> {
+    let delta = ticks(next)? - ticks(previous)?;
+    let accumulated = total
+        .checked_add(delta)
+        .filter(|value| delta > 0 && *value <= 1_i64 << 52)
+        .ok_or_else(|| failed("routed deposition exceeds exact positive E8 accounting range"))?;
+    *total = accumulated;
+    Ok(())
 }
 
 impl<'a> RouteState<'a> {
@@ -86,6 +98,8 @@ impl<'a> RouteState<'a> {
             stage: Stage::Setup,
             active: 0,
             debt_ticks: [0; 2],
+            model_ticks: [0; 2],
+            waste_ticks: [0; 2],
             ready: [false; 2],
             group: 0,
             layer: 0,
@@ -587,11 +601,9 @@ impl<'a> RouteState<'a> {
                         "waste quantity, E8 volume, flow or speed differs from declared supported strip",
                     ));
                 }
-                let filament_area = self.filament_area();
+                accumulate_dose(&mut self.waste_ticks[tool], motion.extrusion, next)?;
                 let account = &mut self.accounting[tool];
                 account.waste_deposition_segments += 1;
-                account.waste_filament_length_mm += delta;
-                account.waste_volume_mm3 += delta * filament_area;
                 if let Some(sink) = replay {
                     sink.push_associated(
                         actual,
@@ -629,7 +641,8 @@ impl<'a> RouteState<'a> {
     pub(super) fn record_model(
         &mut self,
         path_tool: u8,
-        delta: f64,
+        previous: f64,
+        next: f64,
     ) -> Result<(), ManufacturingError> {
         if path_tool != self.active
             || !self.ready[self.active as usize]
@@ -639,11 +652,9 @@ impl<'a> RouteState<'a> {
                 "actual selected feeder does not own the expected source material",
             ));
         }
-        let area = self.filament_area();
+        accumulate_dose(&mut self.model_ticks[self.active as usize], previous, next)?;
         let account = &mut self.accounting[self.active as usize];
         account.model_deposition_segments += 1;
-        account.model_filament_length_mm += delta;
-        account.model_volume_mm3 += delta * area;
         Ok(())
     }
     pub(super) fn report(&mut self) -> Result<FixedDualVerification, ManufacturingError> {
@@ -658,6 +669,13 @@ impl<'a> RouteState<'a> {
             }
             self.accounting[tool].outstanding_retraction_mm =
                 self.debt_ticks[tool] as f64 / 100_000_000.0;
+            let filament_area =
+                std::f64::consts::PI * (self.job.tools[tool].filament_diameter_mm * 0.5).powi(2);
+            let account = &mut self.accounting[tool];
+            account.model_filament_length_mm = self.model_ticks[tool] as f64 / 100_000_000.0;
+            account.model_volume_mm3 = account.model_filament_length_mm * filament_area;
+            account.waste_filament_length_mm = self.waste_ticks[tool] as f64 / 100_000_000.0;
+            account.waste_volume_mm3 = account.waste_filament_length_mm * filament_area;
         }
         let report = FixedDualVerification {
             selection_count: self.selection_count,
@@ -665,5 +683,36 @@ impl<'a> RouteState<'a> {
         };
         report.validate()?;
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accumulate_dose;
+
+    #[test]
+    fn actual_e8_dose_is_independent_of_partition_order_and_epoch() {
+        let mut whole = 0;
+        accumulate_dose(&mut whole, 100.0, 100.30000003).unwrap();
+        let mut partitioned = 0;
+        accumulate_dose(&mut partitioned, 1000.0, 1000.20000003).unwrap();
+        accumulate_dose(&mut partitioned, 0.0, 0.1).unwrap();
+        let mut reversed = 0;
+        accumulate_dose(&mut reversed, 0.0, 0.1).unwrap();
+        accumulate_dose(&mut reversed, 1000.0, 1000.20000003).unwrap();
+        assert_eq!(whole, 30_000_003);
+        assert_eq!(partitioned, whole);
+        assert_eq!(reversed, whole);
+        accumulate_dose(&mut partitioned, 0.0, 0.00000001).unwrap();
+        assert_eq!(partitioned, whole + 1);
+
+        let previous = partitioned;
+        for (start, end) in [(1.0, 1.0), (2.0, 1.0), (f64::NAN, 1.0)] {
+            assert!(accumulate_dose(&mut partitioned, start, end).is_err());
+            assert_eq!(partitioned, previous);
+        }
+        let mut limit = 1_i64 << 52;
+        assert!(accumulate_dose(&mut limit, 0.0, 0.00000001).is_err());
+        assert_eq!(limit, 1_i64 << 52);
     }
 }

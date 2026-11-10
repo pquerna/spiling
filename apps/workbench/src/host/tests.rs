@@ -4827,7 +4827,18 @@ fn interior_policy_suggestion_is_detached_cancelable_and_exactly_adopted() {
         .interior_policy
         .as_deref()
         .unwrap();
-    assert!(assessment.qualified());
+    assert!(
+        assessment.qualified(),
+        "captured comparison: {assessment:?}, candidates={:?}",
+        loaded
+            .manufacturing
+            .alternative_review
+            .as_ref()
+            .unwrap()
+            .bundle
+            .plan
+            .interior_selection,
+    );
     assert_eq!(assessment.opportunity, opportunity);
     let candidate = loaded
         .manufacturing
