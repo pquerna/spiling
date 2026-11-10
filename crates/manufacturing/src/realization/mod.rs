@@ -123,7 +123,8 @@ fn canonical_order(a: &DepositionPath, b: &DepositionPath) -> std::cmp::Ordering
 }
 
 /// Canonical geometry traversal is stored in the normalized plan, never hidden
-/// in the emitter. In-place sort/rotation/reversal requires no motion/index vector.
+/// in the emitter. Temporary bounded permutation storage is released before
+/// streaming; no second motion/index stream is retained.
 pub(crate) fn canonicalize(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -145,7 +146,7 @@ pub(crate) fn canonicalize(
     let mut recent_starts = [[[0.0; 2]; 8]; 2];
     let mut recent_counts = [0usize; 2];
     let mut next_start = [0usize; 2];
-    let mut route_work = 0usize;
+    let mut route_work = row_route::RouteWork::default();
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
         let mut boundary = layer.paths.len();
