@@ -166,9 +166,9 @@ prints, as other slicers do, and its span is reported on the layer as
 `unsupported_overhang_mm`. A fill, skin or bridge row shorter than one minimum
 command is omitted, since it holds less material than the profile tolerance.
 
-Constant-section Cathedral (`web_roof`) infill still needs one upright
-constant-section part, so it refuses every corpus part; generalizing it is
-separate work.
+Cathedral (`web_roof`) infill builds on general parts in both modes; the
+[manufacturing contract](../protocol/manufacturing.md#web-and-roof-infill) owns
+its construction.
 
 ## Delivery and measure
 

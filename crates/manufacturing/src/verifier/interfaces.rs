@@ -54,19 +54,18 @@ pub(super) fn verify_two_axis_sparse(
             }
             let a = project_xyz6_point_mm(path.points_mm[0])?;
             let b = project_xyz6_point_mm(path.points_mm[1])?;
-            let family = if a[0] == b[0] && a[1] != b[1] {
-                1
-            } else if a[1] == b[1] && a[0] != b[0] {
-                2
-            } else {
+            if (a[0] == b[0]) == (a[1] == b[1]) {
                 return Err(failed(
                     "two-axis sparse row is not a positive build-X/Y segment",
                 ));
-            };
-            let slot = families
-                .get_mut(usize::from(region_index))
-                .ok_or_else(|| failed("two-axis sparse row owner exceeds the region budget"))?;
-            *slot |= family;
+            }
+            families[usize::from(region_index).min(MAX_PROCESS_REGIONS - 1)] |=
+                if a[0] == b[0] { 1 } else { 2 };
+            if usize::from(region_index) >= MAX_PROCESS_REGIONS {
+                return Err(failed(
+                    "two-axis sparse row owner exceeds the region budget",
+                ));
+            }
             let Some(previous) = index.checked_sub(1).map(|i| &plan.layers[i]) else {
                 if layer.lower_z_mm != 0.0 {
                     return Err(failed("two-axis sparse first interval is not bed rooted"));
@@ -79,20 +78,9 @@ pub(super) fn verify_two_axis_sparse(
             let ends = [a, b];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             let width = constant_width(path)?;
-            if path.kind == DepositionKind::Bridge {
-                // Role conversion is only accepted for the exact required
-                // construction road and a real direct-ended earlier gap.
-                verify_bridge_lower(
-                    plan, index, ends, width, recipe, true, work, anchors, cancel,
-                )
-                .map_err(|e| {
-                    ManufacturingError::new(
-                        e.code,
-                        format!("web + roof required road: {}", e.message),
-                    )
-                })?;
-                continue;
-            }
+            // Bridge-role Cathedral roads take the same span rule as every
+            // other sparse row below, and must really span something.
+            let mut spans_gap = false;
             for gap in anchors.gaps_edges(
                 AnchorCandidate {
                     endpoints_mm: ends,
@@ -102,31 +90,48 @@ pub(super) fn verify_two_axis_sparse(
                 work,
                 cancel,
             )? {
-                if !matches!(
-                    gap_kind(
-                        gap,
-                        (gap.end - gap.start) * length,
-                        width,
-                        recipe.process.max_bridge_span_mm,
-                    ),
-                    GapKind::Supported
-                ) {
-                    return Err(failed(
-                        "actual two-axis sparse row lacks direct earlier-layer anchors",
-                    ));
+                let span = (gap.end - gap.start) * length;
+                // Supported, or an ordinary short span: a bridge between two
+                // anchors within the bridge limit, or an end overhanging by no
+                // more than a joint flange's designed three bead widths. A
+                // longer unsupported span must be one the layer reports.
+                let kind = gap_kind(gap, span, width, recipe.process.max_bridge_span_mm);
+                spans_gap |= !matches!(kind, GapKind::Supported);
+                let short = matches!(
+                    kind,
+                    GapKind::Supported | GapKind::Bridge | GapKind::Contact
+                ) || span <= 3.0 * width;
+                if !short && layer.region_coverage.unsupported_overhang_mm == 0.0 {
+                    return Err(failed(format!(
+                        "sparse row has an unreported unsupported span: layer {} {:?} to {:?}, {:.4}..{:.4} mm",
+                        layer.index,
+                        a,
+                        b,
+                        gap.start * length,
+                        gap.end * length
+                    )));
                 }
             }
-        }
-        for (region_index, region) in layer.region_coverage.process_regions.iter().enumerate() {
-            charge(work)?;
-            if region.area_mm2 > 0.0
-                && region.fraction > 0.0
-                && region.fraction < 1.0
-                && families[region_index] != 3
-            {
+            if path.kind == DepositionKind::Bridge && !spans_gap {
                 return Err(failed(
-                    "two-axis sparse interior is missing an orthogonal line family",
+                    "web + roof road is fully supported but labelled Bridge",
                 ));
+            }
+        }
+        // Grid has no road-by-road replay: both line families are its
+        // completeness check. Cathedral replays every road, and a narrow
+        // interior may hold webs of one direction only.
+        if !web_roof {
+            for (region_index, region) in layer.region_coverage.process_regions.iter().enumerate() {
+                if region.area_mm2 > 0.0
+                    && region.fraction > 0.0
+                    && region.fraction < 1.0
+                    && families[region_index] != 3
+                {
+                    return Err(failed(
+                        "two-axis sparse interior is missing an orthogonal line family",
+                    ));
+                }
             }
         }
     }

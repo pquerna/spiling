@@ -3597,7 +3597,7 @@ fn native_web_roof_architecture_ablations_keep_complete_construction_and_reject_
 }
 
 #[test]
-fn native_web_roof_refuses_multiple_parts_without_a_fill_fallback() {
+fn native_web_roof_builds_each_part_of_a_plate_on_one_lattice() {
     let mut requested = intent();
     requested.recipe.infill_fraction = 0.08;
     requested.recipe.sparse_infill = SparseInfillPolicy::web_roof();
@@ -3605,9 +3605,15 @@ fn native_web_roof_refuses_multiple_parts_without_a_fill_fallback() {
     requested.recipe.bead_width_mm = 0.45;
     requested.recipe.process.max_bridge_span_mm = 2.0;
     let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0), pose(60.0, 40.0, 0.0)]);
-    let error = scene.compile(&requested).unwrap_err();
-    assert_eq!(error.code, ManufacturingErrorCode::UnsupportedGeometry);
-    assert!(error.message.contains("web + roof"), "{}", error.message);
+    let bundle = scene.compile(&requested).unwrap();
+    assert!(bundle.verification.verified);
+    assert!(bundle.plan.layers.iter().any(|layer| {
+        layer
+            .region_coverage
+            .web_roof_domains
+            .iter()
+            .any(|domain| domain.extent.len() == 2)
+    }));
 }
 
 #[test]

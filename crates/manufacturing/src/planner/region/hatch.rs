@@ -182,7 +182,7 @@ mod tests {
             }
             let recipe = crate::planner::tests::recipe(1.0);
             let layer = HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: recipe.bead_width_mm,
                 z: recipe.layer_height_mm,
                 lower_z: 0.0,
@@ -295,7 +295,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         for axis in [HatchAxis::X, HatchAxis::Y] {
             let layer = HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: recipe.bead_width_mm,
                 z: recipe.layer_height_mm,
                 lower_z: 0.0,

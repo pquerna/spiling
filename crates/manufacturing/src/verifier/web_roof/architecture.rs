@@ -112,6 +112,9 @@ pub(super) fn pier_roads(
     Ok(())
 }
 
+/// ADR012 profile tolerance for matching a replayed road's ends.
+const ROAD_END_TOLERANCE_MM: f64 = 0.01;
+
 pub(super) fn consume(
     expected: &mut [IntervalRoad],
     roads: &mut BTreeSet<(u16, Road)>,
@@ -139,10 +142,56 @@ pub(super) fn consume(
         b[r.0] = r.1;
         a[1 - r.0] = r.2;
         b[1 - r.0] = r.3;
+        // A road shorter than one minimum command is omitted by the
+        // planner; it holds less material than the profile tolerance.
+        let (pa, pb) = (project_xyz6_point_mm(a)?, project_xyz6_point_mm(b)?);
+        if (pb[0] - pa[0]).hypot(pb[1] - pa[1]) < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+            return Ok(());
+        }
         if !roads.remove(&(owner, key(a, b)?)) {
+            let line = if r.0 == 0 { pa[0] } else { pa[1] };
+            // Planner and replay clip the same row against the same rings
+            // with independent arithmetic; ends agree within the profile
+            // tolerance, not bit for bit.
+            let (from, to) = (pa[1 - r.0].min(pb[1 - r.0]), pa[1 - r.0].max(pb[1 - r.0]));
+            let near = roads
+                .iter()
+                .find(|(o, k)| {
+                    let k = k.map(f64::from_bits);
+                    *o == owner
+                        && k[r.0] == line
+                        && k[r.0 + 2] == line
+                        && (k[1 - r.0].min(k[3 - r.0]) - from).abs() <= ROAD_END_TOLERANCE_MM
+                        && (k[1 - r.0].max(k[3 - r.0]) - to).abs() <= ROAD_END_TOLERANCE_MM
+                })
+                .copied();
+            if let Some(found) = near {
+                roads.remove(&found);
+                return Ok(());
+            }
+            let actual: Vec<[f64; 2]> = roads
+                .iter()
+                .filter(|(o, _)| *o == owner)
+                .map(|(_, k)| k.map(f64::from_bits))
+                .filter(|k| k[r.0] == line && k[r.0 + 2] == line)
+                .map(|k| [k[1 - r.0], k[3 - r.0]])
+                .take(6)
+                .collect();
+            let nearby: Vec<[f64; 4]> = roads
+                .iter()
+                .filter(|(o, _)| *o == owner)
+                .map(|(_, k)| k.map(f64::from_bits))
+                .filter(|k| {
+                    (0..2).all(|axis| {
+                        k[axis].min(k[axis + 2]) <= pa[axis].max(pb[axis]) + 1.0
+                            && k[axis].max(k[axis + 2]) >= pa[axis].min(pb[axis]) - 1.0
+                    })
+                })
+                .take(8)
+                .collect();
             return Err(failed(format!(
-                "web + roof missing a required web/roof road at layer {}: {:?} to {:?}",
-                layer.index, a, b
+                "web + roof missing a required web/roof road at layer {}: {:?} to {:?}; printed on that line: {:?}; printed nearby: {:?}",
+                layer.index, a, b, actual, nearby
             )));
         }
         Ok(())

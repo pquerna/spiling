@@ -19,12 +19,13 @@ OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
 ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
 TIMEOUT = 900
 CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
+FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 WORK = os.path.join(ROOT, "work")
 
 
 def intent_file():
     d = json.load(open(INTENT_SRC))
-    d["recipe"]["infill_fraction"] = 0.15
+    d["recipe"]["infill_fraction"] = FRACTION
     d["recipe"]["layer_height_mm"] = 0.2
     d["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
     # PrusaSlicer's default: no generated supports.
@@ -88,7 +89,7 @@ def prusa(step, cwd):
     gcode = os.path.join(cwd, "prusa.gcode")
     try:
         proc = subprocess.run(["prusa-slicer", "--export-gcode", "--layer-height", "0.2",
-                               "--fill-density", "15%", "--center", "110,110", "-o", gcode, step],
+                               "--fill-density", f"{round(FRACTION * 100)}%", "--center", "110,110", "-o", gcode, step],
                               cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return {"ok": False, "seconds": TIMEOUT}
@@ -129,6 +130,17 @@ def main():
                     stdout = open(os.path.join(cwd, "stdout.json")).read()
                     m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
                     record["deposition_segments"] = int(m.group(1)) if m else None
+                    m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
+                    record["filament_mm"] = float(m.group(1)) if m else None
+                    plan = json.load(open(os.path.join(cwd, "out", "plan.json")))
+                    layers = plan["layers"]
+                    spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
+                    record["layers"] = len(layers)
+                    record["overhang_layers"] = sum(1 for v in spans if v > 0)
+                    record["max_overhang_mm"] = round(max(spans, default=0), 3)
+                    record["ceiling_layers"] = sum(
+                        1 for l in layers
+                        if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
             results.write(json.dumps(record) + "\n")
             results.flush()
             c = record["spiling_compile"]

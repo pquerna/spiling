@@ -381,6 +381,10 @@ impl ClassifiedRegions {
                                     .collect(),
                             })
                             .collect(),
+                        // Stamped with the part frame and this layer's
+                        // ceilings when the layer is assembled.
+                        frame_mm: [[0.0; 2]; 2],
+                        ceilings: Vec::new(),
                     });
                 }
             }
@@ -1175,7 +1179,7 @@ impl ClassifiedRegions {
         axis: region::HatchAxis,
         top_axis: region::HatchAxis,
         recipe: &PlanarPrintRecipe,
-        roof_z_mm: Option<f64>,
+        roof: Option<region::Roof<'_>>,
         phase: region::OrdinaryHatchPhase,
         classified_owned_bytes: usize,
         source_domains: &[super::ProcessDomain],
@@ -1194,7 +1198,7 @@ impl ClassifiedRegions {
         self.layout
             .append_paths(lower_z, z, &mut paths, segments, cancel)?;
         let layer = region::HatchLayer {
-            roof_z_mm,
+            roof,
             width_mm: recipe.bead_width_mm,
             z,
             lower_z,
@@ -1393,17 +1397,24 @@ impl ClassifiedRegions {
                 && interior.coverage.fraction < 1.0
                 && !interior.domain.0.is_empty()
         }) {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                if matches!(
-                    layer.recipe.sparse_infill,
-                    SparseInfillPolicy::WebRoof { .. }
-                ) {
-                    "web + roof requires direct lower anchors; sparse bridge recovery is not implemented"
-                } else {
-                    "grid infill requires direct lower anchors; sparse bridge recovery is not implemented"
-                },
-            ));
+            // These patterns are whole constructions: their roads are not
+            // re-hatched into bridge rows. Keep the layer as constructed; any
+            // stroke that still lacks support is reported as an overhang.
+            let (paths, _, _) = self.paths(
+                layer.z,
+                layer.lower_z,
+                layer.axis,
+                layer.top_axis,
+                layer.recipe,
+                layer.roof,
+                phase,
+                classified_owned_bytes,
+                source_domains,
+                segments,
+                &mut admit,
+                cancel,
+            )?;
+            return Ok(paths);
         }
         let initial_segments = *segments;
         let mut normal = super::support::RasterCandidate {
@@ -1516,7 +1527,7 @@ impl ClassifiedRegions {
             )
         })) {
             let role_layer = region::HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: owner
                     .and_then(|(_, region)| region.bead_width_mm)
                     .unwrap_or(layer.width_mm),
@@ -2207,7 +2218,7 @@ impl ClassifiedRegions {
                     let normal_along = if a[0] == b[0] { 1 } else { 0 };
                     let normal_fixed = 1 - normal_along;
                     let path_layer = region::HatchLayer {
-                        roof_z_mm: None,
+                        roof: None,
                         axis: if normal_along == 0 {
                             region::HatchAxis::X
                         } else {
@@ -4142,7 +4153,7 @@ mod ownership_tests {
             ClassifiedRegions::new(layout, &fill, &fill, |_, _| Ok(()), &recipe, &cancel).unwrap();
         let owned_bytes = classified.retained_bytes();
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 2.0 * h,
             lower_z: h,
@@ -4367,7 +4378,7 @@ mod skin_bridge_tests {
         let original = check(&mut probe, region::HatchAxis::Y, 0, 0).unwrap();
         assert!(!original.supported);
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: transition[2],
             lower_z: floor,
@@ -4533,7 +4544,7 @@ mod split_skin_tests {
                     region::HatchAxis::X
                 };
                 let layer = region::HatchLayer {
-                    roof_z_mm: None,
+                    roof: None,
                     width_mm: recipe.bead_width_mm,
                     z: 0.4,
                     lower_z: 0.2,

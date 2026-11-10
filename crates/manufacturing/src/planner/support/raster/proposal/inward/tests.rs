@@ -168,7 +168,7 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
     };
     for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 0.2,
             lower_z: 0.0,
@@ -281,7 +281,7 @@ fn inward_chain_preserves_hole_topology_and_original_interface_roles() {
                 &interface,
                 1.0,
                 &region::HatchLayer {
-                    roof_z_mm: None,
+                    roof: None,
                     width_mm: recipe.bead_width_mm,
                     z: recipe.layer_height_mm,
                     lower_z: 0.0,

@@ -722,7 +722,7 @@ mod tests {
                 &lower_interface,
                 1.0,
                 &region::HatchLayer {
-                    roof_z_mm: None,
+                    roof: None,
                     width_mm: recipe.bead_width_mm,
                     z: 0.575,
                     lower_z: 0.0,
@@ -742,7 +742,7 @@ mod tests {
                 &upper_interface,
                 1.0,
                 &region::HatchLayer {
-                    roof_z_mm: None,
+                    roof: None,
                     width_mm: recipe.bead_width_mm,
                     z: 1.15,
                     lower_z: 0.575,
@@ -813,7 +813,7 @@ mod tests {
                 interface: &interface,
             },
             &region::HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: recipe.bead_width_mm,
                 z: 0.6,
                 lower_z: 0.0,
@@ -868,7 +868,7 @@ mod tests {
         .unwrap();
         let recipe = crate::planner::tests::recipe(1.0);
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 0.4,
             lower_z: 0.0,

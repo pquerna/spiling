@@ -110,13 +110,13 @@ fn seed_webs(
                             .any(|&v| chord[0] <= v && v <= chord[1])
                     {
                         let seed = (chord[0] + chord[1]) * 0.5;
+                        // A web within a bead of the midpoint is already the
+                        // support; the leftover gap is an ordinary short bridge.
                         if roots[1 - fixed]
                             .iter()
                             .any(|v| (seed - v).abs() < layer.width_mm)
                         {
-                            return Err(unsupported(
-                                "web + roof local root would crowd an existing web; revise base density or roof spacing",
-                            ));
+                            continue;
                         }
                         if roots[0].len() + roots[1].len() >= MAX_DEPOSITION_SEGMENTS as usize {
                             return Err(resource("web + roof local seed budget exceeded"));
@@ -131,6 +131,24 @@ fn seed_webs(
     Ok(roots)
 }
 
+/// How far a corbel extends from `root` toward `limit` at height `z`. It grows
+/// 0.5 mm per millimetre of rise and must reach every point of its catchment
+/// by that point's own ceiling: the part roof, or a lower ceiling over it.
+fn reach(root: f64, limit: f64, roof_z: f64, z: f64, lowered: &[[f64; 3]]) -> f64 {
+    let (lo, hi) = (root.min(limit), root.max(limit));
+    let span = hi - lo;
+    let mut extent = (span - 0.5 * (roof_z - z).max(0.0)).max(0.0);
+    for &[a, b, ceiling_z] in lowered {
+        let (a, b) = (a.max(lo), b.min(hi));
+        if b <= a {
+            continue;
+        }
+        let far = if limit < root { root - a } else { b - root };
+        extent = extent.max(far - 0.5 * (ceiling_z - z).max(0.0));
+    }
+    extent.min(span)
+}
+
 pub(super) fn hatch(
     fill: &MultiPolygon<f64>,
     fraction: f64,
@@ -141,7 +159,7 @@ pub(super) fn hatch(
 ) -> Result<(), ManufacturingError> {
     let first_path = paths.len();
     let roof = layer
-        .roof_z_mm
+        .roof
         .ok_or_else(|| unsupported("web + roof lacks its physical roof horizon"))?;
     let nominal = layer.recipe.layer_height_mm;
     let pitch = 2.0 * (layer.width_mm - nominal + std::f64::consts::PI * nominal / 4.0) / fraction;
@@ -149,22 +167,21 @@ pub(super) fn hatch(
     let mut proposals = 0usize;
     let mut hits = Vec::new();
     let mut roots = Vec::new();
+    let mut lowered: Vec<[f64; 3]> = Vec::new();
+    // One part-level lattice: webs keep their XY through changing sections.
+    let lattices = [
+        Lattice::new(roof.frame_mm[0][0], roof.frame_mm[1][0], pitch)?,
+        Lattice::new(roof.frame_mm[0][1], roof.frame_mm[1][1], pitch)?,
+    ];
     for polygon in &fill.0 {
         check_cancel(cancel)?;
-        let bounds = polygon
-            .bounding_rect()
-            .ok_or_else(|| unsupported("web + roof has no interior bounds"))?;
-        let lattices = [
-            Lattice::new(bounds.min().x, bounds.max().x, pitch)?,
-            Lattice::new(bounds.min().y, bounds.max().y, pitch)?,
-        ];
         let web_roots = seed_webs(polygon, lattices, layer, &mut work, cancel)?;
         let architecture = match layer.recipe.sparse_infill {
             SparseInfillPolicy::WebRoof { architecture, .. } => architecture,
             _ => None,
         };
         if let Some(a) = architecture {
-            architecture::admit(a, &web_roots, &lattices, roof, layer)?;
+            architecture::admit(a, &web_roots, &lattices, roof.z_mm, layer)?;
         }
         let edges = std::iter::once(polygon.exterior())
             .chain(polygon.interiors())
@@ -213,6 +230,22 @@ pub(super) fn hatch(
                     if web_roots[fixed].contains(&coordinate) {
                         continue;
                     }
+                    // Lower ceilings crossing this roof row: [from, to, roof Z].
+                    // A span thinner than a bead is a wall step the wall
+                    // itself carries.
+                    lowered.clear();
+                    for ceiling in roof.ceilings {
+                        for area in &ceiling.area.0 {
+                            charge(&mut work, area.exterior().0.len(), cancel)?;
+                            hits.clear();
+                            row_intersections(area, coordinate, axis, &mut hits, cancel)?;
+                            for span in hits.as_chunks::<2>().0 {
+                                if span[1] - span[0] >= layer.width_mm {
+                                    lowered.push([span[0], span[1], ceiling.roof_z_mm]);
+                                }
+                            }
+                        }
+                    }
                     hits.clear();
                     row_intersections(polygon, coordinate, axis, &mut hits, cancel)?;
                     for chord in hits.as_chunks::<2>().0 {
@@ -244,9 +277,9 @@ pub(super) fn hatch(
                             } else {
                                 (root + roots[index + 1]) * 0.5
                             };
-                            let retreat = 0.5 * (roof - layer.z).max(0.0);
-                            let start = root - (root - left - retreat).max(0.0);
-                            let stop = root + (right - root - retreat).max(0.0);
+                            charge(&mut work, lowered.len(), cancel)?;
+                            let start = root - reach(root, left, roof.z_mm, layer.z, &lowered);
+                            let stop = root + reach(root, right, roof.z_mm, layer.z, &lowered);
                             if stop - start < MIN_DEPOSITION_COMMAND_MM {
                                 continue;
                             }
@@ -299,6 +332,18 @@ pub(super) fn hatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A flat part roof with the lattice framed on `fill`, as a prism has.
+    pub(in crate::planner) fn flat(z_mm: f64, fill: &MultiPolygon<f64>) -> Roof<'static> {
+        let bounds = fill.bounding_rect().unwrap();
+        Roof {
+            z_mm,
+            frame_mm: [
+                [bounds.min().x, bounds.min().y],
+                [bounds.max().x, bounds.max().y],
+            ],
+            ceilings: &[],
+        }
+    }
     fn paths(z: f64, height: f64) -> Vec<DepositionPath> {
         let mut recipe = super::super::super::tests::recipe(0.08);
         recipe.sparse_infill = SparseInfillPolicy::web_roof();
@@ -306,7 +351,10 @@ mod tests {
         recipe.bead_width_mm = 0.45;
         recipe.process.max_bridge_span_mm = 4.0;
         let layer = HatchLayer {
-            roof_z_mm: Some(24.0),
+            roof: Some(flat(
+                24.0,
+                &MultiPolygon(vec![geo::Rect::new([0.0, 0.0], [24.0, 24.0]).to_polygon()]),
+            )),
             width_mm: 0.45,
             z,
             lower_z: z - height,
@@ -387,7 +435,10 @@ mod tests {
         recipe.sparse_infill = SparseInfillPolicy::web_roof();
         recipe.process.max_bridge_span_mm = 1e-12;
         let layer = HatchLayer {
-            roof_z_mm: Some(24.0),
+            roof: Some(flat(
+                24.0,
+                &MultiPolygon(vec![geo::Rect::new([0.0, 0.0], [24.0, 24.0]).to_polygon()]),
+            )),
             width_mm: 0.45,
             z: 24.0,
             lower_z: 23.8,
@@ -457,7 +508,7 @@ mod tests {
             recipe.process.max_bridge_span_mm = 4.;
             for z in [1., 20., 23., 24.] {
                 let layer = HatchLayer {
-                    roof_z_mm: Some(24.),
+                    roof: Some(flat(24., &fill)),
                     width_mm: 0.45,
                     z,
                     lower_z: z - 0.2,

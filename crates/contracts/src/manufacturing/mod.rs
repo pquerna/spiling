@@ -3595,15 +3595,6 @@ impl ManufacturingProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if matches!(
             self.intent.recipe.sparse_infill,
-            SparseInfillPolicy::WebRoof { .. }
-        ) && self.occurrences.len() != 1
-        {
-            return Err(invalid(
-                "web + roof provenance requires exactly one occurrence",
-            ));
-        }
-        if matches!(
-            self.intent.recipe.sparse_infill,
             SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
         ) && (self
             .process_document

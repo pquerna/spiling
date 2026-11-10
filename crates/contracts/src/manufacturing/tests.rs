@@ -4676,6 +4676,8 @@ fn web_roof_domains_are_required_closed_finite_bounded_and_uniquely_owned() {
             outer: vec![[0., 0.], [10., 0.], [10., 5.], [0., 5.], [0., 0.]],
             holes: vec![],
         }],
+        frame_mm: [[0., 0.], [10., 5.]],
+        ceilings: vec![],
     };
     domain.validate().unwrap();
     for attack in 0..5 {

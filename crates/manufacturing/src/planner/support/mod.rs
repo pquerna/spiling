@@ -1538,7 +1538,7 @@ pub(super) fn realize(
                     interface,
                     density,
                     &region::HatchLayer {
-                        roof_z_mm: None,
+                        roof: None,
                         width_mm: recipe.bead_width_mm,
                         z: layer.z_mm,
                         lower_z: layer.lower_z_mm,
@@ -2292,6 +2292,14 @@ fn coalesce_bridge_rows<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    // Grid and Cathedral are whole constructions replayed road for road; their
+    // rows are never joined or extended into bridge rows.
+    if matches!(
+        context.recipe.sparse_infill,
+        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+    ) {
+        return Ok(false);
+    }
     let mut joined = false;
     for axis in [context.axis, context.axis.orthogonal()] {
         let fixed = usize::from(axis == region::HatchAxis::X);
@@ -3729,7 +3737,7 @@ mod tests {
             let mut recipe = crate::planner::tests::recipe(0.1);
             recipe.process.max_bridge_span_mm = limit;
             let layer = region::HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: recipe.bead_width_mm,
                 z: 0.8,
                 lower_z: 0.4,
@@ -3811,7 +3819,7 @@ mod tests {
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 0.8,
             lower_z: 0.4,
@@ -4059,7 +4067,7 @@ mod tests {
                 &[],
                 &required,
                 &region::HatchLayer {
-                    roof_z_mm: None,
+                    roof: None,
                     width_mm: recipe.bead_width_mm,
                     z: 0.8,
                     lower_z: 0.4,
@@ -4121,7 +4129,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let recipe = crate::planner::tests::recipe(0.1);
         let layer = region::HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 0.8,
             lower_z: 0.4,

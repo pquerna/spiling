@@ -72,6 +72,21 @@ fn crossing_intervals(
     Ok(())
 }
 
+/// Required corbel length from `root` toward `limit`: 0.5 mm of growth per
+/// millimetre of rise, complete under every ceiling by that ceiling's height.
+fn closing(root: f64, limit: f64, roof_z: f64, z: f64, lowered: &[[f64; 3]]) -> f64 {
+    let (lo, hi) = (root.min(limit), root.max(limit));
+    let mut need = (hi - lo - 0.5 * (roof_z - z).max(0.0)).max(0.0);
+    for &[a, b, ceiling_z] in lowered {
+        let (a, b) = (a.max(lo), b.min(hi));
+        if b > a {
+            let far = if limit < root { root - a } else { b - root };
+            need = need.max(far - 0.5 * (ceiling_z - z).max(0.0));
+        }
+    }
+    need.min(hi - lo)
+}
+
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
@@ -93,6 +108,9 @@ pub(super) fn verify(
         return Err(failed("web + roof reconstructed pitch is unconditioned"));
     }
     let mut hits = Vec::new();
+    let mut spans = Vec::new();
+    let mut lowered: Vec<[f64; 3]> = Vec::new();
+    let mut frame = None;
     for layer in &plan.layers {
         cancelled(cancel)?;
         let coverage = &layer.region_coverage;
@@ -128,10 +146,14 @@ pub(super) fn verify(
                 .iter()
                 .find(|d| usize::from(d.region_index) == region_index)
                 .ok_or_else(|| failed("web + roof lacks its independent classified domain"))?;
+            let frame = *frame.get_or_insert(domain.frame_mm);
+            if domain.frame_mm != frame {
+                return Err(failed("web + roof lattice frame changes between layers"));
+            }
             let mut area = 0.0;
             for polygon in &domain.extent {
-                let mut min = [f64::INFINITY; 2];
-                let mut max = [f64::NEG_INFINITY; 2];
+                // One declared part-level frame anchors every layer's lattice.
+                let [min, max] = domain.frame_mm;
                 for (ring_index, ring) in std::iter::once(&polygon.outer)
                     .chain(&polygon.holes)
                     .enumerate()
@@ -144,12 +166,6 @@ pub(super) fn verify(
                         let origin = ring[0];
                         twice += (edge[0][0] - origin[0]) * (edge[1][1] - origin[1])
                             - (edge[1][0] - origin[0]) * (edge[0][1] - origin[1]);
-                        if ring_index == 0 {
-                            for axis in 0..2 {
-                                min[axis] = min[axis].min(edge[0][axis]);
-                                max[axis] = max[axis].max(edge[0][axis]);
-                            }
-                        }
                     }
                     area += if ring_index == 0 {
                         twice.abs() * 0.5
@@ -218,9 +234,7 @@ pub(super) fn verify(
                                         .iter()
                                         .any(|v| (seed - v).abs() < recipe.bead_width_mm)
                                     {
-                                        return Err(failed(
-                                            "web + roof reconstructed local root crowds an existing web",
-                                        ));
+                                        continue;
                                     }
                                     if web_coordinates[0].len() + web_coordinates[1].len()
                                         >= MAX_DEPOSITION_SEGMENTS as usize
@@ -301,6 +315,18 @@ pub(super) fn verify(
                             if web_coordinates[fixed].contains(&c) {
                                 continue;
                             }
+                            // Declared lower ceilings crossing this roof row.
+                            lowered.clear();
+                            for ceiling in &domain.ceilings {
+                                for area in &ceiling.extent {
+                                    crossing_intervals(area, fixed, c, &mut spans, work, cancel)?;
+                                    for span in spans.as_chunks::<2>().0 {
+                                        if span[1] - span[0] >= recipe.bead_width_mm {
+                                            lowered.push([span[0], span[1], ceiling.roof_z_mm]);
+                                        }
+                                    }
+                                }
+                            }
                             crossing_intervals(polygon, fixed, c, &mut hits, work, cancel)?;
                             for pair in hits.as_chunks::<2>().0 {
                                 let mut pending: Option<[f64; 2]> = None;
@@ -326,10 +352,10 @@ pub(super) fn verify(
                                         previous_root.map_or(pair[0], |p: f64| (p + root) * 0.5);
                                     let right = next.map_or(pair[1], |p| (p + root) * 0.5);
                                     previous_root = Some(root);
-                                    let retreat = 0.5 * (roof_z - layer.z_mm).max(0.0);
+                                    charge_many(work, lowered.len(), cancel)?;
                                     let interval = [
-                                        root - (root - left - retreat).max(0.0),
-                                        root + (right - root - retreat).max(0.0),
+                                        root - closing(root, left, roof_z, layer.z_mm, &lowered),
+                                        root + closing(root, right, roof_z, layer.z_mm, &lowered),
                                     ];
                                     if interval[1] - interval[0]
                                         < program_coordinates::MIN_DEPOSITION_COMMAND_MM

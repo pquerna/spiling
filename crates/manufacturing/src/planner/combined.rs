@@ -409,7 +409,7 @@ pub(super) fn combine(
                 .map(|p| p.points_mm.len() - 1)
                 .sum();
             let hatch = region::HatchLayer {
-                roof_z_mm: None,
+                roof: None,
                 width_mm: width,
                 z,
                 lower_z,

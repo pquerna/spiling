@@ -10,6 +10,7 @@ mod joins;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
 mod bonds;
+mod cathedral;
 mod combined;
 mod native;
 mod partition;
@@ -1076,11 +1077,17 @@ fn admit_schedule<'model>(
                 "startup wall retained-point overflow",
             )
         })?;
-    let web_roof_z = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+    if matches!(
+        recipe.sparse_infill,
+        SparseInfillPolicy::WebRoof {
+            architecture: Some(_),
+            ..
+        }
+    ) {
         let first = sections.first().ok_or_else(|| {
             error(
                 ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof requires an upright constant-section part",
+                "web + roof study architecture requires an upright constant-section part",
             )
         })?;
         if input.occurrences.len() != 1
@@ -1090,7 +1097,7 @@ fn admit_schedule<'model>(
         {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof currently requires one upright constant-section part",
+                "web + roof study architecture requires one upright constant-section part",
             ));
         }
         let occurrence = &input.occurrences[0];
@@ -1151,17 +1158,24 @@ fn admit_schedule<'model>(
                 ));
             }
         }
-        // The source's actual carrier/pose eligibility and every native slab
-        // remain separate. In particular, an endpoint collar is not reclassified
-        // as invariant merely because its rectangular footprint matches.
-        // Complete the crown one nominal interval before the physical top-skin
-        // horizon. Refinement may add intervals; it cannot defer this target.
-        Some(
-            (schedule.last().expect("nonempty schedule").z
-                - recipe.top_skin_thickness_mm
-                - recipe.layer_height_mm)
-                .max(input.intent.printer.build_envelope.min[2]),
-        )
+    }
+    // Cathedral on any part: one lattice frame and each layer's ceilings.
+    let web_roof = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+        let covered = sections.last().map_or(0, |span| span.end as usize);
+        let materials: Vec<&Arc<MultiPolygon<f64>>> = (0..schedule.len().min(covered))
+            .map(|index| &sections[span_at(&sections, index as u32)].material)
+            .collect();
+        let tops: Vec<f64> = schedule[..materials.len()]
+            .iter()
+            .map(|layer| layer.z)
+            .collect();
+        Some(cathedral::field(
+            &materials,
+            &tops,
+            recipe,
+            input.intent.printer.build_envelope.min[2],
+            cancel,
+        )?)
     } else {
         None
     };
@@ -1695,7 +1709,7 @@ fn admit_schedule<'model>(
                 &templates,
             )?;
             let hatch_layer = region::HatchLayer {
-                roof_z_mm: web_roof_z,
+                roof: web_roof.as_ref().map(|field| field.roof(index as usize)),
                 width_mm: recipe.bead_width_mm,
                 z,
                 lower_z: elevation.lower_z,
@@ -1766,7 +1780,7 @@ fn admit_schedule<'model>(
                     axis,
                     top_axis,
                     recipe,
-                    web_roof_z,
+                    web_roof.as_ref().map(|field| field.roof(index as usize)),
                     phase,
                     classified_owned_bytes,
                     &sections[current].process_domains,
@@ -1929,6 +1943,9 @@ fn admit_schedule<'model>(
             coverage.source_section_area_mm2 = sections[current].source_area_mm2;
             coverage.surface_added_area_mm2 =
                 coverage.section_area_mm2 - coverage.source_section_area_mm2;
+            if let Some(field) = &web_roof {
+                field.stamp(index as usize, &mut coverage.web_roof_domains);
+            }
             layers.push(PrintLayer {
                 skin_command_fits,
                 index,
@@ -2156,7 +2173,7 @@ fn admit_schedule<'model>(
                     )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
-                        roof_z_mm: web_roof_z,
+                        roof: web_roof.as_ref().map(|field| field.roof(index as usize)),
                         width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
@@ -2222,7 +2239,7 @@ fn admit_schedule<'model>(
                             axis,
                             region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
                             recipe,
-                            web_roof_z,
+                            web_roof.as_ref().map(|field| field.roof(index as usize)),
                             phase_by_layer[index],
                             classified_bytes,
                             &sections[current].process_domains,

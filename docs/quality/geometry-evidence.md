@@ -839,18 +839,24 @@ the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
 
-Current support (planner 77): 12 of the 30 parts compile and complete the
+Current support (planner 78): 12 of the 30 parts compile and complete the
 source-absent reopen, fresh verify and export; PrusaSlicer slices 25. All 12
 take the ADR012 tolerant path, because exact certification still refuses
-every corpus part. Their deposition segment counts fall within roughly 0.65-1.45x
-PrusaSlicer's `G1` line counts at matched settings. Of the 13 parts that
-import, one (`25`) refuses on a section thinner than any admitted bead, and
-PrusaSlicer also fails on it. Seventeen still refuse at import (single-solid
-assembly wrappers, multi-body parts, multi-part assemblies, AP242 or long AP203
-schema names); import packaging is now the binding limit.
-`SPILING_CORPUS_INFILL=cathedral` runs the same parts with `web_roof` infill;
-it refuses all of them, because Cathedral needs one upright constant-section
-part.
+every corpus part. Of the 13 parts that import, one (`25`) refuses on a section
+thinner than any admitted bead, and PrusaSlicer also fails on it. Seventeen
+still refuse at import (single-solid assembly wrappers, multi-body parts,
+multi-part assemblies, AP242 or long AP203 schema names); import packaging is
+the binding limit.
+
+`SPILING_CORPUS_INFILL=cathedral` runs the same parts with Cathedral infill and
+`SPILING_CORPUS_FRACTION` sets the infill fraction (default 0.15). The same 12
+parts pass with Cathedral at 15% and at 8%, where corbels are active, using
+filament within about 7% of rectilinear at 15%. Each record also carries
+filament length, the count of layers reporting an unsupported span and the
+count of layers with a Cathedral ceiling. Cathedral reports more such layers
+than rectilinear on some parts, because rectilinear re-hatches skins over
+sparse interior into anchored bridge rows and Cathedral keeps its construction
+as built.
 
 ## Minimal user flows
 

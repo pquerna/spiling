@@ -929,7 +929,17 @@ export type PlanarRegionCoverage = { section_area_mm2: number, source_section_ar
  */
 unsupported_overhang_mm: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
 
-export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>, };
+export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>,
+/**
+ * Part-level XY bounds `[min, max]` that anchor the web lattice on every
+ * layer, so webs stack vertically through changing sections.
+ */
+frame_mm: [[number, number], [number, number]],
+/**
+ * Areas whose ceiling is lower than the part's top roof horizon, each with
+ * the height its corbels must close by.
+ */
+ceilings: Array<WebRoofCeiling>, };
 
 export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage,
 /**

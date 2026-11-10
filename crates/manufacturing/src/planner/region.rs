@@ -746,9 +746,27 @@ impl HatchAxis {
     }
 }
 
+/// Material that ends above a layer, with the height its corbels close by.
+#[derive(Debug)]
+pub(super) struct Ceiling {
+    pub roof_z_mm: f64,
+    pub area: MultiPolygon<f64>,
+}
+
+/// Cathedral construction inputs for one layer.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Roof<'a> {
+    /// Last physical web interval before the part's top roof skin.
+    pub z_mm: f64,
+    /// Part-level XY bounds `[min, max]` anchoring the web lattice.
+    pub frame_mm: [[f64; 2]; 2],
+    /// Lower ceilings above this layer, within the corbel growth horizon.
+    pub ceilings: &'a [Ceiling],
+}
+
 pub(super) struct HatchLayer<'a> {
-    /// Last physical web interval needed before the first mandatory roof skin.
-    pub roof_z_mm: Option<f64>,
+    /// Cathedral roof horizon, lattice frame and local ceilings.
+    pub roof: Option<Roof<'a>>,
     /// Actual proposed hatch width, independent of wall/skin recipe defaults.
     pub width_mm: f64,
     pub z: f64,
@@ -1488,7 +1506,7 @@ fn optional_support_rows_omit_uncommandable_proposals_but_preserve_required_skin
     let recipe = super::tests::recipe(1.0);
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: recipe.layer_height_mm,
             lower_z: 0.0,
@@ -1549,7 +1567,7 @@ fn ordinary_quarter_hatch_preserves_each_polygon_cadence_and_authored_origins() 
     let recipe = super::tests::recipe(0.5);
     let cancel = AtomicBool::new(false);
     let layer = HatchLayer {
-        roof_z_mm: None,
+        roof: None,
         width_mm: recipe.bead_width_mm,
         z: recipe.layer_height_mm,
         lower_z: 0.0,
@@ -1718,7 +1736,7 @@ fn zero_fraction_has_no_rows_for_centered_alternate_or_transported_phases() {
     );
     for axis in [HatchAxis::X, HatchAxis::Y] {
         let layer = HatchLayer {
-            roof_z_mm: None,
+            roof: None,
             width_mm: recipe.bead_width_mm,
             z: 0.2,
             lower_z: 0.0,

@@ -106,7 +106,11 @@ mod tests {
         .unwrap()
         .recipe;
         let layer = HatchLayer {
-            roof_z_mm: Some(48.),
+            roof: Some(Roof {
+                z_mm: 48.,
+                frame_mm: [[0., 0.], [48., 48.]],
+                ceilings: &[],
+            }),
             width_mm: width,
             z,
             lower_z: z - 0.2,
