@@ -819,6 +819,34 @@ standalone default test profile on both the patched snapshot and unpatched base.
 Do not suppress this regression or infer general revolution admission from the
 passing conformance corpus and narrower native workflows.
 
+## Realistic-part corpus
+
+`tools/realistic-corpus/` measures what happens to real printed-part STEP
+exports, not authored fixtures. `manifest.json` pins 30 files from the
+VoronUsers community repository by commit and SHA-256; they are third-party
+GPL-3.0 parts, fetched into an ignored cache and never committed.
+
+```sh
+python3 tools/realistic-corpus/fetch.py .cache/realistic-corpus
+cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
+python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling \
+  fixtures/manufacturing/complete-sparse.intent.json
+```
+
+Each part goes through the real CLI as an operator would: create, import,
+center on the bed, compile at 0.2 mm layers and 15% infill, save; then remove
+the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
+same STEP with matched settings as the printability reference. Results record
+the refusing stage and code, wall time and sampled engine peak RSS per part.
+
+Current support (planner 75): none of the 30 parts compile; PrusaSlicer slices 25. Seventeen refuse at import (single-solid assembly wrappers, multi-body
+parts, multi-part assemblies, AP242 or long AP203 schema names); the rest
+refuse at exact native certification (chart correspondence, indeterminate
+slabs, near-coincident layer events). Re-exporting the import-refused solids
+individually through OCCT does not change the outcome: those 18 solids also
+refuse at certification while PrusaSlicer slices 17. Import packaging is not
+the binding limit for ordinary parts; exact certification is.
+
 ## Minimal user flows
 
 Build the coordinated engine and client together, then run from the repository

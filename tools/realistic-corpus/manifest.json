@@ -1,0 +1,188 @@
+{
+  "repository": "VoronDesign/VoronUsers",
+  "commit": "8e5067f4f6457da8a552983dd210ec48c40be2ca",
+  "license": "GPL-3.0 (third-party; fetched, never committed)",
+  "selection": "STEP/STP files under 6 MB sorted by size, every 18th, first 30",
+  "parts": [
+    {
+      "file": "00-canable_pro_clip.step",
+      "path": "printer_mods/reapola/MKS_CANable_Pro_mount/CAD/canable_pro_clip.step",
+      "sha256": "1694681f51edd250b8a873302fb223b7e1ffa1893bcf28aaac93aacf66f3bc2c",
+      "bytes": 3415
+    },
+    {
+      "file": "01-300_top_skirt_270.stp",
+      "path": "printer_mods/Printopal/Magnetic_top_panel/STEP/300_top_skirt_270.stp",
+      "sha256": "a66ff7369e804c7dbf362262dd677caa0b5d56673fd02bc92d3aabd7d371e236",
+      "bytes": 31525
+    },
+    {
+      "file": "02-Rear_Cover_120+.step",
+      "path": "printer_mods/chri.kai.in/Angry_CAM_USB/CAD/Rear_Cover_120+.step",
+      "sha256": "fe5742508da7bc3dc0e214724a3cdcfe37bab5e03eb2cf07029f65bf9fdd0f89",
+      "bytes": 41562
+    },
+    {
+      "file": "03-HOYMK_SSR_Mount_B.step",
+      "path": "printer_mods/xbst_/HOYMK_SSR_Mount/CAD/HOYMK_SSR_Mount_B.step",
+      "sha256": "772843e7883522ff8c91f6a8d9e98487313207a2739cd1b935cf0d20afd51f43",
+      "bytes": 55383
+    },
+    {
+      "file": "04-wile.e-deck_panel_support_upper.stp",
+      "path": "printer_mods/wile-e1/Deck_Panel_Support_Clips/wile.e-deck_panel_support_upper.stp",
+      "sha256": "61b1b9d1fb82d28fe326791c35927f0609782b8350d52f605c9a7413082903fa",
+      "bytes": 69890
+    },
+    {
+      "file": "05-z_carriage_stop_pass_through.stp",
+      "path": "printer_mods/gen2eng/z_carriage_stop_pass_through/z_carriage_stop_pass_through.stp",
+      "sha256": "4bc2201f471eb8d12630d959f31ab26417a31484072c6b86432e0f13a5073120",
+      "bytes": 81965
+    },
+    {
+      "file": "06-1515_SnapIn_ZipTie_LDO.step",
+      "path": "printer_mods/BlueBear/Ziptie_Mount/1515_SnapIn_ZipTie_LDO.step",
+      "sha256": "b9b4e5faf1e14e97dcf853423323ec1cc974cf73ffd7c09e0b98b5602be3160f",
+      "bytes": 100384
+    },
+    {
+      "file": "07-WAGO_221-412_3x2-mount.step",
+      "path": "printer_mods/BlueBear/Wago_221_mount/WAGO_221-412_3x2-mount.step",
+      "sha256": "ebb919b13177666feabda2de6c1dcbffb037c6eb7220d7fa96df3f87eaac3e4e",
+      "bytes": 115822
+    },
+    {
+      "file": "08-Scrubby.STEP",
+      "path": "printer_mods/LJ/Scrubby/Scrubby.STEP",
+      "sha256": "702e5a1d202d23c41e311b52bb01621607dd2707a681d6b4703f956c4f004bac",
+      "bytes": 137973
+    },
+    {
+      "file": "09-slider.stp",
+      "path": "printer_mods/AVieira/Universal_Phone_Mount/CAD/slider.stp",
+      "sha256": "8ede7689d2270ce2ae073bdb47bc7cf7c7366cfe275b01092f388f457921e33f",
+      "bytes": 155403
+    },
+    {
+      "file": "10-STM32_Klipper_Expander_v5.step",
+      "path": "printer_mods/Hobson318/Klipper_Expander_Mount/STM32_Klipper_Expander_v5.step",
+      "sha256": "13662be468a6c6ebdd955d67a7699798752702824a216fa92d30668f2916d1df",
+      "bytes": 180195
+    },
+    {
+      "file": "11-Indicator_Mount.STEP",
+      "path": "legacy_printers/printer_mods/PhilLeMint/Indicator_Mount/Indicator_Mount.STEP",
+      "sha256": "cb2663d38dd5ca1e5d5a6c975c5bc12448d3b8635493c1cf6745690aad9a5b5c",
+      "bytes": 207647
+    },
+    {
+      "file": "12-10x11_Chain_Bottom_Anchor.step",
+      "path": "legacy_printers/printer_mods/manfre/cable_chains/10x11_Chain_Bottom_Anchor.step",
+      "sha256": "c1fc876ce3fe87f1be37298fdb7912a3dfbd2a2a5677f0c1190e98a4b653cefd",
+      "bytes": 231526
+    },
+    {
+      "file": "13-Deck_Panel_no_Logo.step",
+      "path": "printer_mods/Kruppes/Deck_Panel_inserts_logo/Deck_Panel_no_Logo.step",
+      "sha256": "399d97cda5b5c6841fdf31113f00c30dba5b1bc0c500fce047e5997964d1570c",
+      "bytes": 254248
+    },
+    {
+      "file": "14-6-pin_microfit_skirt_insert.step",
+      "path": "printer_mods/StvPtrsn/Parts_Jigs_and_Mods/Parts/6-pin_microfit_skirt_insert.step",
+      "sha256": "001a92c63b4a52ab4410e27afe3f0e5b3cb8387c83d5dc186c6c434de4626ebd",
+      "bytes": 278631
+    },
+    {
+      "file": "15-Deck_Panel_with_Logo.step",
+      "path": "printer_mods/Kruppes/Deck_Panel_inserts_logo/Deck_Panel_with_Logo.step",
+      "sha256": "068dfb40862f9cd4614407cd755008925dc81e4c301249b2786b6b84edbad401",
+      "bytes": 315673
+    },
+    {
+      "file": "16-V0_reverse_bowden_mount.step",
+      "path": "printer_mods/KiloQubit/V0_reverse_bowden_mount/V0_reverse_bowden_mount.step",
+      "sha256": "f1f965eb7ad47e2b4e13ef2651965de4a42bdb672e450ced0858ed8da9373dfd",
+      "bytes": 353302
+    },
+    {
+      "file": "17-cable_routing_z_belt_cover_b_mod_rail_notch_v2.2.step",
+      "path": "printer_mods/Akio/cable_routing_z_belt_cover/cad/cable_routing_z_belt_cover_b_mod_rail_notch_v2.2.step",
+      "sha256": "ba1102bc88cd026f6a39f3515014dfe58c49d3f9f53d85c6b68e23ae8bb729c2",
+      "bytes": 391617
+    },
+    {
+      "file": "18-Bowden_Guide.step",
+      "path": "printer_mods/Galvanic/Bowden_Tube_Guide/CAD/Bowden_Guide.step",
+      "sha256": "fea2e3c842201e21197a46b2278431f0e928f4bf3b32e8b5607f56a2c74deaf6",
+      "bytes": 448639
+    },
+    {
+      "file": "19-side_skirt_ab_320_x2.step",
+      "path": "printer_mods/StvPtrsn/320mm_Build/CAD/side_skirt_ab_320_x2.step",
+      "sha256": "3387c7d0b9c70de9f3056d46468fbddafc560242601a422c362a0f6ccca6abbb",
+      "bytes": 511833
+    },
+    {
+      "file": "20-Voron_SwitchWire_Connector_cover_LDO-42STH20-1004AS2.stp",
+      "path": "printer_mods/hhammarstrand/afterburner_connector_cover_42STH20-1004AS/STEP/Voron_SwitchWire_Connector_cover_LDO-42STH20-1004AS2.stp",
+      "sha256": "2d18fcefcec0041dc1ca504941b4f3c517c30d0e99dd0b031a9724f93e16db7f",
+      "bytes": 584937
+    },
+    {
+      "file": "21-spool_holder_base_side.step",
+      "path": "printer_mods/StvPtrsn/Parts_Jigs_and_Mods/Mods/Switchwire/spool_holder_base_side.step",
+      "sha256": "057d303de0a1d3134bcb9c82f9a791a89bb3fd38380728d25865cdf40dcd6c52",
+      "bytes": 684167
+    },
+    {
+      "file": "22-Monster8_DIN_clip.step",
+      "path": "printer_mods/clee/Monster8_heatsert_mount/Monster8_DIN_clip.step",
+      "sha256": "69b7f8218d2efdc741c91333719ed7b98c763d2bf3c9f1272a7cf38b23bee00c",
+      "bytes": 759999
+    },
+    {
+      "file": "23-LCD_Front_holes.STEP",
+      "path": "printer_mods/mjoaris/Mini12864_LCD_Mount_for_V2.4/CAD/Alternative_base_(No_Heatset_Inserts)/LCD_Front_holes.STEP",
+      "sha256": "dae5781428785d53e76aa33ecbd67f9efda4e57ddf8c93a5c7ac33e0805cc907",
+      "bytes": 975597
+    },
+    {
+      "file": "24-dti-mount.step",
+      "path": "printer_mods/arkeet/dti-mount/dti-mount.step",
+      "sha256": "77aaf1eb1038564fe2d2f557ac93d2745791127fe03fb065f1a068745f5bf549",
+      "bytes": 1204706
+    },
+    {
+      "file": "25-4.3_fly_screen_mount.STEP",
+      "path": "printer_mods/jaysuk/4.3_fly_screen_mount/CAD/4.3_fly_screen_mount.STEP",
+      "sha256": "6b1acdedcb801896ff2934c077a5fe3d72212f1b6ec67c915bba20c791b8bab2",
+      "bytes": 1470609
+    },
+    {
+      "file": "26-front_skirt_b_250.stp",
+      "path": "legacy_printers/printer_mods/schlank/minima/step/front_skirt_b_250.stp",
+      "sha256": "11b111d9a2b4ce12378b4b09d6e2419a19331c4251d8924160b1d4319116f32d",
+      "bytes": 1825990
+    },
+    {
+      "file": "27-V2_SexBolt_Z_Endstop.step",
+      "path": "printer_mods/hartk1213/Voron2.4_SexBolt_ZEndstop/CAD/V2_SexBolt_Z_Endstop.step",
+      "sha256": "e3588b108755d2260aaf33f8500cec5f1a04f1b3a6656cc493c17f1c5f9f08b5",
+      "bytes": 2507162
+    },
+    {
+      "file": "28-RunoutUnKlicky.step",
+      "path": "printer_mods/chirpy/RunoutUnklicky/CAD/RunoutUnKlicky.step",
+      "sha256": "1d8cd6f55effc603a33508d2e00277053c77a7b8e81dd657749918502e8c2e23",
+      "bytes": 3093756
+    },
+    {
+      "file": "29-10x11-chain-endcap1_nosupport.STEP",
+      "path": "printer_mods/mjoaris/10x11_Cable_Chain_Endcaps/CAD/10x11-chain-endcap1_nosupport.STEP",
+      "sha256": "58d8b24c3df4045ff5b0c7b44d31c5807b765162a7fb3242d644db3d74bfcb21",
+      "bytes": 3649696
+    }
+  ]
+}

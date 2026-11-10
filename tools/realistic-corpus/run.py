@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+"""Realistic-corpus journey: each STEP through the real Spiling CLI and PrusaSlicer.
+
+Spiling: create + import + intent + center-on-bed + compile + save, then
+source-absent read-only reopen + verify + export. PrusaSlicer: slice the same
+STEP with matched layer height and infill as the printability reference.
+Usage: run.py CORPUS_DIR BIN_DIR INTENT_JSON [RESULTS] [PART_PREFIX...]
+CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
+Writes one JSON record per part to results.ndjson. Standard library only.
+"""
+import json, os, re, shutil, subprocess, sys, time, hashlib
+
+ROOT = os.path.abspath(sys.argv[1])
+R = sys.argv[2]  # directory holding spiling-cli and spiling-engine
+INTENT_SRC = sys.argv[3]
+OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
+ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
+TIMEOUT = 900
+WORK = os.path.join(ROOT, "work")
+
+
+def intent_file():
+    d = json.load(open(INTENT_SRC))
+    d["recipe"]["infill_fraction"] = 0.15
+    d["recipe"]["layer_height_mm"] = 0.2
+    d["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
+    path = os.path.join(WORK, "intent.json")
+    json.dump(d, open(path, "w"))
+    return path
+
+
+def engine_peak(proc):
+    peak = 0
+    while proc.poll() is None:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                if open(f"/proc/{pid}/comm").read().strip() != "spiling-engine":
+                    continue
+                if int(open(f"/proc/{pid}/stat").read().split()[3]) != proc.pid:
+                    continue
+                for line in open(f"/proc/{pid}/status"):
+                    if line.startswith("VmHWM:"):
+                        peak = max(peak, int(line.split()[1]))
+            except OSError:
+                pass
+        time.sleep(0.2)
+    return peak // 1024
+
+
+def run_cli(args, cwd):
+    started = time.time()
+    err_path = os.path.join(cwd, "stderr.txt")
+    with open(os.path.join(cwd, "stdout.json"), "w") as out, open(err_path, "w") as err:
+        proc = subprocess.Popen(
+            [os.path.join(R, "spiling-cli"), "project", *args, "--engine", os.path.join(R, "spiling-engine")],
+            cwd=cwd, stdout=out, stderr=err)
+        try:
+            peak = engine_peak(proc)
+            proc.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return {"ok": False, "seconds": TIMEOUT, "error": {"code": "timeout"}}
+    failure = None
+    for line in open(err_path):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("level") == "error":
+            failure = {"code": (record.get("error") or {}).get("code") or record.get("event"),
+                       "domain": record.get("domain"),
+                       "message": (record.get("error") or {}).get("message") or record.get("message")}
+    return {"ok": proc.returncode == 0, "seconds": round(time.time() - started, 2),
+            "engine_mib": peak, "error": failure}
+
+
+def prusa(step, cwd):
+    started = time.time()
+    gcode = os.path.join(cwd, "prusa.gcode")
+    try:
+        proc = subprocess.run(["prusa-slicer", "--export-gcode", "--layer-height", "0.2",
+                               "--fill-density", "15%", "--center", "110,110", "-o", gcode, step],
+                              cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "seconds": TIMEOUT}
+    ok = proc.returncode == 0 and os.path.exists(gcode)
+    info = {"ok": ok, "seconds": round(time.time() - started, 2)}
+    if ok:
+        info["g1_lines"] = sum(1 for l in open(gcode) if l.startswith("G1 "))
+    else:
+        info["message"] = (proc.stderr or proc.stdout)[-300:]
+    return info
+
+
+def main():
+    os.makedirs(WORK, exist_ok=True)
+    intent = intent_file()
+    steps = sorted(os.listdir(os.path.join(ROOT, "step")))
+    if ONLY:
+        steps = [s for s in steps if any(s.startswith(o) for o in ONLY)]
+    with open(OUT, "a") as results:
+        for name in steps:
+            src = os.path.join(ROOT, "step", name)
+            cwd = os.path.join(WORK, name)
+            shutil.rmtree(cwd, ignore_errors=True)
+            os.makedirs(cwd)
+            local = os.path.join(cwd, "source.step")
+            shutil.copy(src, local)
+            record = {"part": name, "bytes": os.path.getsize(src),
+                      "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
+            record["prusa"] = prusa(local, cwd)
+            create = run_cli(["create", "p.spil", "--import", "source.step", "--intent", intent,
+                              "--center-on-bed", "1", "--compile", "--save"], cwd)
+            record["spiling_compile"] = create
+            if create["ok"]:
+                os.remove(local)
+                ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
+                record["spiling_return"] = ret
+                if ret["ok"]:
+                    stdout = open(os.path.join(cwd, "stdout.json")).read()
+                    m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
+                    record["deposition_segments"] = int(m.group(1)) if m else None
+            results.write(json.dumps(record) + "\n")
+            results.flush()
+            c = record["spiling_compile"]
+            print(name, "prusa", record["prusa"]["ok"], "| spiling", c["ok"],
+                  (c["error"] or {}).get("code"), "| return", (record.get("spiling_return") or {}).get("ok"),
+                  flush=True)
+
+
+main()
