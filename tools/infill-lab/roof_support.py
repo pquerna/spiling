@@ -194,7 +194,7 @@ def trial(root, name, policy, parent, hypothesis, split):
         run(["cargo", "build", "--locked", "-p", "spiling-manufacturing", "--example", "roof_support", "--features", "roof-research"], timeout=240, output=folder / "build")
         target = Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target")) / "debug/examples/roof_support"
         binary = folder / "roof_support"
-        shutil.copyfile(target, binary)
+        shutil.copy2(target, binary)
         write(folder / "policy.json", policy)
         for case, item in frozen["contexts"].items():
             if item["split"] != split:
