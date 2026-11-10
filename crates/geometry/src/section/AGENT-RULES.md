@@ -6,6 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Native planar section rules
 
+[ADR012](../../../../docs/adr/012-tolerant-brep-curves-and-feature-heights.md) governs acceptance: sections are admitted within the recorded join and profile tolerances and checked for closure, simplicity and nesting. The rules below describe the exact path, which now supplies the optional "certified" mark rather than a gate; rewrite each rule here as its tolerant replacement lands.
+
 Own direct definition-local SolidCore BREP sections and immutable certificates. Borrow the one millimetre-scaled BREP; source unit scale is provenance, not another conversion. No clipping solid, Boolean, display mesh, fitted curve, family label or tolerance supplies section authority.
 
 Evaluate literal stored charts. Native NURBS UV is not the original STEP angular law. Trims retain original edgeuse associations and native edge direction; map only declared normalized fractions. Prove whole spatial/chart correspondence. Intersect an overestimated UV range with the active chart only after homogeneous coefficient containment; never borrow a seam or guess a period.

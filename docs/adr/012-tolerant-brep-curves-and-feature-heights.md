@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Tolerant BREP slicing, curved toolpaths and feature-first heights
 
-Status: proposed. Amends [ADR005](ADR005-native-first-development-geometry.md)
+Status: accepted. Amends [ADR005](ADR005-native-first-development-geometry.md)
 and [ADR008](008-construction-goals.md) on acceptance, not authority: the one
 imported SolidCore BREP stays the only material source. What changes is how we
 decide a slice is good enough to print.
@@ -112,6 +112,21 @@ height bounds the layer, so no section is taken through a degenerate plane.
 - The verifier decodes `G2`/`G3`, checks the endpoint against the plan on the
   output lattice, checks that the centre is equidistant from both endpoints
   within the lattice error, and computes extrusion from arc length.
+
+### What other slicers do
+
+PrusaSlicer (`arc_fitting`), Bambu Studio and OrcaSlicer (`enable_arc_fitting`)
+all emit `G2`/`G3` by fitting arcs afterwards to polylines sliced from a mesh,
+with the G-code resolution as tolerance. All default to off in code; Prusa's
+own MK3, MK3.5, MK4, XL and MINI profiles turn it on, Bambu Studio's common
+profile leaves it off, and OrcaSlicer's Bambu profile turns it on. OrcaSlicer
+recommends off for Klipper, which splits arcs back into segments. Firmware
+subdivides arcs into short segments in any case, so the benefit is smoother,
+more compact motion, not a different surface.
+
+Spiling derives arcs from exact BREP circles instead of refitting triangle
+edges. Arc emission follows the selected printer: on for Prusa- and
+Marlin-class firmware that declares arc support, off by default for Klipper.
 
 ## Consequences
 

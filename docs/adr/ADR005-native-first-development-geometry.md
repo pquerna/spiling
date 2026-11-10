@@ -7,6 +7,10 @@ Licensed under the Open Software License version 3.0
 # ADR005: native-first DEVELOPMENT geometry
 
 Status: **adopted; native-first material implementation, producer-specific qualification**.
+Acceptance is amended by [ADR012](012-tolerant-brep-curves-and-feature-heights.md):
+the imported BREP stays the only material authority, but results are admitted
+by one recorded tolerance policy and checked guarantees rather than exact
+proof, and exact certification becomes an optional mark.
 This decision supersedes ADR004's custom original-source material reconstruction
 requirements. It does not broaden supported STEP, finishes, processes or machines,
 or establish complete operator qualification merely from implementation.
@@ -46,9 +50,10 @@ relaxation behind a query API.
 Unsupported, indeterminate, ill-conditioned and invalid operations refuse
 explicitly. Keep cumulative work, live-byte admission and cancellation through
 native calls and derived output. A native method's name, successful import or
-finite sample is not evidence of its required behavior. There is no mesh slicing
-fallback, alternate material path, or inference of physical support from native
-occupancy. Actual prior deposited strokes remain software anchor evidence.
+finite sample is not evidence of its required behavior. There is no whole-part
+mesh slicing path, alternate material source, or inference of physical support
+from native occupancy; per ADR012 a single face may use its own tessellation
+when its intersection cannot be traced, reported per layer. Actual prior deposited strokes remain software anchor evidence.
 
 ## Why this boundary
 
