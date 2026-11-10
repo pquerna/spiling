@@ -171,7 +171,16 @@ pub(super) fn certify(
                 owner_bytes,
                 work,
                 cancel,
-            )?;
+            )
+            .map_err(|cause| {
+                GeometryError::new(
+                    cause.code,
+                    format!(
+                        "original display spatial trim {:?}: {}",
+                        record.interval, cause.message
+                    ),
+                )
+            })?;
             let uv_partition = uv_curve
                 .map(|curve| {
                     let domain = curve.natural_interval();
@@ -183,6 +192,12 @@ pub(super) fn certify(
                         work,
                         cancel,
                     )
+                    .map_err(|cause| {
+                        GeometryError::new(
+                            cause.code,
+                            format!("original display UV trim {domain:?}: {}", cause.message),
+                        )
+                    })
                 })
                 .transpose()?;
             for index in 0..poly.params.len() - 1 {
@@ -340,9 +355,11 @@ pub(super) fn certify(
         .filter(|edge| edge.source_loop == usize::MAX)
         .count();
     if source_count != source.len() {
-        return Err(invalid(
-            "native display omitted an original trim segment or loop",
-        ));
+        return Err(invalid(format!(
+            "native display omitted an original trim segment or loop: boundary_segments={source_count} original_segments={} total_boundary_segments={}",
+            source.len(),
+            boundary.len(),
+        )));
     }
     let shared_key = |edge: &Boundary| -> Result<[u32; 2], GeometryError> {
         let a = inventory.shared(mesh, edge.a).ok_or_else(|| {
@@ -993,11 +1010,7 @@ fn bounded_uv(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
-    let natural = surface.natural_uv_domain_if_built();
-    let domain = [
-        [natural.u_min(), natural.u_max()],
-        [natural.v_min(), natural.v_max()],
-    ];
+    let domain = parametric::surface_active_domain(surface)?;
     let proposed = [
         [position[0].lo, position[0].hi],
         [position[1].lo, position[1].hi],
@@ -1027,6 +1040,63 @@ mod tests {
     fn native_curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>) -> Curve {
         let raw = crv_basic::Curve::new(points, degree, knots).unwrap();
         BSplineCurve::from_nurb(raw, 3, true).into()
+    }
+
+    #[test]
+    fn lifted_trim_containment_uses_active_knots_not_exterior_support() {
+        use solidcore::{
+            nurbs::{b_spline_surface::BSplineSurface, srf_basic},
+            surface::surface::p2::SurfaceKind,
+        };
+        let raw = srf_basic::Surface::new(
+            vec![
+                vec![
+                    CPoint::new(0.0, 0.0, 0.0, 1.0),
+                    CPoint::new(0.0, 1.0, 0.0, 1.0),
+                ],
+                vec![
+                    CPoint::new(1.0, 0.0, 0.0, 1.0),
+                    CPoint::new(1.0, 1.0, 0.0, 1.0),
+                ],
+            ],
+            1,
+            1,
+            vec![-1.0, 0.0, 1.0, 2.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+        let cancel = AtomicBool::new(false);
+        for end in [1.0, 1.1] {
+            let chart = native_curve(
+                vec![
+                    CPoint::new(0.0, 0.5, 0.0, 1.0),
+                    CPoint::new(end, 0.5, 0.0, 1.0),
+                ],
+                1,
+                vec![0.0, 0.0, 1.0, 1.0],
+            );
+            let result = bounded_uv(
+                &chart,
+                [0.0, 1.0],
+                &surface,
+                [
+                    Interval::new(-0.1, 1.2).unwrap(),
+                    Interval::point(0.5),
+                    Interval::point(0.0),
+                ],
+                &mut GeometryWorkBudget::query(),
+                &cancel,
+            );
+            if end == 1.0 {
+                assert_eq!(result.unwrap(), [[0.0, 1.0], [0.5, 0.5]]);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    GeometryErrorCode::ConditioningFailure
+                );
+            }
+        }
     }
 
     fn bound(curve: &Curve, range: [f64; 2], chord: [[f64; 3]; 2]) -> Result<f64, GeometryError> {

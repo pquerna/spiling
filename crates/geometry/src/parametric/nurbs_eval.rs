@@ -552,6 +552,17 @@ pub(super) fn evaluate_nurbs_surface_tensor(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SurfaceTensor, GeometryError> {
+    evaluate_nurbs_surface_tensor_about(surface, uv, order, None, work, cancel)
+}
+
+pub(super) fn evaluate_nurbs_surface_tensor_about(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    order: usize,
+    origin: Option<[f64; 3]>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SurfaceTensor, GeometryError> {
     if order > 3 {
         return Err(conditioning("surface derivative order exceeds three"));
     }
@@ -589,15 +600,17 @@ pub(super) fn evaluate_nurbs_surface_tensor(
             let anchor_w = if rational { anchor.w } else { 1.0 };
             // Any finite binary64 constant is a valid recentering origin.
             // A zero anchor weight does not imply a zero curve denominator.
-            let origin = if anchor_w != 0.0 {
-                [
-                    anchor.x / anchor_w,
-                    anchor.y / anchor_w,
-                    anchor.z / anchor_w,
-                ]
-            } else {
-                [0.0; 3]
-            };
+            let origin = origin.unwrap_or_else(|| {
+                if anchor_w != 0.0 {
+                    [
+                        anchor.x / anchor_w,
+                        anchor.y / anchor_w,
+                        anchor.z / anchor_w,
+                    ]
+                } else {
+                    [0.0; 3]
+                }
+            });
             for v in origin {
                 Interval::new(v, v)?;
             }

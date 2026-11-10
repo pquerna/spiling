@@ -155,22 +155,24 @@ pub(super) fn inventory(
         locals: Vec::new(),
         carrier_error: 0.0,
     };
+    let outside = outside.saturating_add(parametric::display_collapse::SCRATCH_BYTES);
+    super::check_memory(outside)?;
     let natural = surface.natural_uv_domain_if_built();
-    let polar = parametric::analytic_eval::collapsed_step_sphere_position(
-        surface,
-        natural.v_min(),
-        work,
-        cancel,
-    )?
-    .is_some()
-        || parametric::analytic_eval::collapsed_step_sphere_position(
+    let rows = [
+        parametric::display_collapse::collapsed_row_position(
+            surface,
+            natural.v_min(),
+            work,
+            cancel,
+        )?,
+        parametric::display_collapse::collapsed_row_position(
             surface,
             natural.v_max(),
             work,
             cancel,
-        )?
-        .is_some();
-    if !polar {
+        )?,
+    ];
+    if rows.iter().all(Option::is_none) {
         return Ok(result);
     }
     super::check_memory(
@@ -263,19 +265,16 @@ pub(super) fn inventory(
             }
             let natural = surface.natural_uv_domain_if_built();
             let mut selected = None;
-            for v in [natural.v_min(), natural.v_max()] {
-                if parametric::analytic_eval::collapsed_step_sphere_position(
-                    surface, v, work, cancel,
-                )?
-                .is_some()
+            for (v, collapsed) in [natural.v_min(), natural.v_max()].into_iter().zip(rows) {
+                if let Some(collapsed) = collapsed
                     && parametric::curve_endpoint_coordinate_equal(ac, at, 1, v, work, cancel)?
                     && parametric::curve_endpoint_coordinate_equal(bc, bt, 1, v, work, cancel)?
                 {
-                    selected = Some(v);
+                    selected = Some((v, collapsed));
                     break;
                 }
             }
-            let Some(v) = selected else {
+            let Some((v, collapsed)) = selected else {
                 continue;
             };
             let uv = [
@@ -284,10 +283,6 @@ pub(super) fn inventory(
             ];
             let domain = [[uv[0][0].min(uv[1][0]), uv[0][0].max(uv[1][0])], [v, v]];
             let image = parametric::surface_position_enclosure(surface, domain, work, cancel)?;
-            let collapsed = parametric::analytic_eval::collapsed_step_sphere_position(
-                surface, v, work, cancel,
-            )?
-            .ok_or_else(|| invalid("singular coefficient law lost pole authority"))?;
             let p = edges
                 .positions()
                 .get(a as usize)
@@ -305,19 +300,8 @@ pub(super) fn inventory(
             .max(norm_upper(std::array::from_fn(|k| {
                 collapsed[k].sub(Interval::point(position[k]))
             })));
-            // The invertible cofactor field extends continuously from the natural
-            // interior to this row. The one-sided closed strip proves a finite,
-            // unique unit enclosure, independently of candidate normal estimates.
-            let inward = if v == natural.v_min() {
-                parametric::up(v)
-            } else {
-                parametric::down(v)
-            };
-            let enclosure = parametric::surface_geometric_normal_enclosure(
-                surface,
-                [domain[0], [v.min(inward), v.max(inward)]],
-                work,
-                cancel,
+            let enclosure = parametric::display_collapse::collapsed_row_normal(
+                surface, domain[0], v, work, cancel,
             )?;
             let center = enclosure.map(Interval::mid);
             let length = center.iter().map(|c| c * c).sum::<f64>().sqrt();
@@ -408,3 +392,6 @@ pub(super) fn fan(
     }
     Ok(error)
 }
+
+#[cfg(test)]
+mod tests;

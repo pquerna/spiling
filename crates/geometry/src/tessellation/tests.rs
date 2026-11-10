@@ -20,6 +20,48 @@ fn fixture(name: &str) -> Definition {
 }
 
 #[test]
+fn candidate_parameter_roundoff_never_changes_source_or_physical_vertices() {
+    let definition = fixture("independent-exporters/occt-spline-housing-mm.step");
+    let kernel = crate::make_kernel_context();
+    let options = TessellateOptions::default();
+    let edges = solidcore_mesh::tessellate_edge_set(&kernel, definition.brep(), &options).unwrap();
+    let face = definition.face_ids()[1];
+    let mut candidate =
+        solidcore_mesh::tessellate_face(&kernel, definition.brep(), face, &edges, &options)
+            .unwrap();
+    let domain = definition
+        .face_surface(face)
+        .unwrap()
+        .natural_uv_domain_if_built();
+    let source = definition.provenance().clone();
+    let positions = candidate.positions.clone();
+    candidate.uvs[0].y = crate::parametric::up(crate::parametric::up(domain.v_max()));
+    let mut work = GeometryWorkBudget::query();
+    let cancel = AtomicBool::new(false);
+    prepare_candidate_parameters(&definition, &mut candidate, &mut work, &cancel).unwrap();
+    assert_eq!(candidate.uvs[0].y, domain.v_max());
+    assert_eq!(candidate.positions, positions);
+    assert_eq!(definition.provenance(), &source);
+    let outside = domain.v_max() + 0.01;
+    candidate.uvs[0].y = outside;
+    prepare_candidate_parameters(&definition, &mut candidate, &mut work, &cancel).unwrap();
+    assert_eq!(candidate.uvs[0].y, outside);
+    assert!(
+        audit::face(
+            &definition,
+            1,
+            &candidate,
+            &edges,
+            MeshBudget::FROZEN,
+            0,
+            &mut work,
+            &cancel,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn refinement_is_scoped_to_failing_faces_without_tightening_unrelated_carriers() {
     let definition = fixture("box-mm.step");
     let faces = definition.face_ids();

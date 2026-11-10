@@ -11,6 +11,7 @@ pub mod analytic_eval;
 mod continuity;
 pub mod coplane;
 pub mod curve_prepared;
+pub(crate) mod display_collapse;
 mod green;
 pub mod interval;
 pub mod nurbs_eval;
@@ -1083,8 +1084,25 @@ fn validate_surface_partition(
     let lo = active.min();
     let hi = active.max();
     if uv[0][0] < lo.x || uv[0][1] > hi.x || uv[1][0] < lo.y || uv[1][1] > hi.y {
-        return Err(nurbs_eval::conditioning(
-            "surface partition exceeds native active domain",
+        return Err(GeometryError::new(
+            GeometryErrorCode::ConditioningFailure,
+            format!(
+                "surface partition exceeds native active domain: query={uv:?} active=[[{}, {}], [{}, {}]] coefficient_domain={:?}",
+                lo.x,
+                hi.x,
+                lo.y,
+                hi.y,
+                analytic_eval::native_surface_nurbs(surface)?.map(|native| [
+                    [
+                        native.u_knots()[native.p()],
+                        native.u_knots()[native.n() + 1]
+                    ],
+                    [
+                        native.v_knots()[native.q()],
+                        native.v_knots()[native.m() + 1]
+                    ],
+                ]),
+            ),
         ));
     }
     if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
@@ -1328,7 +1346,10 @@ fn certify_surface_regular(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    if regular_jet(root) || correlated_surface_regular(surface, domain, root, work, cancel)? {
+    if regular_jet(root)
+        || correlated_surface_regular(surface, domain, root, work, cancel)?
+        || display_collapse::strip_regular(surface, domain, work, cancel)?
+    {
         return Ok(());
     }
     // Geometric regularity need not imply a regular choice of UV chart.
@@ -1353,7 +1374,10 @@ fn certify_surface_regular(
         let (cell, depth) = stack[live];
         work.charge(1, cancel)?;
         let jet = surface_piecewise_enclosure(surface, cell, work, cancel)?;
-        if regular_jet(&jet) || correlated_surface_regular(surface, cell, &jet, work, cancel)? {
+        if regular_jet(&jet)
+            || correlated_surface_regular(surface, cell, &jet, work, cancel)?
+            || display_collapse::strip_regular(surface, cell, work, cancel)?
+        {
             continue;
         }
         if depth == 24 {
@@ -1472,6 +1496,7 @@ struct DisplaySubdivisionScratch {
 const DISPLAY_EVALUATION_SCRATCH_BYTES: usize = nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
     + nurbs_eval::DISPLAY_AFFINE_SCRATCH_BYTES
     + continuity::SCRATCH_BYTES
+    + display_collapse::SCRATCH_BYTES
     + std::mem::size_of::<[([[f64; 2]; 2], u8); 50]>()
     + 4 * std::mem::size_of::<SurfaceEnclosure>();
 /// Refine only display interpolation's already-qualified native jet. Section

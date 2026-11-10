@@ -328,7 +328,7 @@ pub(crate) fn tessellate_with_work(
                 phase.stage = DisplayStage::TessellatingFace;
                 phase.consumed_work = work.consumed();
                 progress(phase);
-                let candidate = candidate_query(occupied, work, cancel, |native| {
+                let mut candidate = candidate_query(occupied, work, cancel, |native| {
                     solidcore_mesh::tessellate_face_with_budget(
                         &kernel,
                         brep,
@@ -352,6 +352,7 @@ pub(crate) fn tessellate_with_work(
                 if candidate.face != face {
                     return Err(invalid("native mesher changed source face identity"));
                 }
+                prepare_candidate_parameters(definition, &mut candidate, work, cancel)?;
                 phase.stage = DisplayStage::AuditingFace;
                 phase.consumed_work = work.consumed();
                 progress(phase);
@@ -438,6 +439,44 @@ pub(crate) fn tessellate_with_work(
         }
     }
     unreachable!("the last candidate returns its actual audit result")
+}
+
+fn prepare_candidate_parameters(
+    definition: &Definition,
+    candidate: &mut solidcore_mesh::FaceMesh,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    let surface = definition
+        .face_surface(candidate.face)
+        .ok_or_else(|| invalid("native display candidate has no carrier"))?;
+    let domain = surface.natural_uv_domain_if_built();
+    let bounds = [
+        [domain.u_min(), domain.u_max()],
+        [domain.v_min(), domain.v_max()],
+    ];
+    for [lower, upper] in bounds {
+        crate::parametric::Interval::new(lower, upper)?;
+    }
+    let roundoff = bounds.map(|[lower, upper]| {
+        let mut enclosure = [lower, upper];
+        for _ in 0..4 {
+            enclosure = [
+                crate::parametric::down(enclosure[0]),
+                crate::parametric::up(enclosure[1]),
+            ];
+        }
+        enclosure
+    });
+    for parameter in &mut candidate.uvs {
+        work.charge(1, cancel)?;
+        for (axis, value) in [&mut parameter.x, &mut parameter.y].into_iter().enumerate() {
+            if roundoff[axis][0] <= *value && *value <= roundoff[axis][1] {
+                *value = (*value).clamp(bounds[axis][0], bounds[axis][1]);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn display_context(

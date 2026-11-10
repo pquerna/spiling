@@ -1679,9 +1679,10 @@ fn certify_adjacent(
         // products, not the floating normalization, establish monotonicity.
         let direction = std::array::from_fn(|k| first[k] / a + second[k] / b);
         if dot(tangents[i], direction).lo <= 0.0 || dot(tangents[next], direction).lo <= 0.0 {
-            return Err(indeterminate(
-                "adjacent native graph spans lack a common strictly monotone separating direction",
-            ));
+            return Err(indeterminate(format!(
+                "adjacent native graph spans lack a common strictly monotone separating direction: first={first:?} second={second:?} tangents={:?}",
+                [tangents[i], tangents[next]],
+            )));
         }
     }
     Ok(())

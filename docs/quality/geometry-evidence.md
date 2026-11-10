@@ -486,8 +486,13 @@ work and cancellation remain mandatory.
 bounded SolidCore mesh candidates. Its `audit` and `trim` modules independently
 check whole-triangle carriers, normals, native trim/triangle coverage and packed
 output. Candidate deviation estimates and generated UV curves are not original
-STEP declarations or manufacturing authority. Unqualified collapsed/singular
-coverage refuses display rather than dropping triangles or publishing an empty mesh.
+STEP declarations or manufacturing authority. Display-only collapsed natural-v
+rows additionally require exact homogeneous coefficient proportionality, clamped
+endpoint support and complete one-sided normal bounds. Their proof-only fan
+transport retains original vertex/coedge ownership and full trim bijections;
+the complete adjacent strip must exclude interior rank loss. No physical vertex
+or source chart moves. Unqualified collapsed/singular coverage refuses display
+rather than dropping triangles or publishing an empty mesh.
 
 Trim circuits use the shared closed-box index rather than checking every
 boundary pair. Only strict closed-box separation skips the unchanged interval
