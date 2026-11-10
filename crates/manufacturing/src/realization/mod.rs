@@ -420,7 +420,7 @@ pub(crate) fn stream(
                     else {
                         unreachable!()
                     };
-                    if process_events > 100_000 - 2 {
+                    if process_events > MAX_PROCESS_EVENTS - 2 {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
                             "process event budget exceeded",

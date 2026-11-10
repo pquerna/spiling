@@ -13,6 +13,9 @@ use geo::{
 
 mod inputs;
 
+/// Boolean input points per occupancy union batch before flushing. A batching
+/// threshold, independent of the job-wide deposition cap.
+const MAX_OCCUPANCY_BATCH_POINTS: usize = 100_000;
 const DISK_SIDES: usize = 64;
 const COMMAND_CAPSULE_VERTICES: usize = DISK_SIDES * 2 + 4;
 const AREA_ROUNDOFF: f64 = 0.0000001;
@@ -1129,7 +1132,7 @@ fn occupancy(
             // never coexist with an over-limit Boolean input batch.
             if batch_points
                 .checked_add(COMMAND_CAPSULE_VERTICES + 1)
-                .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS as usize)
+                .is_none_or(|n| n > MAX_OCCUPANCY_BATCH_POINTS)
             {
                 flush_occupancy_batch(
                     &mut primitives,
@@ -1988,7 +1991,7 @@ mod tests {
             .0
             .len();
         assert!(
-            primitive_points * 1600 > MAX_DEPOSITION_SEGMENTS as usize,
+            primitive_points * 1600 > MAX_OCCUPANCY_BATCH_POINTS,
             "legal command subdivision exceeds the Boolean primitive boundary staging cap"
         );
         let subdivided = DepositionPath {

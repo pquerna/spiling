@@ -464,11 +464,12 @@ mod tests {
 
     #[test]
     fn compilation_reserves_only_remaining_current_and_history_headroom() {
-        let retained = 60 * 1024 * 1024;
+        let retained = MAX_MANUFACTURING_RETAINED_BYTES - 4 * 1024 * 1024;
         assert_eq!(compilation_byte_budget(retained).unwrap(), 4 * 1024 * 1024);
+        // Compressed retention, not raw bundle size, is the binding allowance.
         assert_eq!(
-            compilation_byte_budget(0).unwrap(),
-            MAX_MANUFACTURING_BUNDLE_BYTES
+            u64::from(compilation_byte_budget(0).unwrap()),
+            MAX_MANUFACTURING_RETAINED_BYTES.min(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         );
         assert_eq!(
             compilation_byte_budget(MAX_MANUFACTURING_RETAINED_BYTES - 1).unwrap(),

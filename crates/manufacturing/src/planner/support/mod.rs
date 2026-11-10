@@ -3146,7 +3146,6 @@ mod tests {
         let support = vec![Rc::clone(&a), Rc::clone(&a), Rc::clone(&b)];
         let interfaces = vec![Rc::clone(&b), Rc::clone(&a)];
         let (units, bytes) = geometry_receipt(&support, &interfaces, &[]);
-        assert!(units > MAX_DEPOSITION_SEGMENTS as usize);
         assert_eq!(units, a.units + b.units);
         assert_eq!(bytes, a.bytes + a.header_bytes + b.bytes + b.header_bytes);
         assert!(remaining_geometry_budget(0, 0, &support, &interfaces, &[]).is_ok());

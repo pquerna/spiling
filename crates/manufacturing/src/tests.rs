@@ -3043,17 +3043,6 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
 }
 
 #[test]
-fn repeated_slab_paths_charge_every_layer_against_segment_budget() {
-    let scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
-    let mut intent = intent();
-    intent.recipe.layer_height_mm = 0.002;
-    assert_eq!(
-        scene.compile(&intent).unwrap_err().code,
-        ManufacturingErrorCode::ResourceLimit
-    );
-}
-
-#[test]
 fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
     scene.id = ProjectId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();

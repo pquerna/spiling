@@ -54,16 +54,26 @@ pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
 /// Exact serialized bundle, including plan, provenance and actual program.
 /// A result may use half the retained/staged allowance, leaving room for
 /// replacement without dropping the active result or its history first.
-pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 32 * 1024 * 1024;
+/// Raw bundle JSON. It is encoded straight into compressed frames and never
+/// buffered whole; this bound stays below PTAC's 1 GiB object and SQLite's
+/// ~1 GB blob ceilings.
+pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 768 * 1024 * 1024;
 /// Program bytes are independently bounded; a larger bundle is not permission
-/// to emit more machine commands.
-pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 16 * 1024 * 1024;
-pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
+/// to emit more machine commands. Programs are held as compressed frames.
+pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 512 * 1024 * 1024;
+/// Live/history/staging allowance, counted in held compressed frames for
+/// bundles and programs and in raw coordinates for planner retention.
+pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
-pub const MAX_DEPOSITION_SEGMENTS: u32 = 100_000;
+/// Job-wide deposition total, a checked count rather than an allocation.
+pub const MAX_DEPOSITION_SEGMENTS: u32 = 2_000_000;
 /// An admitted path may require lift, XY travel and landing. Fixed-dual waste
 /// entries have the same bound and share the deposition inventory.
 pub const MAX_TRAVEL_SEGMENTS: u32 = 3 * MAX_DEPOSITION_SEGMENTS;
+/// Stationary retract/recover events; each pair accompanies at most one travel.
+pub const MAX_PROCESS_EVENTS: u32 = MAX_TRAVEL_SEGMENTS;
+/// Retractions accompany at most one deposition path each.
+pub const MAX_RETRACTIONS: u32 = MAX_DEPOSITION_SEGMENTS;
 pub const MAX_MACHINE_COMPONENTS: u32 = 64;
 pub const MAX_PROFILE_JSON_BYTES: u32 = 32_768;
 pub const MAX_MANUFACTURING_ERROR_BYTES: usize = 2048;
@@ -3772,7 +3782,7 @@ impl VerificationReport {
             .checked_add(self.support_deposition_segments)
             .and_then(|n| n.checked_add(waste_segments))
             .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
-            || self.retraction_count > 50_000
+            || self.retraction_count > MAX_RETRACTIONS
             || self.travel_segments > MAX_TRAVEL_SEGMENTS
         {
             return Err(resource("verification segment limit exceeded"));

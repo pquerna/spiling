@@ -413,8 +413,11 @@ impl projects_server::Projects for Service {
             request_id: id,
             digest,
             command: Control::Project(command),
-            // Open can publish all 64 MiB of retained per-layout bundles alongside the scene.
-            reservation: 128 * 1024 * 1024,
+            // Open republishes retained per-layout bundles and programs with the
+            // scene; admit one maximal result beside the smaller ones.
+            reservation: 128 * 1024 * 1024
+                + u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
+                + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES),
         };
         Ok(Response::new(
             self.jobs.start_native(self.native.clone(), input).await?,

@@ -97,7 +97,8 @@ fn timestamp(value: &prost_types::Timestamp) -> Result<(), String> {
     }
     Ok(())
 }
-fn native_artifact_limit(media: &str) -> Result<u64, String> {
+/// Largest admitted size for each published artifact media type.
+pub fn native_artifact_limit(media: &str) -> Result<u64, String> {
     match media {
         crate::analysis::mechanics::ANALYSIS_FIELDS_MIME => {
             Ok(crate::analysis::mechanics::MAX_MECHANICAL_FIELD_BYTES as u64)
@@ -262,7 +263,7 @@ pub fn native_operation_view(
             .checked_add(output.size_bytes)
             .ok_or("native output overflow")?;
     }
-    if bytes > u64::from(MAX_ENGINE_ARTIFACT_BYTES) {
+    if bytes > crate::geometry::MAX_NATIVE_STORAGE_BYTES {
         return Err("native output budget exceeded".into());
     }
     let (result, error) = match &operation.result {

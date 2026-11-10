@@ -793,7 +793,7 @@ pub(crate) fn verify_actual(
                         recovery_moves = 0;
                         retraction_count += 1;
                         retracted_filament_mm -= delta;
-                        if retraction_count > 50_000 {
+                        if retraction_count > MAX_RETRACTIONS {
                             return Err(failed("process event budget exceeded"));
                         }
                     }

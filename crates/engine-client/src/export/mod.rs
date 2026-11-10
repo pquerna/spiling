@@ -35,6 +35,14 @@ impl OutputDirectory {
     }
     /// Create one new file and copy `reader` into it without buffering it whole.
     pub fn write_from(&mut self, name: &str, reader: &mut dyn io::Read) -> io::Result<()> {
+        self.write_with(name, |file| io::copy(reader, file).map(|_| ()))
+    }
+    /// Create one new file and let `body` write it through a buffered handle.
+    pub fn write_with(
+        &mut self,
+        name: &str,
+        mut body: impl FnMut(&mut dyn Write) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut components = Path::new(name).components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             return Err(io::Error::new(
@@ -42,7 +50,7 @@ impl OutputDirectory {
                 "output filename must be a single normal component",
             ));
         }
-        self.owned.write(name, reader)
+        self.owned.write(name, &mut body)
     }
     /// Export only a client-validated bundle after fresh engine-side replay.
     /// `program` must be the exact bytes named by the bundle's descriptor.
@@ -77,7 +85,10 @@ impl OutputDirectory {
             captured: &'a spiling_contracts::manufacturing::ManufacturingProvenance,
             inspection: &'a spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
         }
-        self.write("plan.json", &serde_json::to_vec_pretty(&bundle.plan)?)?;
+        // Stream pretty JSON into the file; a large plan is never one string.
+        self.write_with("plan.json", |file| {
+            serde_json::to_writer_pretty(file, &bundle.plan).map_err(io::Error::other)
+        })?;
         self.write_from("program.gcode", &mut program.reader())?;
         self.write(
             "verification.json",
@@ -246,7 +257,11 @@ mod platform {
                 files: Vec::new(),
             })
         }
-        pub fn write(&mut self, name: &str, bytes: &mut dyn io::Read) -> io::Result<()> {
+        pub fn write(
+            &mut self,
+            name: &str,
+            body: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>,
+        ) -> io::Result<()> {
             let current = statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW)?;
             if !same(&current, &fstat(&self.directory)?) {
                 return Err(io::Error::other("output directory was replaced or moved"));
@@ -263,7 +278,10 @@ mod platform {
                 handle: file,
             });
             let file = &mut self.files.last_mut().unwrap().handle;
-            io::copy(bytes, file)?;
+            let mut buffered = io::BufWriter::new(&*file);
+            body(&mut buffered)?;
+            buffered.flush()?;
+            drop(buffered);
             file.flush()
         }
         pub fn cleanup(&mut self) {
@@ -412,7 +430,11 @@ mod platform {
                 _ancestors: ancestors,
             })
         }
-        pub fn write(&mut self, name: &str, bytes: &mut dyn io::Read) -> io::Result<()> {
+        pub fn write(
+            &mut self,
+            name: &str,
+            body: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>,
+        ) -> io::Result<()> {
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -422,7 +444,10 @@ mod platform {
                 .open(self.path.join(name))?;
             self.files.push(file);
             let file = self.files.last_mut().unwrap();
-            io::copy(bytes, file)?;
+            let mut buffered = io::BufWriter::new(&*file);
+            body(&mut buffered)?;
+            buffered.flush()?;
+            drop(buffered);
             file.flush()
         }
         pub fn cleanup(&mut self) {

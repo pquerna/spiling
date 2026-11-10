@@ -35,7 +35,7 @@ impl ReplaySink {
             RetractionPolicy::Disabled => (paths, 0),
             RetractionPolicy::Enabled { z_hop_mm, .. } => (
                 (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(MAX_TRAVEL_SEGMENTS as usize),
-                (paths * 2).min(100_000),
+                (paths * 2).min(MAX_PROCESS_EVENTS as usize),
             ),
         };
         let (lifecycle, epochs) = match &intent.printer.workflow {
@@ -149,7 +149,7 @@ impl ReplaySink {
         } else if kind == 0 {
             MAX_TRAVEL_SEGMENTS
         } else {
-            100_000
+            MAX_PROCESS_EVENTS
         };
         if count >= max {
             return Err(ManufacturingError::new(

@@ -86,6 +86,50 @@ const BORE: &[u8] = include_bytes!("../../../fixtures/geometry/through-hole.step
 const BOX: &[u8] = include_bytes!("../../../fixtures/geometry/box-mm.step");
 const INTENT: &[u8] =
     include_bytes!("../../../fixtures/manufacturing/mixed-width-combined.intent.json");
+const BOX_MM: &str = include_str!("../../../fixtures/geometry/box-mm.step");
+const SINGLE_TOOL: &[u8] =
+    include_bytes!("../../../fixtures/manufacturing/complete-sparse.intent.json");
+
+/// The 20 x 10 x 8 mm box fixture rescaled to `size`. Every coordinate and
+/// edge length in it is 0, 20, 10 or 8, so each maps to one axis.
+fn scaled_box(size: [f64; 3]) -> Vec<u8> {
+    let axis = |value: &str, index: usize| -> String {
+        match (value.trim(), index) {
+            ("20.0", 0) => size[0].to_string(),
+            ("10.0", 1) => size[1].to_string(),
+            ("8.0", 2) => size[2].to_string(),
+            (other, _) => other.to_string(),
+        }
+    };
+    BOX_MM
+        .lines()
+        .map(|line| {
+            if let Some((head, rest)) = line.split_once("CARTESIAN_POINT('', (") {
+                let (tuple, tail) = rest.split_once(')').unwrap();
+                let values: Vec<_> = tuple
+                    .split(',')
+                    .enumerate()
+                    .map(|(i, v)| axis(v, i))
+                    .collect();
+                format!("{head}CARTESIAN_POINT('', ({}){tail}", values.join(", "))
+            } else if let Some((head, rest)) = line.split_once("VECTOR('', ") {
+                let (direction, magnitude) = rest.split_once(", ").unwrap();
+                let (value, tail) = magnitude.split_once(')').unwrap();
+                let scaled = match value {
+                    "20.0" => size[0],
+                    "10.0" => size[1],
+                    "8.0" => size[2],
+                    other => other.parse().unwrap(),
+                };
+                format!("{head}VECTOR('', {direction}, {scaled}){tail}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes()
+}
 
 struct Scene {
     project: ProjectId,
@@ -98,6 +142,42 @@ struct Scene {
     images: BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
 impl Scene {
+    /// One scaled box on the single-tool complete workflow.
+    fn sized_box(size: [f64; 3], infill: f64, layer: f64, cancel: &AtomicBool) -> Result<Self> {
+        let step = scaled_box(size);
+        let definition = Arc::new(spiling_geometry::from_step_bytes_with_cancel(
+            &step, cancel,
+        )?);
+        let mut intent = decode_intent(SINGLE_TOOL)?;
+        intent.recipe.infill_fraction = infill;
+        intent.recipe.layer_height_mm = layer;
+        // Park above the scaled part, within the build envelope.
+        if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+            job.park_position_mm[2] = (size[2] + 10.0).min(intent.printer.build_envelope.max[2]);
+        }
+        let occurrences = vec![OccurrenceRecord {
+            occurrence_id: OccurrenceId::new(1).expect("one occurrence"),
+            definition_id: definition.id().clone(),
+            pose: RigidPoseMm {
+                translation_mm: [10.0, 10.0, 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        }];
+        intent.validate()?;
+        Ok(Self {
+            project: ProjectId::parse("00000000-0000-4000-8000-000000000001")?,
+            stored: vec![StoredDefinition {
+                definition_id: definition.id().clone(),
+                provenance: definition.provenance().clone(),
+            }],
+            definitions: BTreeMap::from([(definition.id().clone(), definition)]),
+            occurrences,
+            intent,
+            surfaces: SurfaceOverlays::empty(),
+            process: ProcessDocument::empty(),
+            images: BTreeMap::new(),
+        })
+    }
     // Production CompilerInput shares native definitions on this one thread.
     fn new(count: usize, primary: bool, cancel: &AtomicBool) -> Result<Self> {
         let mut definitions = BTreeMap::new();
@@ -204,6 +284,31 @@ fn read_result(path: &str) -> Result<ManufacturingResult> {
     let program = ChunkSource::from_slice(&program, u64::from(MAX_MANUFACTURING_PROGRAM_BYTES))?;
     Ok(ManufacturingResult::new(bundle, program)?)
 }
+/// Which frozen workload to build: the fixed mixed-tool plate, or one scaled box.
+struct SceneSpec {
+    parts: usize,
+    primary: bool,
+    size: Option<[f64; 3]>,
+    infill: f64,
+    layer: f64,
+}
+impl SceneSpec {
+    fn build(&self, cancel: &AtomicBool) -> Result<Scene> {
+        match self.size {
+            Some(size) => Scene::sized_box(size, self.infill, self.layer, cancel),
+            None => Scene::new(self.parts, self.primary, cancel),
+        }
+    }
+    fn label(&self) -> String {
+        match self.size {
+            Some([x, y, z]) => format!(
+                "box={x}x{y}x{z} infill={} layer={}",
+                self.infill, self.layer
+            ),
+            None => format!("parts={}", self.parts),
+        }
+    }
+}
 fn read_bundle(path: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -228,6 +333,9 @@ fn main() -> Result<()> {
     // Cargo may append --bench. All operator options are explicit pairs.
     let allowed = [
         "--parts",
+        "--box",
+        "--infill",
+        "--layer",
         "--samples",
         "--warmup",
         "--phase",
@@ -245,6 +353,21 @@ fn main() -> Result<()> {
         i += if args[i] == "--bench" { 1 } else { 2 };
     }
     let parts: usize = option("--parts", "1")?.parse()?;
+    let size = match option("--box", "")?.as_str() {
+        "" => None,
+        text => {
+            let values: Vec<f64> = text
+                .split(',')
+                .map(str::parse)
+                .collect::<std::result::Result<_, _>>()?;
+            let size: [f64; 3] = values
+                .try_into()
+                .map_err(|_| "--box takes X,Y,Z millimetres")?;
+            Some(size)
+        }
+    };
+    let infill: f64 = option("--infill", "0.25")?.parse()?;
+    let layer: f64 = option("--layer", "0.2")?.parse()?;
     let samples: usize = option("--samples", "3")?.parse()?;
     let warmup: usize = option("--warmup", "0")?.parse()?;
     let phase = option("--phase", "compile")?;
@@ -271,7 +394,14 @@ fn main() -> Result<()> {
     let file = option("--bundle", "")?;
     let save = option("--write-bundle", "")?;
     if phase == "residency" {
-        return residency(parts, policy == "primary", &file);
+        let spec = SceneSpec {
+            parts,
+            primary: policy == "primary",
+            size,
+            infill,
+            layer,
+        };
+        return residency(&spec, &file);
     }
     if phase == "compile" && !file.is_empty() {
         return Err("compile uses frozen native sources, not --bundle".into());
@@ -286,7 +416,16 @@ fn main() -> Result<()> {
     let cancel = AtomicBool::new(false);
     let setup = Instant::now();
     let scene = if file.is_empty() {
-        Some(Scene::new(parts, policy == "primary", &cancel)?)
+        Some(
+            SceneSpec {
+                parts,
+                primary: policy == "primary",
+                size,
+                infill,
+                layer,
+            }
+            .build(&cancel)?,
+        )
     } else {
         None
     };
@@ -404,14 +543,14 @@ fn main() -> Result<()> {
 /// Peak and retained heap per resident form of one result, single-threaded.
 /// Compile peak includes planner, emitter and verifier transients together;
 /// retained sizes come from dropping one owned part at a time.
-fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
+fn residency(spec: &SceneSpec, file: &str) -> Result<()> {
     spiling_compute::configure(ComputeSettings {
         default_backend: ComputeBackend::parse("cpu")?,
         fea_backend: None,
     })?;
     let cancel = AtomicBool::new(false);
     let (bundle, compile_peak, setup) = if file.is_empty() {
-        let scene = Scene::new(parts, primary, &cancel)?;
+        let scene = spec.build(&cancel)?;
         let before = live();
         let (bundle, peak) = peak_above(|| Ok(compile(scene.input(), &cancel)?))?;
         (bundle, Some(peak), live() - before)
@@ -432,15 +571,25 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
         drop(decoded);
         before - live()
     };
+    // Motion display is separately capped; a refusal is reported, not fatal.
     let (inspection, motion_peak) = peak_above(|| {
         Ok(inspect_bundle(
             &bundle,
             &encoded_hash,
             VerificationOutput::ReportAndMotion,
             &cancel,
-        )?)
+        ))
     })?;
-    let replay_bytes = inspection.replay.as_ref().map_or(0, |m| m.bytes.len());
+    let (replay_bytes, motion_refusal) = match &inspection {
+        Ok(inspection) => (
+            inspection.replay.as_ref().map_or(0, |m| m.bytes.len()),
+            None,
+        ),
+        Err(error) if error.code == ManufacturingErrorCode::ResourceLimit => {
+            (0, Some(error.message.clone()))
+        }
+        Err(error) => return Err(error.clone().into()),
+    };
     drop(inspection);
     let segments = bundle.verification.deposition_segments as usize;
     let travels = bundle.verification.travel_segments as usize;
@@ -475,7 +624,7 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
         "{}",
         serde_json::json!({
             "benchmark": "native-manufacturing-residency-v1",
-            "source": if file.is_empty() { format!("parts={parts}") } else { file.to_owned() },
+            "source": if file.is_empty() { spec.label() } else { file.to_owned() },
             "engine_build": spiling_contracts::ENGINE_BUILD_ID,
             "debug_assertions": cfg!(debug_assertions),
             "layers": layers, "paths": paths, "points": points,
@@ -497,6 +646,7 @@ fn residency(parts: usize, primary: bool, file: &str) -> Result<()> {
                 "motion_peak": per(motion_peak), "replay": per(replay_bytes),
             },
             "frames_decode_us": frames_decode_us,
+            "motion_refusal": motion_refusal,
             "software_only": true,
         })
     );

@@ -162,7 +162,7 @@ pub fn emit(
                 Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
                 Event::Extrusion(e, speed) => {
                     process_events += 1;
-                    if process_events > 100_000 {
+                    if process_events > MAX_PROCESS_EVENTS {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
                             "stationary process event budget exceeded",

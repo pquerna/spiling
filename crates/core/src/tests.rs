@@ -652,6 +652,11 @@ fn fixture_program_descriptor(program: &[u8]) -> ProgramDescriptor {
 pub(crate) fn fixture_program(program: &[u8]) -> spiling_chunks::ChunkSource {
     spiling_chunks::ChunkSource::from_slice(program, u64::MAX).unwrap()
 }
+/// Just under a quarter of the retained manufacturing allowance, so four
+/// incompressible results fit and a fifth does not.
+fn retained_share() -> usize {
+    (MAX_MANUFACTURING_RETAINED_BYTES / 4) as usize - 2 * 1024 * 1024
+}
 /// Deterministic incompressible bytes, so retention counts their full size.
 fn incompressible(len: usize, seed: u64) -> Vec<u8> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
@@ -969,7 +974,7 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
     // Retention counts held program frames; incompressible content keeps them full size.
     for index in 0..4 {
         let bundle = manufacturing_bundle(&project);
-        let asset = bundle_asset_with(&bundle, &incompressible(15 * 1024 * 1024 + 1, index));
+        let asset = bundle_asset_with(&bundle, &incompressible(retained_share(), index));
         edit(&mut project, Edit::PublishManufacturing { asset });
         edit(
             &mut project,
@@ -990,7 +995,7 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
     assert_eq!(
         project
             .prepare(Edit::PublishManufacturing {
-                asset: bundle_asset_with(&bundle, &incompressible(15 * 1024 * 1024 + 1, 4))
+                asset: bundle_asset_with(&bundle, &incompressible(retained_share(), 4))
             })
             .unwrap_err()
             .code,

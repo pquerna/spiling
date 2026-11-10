@@ -9,7 +9,7 @@ use spiling_contracts::{
     NATIVE_METADATA_TYPE, NATIVE_RESULT_TYPE, geometry::SessionId, native_metadata,
 };
 
-const NATIVE_STORAGE_BUDGET: u64 = 256 * 1024 * 1024;
+const NATIVE_STORAGE_BUDGET: u64 = spiling_contracts::geometry::MAX_NATIVE_STORAGE_BYTES;
 
 /// Immutable bytes published with a terminal native operation.
 pub(crate) enum ArtifactBytes<'a> {

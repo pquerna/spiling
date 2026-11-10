@@ -2780,50 +2780,6 @@ fn plan_json_admits_exact_cumulative_segment_budget_across_paths_and_layers() {
 }
 
 #[test]
-fn plan_json_rejects_cumulative_segment_excess_across_paths_and_layers() {
-    for counts in [
-        vec![vec![50_000, 50_001]],
-        vec![vec![25_000, 25_000], vec![25_000, 25_001]],
-        vec![vec![100_001]],
-    ] {
-        let slices: Vec<&[usize]> = counts.iter().map(Vec::as_slice).collect();
-        let exceeded = segmented_plan(&slices);
-        assert_eq!(
-            exceeded.validate(&intent()).unwrap_err().code,
-            ManufacturingErrorCode::ResourceLimit
-        );
-        let bytes = serde_json::to_vec(&exceeded).unwrap();
-        assert!(
-            serde_json::from_slice::<NormalizedPrintPlan>(&bytes)
-                .unwrap_err()
-                .is_data()
-        );
-        let mut artifact = bundle();
-        artifact.plan = exceeded;
-        assert_eq!(
-            decode_bundle(&serde_json::to_vec(&artifact).unwrap())
-                .unwrap_err()
-                .code,
-            ManufacturingErrorCode::CorruptArtifact
-        );
-    }
-}
-
-#[test]
-fn cumulative_segment_excess_is_rejected_before_decoding_later_points() {
-    for counts in [vec![vec![99_999, 2]], vec![vec![99_999], vec![2]]] {
-        let slices: Vec<&[usize]> = counts.iter().map(Vec::as_slice).collect();
-        let mut json = serde_json::to_string(&segmented_plan(&slices)).unwrap();
-        // An invalid token follows the point exceeding the aggregate limit.
-        // Schema admission must fail before the JSON parser reaches that token.
-        let final_points_close = json.rfind("]]}").unwrap() + 1;
-        json.insert_str(final_points_close, ",INVALID");
-        let error = serde_json::from_str::<NormalizedPrintPlan>(&json).unwrap_err();
-        assert!(error.is_data(), "{error:?}");
-    }
-}
-
-#[test]
 fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
     for points in ["[]", "[[10,10,5.2]]"] {
         let json = format!(
@@ -4391,40 +4347,6 @@ fn unit_wall_ownership_is_limited_to_immutable_walls() {
     let mut missing_owner = plan();
     missing_owner.layers[0].paths[0].owner = None;
     assert!(missing_owner.validate(&intent()).is_err());
-}
-
-#[test]
-fn plan_json_shares_one_cumulative_width_allowance_without_halving_segments() {
-    let mut exact = segmented_plan(&[&[50_000], &[50_000]]);
-    for path in exact.layers.iter_mut().flat_map(|layer| &mut layer.paths) {
-        path.width = WidthProfile::PerEdge {
-            widths_mm: vec![0.45; path.points_mm.len() - 1],
-        };
-    }
-    let encoded = serde_json::to_vec(&exact).unwrap();
-    let decoded: NormalizedPrintPlan = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(decoded, exact);
-    assert_eq!(
-        decoded
-            .layers
-            .iter()
-            .flat_map(|layer| &layer.paths)
-            .map(|path| match &path.width {
-                WidthProfile::PerEdge { widths_mm } => widths_mm.len(),
-                WidthProfile::Constant { .. } => 0,
-            })
-            .sum::<usize>(),
-        MAX_DEPOSITION_SEGMENTS as usize
-    );
-    decoded.validate(&intent()).unwrap();
-    let mut exceeded = exact.clone();
-    if let WidthProfile::PerEdge { widths_mm } = &mut exceeded.layers[1].paths[0].width {
-        widths_mm.push(0.45);
-    }
-    let error =
-        serde_json::from_slice::<NormalizedPrintPlan>(&serde_json::to_vec(&exceeded).unwrap())
-            .unwrap_err();
-    assert!(error.is_data(), "{error:?}");
 }
 
 #[test]

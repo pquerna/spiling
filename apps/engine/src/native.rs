@@ -676,7 +676,9 @@ fn publish_terminal(
 }
 
 fn view(artifact: &Artifact) -> Result<ArtifactView, Status> {
-    spiling_contracts::native::artifact_to_view(artifact.clone(), 64 * 1024 * 1024)
+    let limit = spiling_contracts::native::native_artifact_limit(&artifact.media_type)
+        .map_err(crate::jobs::internal)?;
+    spiling_contracts::native::artifact_to_view(artifact.clone(), limit)
         .map_err(crate::jobs::internal)
 }
 fn resource(hash: &str, resources: &BTreeMap<String, Artifact>) -> Result<ArtifactView, Status> {
