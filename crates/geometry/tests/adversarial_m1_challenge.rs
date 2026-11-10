@@ -9,7 +9,7 @@
 //!    with valid and non-existent IDs (out-of-bounds, u32::MAX) -> zero panic
 //! 3. retained_query_proof_bytes monotonicity, determinism, non-zero bounds, resource limits
 //! 4. Complete 14 adversarial mutated fixtures from fixtures/geometry/manifest.json
-//! 5. Baseline accepted models: box-mm, box-inch (scaling), cylinder, through-hole, perforated-plate
+//! 5. Inch-to-millimetre dimensional regression
 //! 6. Cancellation and resource limit enforcement
 //! 7. Thread transfer (Send) and upstream Sync analysis
 
@@ -367,64 +367,6 @@ fn challenge_manifest_all_14_adversaries() {
         adversary_count, 13,
         "manifest should contain 13 expected_error adversaries + 1 accepted mutation (unsupported-nurbs.step)"
     );
-}
-
-#[test]
-fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
-    // 1. Box mm
-    let box_mm = from_step_bytes(&load_fixture("box-mm.step")).expect("box-mm");
-    assert_eq!(box_mm.faces().len(), 6);
-    assert_eq!(box_mm.provenance().source_unit, SourceUnit::Millimetre);
-    let b_mm = common::physical_bounds(&box_mm, 1e-5).expect("certified physical extents");
-    assert!((b_mm.min[0] - 0.0).abs() < 1e-5);
-    assert!((b_mm.min[1] - 0.0).abs() < 1e-5);
-    assert!((b_mm.min[2] - 0.0).abs() < 1e-5);
-    assert!((b_mm.max[0] - 20.0).abs() < 1e-5);
-    assert!((b_mm.max[1] - 10.0).abs() < 1e-5);
-    assert!((b_mm.max[2] - 8.0).abs() < 1e-5);
-
-    // 1b. Box inch (must evaluate to 20x10x8 mm physical dimensions)
-    let box_in = from_step_bytes(&load_fixture("box-inch.step")).expect("box-inch");
-    assert_eq!(box_in.faces().len(), 6);
-    assert_eq!(box_in.provenance().source_unit, SourceUnit::Inch);
-    let b_in = common::physical_bounds(&box_in, 1e-5).expect("certified physical extents");
-    assert!((b_in.min[0] - 0.0).abs() < 1e-5);
-    assert!((b_in.min[1] - 0.0).abs() < 1e-5);
-    assert!((b_in.min[2] - 0.0).abs() < 1e-5);
-    assert!((b_in.max[0] - 20.0).abs() < 1e-5);
-    assert!((b_in.max[1] - 10.0).abs() < 1e-5);
-    assert!((b_in.max[2] - 8.0).abs() < 1e-5);
-
-    // 2. Cylinder
-    let cyl = from_step_bytes(&load_fixture("cylinder.step")).expect("cylinder");
-    assert_eq!(
-        cyl.faces().len(),
-        4,
-        "cylinder has 2 semi-cylinders + 2 planar caps = 4 faces"
-    );
-    let b_cyl = common::physical_bounds(&cyl, 1e-5).expect("certified physical extents");
-    assert!((b_cyl.min[0] - (-5.0)).abs() < 1e-5);
-    assert!((b_cyl.min[1] - (-5.0)).abs() < 1e-5);
-    assert!((b_cyl.min[2] - 0.0).abs() < 1e-5);
-    assert!((b_cyl.max[0] - 5.0).abs() < 1e-5);
-    assert!((b_cyl.max[1] - 5.0).abs() < 1e-5);
-    assert!((b_cyl.max[2] - 8.0).abs() < 1e-5);
-
-    // 3. Through-hole
-    let th = from_step_bytes(&load_fixture("through-hole.step")).expect("through-hole");
-    let b_th = common::physical_bounds(&th, 1e-5).expect("certified physical extents");
-    assert!((b_th.min[0] - 0.0).abs() < 1e-5);
-    assert!((b_th.max[0] - 20.0).abs() < 1e-5);
-    assert!((b_th.max[1] - 20.0).abs() < 1e-5);
-    assert!((b_th.max[2] - 8.0).abs() < 1e-5);
-
-    // 4. Perforated plate
-    let plate = from_step_bytes(&load_fixture("perforated-plate.step")).expect("plate");
-    let b_plate = common::physical_bounds(&plate, 1e-4).expect("certified physical extents");
-    assert!((b_plate.min[0] - 0.0).abs() < 1e-4);
-    assert!((b_plate.max[0] - 1640.0).abs() < 1e-4);
-    assert!((b_plate.max[1] - 840.0).abs() < 1e-4);
-    assert!((b_plate.max[2] - 20.0).abs() < 1e-4);
 }
 
 #[test]

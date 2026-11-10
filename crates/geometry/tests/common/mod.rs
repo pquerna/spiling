@@ -5,8 +5,8 @@ use spiling_contracts::geometry::{AabbMm, GeometryError};
 use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget, projected_bounds};
 use std::sync::atomic::AtomicBool;
 
-/// Physical dimension assertions need native directional queries. Import bounds
-/// are conservative exclusions, with no promise of this endpoint precision.
+/// Exact dimensional controls use native directional queries on qualified
+/// sources. Import bounds are conservative exclusions, not this precision.
 pub fn physical_bounds(
     definition: &Definition,
     tolerance_mm: f64,

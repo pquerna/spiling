@@ -74,6 +74,13 @@ for related section probes. Preserve distinct topology, source identity,
 serialization and fresh-replay checks rather than repeating nonempty/cache
 assertions or prescribing incidental deposition-role and veto choices.
 
+Unit conversion has a paired millimetre/inch stock oracle with native directional
+bounds. Cylinder and through-hole positives retain their dedicated source,
+section/material and complete display tests; they do not also require every
+imported source to pass the optional exact support service. Oversized plate
+material/dimension checks belong to the explicit geometry-stress command below,
+not another catch-all baseline import test.
+
 `pnpm test:geometry-stress` separately runs the unchanged 1640 × 840 × 20 mm,
 512-hole source through consolidated source/bounds/material/void/storage checks
 and its native-support diagnostic. It replaces repeated oversized queries in
