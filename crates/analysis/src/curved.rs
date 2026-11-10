@@ -22,24 +22,6 @@ fn partition_point(start: f64, end: f64, step: usize, count: usize) -> f64 {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn radial_interfaces_keep_exact_canonical_endpoints() {
-        assert_ne!(1.6 + (7.2 - 1.6), 7.2);
-        for count in [1, 2, 3, 7, 11] {
-            assert_eq!(partition_point(1.6, 7.2, 0, count), 1.6);
-            assert_eq!(partition_point(1.6, 7.2, count, count), 7.2);
-            assert_eq!(
-                partition_point(1.6, 7.2, count, count),
-                partition_point(7.2, 8.0, 0, count)
-            );
-        }
-    }
-}
-
 pub(crate) fn build(
     plate: &spiling_geometry::BoredPlate,
     settings: &AnalysisRunSettings,
@@ -330,4 +312,22 @@ pub(crate) fn build(
         service_to_print: rotation,
         layer_axis: 2,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radial_interfaces_keep_exact_canonical_endpoints() {
+        assert_ne!(1.6 + (7.2 - 1.6), 7.2);
+        for count in [1, 2, 3, 7, 11] {
+            assert_eq!(partition_point(1.6, 7.2, 0, count), 1.6);
+            assert_eq!(partition_point(1.6, 7.2, count, count), 7.2);
+            assert_eq!(
+                partition_point(1.6, 7.2, count, count),
+                partition_point(7.2, 8.0, 0, count)
+            );
+        }
+    }
 }
