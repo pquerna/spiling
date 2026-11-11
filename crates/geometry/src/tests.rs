@@ -1025,3 +1025,56 @@ fn tolerant_sections_agree_with_certified_exact_sections() {
         "only {compared} certified sections to compare"
     );
 }
+
+#[test]
+fn tolerant_sections_lie_on_analytic_faces_and_report_their_circles() {
+    use crate::tolerant::{TolerantModel, TolerantPolicy};
+    let cancel = AtomicBool::new(false);
+    let policy = TolerantPolicy::default();
+    let mut circles = 0;
+    for name in [
+        "cylinder.step",
+        "through-hole.step",
+        "independent-exporters/occt-cylinder-mm.step",
+        "independent-exporters/occt-through-hole-mm.step",
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ] {
+        let definition = load(name);
+        let model = TolerantModel::build(&definition, policy, &cancel).unwrap();
+        let bounds = definition.bounds_mm();
+        for fraction in [0.23, 0.5, 0.77] {
+            let z = bounds.min[2] + (bounds.max[2] - bounds.min[2]) * fraction;
+            let section = model.section(z).unwrap();
+            for circle in &section.circles {
+                let mut on_circle = 0;
+                for l in &section.loops {
+                    let n = l.points.len();
+                    for i in 0..n {
+                        if l.faces[i] != circle.face {
+                            continue;
+                        }
+                        // Both ends of every chord on the face lie on its
+                        // exact circle, and the chord sags at most a quarter
+                        // of the profile tolerance.
+                        let (a, b) = (l.points[i], l.points[(i + 1) % n]);
+                        for p in [a, b] {
+                            let radial = (p[0] - circle.center[0]).hypot(p[1] - circle.center[1]);
+                            assert!(
+                                (radial - circle.radius).abs() <= 1e-9,
+                                "{name} at {z}: {radial} vs {}",
+                                circle.radius
+                            );
+                        }
+                        let half = (a[0] - b[0]).hypot(a[1] - b[1]) * 0.5;
+                        let sag = circle.radius - (circle.radius.powi(2) - half * half).sqrt();
+                        assert!(sag <= policy.profile_mm * 0.25 + 1e-12, "{name}: sag {sag}");
+                        on_circle += 1;
+                    }
+                }
+                assert!(on_circle > 0, "{name} at {z}: circle with no chords");
+                circles += 1;
+            }
+        }
+    }
+    assert!(circles >= 12, "only {circles} exact circles reported");
+}

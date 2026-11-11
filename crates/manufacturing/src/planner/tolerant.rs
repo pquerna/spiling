@@ -82,10 +82,11 @@ fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, Manufa
     })?;
     let mut result = polygons(&section);
     // Chords of flat faces cross the plane in runs of collinear points, and
-    // curved walls in sub-micrometre steps. Drop vertices within the profile
-    // budget left over after tessellation, so walls see the section's shape
-    // rather than its triangle fans.
-    let epsilon = model.policy().profile_mm * 0.5;
+    // freeform faces in sub-micrometre steps. Drop vertices within a quarter
+    // of the profile tolerance, the sag analytic curves were densified to, so
+    // walls see the section's shape rather than its triangle fans. Kept
+    // vertices stay on the BREP.
+    let epsilon = model.policy().profile_mm * 0.25;
     result = geo::Simplify::simplify(&result, epsilon);
     result
         .0

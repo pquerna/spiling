@@ -2040,6 +2040,7 @@ impl ClassifiedRegions {
             anchor_workspace_bytes = direct.workspace_bytes;
             bridge.paths = self.demanded_skin_bridges(
                 &normal.paths,
+                &[],
                 &direct.demands,
                 layer,
                 point_sum(base, direct.retained_points())?,
@@ -2396,6 +2397,7 @@ impl ClassifiedRegions {
                     )?;
                     let mut additional = self.demanded_skin_bridges(
                         &normal.paths,
+                        &bridge.paths,
                         &proof.demands,
                         layer,
                         point_sum(retained, proof.retained_points())?,
@@ -2500,6 +2502,7 @@ impl ClassifiedRegions {
     fn demanded_skin_bridges(
         &self,
         required: &[DepositionPath],
+        barriers: &[DepositionPath],
         demands: &[[[f64; 2]; 2]],
         layer: &region::HatchLayer<'_>,
         retained: usize,
@@ -2608,6 +2611,20 @@ impl ClassifiedRegions {
                     )
                 },
             )?;
+            // An extension may reach a stroke already planned on its row but
+            // never run over it: the bridge construction it would duplicate
+            // already owns that span.
+            let cut_rows = cut_rows_at_barriers(&candidate.whole_rows, barriers, axis)?;
+            admit(
+                point_sum(point_sum(live, points)?, path_points(&cut_rows))?,
+                byte_sum(
+                    whole_base_bytes,
+                    super::bonds::path_bytes(&candidate.whole_rows)
+                        + super::bonds::path_bytes(&cut_rows),
+                )?,
+                0,
+            )?;
+            candidate.whole_rows = cut_rows;
             let candidate_live =
                 point_sum(point_sum(live, points)?, path_points(&candidate.whole_rows))?;
             let proof = anchors(&mut candidate, axis, live, live_bytes)?;
@@ -2927,6 +2944,23 @@ impl ClassifiedRegions {
                                 if grid(actual.points_mm[if skin_first { 0 } else { 2 }][along])?
                                     == grid(transition[along])?
                                 {
+                                    continue;
+                                }
+                                // Its emitted row must stay in source
+                                // material, as replay checks: an end on a
+                                // slanted boundary can leave it once the
+                                // row rounds to the command lattice.
+                                if !emitted_within(source_owner, actual, fixed, along)? {
+                                    continue;
+                                }
+                                // A mixed bridge never deposits over a bridge
+                                // stroke already planned on its row.
+                                if duplicates_planned_stroke(
+                                    actual,
+                                    bridge.paths.iter().chain(&selected.paths),
+                                    fixed,
+                                    along,
+                                )? {
                                     continue;
                                 }
                                 if chosen.is_some() {
@@ -3735,6 +3769,135 @@ struct NormalOwner<'a> {
     paths: std::ops::Range<usize>,
 }
 
+/// `rows` with every span covered by a stroke of `barriers` on the same XYZ6
+/// row removed. Rows run along `axis`; touching spans are kept.
+fn cut_rows_at_barriers(
+    rows: &[DepositionPath],
+    barriers: &[DepositionPath],
+    axis: region::HatchAxis,
+) -> Result<Vec<DepositionPath>, ManufacturingError> {
+    let fixed = usize::from(axis == region::HatchAxis::X);
+    let along = 1 - fixed;
+    let grid = program_coordinates::project_xyz6_coordinate_mm;
+    let mut out = Vec::with_capacity(rows.len());
+    let mut cuts = Vec::new();
+    for row in rows {
+        let (a, b) = (row.points_mm[0], *row.points_mm.last().unwrap());
+        let row_fixed = grid(a[fixed])?;
+        cuts.clear();
+        for barrier in barriers {
+            for edge in barrier.points_mm.windows(2) {
+                if grid(edge[0][fixed])? == row_fixed
+                    && grid(edge[1][fixed])? == row_fixed
+                    && edge[0][2] == a[2]
+                {
+                    cuts.push([
+                        edge[0][along].min(edge[1][along]),
+                        edge[0][along].max(edge[1][along]),
+                    ]);
+                }
+            }
+        }
+        if cuts.is_empty() {
+            out.push(row.clone());
+            continue;
+        }
+        cuts.sort_by(|x, y| x[0].total_cmp(&y[0]));
+        let forward = a[along] <= b[along];
+        let (lo, hi) = (a[along].min(b[along]), a[along].max(b[along]));
+        let mut cursor = lo;
+        let mut pieces = Vec::new();
+        for cut in &cuts {
+            if cut[1] <= cursor || cut[0] >= hi {
+                continue;
+            }
+            if cut[0] > cursor {
+                pieces.push([cursor, cut[0]]);
+            }
+            cursor = cursor.max(cut[1]);
+        }
+        if cursor < hi {
+            pieces.push([cursor, hi]);
+        }
+        for [start, end] in pieces {
+            let mut piece = row.clone();
+            let (first, last) = if forward { (start, end) } else { (end, start) };
+            piece.points_mm[0][along] = first;
+            let n = piece.points_mm.len() - 1;
+            piece.points_mm[n][along] = last;
+            out.push(piece);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the emitted (XYZ6) span of a straight row path lies inside one
+/// interval of `domain` sectioned at the emitted row coordinate.
+fn emitted_within(
+    domain: &MultiPolygon<f64>,
+    path: &DepositionPath,
+    fixed: usize,
+    along: usize,
+) -> Result<bool, ManufacturingError> {
+    let grid = program_coordinates::project_xyz6_coordinate_mm;
+    let row = grid(path.points_mm[0][fixed])?;
+    let ends = [
+        grid(path.points_mm[0][along])?,
+        grid(path.points_mm.last().unwrap()[along])?,
+    ];
+    let span = [ends[0].min(ends[1]), ends[0].max(ends[1])];
+    let mut hits = Vec::new();
+    for polygon in &domain.0 {
+        hits.clear();
+        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+            for edge in ring.0.windows(2) {
+                let c = [edge[0].x, edge[0].y];
+                let d = [edge[1].x, edge[1].y];
+                if (c[fixed] <= row && row < d[fixed]) || (d[fixed] <= row && row < c[fixed]) {
+                    hits.push(
+                        c[along] + (row - c[fixed]) * (d[along] - c[along]) / (d[fixed] - c[fixed]),
+                    );
+                }
+            }
+        }
+        hits.sort_unstable_by(f64::total_cmp);
+        for pair in hits.as_chunks::<2>().0 {
+            if grid(pair[0])? <= span[0] && span[1] <= grid(pair[1])? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `path` runs along any edge of `others` on its own XYZ6 row for
+/// more than one coordinate quantum. Strokes meeting end to end may overlap by
+/// one quantum where their joint rounds to adjacent command values.
+fn duplicates_planned_stroke<'p>(
+    path: &DepositionPath,
+    others: impl Iterator<Item = &'p DepositionPath>,
+    fixed: usize,
+    along: usize,
+) -> Result<bool, ManufacturingError> {
+    let grid = program_coordinates::project_xyz6_point_mm;
+    let first = grid(path.points_mm[0])?;
+    let last = grid(*path.points_mm.last().unwrap())?;
+    let span = [first[along].min(last[along]), first[along].max(last[along])];
+    for other in others {
+        for edge in other.points_mm.windows(2) {
+            let (c, d) = (grid(edge[0])?, grid(edge[1])?);
+            if c[fixed] != first[fixed] || d[fixed] != first[fixed] || c[2] != first[2] {
+                continue;
+            }
+            let overlap = span[1].min(c[along].max(d[along])) - span[0].max(c[along].min(d[along]));
+            if overlap > 1.5 * program_coordinates::XYZ6_QUANTUM_MM {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 struct BridgePatch<'a> {
     // A full hatch cell belongs only to its classified role. Actual bead
     // corridors reserve cross-role anchor extrusion without erasing skin cells.
@@ -4266,6 +4429,74 @@ mod skin_bridge_tests {
     use super::*;
     use crate::planner::support::{self, AnchorWorkspace};
     use geo::polygon;
+
+    fn stroke(owner: Option<DepositionOwner>, points: &[[f64; 2]]) -> DepositionPath {
+        DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::Bridge,
+            owner,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [5.0, 5.4],
+            points_mm: points.iter().map(|p| [p[0], p[1], 5.4]).collect(),
+        }
+    }
+
+    #[test]
+    fn skin_bridge_extensions_stop_at_strokes_already_on_their_row() {
+        // Observed on a real part: a skin bridge row extended over the regional
+        // end of a mixed bridge already planned on the same row.
+        let skin = Some(DepositionOwner::MandatorySkin {
+            skin: ProcessSkinKind::TopSkin,
+        });
+        let mixed = stroke(
+            Some(DepositionOwner::RegionalSkinBridge {
+                region_index: 0,
+                skin: ProcessSkinKind::TopSkin,
+                skin_first: false,
+            }),
+            &[
+                [101.858408, 163.782286],
+                [101.858408, 161.276614],
+                [101.858408, 160.852533],
+            ],
+        );
+        let whole = [
+            stroke(skin, &[[101.858408, 139.0], [101.858408, 170.0]]),
+            stroke(skin, &[[105.0, 139.0], [105.0, 170.0]]),
+        ];
+        let cut = cut_rows_at_barriers(&whole, std::slice::from_ref(&mixed), region::HatchAxis::Y)
+            .unwrap();
+        let spans: Vec<[f64; 3]> = cut
+            .iter()
+            .map(|row| {
+                [
+                    row.points_mm[0][0],
+                    row.points_mm[0][1],
+                    row.points_mm[1][1],
+                ]
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                [101.858408, 139.0, 160.852533],
+                [101.858408, 163.782286, 170.0],
+                [105.0, 139.0, 170.0],
+            ]
+        );
+        // A bridge chosen over the mixed bridge's span would duplicate it; one
+        // meeting it end to end, even one XYZ6 step over, would not.
+        let over = stroke(skin, &[[101.858408, 139.0], [101.858408, 161.0]]);
+        let meeting = stroke(skin, &[[101.858408, 139.0], [101.858409, 160.852534]]);
+        let along = stroke(skin, &[[101.858408, 139.0], [101.858408, 160.852534]]);
+        let fixed = 0;
+        for (candidate, duplicates) in [(&over, true), (&meeting, false), (&along, false)] {
+            assert_eq!(
+                duplicates_planned_stroke(candidate, std::iter::once(&mixed), fixed, 1).unwrap(),
+                duplicates
+            );
+        }
+    }
 
     #[test]
     fn demanded_sparse_terminal_joins_only_adjacent_required_skin_at_nearest_actual_anchor() {

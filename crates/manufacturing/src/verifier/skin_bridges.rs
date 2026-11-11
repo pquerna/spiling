@@ -5,11 +5,10 @@
 //! binds the sole ownership transition; each portion retains its captured domain.
 use super::{cancelled, failed, project_xyz6_point_mm};
 
-/// One XYZ6 command step.
-const XYZ6_QUANTUM_MM: f64 = 0.000_001;
 use crate::planner::support::{
     AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
 };
+use spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 

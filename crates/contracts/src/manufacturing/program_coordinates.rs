@@ -13,6 +13,8 @@ use super::{ManufacturingError, ManufacturingErrorCode};
 /// whose adjacent decimal lattice points remain distinct under f64 decoding
 /// (about 4503.6 km). Raw multiplication still has its normal rounding error.
 pub const MAX_XYZ6_COORDINATE_MM: f64 = (1u64 << 52) as f64 / 1_000_000.0;
+/// One step of the XYZ6 coordinate lattice.
+pub const XYZ6_QUANTUM_MM: f64 = 0.000_001;
 
 /// Software deposition-resolution policy, not calibrated motion performance.
 pub const MIN_DEPOSITION_COMMAND_MM: f64 = 0.02;

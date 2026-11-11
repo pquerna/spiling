@@ -164,9 +164,16 @@ refuses for a geometric reason or exhausts its proof work, and the job uses no
 finish, generated support or fixed-dual routing, the planner reslices the whole
 job within tolerance:
 
-- Sections come from the BREP's own watertight tessellation at half the
-  profile tolerance, chained by mesh edge identity, joined within `τ`, then
-  simplified within the remaining profile budget. Each segment keeps its face.
+- Sections take their topology from the BREP's own watertight tessellation
+  at half the profile tolerance: which faces a plane crosses and in what
+  order, chained by mesh edge identity and joined within `τ`. Their geometry
+  comes from the BREP. On analytic faces (planes, cylinders, cones, spheres
+  and tori in any orientation) every crossing is moved onto the true section
+  curve, a corner onto both faces, and curved runs are densified on the true
+  curve to a quarter of `ε_xy`; vertical-axis surfaces of revolution report
+  their exact circles. Freeform faces keep the mesh's chord accuracy. The
+  section is then simplified within a quarter of `ε_xy`, keeping only
+  vertices that lie on the BREP. Each segment keeps its face.
 - Feature heights are flat faces and part extremes, merged within `ε_z`; a
   height within `ε_z` of the bed is bed contact.
 - Walls are classic constant-width perimeters, the section offset inward to
@@ -201,7 +208,9 @@ material, time and travel counts on the same parts.
 1. Tolerance policy and height merging (`ε_z`, `τ`), with tolerant section
    chaining. Delivered as the job-wide tolerant mode above; `ε_z` is the
    printer's Z step in both paths, recorded as `height_merge_mm`.
-2. Tolerant seam and edge correspondence within `τ`; per-face fallback.
+2. Sections with BREP geometry: delivered for analytic faces, which report
+   their exact circles. Freeform tracing to `ε_xy`, tolerant seam and
+   edge correspondence within `τ`, and per-face fallback remain.
 3. Import packaging: single-solid assembly wrappers, multi-body parts, AP242,
    assemblies as plate occurrences. Delivered: one definition per solid at its
    source placement; overlapping occurrences slice as a union.

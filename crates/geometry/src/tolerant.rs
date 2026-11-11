@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! ADR012 tolerant sections from the native BREP's own watertight tessellation.
+//! ADR012 tolerant sections: mesh topology, BREP geometry.
 //!
 //! One f64 tessellation of the imported BREP is built once per definition at a
 //! chord tolerance below the profile tolerance. A section intersects its
@@ -10,8 +10,18 @@
 //! indices of the crossed mesh edge; neighbouring faces share edge vertices, so
 //! pieces chain by mesh topology. Only genuine source gaps are joined by
 //! proximity, within the join tolerance. Every segment keeps its source face.
-//! Loops are validated, oriented and nested on the result; nothing here is a
-//! proof, and the measured gaps and dropped slivers are reported.
+//!
+//! The mesh decides only which faces a section crosses and in what order.
+//! Where a face is analytic (plane, cylinder, cone, sphere, torus), each
+//! crossing is moved onto its true section curve, corners onto both faces,
+//! and curved runs are densified on the true curve; such sections lie on the
+//! BREP to rounding, and vertical-axis surfaces of revolution report their
+//! exact circles. Other faces keep the mesh's chord accuracy. Loops are
+//! validated, oriented and nested on the result; nothing here is a proof, and
+//! the measured gaps and dropped slivers are reported.
+
+mod exact;
+pub use exact::SectionCircle;
 
 use crate::{GeometryError, GeometryErrorCode, kernel::Definition};
 use solidcore_mesh::{EdgeOptions, OutputOptions, TessellateOptions, Tolerance};
@@ -43,6 +53,8 @@ pub struct TolerantSection {
     pub max_gap_mm: f64,
     /// Loops dropped for having less than the profile tolerance squared of area.
     pub dropped_slivers: usize,
+    /// Exact circles of the crossed vertical-axis surfaces of revolution.
+    pub circles: Vec<SectionCircle>,
 }
 
 /// The tolerances a tolerant section is built and admitted with.
@@ -68,6 +80,8 @@ pub struct TolerantModel {
     positions: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
     faces: Vec<u32>,
+    /// Analytic surface of each source face, by ordinal, in the model frame.
+    surfaces: Vec<Option<exact::Implicit>>,
     buckets: Vec<Vec<u32>>,
     z_min: f64,
     policy: TolerantPolicy,
@@ -121,10 +135,21 @@ impl TolerantModel {
         if positions.is_empty() || positions.iter().flatten().any(|v| !v.is_finite()) {
             return Err(unavailable("tolerant tessellation is empty or not finite"));
         }
+        let surfaces = definition
+            .faces()
+            .iter()
+            .map(|face| {
+                face.geometry
+                    .analytic
+                    .as_ref()
+                    .and_then(exact::Implicit::from_analytic)
+            })
+            .collect();
         Ok(Self::indexed(
             positions,
             mesh.triangles,
             faces,
+            surfaces,
             policy,
             mesh.failures.len() + mesh.unconverged_faces.len(),
         ))
@@ -137,30 +162,11 @@ impl TolerantModel {
     /// The same tessellation placed by a rigid pose, so sections at world Z
     /// are horizontal planes in the placed frame.
     pub fn placed(&self, pose: &spiling_contracts::geometry::RigidPoseMm) -> Self {
-        let [qx, qy, qz, qw] = pose.rotation_xyzw;
-        let rotate = |v: [f64; 3]| -> [f64; 3] {
-            // v' = v + 2w(q x v) + 2 q x (q x v)
-            let q = [qx, qy, qz];
-            let cross = |a: [f64; 3], b: [f64; 3]| {
-                [
-                    a[1] * b[2] - a[2] * b[1],
-                    a[2] * b[0] - a[0] * b[2],
-                    a[0] * b[1] - a[1] * b[0],
-                ]
-            };
-            let t = cross(q, v).map(|c| 2.0 * c);
-            let u = cross(q, t);
-            [
-                v[0] + qw * t[0] + u[0],
-                v[1] + qw * t[1] + u[1],
-                v[2] + qw * t[2] + u[2],
-            ]
-        };
         let positions = self
             .positions
             .iter()
             .map(|p| {
-                let r = rotate(*p);
+                let r = rotate(pose, *p);
                 [
                     r[0] + pose.translation_mm[0],
                     r[1] + pose.translation_mm[1],
@@ -172,6 +178,10 @@ impl TolerantModel {
             positions,
             self.triangles.clone(),
             self.faces.clone(),
+            self.surfaces
+                .iter()
+                .map(|surface| surface.map(|surface| surface.placed(pose)))
+                .collect(),
             self.policy,
             self.failed_faces,
         )
@@ -181,6 +191,7 @@ impl TolerantModel {
         positions: Vec<[f64; 3]>,
         triangles: Vec<[u32; 3]>,
         faces: Vec<u32>,
+        surfaces: Vec<Option<exact::Implicit>>,
         policy: TolerantPolicy,
         failed_faces: usize,
     ) -> Self {
@@ -205,6 +216,7 @@ impl TolerantModel {
             positions,
             triangles,
             faces,
+            surfaces,
             buckets,
             z_min,
             policy,
@@ -260,6 +272,7 @@ impl TolerantModel {
         self.positions.capacity() * 24
             + self.triangles.capacity() * 12
             + self.faces.capacity() * 4
+            + self.surfaces.capacity() * std::mem::size_of::<Option<exact::Implicit>>()
             + self.buckets.iter().map(|b| b.capacity() * 4).sum::<usize>()
     }
 
@@ -271,6 +284,7 @@ impl TolerantModel {
             joined_gaps: 0,
             max_gap_mm: 0.0,
             dropped_slivers: 0,
+            circles: Vec::new(),
         };
         if !z.is_finite() {
             return Err(unavailable("tolerant section height is not finite"));
@@ -289,24 +303,37 @@ impl TolerantModel {
         };
         let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
         let mut segments = Vec::new();
-        let mut points: HashMap<(u32, u32), [f64; 2]> = HashMap::new();
+        // Each crossing with the face of each triangle that uses it.
+        let mut points: HashMap<(u32, u32), Crossing> = HashMap::new();
         for &index in &self.buckets[offset as usize] {
             let [a, b, c] = self.triangles[index as usize];
+            let face = self.faces[index as usize];
             let mut ends = Vec::with_capacity(2);
             for (p, q) in [(a, b), (b, c), (c, a)] {
                 if above(p) != above(q) {
                     let k = key(p, q);
-                    points.entry(k).or_insert_with(|| crossing(p, q));
+                    points
+                        .entry(k)
+                        .and_modify(|entry| {
+                            if entry.1 != face {
+                                entry.2 = Some(face);
+                            }
+                        })
+                        .or_insert_with(|| (crossing(p, q), face, None));
                     ends.push(k);
                 }
             }
             if ends.len() == 2 {
-                segments.push((ends[0], ends[1], self.faces[index as usize]));
+                segments.push((ends[0], ends[1], face));
             }
         }
         if segments.is_empty() {
             return Ok(empty);
         }
+        let points: HashMap<(u32, u32), [f64; 2]> = points
+            .into_iter()
+            .map(|(k, (p, first, second))| (k, self.exact_crossing(p, z, first, second)))
+            .collect();
         // Chain by crossing identity: open chains from degree-one crossings
         // first, then the remaining closed cycles.
         let mut incident: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
@@ -407,6 +434,7 @@ impl TolerantModel {
         let mut loops = Vec::new();
         for (mut points, mut faces) in rings {
             dedupe(&mut points, &mut faces);
+            self.densify(&mut points, &mut faces, z);
             if points.len() < 3 {
                 dropped_slivers += 1;
                 continue;
@@ -440,15 +468,129 @@ impl TolerantModel {
                 l.area = -l.area;
             }
         }
+        let mut crossed: Vec<u32> = loops.iter().flat_map(|l| l.faces.iter().copied()).collect();
+        crossed.sort_unstable();
+        crossed.dedup();
+        let mut circles = Vec::new();
+        for face in crossed {
+            if let Some(Some(surface)) = self.surfaces.get(face as usize) {
+                surface.circles(z, face, &mut circles);
+            }
+        }
         Ok(TolerantSection {
             z_mm: z,
             loops,
             joined_gaps,
             max_gap_mm: max_gap,
             dropped_slivers,
+            circles,
         })
     }
+
+    fn surface(&self, face: u32) -> Option<&exact::Implicit> {
+        self.surfaces.get(face as usize).and_then(Option::as_ref)
+    }
+
+    /// A mesh crossing moved onto its analytic face, or onto both faces where
+    /// it is a corner between two. The mesh point stands where no analytic
+    /// surface applies or the true curve is ill-conditioned.
+    fn exact_crossing(&self, p: [f64; 2], z: f64, first: u32, second: Option<u32>) -> [f64; 2] {
+        let reach = self.policy.profile_mm;
+        let (a, b) = (self.surface(first), second.and_then(|f| self.surface(f)));
+        let single = |surface: Option<&exact::Implicit>| {
+            surface.and_then(|surface| surface.project(p, z, reach))
+        };
+        match (a, b) {
+            (Some(a), Some(b)) if a != b => a
+                .project_pair(b, p, z, reach)
+                // Tangent faces share their section curve to first order;
+                // the curved one carries it.
+                .or_else(|| single(Some(if a.is_plane() { b } else { a })))
+                .unwrap_or(p),
+            (Some(a), _) => single(Some(a)).unwrap_or(p),
+            (None, Some(b)) => single(Some(b)).unwrap_or(p),
+            (None, None) => p,
+        }
+    }
+
+    /// Insert points on the true curve wherever a chord on a curved analytic
+    /// face sags more than a quarter of the profile tolerance.
+    fn densify(&self, points: &mut Vec<[f64; 2]>, faces: &mut Vec<u32>, z: f64) {
+        let sag = self.policy.profile_mm * 0.25;
+        let reach = self.policy.profile_mm;
+        if points.len() < 2 {
+            return;
+        }
+        let mut dense_points = Vec::with_capacity(points.len());
+        let mut dense_faces = Vec::with_capacity(faces.len());
+        let n = points.len();
+        for i in 0..n {
+            let (a, b, face) = (points[i], points[(i + 1) % n], faces[i]);
+            dense_points.push(a);
+            dense_faces.push(face);
+            let Some(surface) = self.surface(face).filter(|s| !s.is_plane()) else {
+                continue;
+            };
+            // Depth-first midpoint subdivision, at most 2^8 pieces per chord.
+            let mut stack = vec![(a, b, 0u8)];
+            let mut inserted = Vec::new();
+            while let Some((a, b, depth)) = stack.pop() {
+                let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+                let Some(on) = surface.project(mid, z, reach) else {
+                    continue;
+                };
+                if (on[0] - mid[0]).hypot(on[1] - mid[1]) <= sag || depth >= 8 {
+                    continue;
+                }
+                // Visit the later half first so points come out in order.
+                stack.push((on, b, depth + 1));
+                stack.push((a, on, depth + 1));
+                inserted.push((depth, on));
+            }
+            // Midpoints were found in pre-order; sort them along the chord.
+            let direction = [b[0] - a[0], b[1] - a[1]];
+            let mut along: Vec<(f64, [f64; 2])> = inserted
+                .into_iter()
+                .map(|(_, p)| {
+                    (
+                        (p[0] - a[0]) * direction[0] + (p[1] - a[1]) * direction[1],
+                        p,
+                    )
+                })
+                .collect();
+            along.sort_by(|x, y| x.0.total_cmp(&y.0));
+            for (_, p) in along {
+                dense_points.push(p);
+                dense_faces.push(face);
+            }
+        }
+        *points = dense_points;
+        *faces = dense_faces;
+    }
 }
+
+/// Rotate `v` by the pose's unit quaternion: v' = v + 2w(q x v) + 2 q x (q x v).
+fn rotate(pose: &spiling_contracts::geometry::RigidPoseMm, v: [f64; 3]) -> [f64; 3] {
+    let [qx, qy, qz, qw] = pose.rotation_xyzw;
+    let q = [qx, qy, qz];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let t = cross(q, v).map(|c| 2.0 * c);
+    let u = cross(q, t);
+    [
+        v[0] + qw * t[0] + u[0],
+        v[1] + qw * t[1] + u[1],
+        v[2] + qw * t[2] + u[2],
+    ]
+}
+
+/// A mesh-edge crossing and the faces of the one or two triangles using it.
+type Crossing = ([f64; 2], u32, Option<u32>);
 
 fn dedupe(points: &mut Vec<[f64; 2]>, faces: &mut Vec<u32>) {
     let mut kept_points = Vec::with_capacity(points.len());
