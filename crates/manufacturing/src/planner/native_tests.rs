@@ -2349,9 +2349,9 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
         rib_count: 12,
         phase_fraction: 0.0,
     };
-    scene.occurrences[0].pose.translation_mm[0] = 1e10;
-    // Native endpoint arithmetic cannot resolve the requested uncertainty at
-    // this placement. Preserve that distinction from known unsupported input;
+    scene.occurrences[0].pose.translation_mm[0] = 1e14;
+    // Native endpoint arithmetic cannot resolve the printer's motion step at
+    // this placement (one f64 ulp exceeds it). Preserve that distinction from known unsupported input;
     // uncertainty must still terminate Compile before any output is published.
     let unresolved = preflight(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(
@@ -3233,7 +3233,9 @@ fn assert_native_family_compile_and_replay(
     assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
     assert_eq!(bundle.provenance.intent, intent, "{name}");
     assert!(
-        (bundle.plan.layers.last().unwrap().z_mm - top).abs() <= 0.000001,
+        // The top resolves to the printer's Z step, not past it.
+        (bundle.plan.layers.last().unwrap().z_mm - top).abs()
+            <= intent.printer.motion_resolution.z_mm,
         "{name}"
     );
     let coverage = &bundle.plan.native_geometry;
@@ -3506,7 +3508,10 @@ fn spline_extrusion_bore_keeps_native_holes_through_ordinary_paths_and_reopen_re
     );
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
-    assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() <= 0.000001);
+    assert!(
+        (bundle.plan.layers.last().unwrap().z_mm - 8.0).abs()
+            <= intent.printer.motion_resolution.z_mm
+    );
     assert!(
         bundle
             .plan

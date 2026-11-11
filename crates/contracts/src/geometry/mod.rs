@@ -56,6 +56,10 @@ pub const MESH_SURFACE_TOLERANCE_MM: f64 = 0.05;
 pub const SECTION_SAMPLING_TOLERANCE_MM: f64 = 0.005;
 pub const SECTION_BOOLEAN_TOLERANCE_MM: f64 = 0.00001;
 pub const SECTION_PLANE_TOLERANCE_MM: f64 = 0.0001;
+/// Largest bed-contact gap a placement request may ask for: the coarsest
+/// printer motion step. Clients pass the selected printer's Z step, so a part
+/// rests on the bed exactly as finely as that printer can command.
+pub const MAX_BED_CONTACT_TOLERANCE_MM: f64 = crate::manufacturing::MAX_MOTION_RESOLUTION_MM;
 pub const POSE_NORM_TOLERANCE: f64 = 1e-10;
 pub const NORMAL_NORM_TOLERANCE: f64 = 1e-4;
 

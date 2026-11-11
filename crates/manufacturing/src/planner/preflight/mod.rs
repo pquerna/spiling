@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::{LAYER_QUANTIZATION_MM, surface};
+use super::surface;
 use crate::{CompilerInput, check_cancel, error};
 use spiling_contracts::geometry::{
     AabbMm, GeometryErrorCode, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId, OccurrenceRecord,
@@ -57,15 +57,22 @@ fn axis_resolution(input: &CompilerInput<'_>, axis: usize) -> f64 {
     }
 }
 
-fn terminal_inside_bed_envelope(bracket: [f64; 2], bed: f64, shape_budget: f64) -> bool {
+/// A terminal touches the bed when it is within one Z step of it and inside
+/// the shape budget.
+fn terminal_inside_bed_envelope(
+    bracket: [f64; 2],
+    bed: f64,
+    z_step: f64,
+    shape_budget: f64,
+) -> bool {
     bed.is_finite()
         && shape_budget.is_finite()
         && shape_budget > 0.0
         && bracket.iter().all(|height| height.is_finite())
         && bracket[0] <= bracket[1]
-        && bracket.into_iter().all(|height| {
-            (height - bed).abs() <= LAYER_QUANTIZATION_MM && (height - bed).abs() <= shape_budget
-        })
+        && bracket
+            .into_iter()
+            .all(|height| (height - bed).abs() <= z_step && (height - bed).abs() <= shape_budget)
 }
 
 impl<'a> LowerTerminalRouting<'a> {
@@ -91,9 +98,24 @@ impl<'a> LowerTerminalRouting<'a> {
             || domain.iter().any(|band| band[0] > band[1])
             || domain[0][0] < bed
             || support[0] < bed
-            || !terminal_inside_bed_envelope(domain[0], bed, policy.maximum_shape_error_mm)
-            || !terminal_inside_bed_envelope(support, bed, policy.maximum_shape_error_mm)
-            || !terminal_inside_bed_envelope(terminal, bed, policy.maximum_shape_error_mm)
+            || !terminal_inside_bed_envelope(
+                domain[0],
+                bed,
+                policy.maximum_height_uncertainty_mm,
+                policy.maximum_shape_error_mm,
+            )
+            || !terminal_inside_bed_envelope(
+                support,
+                bed,
+                policy.maximum_height_uncertainty_mm,
+                policy.maximum_shape_error_mm,
+            )
+            || !terminal_inside_bed_envelope(
+                terminal,
+                bed,
+                policy.maximum_height_uncertainty_mm,
+                policy.maximum_shape_error_mm,
+            )
         {
             return None;
         }
@@ -662,17 +684,25 @@ pub(super) fn admit_with<'a, 'work>(
             };
             for axis in 0..3 {
                 let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
-                let extent = match geometry_sources[&occurrence.definition_id]
-                    .placed_material_bounds(
-                        occurrence.pose,
-                        direction,
-                        spiling_geometry::BoundsPolicy {
-                            maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
-                        },
-                        query_bytes,
-                        result.geometry_work,
-                        cancel,
-                    ) {
+                // A defect fuse per query; a fused query is a ResourceLimit
+                // refusal, which the planner retries in the tolerant lane.
+                let mut fuse = spiling_geometry::GeometryWorkBudget::exact_bounds_fuse();
+                let query = geometry_sources[&occurrence.definition_id].placed_material_bounds(
+                    occurrence.pose,
+                    direction,
+                    // Extents need not be finer than the printer can move.
+                    spiling_geometry::BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: axis_resolution(input, axis),
+                    },
+                    query_bytes,
+                    &mut fuse,
+                    cancel,
+                );
+                result
+                    .geometry_work
+                    .charge(fuse.consumed(), cancel)
+                    .map_err(|e| super::native_error(e, "material projected bounds"))?;
+                let extent = match query {
                     Ok(extent) => {
                         if extent.definition_id() != &occurrence.definition_id
                             || !extent.is_compatible_with_definition(definition)
@@ -998,8 +1028,10 @@ pub(super) fn resolve_native_events(
         *proposal_work = proposal_work.saturating_add(admission.horizontal_events.len());
         return Ok(());
     }
+    // Heights resolve to the printer's Z step: two events closer than one step
+    // are one commanded height on this machine.
     let policy = spiling_geometry::AnalysisPolicy {
-        maximum_height_uncertainty_mm: LAYER_QUANTIZATION_MM,
+        maximum_height_uncertainty_mm: axis_resolution(input, 2),
         maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,
     };
     let mut completed_bounds: Option<AabbMm> = None;
@@ -1311,34 +1343,49 @@ fn native_check_code(code: GeometryErrorCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::super::LAYER_QUANTIZATION_MM;
     use super::*;
 
     #[test]
     fn terminal_bed_envelope_checks_each_bracket_and_shape_budget_independently() {
         let bed = 2.0;
         let shape = 0.25 * LAYER_QUANTIZATION_MM;
-        assert!(terminal_inside_bed_envelope([bed, bed], bed, shape));
+        assert!(terminal_inside_bed_envelope(
+            [bed, bed],
+            bed,
+            LAYER_QUANTIZATION_MM,
+            shape
+        ));
         assert!(terminal_inside_bed_envelope(
             [bed - shape * 0.5, bed + shape * 0.5],
             bed,
+            LAYER_QUANTIZATION_MM,
             shape,
         ));
         assert!(!terminal_inside_bed_envelope(
             [bed, bed + shape * 2.0],
             bed,
+            LAYER_QUANTIZATION_MM,
             shape,
         ));
         assert!(!terminal_inside_bed_envelope(
             [bed, bed + LAYER_QUANTIZATION_MM * 2.0],
             bed,
+            LAYER_QUANTIZATION_MM,
             0.05,
         ));
         assert!(!terminal_inside_bed_envelope(
             [bed + shape, bed],
             bed,
+            LAYER_QUANTIZATION_MM,
             shape
         ));
-        assert!(!terminal_inside_bed_envelope([bed, f64::NAN], bed, shape));
+        assert!(!terminal_inside_bed_envelope(
+            [bed, f64::NAN],
+            bed,
+            LAYER_QUANTIZATION_MM,
+            shape
+        ));
     }
 
     #[test]

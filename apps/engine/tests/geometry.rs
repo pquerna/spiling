@@ -1575,7 +1575,14 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
     let revision = project_revision(&client).await;
     let envelope = AabbMm::new([0.0; 3], [200.0; 3]).unwrap();
     let prepared = client
-        .prepare_bed_pose(&captured, revision, &occurrence, envelope, true)
+        .prepare_bed_pose(
+            &captured,
+            revision,
+            &occurrence,
+            envelope,
+            true,
+            SECTION_PLANE_TOLERANCE_MM,
+        )
         .await
         .unwrap();
     assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
@@ -1634,7 +1641,14 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
     ));
     let current_revision = project_revision(&client).await;
     let fresh = client
-        .prepare_bed_pose(&captured, current_revision, &occurrence, envelope, true)
+        .prepare_bed_pose(
+            &captured,
+            current_revision,
+            &occurrence,
+            envelope,
+            true,
+            SECTION_PLANE_TOLERANCE_MM,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -1661,6 +1675,7 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
                 &placed,
                 too_small,
                 true,
+                SECTION_PLANE_TOLERANCE_MM,
             )
             .await,
         Err(spiling_engine_client::ClientError::Geometry(_))
@@ -1686,6 +1701,7 @@ async fn native_bed_contact_resolves_support_before_large_world_translation() {
             &occurrence,
             AabbMm::new([0.0; 3], [200.0; 3]).unwrap(),
             true,
+            SECTION_PLANE_TOLERANCE_MM,
         )
         .await
         .unwrap();

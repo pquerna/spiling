@@ -360,7 +360,7 @@ impl BedPosePreparation {
         if self.pose.rotation_xyzw != self.original_pose.rotation_xyzw
             || !self.contact_tolerance_mm.is_finite()
             || self.contact_tolerance_mm <= 0.0
-            || self.contact_tolerance_mm > SECTION_PLANE_TOLERANCE_MM
+            || self.contact_tolerance_mm > MAX_BED_CONTACT_TOLERANCE_MM
             || !self.maximum_contact_gap_mm.is_finite()
             || self.maximum_contact_gap_mm < 0.0
             || self.maximum_contact_gap_mm > self.contact_tolerance_mm

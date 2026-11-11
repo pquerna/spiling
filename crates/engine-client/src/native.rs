@@ -11,8 +11,7 @@ use spiling_contracts::{
     geometry::{
         AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
         GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
-        MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SECTION_PLANE_TOLERANCE_MM, SceneSummary,
-        SessionId, SourceHash,
+        MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SceneSummary, SessionId, SourceHash,
     },
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
@@ -708,6 +707,7 @@ impl EngineRpc {
         occurrence: &OccurrenceRecord,
         envelope_mm: AabbMm,
         center_xy: bool,
+        contact_tolerance_mm: f64,
     ) -> Result<BedPosePreparation, ClientError> {
         let response = self
             .geometry(GeometryCommand::PrepareBedPose {
@@ -719,7 +719,7 @@ impl EngineRpc {
                 expected_pose: occurrence.pose,
                 envelope_mm,
                 center_xy,
-                contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+                contact_tolerance_mm,
             })
             .await?;
         let GeometryResponse::OperationAccepted { operation } = response else {
@@ -767,7 +767,7 @@ impl EngineRpc {
             || preparation.original_pose != occurrence.pose
             || preparation.envelope_mm != envelope_mm
             || preparation.center_xy != center_xy
-            || preparation.contact_tolerance_mm != SECTION_PLANE_TOLERANCE_MM
+            || preparation.contact_tolerance_mm != contact_tolerance_mm
         {
             return Err(ClientError::Protocol(
                 "native contact capture mismatch".into(),
@@ -1169,9 +1169,17 @@ impl EngineClient {
         occurrence: &OccurrenceRecord,
         envelope_mm: AabbMm,
         center_xy: bool,
+        contact_tolerance_mm: f64,
     ) -> Result<BedPosePreparation, ClientError> {
         self.rpc
-            .prepare_bed_pose(scene, project_revision, occurrence, envelope_mm, center_xy)
+            .prepare_bed_pose(
+                scene,
+                project_revision,
+                occurrence,
+                envelope_mm,
+                center_xy,
+                contact_tolerance_mm,
+            )
             .await
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {

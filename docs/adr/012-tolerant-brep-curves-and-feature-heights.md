@@ -176,6 +176,13 @@ job within tolerance:
 - The plan carries `PreflightEvidence::Tolerant` and claims no native
   certificate. Fresh independent replay is unchanged.
 
+The exact attempt that precedes it resolves at the same printer step: part
+extents to the XY and Z step, height events to the Z step, and bed placement to
+a contact gap of one Z step. Each exact directional-bounds query also runs under
+a defect fuse (2^26 work units, above every successful query in the corpus); a
+query that cannot prune a face falls back like any other exact refusal, so the
+exact path never delays the tolerant one.
+
 Two outcomes apply in both modes. With supports disabled, an unanchored stroke
 prints, as other slicers do, and its span is reported on the layer as
 `unsupported_overhang_mm`. A fill, skin or bridge row shorter than one minimum

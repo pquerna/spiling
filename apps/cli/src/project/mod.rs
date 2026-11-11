@@ -2850,6 +2850,7 @@ async fn execute(
                         occurrence,
                         intent.printer.build_envelope,
                         center,
+                        intent.printer.motion_resolution.z_mm,
                     )
                     .await?;
                 let response = geometry::control(
@@ -2896,7 +2897,14 @@ async fn execute(
                 let mut lift = f64::NEG_INFINITY;
                 for occurrence in &occurrences {
                     let preparation = client
-                        .prepare_bed_pose(&summary, project_revision, occurrence, wide, false)
+                        .prepare_bed_pose(
+                            &summary,
+                            project_revision,
+                            occurrence,
+                            wide,
+                            false,
+                            intent.printer.motion_resolution.z_mm,
+                        )
                         .await?;
                     for axis in 0..3 {
                         lower[axis] = lower[axis].min(preparation.minimum_lower_mm[axis]);

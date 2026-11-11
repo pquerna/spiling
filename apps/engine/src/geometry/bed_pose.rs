@@ -34,7 +34,7 @@ pub(super) fn prepare(
     if definition.id() != &request.definition_id
         || !request.contact_tolerance_mm.is_finite()
         || request.contact_tolerance_mm <= 0.0
-        || request.contact_tolerance_mm > SECTION_PLANE_TOLERANCE_MM
+        || request.contact_tolerance_mm > MAX_BED_CONTACT_TOLERANCE_MM
         || (0..3).any(|axis| request.envelope_mm.min[axis] >= request.envelope_mm.max[axis])
     {
         return Err(error(
@@ -136,11 +136,12 @@ fn exact_brackets(
     let mut minimum_upper_mm = [0.0; 3];
     let mut maximum_lower_mm = [0.0; 3];
     let mut maximum_upper_mm = [0.0; 3];
-    // Conservative placement uses the minimum's lower enclosure. Resolve Z at
-    // least as tightly as the captured kernel's approximation policy, not just
-    // the operator's contact allowance. A coarser enclosure can lift the part
-    // above its native terminal band and invent a mandatory micro-layer.
-    // This tightens support analysis; it neither moves nor discards an event.
+    // Conservative placement uses the minimum's lower enclosure, so the
+    // contact gap is at most the Z bracket width; half the contact tolerance
+    // leaves room for the transported translation. XY only centers the part
+    // and is rechecked against the printer's envelope at compile, so it needs
+    // no finer than the contact tolerance. Heights within one printer Z step
+    // are one layer boundary, so a looser Z bracket cannot invent a layer.
     // The old Z translation is removed by placement. Query without it so its
     // binary64 spacing cannot make native-scale support unrepresentable, then
     // transport closed brackets back for the original-pose contact evidence.
@@ -152,21 +153,24 @@ fn exact_brackets(
         if axis == 2 {
             query_pose.translation_mm[2] = 0.0;
         }
+        // Each axis runs under its own defect fuse; a fused query falls back
+        // to tolerant brackets like any other exact refusal.
+        let mut fuse = GeometryWorkBudget::exact_bounds_fuse();
         let support = source.placed_material_bounds(
             query_pose,
             direction,
             BoundsPolicy {
                 maximum_endpoint_uncertainty_mm: if axis == 2 {
-                    (request.contact_tolerance_mm * 0.25)
-                        .min(spiling_geometry::KERNEL_APPROXIMATION_TOLERANCE_MM)
+                    request.contact_tolerance_mm * 0.5
                 } else {
-                    request.contact_tolerance_mm * 0.25
+                    request.contact_tolerance_mm
                 },
             },
             query_bytes,
-            &mut work,
+            &mut fuse,
             cancel,
         )?;
+        work.charge(fuse.consumed(), cancel)?;
         if support.definition_id() != &request.definition_id
             || !support.is_compatible_with_definition(definition)
             || support.placed_pose() != query_pose

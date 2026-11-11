@@ -16,7 +16,7 @@ pub(super) fn validate_request(
     if (0..3).any(|axis| envelope.min[axis] >= envelope.max[axis])
         || !contact_tolerance_mm.is_finite()
         || contact_tolerance_mm <= 0.0
-        || contact_tolerance_mm > SECTION_PLANE_TOLERANCE_MM
+        || contact_tolerance_mm > MAX_BED_CONTACT_TOLERANCE_MM
     {
         return Err("invalid native bed-preparation policy".into());
     }

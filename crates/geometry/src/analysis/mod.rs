@@ -60,6 +60,14 @@ pub use voids::{
     projected_protected_void_envelopes,
 };
 
+/// Defect fuse for one exact directional-bounds query. Precision comes from
+/// the printer's motion step; at that precision every bounds query in the
+/// realistic corpus completes within about 16 million units, except trimmed
+/// faces the interval search cannot prune, which run to hundreds of millions.
+/// The fuse sends those to the ADR012 tolerant lane rather than letting them
+/// stall a job. It is not a quality gate.
+pub const EXACT_BOUNDS_WORK_FUSE: u64 = 1 << 26;
+
 /// Cumulative numerical work across a captured geometry job. Reusing a cache or
 /// subdividing an interval never resets this counter.
 #[derive(Debug)]
@@ -89,6 +97,10 @@ impl GeometryWorkBudget {
     /// Default cumulative accounting for one complete manufacturing compile.
     pub fn compile() -> Self {
         Self::monitored()
+    }
+    /// One exact bounds query under [`EXACT_BOUNDS_WORK_FUSE`].
+    pub fn exact_bounds_fuse() -> Self {
+        Self::new(EXACT_BOUNDS_WORK_FUSE)
     }
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)

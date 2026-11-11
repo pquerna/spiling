@@ -365,7 +365,7 @@ impl Workbench {
                 expected_pose: o.pose,
                 envelope_mm: intent.printer.build_envelope,
                 center_xy: true,
-                contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+                contact_tolerance_mm: intent.printer.motion_resolution.z_mm,
             });
         }
     }

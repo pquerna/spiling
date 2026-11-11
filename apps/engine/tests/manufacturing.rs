@@ -232,8 +232,25 @@ async fn start_alternative(client: &mut EngineClient, intent: ManufacturingInten
     operation.name
 }
 
-#[tokio::test]
-async fn alternatives_preserve_current_replay_and_survive_named_option_reopen() {
+// The in-process fresh verification below needs more than a default test
+// thread's stack in debug builds.
+#[test]
+fn alternatives_preserve_current_replay_and_survive_named_option_reopen() {
+    std::thread::Builder::new()
+        .name("alternatives-reopen".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(alternatives_check()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+async fn alternatives_check() {
     let work = Workspace::new();
     let source = work.source("box-mm.step");
     let project = work.0.join("alternatives.spil");
@@ -789,6 +806,7 @@ async fn distributed_seams_change_actual_closed_wall_starts_and_survive_fresh_re
             &occurrences[0],
             nearest.printer.build_envelope,
             true,
+            nearest.printer.motion_resolution.z_mm,
         )
         .await
         .unwrap();
@@ -1455,7 +1473,11 @@ async fn stale_cancelled_and_resource_limited_compilation_never_publish() {
     );
     assert!(job.outputs.is_empty());
     assert!(status(&mut client).await.1.is_none());
+    // Micrometre layers on a printer whose step admits them exceed the layer
+    // budget rather than the printer's resolution.
     let mut too_many_layers = intent();
+    too_many_layers.printer.motion_resolution.z_mm = 0.000001;
+    too_many_layers.printer.deposition_limits.min_bead_height_mm = 0.001;
     too_many_layers.recipe.layer_height_mm = 0.001;
     set_intent(&mut client, too_many_layers).await;
     let id = start_compile(&mut client).await;
@@ -2223,6 +2245,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
             occurrence,
             requested.printer.build_envelope,
             true,
+            requested.printer.motion_resolution.z_mm,
         )
         .await
         .unwrap();
