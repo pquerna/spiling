@@ -159,6 +159,7 @@ fn challenge_manifest_all_14_adversaries() {
         .expect("fixtures array in manifest");
 
     let mut adversary_count = 0;
+    let mut accepted_mutations = 0;
     for entry in fixtures {
         let path = entry["path"].as_str().expect("fixture path");
         let source_bytes = load_fixture(path);
@@ -177,8 +178,9 @@ fn challenge_manifest_all_14_adversaries() {
                 "fixture '{path}' expected error '{expected_err_str}' but got '{err_code_val}' (msg: {})",
                 err.message
             );
-        } else if path == "unsupported-nurbs.step" {
-            // Special mutation: replace_one_plane_with_original_nurbs_carrier -> expected accepted!
+        } else if entry["mutation"].is_string() && entry["expected"] == "accepted" {
+            // Accepted mutations: an original NURBS carrier and a degree angle unit.
+            accepted_mutations += 1;
             let result = from_step_bytes(&source_bytes);
             assert!(
                 result.is_ok(),
@@ -188,8 +190,9 @@ fn challenge_manifest_all_14_adversaries() {
     }
 
     assert_eq!(
-        adversary_count, 13,
-        "manifest should contain 13 expected_error adversaries + 1 accepted mutation (unsupported-nurbs.step)"
+        (adversary_count, accepted_mutations),
+        (12, 2),
+        "manifest should contain 12 expected_error adversaries and 2 accepted mutations"
     );
 }
 
