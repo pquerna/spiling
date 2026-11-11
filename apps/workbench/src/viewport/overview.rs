@@ -259,7 +259,9 @@ impl egui_wgpu::CallbackTrait for Frame {
             r.inspection_buffer = None;
             r.replay = None;
             r.replay_buffers.clear();
-            r.bead_buffers.clear();
+            r.replay_upload = None;
+            r.replay_pending.clear();
+            r.replay_failure = None;
             r.retain_meshes(&self.scene);
             r.overview.scene = Some(self.scene.clone());
             r.overview.dark = Some(self.dark);

@@ -56,7 +56,34 @@
       "name": "artifacts/5d1b942620846e30a61e302f38a7c7a89426df57aaf7b3f7b4eff86c2c5ca50b",
       "sha256": "5d1b942620846e30a61e302f38a7c7a89426df57aaf7b3f7b4eff86c2c5ca50b",
       "size_bytes": "416"
-    }
+    },
+    "pages": [
+      {
+        "first_event": 0,
+        "event_count": 4,
+        "hash": "ace66fb5028966e15c0668d204ae97ae9f339b025fe6db09ff294477855949e9",
+        "first_line": 7,
+        "last_line": 10,
+        "first_layer": 0,
+        "last_layer": 0,
+        "bounds_mm": {
+          "min": [
+            1.0,
+            1.0,
+            0.4
+          ],
+          "max": [
+            9.0,
+            1.0,
+            0.4
+          ]
+        },
+        "physical_z_mm": [
+          0.0,
+          0.4
+        ]
+      }
+    ]
   },
   "encoding": "hex",
   "program": "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1.000000 Y1.000000 Z0.400000 F6000.000000\nG1 X5.000000 Y1.000000 Z0.400000 E0.34202013 F1200.000000\nG0 X5.000000 Y1.000000 Z0.400000 F6000.000000\nG1 X9.000000 Y1.000000 Z0.400000 E0.68404026 F1200.000000\n"

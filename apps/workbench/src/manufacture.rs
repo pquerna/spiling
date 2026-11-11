@@ -65,13 +65,13 @@ pub struct Capture {
 pub struct Review {
     pub capture: Arc<Capture>,
     pub bundle: Arc<ManufacturingBundle>,
-    pub motion: Option<Arc<[u8]>>,
+    pub motion: Option<spiling_chunks::ChunkSource>,
     pub display: Option<Arc<crate::replay::Replay>>,
     /// Why a verified result has no toolpath preview, when it has none.
     pub display_note: Option<String>,
 }
-/// Shown when verified output is too large to preview; export stays available.
-pub const PREVIEW_OMITTED: &str = "Toolpath preview omitted: the actual motion exceeds the display budget. Verification passed and export is available.";
+/// A report-only inspection carries no actual-motion document.
+pub const PREVIEW_OMITTED: &str = "Toolpaths were not requested for this inspection. Verification passed and export is available.";
 #[derive(Debug, Clone)]
 pub struct InspectedOption {
     pub project: spiling_contracts::project::ProjectId,
@@ -243,18 +243,16 @@ pub async fn check_current(rpc: &EngineRpc, capture: &Capture) -> Result<(), Cli
 pub async fn load_review(
     rpc: EngineRpc,
     capture: Arc<Capture>,
-    reserved: usize,
     origin: glam::DVec3,
 ) -> Result<Arc<Review>, ClientError> {
     check_current(&rpc, &capture).await?;
-    let review = load_checked_review(rpc.clone(), capture, reserved, origin).await?;
+    let review = load_checked_review(rpc.clone(), capture, origin).await?;
     check_current(&rpc, &review.capture).await?;
     Ok(review)
 }
 pub async fn load_checked_review(
     rpc: EngineRpc,
     capture: Arc<Capture>,
-    reserved: usize,
     origin: glam::DVec3,
 ) -> Result<Arc<Review>, ClientError> {
     capture.provenance.validate_for_record(&capture.record)?;
@@ -264,20 +262,25 @@ pub async fn load_checked_review(
     if bundle.provenance.input_hash != capture.provenance.input_hash {
         return Err(invalid("Captured bundle/provenance input mismatch"));
     }
-    let motion: Option<Arc<[u8]>> = match &capture.replay {
+    let motion: Option<spiling_chunks::ChunkSource> = match &capture.replay {
         Some(descriptor) => Some(
-            rpc.fetch_replay_display(&capture.record, descriptor)
-                .await?
-                .into(),
+            rpc.fetch_replay_document(&capture.record, descriptor)
+                .await?,
         ),
         None => None,
     };
-    // A verified result too large to preview still reviews and exports.
+    // Display preparation failure retains exact motion and verified export.
     let (motion, display, display_note) = match (motion, &capture.replay) {
         (Some(bytes), Some(descriptor)) => {
-            match crate::replay::Replay::project(&bytes, descriptor, reserved, origin) {
+            match crate::replay::Replay::project_document(&bytes, descriptor, origin) {
                 Ok(display) => (Some(bytes), Some(Arc::new(display)), None),
-                Err(_) => (None, None, Some(PREVIEW_OMITTED.to_owned())),
+                Err(error) => (
+                    Some(bytes),
+                    None,
+                    Some(format!(
+                        "Toolpath display unavailable: {error}. Verification and export remain available."
+                    )),
+                ),
             }
         }
         _ => (None, None, Some(PREVIEW_OMITTED.to_owned())),

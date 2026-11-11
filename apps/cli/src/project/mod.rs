@@ -2726,12 +2726,20 @@ async fn execute(
                     .as_ref()
                     .ok_or("verified, but the replay display was omitted: actual motion exceeds the display budget; --manufacturing-out still exports the verified program")?;
                 let bytes = client
-                    .fetch_replay_display(&inspection.record, descriptor)
+                    .fetch_replay_document(&inspection.record, descriptor)
                     .await?;
-                replay_output
+                let output = replay_output
                     .as_deref_mut()
-                    .ok_or("replay output file was not admitted")?
-                    .write(&bytes)?;
+                    .ok_or("replay output file was not admitted")?;
+                let mut reader = bytes.reader();
+                let mut block = [0; 64 * 1024];
+                loop {
+                    let read = reader.read(&mut block)?;
+                    if read == 0 {
+                        break;
+                    }
+                    output.write(&block[..read])?;
+                }
                 replay_evidence = Some(serde_json::json!({
                     "artifact": inspection.record,
                     "verification": inspection.report,

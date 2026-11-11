@@ -608,7 +608,7 @@ impl Workbench {
                                 display
                                     .batches
                                     .iter()
-                                    .flat_map(|batch| &batch.events)
+                                    .flat_map(|batch| batch.events.iter())
                                     .filter(|event| u32::from(event.1) == index)
                                     .map(|event| event.0)
                                     .max()
@@ -989,7 +989,17 @@ fn event_controls(
         && let Some(bytes) = &review.motion
     {
         let start = REPLAY_HEADER_BYTES + index as usize * REPLAY_RECORD_BYTES;
-        let r = &bytes[start..start + REPLAY_RECORD_BYTES];
+        use std::io::{Read, Seek, SeekFrom};
+        let mut reader = bytes.reader();
+        let mut r = [0; REPLAY_RECORD_BYTES];
+        if reader
+            .seek(SeekFrom::Start(start as u64))
+            .and_then(|_| reader.read_exact(&mut r))
+            .is_err()
+        {
+            ui.weak("Command detail unavailable");
+            return;
+        }
         let number = |offset| {
             f64::from_le_bytes(
                 r[offset..offset + 8]

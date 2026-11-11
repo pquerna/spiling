@@ -90,23 +90,6 @@ impl Actor {
         if let Some(task) = self.alternative_task.take() {
             task.abort();
         }
-        let reserved = self
-            .state
-            .display
-            .as_ref()
-            .map_or(0, |display| display.raw_bytes * 2)
-            + self.state.manufacturing.display_bytes()
-            + crate::scene::CONTEXT_DISPLAY_RESERVE_BYTES
-            + self.state.section.as_ref().map_or(0, |section| {
-                section.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
-            })
-            + if self.section_task.is_some() {
-                spiling_contracts::geometry::MAX_SECTION_BYTES as usize
-                    * crate::scene::SECTION_DISPLAY_MULTIPLIER
-            } else {
-                0
-            }
-            + 16 * 1024 * 1024;
         let origin = self
             .state
             .scene
@@ -119,7 +102,6 @@ impl Actor {
         self.alternative_task = Some(tokio::spawn(manufacture::load_checked_review(
             client.rpc(),
             capture,
-            reserved,
             origin,
         )));
     }
@@ -466,19 +448,6 @@ impl Actor {
         self.review_task = Some(tokio::spawn(manufacture::load_review(
             rpc,
             capture,
-            self.state.display.as_ref().map_or(0, |d| d.raw_bytes * 2)
-                + self.state.section.as_ref().map_or(0, |s| {
-                    s.summary.total_bytes as usize * crate::scene::SECTION_DISPLAY_MULTIPLIER
-                })
-                + self.state.manufacturing.display_bytes()
-                + crate::scene::CONTEXT_DISPLAY_RESERVE_BYTES
-                + if self.section_task.is_some() {
-                    spiling_contracts::geometry::MAX_SECTION_BYTES as usize
-                        * crate::scene::SECTION_DISPLAY_MULTIPLIER
-                } else {
-                    0
-                }
-                + 16 * 1024 * 1024,
             self.state
                 .scene
                 .as_ref()

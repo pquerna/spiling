@@ -12,8 +12,10 @@
 //! the process in this form: storage and transfer receive the raw bytes.
 
 use sha2::{Digest, Sha256};
-use std::io::{self, BufRead, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Raw bytes per frame; the last frame may be shorter.
 pub const FRAME_BYTES: usize = 256 * 1024;
@@ -21,10 +23,22 @@ const LEVEL: i32 = 3;
 /// Keep a frame raw unless compression saves at least this much.
 const MIN_SAVING: usize = 64;
 
+/// Append-only anonymous backing shared by independently sealed byte sources.
+/// Appends cannot modify previously published frame ranges.
+#[derive(Clone)]
+pub struct Spool(Arc<Mutex<File>>);
+impl Spool {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self(Arc::new(Mutex::new(tempfile::tempfile()?))))
+    }
+}
+
 struct Frame {
     raw_len: u32,
     compressed: bool,
     data: Box<[u8]>,
+    offset: u64,
+    stored_len: usize,
 }
 
 struct Content {
@@ -32,6 +46,7 @@ struct Content {
     len: u64,
     digest: [u8; 32],
     stored: usize,
+    spool: Option<Spool>,
 }
 
 /// Sealed immutable content. Clones share frames.
@@ -118,6 +133,7 @@ pub struct ChunkWriter {
     len: u64,
     limit: u64,
     stored: usize,
+    spool: Option<Spool>,
 }
 
 impl ChunkWriter {
@@ -130,7 +146,19 @@ impl ChunkWriter {
             len: 0,
             limit,
             stored: 0,
+            spool: None,
         }
+    }
+    /// Keep frame payloads in an anonymous, owner-lifetime temporary file.
+    /// Logical content size remains independent of live decode/encode buffers.
+    pub fn spooled(limit: u64) -> io::Result<Self> {
+        Ok(Self::spooled_in(limit, &Spool::new()?))
+    }
+    /// Seal independent streams in one shared append-only backing file.
+    pub fn spooled_in(limit: u64, spool: &Spool) -> Self {
+        let mut writer = Self::new(limit);
+        writer.spool = Some(spool.clone());
+        writer
     }
     /// Raw bytes accepted so far.
     pub fn len(&self) -> u64 {
@@ -150,12 +178,27 @@ impl ChunkWriter {
         } else {
             (false, self.pending.as_slice().into())
         };
-        self.stored += data.len();
+        let stored_len = data.len();
+        let mut offset = 0;
+        let data = if let Some(spool) = &self.spool {
+            let mut file = spool
+                .0
+                .lock()
+                .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
+            offset = file.seek(SeekFrom::End(0))?;
+            file.write_all(&data)?;
+            Box::default()
+        } else {
+            self.stored += stored_len;
+            data
+        };
         self.frames.try_reserve(1).map_err(io::Error::other)?;
         self.frames.push(Frame {
             raw_len,
             compressed,
             data,
+            offset,
+            stored_len,
         });
         self.pending.clear();
         Ok(())
@@ -169,6 +212,7 @@ impl ChunkWriter {
             len: self.len,
             digest,
             stored: self.stored,
+            spool: self.spool,
         })))
     }
 }
@@ -220,8 +264,26 @@ impl ChunkReader {
         self.pos = 0;
         self.buf.clear();
         let raw_len = frame.raw_len as usize;
+        let disk_data;
+        let data = if let Some(spool) = &self.source.0.spool {
+            let mut file = spool
+                .0
+                .lock()
+                .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
+            file.seek(SeekFrom::Start(frame.offset))?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(frame.stored_len)
+                .map_err(io::Error::other)?;
+            bytes.resize(frame.stored_len, 0);
+            file.read_exact(&mut bytes)?;
+            disk_data = bytes;
+            &disk_data[..]
+        } else {
+            &frame.data
+        };
         if frame.compressed {
-            let decoded = zstd::bulk::decompress(&frame.data, raw_len)?;
+            let decoded = zstd::bulk::decompress(data, raw_len)?;
             if decoded.len() != raw_len {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -230,9 +292,41 @@ impl ChunkReader {
             }
             self.buf = decoded;
         } else {
-            self.buf.extend_from_slice(&frame.data);
+            self.buf.extend_from_slice(data);
         }
         Ok(true)
+    }
+}
+
+impl Seek for ChunkReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let current = (self.next as u64 * FRAME_BYTES as u64)
+            .min(self.source.len())
+            .saturating_sub((self.buf.len() - self.pos) as u64);
+        let target = match position {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::Current(n) => i128::from(current) + i128::from(n),
+            SeekFrom::End(n) => i128::from(self.source.len()) + i128::from(n),
+        };
+        if target < 0 || target > i128::from(self.source.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "chunk seek outside content",
+            ));
+        }
+        let target = target as u64;
+        self.next = if target == self.source.len() {
+            self.source.0.frames.len()
+        } else {
+            (target / FRAME_BYTES as u64) as usize
+        };
+        self.buf.clear();
+        self.pos = 0;
+        if target < self.source.len() {
+            self.load()?;
+            self.pos = (target % FRAME_BYTES as u64) as usize;
+        }
+        Ok(target)
     }
 }
 
@@ -276,12 +370,12 @@ pub fn is_limit(error: &io::Error) -> bool {
 mod tests {
     use super::*;
 
-    fn text(len: usize) -> Vec<u8> {
+    pub(super) fn text(len: usize) -> Vec<u8> {
         (0..len)
             .map(|i| b"G1 X12.345678 Y9.876543 E1.00000000\n"[i % 36])
             .collect()
     }
-    fn noise(len: usize) -> Vec<u8> {
+    pub(super) fn noise(len: usize) -> Vec<u8> {
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         (0..len)
             .map(|_| {
@@ -349,5 +443,65 @@ mod tests {
         let clone = source.clone();
         assert_eq!(clone, source);
         assert_eq!(clone.ptr(), source.ptr());
+    }
+}
+
+#[cfg(test)]
+mod spool_tests {
+    use super::*;
+    #[test]
+    fn spooled_content_is_shared_seekable_and_does_not_retain_payloads() {
+        let raw = super::tests::noise(3 * FRAME_BYTES + 71);
+        let mut writer = ChunkWriter::spooled(raw.len() as u64).unwrap();
+        for block in raw.chunks(1717) {
+            writer.write_all(block).unwrap();
+        }
+        let source = writer.finish().unwrap();
+        assert!(source.0.frames.iter().all(|frame| frame.data.is_empty()));
+        assert_eq!(source.to_vec().unwrap(), raw);
+        let clone = source.clone();
+        drop(source);
+        let mut reader = clone.reader();
+        for offset in [0, 31, FRAME_BYTES - 3, FRAME_BYTES + 7, raw.len() - 17] {
+            reader.seek(SeekFrom::Start(offset as u64)).unwrap();
+            let mut buffer = [0; 17];
+            reader.read_exact(&mut buffer).unwrap();
+            assert_eq!(buffer, raw[offset..offset + 17]);
+            assert_eq!(reader.stream_position().unwrap(), (offset + 17) as u64);
+        }
+        reader.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+        assert!(reader.seek(SeekFrom::End(1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shared_spool_tests {
+    use super::*;
+    #[test]
+    fn independently_hashed_streams_share_backing_without_sharing_frame_ranges() {
+        let spool = Spool::new().unwrap();
+        let a = super::tests::noise(2 * FRAME_BYTES + 11);
+        let b = super::tests::text(2 * FRAME_BYTES + 71);
+        let mut left = ChunkWriter::spooled_in(u64::MAX, &spool);
+        let mut right = ChunkWriter::spooled_in(u64::MAX, &spool);
+        left.write_all(&a[..FRAME_BYTES]).unwrap();
+        right.write_all(&b[..FRAME_BYTES + 1]).unwrap();
+        left.write_all(&a[FRAME_BYTES..]).unwrap();
+        right.write_all(&b[FRAME_BYTES + 1..]).unwrap();
+        let left = left.finish().unwrap();
+        let right = right.finish().unwrap();
+        drop(spool);
+        assert_eq!(left.to_vec().unwrap(), a);
+        assert_eq!(right.to_vec().unwrap(), b);
+        assert_eq!(&Sha256::digest(&a)[..], &left.digest()[..]);
+        assert_eq!(&Sha256::digest(&b)[..], &right.digest()[..]);
+        let mut reader = left.reader();
+        reader
+            .seek(SeekFrom::Start((FRAME_BYTES - 2) as u64))
+            .unwrap();
+        let mut buffer = [0; 13];
+        reader.read_exact(&mut buffer).unwrap();
+        assert_eq!(buffer, a[FRAME_BYTES - 2..FRAME_BYTES + 11]);
     }
 }

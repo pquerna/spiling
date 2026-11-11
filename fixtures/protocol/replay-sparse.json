@@ -76,7 +76,34 @@
       "name": "artifacts/ce29843e43752822ce57825c5b6632b9b199765d86c68ffb51be64e87ccc20f8",
       "sha256": "ce29843e43752822ce57825c5b6632b9b199765d86c68ffb51be64e87ccc20f8",
       "size_bytes": "736"
-    }
+    },
+    "pages": [
+      {
+        "first_event": 0,
+        "event_count": 8,
+        "hash": "af42cefd72c7638cdb3634580263279eaedbf234e634847af588b770f3d53e3f",
+        "first_line": 7,
+        "last_line": 14,
+        "first_layer": 0,
+        "last_layer": 2,
+        "bounds_mm": {
+          "min": [
+            2.0,
+            2.0,
+            0.1
+          ],
+          "max": [
+            6.0,
+            8.0,
+            0.3
+          ]
+        },
+        "physical_z_mm": [
+          0.0,
+          0.3
+        ]
+      }
+    ]
   },
   "encoding": "hex",
   "program": "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2.000000 Y2.000000 Z0.100000 F1200.000000\nG1 X6.000000 Y2.000000 Z0.100000 E0.05456338 F600.000000\nG0 X2.000000 Y8.000000 Z0.100000 F1200.000000\nG1 X6.000000 Y8.000000 Z0.100000 E0.10912677 F600.000000\nG0 X2.000000 Y8.000000 Z0.200000 F1200.000000\nG1 X6.000000 Y8.000000 Z0.200000 E0.16369015 F600.000000\nG0 X2.000000 Y2.000000 Z0.300000 F1200.000000\nG1 X6.000000 Y2.000000 Z0.300000 E0.26735213 F600.000000\n"

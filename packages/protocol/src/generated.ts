@@ -1005,7 +1005,17 @@ export type OpticalBackingModel = "unmodelled";
 
 export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, tool_epoch_count: number, waste_count: number, bounds_mm: AabbMm, };
 
-export type ReplayDisplayDescriptor = { info: ReplayDisplayInfo, resource: ArtifactView, };
+export type ReplayDisplayDescriptor = { pages: Array<ReplayPage>, info: ReplayDisplayInfo, resource: ArtifactView, };
+
+export type ReplayPage = {
+/**
+ * Global ordinal; u64 on the wire even though SPLR6 counts are u32.
+ */
+first_event: number, event_count: number, hash: SourceHash, first_line: number, last_line: number,
+/**
+ * Body layers only; MAX denotes a page containing lifecycle commands only.
+ */
+first_layer: number, last_layer: number, bounds_mm: AabbMm, physical_z_mm: [number, number], };
 
 export type SurfaceFeatureClass = "resolved" | "ambiguous" | "below_nominal_resolution" | "unavailable";
 
@@ -1071,8 +1081,9 @@ export const MAX_DISPLAY_VERTICES = 1000000 as const;
 export const MAX_DISPLAY_TRIANGLES = 1000000 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
 export const MAX_SECTION_BYTES = 16777216 as const;
-export const MAX_REPLAY_DISPLAY_BYTES = 33554432 as const;
-export const MAX_REPLAY_EVENTS = 419429 as const;
+export const MAX_REPLAY_DISPLAY_BYTES = 964000416 as const;
+export const MAX_REPLAY_EVENTS = 12050004 as const;
+export const REPLAY_PAGE_EVENTS = 65536 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 80 as const;
 export const REPLAY_SCHEMA_VERSION = 6 as const;
@@ -1116,6 +1127,7 @@ export const MAX_PRINT_LAYERS = 4096 as const;
 export const MAX_PROCESS_REGIONS = 256 as const;
 export const MAX_DEPOSITION_SEGMENTS = 2000000 as const;
 export const MAX_TRAVEL_SEGMENTS = 6000000 as const;
+export const MAX_RETRACTIONS = 2000000 as const;
 export const MAX_MACHINE_COMPONENTS = 64 as const;
 export const MAX_PROFILE_JSON_BYTES = 32768 as const;
 export const MAX_MANUFACTURING_ERROR_BYTES = 2048 as const;

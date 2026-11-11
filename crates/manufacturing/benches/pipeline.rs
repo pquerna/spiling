@@ -580,6 +580,11 @@ fn residency(spec: &SceneSpec, file: &str) -> Result<()> {
             &cancel,
         ))
     })?;
+    let replay_retained = inspection
+        .as_ref()
+        .ok()
+        .and_then(|i| i.replay.as_ref())
+        .map_or(0, |m| m.bytes.retained_bytes());
     let (replay_bytes, motion_refusal) = match &inspection {
         Ok(inspection) => (
             inspection.replay.as_ref().map_or(0, |m| m.bytes.len()),
@@ -636,14 +641,15 @@ fn residency(spec: &SceneSpec, file: &str) -> Result<()> {
                 "encode_peak": encode_peak, "decode_peak": decode_peak,
                 "bundle_frames": frames.retained_bytes(), "frames_decode_peak": frames_decode_peak,
                 "decoded_bundle_retained": decoded_retained,
-                "motion_peak": motion_peak, "replay": replay_bytes,
+                "motion_peak": motion_peak, "replay": replay_bytes, "replay_retained": replay_retained,
             },
             "bytes_per_deposition_segment": {
                 "compile_peak": compile_peak.map(per), "plan_retained": per(plan_retained),
                 "program_retained": per(program_retained), "json_bundle": per(encoded_len),
                 "encode_peak": per(encode_peak), "decode_peak": per(decode_peak),
                 "bundle_frames": per(frames.retained_bytes()), "frames_decode_peak": per(frames_decode_peak),
-                "motion_peak": per(motion_peak), "replay": per(replay_bytes),
+                "motion_peak": per(motion_peak), "replay": replay_bytes as f64 / segments.max(1) as f64,
+                "replay_retained": per(replay_retained),
             },
             "frames_decode_us": frames_decode_us,
             "motion_refusal": motion_refusal,

@@ -224,6 +224,19 @@ message ReplayDisplayInfo {
 message ReplayDisplayDescriptor {
   ReplayDisplayInfo info = 1;
   Artifact resource = 2;
+  repeated ReplayPage pages = 3;
+}
+message ReplayPage {
+  uint64 first_event = 1;
+  uint32 event_count = 2;
+  string hash = 3;
+  uint32 first_line = 4;
+  uint32 last_line = 5;
+  uint32 first_layer = 6;
+  uint32 last_layer = 7;
+  AabbMm bounds_mm = 8;
+  double physical_lower_z_mm = 9;
+  double physical_upper_z_mm = 10;
 }
 
 message RoutedToolAccounting {

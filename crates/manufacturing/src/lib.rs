@@ -197,7 +197,8 @@ pub fn verify_bundle(
 
 pub struct EncodedReplayDisplay {
     pub info: ReplayDisplayInfo,
-    pub bytes: Vec<u8>,
+    pub bytes: spiling_chunks::ChunkSource,
+    pub pages: Vec<ReplayPage>,
 }
 
 pub struct ManufacturingInspection {
@@ -272,7 +273,8 @@ pub fn inspect_bundle(
             bounds_mm,
         };
         info.validate()?;
-        Some(EncodedReplayDisplay { info, bytes })
+        let pages = index_replay(bytes.reader(), &info)?;
+        Some(EncodedReplayDisplay { info, bytes, pages })
     } else {
         None
     };

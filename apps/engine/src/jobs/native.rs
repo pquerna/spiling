@@ -463,6 +463,23 @@ impl Jobs {
             media_type: spiling_contracts::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE.into(),
         })
     }
+    pub(crate) fn describe_replay_artifact(
+        &self,
+        bytes: &spiling_chunks::ChunkSource,
+    ) -> Result<Artifact, Status> {
+        if bytes.len() > u64::from(spiling_contracts::manufacturing::MAX_REPLAY_DISPLAY_BYTES) {
+            return Err(Status::resource_exhausted(
+                "replay representation exceeds command counts",
+            ));
+        }
+        let hash = spiling_contracts::geometry::SourceHash::from_digest(bytes.digest());
+        Ok(Artifact {
+            name: format!("artifacts/{}", hash.as_str()),
+            size_bytes: bytes.len(),
+            sha256: hash.as_str().into(),
+            media_type: spiling_contracts::manufacturing::REPLAY_MEDIA_TYPE.into(),
+        })
+    }
     pub(crate) fn describe_native_artifact(
         &self,
         bytes: &[u8],

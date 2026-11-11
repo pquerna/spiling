@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { decodeReplayDisplay, ReplayDecodeError } from "../src/replay.ts";
+import { REPLAY_HEADER_BYTES, REPLAY_RECORD_BYTES, REPLAY_PAGE_EVENTS } from "../src/generated.ts";
 import type { ReplayDisplayDescriptor } from "../src/generated.ts";
 
 // Produced by the native independent inspector, not a TypeScript invented verified model.
@@ -28,6 +29,47 @@ async function rehash(bytes: ArrayBuffer, base = descriptor): Promise<ReplayDisp
     "hex",
   );
   result.resource.name = `artifacts/${result.resource.sha256}`;
+  const data = new DataView(bytes);
+  result.pages = [];
+  for (let first = 0; first < result.info.event_count; first += REPLAY_PAGE_EVENTS) {
+    const count = Math.min(REPLAY_PAGE_EVENTS, result.info.event_count - first),
+      min: [number, number, number] = [Infinity, Infinity, Infinity],
+      max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    let lower = Infinity,
+      upper = -Infinity,
+      firstLayer = 0xffffffff,
+      lastLayer = 0xffffffff;
+    for (let j = 0; j < count; j++) {
+      const at = REPLAY_HEADER_BYTES + (first + j) * REPLAY_RECORD_BYTES;
+      for (let axis = 0; axis < 3; axis++) {
+        const v = data.getFloat64(at + axis * 8, true);
+        min[axis] = Math.min(min[axis]!, v);
+        max[axis] = Math.max(max[axis]!, v);
+      }
+      const layer = data.getUint16(at + 44, true);
+      if (layer !== 0xffff) {
+        firstLayer = Math.min(firstLayer, layer);
+        lastLayer = lastLayer === 0xffffffff ? layer : Math.max(lastLayer, layer);
+      }
+      const associated = (data.getUint8(at + 47) & 2) !== 0;
+      lower = Math.min(lower, data.getFloat64(at + (associated ? 56 : 16), true));
+      upper = Math.max(upper, data.getFloat64(at + (associated ? 64 : 16), true));
+    }
+    const at = REPLAY_HEADER_BYTES + first * REPLAY_RECORD_BYTES;
+    result.pages.push({
+      first_event: first,
+      event_count: count,
+      hash: Buffer.from(
+        await crypto.subtle.digest("SHA-256", bytes.slice(at, at + count * REPLAY_RECORD_BYTES)),
+      ).toString("hex"),
+      first_line: data.getUint32(at + 40, true),
+      last_line: data.getUint32(at + (count - 1) * REPLAY_RECORD_BYTES + 40, true),
+      first_layer: firstLayer,
+      last_layer: lastLayer,
+      bounds_mm: { min, max },
+      physical_z_mm: [lower, upper],
+    });
+  }
   return result;
 }
 
@@ -780,4 +822,28 @@ test("native waste-only groups retain both services while the active tool crosse
     decodeReplayDisplay(changed, await rehash(changed, native.descriptor)),
     ReplayDecodeError,
   );
+});
+
+test("page hashes do not authorize forged visibility spans or ordinal gaps", async () => {
+  for (const mutate of [
+    (d: ReplayDisplayDescriptor) => {
+      d.pages[0]!.bounds_mm.min[0] += 0.01;
+    },
+    (d: ReplayDisplayDescriptor) => {
+      d.pages[0]!.physical_z_mm[0] -= 0.01;
+    },
+    (d: ReplayDisplayDescriptor) => {
+      d.pages[0]!.first_event++;
+    },
+    (d: ReplayDisplayDescriptor) => {
+      d.pages[0]!.event_count--;
+    },
+    (d: ReplayDisplayDescriptor) => {
+      d.pages = [];
+    },
+  ]) {
+    const altered = structuredClone(descriptor);
+    mutate(altered);
+    await assert.rejects(decodeReplayDisplay(golden, altered), ReplayDecodeError);
+  }
 });

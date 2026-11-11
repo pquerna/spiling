@@ -52,14 +52,26 @@ struct LineVertex {
     position: [f32; 3],
     color: [f32; 3],
 }
+type UploadResult =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<wgpu::Error>> + Send>>;
+struct PendingUpload {
+    index: usize,
+    buffer: wgpu::Buffer,
+    instances: Arc<Vec<crate::replay::beads::Instance>>,
+    result: std::sync::Mutex<UploadResult>,
+}
 struct Resources {
     mechanics: mechanics::Renderer,
     meshes: HashMap<SourceHash, Arc<wgpu::Buffer>>,
     overview: overview::Renderer,
     plate: plate::Renderer,
     replay: Option<Arc<crate::manufacture::Review>>,
-    replay_buffers: Vec<wgpu::Buffer>,
-    bead_buffers: Vec<wgpu::Buffer>,
+    replay_buffers: Vec<Option<wgpu::Buffer>>,
+    replay_pending: Vec<PendingUpload>,
+    replay_failure: Option<String>,
+    replay_upload:
+        Option<std::sync::Mutex<std::sync::mpsc::Receiver<crate::replay::upload::Prepared>>>,
+    replay_line_pipeline: wgpu::RenderPipeline,
     bead_pipeline: wgpu::RenderPipeline,
     source_stencil: wgpu::RenderPipeline,
     bead_stencil: wgpu::RenderPipeline,
@@ -339,6 +351,48 @@ impl Viewport {
             multiview_mask: None,
             cache: None,
         });
+        let replay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shared compact actual motion"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("replay.wgsl").into()),
+        });
+        let replay_line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("native section lines"),
+            layout: Some(&line_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &replay_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::replay::beads::Instance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32,2=>Float32x3,3=>Float32,4=>Uint32],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &replay_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: state.target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: egui_wgpu::depth_format_from_bits(24, 8).expect("depth format"),
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let bead_pipeline =
             beads::pipeline(device, &line_pipeline_layout, state.target_format, false);
         let bead_stencil =
@@ -353,17 +407,17 @@ impl Viewport {
                 label: Some(label),
                 layout: Some(&line_pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &line_shader,
+                    module: &replay_shader,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: 24,
+                        array_stride: std::mem::size_of::<crate::replay::beads::Instance>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3],
+                        attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32,2=>Float32x3,3=>Float32,4=>Uint32],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &line_shader,
+                    module: &replay_shader,
                     entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -449,7 +503,10 @@ impl Viewport {
             plate,
             replay: None,
             replay_buffers: Vec::new(),
-            bead_buffers: Vec::new(),
+            replay_pending: Vec::new(),
+            replay_failure: None,
+            replay_upload: None,
+            replay_line_pipeline,
             bead_pipeline,
             source_stencil,
             bead_stencil,
@@ -1208,6 +1265,7 @@ impl Viewport {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
+                context: ui.ctx().clone(),
                 mechanics: mechanics.clone(),
                 inspection,
                 plate: plate.clone(),
@@ -1327,6 +1385,28 @@ impl Viewport {
         }
         if let Some(state) = frame.wgpu_render_state()
             && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
+            && !resources.replay_buffers.is_empty()
+            && resources.replay_buffers.iter().any(Option::is_none)
+            && resources.replay_failure.is_none()
+        {
+            let loaded = resources
+                .replay_buffers
+                .iter()
+                .filter(|b| b.is_some())
+                .count();
+            ui.painter().text(
+                rect.left_top() + egui::vec2(12.0, 12.0),
+                egui::Align2::LEFT_TOP,
+                format!(
+                    "Loading toolpaths · {}%",
+                    loaded * 100 / resources.replay_buffers.len()
+                ),
+                egui::FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+        if let Some(state) = frame.wgpu_render_state()
+            && let Some(resources) = state.renderer.read().callback_resources.get::<Resources>()
             && let Some(error) = resources.plate.error
         {
             ui.painter().text(
@@ -1342,6 +1422,7 @@ impl Viewport {
             && let Some(error) = resources
                 .failure
                 .as_ref()
+                .or(resources.replay_failure.as_ref())
                 .or(resources.mechanics.error.as_ref())
         {
             hit = None;
@@ -1357,6 +1438,7 @@ impl Viewport {
     }
 }
 struct Callback {
+    context: egui::Context,
     mechanics: Option<mechanics::Input>,
     inspection: Option<Arc<crate::inspection::Area>>,
     plate: Option<plate::Plate>,
@@ -1470,35 +1552,118 @@ impl egui_wgpu::CallbackTrait for Callback {
         };
         if replay_changed {
             r.replay_buffers.clear();
-            r.bead_buffers.clear();
+            r.replay_pending.clear();
+            r.replay_upload = None;
+            r.replay_failure = None;
             if let Some(display) = self.review.as_ref().and_then(|r| r.display.as_ref()) {
-                for batch in &display.batches {
-                    r.replay_buffers.push(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("checked SPLR6 actual events"),
-                            contents: bytemuck::cast_slice(&batch.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    ));
-                }
-            }
-            if let Some(beads) = self
-                .review
-                .as_ref()
-                .and_then(|review| review.display.as_ref())
-                .and_then(|display| display.beads.as_ref().ok())
-            {
-                for batch in &beads.batches {
-                    r.bead_buffers.push(device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("Checked nominal bead instances"),
-                            contents: bytemuck::cast_slice(&batch.instances),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    ));
+                r.replay_buffers.resize_with(display.batches.len(), || None);
+                match crate::replay::upload::start(&display.batches) {
+                    Ok(receiver) => r.replay_upload = Some(std::sync::Mutex::new(receiver)),
+                    Err(error) => r.replay_failure = Some(error),
                 }
             }
             r.replay = self.review.clone();
+        }
+        // Publish buffers only after the device has accepted their allocations.
+        // Poll without waiting; neither file reads nor GPU waits belong on paint.
+        let mut pending = Vec::new();
+        for mut upload in r.replay_pending.drain(..) {
+            let status = upload
+                .result
+                .get_mut()
+                .expect("exclusive pending upload")
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            match status {
+                std::task::Poll::Ready(None) => {
+                    match upload.buffer.get_mapped_range_mut(..) {
+                        Ok(mut mapped) => mapped
+                            .copy_from_slice(bytemuck::cast_slice(upload.instances.as_slice())),
+                        Err(error) => {
+                            r.replay_failure = Some(format!(
+                                "Toolpath GPU upload failed: {error}. Verification and export remain available."
+                            ));
+                            continue;
+                        }
+                    }
+                    upload.buffer.unmap();
+                    r.replay_buffers[upload.index] = Some(upload.buffer);
+                }
+                std::task::Poll::Ready(Some(error)) => {
+                    upload.buffer.destroy();
+                    r.replay_failure = Some(format!(
+                        "Toolpath GPU allocation failed: {error}. Verification and export remain available."
+                    ));
+                }
+                std::task::Poll::Pending => pending.push(upload),
+            }
+        }
+        r.replay_pending = pending;
+        if r.replay_failure.is_some() {
+            r.replay_upload = None;
+            r.replay_pending.clear();
+            r.replay_buffers
+                .iter_mut()
+                .for_each(|buffer| *buffer = None);
+        } else if r.replay_pending.is_empty()
+            && let Some(receiver) = &mut r.replay_upload
+        {
+            let receiver = receiver
+                .get_mut()
+                .expect("upload receiver is exclusively owned");
+            let mut staged = 0usize;
+            while staged < 16 * 1024 * 1024 {
+                match receiver.try_recv() {
+                    Ok(Ok((index, instances))) => {
+                        let bytes: &[u8] = bytemuck::cast_slice(instances.as_slice());
+                        if bytes.len() as u64 > device.limits().max_buffer_size {
+                            r.replay_failure = Some(
+                                "A replay page exceeds the device buffer representation".into(),
+                            );
+                            break;
+                        }
+                        let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                        let size = bytes.len();
+                        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Shared compact actual-motion page"),
+                            size: size as u64,
+                            mapped_at_creation: true,
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                        r.replay_pending.push(PendingUpload {
+                            index,
+                            buffer,
+                            instances,
+                            result: std::sync::Mutex::new(Box::pin(scope.pop())),
+                        });
+                        staged += size;
+                    }
+                    Ok(Err(error)) => {
+                        r.replay_failure = Some(error);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if r.replay_buffers.iter().filter(|b| b.is_none()).count()
+                            != r.replay_pending.len()
+                        {
+                            r.replay_failure = Some(
+                                "Toolpath page preparation ended before completing the display"
+                                    .into(),
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if r.replay_buffers.iter().any(Option::is_none) && r.replay_failure.is_none() {
+            self.context
+                .request_repaint_after(std::time::Duration::from_millis(8));
+        }
+        if r.replay_upload.is_some() && r.replay_buffers.iter().all(Option::is_some) {
+            r.replay_upload = None;
+            crate::performance::mark("replay_gpu_ready");
         }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
         queue.write_buffer(
@@ -1606,25 +1771,40 @@ impl egui_wgpu::CallbackTrait for Callback {
             // remain foreground; no statistics or caps include unselected paths.
             // Section-only hides them too, and normal cuts still clip the lines.
             if self.uniform.cut[1] == 0.0 {
-                pass.set_pipeline(&r.line_pipeline);
+                pass.set_pipeline(&r.replay_line_pipeline);
                 pass.set_bind_group(0, &r.context_group, &[]);
-                for (batch, buffer) in display.batches.iter().zip(&r.replay_buffers) {
+                for (batch, buffer) in display
+                    .batches
+                    .iter()
+                    .zip(&r.replay_buffers)
+                    .filter_map(|(batch, buffer)| buffer.as_ref().map(|buffer| (batch, buffer)))
+                {
                     for range in batch.context_ranges(self.view) {
                         if !range.is_empty() {
                             pass.set_vertex_buffer(0, buffer.slice(..));
-                            pass.draw(range, 0..1);
+                            pass.draw(0..2, range);
                         }
                     }
                 }
             }
-            let beads = display.beads.as_ref().ok().filter(|_| self.view.beads);
+            let beads = display
+                .beads
+                .as_ref()
+                .ok()
+                .filter(|_| self.view.beads && r.replay_upload.is_none());
             if let Some(beads) = beads {
                 pass.set_pipeline(&r.bead_pipeline);
-                for (batch, buffer) in beads
+                for (batch, buffer) in display
                     .batches
                     .iter()
-                    .zip(&r.bead_buffers)
-                    .filter(|_| self.uniform.cut[1] == 0.0)
+                    .zip(&r.replay_buffers)
+                    .filter_map(|(batch, buffer)| buffer.as_ref().map(|buffer| (batch, buffer)))
+                    .filter(|(b, _)| {
+                        !b.points
+                            && !b.seam
+                            && matches!(b.kind, 1..=5 | 8..=10 | 13 | 15)
+                            && self.uniform.cut[1] == 0.0
+                    })
                 {
                     let range = batch.range(self.view);
                     if range.is_empty() {
@@ -1645,11 +1825,17 @@ impl egui_wgpu::CallbackTrait for Callback {
                     pass.set_stencil_reference(0);
                     pass.set_pipeline(&r.bead_stencil);
                     pass.set_bind_group(0, &r.tool_groups[tool], &[]);
-                    for (batch, buffer) in beads
+                    for (batch, buffer) in display
                         .batches
                         .iter()
-                        .zip(&r.bead_buffers)
-                        .filter(|(b, _)| b.tool as usize == tool)
+                        .zip(&r.replay_buffers)
+                        .filter_map(|(batch, buffer)| buffer.as_ref().map(|buffer| (batch, buffer)))
+                        .filter(|(b, _)| {
+                            !b.points
+                                && !b.seam
+                                && matches!(b.kind, 1..=5 | 8..=10 | 13 | 15)
+                                && b.tool as usize == tool
+                        })
                     {
                         let range = batch.range(self.view);
                         if range.is_empty() {
@@ -1666,6 +1852,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 .batches
                 .iter()
                 .zip(&r.replay_buffers)
+                .filter_map(|(batch, buffer)| buffer.as_ref().map(|buffer| (batch, buffer)))
                 .filter(|_| self.uniform.cut[1] == 0.0)
             {
                 if !batch.seam
@@ -1687,7 +1874,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 } else if batch.points {
                     &r.point_pipeline
                 } else {
-                    &r.line_pipeline
+                    &r.replay_line_pipeline
                 });
                 let deposition = matches!(batch.kind,1..=5|8..=10|13|15);
                 pass.set_bind_group(
@@ -1713,7 +1900,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                         pass.draw(0..6, index as u32..index as u32 + 1);
                     }
                 } else {
-                    pass.draw(range, 0..1);
+                    pass.draw(0..2, range);
                 }
             }
             if self.uniform.cut[1] == 0.0
@@ -1721,8 +1908,10 @@ impl egui_wgpu::CallbackTrait for Callback {
             {
                 pass.set_pipeline(&r.start_pipeline);
                 pass.set_bind_group(0, &r.line_group, &[]);
-                pass.set_vertex_buffer(0, r.replay_buffers[batch].slice(..));
-                pass.draw(0..6, vertex..vertex + 1);
+                if let Some(buffer) = &r.replay_buffers[batch] {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, vertex..vertex + 1);
+                }
             }
         }
         if let (Some(area), Some(buffer)) = (&r.inspection, &r.inspection_buffer) {
@@ -2119,6 +2308,7 @@ mod shader_tests {
             ("lines", include_str!("lines.wgsl")),
             ("plate", include_str!("plate.wgsl")),
             ("beads", include_str!("beads.wgsl")),
+            ("replay", include_str!("replay.wgsl")),
             ("section", include_str!("section.wgsl")),
         ] {
             let module = wgpu::naga::front::wgsl::parse_str(source)

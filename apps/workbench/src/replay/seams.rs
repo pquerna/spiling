@@ -88,16 +88,16 @@ fn same_path(first: &[u8; REPLAY_RECORD_BYTES], next: &[u8; REPLAY_RECORD_BYTES]
     wall(next) && first[44..46] == next[44..46] && first[56..80] == next[56..80]
 }
 
-pub(super) fn scan(bytes: &[u8], mut accept: impl FnMut(SeamStart)) {
-    let records = bytes[REPLAY_HEADER_BYTES..]
-        .as_chunks::<REPLAY_RECORD_BYTES>()
-        .0;
+pub(super) fn scan_records(
+    records: &super::records::Records,
+    mut accept: impl FnMut(SeamStart),
+) -> Result<(), String> {
     let mut index = 1;
-    while index < records.len() {
-        let first = &records[index];
-        let entry_index = if records[index - 1][46] == 12 && index >= 2 {
-            let recovery = &records[index - 1];
-            let travel = &records[index - 2];
+    while index < records.count {
+        let first = &records.get(index)?;
+        let entry_index = if records.get(index - 1)?[46] == 12 && index >= 2 {
+            let recovery = &records.get(index - 1)?;
+            let travel = &records.get(index - 2)?;
             if position(recovery) != position(travel)
                 || recovery[44..46] != travel[44..46]
                 || integer(recovery, 76) != integer(travel, 76)
@@ -109,7 +109,7 @@ pub(super) fn scan(bytes: &[u8], mut accept: impl FnMut(SeamStart)) {
         } else {
             index - 1
         };
-        let entry = &records[entry_index];
+        let entry = &records.get(entry_index)?;
         if !wall(first)
             || entry[46] != 0
             || entry[44..46] != first[44..46]
@@ -119,10 +119,10 @@ pub(super) fn scan(bytes: &[u8], mut accept: impl FnMut(SeamStart)) {
             continue;
         }
         let mut end = index + 1;
-        while end < records.len() && same_path(first, &records[end]) {
+        while end < records.count && same_path(first, &records.get(end)?) {
             end += 1;
         }
-        let closing = &records[end - 1];
+        let closing = &records.get(end - 1)?;
         if position(entry) == position(closing) {
             accept(SeamStart {
                 position: position(entry),
@@ -139,6 +139,17 @@ pub(super) fn scan(bytes: &[u8], mut accept: impl FnMut(SeamStart)) {
         }
         index = end;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn scan(bytes: &[u8], accept: impl FnMut(SeamStart)) {
+    let source = spiling_chunks::ChunkSource::from_slice(bytes, u64::MAX).unwrap();
+    let records = super::records::Records::new(
+        source,
+        (bytes.len() - REPLAY_HEADER_BYTES) / REPLAY_RECORD_BYTES,
+    );
+    scan_records(&records, accept).unwrap();
 }
 
 #[cfg(test)]
@@ -238,11 +249,58 @@ mod tests {
         descriptor.resource.name = format!("artifacts/{}", hash.as_str());
         descriptor.resource.sha256 = hash.as_str().into();
         descriptor.resource.size_bytes = bytes.len().to_string();
+        if let Ok(pages) = index_replay(std::io::Cursor::new(&bytes), &descriptor.info) {
+            descriptor.pages = pages;
+        }
         (bytes, descriptor)
     }
     fn project(records: Vec<[u8; REPLAY_RECORD_BYTES]>) -> Replay {
         let (bytes, descriptor) = encode(records);
-        Replay::project(&bytes, &descriptor, 0, DVec3::ZERO).unwrap()
+        Replay::project(&bytes, &descriptor, DVec3::ZERO).unwrap()
+    }
+
+    #[test]
+    fn a_closed_run_keeps_its_start_and_predecessors_across_index_pages() {
+        let mut input = vec![record([0., 0., 0.2], 0, u32::MAX)];
+        for i in 0..REPLAY_PAGE_EVENTS + 2 {
+            input.push(record(
+                [if i % 2 == 0 { 2. } else { 0. }, 0., 0.2],
+                1,
+                u32::MAX - 2,
+            ));
+        }
+        let (bytes, descriptor) = encode(input);
+        assert!(descriptor.pages.len() > 1);
+        let source = spiling_chunks::ChunkSource::from_slice(&bytes, u64::MAX).unwrap();
+        let replay =
+            Replay::project_document_with_budget(&source, &descriptor, DVec3::ZERO, 0).unwrap();
+        assert_eq!(replay.seams.len(), 1);
+        assert_eq!(replay.seams[0].first_event, 1);
+        assert_eq!(
+            replay.seams[0].closing_event,
+            descriptor.info.event_count - 1
+        );
+        assert_eq!(
+            replay
+                .beads
+                .as_ref()
+                .unwrap()
+                .statistics(View::default())
+                .unwrap()
+                .count,
+            descriptor.info.deposition_count as usize
+        );
+        for batch in replay.batches.iter().filter(|b| !b.seam && b.kind == 1) {
+            let data = batch.instances.load().unwrap();
+            for (instance, (ordinal, _)) in data.iter().zip(batch.events.iter()) {
+                let previous =
+                    &bytes[REPLAY_HEADER_BYTES + (*ordinal as usize - 1) * REPLAY_RECORD_BYTES..];
+                assert_eq!(
+                    instance.start[0],
+                    f64::from_le_bytes(previous[..8].try_into().unwrap()) as f32
+                );
+            }
+        }
     }
 
     #[test]
@@ -291,7 +349,7 @@ mod tests {
         );
         let marker = replay.batches.iter().find(|batch| batch.seam).unwrap();
         assert!(marker.points);
-        assert_eq!(marker.vertices[0].position, [0.0, 0.0, 0.2]);
+        assert_eq!(marker.instances.load().unwrap()[0].end, [0.0, 0.0, 0.2]);
         assert!(replay.beads.is_ok());
     }
 
@@ -360,7 +418,7 @@ mod tests {
             ("replay-waste-only", 2),
         ] {
             let (bytes, descriptor) = super::super::bead_tests::fixture(name);
-            let replay = Replay::project(&bytes, &descriptor, 0, DVec3::ZERO).unwrap();
+            let replay = Replay::project(&bytes, &descriptor, DVec3::ZERO).unwrap();
             assert_eq!(replay.seams.len(), expected, "{name}");
             for start in &replay.seams {
                 let records = bytes[REPLAY_HEADER_BYTES..]
@@ -447,29 +505,13 @@ mod tests {
     }
 
     #[test]
-    fn marker_peak_budget_and_hash_admission_precede_publication() {
+    fn marker_identity_and_hash_admission_precede_publication() {
         let (mut bytes, descriptor) = encode(closed());
-        let replay = Replay::project(&bytes, &descriptor, 0, DVec3::ZERO).unwrap();
-        let centerline_peak = METADATA_BYTES
-            + bytes.len()
-            + descriptor.info.event_count as usize * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
-        let reserved =
-            spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize - centerline_peak;
-        assert!(Replay::project(&bytes, &descriptor, reserved, DVec3::ZERO).is_err());
-        let owned = METADATA_BYTES
-            + bytes.len()
-            + replay.seams.capacity() * std::mem::size_of::<SeamStart>()
-            + replay
-                .batches
-                .iter()
-                .map(|batch| {
-                    batch.vertices.capacity() * std::mem::size_of::<Vertex>() * 2
-                        + batch.events.capacity() * 8
-                })
-                .sum::<usize>()
-            + replay.beads.as_ref().unwrap().owned_bytes;
-        assert_eq!(replay.owned_bytes, owned);
+        let replay = Replay::project(&bytes, &descriptor, DVec3::ZERO).unwrap();
+        assert_eq!(replay.seams.len(), 1);
+        let marker = replay.batches.iter().find(|b| b.seam).unwrap();
+        assert_eq!(marker.events[0].0, replay.seams[0].first_event);
         bytes[REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES] ^= 1;
-        assert!(Replay::project(&bytes, &descriptor, 0, DVec3::ZERO).is_err());
+        assert!(Replay::project(&bytes, &descriptor, DVec3::ZERO).is_err());
     }
 }

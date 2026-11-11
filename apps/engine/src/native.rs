@@ -12,7 +12,7 @@ use spiling_contracts::{
     geometry::{
         ArtifactChunkMetadata, ArtifactId, GeometryResponse, SceneRevision, SessionId, SourceHash,
     },
-    manufacturing::{MAX_REPLAY_DISPLAY_BYTES, ManufacturingResponse, ReplayDisplayDescriptor},
+    manufacturing::{ManufacturingResponse, ReplayDisplayDescriptor},
     project::ProjectRevision,
     rpc::Artifact,
 };
@@ -592,11 +592,7 @@ fn publish_terminal(
             .replay_publication(id)
             .ok_or_else(|| Status::internal("ACK candidate replay missing"))?;
         let bundle_descriptor = jobs.describe_bundle_artifact(&asset.record, &asset.bundle)?;
-        let replay_descriptor = jobs.describe_native_artifact(
-            &replay.bytes,
-            "application/x-spiling-replay-motion",
-            MAX_REPLAY_DISPLAY_BYTES as u64,
-        )?;
+        let replay_descriptor = jobs.describe_replay_artifact(&replay.bytes)?;
         let program_descriptor = jobs.describe_program_artifact(&asset.record.program)?;
         if view(&bundle_descriptor)? != evaluation.resource
             || view(&replay_descriptor)? != evaluation.replay_display.resource
@@ -615,7 +611,7 @@ fn publish_terminal(
             vec![
                 (bundle_descriptor, (&asset.bundle).into()),
                 (program_descriptor, (&asset.program).into()),
-                (replay_descriptor, replay.bytes.as_slice().into()),
+                (replay_descriptor, (&replay.bytes).into()),
             ],
         )?;
         runtime.release_alternative_publication(id);
@@ -652,19 +648,16 @@ fn publish_terminal(
             if &replay.info != info {
                 return Err(Status::data_loss("ACK replay metadata mismatch"));
             }
-            let artifact = jobs.describe_native_artifact(
-                &replay.bytes,
-                "application/x-spiling-replay-motion",
-                u64::from(MAX_REPLAY_DISPLAY_BYTES),
-            )?;
+            let artifact = jobs.describe_replay_artifact(&replay.bytes)?;
             let descriptor = ReplayDisplayDescriptor {
+                pages: replay.pages.clone(),
                 info: info.clone(),
                 resource: view(&artifact)?,
             };
             descriptor
                 .validate_for_record(record)
                 .map_err(|e| domain_tonic(e.into()))?;
-            outputs.push((artifact, replay.bytes.as_slice().into()));
+            outputs.push((artifact, (&replay.bytes).into()));
             Some(descriptor)
         }
         _ => None,

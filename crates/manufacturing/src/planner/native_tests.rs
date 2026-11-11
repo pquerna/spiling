@@ -216,9 +216,10 @@ fn visit_fresh_replayed_object_segments(
     .unwrap();
     assert!(inspection.report.verified && inspection.report.deposition_segments > 0);
     let replay = inspection.replay.unwrap();
+    let replay_bytes = replay.bytes.to_vec().unwrap();
     let mut previous: Option<([f64; 3], f64)> = None;
     let mut object_segments = 0;
-    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+    for record in replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
     {
@@ -953,10 +954,11 @@ fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay()
             .unwrap();
     assert!(inspection.report.verified);
     let replay = inspection.replay.unwrap();
+    let replay_bytes = replay.bytes.to_vec().unwrap();
     let mut object_bottom = f64::INFINITY;
     let mut support_top = f64::NEG_INFINITY;
     let mut interface_segments = 0usize;
-    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+    for record in replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
     {
@@ -1011,6 +1013,7 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
             .unwrap();
     assert!(inspection.report.verified);
     let replay = inspection.replay.unwrap();
+    let replay_bytes = replay.bytes.to_vec().unwrap();
     let SupportPolicy::Breakaway {
         xy_clearance_mm,
         z_gap_mm,
@@ -1024,7 +1027,7 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
     let mut checked = 0usize;
     let mut supports = Vec::new();
     let mut objects = Vec::new();
-    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+    for record in replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
     {
@@ -1623,7 +1626,8 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
     )
     .unwrap();
     let replay = inspection.replay.unwrap();
-    let peak = replay.bytes[REPLAY_HEADER_BYTES..]
+    let replay_bytes = replay.bytes.to_vec().unwrap();
+    let peak = replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
         .iter()
@@ -3836,11 +3840,12 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
         .unwrap();
         assert!(inspection.report.verified);
         let replay = inspection.replay.unwrap();
+        let replay_bytes = replay.bytes.to_vec().unwrap();
         let filament_area =
             std::f64::consts::PI * (intent.recipe.filament_diameter_mm * 0.5).powi(2);
         let mut actual_volumes = [0.0f64; 3];
         let mut previous: Option<([f64; 3], f64)> = None;
-        for record in replay.bytes[REPLAY_HEADER_BYTES..]
+        for record in replay_bytes[REPLAY_HEADER_BYTES..]
             .as_chunks::<REPLAY_RECORD_BYTES>()
             .0
         {

@@ -26,8 +26,7 @@ pub(super) fn pipeline(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x3, 1 => Float32,
                     2 => Float32x3, 3 => Float32,
-                    4 => Float32x2, 5 => Float32x3,
-                    6 => Uint32, 7 => Uint32
+                    4 => Uint32
                 ],
             })],
         },

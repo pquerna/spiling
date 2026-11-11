@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use spiling_contracts::{geometry::AabbMm, manufacturing::*};
+use std::io::{Read, Write};
 
 /// Optional bounded byte sink; no per-motion object vector or planner positions.
 pub(crate) struct ReplaySink {
-    bytes: Vec<u8>,
+    bytes: spiling_chunks::ChunkWriter,
     min: [f64; 3],
     max: [f64; 3],
     events: u32,
@@ -35,71 +36,9 @@ impl ReplaySink {
         capacity: usize,
     ) -> Result<Self, ManufacturingError> {
         plan.validate(intent)?;
-        let mut deposition: usize = plan
-            .layers
-            .iter()
-            .flat_map(|l| &l.paths)
-            .map(|p| p.points_mm.len() - 1)
-            .sum();
-        let paths: usize = plan.layers.iter().map(|l| l.paths.len()).sum();
-        let (mut travels, mut process) = match intent.recipe.process.retraction {
-            RetractionPolicy::Disabled => (paths, 0),
-            RetractionPolicy::Enabled { z_hop_mm, .. } => (
-                (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(MAX_TRAVEL_SEGMENTS as usize),
-                (paths * 2).min(MAX_PROCESS_EVENTS as usize),
-            ),
-        };
-        let (lifecycle, epochs) = match &intent.printer.workflow {
-            JobWorkflow::CompleteMarlin { .. } => (4, 0),
-            JobWorkflow::FixedDualMarlin { .. } => {
-                let groups = plan.layers.len() * 2;
-                deposition += groups;
-                travels = paths * 3 + groups * 3;
-                let selections = plan.routing_selection_count() as usize;
-                process = selections * 2 - 2;
-                (2, selections)
-            }
-            JobWorkflow::DiagnosticBodyOnly => (0, 0),
-        };
-        let events = deposition
-            .checked_add(travels)
-            .and_then(|n| n.checked_add(process))
-            .and_then(|n| n.checked_add(lifecycle))
-            .and_then(|n| n.checked_add(epochs))
-            .ok_or_else(|| super::failed("replay event count overflow"))?;
-        // The policy gives an upper bound, not the actual retraction count.
-        // A long plan can fit when most entries do not retract. Reserve once
-        // up to the byte ceiling; reject only actual events exceeding it.
-        let events = events.min(capacity).min(MAX_REPLAY_EVENTS as usize);
-        let bytes = events
-            .checked_mul(REPLAY_RECORD_BYTES)
-            .and_then(|n| n.checked_add(REPLAY_HEADER_BYTES))
-            .ok_or_else(|| super::failed("replay byte count overflow"))?;
-        if bytes > MAX_REPLAY_DISPLAY_BYTES as usize
-            || deposition > MAX_DEPOSITION_SEGMENTS as usize
-            || travels > MAX_TRAVEL_SEGMENTS as usize
-            || process > MAX_DEPOSITION_SEGMENTS as usize
-            || epochs > MAX_TOOL_SELECTIONS as usize
-        {
-            return Err(ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "replay display budget exceeded",
-            ));
-        }
-        let mut buffer = Vec::new();
-        buffer.try_reserve_exact(bytes).map_err(|_| {
-            ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "replay display allocation failed",
-            )
-        })?;
-        if buffer.capacity() > MAX_REPLAY_DISPLAY_BYTES as usize {
-            return Err(ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "replay display actual capacity exceeds byte budget",
-            ));
-        }
-        buffer.resize(REPLAY_HEADER_BYTES, 0);
+        let events = capacity.min(MAX_REPLAY_EVENTS as usize);
+        let buffer = spiling_chunks::ChunkWriter::spooled(u64::from(MAX_REPLAY_DISPLAY_BYTES))
+            .map_err(|e| super::failed(format!("replay spool: {e}")))?;
         Ok(Self {
             bytes: buffer,
             min: [f64::INFINITY; 3],
@@ -173,28 +112,14 @@ impl ReplaySink {
                 "replay category event budget exceeded",
             ));
         }
-        if self.events >= self.expected_events
-            || self.bytes.len() + REPLAY_RECORD_BYTES > self.bytes.capacity()
-        {
-            // Too much motion to display: stop recording, keep verifying.
+        if self.events >= self.expected_events {
+            // Only an explicitly constrained sink can omit output. Production
+            // derives its representation from the admitted command counts.
             self.omitted = true;
-            self.bytes = Vec::new();
             return Ok(());
         }
-        for value in position {
-            self.bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        self.bytes.extend_from_slice(&e.to_le_bytes());
-        self.bytes.extend_from_slice(&feed.to_le_bytes());
-        self.bytes.extend_from_slice(&line.to_le_bytes());
-        self.bytes.extend_from_slice(&layer.to_le_bytes());
-        self.bytes.push(kind);
-        self.bytes.push(
-            u8::from(self.events != 0 && kind != 14) | if association.is_some() { 2 } else { 0 },
-        );
         let (width, physical_z, owner) = match association {
             Some(association) => {
-                let physical_z = association.physical_z;
                 let owner = match association.owner {
                     None => u32::MAX,
                     Some(DepositionOwner::MandatorySkin { .. }) => u32::MAX - 1,
@@ -202,21 +127,33 @@ impl ReplaySink {
                     Some(DepositionOwner::Regional { region_index }) => u32::from(region_index),
                     Some(DepositionOwner::RegionalSkinBridge { .. }) => {
                         return Err(super::failed(
-                            "mixed path ownership must be projected to each actual deposition segment",
+                            "mixed ownership must be projected per actual segment",
                         ));
                     }
                 };
-                (association.width, physical_z, owner)
+                (association.width, association.physical_z, owner)
             }
             None => (0.0, [0.0; 2], u32::MAX),
         };
-        self.bytes.extend_from_slice(&width.to_le_bytes());
-        for z in physical_z {
-            self.bytes.extend_from_slice(&z.to_le_bytes());
+        let mut record = [0; REPLAY_RECORD_BYTES];
+        for (axis, value) in position.iter().enumerate() {
+            record[axis * 8..axis * 8 + 8].copy_from_slice(&value.to_le_bytes());
         }
-        self.bytes.extend_from_slice(&owner.to_le_bytes());
+        record[24..32].copy_from_slice(&e.to_le_bytes());
+        record[32..40].copy_from_slice(&feed.to_le_bytes());
+        record[40..44].copy_from_slice(&line.to_le_bytes());
+        record[44..46].copy_from_slice(&layer.to_le_bytes());
+        record[46] = kind;
+        record[47] =
+            u8::from(self.events != 0 && kind != 14) | if association.is_some() { 2 } else { 0 };
+        record[48..56].copy_from_slice(&width.to_le_bytes());
+        record[56..64].copy_from_slice(&physical_z[0].to_le_bytes());
+        record[64..72].copy_from_slice(&physical_z[1].to_le_bytes());
+        record[72..76].copy_from_slice(&owner.to_le_bytes());
+        record[76..80].copy_from_slice(&self.active_tool.to_le_bytes());
         self.bytes
-            .extend_from_slice(&self.active_tool.to_le_bytes());
+            .write_all(&record)
+            .map_err(|e| super::failed(format!("replay spool write: {e}")))?;
         for (axis, value) in position.iter().enumerate() {
             self.min[axis] = self.min[axis].min(*value);
             self.max[axis] = self.max[axis].max(*value);
@@ -239,7 +176,9 @@ impl ReplaySink {
     pub(crate) fn omitted(&self) -> bool {
         self.omitted
     }
-    pub(crate) fn finish(mut self) -> Result<(Vec<u8>, AabbMm), ManufacturingError> {
+    pub(crate) fn finish(
+        self,
+    ) -> Result<(spiling_chunks::ChunkSource, AabbMm), ManufacturingError> {
         if self.omitted {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::ResourceLimit,
@@ -249,9 +188,10 @@ impl ReplaySink {
         if self.events == 0 || !self.process.is_multiple_of(2) {
             return Err(super::failed("incomplete replay display"));
         }
-        self.bytes[..4].copy_from_slice(b"SPLR");
-        self.bytes[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
-        self.bytes[6..8].copy_from_slice(&(REPLAY_HEADER_BYTES as u16).to_le_bytes());
+        let mut header = [0; REPLAY_HEADER_BYTES];
+        header[..4].copy_from_slice(b"SPLR");
+        header[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
+        header[6..8].copy_from_slice(&(REPLAY_HEADER_BYTES as u16).to_le_bytes());
         for (offset, value) in [
             (8, self.events),
             (12, REPLAY_RECORD_BYTES as u32),
@@ -262,13 +202,25 @@ impl ReplaySink {
             (88, self.process),
             (92, self.epochs),
         ] {
-            self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            header[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
         for axis in 0..3 {
-            self.bytes[32 + 8 * axis..40 + 8 * axis].copy_from_slice(&self.min[axis].to_le_bytes());
-            self.bytes[56 + 8 * axis..64 + 8 * axis].copy_from_slice(&self.max[axis].to_le_bytes());
+            header[32 + 8 * axis..40 + 8 * axis].copy_from_slice(&self.min[axis].to_le_bytes());
+            header[56 + 8 * axis..64 + 8 * axis].copy_from_slice(&self.max[axis].to_le_bytes());
         }
         let bounds = AabbMm::new(self.min, self.max).map_err(|e| super::failed(e.message))?;
-        Ok((self.bytes, bounds))
+        let body = self
+            .bytes
+            .finish()
+            .map_err(|e| super::failed(format!("replay spool seal: {e}")))?;
+        let mut stream = std::io::Cursor::new(header).chain(body.reader());
+        let mut writer = spiling_chunks::ChunkWriter::spooled(u64::from(MAX_REPLAY_DISPLAY_BYTES))
+            .map_err(|e| super::failed(format!("replay spool: {e}")))?;
+        std::io::copy(&mut stream, &mut writer)
+            .map_err(|e| super::failed(format!("replay spool finish: {e}")))?;
+        let bytes = writer
+            .finish()
+            .map_err(|e| super::failed(format!("replay spool seal: {e}")))?;
+        Ok((bytes, bounds))
     }
 }

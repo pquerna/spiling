@@ -2713,7 +2713,7 @@ fn native_h1_housing_and_physical_plate_parity() {
                 bead_display
                     .batches
                     .iter()
-                    .flat_map(|batch| &batch.instances)
+                    .flat_map(|batch| batch.instances.load().unwrap().as_ref().clone())
                     .any(|bead| f64::from(bead.height) > intent.recipe.layer_height_mm + 0.01),
                 "H1 bead display must retain genuinely thick physical intervals"
             );
@@ -2750,6 +2750,7 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (name, cylinder) in [
         ("cylinder-ribs", true),
+        ("cathedral", false),
         ("fixed-dual", false),
         ("fixed-dual-shared-material", false),
         ("fixed-dual-profiles", false),
@@ -2780,6 +2781,8 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             decode_intent(
                 &std::fs::read(repo.join(if cylinder {
                     "fixtures/manufacturing/solid-fill.intent.json"
+                } else if name == "cathedral" {
+                    "fixtures/manufacturing/web-roof.intent.json"
                 } else if name == "mixed-width-combined" {
                     "fixtures/manufacturing/mixed-width-combined.intent.json"
                 } else if name == "mixed-width-interior" {
@@ -2805,7 +2808,9 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
                 intent: intent.clone(),
             }
         });
-        if cylinder {
+        if name == "cathedral" {
+            place_on_bed(&host, &intent);
+        } else if cylinder {
             place_on_bed(&host, &intent);
             let s = wait(&host, |s| {
                 s.display
@@ -2964,7 +2969,19 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
         let s = checked_review(&host);
         let review = s.manufacturing.review.as_ref().unwrap();
         assert!(review.capture.report.verified);
-        if !cylinder {
+        if name == "cathedral" {
+            let display = review.display.as_ref().unwrap();
+            assert!(display.beads.is_ok(), "{:?}", display.beads);
+            assert!(display.batches.iter().any(|b| b.kind == 5 && !b.points));
+            assert!(
+                review
+                    .bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .any(|layer| !layer.region_coverage.web_roof_domains.is_empty())
+            );
+        } else if !cylinder {
             let r = review.display.as_ref().unwrap();
             assert!(r.batches.iter().any(|b| b.tool == 1 && b.kind == 15));
             assert!(r.batches.iter().any(|b| b.kind == 11 && b.points));

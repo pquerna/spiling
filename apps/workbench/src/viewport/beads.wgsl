@@ -27,10 +27,14 @@ fn section(index:u32, facets:u32, width:f32, height:f32, elliptical:u32)->vec4<f
 @vertex fn vs(
     @location(0) start:vec3<f32>, @location(1) width:f32,
     @location(2) end:vec3<f32>, @location(3) height:f32,
-    @location(4) sideways:vec2<f32>, @location(5) color:vec3<f32>,
-    @location(6) elliptical:u32, @location(7) facets:u32,
+    @location(4) kind_bits:u32,
     @builtin(vertex_index) vertex:u32
 )->Output {
+    let delta=end.xy-start.xy;
+    let sideways=vec2(-delta.y,delta.x)/max(length(delta),1e-20);
+    let facets=kind_bits>>4u;
+    let elliptical=select(0u,1u,(kind_bits&15u)==8u);
+    let color=role_color(kind_bits);
     let edge=vertex/12u; let slot=vertex%12u;
     let next=(edge+1u)%(facets+2u);
     // Two side triangles followed by one flat start and one flat end cap.
@@ -55,4 +59,9 @@ fn section(index:u32, facets:u32, width:f32, height:f32, elliptical:u32)->vec4<f
     if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 { discard; }
     let light=0.4+0.6*max(dot(input.normal/max(length(input.normal),1e-20),normalize(vec3(0.4,-0.5,0.8))),0.0);
     return vec4(input.color*light,1.0);
+}
+
+fn role_color(kind_bits:u32)->vec3<f32> {
+ let colors=array<vec3<f32>,16>(vec3<f32>(142.0,172.0,189.0),vec3<f32>(255.0,187.0,102.0),vec3<f32>(108.0,222.0,199.0),vec3<f32>(182.0,147.0,255.0),vec3<f32>(255.0,121.0,155.0),vec3<f32>(142.0,208.0,90.0),vec3<f32>(123.0,145.0,235.0),vec3<f32>(255.0,240.0,122.0),vec3<f32>(255.0,147.0,74.0),vec3<f32>(98.0,162.0,255.0),vec3<f32>(179.0,229.0,255.0),vec3<f32>(226.0,96.0,134.0),vec3<f32>(246.0,184.0,206.0),vec3<f32>(245.0,239.0,68.0),vec3<f32>(255.0,119.0,183.0),vec3<f32>(215.0,167.0,255.0));
+ return colors[kind_bits&15u]/255.0;
 }

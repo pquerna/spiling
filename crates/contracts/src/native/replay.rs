@@ -134,6 +134,14 @@ impl TryFrom<rpc::ReplayDisplayDescriptor> for ReplayDisplayDescriptor {
     fn try_from(v: rpc::ReplayDisplayDescriptor) -> Result<Self, String> {
         let value = Self {
             info: required(v.info, "replay info")?.try_into()?,
+            pages: if v.pages.len() > MAX_REPLAY_EVENTS.div_ceil(REPLAY_PAGE_EVENTS) as usize {
+                return Err("replay page index exceeds representation".into());
+            } else {
+                v.pages
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, String>>()?
+            },
             resource: super::artifact_to_view(
                 required(v.resource, "replay resource")?,
                 MAX_REPLAY_DISPLAY_BYTES as u64,
@@ -149,10 +157,49 @@ impl TryFrom<ReplayDisplayDescriptor> for rpc::ReplayDisplayDescriptor {
         v.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             info: Some(v.info.try_into()?),
+            pages: v
+                .pages
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, String>>()?,
             resource: Some(super::artifact_from_view(
                 v.resource,
                 MAX_REPLAY_DISPLAY_BYTES as u64,
             )?),
+        })
+    }
+}
+
+impl TryFrom<rpc::ReplayPage> for ReplayPage {
+    type Error = String;
+    fn try_from(v: rpc::ReplayPage) -> Result<Self, String> {
+        Ok(Self {
+            first_event: v.first_event,
+            event_count: v.event_count,
+            hash: SourceHash::parse(v.hash).map_err(|e| e.to_string())?,
+            first_line: v.first_line,
+            last_line: v.last_line,
+            first_layer: v.first_layer,
+            last_layer: v.last_layer,
+            bounds_mm: required(v.bounds_mm, "replay page bounds")?.try_into()?,
+            physical_z_mm: [v.physical_lower_z_mm, v.physical_upper_z_mm],
+        })
+    }
+}
+impl TryFrom<ReplayPage> for rpc::ReplayPage {
+    type Error = String;
+    fn try_from(v: ReplayPage) -> Result<Self, String> {
+        Ok(Self {
+            first_event: v.first_event,
+            event_count: v.event_count,
+            hash: v.hash.into(),
+            first_line: v.first_line,
+            last_line: v.last_line,
+            first_layer: v.first_layer,
+            last_layer: v.last_layer,
+            bounds_mm: Some(v.bounds_mm.try_into()?),
+            physical_lower_z_mm: v.physical_z_mm[0],
+            physical_upper_z_mm: v.physical_z_mm[1],
         })
     }
 }
@@ -164,7 +211,8 @@ mod tests {
 
     fn display() -> ReplayDisplayDescriptor {
         let hash = SourceHash::from_bytes(b"replay");
-        ReplayDisplayDescriptor {
+        let mut descriptor = ReplayDisplayDescriptor {
+            pages: vec![],
             info: ReplayDisplayInfo {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 bundle_hash: SourceHash::from_bytes(b"bundle"),
@@ -188,7 +236,19 @@ mod tests {
                 size_bytes: (REPLAY_HEADER_BYTES + 4 * REPLAY_RECORD_BYTES).to_string(),
                 media_type: REPLAY_MEDIA_TYPE.into(),
             },
-        }
+        };
+        descriptor.pages = vec![ReplayPage {
+            first_event: 0,
+            event_count: 4,
+            hash: SourceHash::from_bytes(b"page"),
+            first_line: 1,
+            last_line: 4,
+            first_layer: 0,
+            last_layer: 0,
+            bounds_mm: descriptor.info.bounds_mm,
+            physical_z_mm: [0., 1.],
+        }];
+        descriptor
     }
     #[test]
     fn replay_wire_rejects_unspecified_output_frames_sizes_hashes_and_counts() {

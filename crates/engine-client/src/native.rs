@@ -17,8 +17,7 @@ use spiling_contracts::{
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
         ManufacturingBundle, ManufacturingCommand, ManufacturingError, ManufacturingErrorCode,
-        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle_from,
-        validate_replay_display,
+        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle_from, validate_replay_reader,
     },
     native::{self, GeometryCall, ManufacturingCall, NativeOperationView, ProjectCall},
     project::{ProjectCommand, ProjectResponse, ProjectRevision},
@@ -973,6 +972,21 @@ impl EngineRpc {
         name: &str,
         size: u64,
     ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        self.read_frames_impl(name, size, false).await
+    }
+    async fn read_frames_spooled(
+        &self,
+        name: &str,
+        size: u64,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        self.read_frames_impl(name, size, true).await
+    }
+    async fn read_frames_impl(
+        &self,
+        name: &str,
+        size: u64,
+        spool: bool,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
         let mut stream = self
             .read_artifact_range(spiling_contracts::google::bytestream::ReadRequest {
                 resource_name: name.to_owned(),
@@ -984,7 +998,12 @@ impl EngineRpc {
                 ClientError::Rpc(status) => rpc_error(status),
                 error => error,
             })?;
-        let mut writer = spiling_chunks::ChunkWriter::new(size);
+        let mut writer = if spool {
+            spiling_chunks::ChunkWriter::spooled(size)
+                .map_err(|_| corrupt_manufacturing("replay spool unavailable"))?
+        } else {
+            spiling_chunks::ChunkWriter::new(size)
+        };
         while let Some(fragment) = stream.message().await? {
             if fragment.data.is_empty() || fragment.data.len() > 1024 * 1024 {
                 return Err(corrupt_manufacturing("artifact fragment range invalid"));
@@ -1048,27 +1067,41 @@ impl EngineRpc {
         Ok(bytes)
     }
 
-    /// Pull one immutable actual-program display, bound to its verified bundle.
-    /// ByteStream fragments are bounded to 1 MiB; no per-event RPCs are issued.
+    /// Stream and independently admit an indexed exact-motion document. Raw
+    /// content is spooled; no whole-job byte vector is required by Review.
+    pub async fn fetch_replay_document(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &ReplayDisplayDescriptor,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        descriptor.validate_for_record(record)?;
+        let size = native::validate_artifact_view(
+            &descriptor.resource,
+            u64::from(MAX_REPLAY_DISPLAY_BYTES),
+        )
+        .map_err(|e| corrupt_manufacturing(&e))?;
+        let source = self
+            .read_frames_spooled(&descriptor.resource.name, size)
+            .await?;
+        if spiling_contracts::geometry::SourceHash::from_digest(source.digest()).as_str()
+            != descriptor.resource.sha256
+        {
+            return Err(corrupt_manufacturing("replay document checksum mismatch"));
+        }
+        validate_replay_reader(source.reader(), descriptor)?;
+        Ok(source)
+    }
+    /// Explicit contiguous convenience for small offline callers. Native Review
+    /// and CLI file export consume the spooled document API instead.
     pub async fn fetch_replay_display(
         &self,
         record: &ManufacturingArtifactRecord,
         descriptor: &ReplayDisplayDescriptor,
     ) -> Result<Vec<u8>, ClientError> {
-        descriptor.validate_for_record(record)?;
-        let resource = &descriptor.resource;
-        let size = native::validate_artifact_view(resource, u64::from(MAX_REPLAY_DISPLAY_BYTES))
-            .map_err(|error| corrupt_manufacturing(&error))?;
-        let bytes = self
-            .read_sized_artifact(&resource.name, size, u64::from(MAX_REPLAY_DISPLAY_BYTES))
-            .await
-            .map_err(|error| match error {
-                ClientError::Protocol(message) => corrupt_manufacturing(&message),
-                ClientError::Rpc(status) => rpc_error(status),
-                error => error,
-            })?;
-        validate_replay_display(&bytes, descriptor)?;
-        Ok(bytes)
+        self.fetch_replay_document(record, descriptor)
+            .await?
+            .to_vec()
+            .map_err(|_| corrupt_manufacturing("replay contiguous allocation failed"))
     }
 }
 
@@ -1190,6 +1223,13 @@ impl EngineClient {
         descriptor: &ArtifactView,
     ) -> Result<Vec<u8>, ClientError> {
         self.rpc.fetch_surface_image(record, descriptor).await
+    }
+    pub async fn fetch_replay_document(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &ReplayDisplayDescriptor,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        self.rpc.fetch_replay_document(record, descriptor).await
     }
     pub async fn fetch_replay_display(
         &self,

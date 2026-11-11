@@ -4,11 +4,14 @@
 
 //! Projection of validated SPLR6 events, never a machine-program parser.
 pub mod beads;
+mod records;
 pub mod seams;
+pub mod table;
+pub mod upload;
 const METADATA_BYTES: usize = 16_384;
 use glam::DVec3;
 use spiling_contracts::manufacturing::*;
-use std::{collections::BTreeMap, ops::Range};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -22,12 +25,14 @@ pub struct Batch {
     pub tool: u32,
     pub points: bool,
     pub seam: bool,
-    pub vertices: Vec<Vertex>,
-    pub events: Vec<(u32, u16)>,
+    pub instances: Arc<table::Table>,
+    pub events: Arc<Vec<(u32, u16)>>,
 }
 #[derive(Debug)]
 pub struct Replay {
     pub origin: DVec3,
+    pub layer_windows: Vec<Range<u32>>,
+    pub event_count: u32,
     pub batches: Vec<Batch>,
     pub seams: Vec<seams::SeamStart>,
     pub owned_bytes: usize,
@@ -89,24 +94,6 @@ pub const ROLES: [&str; 16] = [
     "Separator wall",
     "Tool epoch",
     "Waste",
-];
-const COLORS: [[u8; 3]; 16] = [
-    [142, 172, 189],
-    [255, 187, 102],
-    [108, 222, 199],
-    [182, 147, 255],
-    [255, 121, 155],
-    [142, 208, 90],
-    [123, 145, 235],
-    [255, 240, 122],
-    [255, 147, 74],
-    [98, 162, 255],
-    [179, 229, 255],
-    [226, 96, 134],
-    [246, 184, 206],
-    [245, 239, 68],
-    [255, 119, 183],
-    [215, 167, 255],
 ];
 fn event_range(
     events: &[(u32, u16)],
@@ -193,13 +180,7 @@ impl Batch {
         if self.seam && !view.seams {
             return 0..0;
         }
-        event_range(
-            &self.events,
-            self.kind,
-            self.tool,
-            view,
-            if self.points { 1 } else { 2 },
-        )
+        event_range(&self.events, self.kind, self.tool, view, 1)
     }
 }
 
@@ -216,7 +197,7 @@ impl Replay {
             .filter_map(|(index, batch)| {
                 let range = batch.range(view);
                 (!range.is_empty()).then(|| {
-                    let event = batch.events[range.start as usize / 2].0;
+                    let event = batch.events[range.start as usize].0;
                     (event, index, range.start)
                 })
             })
@@ -227,34 +208,44 @@ impl Replay {
     pub fn project(
         bytes: &[u8],
         descriptor: &ReplayDisplayDescriptor,
-        reserved: usize,
         origin: DVec3,
     ) -> Result<Self, String> {
-        validate_replay_display(bytes, descriptor).map_err(|e| e.to_string())?;
+        let source =
+            spiling_chunks::ChunkSource::from_slice(bytes, u64::from(MAX_REPLAY_DISPLAY_BYTES))
+                .map_err(|e| e.to_string())?;
+        Self::project_document(&source, descriptor, origin)
+    }
+    pub fn project_document(
+        source: &spiling_chunks::ChunkSource,
+        descriptor: &ReplayDisplayDescriptor,
+        origin: DVec3,
+    ) -> Result<Self, String> {
+        Self::project_document_with_budget(source, descriptor, origin, table::available_growth())
+    }
+    fn project_document_with_budget(
+        source: &spiling_chunks::ChunkSource,
+        descriptor: &ReplayDisplayDescriptor,
+        origin: DVec3,
+        resident: usize,
+    ) -> Result<Self, String> {
+        let _preparation = crate::performance::span("replay_projection");
+        validate_replay_reader(source.reader(), descriptor).map_err(|e| e.to_string())?;
         let count = descriptor.info.event_count as usize;
-        let mut seam_counts = BTreeMap::<(u8, u32), usize>::new();
-        seams::scan(bytes, |start| {
-            *seam_counts.entry((start.role, start.tool)).or_default() += 1
-        });
+        let records = records::Records::new(source.clone(), count);
+        let mut seam_counts = BTreeMap::<(usize, u8, u32), usize>::new();
+        seams::scan_records(&records, |start| {
+            *seam_counts
+                .entry((
+                    start.first_event as usize / REPLAY_PAGE_EVENTS as usize,
+                    start.role,
+                    start.tool,
+                ))
+                .or_default() += 1
+        })?;
         let seam_count: usize = seam_counts.values().sum();
-        // Raw input plus CPU vertices, GPU copy, event indices and a bounded staging copy.
-        let upper = METADATA_BYTES
-            + bytes.len()
-            + count * (2 * std::mem::size_of::<Vertex>() * 3 + 8)
-            + seam_count
-                * (std::mem::size_of::<seams::SeamStart>() + 3 * std::mem::size_of::<Vertex>() + 8);
-        if reserved
-            .checked_add(upper)
-            .is_none_or(|n| n > spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize)
-        {
-            return Err("Replay exceeds the combined active/staged display budget".into());
-        }
-        let record = |i: usize| {
-            &bytes[REPLAY_HEADER_BYTES + i * REPLAY_RECORD_BYTES
-                ..REPLAY_HEADER_BYTES + (i + 1) * REPLAY_RECORD_BYTES]
-        };
+        let record = |i: usize| records.get(i);
         let point = |i: usize| -> Result<[f32; 3], String> {
-            let r = record(i);
+            let r = record(i)?;
             let p = DVec3::new(
                 f64::from_le_bytes(r[0..8].try_into().unwrap()),
                 f64::from_le_bytes(r[8..16].try_into().unwrap()),
@@ -266,10 +257,27 @@ impl Replay {
             }
             Ok(f.to_array())
         };
-        let mut counts = BTreeMap::<(u8, u32, bool), usize>::new();
+        let envelope = beads::Beads::project_records(&records, origin);
+        let facets = envelope.as_ref().map_or(0, |b| b.facets);
+        let retain = count.saturating_add(seam_count).saturating_mul(2 * 36 + 8) <= resident;
+        let backing = if retain {
+            None
+        } else {
+            Some(spiling_chunks::Spool::new().map_err(|e| e.to_string())?)
+        };
+        let mut counts = BTreeMap::<(usize, u8, u32, bool), usize>::new();
+        let mut layer_windows = vec![0..0; descriptor.info.layer_count as usize];
         for i in 0..count {
-            let r = record(i);
+            let r = record(i)?;
             let kind = r[46];
+            let layer = u16::from_le_bytes(r[44..46].try_into().unwrap());
+            if layer != u16::MAX {
+                let range = &mut layer_windows[layer as usize];
+                if range.start == range.end {
+                    range.start = i as u32;
+                }
+                range.end = i as u32 + 1;
+            }
             if kind == 14 {
                 continue;
             }
@@ -279,26 +287,32 @@ impl Replay {
             } else {
                 0
             };
-            *counts.entry((kind, tool, points)).or_default() += 1;
+            *counts
+                .entry((i / REPLAY_PAGE_EVENTS as usize, kind, tool, points))
+                .or_default() += 1;
         }
         let mut groups: BTreeMap<_, _> = counts
             .into_iter()
-            .map(|((kind, tool, points), count)| {
+            .map(|((page, kind, tool, points), count)| {
                 (
-                    (kind, tool, points),
+                    (page, kind, tool, points),
                     Batch {
                         kind,
                         tool,
                         points,
                         seam: false,
-                        vertices: Vec::with_capacity(count * if points { 1 } else { 2 }),
-                        events: Vec::with_capacity(count),
+                        instances: Arc::new(table::Table::with_capacity(if retain {
+                            count
+                        } else {
+                            0
+                        })),
+                        events: Arc::new(Vec::with_capacity(count)),
                     },
                 )
             })
             .collect();
         for i in 0..count {
-            let r = record(i);
+            let r = record(i)?;
             let kind = r[46];
             // The first endpoint is an unknown-start marker only in the single-tool stream.
             if kind == 14 || (i == 0 && descriptor.info.tool_epoch_count > 0) {
@@ -311,73 +325,142 @@ impl Replay {
             } else {
                 0
             };
-            let batch = groups.entry((kind, tool, points)).or_insert_with(|| Batch {
-                kind,
-                tool,
-                points,
-                seam: false,
-                vertices: vec![],
-                events: vec![],
-            });
-            let color = COLORS[kind as usize].map(|n| f32::from(n) / 255.0);
-            if !points {
-                batch.vertices.push(Vertex {
-                    position: point(i - 1)?,
-                    color,
+            let batch = groups
+                .entry((i / REPLAY_PAGE_EVENTS as usize, kind, tool, points))
+                .or_insert_with(|| Batch {
+                    kind,
+                    tool,
+                    points,
+                    seam: false,
+                    instances: Arc::new(table::Table::with_capacity(0)),
+                    events: Arc::new(vec![]),
                 });
-            }
-            batch.vertices.push(Vertex {
-                position: point(i)?,
-                color,
-            });
-            batch
-                .events
+            Arc::get_mut(&mut batch.instances)
+                .unwrap()
+                .push(beads::Instance {
+                    start: if points { point(i)? } else { point(i - 1)? },
+                    end: point(i)?,
+                    width: f64::from_le_bytes(r[48..56].try_into().unwrap()) as f32,
+                    height: (f64::from_le_bytes(r[64..72].try_into().unwrap())
+                        - f64::from_le_bytes(r[56..64].try_into().unwrap()))
+                        as f32,
+                    class: u32::from(kind) | (facets << 4),
+                });
+            Arc::get_mut(&mut batch.events)
+                .unwrap()
                 .push((i as u32, u16::from_le_bytes(r[44..46].try_into().unwrap())));
+            if !retain && ((i + 1).is_multiple_of(REPLAY_PAGE_EVENTS as usize) || i + 1 == count) {
+                let page = i / REPLAY_PAGE_EVENTS as usize;
+                for (_, batch) in
+                    groups.range_mut((page, 0, 0, false)..=(page, u8::MAX, u32::MAX, true))
+                {
+                    Arc::get_mut(&mut batch.instances)
+                        .unwrap()
+                        .spool(backing.as_ref().unwrap())?;
+                }
+            }
+        }
+        if !retain {
+            for batch in groups.values_mut() {
+                Arc::get_mut(&mut batch.instances)
+                    .unwrap()
+                    .spool(backing.as_ref().unwrap())?;
+            }
         }
         let mut batches: Vec<_> = groups.into_values().collect();
         let mut seams = Vec::with_capacity(seam_count);
         let mut markers: BTreeMap<_, _> = seam_counts
             .into_iter()
-            .map(|((kind, tool), count)| {
+            .map(|((page, kind, tool), count)| {
                 (
-                    (kind, tool),
+                    (page, kind, tool),
                     Batch {
                         kind,
                         tool,
                         points: true,
                         seam: true,
-                        vertices: Vec::with_capacity(count),
-                        events: Vec::with_capacity(count),
+                        instances: Arc::new(table::Table::with_capacity(if retain {
+                            count
+                        } else {
+                            0
+                        })),
+                        events: Arc::new(Vec::with_capacity(count)),
                     },
                 )
             })
             .collect();
-        seams::scan(bytes, |start| {
-            let batch = markers.get_mut(&(start.role, start.tool)).unwrap();
-            batch.vertices.push(Vertex {
-                position: (DVec3::from_array(start.position) - origin)
-                    .as_vec3()
-                    .to_array(),
-                color: [0.25, 0.85, 1.0],
-            });
-            batch.events.push((start.first_event, start.layer));
+        seams::scan_records(&records, |start| {
+            let batch = markers
+                .get_mut(&(
+                    start.first_event as usize / REPLAY_PAGE_EVENTS as usize,
+                    start.role,
+                    start.tool,
+                ))
+                .unwrap();
+            let position = (DVec3::from_array(start.position) - origin)
+                .as_vec3()
+                .to_array();
+            Arc::get_mut(&mut batch.instances)
+                .unwrap()
+                .push(beads::Instance {
+                    start: position,
+                    end: position,
+                    width: 0.0,
+                    height: 0.0,
+                    class: u32::from(start.role),
+                });
+            Arc::get_mut(&mut batch.events)
+                .unwrap()
+                .push((start.first_event, start.layer));
             seams.push(start);
-        });
+        })?;
         batches.extend(markers.into_values());
+        if !retain {
+            for batch in &mut batches {
+                Arc::get_mut(&mut batch.instances)
+                    .unwrap()
+                    .spool(backing.as_ref().unwrap())?;
+            }
+        }
+        let beads = envelope.map(|mut beads| {
+            for batch in &batches {
+                if !batch.points && !batch.seam && matches!(batch.kind,1..=5|8..=10|13|15) {
+                    beads.batches.push(beads::BeadBatch {
+                        kind: batch.kind,
+                        tool: batch.tool,
+                        instances: batch.instances.clone(),
+                        events: batch.events.clone(),
+                    });
+                }
+            }
+            beads
+        });
         let owned_bytes = METADATA_BYTES
-            + bytes.len()
+            + source.retained_bytes()
             + seams.capacity() * std::mem::size_of::<seams::SeamStart>()
             + batches
                 .iter()
                 .map(|b| {
-                    b.vertices.capacity() * std::mem::size_of::<Vertex>() * 2
-                        + b.events.capacity() * 8
+                    b.instances.retained_bytes() + b.instances.len() * 36 + b.events.capacity() * 8
                 })
                 .sum::<usize>();
-        let beads = beads::Beads::project(bytes, origin, reserved + upper);
-        let owned_bytes = owned_bytes + beads.as_ref().map_or(0, |b| b.owned_bytes);
+        if std::env::var_os("SPILING_OPEN_TRACE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            let gpu_bytes = batches
+                .iter()
+                .map(|b| b.instances.len() * 36)
+                .sum::<usize>();
+            eprintln!(
+                "SPILING_REPLAY {}",
+                serde_json::json!({
+                    "events": count, "raw_bytes": source.len(), "cpu_retained_bytes": owned_bytes - gpu_bytes,
+                    "gpu_bytes": gpu_bytes, "batches": batches.len(), "resident_tables": retain,
+                })
+            );
+        }
         Ok(Self {
             beads,
+            layer_windows,
+            event_count: descriptor.info.event_count,
             origin,
             batches,
             seams,
@@ -443,8 +526,7 @@ mod tests {
             let descriptor: ReplayDisplayDescriptor =
                 serde_json::from_value(fixture["descriptor"].clone()).unwrap();
             let origin = DVec3::splat(0.125);
-            let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
-            assert!(Replay::project(&bytes, &descriptor, 128 * 1024 * 1024, origin).is_err());
+            let replay = Replay::project(&bytes, &descriptor, origin).unwrap();
             let all = View {
                 pressure: true,
                 seams: true,
@@ -455,7 +537,7 @@ mod tests {
                 if matches!(batch.kind, 11 | 12) {
                     assert!(batch.range(View::default()).is_empty());
                 }
-                assert_eq!(batch.range(all).len(), batch.vertices.len());
+                assert_eq!(batch.range(all).len(), batch.instances.len());
                 for (j, (event, layer)) in batch.events.iter().enumerate() {
                     let n = if batch.points { 1 } else { 2 };
                     for k in 0..n {
@@ -473,8 +555,14 @@ mod tests {
                             expected[2].as_f64().unwrap(),
                         ) - origin;
                         assert!(
-                            (DVec3::from_array(batch.vertices[j * n + k].position.map(f64::from))
-                                - p)
+                            (DVec3::from_array(
+                                (if k == 0 {
+                                    batch.instances.load().unwrap()[j].start
+                                } else {
+                                    batch.instances.load().unwrap()[j].end
+                                })
+                                .map(f64::from)
+                            ) - p)
                                 .length()
                                 <= 0.001
                         );
@@ -549,7 +637,7 @@ mod bead_tests {
         ] {
             let (bytes, descriptor) = fixture(name);
             let origin = DVec3::splat(0.125);
-            let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
+            let replay = Replay::project(&bytes, &descriptor, origin).unwrap();
             let records = bytes[REPLAY_HEADER_BYTES..]
                 .as_chunks::<REPLAY_RECORD_BYTES>()
                 .0;
@@ -605,13 +693,16 @@ mod bead_tests {
                 assert_eq!(actual.is_some(), expected.is_some(), "{name}");
                 if let (Some((batch, vertex)), Some((event, _))) = (actual, expected) {
                     let batch = &replay.batches[batch];
-                    assert_eq!(batch.events[vertex as usize / 2].0 as usize, event);
+                    assert_eq!(batch.events[vertex as usize].0 as usize, event);
                     let previous = &records[event - 1];
                     let expected = DVec3::from_array(std::array::from_fn(|axis| {
                         f64::from_le_bytes(previous[axis * 8..axis * 8 + 8].try_into().unwrap())
                     })) - origin;
-                    let position =
-                        DVec3::from_array(batch.vertices[vertex as usize].position.map(f64::from));
+                    let position = DVec3::from_array(
+                        batch.instances.load().unwrap()[vertex as usize]
+                            .start
+                            .map(f64::from),
+                    );
                     assert!((position - expected).length() <= 0.001);
                 }
             }
@@ -627,7 +718,7 @@ mod bead_tests {
         ] {
             let (bytes, descriptor) = fixture(name);
             let origin = DVec3::splat(0.125);
-            let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
+            let replay = Replay::project(&bytes, &descriptor, origin).unwrap();
             let beads = replay.beads.as_ref().unwrap();
             assert!(beads.chord_error_mm <= 0.001);
             assert_eq!(
@@ -669,8 +760,27 @@ mod bead_tests {
                 records.iter().filter(|r| r[47] & 2 != 0).count()
             );
             for batch in &beads.batches {
+                let line = replay
+                    .batches
+                    .iter()
+                    .find(|line| {
+                        !line.points
+                            && !line.seam
+                            && line.kind == batch.kind
+                            && line.tool == batch.tool
+                    })
+                    .unwrap();
+                assert!(Arc::ptr_eq(&line.instances, &batch.instances));
+                assert!(Arc::ptr_eq(&line.events, &batch.events));
+
                 assert!(!matches!(batch.kind, 0 | 6 | 7 | 11 | 12 | 14));
-                for (instance, (event, layer)) in batch.instances.iter().zip(&batch.events) {
+                for (instance, (event, layer)) in batch
+                    .instances
+                    .load()
+                    .unwrap()
+                    .iter()
+                    .zip(batch.events.iter())
+                {
                     let record = &records[*event as usize];
                     let prior = &records[*event as usize - 1];
                     for (p, r) in [(instance.start, prior), (instance.end, record)] {
@@ -727,23 +837,19 @@ mod bead_tests {
         }
     }
     #[test]
-    fn exhausted_bead_budget_and_large_local_extent_keep_checked_centerlines() {
+    fn shared_beads_fit_the_line_budget_and_numerical_fallback_keeps_checked_lines() {
         let (bytes, descriptor) = fixture("replay");
-        assert!(Replay::project(&bytes, &descriptor, 0, DVec3::NAN).is_err());
-        assert!(Replay::project(&bytes, &descriptor, 0, DVec3::splat(f64::INFINITY)).is_err());
-        let base_peak = METADATA_BYTES
-            + bytes.len()
-            + descriptor.info.event_count as usize * (2 * std::mem::size_of::<Vertex>() * 3 + 8);
-        let reserved = spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize - base_peak;
-        let replay = Replay::project(&bytes, &descriptor, reserved, DVec3::ZERO).unwrap();
-        assert!(replay.beads.as_ref().unwrap_err().contains("budget"));
-        assert!(!replay.batches.is_empty());
-        assert!(
-            reserved + replay.owned_bytes
-                <= spiling_contracts::geometry::MAX_DISPLAY_BUFFER_BYTES as usize
-        );
+        assert!(Replay::project(&bytes, &descriptor, DVec3::NAN).is_err());
+        assert!(Replay::project(&bytes, &descriptor, DVec3::splat(f64::INFINITY)).is_err());
+        let source = spiling_chunks::ChunkSource::from_slice(&bytes, u64::MAX).unwrap();
         let replay =
-            Replay::project(&bytes, &descriptor, 0, DVec3::new(10_000.0, 0.0, 0.0)).unwrap();
+            Replay::project_document_with_budget(&source, &descriptor, DVec3::ZERO, 0).unwrap();
+        assert!(replay.beads.is_ok());
+        assert!(!replay.batches.is_empty());
+        for batch in &replay.batches {
+            assert_eq!(batch.instances.capacity(), 0);
+        }
+        let replay = Replay::project(&bytes, &descriptor, DVec3::new(10_000.0, 0.0, 0.0)).unwrap();
         assert!(replay.beads.as_ref().unwrap_err().contains("numerical"));
         assert!(!replay.batches.is_empty());
     }
@@ -759,8 +865,8 @@ mod layer_range_tests {
             tool: 0,
             points: false,
             seam: false,
-            vertices: Vec::new(),
-            events: vec![
+            instances: Arc::new(table::Table::with_capacity(0)),
+            events: Arc::new(vec![
                 (0, u16::MAX),
                 (2, 0),
                 (5, 1),
@@ -768,7 +874,7 @@ mod layer_range_tests {
                 (9, 2),
                 (12, 3),
                 (20, u16::MAX),
-            ],
+            ]),
         };
         let view = View {
             layer: Some(1),
@@ -777,28 +883,28 @@ mod layer_range_tests {
         };
         // Below and above remain whole even at zero selected-command progress.
         // No selected paths or unattributed lifecycle sentinels enter context.
-        assert_eq!(batch.context_ranges(view), [2..4, 8..12]);
+        assert_eq!(batch.context_ranges(view), [1..2, 4..6]);
         assert!(batch.range(view).is_empty());
         assert_eq!(
             batch.context_ranges(View {
                 layer_end: Some(2),
                 ..view
             }),
-            [2..4, 10..12]
+            [1..2, 5..6]
         );
         assert_eq!(
             batch.context_ranges(View {
                 layer: Some(0),
                 ..view
             }),
-            [0..0, 4..12]
+            [0..0, 2..6]
         );
         assert_eq!(
             batch.context_ranges(View {
                 layer: Some(u16::MAX - 1),
                 ..view
             }),
-            [2..12, 0..0]
+            [1..6, 0..0]
         );
         for excluded in [
             View {
@@ -828,7 +934,7 @@ mod layer_range_tests {
             let non_deposition = Batch {
                 kind,
                 events: batch.events.clone(),
-                vertices: Vec::new(),
+                instances: Arc::new(table::Table::with_capacity(0)),
                 points: false,
                 seam: false,
                 tool: 0,

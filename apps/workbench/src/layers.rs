@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 use crate::{manufacture::Review, replay::View};
+#[cfg(test)]
 use spiling_contracts::manufacturing::REPLAY_RECORD_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -21,14 +22,20 @@ pub struct Browser {
 }
 
 pub fn event_window(review: &Review, view: View) -> std::ops::Range<u32> {
-    let Some(bytes) = &review.motion else {
+    let Some(display) = &review.display else {
         return 0..0;
     };
-    record_window(
-        &bytes[spiling_contracts::manufacturing::REPLAY_HEADER_BYTES..],
-        view,
-    )
+    let Some(lower) = view.layer else {
+        return 0..display.event_count;
+    };
+    let upper = view.layer_end.unwrap_or(lower).max(lower);
+    let Some(first) = display.layer_windows.get(lower as usize) else {
+        return display.event_count..display.event_count;
+    };
+    let last = &display.layer_windows[usize::from(upper).min(display.layer_windows.len() - 1)];
+    first.start..last.end.max(first.start)
 }
+#[cfg(test)]
 // Called only with checked SPLR records. Complete jobs place unattributed lifecycle
 // events at the ends; those sentinels must not break the ordered body-layer search.
 fn record_window(bytes: &[u8], view: View) -> std::ops::Range<u32> {

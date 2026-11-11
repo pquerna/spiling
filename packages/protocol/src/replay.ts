@@ -8,12 +8,14 @@ import {
   MAX_REPLAY_EVENTS,
   REPLAY_HEADER_BYTES,
   REPLAY_RECORD_BYTES,
+  REPLAY_PAGE_EVENTS,
   MAX_PRINT_LAYERS,
   MAX_DEPOSITION_SEGMENTS,
   MAX_TRAVEL_SEGMENTS,
   MAX_MANUFACTURING_PROGRAM_BYTES,
   MAX_MANUFACTURING_LABEL_BYTES,
   MAX_PROCESS_REGIONS,
+  MAX_RETRACTIONS,
 } from "./generated.ts";
 import type { ReplayDisplayDescriptor } from "./generated.ts";
 import { bounds, hash, keys, uint, verifyHash, zero } from "./display.ts";
@@ -86,7 +88,7 @@ export async function decodeReplayDisplay(
   bytes: ArrayBuffer,
   descriptor: ReplayDisplayDescriptor,
 ): Promise<DecodedReplayDisplay> {
-  keys(descriptor, ["info", "resource"], fail);
+  keys(descriptor, ["info", "resource", "pages"], fail);
   const { info, resource } = descriptor;
   keys(
     info,
@@ -128,7 +130,7 @@ export async function decodeReplayDisplay(
   uint(info.travel_count, "travel count", fail, 1, MAX_TRAVEL_SEGMENTS);
   uint(info.layer_count, "layer count", fail, 1, MAX_PRINT_LAYERS);
   uint(info.lifecycle_count, "lifecycle count", fail, 0, 4);
-  uint(info.process_count, "process count", fail, 0, MAX_DEPOSITION_SEGMENTS);
+  uint(info.process_count, "process count", fail, 0, 2 * MAX_RETRACTIONS);
   uint(info.tool_epoch_count, "tool epoch count", fail, 0, MAX_DEPOSITION_SEGMENTS);
   uint(info.waste_count, "waste count", fail, 0, info.deposition_count);
   const dual = info.tool_epoch_count > 0;
@@ -438,6 +440,81 @@ export async function decodeReplayDisplay(
   for (let axis = 0; axis < 3; axis++)
     if (min[axis] !== info.bounds_mm.min[axis] || max[axis] !== info.bounds_mm.max[axis])
       fail("bounds do not exactly cover actual endpoints");
+  if (
+    !Array.isArray(descriptor.pages) ||
+    descriptor.pages.length !== Math.ceil(info.event_count / REPLAY_PAGE_EVENTS)
+  )
+    fail("page index count mismatch");
+  for (let pageIndex = 0; pageIndex < descriptor.pages.length; pageIndex++) {
+    const page = descriptor.pages[pageIndex]!;
+    keys(
+      page,
+      [
+        "first_event",
+        "event_count",
+        "hash",
+        "first_line",
+        "last_line",
+        "first_layer",
+        "last_layer",
+        "bounds_mm",
+        "physical_z_mm",
+      ],
+      fail,
+    );
+    const first = pageIndex * REPLAY_PAGE_EVENTS,
+      count = Math.min(REPLAY_PAGE_EVENTS, info.event_count - first);
+    if (page.first_event !== first || page.event_count !== count) fail("page ordinal mismatch");
+    hash(page.hash, fail);
+    bounds(page.bounds_mm, fail);
+    const pageMin = [Infinity, Infinity, Infinity],
+      pageMax = [-Infinity, -Infinity, -Infinity];
+    let lower = Infinity,
+      upper = -Infinity,
+      firstLayer = 0xffffffff,
+      lastLayer = 0xffffffff;
+    for (let j = 0; j < count; j++) {
+      const at = REPLAY_HEADER_BYTES + (first + j) * REPLAY_RECORD_BYTES;
+      for (let axis = 0; axis < 3; axis++) {
+        const v = data.getFloat64(at + axis * 8, true);
+        pageMin[axis] = Math.min(pageMin[axis]!, v);
+        pageMax[axis] = Math.max(pageMax[axis]!, v);
+      }
+      const layer = data.getUint16(at + 44, true);
+      if (layer !== 0xffff) {
+        firstLayer = Math.min(firstLayer, layer);
+        lastLayer = lastLayer === 0xffffffff ? layer : Math.max(lastLayer, layer);
+      }
+      const associated = (data.getUint8(at + 47) & 2) !== 0;
+      lower = Math.min(lower, data.getFloat64(at + (associated ? 56 : 16), true));
+      upper = Math.max(upper, data.getFloat64(at + (associated ? 64 : 16), true));
+    }
+    if (
+      page.first_line !==
+        data.getUint32(REPLAY_HEADER_BYTES + first * REPLAY_RECORD_BYTES + 40, true) ||
+      page.last_line !==
+        data.getUint32(
+          REPLAY_HEADER_BYTES + (first + count - 1) * REPLAY_RECORD_BYTES + 40,
+          true,
+        ) ||
+      page.first_layer !== firstLayer ||
+      page.last_layer !== lastLayer ||
+      !Array.isArray(page.physical_z_mm) ||
+      page.physical_z_mm.length !== 2 ||
+      page.physical_z_mm[0] !== lower ||
+      page.physical_z_mm[1] !== upper ||
+      pageMin.some((v, a) => v !== page.bounds_mm.min[a]) ||
+      pageMax.some((v, a) => v !== page.bounds_mm.max[a])
+    )
+      fail("page metadata mismatch");
+    await verifyHash(
+      bytes,
+      REPLAY_HEADER_BYTES + first * REPLAY_RECORD_BYTES,
+      count * REPLAY_RECORD_BYTES,
+      page.hash,
+      fail,
+    );
+  }
   await verifyHash(bytes, 0, length, resource.sha256, fail);
   const offset = (index: number): number => {
     uint(index, "event index", fail, 0, info.event_count - 1);

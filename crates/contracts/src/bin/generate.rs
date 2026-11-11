@@ -417,6 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OpticalBackingModel::decl(&config),
         ReplayDisplayInfo::decl(&config),
         ReplayDisplayDescriptor::decl(&config),
+        ReplayPage::decl(&config),
         SurfaceFeatureClass::decl(&config),
         SurfaceFeatureResolution::decl(&config),
         SurfaceResolution::decl(&config),
@@ -513,6 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             u64::from(MAX_REPLAY_DISPLAY_BYTES),
         ),
         ("MAX_REPLAY_EVENTS", u64::from(MAX_REPLAY_EVENTS)),
+        ("REPLAY_PAGE_EVENTS", u64::from(REPLAY_PAGE_EVENTS)),
         ("REPLAY_HEADER_BYTES", REPLAY_HEADER_BYTES as u64),
         ("REPLAY_RECORD_BYTES", REPLAY_RECORD_BYTES as u64),
         ("REPLAY_SCHEMA_VERSION", u64::from(REPLAY_SCHEMA_VERSION)),
@@ -616,6 +618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             u64::from(MAX_DEPOSITION_SEGMENTS),
         ),
         ("MAX_TRAVEL_SEGMENTS", u64::from(MAX_TRAVEL_SEGMENTS)),
+        ("MAX_RETRACTIONS", u64::from(MAX_RETRACTIONS)),
         ("MAX_MACHINE_COMPONENTS", u64::from(MAX_MACHINE_COMPONENTS)),
         ("MAX_PROFILE_JSON_BYTES", u64::from(MAX_PROFILE_JSON_BYTES)),
         (

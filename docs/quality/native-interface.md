@@ -266,6 +266,12 @@ Actual-motion controls scroll within half the available central height so expand
 inspection and playback retain a usable canvas. Start coordinates and command
 details use progressive disclosure; counts and navigation remain above them.
 
+Review prepares complete actual motion through the checked indexed document. CPU
+backing and staged GPU upload are automatic; a compact loading percentage stays
+visible until all geometry is uploaded. Preparation uses checked centerlines before
+nominal bead surfaces are ready. A display allocation/preparation error retains
+verified export and states the actual failure. There is no job-size preview cutoff.
+
 Layer review keeps selected layers in color and shows other layers as dim neutral
 actual-program deposition paths by default. Other layers can be hidden for isolated
 inspection. Context respects role/tool visibility and section clipping, excludes

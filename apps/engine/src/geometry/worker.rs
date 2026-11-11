@@ -550,15 +550,6 @@ fn run(
                             "candidate inspection omitted actual replay",
                         )
                     })?;
-                    let descriptor = |bytes: &[u8], media_type: &str| {
-                        let hash = SourceHash::from_bytes(bytes);
-                        spiling_contracts::ArtifactView {
-                            name: format!("artifacts/{}", hash.as_str()),
-                            size_bytes: bytes.len().to_string(),
-                            sha256: hash.as_str().into(),
-                            media_type: media_type.into(),
-                        }
-                    };
                     let interior_policy = interior_opportunity
                         .map(|opportunity| {
                             let bundle = asset.decode()?;
@@ -592,10 +583,16 @@ fn run(
                         },
                         replay_display: ReplayDisplayDescriptor {
                             info: replay.info.clone(),
-                            resource: descriptor(
-                                &replay.bytes,
-                                "application/x-spiling-replay-motion",
-                            ),
+                            pages: replay.pages.clone(),
+                            resource: {
+                                let hash = SourceHash::from_digest(replay.bytes.digest());
+                                spiling_contracts::ArtifactView {
+                                    name: format!("artifacts/{}", hash.as_str()),
+                                    sha256: hash.as_str().into(),
+                                    size_bytes: replay.bytes.len().to_string(),
+                                    media_type: REPLAY_MEDIA_TYPE.into(),
+                                }
+                            },
                         },
                     };
                     let wire =

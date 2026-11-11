@@ -375,13 +375,27 @@ The host separates request acknowledgements from background display publications
 Review/export workers retain captured identities and recheck the active record;
 close waits for staged output cleanup and child exit. Input revision is immutable
 artifact provenance and can precede compilation's project publication revision.
-A current capture binds the observed project revision separately. Display memory
-accounts active/staged source, section and motion together; prior replay GPU charge
-is conservatively retained until the engine session ends.
-This display allowance counts source, section and projected motion buffers,
-not the maximum serialized manufacturing-bundle size. Checked CPU-only bundles
-retain their separate decoding limits and bounded Current/comparison ownership;
-raising a file limit must not consume the viewport's buffer allowance.
+A current capture binds the observed project revision separately. Replay CPU retention observes current machine/container headroom and uses anonymous
+backing when needed. Its shared compact geometry serves centerline/bead/context
+passes, with backpressured page decode and staged uploads. Source and section
+retention retain their own current display envelope; these are separate from the
+serialized manufacturing bundle and exact motion representations. Current and
+comparison inspection retain checked decoded plans for their manufacturing
+inspectors; replay paging does not yet remove those plans or add GPU eviction.
+
+Reproduce the retired 32 MiB motion omission regression using coherent debug
+engine/CLI binaries, then run `node --experimental-strip-types tools/smoke-toolpath-display.mjs`
+sequentially inside an external memory/task envelope. It creates a native 96 mm
+box with explicit solid-fill/retraction policies, compiles and saves, removes its
+owned source/declaration copies and opens a fresh process for complete actual
+replay and five-file export. The independent TypeScript decoder checks the full
+indexed result beyond the old limit. The runner honors `CARGO_TARGET_DIR`, never
+builds, and retains receipts under ignored `.cache/toolpath-display-*` paths.
+Open its saved project in the native workbench, Verify, review all/single/ranged
+layers, toggle centerlines/beads, inspect starts and actual section caps. Setting
+`SPILING_REPLAY_RESIDENT_BYTES=0` before launch exercises backed CPU projection;
+it is a retention choice, not a geometric or job-size refusal. Native window,
+frame-time and GPU-cohort evidence remain separate from this CLI journey.
 
 The `inspection` Cargo feature enables upstream development inspection tooling;
 it is off by default and must stay off in distributions. It is not a second

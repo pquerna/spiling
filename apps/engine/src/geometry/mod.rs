@@ -1144,13 +1144,6 @@ impl Runtime {
                 },
             ) => {
                 evaluation.validate()?;
-                if replay.bytes.capacity() > MAX_REPLAY_DISPLAY_BYTES as usize {
-                    return Err(ManufacturingError::new(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "staged alternative replay exceeds its separate byte budget",
-                    )
-                    .into());
-                }
                 Ok(Publication {
                     kind: PublicationKind::AlternativeEvaluated {
                         evaluation,
@@ -1200,21 +1193,10 @@ impl Runtime {
                     artifact: None,
                 })
             }
-            (Purpose::Verify, Product::Verified { record, inspection }) => {
-                if inspection.replay.as_ref().is_some_and(|replay| {
-                    replay.bytes.capacity() > MAX_REPLAY_DISPLAY_BYTES as usize
-                }) {
-                    return Err(ManufacturingError::new(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "staged replay exceeds its separate 16 MiB byte budget",
-                    )
-                    .into());
-                }
-                Ok(Publication {
-                    kind: PublicationKind::Verified { record, inspection },
-                    artifact: None,
-                })
-            }
+            (Purpose::Verify, Product::Verified { record, inspection }) => Ok(Publication {
+                kind: PublicationKind::Verified { record, inspection },
+                artifact: None,
+            }),
             (Purpose::Section, Product::Section(section)) => {
                 if section.summary.total_bytes > MAX_ENGINE_ARTIFACT_BYTES - self.artifact_bytes() {
                     return Err(resource("section exceeds remaining artifact budget").into());

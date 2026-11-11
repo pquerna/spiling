@@ -334,6 +334,7 @@ fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
         assert!(report.verified);
         assert_eq!(report.deposition_segments, 5);
         let (bytes, bounds) = sink.finish().unwrap();
+        let bytes = bytes.to_vec().unwrap();
         validate_replay_display(
             &bytes,
             &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
@@ -977,7 +978,7 @@ fn cancellation_and_parser_resources_are_bounded() {
 }
 
 #[test]
-fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
+fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
     let (intent, mut plan) = fixture();
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![
@@ -989,22 +990,23 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
         };
-        100_000
+        220_000
     ];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
-    assert_eq!(report.deposition_segments, 100_000);
-    assert_eq!(report.travel_segments, 100_000);
+    assert_eq!(report.deposition_segments, 220_000);
+    assert_eq!(report.travel_segments, 220_000);
     let (bytes, bounds) = sink.finish().unwrap();
+    assert!(bytes.len() > 32 * 1024 * 1024);
+    let bytes = bytes.to_vec().unwrap();
+    let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
+    validate_replay_display(&bytes, &descriptor).unwrap();
     assert_eq!(
         bytes.len(),
-        REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 200_000
-    );
-    assert!(
-        bytes.capacity() <= spiling_contracts::manufacturing::MAX_REPLAY_DISPLAY_BYTES as usize
+        REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 440_000
     );
     assert_eq!(bounds.min, [1.0, 1.0, 1.0]);
     assert_eq!(bounds.max, [5.0, 1.0, 1.0]);
@@ -1043,6 +1045,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
     assert_eq!(report.retraction_count, 39_999);
     report.validate().unwrap();
     let (bytes, bounds) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     assert_eq!(
         bytes.len(),
         REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 239_996
@@ -1084,7 +1087,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
     assert_eq!(report.travel_segments, 100_000);
     assert_eq!(report.retraction_count, 0);
     let (bytes, bounds) = sink.finish().unwrap();
-    assert!(bytes.capacity() <= MAX_REPLAY_DISPLAY_BYTES as usize);
+    let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
         &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
@@ -1134,6 +1137,7 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     assert_eq!(report.priming_filament_length_mm, 1.0);
     assert_eq!(report.lifecycle_motion_count, 4);
     let (bytes, bounds) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     assert_eq!(bytes.len(), REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 13);
     assert_eq!(bounds.max, [20.0, 10.0, 10.0]);
     assert_eq!(&bytes[28..32], &4u32.to_le_bytes());
@@ -1141,7 +1145,8 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     assert_eq!(bytes[96 + REPLAY_RECORD_BYTES + 46], 7);
     report.validate().unwrap();
     let hash = spiling_contracts::geometry::SourceHash::from_bytes(&bytes);
-    let descriptor = ReplayDisplayDescriptor {
+    let mut descriptor = ReplayDisplayDescriptor {
+        pages: vec![],
         info: ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"test bundle"),
@@ -1166,6 +1171,7 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
             media_type: REPLAY_MEDIA_TYPE.into(),
         },
     };
+    descriptor.pages = index_replay(std::io::Cursor::new(&bytes), &descriptor.info).unwrap();
     validate_replay_display(&bytes, &descriptor).unwrap();
     for offset in [
         96 + 44,
@@ -1432,8 +1438,14 @@ fn packed_process_descriptor(
     plan: &NormalizedPrintPlan,
     report: &VerificationReport,
 ) -> ReplayDisplayDescriptor {
+    let epochs = report.routing.as_ref().map_or(0, |r| r.selection_count);
+    let waste = report.routing.as_ref().map_or(0, |r| {
+        r.tools.iter().map(|t| t.waste_deposition_segments).sum()
+    });
+    let process = report.retraction_count * 2 - if epochs > 0 { 2 } else { 0 };
     let hash = spiling_contracts::geometry::SourceHash::from_bytes(bytes);
-    ReplayDisplayDescriptor {
+    let mut descriptor = ReplayDisplayDescriptor {
+        pages: vec![],
         info: ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: spiling_contracts::geometry::SourceHash::from_bytes(
@@ -1448,14 +1460,18 @@ fn packed_process_descriptor(
             event_count: report.deposition_segments
                 + report.support_deposition_segments
                 + report.travel_segments
-                + report.retraction_count * 2
+                + process
+                + epochs
+                + waste
                 + report.lifecycle_motion_count,
-            deposition_count: report.deposition_segments + report.support_deposition_segments,
+            deposition_count: report.deposition_segments
+                + report.support_deposition_segments
+                + waste,
             travel_count: report.travel_segments,
             lifecycle_count: report.lifecycle_motion_count,
-            process_count: report.retraction_count * 2,
-            tool_epoch_count: 0,
-            waste_count: 0,
+            process_count: process,
+            tool_epoch_count: epochs,
+            waste_count: waste,
             layer_count: plan.layers.len() as u32,
             bounds_mm: bounds,
         },
@@ -1465,7 +1481,9 @@ fn packed_process_descriptor(
             size_bytes: bytes.len().to_string(),
             media_type: REPLAY_MEDIA_TYPE.into(),
         },
-    }
+    };
+    descriptor.pages = index_replay(std::io::Cursor::new(bytes), &descriptor.info).unwrap();
+    descriptor
 }
 
 #[test]
@@ -1483,6 +1501,7 @@ fn independent_process_golden_separates_support_object_and_stationary_recovery()
     assert!((report.support_deposited_volume_mm3 - 1.2 * std::f64::consts::PI).abs() < 1e-12);
     assert!((report.deposited_volume_mm3 - (0.8 + 0.8 * std::f64::consts::PI)).abs() < 2e-8);
     let (bytes, bounds) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
         &packed_process_descriptor(&bytes, bounds, PROCESS_GOLDEN, &intent, &plan, &report),
@@ -2162,6 +2181,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     assert_eq!(&bytes[24..28], &3u32.to_le_bytes());
     for record in bytes[96..].as_chunks::<REPLAY_RECORD_BYTES>().0 {
         assert_ne!(u16::from_le_bytes(record[44..46].try_into().unwrap()), 1);
@@ -2202,6 +2222,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
         let mut sink = ReplaySink::new(&plan, &intent).unwrap();
         let report = verify_actual(&emitted, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
         let (bytes, bounds) = sink.finish().unwrap();
+        let bytes = bytes.to_vec().unwrap();
         validate_replay_display(
             &bytes,
             &packed_process_descriptor(&bytes, bounds, &emitted, &intent, &plan, &report),
@@ -2238,6 +2259,7 @@ fn complete_prime_to_first_body_can_retract_at_known_stationary_position() {
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, bounds) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     assert_eq!(
         bytes[96 + 2 * REPLAY_RECORD_BYTES + 46],
         11,
@@ -2328,6 +2350,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     let coarse_area = 0.25 * 0.2 + std::f64::consts::PI * 0.1f64.powi(2);
     assert!((report.deposited_volume_mm3 - 4.0 * (3.0 * fine_area + coarse_area)).abs() < 1e-7);
     let (bytes, bounds) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     let sparse = bytes[REPLAY_HEADER_BYTES..]
@@ -3584,13 +3607,8 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
         assert_eq!(tool.outstanding_retraction_mm, 0.6);
     }
     let (bytes, bounds) = sink.finish().unwrap();
-    let mut descriptor =
-        packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
-    descriptor.info.tool_epoch_count = routing.selection_count;
-    descriptor.info.waste_count = 4;
-    descriptor.info.deposition_count += 4;
-    descriptor.info.process_count -= 2; // Both physical feeders remain retracted at shutdown.
-    descriptor.info.event_count += routing.selection_count + 4 - 2;
+    let bytes = bytes.to_vec().unwrap();
+    let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     let records = bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
@@ -3749,6 +3767,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
     let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     let mut seen = [[0u32; 2]; 2];
     for record in bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
@@ -3937,6 +3956,7 @@ fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut full)).unwrap();
     assert!(!full.omitted());
     let (bytes, bounds) = full.finish().unwrap();
+    let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
         &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),

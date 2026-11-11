@@ -28,6 +28,9 @@ serde.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 spiling-contracts.workspace = true
+spiling-chunks.workspace = true
+sysinfo = "=0.39.6"
+libc = "=0.2.190"
 spiling-appearance.workspace = true
 spiling-engine-client.workspace = true
 

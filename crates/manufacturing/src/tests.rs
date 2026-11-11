@@ -1279,7 +1279,7 @@ fn actual_motion(bundle: &ManufacturingResult) -> Vec<(u8, u32, [f64; 3])> {
     )
     .unwrap();
     assert!(inspection.report.verified);
-    inspection.replay.unwrap().bytes[REPLAY_HEADER_BYTES..]
+    inspection.replay.unwrap().bytes.to_vec().unwrap()[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
         .iter()
@@ -3168,14 +3168,15 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         ManufacturingInspectionProvenance::from(&bundle.provenance)
     );
     let replay = inspection.replay.unwrap();
+    let replay_bytes = replay.bytes.to_vec().unwrap();
     assert_eq!(replay.info.event_count, 4);
     assert_eq!(replay.info.travel_count, 2);
-    assert_eq!(replay.bytes[REPLAY_HEADER_BYTES + 47], 0);
+    assert_eq!(replay_bytes[REPLAY_HEADER_BYTES + 47], 0);
     assert_eq!(
-        replay.bytes[REPLAY_HEADER_BYTES + 2 * REPLAY_RECORD_BYTES + 47],
+        replay_bytes[REPLAY_HEADER_BYTES + 2 * REPLAY_RECORD_BYTES + 47],
         1
     );
-    let positions: Vec<[f64; 3]> = replay.bytes[REPLAY_HEADER_BYTES..]
+    let positions: Vec<[f64; 3]> = replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
         .iter()
@@ -3192,7 +3193,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     // rounding, and replay preserves the emitted eight-decimal absolute E.
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
     let mut expected_extrusion = 0.0;
-    for (index, record) in replay.bytes[REPLAY_HEADER_BYTES..]
+    for (index, record) in replay_bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
         .iter()
@@ -3209,12 +3210,13 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             (expected_extrusion * 100_000_000.0).round() / 100_000_000.0
         );
     }
-    let replay_hash = SourceHash::from_bytes(&replay.bytes);
+    let replay_hash = SourceHash::from_bytes(&replay_bytes);
     let descriptor = ReplayDisplayDescriptor {
+        pages: replay.pages.clone(),
         info: replay.info,
         resource: spiling_contracts::ArtifactView {
             name: format!("artifacts/{}", replay_hash.as_str()),
-            size_bytes: replay.bytes.len().to_string(),
+            size_bytes: replay_bytes.len().to_string(),
             sha256: replay_hash.as_str().into(),
             media_type: REPLAY_MEDIA_TYPE.into(),
         },
@@ -3228,8 +3230,8 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             program: bundle.bundle.program.clone(),
         })
         .unwrap();
-    validate_replay_display(&replay.bytes, &descriptor).unwrap();
-    let mut corrupted = replay.bytes.clone();
+    validate_replay_display(&replay_bytes, &descriptor).unwrap();
+    let mut corrupted = replay_bytes.clone();
     corrupted[REPLAY_HEADER_BYTES + 47] = 1;
     let changed_hash = SourceHash::from_bytes(&corrupted);
     let mut corrupted_descriptor = descriptor.clone();
@@ -3269,8 +3271,8 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     );
     // The ABI golden owns decoded layout and motion, not producer-dependent identity.
     use std::fmt::Write;
-    let mut hex = String::with_capacity(replay.bytes.len() * 2);
-    for byte in &replay.bytes {
+    let mut hex = String::with_capacity(replay_bytes.len() * 2);
+    for byte in &replay_bytes {
         write!(&mut hex, "{byte:02x}").unwrap();
     }
     let mut fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,

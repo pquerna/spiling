@@ -5,13 +5,16 @@
 use super::*;
 use crate::ArtifactView;
 
-pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 32 * 1024 * 1024;
+/// Representation ceiling derived from admitted command-category counts, not RAM.
+pub const MAX_REPLAY_DISPLAY_BYTES: u32 =
+    REPLAY_HEADER_BYTES as u32 + MAX_REPLAY_EVENTS * REPLAY_RECORD_BYTES as u32;
+/// Maximum independently indexed record span; pages are raw SPLR records,
+/// never standalone SPLR streams.
+pub const REPLAY_PAGE_EVENTS: u32 = 65_536;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 80;
-/// All event categories share the existing byte budget; hops do not need a
-/// second allocation or an independent arbitrary aggregate-count ceiling.
 pub const MAX_REPLAY_EVENTS: u32 =
-    (MAX_REPLAY_DISPLAY_BYTES - REPLAY_HEADER_BYTES as u32) / REPLAY_RECORD_BYTES as u32;
+    MAX_DEPOSITION_SEGMENTS + MAX_TRAVEL_SEGMENTS + 2 * MAX_RETRACTIONS + MAX_TOOL_SELECTIONS + 4;
 pub const REPLAY_SCHEMA_VERSION: u32 = 6;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
@@ -153,7 +156,7 @@ impl ReplayDisplayInfo {
                         .and_then(|n| n.checked_sub(2))
                         != Some(self.process_count)
             }
-            || self.process_count > MAX_DEPOSITION_SEGMENTS
+            || self.process_count > 2 * MAX_RETRACTIONS
             || self
                 .deposition_count
                 .checked_add(self.travel_count)
@@ -183,11 +186,17 @@ impl ReplayDisplayInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayDisplayDescriptor {
+    #[serde(deserialize_with = "replay_pages")]
+    pub pages: Vec<ReplayPage>,
     pub info: ReplayDisplayInfo,
     pub resource: ArtifactView,
 }
+fn replay_pages<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ReplayPage>, D::Error> {
+    bounded_vec::<D, _, { MAX_REPLAY_EVENTS.div_ceil(REPLAY_PAGE_EVENTS) as usize }>(d)
+}
 impl ReplayDisplayDescriptor {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        validate_replay_index(&self.pages, &self.info)?;
         let size =
             crate::native::validate_artifact_view(&self.resource, MAX_REPLAY_DISPLAY_BYTES as u64)
                 .map_err(|e| corrupt(&e))?;
@@ -257,13 +266,24 @@ pub fn validate_replay_display(
     bytes: &[u8],
     descriptor: &ReplayDisplayDescriptor,
 ) -> Result<(), ManufacturingError> {
+    validate_replay_reader(std::io::Cursor::new(bytes), descriptor)
+}
+
+/// Admit exact bytes with a fixed record scratch buffer, retaining sequence state
+/// across all index pages. Page boundaries cannot reset tool, E, debt or layers.
+pub fn validate_replay_reader(
+    mut reader: impl std::io::Read + std::io::Seek,
+    descriptor: &ReplayDisplayDescriptor,
+) -> Result<(), ManufacturingError> {
     descriptor.validate()?;
     let info = &descriptor.info;
-    if bytes.len() != info.byte_count()? as usize
-        || SourceHash::from_bytes(bytes).as_str() != descriptor.resource.sha256
-    {
-        return Err(corrupt("replay bytes size or hash mismatch"));
-    }
+    let mut hasher = Sha256::new();
+    let mut header = [0; REPLAY_HEADER_BYTES];
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| corrupt("truncated replay header"))?;
+    hasher.update(header);
+    let bytes = &header[..];
     if &bytes[..4] != b"SPLR"
         || u16_at(bytes, 4) != REPLAY_SCHEMA_VERSION as u16
         || u16_at(bytes, 6) != 96
@@ -308,12 +328,24 @@ pub fn validate_replay_display(
     let mut layer_model = false;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
-    for (index, record) in bytes[REPLAY_HEADER_BYTES..]
-        .as_chunks::<REPLAY_RECORD_BYTES>()
-        .0
-        .iter()
-        .enumerate()
-    {
+    let mut page_hasher = Sha256::new();
+    let mut page_number = 0usize;
+    for index in 0..info.event_count as usize {
+        let mut record_bytes = [0; REPLAY_RECORD_BYTES];
+        reader
+            .read_exact(&mut record_bytes)
+            .map_err(|_| corrupt("truncated replay record"))?;
+        hasher.update(record_bytes);
+        page_hasher.update(record_bytes);
+        let page = &descriptor.pages[page_number];
+        if index as u64 + 1 == page.first_event + u64::from(page.event_count) {
+            let hash = SourceHash::from_digest(&page_hasher.finalize_reset().into());
+            if hash != page.hash {
+                return Err(corrupt("replay page checksum mismatch"));
+            }
+            page_number += 1;
+        }
+        let record = &record_bytes[..];
         let position = [f64_at(record, 0), f64_at(record, 8), f64_at(record, 16)];
         let e = f64_at(record, 24);
         let feed = f64_at(record, 32);
@@ -586,6 +618,21 @@ pub fn validate_replay_display(
         previous_e = e;
         previous_line = line;
     }
+    let mut trailing = [0];
+    if reader
+        .read(&mut trailing)
+        .map_err(|_| corrupt("replay read failed"))?
+        != 0
+        || SourceHash::from_digest(&hasher.finalize().into()).as_str() != descriptor.resource.sha256
+    {
+        return Err(corrupt("replay bytes size or hash mismatch"));
+    }
+    reader
+        .rewind()
+        .map_err(|_| corrupt("replay rewind failed"))?;
+    if index_replay(&mut reader, info)? != descriptor.pages {
+        return Err(corrupt("replay index metadata mismatch"));
+    }
     if !layer_deposition
         || layer + 1 != info.layer_count
         || depositions != info.deposition_count
@@ -644,7 +691,8 @@ mod tests {
             append_association(&mut bytes, index, kind, position[2]);
         }
         let hash = SourceHash::from_bytes(&bytes);
-        let descriptor = ReplayDisplayDescriptor {
+        let mut descriptor = ReplayDisplayDescriptor {
+            pages: vec![],
             info: ReplayDisplayInfo {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 bundle_hash: SourceHash::from_bytes(b"bundle"),
@@ -669,6 +717,7 @@ mod tests {
                 media_type: REPLAY_MEDIA_TYPE.into(),
             },
         };
+        descriptor.pages = index_replay(std::io::Cursor::new(&bytes), &descriptor.info).unwrap();
         (bytes, descriptor)
     }
     fn append_association(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64) {
@@ -805,6 +854,9 @@ mod tests {
         let hash = SourceHash::from_bytes(bytes);
         descriptor.resource.name = format!("artifacts/{}", hash.as_str());
         descriptor.resource.sha256 = hash.as_str().into();
+        if let Ok(pages) = index_replay(std::io::Cursor::new(bytes), &descriptor.info) {
+            descriptor.pages = pages;
+        }
     }
     #[test]
     fn complete_body_startup_retraction_uses_known_prime_endpoint() {
@@ -954,5 +1006,29 @@ mod tests {
         let mut truncated = bytes.clone();
         truncated.pop();
         assert!(validate_replay_display(&truncated, &descriptor).is_err());
+    }
+    #[test]
+    fn a_valid_page_hash_cannot_authorize_forged_visibility_metadata() {
+        let (bytes, descriptor) = encoded();
+        for field in 0..4 {
+            let mut forged = descriptor.clone();
+            match field {
+                0 => forged.pages[0].bounds_mm.min[0] = 0.25,
+                1 => forged.pages[0].physical_z_mm[0] -= 0.1,
+                2 => forged.pages[0].first_line += 1,
+                _ => forged.pages[0].last_line -= 1,
+            }
+            forged.validate().unwrap();
+            assert!(validate_replay_reader(std::io::Cursor::new(&bytes), &forged).is_err());
+        }
+        for field in 0..3 {
+            let mut forged = descriptor.clone();
+            match field {
+                0 => forged.pages[0].first_event += 1,
+                1 => forged.pages[0].event_count -= 1,
+                _ => forged.pages.clear(),
+            }
+            assert!(forged.validate().is_err());
+        }
     }
 }
