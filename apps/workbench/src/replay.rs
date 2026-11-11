@@ -204,6 +204,26 @@ impl Batch {
 }
 
 impl Replay {
+    /// First actual deposition in the selection, using its existing start vertex.
+    /// Context, travel, startup priming and stationary events are not path starts.
+    pub fn toolpath_start(&self, view: View) -> Option<(usize, u32)> {
+        self.batches
+            .iter()
+            .enumerate()
+            .filter(|(_, batch)| {
+                !batch.points && !batch.seam && matches!(batch.kind, 1..=5 | 8..=10 | 13 | 15)
+            })
+            .filter_map(|(index, batch)| {
+                let range = batch.range(view);
+                (!range.is_empty()).then(|| {
+                    let event = batch.events[range.start as usize / 2].0;
+                    (event, index, range.start)
+                })
+            })
+            .min_by_key(|(event, _, _)| *event)
+            .map(|(_, batch, vertex)| (batch, vertex))
+    }
+
     pub fn project(
         bytes: &[u8],
         descriptor: &ReplayDisplayDescriptor,
@@ -518,6 +538,84 @@ mod bead_tests {
             bytes,
             serde_json::from_value(fixture["descriptor"].clone()).unwrap(),
         )
+    }
+    #[test]
+    fn start_marker_uses_first_selected_actual_deposition_not_travel_or_context() {
+        for name in [
+            "replay",
+            "replay-sparse",
+            "replay-fixed-dual",
+            "replay-waste-only",
+        ] {
+            let (bytes, descriptor) = fixture(name);
+            let origin = DVec3::splat(0.125);
+            let replay = Replay::project(&bytes, &descriptor, 0, origin).unwrap();
+            let records = bytes[REPLAY_HEADER_BYTES..]
+                .as_chunks::<REPLAY_RECORD_BYTES>()
+                .0;
+            for view in [
+                View::default(),
+                View {
+                    layer: Some(0),
+                    ..View::default()
+                },
+                View {
+                    layer: Some(1),
+                    ..View::default()
+                },
+                View {
+                    role: Some(5),
+                    ..View::default()
+                },
+                View {
+                    tool: Some(0),
+                    ..View::default()
+                },
+                View {
+                    tool: Some(1),
+                    ..View::default()
+                },
+                View {
+                    events: descriptor.info.event_count / 2,
+                    ..View::default()
+                },
+                View {
+                    events: 0,
+                    ..View::default()
+                },
+                View {
+                    visible: false,
+                    ..View::default()
+                },
+            ] {
+                // Oracle is chronological decoded commands, independent of role-sorted GPU batches.
+                let expected = records.iter().enumerate().find(|(event, record)| {
+                    let layer = u16::from_le_bytes(record[44..46].try_into().unwrap());
+                    let tool = u32::from_le_bytes(record[76..80].try_into().unwrap());
+                    view.visible
+                        && (*event as u32) < view.events
+                        && matches!(record[46], 1..=5 | 8..=10 | 13 | 15)
+                        && view.layer.is_none_or(|lo| {
+                            layer >= lo && layer <= view.layer_end.unwrap_or(lo).max(lo)
+                        })
+                        && view.role.is_none_or(|role| role == record[46])
+                        && view.tool.is_none_or(|selected| selected == tool)
+                });
+                let actual = replay.toolpath_start(view);
+                assert_eq!(actual.is_some(), expected.is_some(), "{name}");
+                if let (Some((batch, vertex)), Some((event, _))) = (actual, expected) {
+                    let batch = &replay.batches[batch];
+                    assert_eq!(batch.events[vertex as usize / 2].0 as usize, event);
+                    let previous = &records[event - 1];
+                    let expected = DVec3::from_array(std::array::from_fn(|axis| {
+                        f64::from_le_bytes(previous[axis * 8..axis * 8 + 8].try_into().unwrap())
+                    })) - origin;
+                    let position =
+                        DVec3::from_array(batch.vertices[vertex as usize].position.map(f64::from));
+                    assert!((position - expected).length() <= 0.001);
+                }
+            }
+        }
     }
     #[test]
     fn nominal_envelopes_keep_actual_endpoints_intervals_roles_and_epochs() {

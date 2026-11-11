@@ -241,6 +241,12 @@ the project. Counts follow selected layers, role/tool, playback and clipping,
 excluding surrounding context. A start marker is not a cosmetic-face assignment,
 minimum-separation guarantee or measured seal.
 
+Review marks the first actual deposition in the selected toolpath with a white
+dot and a dark rim. The dot follows layer/range, role/tool and playback filters;
+surrounding-layer context, travel, pressure and startup prime do not choose its
+position. It uses the decoded start endpoint in both centerline and nominal-bead
+views, obeys section clipping and is absent from section-only views.
+
 Try and Compare preserves the ordinary Settings → Apply → Review path. A separate
 trial editor identifies its captured subject and says Current is unchanged.
 Evaluate alternative computes a result; Use these settings deliberately adopts

@@ -67,6 +67,7 @@ struct Resources {
     actual_cap: wgpu::RenderPipeline,
     clear_stencil: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
+    start_pipeline: wgpu::RenderPipeline,
     seam_pipeline: wgpu::RenderPipeline,
     selected_seam_pipeline: wgpu::RenderPipeline,
     tool_uniforms: [wgpu::Buffer; 2],
@@ -347,7 +348,7 @@ impl Viewport {
         let source_cap = section::cap(device, &line_pipeline_layout, state.target_format, true);
         let actual_cap = section::cap(device, &line_pipeline_layout, state.target_format, false);
         let clear_stencil = section::clear(device, &line_pipeline_layout, state.target_format);
-        let points = |entry, label| {
+        let points = |entry, fragment, label| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&line_pipeline_layout),
@@ -363,9 +364,13 @@ impl Viewport {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &line_shader,
-                    entry_point: Some("fs"),
+                    entry_point: Some(fragment),
                     compilation_options: Default::default(),
-                    targets: &[Some(state.target_format.into())],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: state.target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -383,9 +388,10 @@ impl Viewport {
                 cache: None,
             })
         };
-        let point_pipeline = points("vs_point", "stationary actual-program events");
-        let seam_pipeline = points("vs_seam", "closed actual wall starts");
-        let selected_seam_pipeline = points("vs_selected_seam", "selected actual wall start");
+        let point_pipeline = points("vs_point", "fs", "stationary actual-program events");
+        let start_pipeline = points("vs_start", "fs_start", "actual toolpath start");
+        let seam_pipeline = points("vs_seam", "fs", "closed actual wall starts");
+        let selected_seam_pipeline = points("vs_selected_seam", "fs", "selected actual wall start");
         let line_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("overlay camera"),
             layout: &line_layout,
@@ -451,6 +457,7 @@ impl Viewport {
             actual_cap,
             clear_stencil,
             point_pipeline,
+            start_pipeline,
             seam_pipeline,
             selected_seam_pipeline,
             tool_uniforms,
@@ -1708,6 +1715,14 @@ impl egui_wgpu::CallbackTrait for Callback {
                 } else {
                     pass.draw(range, 0..1);
                 }
+            }
+            if self.uniform.cut[1] == 0.0
+                && let Some((batch, vertex)) = display.toolpath_start(self.view)
+            {
+                pass.set_pipeline(&r.start_pipeline);
+                pass.set_bind_group(0, &r.line_group, &[]);
+                pass.set_vertex_buffer(0, r.replay_buffers[batch].slice(..));
+                pass.draw(0..6, vertex..vertex + 1);
             }
         }
         if let (Some(area), Some(buffer)) = (&r.inspection, &r.inspection_buffer) {

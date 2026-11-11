@@ -26,4 +26,28 @@ fn seam_point(position:vec3<f32>,color:vec3<f32>,vertex:u32,size:f32)->Output {
 @vertex fn vs_selected_seam(@location(0) position:vec3<f32>,@location(1) color:vec3<f32>,@builtin(vertex_index) vertex:u32)->Output {
     return seam_point(position,vec3(1.0,0.78,0.2),vertex,13.0);
 }
+struct StartOutput {
+    @builtin(position) position:vec4<f32>,
+    @location(0) world:vec3<f32>,
+    @location(1) uv:vec2<f32>,
+};
+@vertex fn vs_start(@location(0) position:vec3<f32>,@location(1) color:vec3<f32>,@builtin(vertex_index) vertex:u32)->StartOutput {
+    let corners=array<vec2<f32>,6>(vec2(-1.0,-1.0),vec2(1.0,-1.0),vec2(1.0,1.0),vec2(-1.0,-1.0),vec2(1.0,1.0),vec2(-1.0,1.0));
+    var out:StartOutput;
+    out.world=position;
+    out.uv=corners[vertex];
+    out.position=camera.view_projection*vec4(position,1.0);
+    out.position=vec4(out.position.xy+out.uv*out.position.w*9.0/max(vec2<f32>(camera.selected.zw),vec2(1.0)),out.position.zw);
+    return out;
+}
+@fragment fn fs_start(input:StartOutput)->@location(0) vec4<f32> {
+    let radius=length(input.uv);
+    let feather=max(fwidth(radius),0.001);
+    if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 {discard;}
+    let alpha=1.0-smoothstep(1.0-feather,1.0,radius);
+    if alpha<=0.0 {discard;}
+    // A dark rim keeps the white center legible on both workbench themes.
+    let white=1.0-smoothstep(0.65-feather,0.65+feather,radius);
+    return vec4(mix(vec3(0.12),vec3(1.0),white),alpha);
+}
 @fragment fn fs(input:Output)->@location(0) vec4<f32>{if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 {discard;} return select(vec4<f32>(input.color,1.0),camera.context,camera.context.w>0.0);}
