@@ -429,6 +429,10 @@ mod tests {
         assert!((circles[1].radius - (10.0 - half)).abs() < 1e-12);
         // A far move is refused rather than snapping to another sheet.
         assert!(cylinder.project([1.0 + 2.0, 2.0], 5.0, 0.2).is_none());
+        // A crossing on an unconverged mesh comes back with a matching reach.
+        assert!(cylinder.project([1.0 + 2.9825, 2.0], 5.0, 0.01).is_none());
+        let q = cylinder.project([1.0 + 2.9825, 2.0], 5.0, 0.035).unwrap();
+        assert!((q[0] - 4.0).abs() < 1e-12);
     }
 
     #[test]

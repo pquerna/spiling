@@ -30,6 +30,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Height of a tessellation bucket used to find the triangles a plane crosses.
 const BUCKET_MM: f64 = 0.5;
+/// Largest measured mesh deviation, in profile tolerances, admitted where the
+/// mesher stopped refining analytic faces: their sections are projected onto
+/// the true surface, so only the mesh's topology is used there.
+const MAX_UNCONVERGED_DEVIATION: f64 = 4.0;
 
 /// One planar section loop in definition-local XY.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +89,10 @@ pub struct TolerantModel {
     buckets: Vec<Vec<u32>>,
     z_min: f64,
     policy: TolerantPolicy,
+    /// How far a mesh crossing may move onto its analytic surface: the
+    /// profile tolerance, or twice the measured deviation where the mesher
+    /// left analytic faces unconverged.
+    reach: f64,
     /// Source faces the mesher could not tessellate; their area is missing.
     pub failed_faces: usize,
 }
@@ -116,8 +124,42 @@ impl TolerantModel {
             measure_deviation: false,
             ..TessellateOptions::default()
         };
-        let mesh = solidcore_mesh::tessellate(&kernel, definition.brep(), &options)
+        let mut mesh = solidcore_mesh::tessellate(&kernel, definition.brep(), &options)
             .map_err(|e| unavailable(format!("tolerant tessellation failed: {e}")))?;
+        let analytic = |face: &solidcore::FaceId| {
+            definition
+                .face_ordinal(*face)
+                .and_then(|o| definition.faces()[o].geometry.analytic.as_ref())
+                .and_then(exact::Implicit::from_analytic)
+                .is_some()
+        };
+        let mut reach = policy.profile_mm;
+        let mut failed_faces = mesh.failures.len() + mesh.unconverged_faces.len();
+        // The mesher can stop refining a face with work left. On analytic
+        // faces only the mesh's topology is used; measure how far it strays
+        // and admit it if projection can bring every crossing back.
+        if mesh.failures.is_empty()
+            && !mesh.unconverged_faces.is_empty()
+            && mesh.unconverged_faces.iter().all(analytic)
+        {
+            let measured = solidcore_mesh::tessellate(
+                &kernel,
+                definition.brep(),
+                &TessellateOptions {
+                    measure_deviation: true,
+                    ..options
+                },
+            )
+            .map_err(|e| unavailable(format!("tolerant tessellation failed: {e}")))?;
+            if let Some(admitted) = unconverged_reach(
+                measured.stats.face_deviation.unwrap_or(f64::INFINITY),
+                policy,
+            ) {
+                reach = admitted;
+                failed_faces = 0;
+                mesh = measured;
+            }
+        }
         if cancel.load(Ordering::Relaxed) {
             return Err(GeometryError::new(
                 GeometryErrorCode::Cancelled,
@@ -151,7 +193,8 @@ impl TolerantModel {
             faces,
             surfaces,
             policy,
-            mesh.failures.len() + mesh.unconverged_faces.len(),
+            reach,
+            failed_faces,
         ))
     }
 
@@ -183,6 +226,7 @@ impl TolerantModel {
                 .map(|surface| surface.map(|surface| surface.placed(pose)))
                 .collect(),
             self.policy,
+            self.reach,
             self.failed_faces,
         )
     }
@@ -193,6 +237,7 @@ impl TolerantModel {
         faces: Vec<u32>,
         surfaces: Vec<Option<exact::Implicit>>,
         policy: TolerantPolicy,
+        reach: f64,
         failed_faces: usize,
     ) -> Self {
         let z_min = positions.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
@@ -220,6 +265,7 @@ impl TolerantModel {
             buckets,
             z_min,
             policy,
+            reach,
             failed_faces,
         }
     }
@@ -495,7 +541,7 @@ impl TolerantModel {
     /// it is a corner between two. The mesh point stands where no analytic
     /// surface applies or the true curve is ill-conditioned.
     fn exact_crossing(&self, p: [f64; 2], z: f64, first: u32, second: Option<u32>) -> [f64; 2] {
-        let reach = self.policy.profile_mm;
+        let reach = self.reach;
         let (a, b) = (self.surface(first), second.and_then(|f| self.surface(f)));
         let single = |surface: Option<&exact::Implicit>| {
             surface.and_then(|surface| surface.project(p, z, reach))
@@ -517,7 +563,7 @@ impl TolerantModel {
     /// face sags more than a quarter of the profile tolerance.
     fn densify(&self, points: &mut Vec<[f64; 2]>, faces: &mut Vec<u32>, z: f64) {
         let sag = self.policy.profile_mm * 0.25;
-        let reach = self.policy.profile_mm;
+        let reach = self.reach;
         if points.len() < 2 {
             return;
         }
@@ -630,6 +676,14 @@ fn rotate(pose: &spiling_contracts::geometry::RigidPoseMm, v: [f64; 3]) -> [f64;
     ]
 }
 
+/// The projection reach for a mesh whose analytic faces stopped short of the
+/// chord tolerance, if its measured deviation admits it: projection must be
+/// able to bring every crossing back onto the true surface.
+fn unconverged_reach(deviation: f64, policy: TolerantPolicy) -> Option<f64> {
+    (deviation <= MAX_UNCONVERGED_DEVIATION * policy.profile_mm)
+        .then(|| policy.profile_mm.max(2.0 * deviation))
+}
+
 /// A mesh-edge crossing and the faces of the one or two triangles using it.
 type Crossing = ([f64; 2], u32, Option<u32>);
 
@@ -681,4 +735,20 @@ fn contains(ring: &[[f64; 2]], p: [f64; 2]) -> bool {
         j = i;
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unconverged_analytic_faces_are_admitted_only_within_measured_deviation() {
+        let policy = TolerantPolicy::default();
+        // Observed: one cylinder 0.0175 mm off (admitted, reach covers it);
+        // six cylinders 6 mm off (refused: the mesh is wrong, not coarse).
+        assert_eq!(unconverged_reach(0.0175, policy), Some(0.035));
+        assert_eq!(unconverged_reach(0.001, policy), Some(policy.profile_mm));
+        assert_eq!(unconverged_reach(6.08, policy), None);
+        assert_eq!(unconverged_reach(f64::INFINITY, policy), None);
+    }
 }
