@@ -18,7 +18,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 /// Section loops as polygons: each hole belongs to the smallest outer loop
 /// that contains it.
-fn polygons(section: &TolerantSection) -> MultiPolygon<f64> {
+pub(super) fn polygons(section: &TolerantSection) -> MultiPolygon<f64> {
     let ring = |points: &[[f64; 2]]| -> LineString<f64> {
         let mut coords: Vec<geo::Coord<f64>> = points
             .iter()
@@ -152,4 +152,17 @@ pub(super) fn collect_span(
         point_count,
         material_bytes,
     ))
+}
+
+/// Protected-void masks for support from sampled sections: none. Native masks
+/// stand in for cavity geometry the exact path cannot certify. Here every
+/// layer's material is sampled, and the support column is clipped against the
+/// occupied material of every layer it crosses, so a cavity with a floor
+/// blocks the column by that floor and a cavity open to the bed is a real
+/// support corridor.
+pub(super) fn protected_voids() -> super::support::ProtectedVoidSet {
+    super::support::ProtectedVoidSet {
+        regions: MultiPolygon(Vec::new()),
+        scopes: Vec::new(),
+    }
 }

@@ -2857,8 +2857,6 @@ fn charge_boolean(
     charge_owned_work(work, foreign_work, pairs, cancel)
 }
 
-const MAX_SUPPORT_OWNED_WORK: usize = 20_000_000;
-
 fn charge_owned_work(
     work: &mut usize,
     foreign: usize,
@@ -2874,11 +2872,10 @@ fn charge_owned_work(
     })?;
     let next = work.checked_add(amount)
         .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-        .filter(|n| n.checked_sub(foreign).is_some_and(|n| n <= MAX_SUPPORT_OWNED_WORK))
         .ok_or_else(|| error(
             ManufacturingErrorCode::ResourceLimit,
             format!(
-                "cumulative support Boolean/projection work budget exceeded; global {}, support-owned {owned}, requested {amount}, global limit {}, support-owned limit {MAX_SUPPORT_OWNED_WORK}",
+                "cumulative planar work budget exceeded in support; global {}, support-owned {owned}, requested {amount}, global limit {}",
                 *work, super::MAX_BOOLEAN_PAIRS,
             ),
         ))?;
@@ -3085,49 +3082,6 @@ fn candidate_clearance_distance(
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
-
-    #[test]
-    fn support_owned_work_excludes_failed_object_raster_and_survives_retry() {
-        let material = MultiPolygon(vec![polygon![
-            (x: 0.0, y: 0.0), (x: 3.0, y: 0.0),
-            (x: 3.0, y: 2.0), (x: 0.0, y: 2.0),
-        ]]);
-        let pairs = region::point_count(&material).pow(2);
-        let cancel = AtomicBool::new(false);
-        let mut bank = SupportWork {
-            planar: MAX_SUPPORT_OWNED_WORK * 2,
-            support_owned: MAX_SUPPORT_OWNED_WORK - pairs,
-            ..SupportWork::default()
-        };
-        let mut work = bank.planar;
-        let mut foreign = bank.foreign_work().unwrap();
-        charge_boolean(&material, &material, &mut work, foreign, &cancel).unwrap();
-
-        // A real object-raster kernel consumes global work before cancellation.
-        // Its failed outcome must not turn that charge into support-owned work.
-        let raster_before = work;
-        let raster_result = (|| {
-            super::super::boolean::budget_accumulated(&material, &material, &mut work, &cancel)?;
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            super::super::boolean::budget_accumulated(&material, &material, &mut work, &cancel)
-        })();
-        assert!(raster_result.is_err());
-        assert!(work > raster_before);
-        exclude_object_raster_work(&mut foreign, raster_before, work).unwrap();
-        bank.finish(work, foreign, 0).unwrap();
-        assert_eq!(bank.support_owned, MAX_SUPPORT_OWNED_WORK);
-        assert_eq!(bank.planar, work);
-
-        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-        let foreign = bank.foreign_work().unwrap();
-        let before = bank.planar;
-        let failure =
-            charge_boolean(&material, &material, &mut work, foreign, &cancel).unwrap_err();
-        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
-        bank.finish(work, foreign, 0).unwrap();
-        assert_eq!(bank.planar, before);
-        assert_eq!(bank.support_owned, MAX_SUPPORT_OWNED_WORK);
-    }
 
     #[test]
     fn support_owned_work_retains_the_global_planar_cap() {

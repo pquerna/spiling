@@ -705,6 +705,14 @@ pub(super) fn transport(
     let preferred = source_width_mm(request)?;
     for vertex in 0..count {
         let lower = -negative_lower[vertex];
+        // A corner-reach seed is a preference for a sharper outer corner, not
+        // a demand on the allocated field: where the allocated widths cannot
+        // narrow to it within the gradient limit, they win locally, as in
+        // Arachne. `lower` is itself gradient-bounded, so the result stays a
+        // valid field; qualification still judges the corner underfill.
+        if lower > upper[vertex] && corner_widths.is_some() {
+            upper[vertex] = lower;
+        }
         if lower > upper[vertex] {
             return Err(unsupported(&format!(
                 "source contour ports have incompatible finite width gradients: vertex={vertex}, point={:?}, lower={lower}, upper={}, incoming={:?}",

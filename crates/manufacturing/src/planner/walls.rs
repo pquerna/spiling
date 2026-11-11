@@ -348,6 +348,7 @@ fn plan_section_walls_against<'a>(
     let mut edge_output = Vec::new();
     let mut junctions = Vec::new();
     let mut construction = beading::Construction::SourceFields;
+    let mut source_fields_refusal: Option<String> = None;
     let (paths, correspondence, qualified_fill) = loop {
         let attempt = (|| {
             let mut source_plan = beading::construct(
@@ -451,8 +452,19 @@ fn plan_section_walls_against<'a>(
                 edge_output = Vec::new();
                 junctions = Vec::new();
                 construction = beading::Construction::BoundaryCaps;
+                source_fields_refusal = Some(reason.message);
             }
-            Err(reason) => return Err(reason),
+            Err(mut reason) => {
+                // Name the first construction's refusal too: the last rung's
+                // error alone hides why the allocated fields were abandoned.
+                if let Some(first) = source_fields_refusal.take() {
+                    reason.message = format!(
+                        "{} (allocated source fields refused first: {first})",
+                        reason.message
+                    );
+                }
+                return Err(reason);
+            }
         }
     };
     drop(edge_output);

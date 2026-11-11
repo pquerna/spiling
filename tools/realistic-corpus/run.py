@@ -20,6 +20,8 @@ ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
 TIMEOUT = 900
 CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
+# "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
+SUPPORTS = os.environ.get("SPILING_CORPUS_SUPPORTS", "disabled")
 WORK = os.path.join(ROOT, "work")
 
 
@@ -28,8 +30,10 @@ def intent_file():
     d["recipe"]["infill_fraction"] = FRACTION
     d["recipe"]["layer_height_mm"] = 0.2
     d["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
-    # PrusaSlicer's default: no generated supports.
-    d["recipe"]["supports"] = {"kind": "disabled"}
+    if SUPPORTS == "disabled":
+        d["recipe"]["supports"] = {"kind": "disabled"}
+    elif d["recipe"]["supports"].get("kind") != SUPPORTS:
+        raise SystemExit(f"intent fixture has no {SUPPORTS} supports to keep")
     if CATHEDRAL:
         d["recipe"]["sparse_infill"] = {"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
     path = os.path.join(WORK, "intent.json")
@@ -90,7 +94,8 @@ def prusa(step, cwd):
     gcode = os.path.join(cwd, "prusa.gcode")
     try:
         proc = subprocess.run(["prusa-slicer", "--export-gcode", "--layer-height", "0.2",
-                               "--fill-density", f"{round(FRACTION * 100)}%", "--center", "110,110", "-o", gcode, step],
+                               "--fill-density", f"{round(FRACTION * 100)}%",
+                               *(["--support-material"] if SUPPORTS != "disabled" else []), "--center", "110,110", "-o", gcode, step],
                               cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return {"ok": False, "seconds": TIMEOUT}

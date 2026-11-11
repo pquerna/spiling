@@ -429,7 +429,7 @@ mod tests {
         for (retained, mut work, cancel, expected) in [
             (
                 0,
-                super::super::super::MAX_SUPPORT_OWNED_WORK,
+                super::super::super::super::MAX_BOOLEAN_PAIRS,
                 false,
                 ManufacturingErrorCode::ResourceLimit,
             ),

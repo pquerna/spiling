@@ -167,8 +167,8 @@ Marlin-class firmware that declares arc support, off by default for Klipper.
 
 Step 1 is a job-wide mode, not yet per face. When the exact native path
 refuses for a geometric reason or exhausts its proof work, and the job uses no
-finish, generated support or fixed-dual routing, the planner reslices the whole
-job within tolerance:
+finish or fixed-dual routing, the planner reslices the whole job within
+tolerance:
 
 - Sections take their topology from the BREP's own watertight tessellation
   at half the profile tolerance: which faces a plane crosses and in what
@@ -186,6 +186,11 @@ job within tolerance:
   each bead centreline, with one thinner wall at the narrowest admitted width
   where a section is thinner than a bead. The exact variable-width wall
   planner remains the exact path's.
+- Generated supports clip their columns against the sampled material of every
+  layer they cross. No protected-void masks are added: those stand in for
+  cavity geometry the exact path cannot certify, and here every layer's
+  material is known. A cavity with a floor blocks the column by its floor; a
+  cavity open to the bed is a support corridor.
 - The plan carries `PreflightEvidence::Tolerant` and claims no native
   certificate. Fresh independent replay is unchanged.
 

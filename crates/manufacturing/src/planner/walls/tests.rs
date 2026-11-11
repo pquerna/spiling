@@ -585,3 +585,140 @@ fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps(
         assert_connected_inner_material(&plan);
     }
 }
+
+/// Wall-generator census on real parts: every 0.2 mm layer of each STEP in
+/// `SPILING_WALL_CORPUS`, sectioned as the tolerant path does, through the
+/// variable-width generator. Prints the refusing gate per layer, tallied.
+/// `cargo test -p spiling-manufacturing --profile profiling wall_census -- --ignored --nocapture`
+#[test]
+#[ignore = "needs SPILING_WALL_CORPUS with STEP files"]
+fn wall_census() {
+    use std::collections::BTreeMap;
+    let dir = std::env::var("SPILING_WALL_CORPUS").expect("SPILING_WALL_CORPUS");
+    let only = std::env::var("SPILING_WALL_PARTS").ok();
+    let cancel = AtomicBool::new(false);
+    let mut recipe = crate::planner::tests::recipe(0.15);
+    recipe.bead_width_mm = 0.45;
+    recipe.layer_height_mm = 0.2;
+    recipe.perimeter_count = 2;
+    let limits = DepositionLimits {
+        min_bead_width_mm: 0.30,
+        max_bead_width_mm: 0.75,
+        min_bead_height_mm: 0.000001,
+        max_bead_height_mm: 0.30,
+    };
+    let normalize = |message: &str| {
+        let cut = message
+            .find(|c: char| c == ':' || c == '[' || c.is_ascii_digit())
+            .unwrap_or(message.len());
+        message[..cut].trim().to_string()
+    };
+    let mut gates: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    let (mut total, mut passed) = (0usize, 0usize);
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if only
+            .as_ref()
+            .is_some_and(|o| !o.split(',').any(|p| name.starts_with(p)))
+        {
+            continue;
+        }
+        let Ok(definition) =
+            spiling_geometry::from_step_bytes_with_cancel(&std::fs::read(&path).unwrap(), &cancel)
+        else {
+            continue;
+        };
+        let Ok(model) = spiling_geometry::tolerant::TolerantModel::build(
+            &definition,
+            Default::default(),
+            &cancel,
+        ) else {
+            continue;
+        };
+        let (min, max) = model.bounds();
+        let (mut part_total, mut part_passed) = (0usize, 0usize);
+        let started = std::time::Instant::now();
+        // Sample at most 60 layers evenly so one tall part cannot dominate.
+        let layers = ((max[2] - min[2]) / 0.2).floor().max(1.0);
+        let step = 0.2 * (layers / 60.0).ceil().max(1.0);
+        let mut z = min[2] + 0.1;
+        while z < max[2] {
+            let Ok(section) = model.section(z) else {
+                z += step;
+                continue;
+            };
+            let mut material = super::super::tolerant::polygons(&section);
+            material = geo::Simplify::simplify(&material, 0.005);
+            region::canonicalize(&mut material);
+            if material.0.is_empty() {
+                z += step;
+                continue;
+            }
+            part_total += 1;
+            let required = region::RequiredMaterial::from_section(&material);
+            let result = plan_section_walls(
+                WallRequest {
+                    material: &material,
+                    required: &required,
+                    recipe: &recipe,
+                    limits: &limits,
+                    nozzle_diameter_mm: 0.4,
+                    owned_bytes: 0,
+                    lower_z: z - 0.1,
+                    upper_z: z + 0.1,
+                    retained_points: region::point_count(&material),
+                    classic: false,
+                },
+                &mut 0,
+                &cancel,
+            );
+            match result {
+                Ok(_) => part_passed += 1,
+                Err(e) => {
+                    println!(
+                        "REFUSE {name} z={z:.2} {:?}: {}",
+                        e.code,
+                        &e.message[..e.message.len().min(
+                            if std::env::var_os("SPILING_WALL_FULL").is_some() {
+                                4000
+                            } else {
+                                160
+                            }
+                        )]
+                    );
+                    let entry = gates
+                        .entry(format!("{:?}: {}", e.code, normalize(&e.message)))
+                        .or_default();
+                    entry.0 += 1;
+                    if entry.1.len() < 3 {
+                        entry.1.push(format!(
+                            "{name} z={z:.2}: {}",
+                            &e.message[..e.message.len().min(300)]
+                        ));
+                    }
+                }
+            }
+            z += step;
+        }
+        println!(
+            "PART {name}: {part_passed}/{part_total} layers in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        total += part_total;
+        passed += part_passed;
+    }
+    println!("\nALL: {passed}/{total} layers pass");
+    let mut sorted: Vec<_> = gates.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    for (gate, (count, examples)) in sorted {
+        println!("\n{count:6}  {gate}");
+        for example in examples {
+            println!("        {example}");
+        }
+    }
+}

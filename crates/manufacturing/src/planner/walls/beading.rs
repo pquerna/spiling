@@ -1816,6 +1816,39 @@ fn corner_completion(
                 )?;
             }
         }
+        // Qualification accepts missing material within a quarter nozzle of
+        // a deposited bead. Measure how far this interval lies from the lane
+        // edge and from every neighbouring cap; only a deeper void needs a
+        // spine. The concentric-corner void between two mitered lanes is the
+        // common shallow case, and every reference slicer leaves it too.
+        let allowance = 0.25 * request.nozzle_diameter_mm - super::super::OFFSET_TOLERANCE_MM;
+        let depth = |t: f64| -> f64 {
+            let p = curve.at(t);
+            let mut deepest = f64::INFINITY;
+            for site in curve.supports {
+                let covered = if pairs == 1 {
+                    outer.at(t)
+                } else {
+                    (pairs as f64 - 0.5) * contour_width(widths, t) + contour_width(widths, t) * 0.5
+                };
+                deepest = deepest.min(site.radius(p) - covered);
+            }
+            for event in events {
+                deepest =
+                    deepest.min(norm(sub(p, curve.at(event.parameter))) - event.cap_radius_mm);
+            }
+            for vertex in curve.vertex_ids {
+                if junction_caps[vertex] > 0.0 {
+                    deepest = deepest
+                        .min(norm(sub(p, graph.junctions[vertex].point)) - junction_caps[vertex]);
+                }
+            }
+            deepest
+        };
+        free.retain(|&[lo, hi]| {
+            (0..=32).any(|i| depth(lo + (hi - lo) * f64::from(i) / 32.0) > allowance)
+        });
+        boolean::charge(work, free.len().saturating_mul(33 * (events.len() + 4)))?;
         for &[lo, hi] in &free {
             check_cancel(cancel)?;
             boolean::charge(work, 64)?;

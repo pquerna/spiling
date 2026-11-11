@@ -202,9 +202,6 @@ fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingErro
     {
         return refuse("a surface finish");
     }
-    if !matches!(input.intent.recipe.supports, SupportPolicy::Disabled) {
-        return refuse("generated support");
-    }
     if matches!(
         &input.intent.printer.workflow,
         JobWorkflow::FixedDualMarlin { .. }
@@ -2365,6 +2362,9 @@ fn admit_schedule<'model>(
              native_owned_bytes,
              support_work,
              native_work| {
+                if admission.tolerant.is_some() {
+                    return Ok(tolerant::protected_voids());
+                }
                 // Carry the complete support receipt into conversion; raw M and
                 // every other live owner coexist with its bounded output/scratch.
                 let before = native_coverage.retained_bytes();

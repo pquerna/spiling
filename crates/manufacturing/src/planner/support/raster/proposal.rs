@@ -528,7 +528,7 @@ mod tests {
         let expected = construct(&centers, None, 0, 0, &mut 0, 0, &cancel)
             .unwrap()
             .unwrap();
-        let mut work = super::super::super::MAX_SUPPORT_OWNED_WORK - 300_000;
+        let mut work = super::super::super::super::MAX_BOOLEAN_PAIRS - 300_000;
         let proposal = construct(&centers, Some(&interface), 0, 0, &mut work, 0, &cancel)
             .unwrap()
             .unwrap();
