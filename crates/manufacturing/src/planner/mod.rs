@@ -2672,6 +2672,7 @@ fn admit_schedule<'model>(
                     certified_layer_count: count,
                     event_count: admission.horizontal_events.len() as u32,
                     geometry_work: admission.geometry_work.consumed().max(1),
+                    height_merge_mm: input.intent.printer.motion_resolution.z_mm,
                     evidence: PreflightEvidence::Tolerant,
                     skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
                     support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
@@ -2691,6 +2692,7 @@ fn admit_schedule<'model>(
                     certified_layer_count: count,
                     event_count: admission.native_event_bands.len() as u32,
                     geometry_work: admission.geometry_work.consumed(),
+                    height_merge_mm: input.intent.printer.motion_resolution.z_mm,
                     evidence: PreflightEvidence::Certified,
                     skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
                     support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
@@ -3041,6 +3043,7 @@ fn admit_source_captures(
     Ok(())
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct LayerElevation {
     z: f64,
     lower_z: f64,
@@ -3476,7 +3479,9 @@ fn goal_layer_schedule(
         ),
         LayerHeightPolicy::ProtectedMaximum => (0.0, nominal),
     };
-    let schedule = layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events)?;
+    let merge_mm = intent.printer.motion_resolution.z_mm;
+    let schedule =
+        layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events, merge_mm)?;
     let command_admitted = |layer: &LayerElevation| -> Result<bool, ManufacturingError> {
         Ok(
             intent.admits_deposition(intent.recipe.bead_width_mm, layer.z - layer.lower_z)
@@ -3502,12 +3507,16 @@ fn goal_layer_schedule(
                     .min(limits.max_bead_height_mm)
                     .min(intent.recipe.bead_width_mm),
                 events,
+                merge_mm,
             );
         }
     }
     Ok(schedule)
 }
 
+/// The software reference printers' declared Z step.
+#[cfg(test)]
+const REFERENCE_Z_STEP_MM: f64 = 0.0025;
 #[cfg(test)]
 fn layer_schedule(
     bed: f64,
@@ -3515,7 +3524,7 @@ fn layer_schedule(
     nominal: f64,
     events: &[f64],
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
-    layer_schedule_with_bounds(bed, top, nominal, 0.0, nominal, events)
+    layer_schedule_with_bounds(bed, top, nominal, 0.0, nominal, events, REFERENCE_Z_STEP_MM)
 }
 
 fn layer_schedule_with_bounds(
@@ -3525,28 +3534,41 @@ fn layer_schedule_with_bounds(
     minimum: f64,
     maximum: f64,
     events: &[f64],
+    merge_mm: f64,
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
-    // Exact native events keep arithmetic identity; ADR012 tolerant events
-    // arrive already merged within the feature-height tolerance.
-    let identity_roundoff = 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max(1.0);
-    let identical =
-        |a: f64, b: f64| (a - b).abs() <= 4.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0);
-    // Admit genuine boundaries before growing either buffer. Insert in order so
-    // repeated occurrences and arithmetic-identical events consume no budget.
-    // No nominal grid participates in event identity or interval construction.
-    let mut boundaries = Vec::with_capacity(events.len().min(MAX_PRINT_LAYERS as usize - 1) + 2);
-    boundaries.extend([bed, top]);
+    // ADR012: heights closer than the printer's Z step are one commanded
+    // height. The bed and top anchor; otherwise the lowest of a cluster stays,
+    // so every scheduled layer is at least one Z step and the result does not
+    // depend on event order. Arithmetic identity remains a subset of this.
+    let roundoff = 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max(1.0);
+    let merge_mm = merge_mm.max(roundoff);
+    if !merge_mm.is_finite() || top - bed <= merge_mm {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "part is not taller than one Z step of the selected printer",
+        ));
+    }
+    let mut sorted = Vec::with_capacity(events.len().min(4 * MAX_PRINT_LAYERS as usize));
     for &event in events {
-        if event <= bed
-            || event >= top
-            || !event.is_finite()
-            || (event - bed).abs() <= identity_roundoff
-            || (event - top).abs() <= identity_roundoff
-        {
-            continue;
+        if sorted.len() >= 4 * MAX_PRINT_LAYERS as usize {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "horizontal native events exceed the layer budget",
+            ));
         }
+        if event.is_finite() && event - bed > merge_mm && top - event > merge_mm {
+            sorted.push(event);
+        }
+    }
+    sorted.sort_by(f64::total_cmp);
+    // Admit genuine boundaries before growing either buffer. No nominal grid
+    // participates in event identity or interval construction.
+    let mut boundaries = Vec::with_capacity(sorted.len().min(MAX_PRINT_LAYERS as usize - 1) + 2);
+    boundaries.extend([bed, top]);
+    for event in sorted {
         let position = boundaries.partition_point(|boundary| *boundary < event);
-        if identical(boundaries[position - 1], event) || identical(boundaries[position], event) {
+        if event - boundaries[position - 1] <= merge_mm || boundaries[position] - event <= merge_mm
+        {
             continue;
         }
         if boundaries.len() > MAX_PRINT_LAYERS as usize {

@@ -8,22 +8,47 @@
     "name": "Software layer-goal example, not a calibrated printer",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
-      "min": [0, 0, 0],
-      "max": [220, 220, 220]
+      "min": [
+        0,
+        0,
+        0
+      ],
+      "max": [
+        220,
+        220,
+        220
+      ]
     },
     "components": [
       {
         "id": "bed",
         "role": "bed",
         "pose": {
-          "translation_mm": [0, 0, 0],
-          "rotation_xyzw": [0, 0, 0, 1]
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
         },
         "shape": {
           "kind": "box",
           "bounds_mm": {
-            "min": [0, 0, -4],
-            "max": [220, 220, 0]
+            "min": [
+              0,
+              0,
+              -4
+            ],
+            "max": [
+              220,
+              220,
+              0
+            ]
           }
         }
       },
@@ -31,8 +56,17 @@
         "id": "toolhead-envelope",
         "role": "toolhead",
         "pose": {
-          "translation_mm": [0, 0, 0],
-          "rotation_xyzw": [0, 0, 0, 1]
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
         },
         "shape": {
           "kind": "cylinder",
@@ -51,6 +85,10 @@
       "kind": "diagnostic_body_only"
     },
     "nozzle_diameter_mm": 0.4,
+    "motion_resolution": {
+      "xy_mm": 0.0125,
+      "z_mm": 0.0025
+    },
     "deposition_limits": {
       "min_bead_width_mm": 0.3,
       "max_bead_width_mm": 0.75,

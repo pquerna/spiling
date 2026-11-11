@@ -153,10 +153,14 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 1.0,
+            motion_resolution: spiling_contracts::manufacturing::MotionResolution {
+                xy_mm: 0.0125,
+                z_mm: 0.0025,
+            },
             deposition_limits: DepositionLimits {
                 min_bead_width_mm: 0.000001,
                 max_bead_width_mm: 1.01,
-                min_bead_height_mm: 0.000001,
+                min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 1.0,
             },
             max_feed_mm_s: 100.0,
@@ -209,6 +213,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         native_geometry: NativeGeometryCoverageSummary {
             requested_shape_error_mm: intent.recipe.native_shape_error_mm,
             achieved_shape_error_mm: 0.0,
+            height_merge_mm: 0.0025,
             height_analysis_count: 1,
             slab_count: 1,
             certified_layer_count: 2,
@@ -747,6 +752,10 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
 
 fn wall_command_fixture(path: DepositionPath) -> (ManufacturingIntent, NormalizedPrintPlan) {
     let (mut intent, mut plan) = fixture();
+    // Command-arithmetic fixtures build layers down to tens of nanometres; the
+    // declared printer resolves the XYZ6 lattice so they remain admissible.
+    intent.printer.motion_resolution.z_mm = 0.000_001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.000_001;
     intent.recipe.layer_height_mm = path.height_mm();
     intent.recipe.bead_width_mm = 0.45;
     plan.layers.truncate(1);
@@ -2253,6 +2262,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     intent.recipe.layer_height_mm = 0.1;
     intent.recipe.bead_width_mm = 0.45;
     intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 };
+    intent.printer.motion_resolution.z_mm = 0.000_001;
     intent.printer.deposition_limits = DepositionLimits {
         min_bead_width_mm: 0.449,
         max_bead_width_mm: 0.451,

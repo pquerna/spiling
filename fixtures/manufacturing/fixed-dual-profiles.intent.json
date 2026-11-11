@@ -127,7 +127,7 @@
                   "deposition_limits": {
                     "min_bead_width_mm": 0.3,
                     "max_bead_width_mm": 0.75,
-                    "min_bead_height_mm": 0.000001,
+                    "min_bead_height_mm": 1e-06,
                     "max_bead_height_mm": 0.3
                   },
                   "nozzle_temperature_c": 200,
@@ -187,7 +187,7 @@
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
-              "min_bead_height_mm": 0.000001,
+              "min_bead_height_mm": 0.0025,
               "max_bead_height_mm": 0.3
             },
             "max_feed_mm_s": 150,
@@ -237,7 +237,7 @@
                   "deposition_limits": {
                     "min_bead_width_mm": 0.3,
                     "max_bead_width_mm": 0.75,
-                    "min_bead_height_mm": 0.000001,
+                    "min_bead_height_mm": 1e-06,
                     "max_bead_height_mm": 0.3
                   },
                   "nozzle_temperature_c": 205,
@@ -297,7 +297,7 @@
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
-              "min_bead_height_mm": 0.000001,
+              "min_bead_height_mm": 0.0025,
               "max_bead_height_mm": 0.3
             },
             "max_feed_mm_s": 150,
@@ -401,10 +401,14 @@
       }
     },
     "nozzle_diameter_mm": 0.4,
+    "motion_resolution": {
+      "xy_mm": 0.0125,
+      "z_mm": 0.0025
+    },
     "deposition_limits": {
       "min_bead_width_mm": 0.3,
       "max_bead_width_mm": 0.75,
-      "min_bead_height_mm": 0.000001,
+      "min_bead_height_mm": 0.0025,
       "max_bead_height_mm": 0.3
     },
     "max_feed_mm_s": 150,

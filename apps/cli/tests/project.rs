@@ -1428,6 +1428,10 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
     let mut too_many_layers: Value =
         serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
     too_many_layers["recipe"]["layer_height_mm"] = serde_json::json!(0.001);
+    // A printer that resolves 1 um layers, so the layer budget is the limit.
+    too_many_layers["printer"]["motion_resolution"]["z_mm"] = serde_json::json!(0.000001);
+    too_many_layers["printer"]["deposition_limits"]["min_bead_height_mm"] =
+        serde_json::json!(0.000001);
     let limited_intent = root.join("limited-intent.json");
     std::fs::write(
         &limited_intent,
@@ -3019,7 +3023,7 @@ fn assert_shallow_overlap_saved_job(height: f64) {
     intent["recipe"]["process"]["retraction"] = serde_json::json!({"kind":"disabled"});
     intent["printer"]["deposition_limits"] = serde_json::json!({
         "min_bead_width_mm":0.01,"max_bead_width_mm":2.0,
-        "min_bead_height_mm":0.000001,"max_bead_height_mm":0.6
+        "min_bead_height_mm":0.0025,"max_bead_height_mm":0.6
     });
     std::fs::write(&intent_file, serde_json::to_vec(&intent).unwrap()).unwrap();
     let prepared = report(

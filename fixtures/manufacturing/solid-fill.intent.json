@@ -85,10 +85,14 @@
       "kind": "diagnostic_body_only"
     },
     "nozzle_diameter_mm": 0.4,
+    "motion_resolution": {
+      "xy_mm": 0.0125,
+      "z_mm": 0.0025
+    },
     "deposition_limits": {
       "min_bead_width_mm": 0.3,
       "max_bead_width_mm": 0.75,
-      "min_bead_height_mm": 0.000001,
+      "min_bead_height_mm": 0.0025,
       "max_bead_height_mm": 0.3
     },
     "max_feed_mm_s": 150,
@@ -100,7 +104,8 @@
     "material_id": "nominal-software-filament",
     "material_revision": "1",
     "filament_diameter_mm": 1.75,
-    "layer_height_mm": 0.2, "layer_height_policy": "protected_maximum",
+    "layer_height_mm": 0.2,
+    "layer_height_policy": "protected_maximum",
     "native_shape_error_mm": 0.1,
     "bead_width_mm": 0.45,
     "perimeter_count": 2,

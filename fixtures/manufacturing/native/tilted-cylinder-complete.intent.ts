@@ -11,7 +11,7 @@ const intent = {
     deposition_limits: {
       min_bead_width_mm: 0.6,
       max_bead_width_mm: 0.6,
-      min_bead_height_mm: 0.000001,
+      min_bead_height_mm: 0.0025,
       max_bead_height_mm: 0.4,
     },
   },

@@ -5,7 +5,7 @@
     "schema_version": 11,
     "id": "software-marlin2-reference",
     "revision": "10",
-    "name": "Complete Marlin 2 software reference \u2014 physically unqualified",
+    "name": "Complete Marlin 2 software reference — physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
       "min": [
@@ -119,10 +119,14 @@
       }
     },
     "nozzle_diameter_mm": 0.4,
+    "motion_resolution": {
+      "xy_mm": 0.0125,
+      "z_mm": 0.0025
+    },
     "deposition_limits": {
       "min_bead_width_mm": 0.3,
       "max_bead_width_mm": 0.75,
-      "min_bead_height_mm": 1e-06,
+      "min_bead_height_mm": 0.0025,
       "max_bead_height_mm": 0.3
     },
     "max_feed_mm_s": 150,

@@ -33,11 +33,13 @@ const printer = {
   },
   workflow: { kind: "diagnostic_body_only" },
   nozzle_diameter_mm: 0.4,
+  // Software declaration: 80 XY and 400 Z full steps per mm; not measured.
+  motion_resolution: { xy_mm: 0.0125, z_mm: 0.0025 },
   // Software-only local allocation envelope, not measured nozzle calibration.
   deposition_limits: {
     min_bead_width_mm: 0.3,
     max_bead_width_mm: 0.75,
-    min_bead_height_mm: 0.000001,
+    min_bead_height_mm: 0.0025,
     max_bead_height_mm: 0.3,
   },
   max_feed_mm_s: 150,

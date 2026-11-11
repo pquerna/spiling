@@ -51,15 +51,30 @@ polylines and the program is G0/G1 only.
    fallback was used. A layer whose exact certificate also succeeds may carry a
    "certified" mark. Certification is never a gate.
 
-### One tolerance policy
+### One tolerance policy, set by the printer
 
-Three values, named once, recorded in provenance:
+A geometric question matters only if its answer can change what the printer
+does. The selected printer declares the smallest position change it realizes
+(`PrinterSpecification.motion_resolution`, XY and Z, in mm). Tolerances derive
+from that declaration and the recipe, not from fixed constants, and every plan
+records the values it used:
 
-| Tolerance      | Default                                           | Governs                                                      |
+| Tolerance      | Value                                             | Governs                                                      |
 | -------------- | ------------------------------------------------- | ------------------------------------------------------------ |
 | Join `τ`       | max(source uncertainty, 1e-6 mm), at most 0.01 mm | Treating vertices, edge ends and seam gaps as the same point |
 | Profile `ε_xy` | 0.01 mm, at most bead width / 20                  | Curve-to-segment approximation and section deviation         |
-| Height `ε_z`   | 0.001 mm                                          | Merging near-coincident feature heights into one event       |
+| Height `ε_z`   | the printer's Z motion resolution                 | Merging near-coincident feature heights into one event       |
+
+Two heights closer than one Z step are one commanded height, so they are one
+layer boundary in both the exact and tolerant paths; no layer is thinner than a
+Z step, and a printer may not declare a minimum bead height below it. Proofs
+and refinement stop once their uncertainty is below the tolerance that governs
+them: a difference the printer cannot realize is decided by rule, recorded, and
+never refused. A refusal remains for differences the printer would produce:
+open or self-intersecting sections, trims disagreeing by more than the
+tolerance, heights the printer cannot reach. A work or time limit is only a
+fuse against defects, never an admission policy. Declared resolution is not
+measured accuracy or repeatability.
 
 Gaps within `τ` are joined. A gap larger than `τ` in an otherwise closed loop is
 a defect in the source: that layer refuses with the location and size. No other
@@ -177,10 +192,12 @@ reaching source-absent verified export, compared with PrusaSlicer's 25 and with
 material, time and travel counts on the same parts.
 
 1. Tolerance policy and height merging (`ε_z`, `τ`), with tolerant section
-   chaining. Delivered as the job-wide tolerant mode above.
+   chaining. Delivered as the job-wide tolerant mode above; `ε_z` is the
+   printer's Z step in both paths, recorded as `height_merge_mm`.
 2. Tolerant seam and edge correspondence within `τ`; per-face fallback.
 3. Import packaging: single-solid assembly wrappers, multi-body parts, AP242,
-   assemblies as plate occurrences.
+   assemblies as plate occurrences. Delivered: one definition per solid at its
+   source placement; overlapping occurrences slice as a union.
 4. Arc segments in the plan, emitter and verifier, from analytic walls.
 5. Height smoothing and slope adaptation.
 

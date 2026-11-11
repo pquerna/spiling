@@ -400,6 +400,15 @@ pub(super) fn capture(
         .and_then(|(_, permission)| *permission);
     let diaphragm = match (axis, permission) {
         (2, Some(ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm })) => {
+            let step = input.intent.printer.motion_resolution.z_mm;
+            if thickness_mm < step {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    format!(
+                        "horizontal diaphragm {thickness_mm} mm is thinner than one {step} mm Z step of the selected printer"
+                    ),
+                ));
+            }
             let endpoints = [
                 source_plane - thickness_mm * 0.5,
                 source_plane + thickness_mm * 0.5,

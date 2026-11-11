@@ -427,10 +427,14 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            motion_resolution: MotionResolution {
+                xy_mm: 0.0125,
+                z_mm: 0.0025,
+            },
             deposition_limits: spiling_contracts::manufacturing::DepositionLimits {
                 min_bead_width_mm: 0.4,
                 max_bead_width_mm: 0.4,
-                min_bead_height_mm: 0.000001,
+                min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 0.3,
             },
             max_feed_mm_s: 100.0,
@@ -564,6 +568,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.1,
                 achieved_shape_error_mm: 0.0,
+                height_merge_mm: 0.0025,
                 height_analysis_count: 1,
                 slab_count: 1,
                 certified_layer_count: 1,

@@ -2915,8 +2915,8 @@ async fn execute(
                 let mut base = summary.revision;
                 for occurrence in &occurrences {
                     let mut pose = occurrence.pose;
-                    for axis in 0..3 {
-                        pose.translation_mm[axis] += delta[axis];
+                    for (translation, step) in pose.translation_mm.iter_mut().zip(delta) {
+                        *translation += step;
                     }
                     let project_revision = info(client).await?.revision;
                     let response = geometry::control(

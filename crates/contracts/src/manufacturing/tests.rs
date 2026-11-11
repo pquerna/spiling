@@ -1111,10 +1111,14 @@ fn intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            motion_resolution: MotionResolution {
+                xy_mm: 0.0125,
+                z_mm: 0.0025,
+            },
             deposition_limits: DepositionLimits {
                 min_bead_width_mm: 0.45,
                 max_bead_width_mm: 0.45,
-                min_bead_height_mm: 0.000001,
+                min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 0.30,
             },
             max_feed_mm_s: 150.0,
@@ -1563,6 +1567,7 @@ fn native_geometry() -> NativeGeometryCoverageSummary {
     NativeGeometryCoverageSummary {
         requested_shape_error_mm: 0.02,
         achieved_shape_error_mm: 0.001,
+        height_merge_mm: 0.0025,
         height_analysis_count: 1,
         slab_count: 1,
         certified_layer_count: 1,
@@ -4773,4 +4778,28 @@ fn web_roof_domains_are_required_closed_finite_bounded_and_uniquely_owned() {
     let mut encoded = serde_json::to_value(coverage()).unwrap();
     encoded.as_object_mut().unwrap().remove("web_roof_domains");
     assert!(serde_json::from_value::<PlanarRegionCoverage>(encoded).is_err());
+}
+
+#[test]
+fn motion_resolution_bounds_what_a_printer_can_declare() {
+    let mut value = intent();
+    assert!(value.validate().is_ok());
+    for (xy, z) in [
+        (0.0, 0.0025),
+        (0.0125, 0.0000001),
+        (0.06, 0.0025),
+        (f64::NAN, 0.0025),
+    ] {
+        value.printer.motion_resolution = MotionResolution { xy_mm: xy, z_mm: z };
+        assert!(value.validate().is_err(), "{xy} {z}");
+    }
+    // A layer thinner than one Z step cannot be commanded.
+    value.printer.motion_resolution = MotionResolution {
+        xy_mm: 0.0125,
+        z_mm: 0.0025,
+    };
+    value.printer.deposition_limits.min_bead_height_mm = 0.002;
+    assert!(value.validate().is_err());
+    value.printer.deposition_limits.min_bead_height_mm = 0.0025;
+    assert!(value.validate().is_ok());
 }

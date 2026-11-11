@@ -51,10 +51,14 @@ fn intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            motion_resolution: spiling_contracts::manufacturing::MotionResolution {
+                xy_mm: 0.0125,
+                z_mm: 0.0025,
+            },
             deposition_limits: spiling_contracts::manufacturing::DepositionLimits {
                 min_bead_width_mm: 0.3,
                 max_bead_width_mm: 0.75,
-                min_bead_height_mm: 0.000001,
+                min_bead_height_mm: 0.0025,
                 // Test-only envelope leaves room for actual commanded width
                 // and height enclosures; this is not a process-boundary test.
                 max_bead_height_mm: 0.5,
@@ -2982,10 +2986,12 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
         assert!(scene.compile(&data).is_err());
     }
     data = intent();
+    // A layer thinner than the printer's Z step is outside the process
+    // envelope; the layer budget itself is covered by the schedule tests.
     data.recipe.layer_height_mm = 0.001;
     assert_eq!(
         scene.compile(&data).err().unwrap().code,
-        ManufacturingErrorCode::ResourceLimit
+        ManufacturingErrorCode::InvalidSpecification
     );
     assert_eq!(
         compile(scene.input(&intent()), &AtomicBool::new(true))

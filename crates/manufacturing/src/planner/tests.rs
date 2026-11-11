@@ -845,13 +845,10 @@ fn true_height_schedule_and_physical_skin_neighborhoods_are_bounded() {
     }
     assert_eq!(physical_neighbor(&schedule, 3, 0.3, false), Some(1));
     assert_eq!(physical_neighbor(&schedule, 0, 0.3, true), Some(2));
-    assert_eq!(
-        layer_schedule(0.0, 1.0, 0.4, &[0.4, 0.4001])
-            .err()
-            .unwrap()
-            .code,
-        ManufacturingErrorCode::UnsupportedGeometry
-    );
+    // 0.1 um apart is one commanded height on a 2.5 um Z step: one boundary.
+    let merged = layer_schedule(0.0, 1.0, 0.4, &[0.4, 0.4001]).unwrap();
+    assert!(merged.iter().any(|layer| layer.z == 0.4));
+    assert!(merged.iter().all(|layer| layer.z != 0.4001));
     assert_eq!(
         layer_schedule(0.0, 1e9, 0.4, &[]).err().unwrap().code,
         ManufacturingErrorCode::ResourceLimit
@@ -875,12 +872,25 @@ fn native_event_roundoff_identity_preserves_genuine_events_and_exact_top() {
     assert!(schedule.iter().any(|layer| layer.z == first));
     assert!(schedule.iter().any(|layer| layer.z == second));
     assert_eq!(schedule.last().unwrap().z, top);
+    // Events within one Z step of the bed, another event or the top are the
+    // same commanded height; every scheduled layer is at least one Z step.
     for events in [&[0.0001][..], &[0.4, 0.4001][..], &[top - 0.0001][..]] {
-        assert_eq!(
-            layer_schedule(0.0, top, 0.4, events).err().unwrap().code,
-            ManufacturingErrorCode::UnsupportedGeometry
+        let schedule = layer_schedule(0.0, top, 0.4, events).unwrap();
+        assert_eq!(schedule.last().unwrap().z, top);
+        assert!(
+            schedule
+                .iter()
+                .all(|layer| layer.height > super::REFERENCE_Z_STEP_MM)
         );
     }
+    // One step apart survives exactly; order does not change the result.
+    let separated = [0.4 + 2.0 * super::REFERENCE_Z_STEP_MM, 0.4];
+    let mut reversed = separated;
+    reversed.reverse();
+    let one = layer_schedule(0.0, top, 0.4, &separated).unwrap();
+    assert_eq!(one, layer_schedule(0.0, top, 0.4, &reversed).unwrap());
+    assert!(one.iter().any(|layer| layer.z == separated[0]));
+    assert!(one.iter().any(|layer| layer.z == 0.4));
 }
 
 #[test]

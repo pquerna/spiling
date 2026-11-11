@@ -44,7 +44,8 @@ def engine_peak(proc):
             if not pid.isdigit():
                 continue
             try:
-                if open(f"/proc/{pid}/comm").read().strip() != "spiling-engine":
+                # Other processes' names need not be UTF-8.
+                if open(f"/proc/{pid}/comm", "rb").read().strip() != b"spiling-engine":
                     continue
                 if int(open(f"/proc/{pid}/stat").read().split()[3]) != proc.pid:
                     continue

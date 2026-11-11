@@ -158,7 +158,9 @@ message PrinterSpecification {
   double max_volumetric_flow_mm3_s = 11;
   JobWorkflow workflow = 12;
   DepositionLimits deposition_limits = 13;
+  MotionResolution motion_resolution = 14;
 }
+message MotionResolution { double xy_mm = 1; double z_mm = 2; }
 message DiagnosticBodyOnly {}
 enum HomingCoordinateContract {
   HOMING_COORDINATE_CONTRACT_UNSPECIFIED = 0;

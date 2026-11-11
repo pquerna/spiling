@@ -152,10 +152,14 @@ fn intent(supports: bool) -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            motion_resolution: spiling_contracts::manufacturing::MotionResolution {
+                xy_mm: 0.0125,
+                z_mm: 0.0025,
+            },
             deposition_limits: DepositionLimits {
                 min_bead_width_mm: 0.01,
                 max_bead_width_mm: 2.0,
-                min_bead_height_mm: 0.000001,
+                min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 0.6,
             },
             max_feed_mm_s: 200.0,
@@ -1245,7 +1249,17 @@ fn balanced_native_top_is_preserved_and_layer_resource_limits_are_explicit() {
             .iter()
             .all(|layer| layer.height_mm <= 0.399995)
     );
+    // Below the reference printer's Z step a layer is outside the process.
     intent.recipe.layer_height_mm = 0.0001;
+    assert_eq!(
+        compile(scene.input(&intent), &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    // On a printer that resolves it, the layer budget is the explicit limit.
+    intent.printer.motion_resolution.z_mm = 0.000001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
     assert_eq!(
         compile(scene.input(&intent), &AtomicBool::new(false))
             .unwrap_err()

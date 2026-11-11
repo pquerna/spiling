@@ -315,6 +315,8 @@ export type SourceHash = string;
 
 export type FaceId = string;
 
+export type SourceSolidId = string;
+
 export type OccurrenceId = number;
 
 export type ArtifactId = number;
@@ -804,9 +806,11 @@ export type MachineComponentShape = { "kind": "box", bounds_mm: AabbMm, } | { "k
 
 export type MachineComponent = { id: string, role: MachineComponentRole, pose: RigidPoseMm, shape: MachineComponentShape, };
 
-export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
+export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, motion_resolution: MotionResolution, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
 export type DepositionLimits = { min_bead_width_mm: number, max_bead_width_mm: number, min_bead_height_mm: number, max_bead_height_mm: number, };
+
+export type MotionResolution = { xy_mm: number, z_mm: number, };
 
 export type LayerHeightPolicy = "preferred" | "protected_maximum";
 
@@ -967,7 +971,12 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  * One certified invariant slab may cover several scheduled layers. Every
  * accepted slab captures every original occurrence, including inactive ones.
  */
-slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
+slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint,
+/**
+ * Feature heights closer than this were scheduled as one height: the
+ * printer's Z motion resolution, below which no command differs.
+ */
+height_merge_mm: number, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
 export type NormalizedPrintPlan = {
 /**

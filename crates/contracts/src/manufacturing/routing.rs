@@ -803,6 +803,7 @@ impl FixedDualJob {
         self.validate_declaration()?;
         let mut cooling = None;
         for tool in &self.tools {
+            printer.admits_layer_limits(&tool.deposition_limits)?;
             if let Some(capture) = &tool.material_profile {
                 let selected = &capture.selection;
                 let profile = &selected.profile;

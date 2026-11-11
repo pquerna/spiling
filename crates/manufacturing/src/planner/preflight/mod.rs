@@ -47,6 +47,16 @@ struct LowerTerminalRouting<'a> {
     lower_support: [f64; 2],
 }
 
+/// The selected printer's motion step on one world axis.
+fn axis_resolution(input: &CompilerInput<'_>, axis: usize) -> f64 {
+    let resolution = input.intent.printer.motion_resolution;
+    if axis == 2 {
+        resolution.z_mm
+    } else {
+        resolution.xy_mm
+    }
+}
+
 fn terminal_inside_bed_envelope(bracket: [f64; 2], bed: f64, shape_budget: f64) -> bool {
     bed.is_finite()
         && shape_budget.is_finite()
@@ -798,9 +808,11 @@ pub(super) fn admit_with<'a, 'work>(
             );
         }
         occurrence_bounds.insert(occurrence.occurrence_id, placed);
+        // ADR012: extents within one motion step of the envelope are the same
+        // commanded position; tessellated extents may sit that far outside.
         if (0..3).any(|a| {
-            placed.min[a] < envelope.min[a] - LAYER_QUANTIZATION_MM
-                || placed.max[a] > envelope.max[a] + LAYER_QUANTIZATION_MM
+            placed.min[a] < envelope.min[a] - axis_resolution(input, a)
+                || placed.max[a] > envelope.max[a] + axis_resolution(input, a)
         }) {
             add("outside_envelope", "Placed native extrema plus admitted surface-finish expansion exceed the build envelope; change placement, finish or printer".into(), Some(occurrence.occurrence_id), None);
         }
@@ -838,7 +850,7 @@ pub(super) fn admit_with<'a, 'work>(
         }
     }
     if let Some(bounds) = result.bounds
-        && bounds.min[2] > envelope.min[2] + LAYER_QUANTIZATION_MM
+        && bounds.min[2] > envelope.min[2] + axis_resolution(input, 2)
         && matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
     {
         add("floating_without_support", "Native material starts above the bed; enable breakaway supports or place it on the bed".into(), None, None);
@@ -943,16 +955,9 @@ pub(super) fn resolve_native_events(
         // ADR012 feature-first heights: horizontal faces and extents of each
         // placed tessellation, merged within the height tolerance. The bed is
         // the first boundary; nothing here is a native event band.
-        // Heights closer than the source's own declared uncertainty are the
-        // same feature (e.g. assembled bodies meant to sit flush); never more
-        // than TOLERANT_HEIGHT_MERGE_LIMIT_MM.
-        let merge_mm = input
-            .occurrences
-            .iter()
-            .filter_map(|occurrence| input.definitions.get(&occurrence.definition_id))
-            .filter_map(|definition| definition.provenance().uncertainty_mm)
-            .fold(FEATURE_HEIGHT_TOLERANCE_MM, f64::max)
-            .min(TOLERANT_HEIGHT_MERGE_LIMIT_MM);
+        // ADR012: heights closer than the printer's Z step are one commanded
+        // height, e.g. assembled bodies meant to sit flush.
+        let merge_mm = input.intent.printer.motion_resolution.z_mm;
         let mut heights = Vec::new();
         let mut combined: Option<AabbMm> = None;
         for occurrence in input.occurrences {
@@ -1482,12 +1487,13 @@ mod tests {
             vec![nonmember[1]],
             thin.iter().map(|band| band[1]).collect(),
         ] {
-            assert_eq!(
-                crate::planner::layer_schedule(0.0, 1.0, 0.2, &events)
-                    .err()
-                    .expect("nonmember critical planes keep the unchanged physical minimum")
-                    .code,
-                ManufacturingErrorCode::UnsupportedGeometry
+            // Planes closer than one Z step are one commanded height: the
+            // schedule never contains a layer thinner than that step.
+            let schedule = crate::planner::layer_schedule(0.0, 1.0, 0.2, &events).unwrap();
+            assert!(
+                schedule
+                    .iter()
+                    .all(|layer| layer.height > crate::planner::REFERENCE_Z_STEP_MM)
             );
         }
         let mut foreign = occurrence.clone();

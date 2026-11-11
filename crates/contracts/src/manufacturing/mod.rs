@@ -65,12 +65,6 @@ pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 512 * 1024 * 1024;
 /// bundles and programs and in raw coordinates for planner retention.
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
-/// ADR012 height tolerance: feature heights closer than this are one layer
-/// boundary. Far below any printable layer, far above CAD export noise.
-pub const FEATURE_HEIGHT_TOLERANCE_MM: f64 = 0.001;
-/// Tolerant feature heights merge within the source's declared uncertainty,
-/// but never further than this.
-pub const TOLERANT_HEIGHT_MERGE_LIMIT_MM: f64 = 0.01;
 /// Job-wide deposition total, a checked count rather than an allocation.
 pub const MAX_DEPOSITION_SEGMENTS: u32 = 2_000_000;
 /// An admitted path may require lift, XY travel and landing. Fixed-dual waste
@@ -861,6 +855,34 @@ impl DepositionLimits {
     }
 }
 
+/// The smallest position change the machine realizes on each axis group, in
+/// millimetres. It bounds which geometric differences can reach a print: two
+/// heights closer than `z_mm` are one commanded height. A declaration until
+/// measured; it does not establish positioning accuracy or repeatability.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MotionResolution {
+    pub xy_mm: f64,
+    pub z_mm: f64,
+}
+/// Coarsest step a declared FDM motion resolution may claim.
+pub const MAX_MOTION_RESOLUTION_MM: f64 = 0.05;
+impl MotionResolution {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        // Finer than the program's XYZ6 lattice is not realizable by any
+        // emitted command; coarser than MAX_MOTION_RESOLUTION_MM is not FDM.
+        if [self.xy_mm, self.z_mm]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.000_001 || *v > MAX_MOTION_RESOLUTION_MM)
+        {
+            return Err(invalid(
+                "motion resolution must lie between the 0.000001 mm command lattice and 0.05 mm",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PrinterSpecification {
@@ -875,6 +897,7 @@ pub struct PrinterSpecification {
     pub capabilities: PrinterCapabilities,
     pub workflow: JobWorkflow,
     pub nozzle_diameter_mm: f64,
+    pub motion_resolution: MotionResolution,
     pub deposition_limits: DepositionLimits,
     pub max_feed_mm_s: f64,
     pub max_volumetric_flow_mm3_s: f64,
@@ -903,7 +926,9 @@ impl PrinterSpecification {
             self.max_feed_mm_s,
             self.max_volumetric_flow_mm3_s,
         ])?;
+        self.motion_resolution.validate()?;
         self.deposition_limits.validate()?;
+        self.admits_layer_limits(&self.deposition_limits)?;
         self.capabilities.validate()?;
         match (&self.workflow, self.capabilities.output_dialect) {
             (JobWorkflow::DiagnosticBodyOnly, OutputDialect::CartesianAbsoluteGcodeV1) => {}
@@ -926,6 +951,17 @@ impl PrinterSpecification {
             }
         }
         json_bytes(self, MAX_PROFILE_JSON_BYTES as usize)?;
+        Ok(())
+    }
+}
+impl PrinterSpecification {
+    /// A machine cannot deposit a layer thinner than one Z step.
+    pub fn admits_layer_limits(&self, limits: &DepositionLimits) -> Result<(), ManufacturingError> {
+        if limits.min_bead_height_mm < self.motion_resolution.z_mm {
+            return Err(invalid(
+                "minimum bead height is finer than the printer's Z motion resolution",
+            ));
+        }
         Ok(())
     }
 }
@@ -2528,6 +2564,9 @@ pub struct NativeGeometryCoverageSummary {
     pub certified_layer_count: u32,
     pub event_count: u32,
     pub geometry_work: u64,
+    /// Feature heights closer than this were scheduled as one height: the
+    /// printer's Z motion resolution, below which no command differs.
+    pub height_merge_mm: f64,
     pub evidence: PreflightEvidence,
     pub source_feature_coverage: NativeFeatureCoverageSummary,
     pub skin_coverage: SkinCoverageScope,
@@ -2536,6 +2575,9 @@ pub struct NativeGeometryCoverageSummary {
 impl NativeGeometryCoverageSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         positive(&[self.requested_shape_error_mm])?;
+        if !(self.height_merge_mm > 0.0 && self.height_merge_mm <= MAX_MOTION_RESOLUTION_MM) {
+            return Err(invalid("height merge must be a declared motion resolution"));
+        }
         if !self.achieved_shape_error_mm.is_finite()
             || self.achieved_shape_error_mm < 0.0
             || self.achieved_shape_error_mm > self.requested_shape_error_mm

@@ -61,6 +61,7 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.1,
                 achieved_shape_error_mm: 0.0,
+                height_merge_mm: 0.0025,
                 height_analysis_count: 1,
                 slab_count: 1,
                 certified_layer_count: 1,

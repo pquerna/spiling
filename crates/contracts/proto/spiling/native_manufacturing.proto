@@ -298,6 +298,7 @@ message NativeGeometryCoverageSummary {
   SupportClearanceScope support_clearance = 9;
   uint32 certified_layer_count = 10;
   NativeFeatureCoverageSummary source_feature_coverage = 11;
+  double height_merge_mm = 12;
 }
 enum ProcessRegionStatus {
   PROCESS_REGION_STATUS_UNSPECIFIED = 0;

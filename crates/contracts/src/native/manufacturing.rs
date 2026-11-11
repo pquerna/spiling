@@ -1026,6 +1026,13 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                     .collect::<Result<_, String>>()?,
                 capabilities: required(value.capabilities, "printer capabilities")?.try_into()?,
                 nozzle_diameter_mm: value.nozzle_diameter_mm,
+                motion_resolution: {
+                    let resolution = required(value.motion_resolution, "motion resolution")?;
+                    MotionResolution {
+                        xy_mm: resolution.xy_mm,
+                        z_mm: resolution.z_mm,
+                    }
+                },
                 deposition_limits: required(value.deposition_limits, "deposition limits")?
                     .try_into()?,
                 max_feed_mm_s: value.max_feed_mm_s,
@@ -1054,6 +1061,10 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
                 .collect::<Result<_, String>>()?,
             capabilities: Some(value.capabilities.try_into()?),
             nozzle_diameter_mm: value.nozzle_diameter_mm,
+            motion_resolution: Some(rpc::MotionResolution {
+                xy_mm: value.motion_resolution.xy_mm,
+                z_mm: value.motion_resolution.z_mm,
+            }),
             deposition_limits: Some(value.deposition_limits.try_into()?),
             max_feed_mm_s: value.max_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
@@ -1436,6 +1447,7 @@ impl TryFrom<rpc::NativeGeometryCoverageSummary> for NativeGeometryCoverageSumma
             Self {
                 requested_shape_error_mm: value.requested_shape_error_mm,
                 achieved_shape_error_mm: value.achieved_shape_error_mm,
+                height_merge_mm: value.height_merge_mm,
                 height_analysis_count: value.height_analysis_count,
                 slab_count: value.slab_count,
                 certified_layer_count: value.certified_layer_count,
@@ -1479,6 +1491,7 @@ impl TryFrom<NativeGeometryCoverageSummary> for rpc::NativeGeometryCoverageSumma
         Ok(Self {
             requested_shape_error_mm: value.requested_shape_error_mm,
             achieved_shape_error_mm: value.achieved_shape_error_mm,
+            height_merge_mm: value.height_merge_mm,
             height_analysis_count: value.height_analysis_count,
             slab_count: value.slab_count,
             certified_layer_count: value.certified_layer_count,
@@ -2201,6 +2214,7 @@ mod tests {
                 native_geometry: NativeGeometryCoverageSummary {
                     requested_shape_error_mm: 0.02,
                     achieved_shape_error_mm: 0.001,
+                    height_merge_mm: 0.0025,
                     height_analysis_count: 1,
                     slab_count: 1,
                     certified_layer_count: 1,
@@ -3850,6 +3864,7 @@ mod routed_report_wire_tests {
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.02,
                 achieved_shape_error_mm: 0.001,
+                height_merge_mm: 0.0025,
                 height_analysis_count: 1,
                 slab_count: 1,
                 certified_layer_count: 1,

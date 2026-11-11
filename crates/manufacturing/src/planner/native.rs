@@ -4574,6 +4574,8 @@ mod refinement_tests {
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"
         ))
         .unwrap();
+        // The printer resolves the XYZ6 lattice; the material minimum governs.
+        intent.printer.motion_resolution.z_mm = 0.000001;
         intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
         let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
             "../../../../fixtures/manufacturing/material-profile-a.json"
