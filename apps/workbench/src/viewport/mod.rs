@@ -1664,6 +1664,7 @@ impl egui_wgpu::CallbackTrait for Callback {
         if r.replay_upload.is_some() && r.replay_buffers.iter().all(Option::is_some) {
             r.replay_upload = None;
             crate::performance::mark("replay_gpu_ready");
+            self.context.request_repaint();
         }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
         queue.write_buffer(
