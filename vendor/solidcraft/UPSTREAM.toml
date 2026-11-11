@@ -30,3 +30,7 @@ reason = "Propose a unique source-associated spline PCURVE only on its identical
 [[changes]]
 paths = ["crates/geom/src/brep/pcurve.rs", "crates/geom/src/brep/pcurve_tests.rs"]
 reason = "Solve generated cubic PCURVE least squares in displacement coordinates with literal fixed endpoints. Preserve exactly constant nonzero chart coordinates without absolute-coordinate cancellation; retain existing lifting checks, real variation and unchanged supplied PCURVEs."
+
+[[changes]]
+paths = ["crates/step/src/topology.rs", "crates/step/src/topology_tests.rs"]
+reason = "Clamp loop-area sample parameters to each pcurve's interval. Traversing a use backwards computed b - (b - a), which rounds one ulp below a for some intervals; the pcurve refused it, the loop lost its area, a hole was taken as the outer loop and its face was turned over."

@@ -1086,7 +1086,9 @@ fn loop_area(l: &[(u32, bool)], pcs: &[Curve2], periodic: [bool; 2]) -> Option<f
         let [a, b] = c.interval()?;
         for k in 0..=16 {
             let s = f64::from(k) / 16.0;
-            let t = if forward { a + (b - a) * s } else { b - (b - a) * s };
+            // Rounding can carry `b - (b - a)` one ulp past `a`; the pcurve
+            // refuses parameters outside its interval.
+            let t = (if forward { a + (b - a) * s } else { b - (b - a) * s }).clamp(a, b);
             pts.push(c.eval(t)?);
         }
     }

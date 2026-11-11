@@ -1198,3 +1198,19 @@ fn parabola_and_hyperbola_edges_bound_faces() {
         }
     }
 }
+
+#[test]
+fn a_loop_traversed_backwards_samples_inside_each_pcurve_interval() {
+    // Observed in an exported part: b - (b - a) lands one ulp below a for
+    // this interval, which the pcurve refuses; the loop then had no area and
+    // its face was turned over.
+    let (a, b) = (0.261908831_f64, 1.0_f64);
+    assert!(b - (b - a) < a);
+    let line = |p: [f64; 2], q: [f64; 2], [a, b]: [f64; 2]| super::Curve2::Spline { knots: vec![a, a, b, b], points: vec![p, q] };
+    let (p, q, r) = ([0.0, 0.0], [1.0, 0.0], [0.0, 1.0]);
+    // Each use runs against its pcurve: the loop is p -> r -> q -> p.
+    let pcs = vec![line(r, p, [a, b]), line(q, r, [0.0, 1.0]), line(p, q, [0.0, 1.0])];
+    let uses = vec![(0, false), (1, false), (2, false)];
+    let area = super::loop_area(&uses, &pcs, [false, false]).expect("the loop closes");
+    assert!((area + 0.5).abs() < 1e-12);
+}
