@@ -425,7 +425,7 @@ export type SectionLoopMetadata = { ordinal: number, occurrence_id: OccurrenceId
 
 export type SectionSummary = { session_id: SessionId, artifact_id: ArtifactId, revision: SceneRevision, schema_version: number, plane: PlaneMm, frame: PlaneFrameMm, total_loop_count: number, chunk_count: number, total_bytes: number, sampling_tolerance_mm: number, boolean_tolerance_mm: number, };
 
-export type GeometryLimits = { source_bytes: number, live_source_bytes: number, step_entities: number, native_faces: number, definitions: number, occurrences: number, display_vertices: number, display_triangles: number, scene_mesh_bytes: number, section_bytes: number, engine_artifact_bytes: number, geometry_chunk_bytes: number, display_buffer_bytes: number, loop_points: number, active_jobs: number, outstanding_chunks: number, };
+export type GeometryLimits = { source_bytes: number, step_entities: number, native_faces: number, definitions: number, occurrences: number, display_vertices: number, display_triangles: number, scene_mesh_bytes: number, section_bytes: number, engine_artifact_bytes: number, geometry_chunk_bytes: number, display_buffer_bytes: number, loop_points: number, active_jobs: number, outstanding_chunks: number, };
 
 export type KernelIdentity = { name: string, version: string, revision: string, };
 
@@ -1062,8 +1062,7 @@ export const MESH_SCHEMA_VERSION = 1 as const;
 export const MESH_HEADER_BYTES = 64 as const;
 export const SECTION_SCHEMA_VERSION = 1 as const;
 export const SECTION_HEADER_BYTES = 64 as const;
-export const MAX_SOURCE_BYTES = 16777216 as const;
-export const MAX_LIVE_SOURCE_BYTES = 67108864 as const;
+export const MAX_SOURCE_BYTES = 1073741824 as const;
 export const MAX_STEP_ENTITIES = 100000 as const;
 export const MAX_NATIVE_FACES = 50000 as const;
 export const MAX_DEFINITIONS = 32 as const;
@@ -1096,7 +1095,6 @@ export const MAX_OUTSTANDING_CHUNKS = 1 as const;
 export const PROJECT_FORMAT_VERSION = 10 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
-export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
 export const MAX_PROJECT_STORED_ASSETS = 128 as const;
 export const MAX_PROJECT_ERROR_BYTES = 2048 as const;
 export const SURFACE_SCHEMA_VERSION = 3 as const;

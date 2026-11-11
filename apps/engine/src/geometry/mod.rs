@@ -237,7 +237,6 @@ pub struct Runtime {
     definitions: BTreeMap<DefinitionId, DefinitionState>,
     project: Project,
     uncertain_copy: Option<Arc<Storage>>,
-    retained_source_bytes: u32,
     artifacts: BTreeMap<ArtifactId, Artifact>,
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
     // into the terminal ledger transaction after ACK and released immediately.
@@ -281,7 +280,6 @@ impl Runtime {
             definitions: BTreeMap::new(),
             project: Project::new(),
             uncertain_copy: None,
-            retained_source_bytes: 0,
             artifacts: BTreeMap::new(),
             replay_publication: None,
             alternative_publication: None,
@@ -1347,7 +1345,6 @@ impl Runtime {
     }
     fn synchronize_native_pins(&mut self) {
         let sources = self.project.retained_sources();
-        self.retained_source_bytes = sources.iter().map(|source| source.bytes.len() as u32).sum();
         let ids: std::collections::BTreeSet<_> = sources
             .iter()
             .map(|source| source.record.definition_id.clone())
@@ -1452,17 +1449,26 @@ impl Runtime {
                 let triangles = self.definitions.values().map(|d| d.triangles).sum::<u32>();
                 let bytes = self.definitions.values().map(|d| d.bytes).sum::<u32>();
                 let allowed_reuse = self.definitions.keys().cloned().collect();
+                let retained_source_bytes = match self.project.retained_source_bytes() {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return Ok(Reply::Geometry(GeometryResponse::ProjectError { error }));
+                    }
+                };
                 self.start(
                     Purpose::Import { pose: initial_pose },
                     MAX_SCENE_MESH_BYTES,
-                    move |_, _, _| Work::Import {
-                        source,
-                        allowed_reuse,
-                        budget: worker::MeshBudget {
-                            vertices: MAX_DISPLAY_VERTICES - vertices,
-                            triangles: MAX_DISPLAY_TRIANGLES - triangles,
-                            bytes: MAX_SCENE_MESH_BYTES - bytes,
-                        },
+                    move |_, _, _| {
+                        Work::Import(worker::ImportRequest {
+                            source,
+                            allowed_reuse,
+                            retained_source_bytes,
+                            budget: worker::MeshBudget {
+                                vertices: MAX_DISPLAY_VERTICES - vertices,
+                                triangles: MAX_DISPLAY_TRIANGLES - triangles,
+                                bytes: MAX_SCENE_MESH_BYTES - bytes,
+                            },
+                        })
                     },
                 )
             }
@@ -2570,7 +2576,8 @@ impl Runtime {
                 project_scene_revision(self.revision)?;
                 let existing = self.project.storage();
                 let allowed_reuse = self.definitions.keys().cloned().collect();
-                let retained_source_bytes = self.retained_source_bytes;
+                let retained_source_bytes = self.project.retained_source_bytes()?;
+                let reuse_sources = self.project.retained_sources();
                 let retained_manufacturing_bytes = self.manufacturing_bytes();
                 let retained_surface_image_bytes = self.surface_image_bytes()?;
                 let retained_appearance_bytes = self.project.retained_appearance_bytes()?;
@@ -2588,6 +2595,7 @@ impl Runtime {
                     .start(Purpose::Open, 0, move |_, _, _| {
                         Work::Open(worker::OpenRequest {
                             path,
+                            reuse_sources,
                             read_only,
                             recover_previous,
                             existing,
@@ -2633,11 +2641,13 @@ impl Runtime {
                     ));
                 }
                 let snapshot = self.project.capture();
+                let retained_source_bytes = self.project.retained_source_bytes()?;
                 let existing = self.project.storage();
                 let fault = self.fault;
                 let response = self
                     .start(Purpose::Save, 0, move |job, _, watchdog| Work::Save {
                         snapshot,
+                        retained_source_bytes,
                         existing,
                         target,
                         fault,

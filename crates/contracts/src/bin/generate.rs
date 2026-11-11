@@ -500,7 +500,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("SECTION_SCHEMA_VERSION", u64::from(SECTION_SCHEMA_VERSION)),
         ("SECTION_HEADER_BYTES", SECTION_HEADER_BYTES as u64),
         ("MAX_SOURCE_BYTES", u64::from(MAX_SOURCE_BYTES)),
-        ("MAX_LIVE_SOURCE_BYTES", u64::from(MAX_LIVE_SOURCE_BYTES)),
         ("MAX_STEP_ENTITIES", u64::from(MAX_STEP_ENTITIES)),
         ("MAX_NATIVE_FACES", u64::from(MAX_NATIVE_FACES)),
         ("MAX_DEFINITIONS", u64::from(MAX_DEFINITIONS)),
@@ -557,10 +556,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             u64::from(MAX_PROJECT_MANIFEST_BYTES),
         ),
         ("MAX_PROJECT_HISTORY", MAX_PROJECT_HISTORY as u64),
-        (
-            "MAX_PROJECT_STORED_SOURCE_BYTES",
-            MAX_PROJECT_STORED_SOURCE_BYTES,
-        ),
         (
             "MAX_PROJECT_STORED_ASSETS",
             MAX_PROJECT_STORED_ASSETS as u64,

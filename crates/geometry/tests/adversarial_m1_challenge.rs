@@ -12,7 +12,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-use spiling_contracts::geometry::{GeometryErrorCode, MAX_SOURCE_BYTES, SourceUnit};
+use spiling_contracts::geometry::{GeometryErrorCode, SourceUnit};
 use spiling_geometry::{from_step_bytes, from_step_bytes_with_cancel, from_step_file};
 
 fn fixtures_dir() -> PathBuf {
@@ -240,18 +240,6 @@ fn challenge_cancellation_pre_aborts_cleanly() {
         err.code,
         GeometryErrorCode::Cancelled,
         "must report Cancelled"
-    );
-}
-
-#[test]
-fn challenge_max_source_bytes_exceeded() {
-    let huge = vec![b' '; MAX_SOURCE_BYTES as usize + 1];
-    let res = from_step_bytes(&huge);
-    assert!(res.is_err(), "must reject oversized source");
-    assert_eq!(
-        res.unwrap_err().code,
-        GeometryErrorCode::ResourceLimit,
-        "must report ResourceLimit"
     );
 }
 

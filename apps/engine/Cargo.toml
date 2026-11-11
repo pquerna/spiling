@@ -11,6 +11,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 spiling-analysis = { path = "../../crates/analysis" }
 spiling-chunks.workspace = true
 spiling-contracts.workspace = true

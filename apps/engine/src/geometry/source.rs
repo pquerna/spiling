@@ -13,7 +13,7 @@ pub struct Captured {
 
 pub fn capture(
     source: NativePath,
-    remaining: u32,
+    remaining: usize,
     cancel: &AtomicBool,
 ) -> Result<Captured, GeometryError> {
     check_cancel(cancel)?;
@@ -42,16 +42,30 @@ pub fn capture(
             format!("{label}: source is not a regular file"),
         ));
     }
-    let limit = remaining.min(MAX_SOURCE_BYTES);
-    if before.len() > u64::from(limit) {
+    let limit = remaining.min(MAX_SOURCE_BYTES as usize);
+    if before.len() > limit as u64 {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
             format!("{label}: source bytes exceed remaining budget"),
         ));
     }
     let modified = before.modified().map_err(io_error)?;
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    let mut reader = (&file).take(u64::from(limit) + 1);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(before.len() as usize)
+        .map_err(|_| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                format!("{label}: cannot allocate captured source"),
+            )
+        })?;
+    if bytes.capacity() > limit {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "captured source capacity exceeds admission",
+        ));
+    }
+    let mut reader = (&file).take(limit as u64 + 1);
     let mut block = [0; 64 * 1024];
     loop {
         check_cancel(cancel)?;
@@ -59,10 +73,16 @@ pub fn capture(
         if count == 0 {
             break;
         }
-        if bytes.len() + count > limit as usize {
+        if bytes.len() + count > limit {
             return Err(error(
                 GeometryErrorCode::ResourceLimit,
                 format!("{label}: source bytes exceed remaining budget"),
+            ));
+        }
+        if bytes.len() + count > before.len() as usize {
+            return Err(error(
+                GeometryErrorCode::SourceChanged,
+                format!("{label}: source grew during capture"),
             ));
         }
         bytes.extend_from_slice(&block[..count]);

@@ -4,13 +4,12 @@
 
 //! Checked project meaning above the closed PTAC container representation.
 use super::{
-    MAX_APPEARANCE_RETAINED_BYTES, MAX_RETAINED_SOURCE_BYTES, MAX_SOURCE_BYTES, ManufacturingAsset,
-    PaletteAsset, Project, SaveSnapshot, Snapshot, SourceAsset, SurfaceImageAsset, error, invalid,
-    validate_snapshot,
+    MAX_APPEARANCE_RETAINED_BYTES, ManufacturingAsset, PaletteAsset, Project, SaveSnapshot,
+    Snapshot, SourceAsset, SurfaceImageAsset, error, invalid, validate_snapshot,
 };
 use spiling_contracts::{
     appearance::{MAX_PALETTE_BYTES, PreparedPalette},
-    geometry::{DefinitionId, SourceHash},
+    geometry::{DefinitionId, MAX_SOURCE_BYTES, SourceHash},
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_PROGRAM_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES,
@@ -166,7 +165,9 @@ pub struct LoadBudgets {
 impl LoadBudgets {
     pub const MAXIMUM: Self = Self {
         analysis_bytes: super::MAX_RETAINED_ANALYSIS_FIELD_BYTES,
-        source_bytes: MAX_RETAINED_SOURCE_BYTES,
+        // No Core-owned RAM policy. The engine supplies actual source growth;
+        // per-object PTAC/identity admission remains independent.
+        source_bytes: usize::MAX,
         manufacturing_bytes: MAX_MANUFACTURING_RETAINED_BYTES as usize,
         image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES,
         appearance_bytes: MAX_APPEARANCE_RETAINED_BYTES,
@@ -378,6 +379,7 @@ fn load_assets(
     manifest: &ProjectManifest,
     capture: &Capture<'_>,
     budgets: LoadBudgets,
+    reuse_sources: &[Arc<SourceAsset>],
     cancel: &AtomicBool,
 ) -> Result<Snapshot, ProjectError> {
     validate_closure(manifest, capture)?;
@@ -438,17 +440,43 @@ fn load_assets(
             record, bytes,
         )?));
     }
-    let mut source_budget = budgets.source_bytes.min(MAX_RETAINED_SOURCE_BYTES);
+    let mut source_budget = budgets.source_bytes;
     // Definitions of several solids in one source share its one allocation.
     let mut loaded = BTreeMap::new();
+    let reusable: BTreeMap<_, _> = reuse_sources
+        .iter()
+        .map(|source| {
+            (
+                source.record.provenance.source_hash.clone(),
+                Arc::clone(&source.bytes),
+            )
+        })
+        .collect();
     for record in &manifest.definitions {
         let bytes = match loaded.get(&record.provenance.source_hash) {
             Some(bytes) => Arc::clone(bytes),
+            None if reusable.contains_key(&record.provenance.source_hash) => {
+                let bytes = &reusable[&record.provenance.source_hash];
+                let id = object_id(&record.provenance.source_hash);
+                if capture.object_length(id).map_err(ptac_error)? != bytes.len() {
+                    return Err(error(
+                        ProjectErrorCode::CorruptAsset,
+                        "retained source length differs from saved object",
+                    ));
+                }
+                // Freshly verify the actual saved chunks and object hash even
+                // when the immutable in-memory payload can be shared.
+                capture
+                    .stream_object(id, MAX_SOURCE_BYTES as usize, cancel, |_| Ok(()))
+                    .map_err(ptac_error)?;
+                loaded.insert(record.provenance.source_hash.clone(), Arc::clone(bytes));
+                Arc::clone(bytes)
+            }
             None => {
                 let bytes = Arc::new(read_asset(
                     capture,
                     &record.provenance.source_hash,
-                    source_budget.min(MAX_SOURCE_BYTES),
+                    source_budget.min(MAX_SOURCE_BYTES as usize),
                     None,
                     cancel,
                 )?);
@@ -587,6 +615,7 @@ pub fn open(
         cancel,
         None,
         LoadBudgets::MAXIMUM,
+        &[],
     )
 }
 
@@ -597,6 +626,7 @@ pub fn open_reusing(
     cancel: &AtomicBool,
     existing: Option<Arc<Storage>>,
     budgets: LoadBudgets,
+    reuse_sources: &[Arc<SourceAsset>],
 ) -> Result<LoadedProject, ProjectError> {
     cancelled(cancel)?;
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
@@ -630,7 +660,7 @@ pub fn open_reusing(
     let mut manifest = parse_manifest(&capture.root)?;
     let guard = parse_guard(&capture.guard)?;
     guard.dominates(&manifest)?;
-    let snapshot = load_assets(&manifest, &capture, budgets, cancel)?;
+    let snapshot = load_assets(&manifest, &capture, budgets, reuse_sources, cancel)?;
     let binding = StorageBinding {
         container: Arc::downgrade(&storage.container),
         heads: capture.heads,
@@ -806,7 +836,9 @@ fn inputs(objects: &BTreeMap<Member, StoredBytes>) -> Vec<ObjectInput<'_>> {
         .collect()
 }
 
-pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, ProjectError> {
+pub(crate) fn retained_source_allocations(
+    project: &Project,
+) -> Result<BTreeMap<*const Vec<u8>, usize>, ProjectError> {
     let staged: Vec<_> = {
         let staged = project.staged_appearance.lock().map_err(|_| {
             error(
@@ -817,7 +849,6 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
         staged.iter().filter_map(Weak::upgrade).collect()
     };
     let mut sources = BTreeMap::new();
-    let mut manufacturing = BTreeMap::new();
     for snapshot in std::iter::once(&project.current)
         .chain(project.undo.iter())
         .chain(project.redo.iter())
@@ -826,6 +857,26 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
         for asset in snapshot.sources.values() {
             sources.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
         }
+    }
+    Ok(sources)
+}
+
+pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, ProjectError> {
+    let staged: Vec<_> = {
+        let staged = project.staged_appearance.lock().map_err(|_| {
+            error(
+                ProjectErrorCode::Io,
+                "prepared snapshot accounting lock poisoned",
+            )
+        })?;
+        staged.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut manufacturing = BTreeMap::new();
+    for snapshot in std::iter::once(&project.current)
+        .chain(project.undo.iter())
+        .chain(project.redo.iter())
+        .chain(staged.iter())
+    {
         for asset in snapshot
             .layouts
             .iter()
@@ -852,8 +903,7 @@ pub(crate) fn remaining_budgets(project: &Project) -> Result<LoadBudgets, Projec
                     .chain(staged.iter().map(Arc::as_ref)),
             ),
         ),
-        source_bytes: MAX_RETAINED_SOURCE_BYTES
-            .saturating_sub(allocation_sum(sources.values().copied())?),
+        source_bytes: usize::MAX.saturating_sub(project.retained_source_bytes()?),
         manufacturing_bytes: (MAX_MANUFACTURING_RETAINED_BYTES as usize)
             .saturating_sub(allocation_sum(manufacturing.values().copied())?),
         image_bytes: MAX_SURFACE_IMAGE_RETAINED_BYTES

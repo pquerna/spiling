@@ -6849,6 +6849,7 @@ dependencies = [
  "spiling-geometry",
  "spiling-manufacturing",
  "spiling-surface-fields",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -6893,6 +6894,7 @@ dependencies = [
  "solidcraft-step",
  "spiling-contracts",
  "step-p21",
+ "tempfile",
 ]
 
 [[package]]

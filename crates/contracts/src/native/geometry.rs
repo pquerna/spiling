@@ -56,7 +56,6 @@ impl TryFrom<rpc::GeometryLimits> for GeometryLimits {
     fn try_from(value: rpc::GeometryLimits) -> Result<Self, String> {
         let value = Self {
             source_bytes: value.source_bytes,
-            live_source_bytes: value.live_source_bytes,
             step_entities: value.step_entities,
             native_faces: value.native_faces,
             definitions: value.definitions,
@@ -87,7 +86,6 @@ impl TryFrom<GeometryLimits> for rpc::GeometryLimits {
         }
         let value = Self {
             source_bytes: value.source_bytes,
-            live_source_bytes: value.live_source_bytes,
             step_entities: value.step_entities,
             native_faces: value.native_faces,
             definitions: value.definitions,

@@ -20,8 +20,10 @@ pub const KERNEL_NAME: &str = "solidcore";
 
 pub const IMPORT_PROFILE: &str = "step-native-trimmed-v2";
 pub const MESH_PROFILE: &str = "mesh-trimmed-mm-0.05-v2";
-pub const MAX_SOURCE_BYTES: u32 = 16 * 1024 * 1024;
-pub const MAX_LIVE_SOURCE_BYTES: u32 = 64 * 1024 * 1024;
+/// One immutable PTAC source object, matching its chunked representation bound.
+/// This is a storage/representation limit, never a live-memory allowance.
+/// The engine independently admits source/proof growth from current headroom.
+pub const MAX_SOURCE_BYTES: u32 = 1024 * 1024 * 1024;
 pub const MAX_STEP_ENTITIES: u32 = 100_000;
 pub const MAX_NATIVE_FACES: u32 = 50_000;
 pub const MAX_DEFINITIONS: u32 = 32;
@@ -1804,7 +1806,6 @@ pub struct SectionSummary {
 #[serde(deny_unknown_fields)]
 pub struct GeometryLimits {
     pub source_bytes: u32,
-    pub live_source_bytes: u32,
     pub step_entities: u32,
     pub native_faces: u32,
     pub definitions: u32,
@@ -1823,7 +1824,6 @@ pub struct GeometryLimits {
 impl GeometryLimits {
     pub const FROZEN: Self = Self {
         source_bytes: MAX_SOURCE_BYTES,
-        live_source_bytes: MAX_LIVE_SOURCE_BYTES,
         step_entities: MAX_STEP_ENTITIES,
         native_faces: MAX_NATIVE_FACES,
         definitions: MAX_DEFINITIONS,

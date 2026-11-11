@@ -363,10 +363,12 @@ fn source_digest_and_definition_identity_are_checked() {
 }
 
 #[test]
-fn retained_raw_byte_limit_counts_history_not_only_active_sources() {
+fn source_retention_measures_history_without_a_fixed_small_memory_quota() {
     let mut project = Project::new();
+    let mut expected = 0;
     for tag in 1..=4u8 {
-        let source = asset(vec![tag; MAX_SOURCE_BYTES], "large.step");
+        let source = asset(vec![tag; 20 * 1024 * 1024], "large.step");
+        expected += source.bytes.capacity();
         edit(
             &mut project,
             Edit::Import {
@@ -382,26 +384,17 @@ fn retained_raw_byte_limit_counts_history_not_only_active_sources() {
         );
     }
     assert!(project.snapshot().sources.is_empty());
-    assert_eq!(
-        project
-            .retained_sources()
-            .iter()
-            .map(|source| source.bytes.len())
-            .sum::<usize>(),
-        MAX_RETAINED_SOURCE_BYTES
+    assert_eq!(project.retained_source_bytes().unwrap(), expected);
+    // Host-selected pressure is enforced by the engine. A retained-history
+    // byte count is not itself evidence that another valid source must refuse.
+    edit(
+        &mut project,
+        Edit::Import {
+            source: asset(vec![5], "next.step"),
+            pose: RigidPoseMm::IDENTITY,
+        },
     );
-    let before = project.info();
-    assert_eq!(
-        project
-            .prepare(Edit::Import {
-                source: asset(vec![5], "over-budget.step"),
-                pose: RigidPoseMm::IDENTITY
-            })
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    assert_eq!(project.info(), before);
+    assert_eq!(project.retained_source_bytes().unwrap(), expected + 1);
 }
 
 pub(crate) fn manufacturing_intent() -> ManufacturingIntent {

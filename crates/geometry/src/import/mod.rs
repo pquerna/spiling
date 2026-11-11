@@ -267,7 +267,6 @@ pub(crate) fn import_step(
     query_proof_byte_limit: usize,
 ) -> Result<Definition, GeometryError> {
     check_cancel(cancel)?;
-    let query_proof_byte_limit = query_proof_byte_limit.min(MAX_QUERY_PROOF_BYTES);
     if face_limit == 0 || face_limit > MAX_NATIVE_FACES {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
@@ -731,18 +730,51 @@ pub fn from_step_solid_with_cancel(
 /// Reads a native Definition from a STEP file on disk.
 pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Definition, GeometryError> {
     use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|cause| {
+        error(
+            GeometryErrorCode::SourceIo,
+            &format!("failed to open STEP file: {cause}"),
+        )
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|cause| error(GeometryErrorCode::SourceIo, &cause.to_string()))?
+        .len();
+    if length > u64::from(MAX_SOURCE_BYTES) {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "STEP source exceeds immutable object representation",
+        ));
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take(u64::from(MAX_SOURCE_BYTES) + 1)
-                .read_to_end(&mut bytes)
-        })
+    bytes.try_reserve_exact(length as usize).map_err(|_| {
+        error(
+            GeometryErrorCode::ResourceLimit,
+            "cannot allocate captured STEP source",
+        )
+    })?;
+    // A changed source cannot force geometric Vec growth beyond its captured length.
+    (&mut file)
+        .take(length)
+        .read_to_end(&mut bytes)
         .map_err(|cause| {
-            GeometryError::new(
+            error(
                 GeometryErrorCode::SourceIo,
-                format!("failed to read STEP file: {cause}"),
+                &format!("failed to read STEP file: {cause}"),
             )
         })?;
+    let mut extra = [0u8; 1];
+    if bytes.len() as u64 != length
+        || file
+            .read(&mut extra)
+            .map_err(|cause| error(GeometryErrorCode::SourceIo, &cause.to_string()))?
+            != 0
+    {
+        return Err(error(
+            GeometryErrorCode::SourceChanged,
+            "STEP source changed during capture",
+        ));
+    }
     from_step_bytes(&bytes)
 }
 

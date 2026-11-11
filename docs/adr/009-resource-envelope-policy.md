@@ -55,14 +55,14 @@ operator constraints and never qualify a product rejection as correct.
 Current transitional geometry-library envelopes remain enforced; responsiveness
 is a separate obligation:
 
-| Envelope                                  | Default                                        |
-| ----------------------------------------- | ---------------------------------------------- |
-| one interactive query or explicit section | monitored work; no unit ceiling                |
-| one complete compile                      | monitored work; no unit ceiling                |
-| prepared-section pool                     | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live    |
-| import query proof                        | `MAX_QUERY_PROOF_BYTES` = 256 MiB live         |
-| directional owner/query scratch           | `MAX_DIRECTIONAL_SCRATCH_BYTES` = 256 MiB live |
-| one display candidate proof               | `DISPLAY_PROOF_BYTES` = 256 MiB live           |
+| Envelope                                  | Default                                                          |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| one interactive query or explicit section | monitored work; no unit ceiling                                  |
+| one complete compile                      | monitored work; no unit ceiling                                  |
+| prepared-section pool                     | `MAX_PREPARED_SECTION_BYTES` = 512 MiB live                      |
+| standalone import query proof             | `MAX_QUERY_PROOF_BYTES` = 256 MiB live; explicit caller override |
+| directional owner/query scratch           | `MAX_DIRECTIONAL_SCRATCH_BYTES` = 256 MiB live                   |
+| one display candidate proof               | `DISPLAY_PROOF_BYTES` = 256 MiB live                             |
 
 Work is cumulative per operation and charged through one guard; a retry, cache
 reuse, layer or API boundary does not reset it. Byte limits are live bounds for
@@ -107,12 +107,33 @@ A later engine-owned aggregate reservation still has to account
 for coexisting definitions, jobs, meshes and outputs rather than summing these
 independent maxima.
 
-These are geometry-library ceilings, not new engine residency limits. Engine
-import still reserves incoming sources and retained proof/index allocations
-against the remaining 64 MiB source/history envelope; it passes that smaller
-proof allowance into import. The 256 MiB standalone proof ceiling does not
-override that reservation. Packed output, source residency, native proof
-scratch and renderer/GPU limits retain distinct owners.
+The engine owns source/proof admission for import, open and missing previous-root
+captures during Save As. It observes available system RAM, the current process's
+container/cgroup ancestor headroom and finite POSIX address-space headroom. Half
+of the smallest observed headroom admits additional source/proof growth, leaving
+room for opaque native transients, the workbench and other applications. This is
+proportional to the current machine, not a fixed model-size allowance. Optional
+`SPILING_SOURCE_MEMORY_BYTES` selects a positive total byte allowance for retained
+raw sources and measured native proofs. Invalid configuration refuses startup.
+Existing residency already reduces observed OS headroom; subtract measured
+retained bytes again only from that explicit total. The worker passes the
+remaining growth into native proof construction without a hidden standalone
+256MiB clamp. Other scratch, mesh, inventory and packed-output limits remain
+separate capacity work.
+
+Core owns semantic source identity and persistence, measures distinct actual
+source Vec capacities across Current/history/prepared snapshots and accepts a
+caller-selected extra allocation budget. Equal hashes with different allocations
+still consume RAM. Saved return freshly streams and verifies actual stored
+chunks/object hashes before sharing unchanged source Arcs; native definitions
+and display caches retain their existing identity-bound reuse. Required BREP and
+tessellation residency is useful work, not waste to eliminate with tiny limits.
+Avoid duplicate allocations and repeated native/display construction instead.
+One source object is bounded by PTAC's 1 GiB immutable-object representation, not
+an arbitrary 16 MiB RAM gate. The native parser/BREP still requires a complete
+source; this policy does not provide streaming BREP construction or exact RSS
+enforcement. Packed output, source residency, native proof scratch and
+renderer/GPU memory retain distinct owners.
 
 Section assembly sorts original endpoint uses and builds an exact successor
 permutation instead of repeatedly scanning all arcs. Degree-one incidence,

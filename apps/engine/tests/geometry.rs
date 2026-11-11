@@ -1757,3 +1757,155 @@ async fn equivalent_world_planes_preserve_sections_for_accepted_near_unit_poses(
     }
     client.shutdown().await.unwrap();
 }
+
+// Verbose valid STEP tests byte capture/persistence, not complex-BREP scalability.
+// Write in blocks so the test itself does not retain a second large source Vec.
+fn verbose_step(path: &std::path::Path, tag: u8) {
+    use std::io::Write;
+    let source = include_bytes!("../../../fixtures/geometry/box-mm.step");
+    let split = source.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+    let mut file = std::fs::File::create(path).unwrap();
+    file.write_all(&source[..split]).unwrap();
+    file.write_all(b"/* Original exporter metadata: ").unwrap();
+    let block = [tag; 64 * 1024];
+    for _ in 0..272 {
+        file.write_all(&block).unwrap();
+    }
+    file.write_all(b" */\n").unwrap();
+    file.write_all(&source[split..]).unwrap();
+}
+
+async fn project_operation(
+    client: &mut EngineClient,
+    request: ProjectCommand,
+) -> NativeOperationView {
+    let ProjectResponse::OperationAccepted { operation } = client.project(request).await.unwrap()
+    else {
+        panic!("expected asynchronous project operation");
+    };
+    let job = wait_job(client, operation.name).await;
+    assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+    job
+}
+
+#[tokio::test]
+async fn source_capture_and_saved_return_exceed_retired_byte_quotas_without_remeshing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let mut paths = Vec::new();
+    // Four unique captures also cross the former 64 MiB aggregate source quota.
+    for index in 0..4 {
+        let path = directory.path().join(format!("verbose-{index}.step"));
+        verbose_step(&path, b'A' + index);
+        let operation = start_import(
+            &mut client,
+            NativePath::from_os_str(path.as_os_str()).unwrap(),
+            RigidPoseMm {
+                translation_mm: [f64::from(index) * 40.0, 0.0, 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        )
+        .await;
+        let job = wait_job(&mut client, operation).await;
+        assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+        paths.push(path);
+    }
+    let before = scene(&mut client).await;
+    assert_eq!(before.definition_count, 4);
+    let original = definitions(&mut client, &before).await;
+    for definition in &original {
+        assert_eq!(definition.face_count, 6);
+        assert_box_enclosure(definition.bounds_mm);
+        assert!(!mesh(&mut client, definition).await.is_empty());
+    }
+    let project = directory.path().join("verbose.spil");
+    project_operation(
+        &mut client,
+        ProjectCommand::Save {
+            session_id: before.session_id.clone(),
+            base_revision: before.revision,
+            target: Some(NativePath::from_os_str(project.as_os_str()).unwrap()),
+        },
+    )
+    .await;
+    for path in paths {
+        std::fs::remove_file(path).unwrap();
+    }
+    project_operation(
+        &mut client,
+        ProjectCommand::Open {
+            session_id: before.session_id.clone(),
+            base_revision: before.revision,
+            path: NativePath::from_os_str(project.as_os_str()).unwrap(),
+            read_only: false,
+            recover_previous: false,
+            discard_changes: false,
+        },
+    )
+    .await;
+    let warm = scene(&mut client).await;
+    assert_eq!(
+        definitions(&mut client, &warm).await,
+        original,
+        "unchanged native definitions and packed display must be reused"
+    );
+    client.shutdown().await.unwrap();
+
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let empty = scene(&mut client).await;
+    project_operation(
+        &mut client,
+        ProjectCommand::Open {
+            session_id: empty.session_id,
+            base_revision: empty.revision,
+            path: NativePath::from_os_str(project.as_os_str()).unwrap(),
+            read_only: false,
+            recover_previous: false,
+            discard_changes: false,
+        },
+    )
+    .await;
+    let cold = scene(&mut client).await;
+    let restored = definitions(&mut client, &cold).await;
+    assert_eq!(restored.len(), original.len());
+    for (actual, expected) in restored.iter().zip(&original) {
+        assert_eq!(actual.definition_id, expected.definition_id);
+        assert_eq!(actual.provenance, expected.provenance);
+        assert_eq!(actual.bounds_mm, expected.bounds_mm);
+        assert!(!mesh(&mut client, actual).await.is_empty());
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_source_memory_refusal_preserves_scene_and_allows_following_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut launch = tokio::process::Command::new(ENGINE);
+    launch.env("SPILING_SOURCE_MEMORY_BYTES", (8 * 1024 * 1024).to_string());
+    let mut client = EngineClient::spawn_command(launch, directory.path().join("ledger"))
+        .await
+        .unwrap();
+    let before = import(&mut client, "box-mm.step", RigidPoseMm::IDENTITY).await;
+    let revision = project_revision(&client).await;
+    let pid = client.pid();
+    let path = directory.path().join("verbose.step");
+    verbose_step(&path, b'Z');
+    let operation = start_import(
+        &mut client,
+        NativePath::from_os_str(path.as_os_str()).unwrap(),
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let job = wait_job(&mut client, operation).await;
+    assert_eq!(job.status, JobStatus::Failed, "{job:?}");
+    assert!(job.outputs.is_empty());
+    assert_eq!(geometry_job_error(job), GeometryErrorCode::ResourceLimit);
+    assert_eq!(scene(&mut client).await, before);
+    assert_eq!(project_revision(&client).await, revision);
+    assert_eq!(client.pid(), pid);
+    let after = import(&mut client, "box-mm.step", RigidPoseMm::IDENTITY).await;
+    assert_eq!(after.definition_count, 1);
+    assert_eq!(after.occurrence_count, 2);
+    client.ping().await.unwrap();
+    client.shutdown().await.unwrap();
+}

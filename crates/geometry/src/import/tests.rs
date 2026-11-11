@@ -95,15 +95,19 @@ fn lexical_caps_ignore_strings_comments_and_binary_strings() {
     );
 }
 #[test]
-fn source_cap_is_checked_before_parser() {
-    let bytes = vec![b' '; MAX_SOURCE_BYTES as usize + 1];
+fn source_object_representation_is_checked_before_file_allocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oversized.step");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(u64::from(MAX_SOURCE_BYTES) + 1)
+        .unwrap();
     assert_eq!(
-        from_step_bytes_with_cancel(&bytes, &cancelled())
-            .unwrap_err()
-            .code,
+        from_step_file(path).unwrap_err().code,
         GeometryErrorCode::ResourceLimit
     );
 }
+
 #[test]
 fn canonical_oriented_face_use_survives_conversion_and_large_entity_ids() {
     let source = fixture("box-mm.step");

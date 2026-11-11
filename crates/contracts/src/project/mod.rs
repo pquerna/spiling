@@ -26,7 +26,6 @@ use ts_rs::TS;
 pub const PROJECT_FORMAT_VERSION: u32 = 10;
 pub const MAX_PROJECT_MANIFEST_BYTES: u32 = 1_048_576;
 pub const MAX_PROJECT_HISTORY: usize = 64;
-pub const MAX_PROJECT_STORED_SOURCE_BYTES: u64 = 268_435_456;
 pub const MAX_PROJECT_STORED_ASSETS: usize = 128;
 pub const MAX_PROJECT_ERROR_BYTES: usize = 2048;
 

@@ -8,6 +8,7 @@ mod jobs;
 mod library;
 mod native;
 mod performance;
+mod resources;
 mod session;
 use geometry::{Control, Reply};
 use jobs::Jobs;
@@ -990,6 +991,7 @@ fn parse_compute_settings(
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    resources::source_memory_limit(std::env::var_os(resources::SOURCE_MEMORY_ENV))?;
     let mut args = std::env::args_os().skip(1);
     let mut store = None;
     let mut library_path = None;

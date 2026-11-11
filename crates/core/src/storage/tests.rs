@@ -142,6 +142,7 @@ fn os_writer_lock_readonly_snapshot_and_reused_writer_are_independent() {
         &flag(),
         writer.storage(),
         LoadBudgets::MAXIMUM,
+        &[],
     )
     .unwrap();
     assert!(Arc::ptr_eq(&reused.storage, &writer.storage().unwrap()));
@@ -172,6 +173,7 @@ fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comp
         &flag(),
         project.storage(),
         LoadBudgets::MAXIMUM,
+        &[],
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -213,6 +215,7 @@ fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
             &cancel,
             project.storage(),
             LoadBudgets::MAXIMUM,
+            &[],
         )
         .unwrap_err()
         .code,
@@ -249,6 +252,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
             source_bytes: bytes - 1,
             ..LoadBudgets::MAXIMUM
         },
+        &[],
     )
     .unwrap_err();
     assert_eq!(error.code, ProjectErrorCode::ResourceLimit);
@@ -269,6 +273,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
             source_bytes: bytes,
             ..LoadBudgets::MAXIMUM
         },
+        &[],
     )
     .unwrap();
     assert_eq!(loaded.manifest, project.capture().manifest);
@@ -442,6 +447,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
                 manufacturing_bytes: count - 1,
                 ..LoadBudgets::MAXIMUM
             },
+            &[],
         )
         .unwrap_err()
         .code,
@@ -464,6 +470,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             manufacturing_bytes: count,
             ..LoadBudgets::MAXIMUM
         },
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -496,6 +503,7 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
                 image_bytes: size - 1,
                 ..LoadBudgets::MAXIMUM
             },
+            &[],
         )
         .unwrap_err()
         .code,
@@ -522,6 +530,7 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
             image_bytes: size,
             ..LoadBudgets::MAXIMUM
         },
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -867,6 +876,7 @@ fn appearance_staged_open_enforces_remaining_budget_without_releasing_writer() {
                 appearance_bytes: 0,
                 ..LoadBudgets::MAXIMUM
             },
+            &[],
         )
         .unwrap_err()
         .code,
@@ -1345,6 +1355,7 @@ fn recovery_binding_refuses_intervening_publication_and_preserves_live_highwater
         &flag(),
         project.storage(),
         LoadBudgets::MAXIMUM,
+        &[],
     )
     .unwrap();
     let mut recovered = Project::from_loaded(loaded).unwrap();
@@ -1603,6 +1614,7 @@ fn uncertainty_receipts_keep_confirmed_baseline_and_block_unknown_writes_until_r
         &flag(),
         project.storage(),
         LoadBudgets::MAXIMUM,
+        &[],
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -1700,7 +1712,8 @@ fn samewriter_symlink_aliases_are_never_reused_for_open_or_save() {
                 false,
                 &flag(),
                 project.storage(),
-                LoadBudgets::MAXIMUM
+                LoadBudgets::MAXIMUM,
+                &[],
             )
             .is_err()
         );
@@ -1763,7 +1776,7 @@ fn unconfirmed_saveas_attaches_target_without_claiming_a_confirmed_saved_revisio
 fn saveas_capture_budget_includes_uncommitted_prepared_source_allocations() {
     let project = imported();
     let before = remaining_budgets(&project).unwrap();
-    let incoming = asset(vec![7; MAX_SOURCE_BYTES], "prepared.step");
+    let incoming = asset(vec![7; 1024 * 1024], "prepared.step");
     let prepared = project
         .prepare(Edit::Import {
             source: incoming.clone(),
@@ -2120,4 +2133,69 @@ fn empty_project_has_a_complete_first_snapshot_and_zero_saved_revision() {
     assert!(!reopened.info().dirty);
     assert!(reopened.snapshot().sources.is_empty());
     assert_eq!(reopened.info().saved_revision, Some(ProjectRevision::ZERO));
+}
+
+#[test]
+fn saved_source_reuse_shares_payload_without_skipping_disk_integrity_or_cancellation() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let before = project.info();
+    let sources = project.retained_sources();
+    let source = sources.first().unwrap();
+    let budgets = LoadBudgets {
+        source_bytes: 0,
+        ..LoadBudgets::MAXIMUM
+    };
+    let loaded = open_reusing(
+        &sandbox.target(),
+        false,
+        false,
+        &flag(),
+        project.storage(),
+        budgets,
+        &sources,
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &loaded.sources[&source.record.definition_id].bytes,
+        &source.bytes
+    ));
+    assert_eq!(loaded.manifest.project_id, before.project_id);
+    drop(loaded);
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    assert_eq!(
+        open_reusing(
+            &sandbox.target(),
+            false,
+            false,
+            &cancelled,
+            project.storage(),
+            budgets,
+            &sources,
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::Cancelled
+    );
+    // A correct in-memory copy must not hide a damaged saved source chunk.
+    connection(&sandbox.target()).execute(
+        "UPDATE chunks SET codec=0,data=zeroblob(raw_length) WHERE chunk_id IN (SELECT chunk_id FROM object_chunks WHERE object_id=?1)",
+        [object_id(&source.record.provenance.source_hash).as_bytes().as_slice()],
+    ).unwrap();
+    assert_eq!(
+        open_reusing(
+            &sandbox.target(),
+            false,
+            false,
+            &flag(),
+            project.storage(),
+            budgets,
+            &sources,
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::InvalidProject
+    );
+    assert_eq!(project.info(), before);
 }

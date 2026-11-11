@@ -39,8 +39,6 @@ pub(crate) fn error(code: ProjectErrorCode, message: impl AsRef<str>) -> Project
 pub(crate) fn invalid(message: impl AsRef<str>) -> ProjectError {
     error(ProjectErrorCode::InvalidProject, message)
 }
-pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_APPEARANCE_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Immutable exact imported bytes and separately content-addressed canonical JSON.
@@ -153,10 +151,10 @@ impl SourceAsset {
         Ok(asset)
     }
     pub(crate) fn validate(&self) -> Result<(), ProjectError> {
-        if self.bytes.is_empty() || self.bytes.len() > MAX_SOURCE_BYTES {
+        if self.bytes.is_empty() || self.bytes.len() > MAX_SOURCE_BYTES as usize {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
-                "source asset must contain 1..16 MiB",
+                "source asset is empty or exceeds the immutable object representation",
             ));
         }
         self.record
@@ -440,6 +438,18 @@ pub struct SaveSnapshot {
     pub(crate) retained: Vec<Arc<Snapshot>>,
     pub(crate) remaining_budgets: Result<storage::LoadBudgets, ProjectError>,
 }
+impl SaveSnapshot {
+    /// Engine-selected growth for source objects missing from retained roots.
+    pub fn limit_source_growth(&mut self, bytes: usize) -> Result<(), ProjectError> {
+        let budgets = self
+            .remaining_budgets
+            .as_mut()
+            .map_err(|error| error.clone())?;
+        budgets.source_bytes = budgets.source_bytes.min(bytes);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Content {
     layouts: Vec<PrintLayoutRecord>,
@@ -761,6 +771,20 @@ impl Project {
     }
     pub fn storage(&self) -> Option<Arc<Storage>> {
         self.storage.clone()
+    }
+    /// Unique source allocations across Current, history and prepared candidates.
+    /// Host admission consumes this measurement; Core does not prescribe RAM.
+    pub fn retained_source_bytes(&self) -> Result<usize, ProjectError> {
+        storage::retained_source_allocations(self)?
+            .values()
+            .try_fold(0usize, |sum, bytes| {
+                sum.checked_add(*bytes).ok_or_else(|| {
+                    error(
+                        ProjectErrorCode::ResourceLimit,
+                        "retained source accounting overflow",
+                    )
+                })
+            })
     }
     pub fn retained_sources(&self) -> Vec<Arc<SourceAsset>> {
         let mut sources = BTreeMap::new();
@@ -2333,18 +2357,10 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
             "retained image allocation budget exceeded",
         ));
     }
-    if sources.len() > MAX_DEFINITIONS as usize
-        || sources
-            .values()
-            .map(|s| (Arc::as_ptr(&s.bytes), s.bytes.len()))
-            .collect::<BTreeMap<_, _>>()
-            .values()
-            .sum::<usize>()
-            > MAX_RETAINED_SOURCE_BYTES
-    {
+    if sources.len() > MAX_DEFINITIONS as usize {
         return Err(error(
             ProjectErrorCode::ResourceLimit,
-            "retained source budget exceeded",
+            "retained definition inventory exceeded",
         ));
     }
     if manufacturing

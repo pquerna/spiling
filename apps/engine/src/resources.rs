@@ -1,0 +1,185 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+//! Host admission belongs to the engine, not source validity or Core persistence.
+use spiling_contracts::geometry::{GeometryError, GeometryErrorCode};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+pub const SOURCE_MEMORY_ENV: &str = "SPILING_SOURCE_MEMORY_BYTES";
+
+pub fn source_memory_limit(value: Option<std::ffi::OsString>) -> Result<Option<usize>, String> {
+    value
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    format!("{SOURCE_MEMORY_ENV} must be a positive integer byte allowance")
+                })
+        })
+        .transpose()
+}
+
+fn resource(message: impl AsRef<str>) -> GeometryError {
+    GeometryError::new(GeometryErrorCode::ResourceLimit, message)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Headroom {
+    available: u64,
+    container: Option<u64>,
+    address_space: Option<u64>,
+}
+impl Headroom {
+    fn growth(self, retained: usize, selected: Option<usize>) -> usize {
+        // Keep half of currently available RAM for opaque native transients,
+        // the workbench and other applications. This is additional live memory,
+        // not a ceiling on total job size or a second charge for existing pins.
+        let available = self
+            .available
+            .min(self.container.unwrap_or(u64::MAX))
+            .min(self.address_space.unwrap_or(u64::MAX));
+        usize::try_from(available / 2)
+            .unwrap_or(usize::MAX)
+            .min(selected.map_or(usize::MAX, |maximum| maximum.saturating_sub(retained)))
+    }
+
+    fn current() -> Result<Self, GeometryError> {
+        let pid = sysinfo::get_current_pid()
+            .map_err(|_| resource("cannot observe engine memory headroom"))?;
+        let mut system = System::new();
+        system.refresh_memory();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let process = system
+            .process(pid)
+            .ok_or_else(|| resource("cannot observe engine process memory"))?;
+        if system.total_memory() == 0 {
+            return Err(resource("system memory observation is unavailable"));
+        }
+        // Process-specific cgroups include ancestor limits. System-wide cgroup
+        // information alone misses a nested service/container's actual bound.
+        let container = process.cgroup_limits().map(|limits| limits.free_memory);
+        #[cfg(unix)]
+        let address_space = {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: getrlimit only writes the initialized caller-owned structure.
+            if unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut limit) } == 0
+                && limit.rlim_cur != libc::RLIM_INFINITY
+            {
+                Some(limit.rlim_cur.saturating_sub(process.virtual_memory()))
+            } else {
+                None
+            }
+        };
+        #[cfg(not(unix))]
+        let address_space = None;
+        Ok(Self {
+            available: system.available_memory(),
+            container,
+            address_space,
+        })
+    }
+}
+
+/// Fresh additional source/proof capacity. Existing current/history/candidate
+/// allocations are already resident in the OS observation; only the explicitly
+/// selected total source allowance subtracts their accounted bytes again.
+pub fn source_growth(retained: usize) -> Result<usize, GeometryError> {
+    let selected = source_memory_limit(std::env::var_os(SOURCE_MEMORY_ENV)).map_err(resource)?;
+    let headroom = Headroom::current()?;
+    let growth = headroom.growth(retained, selected);
+    crate::diagnostic(
+        "info",
+        "source_memory_admission",
+        &format!(
+            "retained_bytes={retained} growth_bytes={growth} available_bytes={} container_headroom={:?} address_headroom={:?} selected_bytes={selected:?}",
+            headroom.available, headroom.container, headroom.address_space,
+        ),
+    );
+    Ok(growth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_follows_free_memory_container_and_selected_total_without_double_charging() {
+        let host = Headroom {
+            available: 96 << 30,
+            container: None,
+            address_space: None,
+        };
+        assert_eq!(host.growth(8 << 30, None), 48 << 30);
+        assert_eq!(host.growth(8 << 30, Some(12 << 30)), 4 << 30);
+        assert_eq!(host.growth(12 << 30, Some(8 << 30)), 0);
+        let constrained = Headroom {
+            container: Some(2 << 30),
+            ..host
+        };
+        assert_eq!(constrained.growth(8 << 30, None), 1 << 30);
+        assert_eq!(
+            Headroom {
+                address_space: Some(800),
+                ..constrained
+            }
+            .growth(0, None),
+            400
+        );
+        assert_eq!(
+            Headroom {
+                container: Some(0),
+                ..host
+            }
+            .growth(0, None),
+            0
+        );
+        assert!(
+            Headroom {
+                available: 8 << 30,
+                ..host
+            }
+            .growth(0, None)
+                < host.growth(0, None)
+        );
+    }
+
+    #[test]
+    fn explicit_source_allowance_is_optional_and_invalid_configuration_is_not_ignored() {
+        assert_eq!(source_memory_limit(None).unwrap(), None);
+        assert_eq!(
+            source_memory_limit(Some("128000000".into())).unwrap(),
+            Some(128000000)
+        );
+        for value in [
+            "",
+            "0",
+            "-1",
+            "1.5",
+            "lots",
+            "999999999999999999999999999999",
+        ] {
+            assert!(source_memory_limit(Some(value.into())).is_err());
+        }
+    }
+
+    #[test]
+    fn current_process_memory_observation_has_no_fixed_small_allowance() {
+        let snapshot = Headroom::current().unwrap();
+        assert!(snapshot.available > 0);
+        let growth = snapshot.growth(0, None);
+        assert!(growth as u64 <= snapshot.available / 2);
+        if let Some(container) = snapshot.container {
+            assert!(growth as u64 <= container / 2);
+        }
+    }
+}

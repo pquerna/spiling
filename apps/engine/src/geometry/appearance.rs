@@ -41,7 +41,7 @@ pub(super) fn import_palette(
     // history or the old project to admit a new import.
     let input_limit = (remaining / 3).min(MAX_PALETTE_BYTES);
     let captured =
-        source::capture(path, input_limit as u32, cancel).map_err(super::project_geometry_error)?;
+        source::capture(path, input_limit, cancel).map_err(super::project_geometry_error)?;
     let metadata_reserve = std::mem::size_of::<PaletteRecord>() + 2048;
     let parsed_budget = remaining
         .saturating_sub(captured.bytes.capacity())

@@ -415,7 +415,6 @@ pub(super) fn read_solid(
             "native face cap exceeded",
         ));
     }
-    let byte_limit = byte_limit.min(super::MAX_QUERY_PROOF_BYTES);
     let mut bytes = 0usize;
     let mut axes = Vec::new();
     for face in faces {

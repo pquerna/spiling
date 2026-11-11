@@ -61,13 +61,21 @@ impl LiveSnapshot {
 }
 pub type Live = Arc<Mutex<LiveSnapshot>>;
 
+pub struct ImportRequest {
+    pub source: NativePath,
+    pub allowed_reuse: BTreeSet<DefinitionId>,
+    pub budget: MeshBudget,
+    pub retained_source_bytes: usize,
+}
+
 pub struct OpenRequest {
     pub path: NativePath,
+    pub reuse_sources: Vec<Arc<SourceAsset>>,
     pub read_only: bool,
     pub recover_previous: bool,
     pub existing: Option<Arc<Storage>>,
     pub allowed_reuse: BTreeSet<DefinitionId>,
-    pub retained_source_bytes: u32,
+    pub retained_source_bytes: usize,
     pub retained_manufacturing_bytes: u64,
     pub budget: MeshBudget,
     pub retained_surface_image_bytes: usize,
@@ -113,11 +121,7 @@ pub enum Work {
         base: spiling_contracts::project::ProjectRevision,
         application: spiling_contracts::manufacturing::ApplyOpticalConstruction,
     },
-    Import {
-        source: NativePath,
-        allowed_reuse: BTreeSet<DefinitionId>,
-        budget: MeshBudget,
-    },
+    Import(ImportRequest),
     ImportSurfaceImage {
         source: NativePath,
         canonical_budget: usize,
@@ -152,6 +156,7 @@ pub enum Work {
     Open(OpenRequest),
     Save {
         snapshot: SaveSnapshot,
+        retained_source_bytes: usize,
         existing: Option<Arc<Storage>>,
         target: Option<NativePath>,
         commit: crate::session::CommitToken,
@@ -481,25 +486,16 @@ fn run(
                 .and_then(|()| check_cancel(&cancel).map_err(super::project_geometry_error))
                 .map(|()| Product::SurfaceImage(asset))
                 .map_err(JobError::from),
-            Work::Import {
-                source,
-                allowed_reuse,
-                budget,
-            } => import(
-                source,
-                &definitions,
-                &allowed_reuse,
-                budget,
-                &cancel,
-                &mut display_work,
-                &report,
-            )
-            .map(|(parts, residents)| {
-                for resident in residents {
-                    pending.insert(resident.definition.id().clone(), resident);
-                }
-                Product::Import(parts)
-            }),
+            Work::Import(request) => {
+                import(request, &definitions, &cancel, &mut display_work, &report).map(
+                    |(parts, residents)| {
+                        for resident in residents {
+                            pending.insert(resident.definition.id().clone(), resident);
+                        }
+                        Product::Import(parts)
+                    },
+                )
+            }
             Work::Open(request) => open(request, &definitions, &cancel, &mut display_work, &report)
                 .map(
                     |Opened {
@@ -521,11 +517,17 @@ fn run(
                 ),
             Work::Save {
                 snapshot,
+                retained_source_bytes,
                 existing,
                 target,
                 commit,
                 fault,
-            } => save(snapshot, existing, target, commit, fault, &cancel).map(Product::Saved),
+            } => source_retention(retained_source_bytes, &definitions)
+                .map_err(JobError::from)
+                .and_then(|retained| {
+                    save(snapshot, existing, target, commit, fault, retained, &cancel)
+                })
+                .map(Product::Saved),
             Work::Compile(request) => {
                 compile(request, &definitions, &cancel).map(Product::Compiled)
             }
@@ -720,34 +722,23 @@ fn run(
 /// including an old copy of an ID that cannot use the dispatcher's cache.
 struct Capacity {
     definitions: u32,
-    source_bytes: u32,
-    /// Sources already charged: several solids of one source share its bytes.
-    charged_sources: BTreeSet<SourceHash>,
-    query_proof_bytes: usize,
+    source_bytes: usize,
+    /// Count live allocations, not hashes: a recapture of identical bytes is
+    /// another allocation, but several bodies of one capture share its Arc.
+    charged_sources: BTreeSet<*const Vec<u8>>,
     faces: u32,
     mesh: MeshBudget,
 }
 impl Capacity {
-    fn new(definitions: &BTreeMap<DefinitionId, Resident>, budget: MeshBudget) -> Self {
-        let mut charged_sources = BTreeSet::new();
+    fn new(
+        definitions: &BTreeMap<DefinitionId, Resident>,
+        budget: MeshBudget,
+        source_bytes: usize,
+    ) -> Self {
         Self {
             definitions: MAX_DEFINITIONS - definitions.len() as u32,
-            source_bytes: (MAX_LIVE_SOURCE_BYTES as usize).saturating_sub(
-                definitions.values().fold(0usize, |bytes, resident| {
-                    let source = if charged_sources
-                        .insert(resident.definition.provenance().source_hash.clone())
-                    {
-                        resident.definition.source_bytes() as usize
-                    } else {
-                        0
-                    };
-                    bytes
-                        .saturating_add(source)
-                        .saturating_add(resident.definition.retained_query_proof_bytes())
-                }),
-            ) as u32,
-            charged_sources,
-            query_proof_bytes: MAX_LIVE_SOURCE_BYTES as usize,
+            source_bytes,
+            charged_sources: BTreeSet::new(),
             faces: MAX_NATIVE_FACES
                 - definitions
                     .values()
@@ -766,6 +757,23 @@ impl Capacity {
             },
         }
     }
+    fn charge_source(&mut self, bytes: &Arc<Vec<u8>>) -> Result<(), GeometryError> {
+        let pointer = Arc::as_ptr(bytes);
+        if !self.charged_sources.contains(&pointer) {
+            let remaining = self
+                .source_bytes
+                .checked_sub(bytes.capacity())
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "captured source exceeds current memory admission",
+                    )
+                })?;
+            self.charged_sources.insert(pointer);
+            self.source_bytes = remaining;
+        }
+        Ok(())
+    }
     fn admit(
         &mut self,
         bytes: &[u8],
@@ -779,43 +787,21 @@ impl Capacity {
                 "resident/staged native definition cap exceeded",
             ));
         }
-        let hash = SourceHash::from_bytes(bytes);
-        let charged = if self.charged_sources.contains(&hash) {
-            0
-        } else {
-            bytes.len()
-        };
-        if charged > self.source_bytes as usize {
-            return Err(error(
-                GeometryErrorCode::ResourceLimit,
-                "live/staged native source budget exceeded",
-            ));
-        }
         let definition = spiling_geometry::from_step_solid_with_limits(
             bytes,
             solid,
             cancel,
             self.faces,
-            self.query_proof_bytes
-                .min(self.source_bytes as usize - charged),
+            self.source_bytes,
         )?;
         let query_proof_bytes = definition.retained_query_proof_bytes();
-        let accounted_bytes = charged
-            .checked_add(query_proof_bytes)
-            .filter(|bytes| *bytes <= self.source_bytes as usize)
-            .ok_or_else(|| {
-                error(
-                    GeometryErrorCode::ResourceLimit,
-                    "live/staged native source and query-proof budget exceeded",
-                )
-            })?;
-        let remaining_proof_bytes = self
-            .query_proof_bytes
+        let remaining_bytes = self
+            .source_bytes
             .checked_sub(query_proof_bytes)
             .ok_or_else(|| {
                 error(
                     GeometryErrorCode::ResourceLimit,
-                    "captured source allocations leave no native query-proof capacity",
+                    "native query proof exceeds current memory admission",
                 )
             })?;
         let faces = definition.faces().len() as u32;
@@ -826,9 +812,7 @@ impl Capacity {
             ));
         }
         self.definitions -= 1;
-        self.charged_sources.insert(hash);
-        self.source_bytes -= accounted_bytes as u32;
-        self.query_proof_bytes = remaining_proof_bytes;
+        self.source_bytes = remaining_bytes;
         self.faces -= faces;
         check_cancel(cancel)?;
         Ok(definition)
@@ -940,18 +924,42 @@ fn resident(definition: Definition, source: &SourceAsset, display: &ImportedDisp
     }
 }
 type ImportedParts = (Vec<(Imported, Vec<RigidPoseMm>)>, Vec<Resident>);
-fn import(
-    source: NativePath,
+fn source_retention(
+    retained_source_bytes: usize,
     definitions: &BTreeMap<DefinitionId, Resident>,
-    reuse: &BTreeSet<DefinitionId>,
-    budget: MeshBudget,
+) -> Result<usize, GeometryError> {
+    definitions
+        .values()
+        .try_fold(retained_source_bytes, |bytes, resident| {
+            bytes
+                .checked_add(resident.definition.retained_query_proof_bytes())
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "retained native allocation accounting overflow",
+                    )
+                })
+        })
+}
+
+fn import(
+    request: ImportRequest,
+    definitions: &BTreeMap<DefinitionId, Resident>,
     cancel: &AtomicBool,
     work: &mut GeometryWorkBudget,
     progress: &dyn Fn(String),
 ) -> Result<ImportedParts, JobError> {
+    let ImportRequest {
+        source,
+        allowed_reuse: reuse,
+        budget,
+        retained_source_bytes,
+    } = request;
     check_cancel(cancel)?;
-    let mut capacity = Capacity::new(definitions, budget);
-    let captured = source::capture(source, capacity.source_bytes.min(MAX_SOURCE_BYTES), cancel)?;
+    let growth =
+        crate::resources::source_growth(source_retention(retained_source_bytes, definitions)?)?;
+    let mut capacity = Capacity::new(definitions, budget, growth);
+    let captured = source::capture(source, capacity.source_bytes, cancel)?;
     let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
     // A source that places one solid keeps its whole-source identity; each
     // solid of a multi-solid source is its own definition of the same bytes.
@@ -965,6 +973,7 @@ fn import(
     }
     let selects = bodies.len() > 1;
     let bytes = Arc::new(captured.bytes);
+    capacity.charge_source(&bytes)?;
     let mut parts = Vec::with_capacity(bodies.len());
     let mut residents = Vec::new();
     for body in bodies {
@@ -1040,6 +1049,7 @@ fn open(
     crate::performance::mark("open_started");
     let OpenRequest {
         path,
+        reuse_sources,
         read_only,
         recover_previous,
         existing,
@@ -1055,18 +1065,8 @@ fn open(
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
     // Enforce their remaining budget before the loader allocates incoming bytes.
-    let retained_query_proof_bytes = definitions.values().fold(0usize, |bytes, resident| {
-        bytes.saturating_add(resident.definition.retained_query_proof_bytes())
-    });
-    let source_budget = (MAX_LIVE_SOURCE_BYTES as usize)
-        .checked_sub(retained_source_bytes as usize)
-        .and_then(|bytes| bytes.checked_sub(retained_query_proof_bytes))
-        .ok_or_else(|| {
-            ProjectError::new(
-                ProjectErrorCode::ResourceLimit,
-                "retained captured source and native query-proof budget exceeded",
-            )
-        })?;
+    let source_budget =
+        crate::resources::source_growth(source_retention(retained_source_bytes, definitions)?)?;
     let loading = crate::performance::span("open_storage");
     let loaded = storage::open_reusing(
         &path,
@@ -1104,24 +1104,18 @@ fn open(
                     )
                 })?,
         },
+        &reuse_sources,
     )?;
     drop(loading);
-    let mut capacity = Capacity::new(definitions, budget);
-    let incoming_source_bytes = loaded
-        .sources
-        .values()
-        .map(|source| (Arc::as_ptr(&source.bytes), source.bytes.len()))
-        .collect::<BTreeMap<_, _>>()
-        .values()
-        .sum::<usize>();
-    capacity.query_proof_bytes = source_budget
-        .checked_sub(incoming_source_bytes)
-        .ok_or_else(|| {
-            ProjectError::new(
-                ProjectErrorCode::ResourceLimit,
-                "captured incoming sources leave no native query-proof capacity",
-            )
-        })?;
+    let mut capacity = Capacity::new(definitions, budget, source_budget);
+    capacity.charged_sources.extend(
+        reuse_sources
+            .iter()
+            .map(|source| Arc::as_ptr(&source.bytes)),
+    );
+    for source in loaded.sources.values() {
+        capacity.charge_source(&source.bytes)?;
+    }
     let mut pending = BTreeMap::new();
     let mut imports = Vec::with_capacity(loaded.sources.len());
     for (id, source) in &loaded.sources {
@@ -1246,13 +1240,15 @@ fn validate_surface_targets(
     Ok(())
 }
 fn save(
-    snapshot: SaveSnapshot,
+    mut snapshot: SaveSnapshot,
     existing: Option<Arc<Storage>>,
     target: Option<NativePath>,
     commit: crate::session::CommitToken,
     fault: Option<crate::ProjectFault>,
+    retained_source_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<SaveReceipt, JobError> {
+    snapshot.limit_source_growth(crate::resources::source_growth(retained_source_bytes)?)?;
     let target = target.map(project_path).transpose()?;
     let receipt = storage::save(snapshot, existing, target, cancel, |stage| {
         if matches!(stage, SaveStage::BeforeCommit) && !commit.begin_commit() {
@@ -1643,14 +1639,17 @@ mod geometry_only_tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
         let cancel = AtomicBool::new(false);
         let (mut parts, mut residents) = import(
-            NativePath::from_os_str(path.as_os_str()).unwrap(),
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            MeshBudget {
-                vertices: 0,
-                triangles: 0,
-                bytes: 0,
+            ImportRequest {
+                source: NativePath::from_os_str(path.as_os_str()).unwrap(),
+                allowed_reuse: BTreeSet::new(),
+                retained_source_bytes: 0,
+                budget: MeshBudget {
+                    vertices: 0,
+                    triangles: 0,
+                    bytes: 0,
+                },
             },
+            &BTreeMap::new(),
             &cancel,
             &mut GeometryWorkBudget::query(),
             &|_| {},
@@ -1695,6 +1694,7 @@ mod geometry_only_tests {
                 triangles: 0,
                 bytes: 0,
             },
+            0,
         );
         assert!(matches!(
             capacity.display(
@@ -1708,5 +1708,34 @@ mod geometry_only_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod source_admission_tests {
+    use super::*;
+
+    #[test]
+    fn shared_sources_charge_once_but_recaptures_and_repeated_refusals_do_not_escape_admission() {
+        let first = Arc::new(vec![1u8; 64]);
+        let recapture = Arc::new(first.as_ref().clone());
+        let mut capacity = Capacity::new(
+            &BTreeMap::new(),
+            MeshBudget {
+                vertices: 0,
+                triangles: 0,
+                bytes: 0,
+            },
+            first.capacity(),
+        );
+        capacity.charge_source(&first).unwrap();
+        capacity.charge_source(&Arc::clone(&first)).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                capacity.charge_source(&recapture).unwrap_err().code,
+                GeometryErrorCode::ResourceLimit
+            );
+        }
+        assert_eq!(capacity.source_bytes, 0);
     }
 }

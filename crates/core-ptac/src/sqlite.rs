@@ -1090,7 +1090,13 @@ fn read_object(
     if length > budget {
         return Err(limit("incoming object allocation budget"));
     }
-    let mut output = Vec::with_capacity(length);
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| limit("cannot allocate incoming object"))?;
+    if output.capacity() > budget {
+        return Err(limit("incoming object capacity exceeds allocation budget"));
+    }
     stream_object(connection, id, budget, cancel, |raw| {
         output.extend_from_slice(raw);
         Ok(())
