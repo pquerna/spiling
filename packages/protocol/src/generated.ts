@@ -335,7 +335,12 @@ export type SourceProvenance = { source_hash: SourceHash, source_name: string, s
 /**
  * Declared source uncertainty, normalized to mm; not a program-created accuracy guarantee.
  */
-uncertainty_mm: number | null, };
+uncertainty_mm: number | null,
+/**
+ * The selected solid when the source places more than one. Absent for a
+ * source that is one solid, so its encoding and identity are unchanged.
+ */
+source_solid?: SourceSolidId, };
 
 export type DisplayProfile = "mesh-trimmed-mm-0.05-v2";
 

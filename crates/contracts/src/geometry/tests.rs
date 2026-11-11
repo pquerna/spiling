@@ -168,6 +168,7 @@ fn finite_bounds_pose_and_provenance_are_checked_at_json_boundary() {
         source_name: "part.step".into(),
         source_unit: SourceUnit::Inch,
         uncertainty_mm: Some(0.01),
+        source_solid: None,
     };
     assert_eq!(SourceUnit::Inch.scale_to_mm(), 25.4);
     assert_eq!(SourceUnit::Metre.scale_to_mm(), 1000.0);
@@ -250,6 +251,7 @@ fn face_refs_reject_every_stale_or_cross_identity() {
             source_name: "part".into(),
             source_unit: SourceUnit::Millimetre,
             uncertainty_mm: None,
+            source_solid: None,
         },
         face_count: 1,
         bounds_mm: bounds,
@@ -468,6 +470,7 @@ fn geometry_only_scene_retains_bounded_definition_and_native_face_identity() {
             source_name: "part.step".into(),
             source_unit: SourceUnit::Millimetre,
             uncertainty_mm: None,
+            source_solid: None,
         },
         face_count: 1,
         bounds_mm: summary.bounds_mm.unwrap(),

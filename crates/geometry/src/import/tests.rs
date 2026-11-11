@@ -5,7 +5,7 @@
 use super::*;
 use crate::from_step_bytes_with_cancel;
 use crate::{GeometryWorkBudget, corpus_fixtures as corpus};
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 use step_p21::ast::{EntityInstance, Name, Parameter};
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -1606,4 +1606,149 @@ fn negative_axis_circular_extrusion_does_not_acquire_positive_gauge_authority() 
         checked, changed,
         "every changed original bore retains its gauge refusal"
     );
+}
+
+fn with_entities(source: &str, entities: &str) -> String {
+    let end = source.rfind("ENDSEC;").unwrap();
+    format!("{}{entities}\n{}", &source[..end], &source[end..])
+}
+
+/// box-mm placed by an assembly usage: rotated 90 degrees about Z and
+/// translated to (100, 50, 0), as `instances` usages of one component.
+fn box_assembly(instances: usize, parent_first: bool) -> String {
+    let source = String::from_utf8(fixture("box-mm.step")).unwrap();
+    let mut entities = String::from(
+        "#9000=CARTESIAN_POINT('',(0.,0.,0.));\n#9001=DIRECTION('',(0.,0.,1.));\n\
+         #9002=DIRECTION('',(1.,0.,0.));\n#9003=AXIS2_PLACEMENT_3D('',#9000,#9001,#9002);\n\
+         #9005=DIRECTION('',(0.,0.,1.));\n#9006=DIRECTION('',(0.,1.,0.));\n\
+         #9009=PRODUCT_DEFINITION('assembly','',#6,#9);\n\
+         #9010=PRODUCT_DEFINITION_SHAPE('','',#9009);\n",
+    );
+    let mut targets = Vec::new();
+    for i in 0..instances {
+        let base = 9100 + 10 * i;
+        targets.push(format!("#{}", base + 1));
+        let (first, second) = if parent_first {
+            ("#9008", "#10")
+        } else {
+            ("#10", "#9008")
+        };
+        let (one, two) = if parent_first {
+            (format!("#{}", base + 1), "#9003".to_string())
+        } else {
+            ("#9003".to_string(), format!("#{}", base + 1))
+        };
+        entities += &format!(
+            "#{p}=CARTESIAN_POINT('',(100.,{y}.,0.));\n\
+             #{a}=AXIS2_PLACEMENT_3D('',#{p},#9005,#9006);\n\
+             #{t}=ITEM_DEFINED_TRANSFORMATION('','',{one},{two});\n\
+             #{r}=(REPRESENTATION_RELATIONSHIP('','',{first},{second}) \
+             REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{t}) SHAPE_REPRESENTATION_RELATIONSHIP());\n\
+             #{u}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{i}','','',#9009,#5,$);\n\
+             #{s}=PRODUCT_DEFINITION_SHAPE('','',#{u});\n\
+             #{c}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{r},#{s});\n",
+            p = base,
+            a = base + 1,
+            y = 50 + 100 * i,
+            t = base + 2,
+            r = base + 3,
+            u = base + 4,
+            s = base + 5,
+            c = base + 6,
+        );
+    }
+    entities += &format!(
+        "#9008=SHAPE_REPRESENTATION('assembly',({}),#11);\n\
+         #9011=SHAPE_DEFINITION_REPRESENTATION(#9010,#9008);\n",
+        targets.join(",")
+    );
+    with_entities(&source, &entities)
+}
+
+#[test]
+fn assembly_usages_place_one_solid_without_changing_its_identity() {
+    let plain = from_step_bytes_with_cancel(&fixture("box-mm.step"), &cancelled()).unwrap();
+    for parent_first in [false, true] {
+        let source = box_assembly(2, parent_first);
+        let bodies = structure::source_bodies(source.as_bytes(), &cancelled()).unwrap();
+        assert_eq!(bodies.len(), 1);
+        let mut placements = bodies[0].placements.clone();
+        placements.sort_by(|a, b| a.translation_mm[1].total_cmp(&b.translation_mm[1]));
+        assert_eq!(placements.len(), 2);
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        for (placement, y) in placements.iter().zip([50.0, 150.0]) {
+            for (axis, expected) in [100.0, y, 0.0].into_iter().enumerate() {
+                assert!((placement.translation_mm[axis] - expected).abs() < 1e-12);
+            }
+            for (value, expected) in placement.rotation_xyzw.iter().zip([0.0, 0.0, half, half]) {
+                assert!((value - expected).abs() < 1e-12, "{placement:?}");
+            }
+            // The box's +X edge maps onto +Y: (20, 10, 0) -> (90, y + 20, 0).
+            let corner = placement.rotate([20.0, 10.0, 0.0]);
+            assert!((corner[0] + placement.translation_mm[0] - 90.0).abs() < 1e-12);
+            assert!((corner[1] + placement.translation_mm[1] - (y + 20.0)).abs() < 1e-12);
+        }
+        // One placed solid keeps the whole-source identity and its own frame.
+        let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap();
+        assert_eq!(definition.bounds_mm(), plain.bounds_mm());
+        assert!(definition.provenance().source_solid.is_none());
+        let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+        assert_eq!(definition.id(), &DefinitionId::from_source_sha256(&digest));
+    }
+}
+
+#[test]
+fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
+    let source = String::from_utf8(fixture("box-mm.step")).unwrap();
+    let source = with_entities(
+        &source.replace(
+            "#10 = SHAPE_REPRESENTATION('', (#16), #11);",
+            "#10 = SHAPE_REPRESENTATION('', (#16,#9500), #11);",
+        ),
+        "#9500=MANIFOLD_SOLID_BREP('second',#17);",
+    );
+    let bodies = structure::source_bodies(source.as_bytes(), &cancelled()).unwrap();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|b| (b.solid.as_str(), b.name.as_str(), b.placements.len()))
+            .collect::<Vec<_>>(),
+        [("step:16", "", 1), ("step:9500", "second", 1)]
+    );
+    assert_eq!(
+        from_step_bytes_with_cancel(source.as_bytes(), &cancelled())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::UnsupportedGeometry
+    );
+    let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
+    let mut ids = BTreeSet::new();
+    for body in &bodies {
+        let definition =
+            crate::from_step_solid_with_cancel(source.as_bytes(), &body.solid, &cancelled())
+                .unwrap();
+        assert_eq!(
+            definition.provenance().source_solid.as_ref(),
+            Some(&body.solid)
+        );
+        assert_eq!(
+            definition.id(),
+            &DefinitionId::from_source_solid(&digest, &body.solid)
+        );
+        assert_eq!(definition.faces().len(), 6);
+        ids.insert(definition.id().clone());
+    }
+    assert_eq!(ids.len(), 2);
+    for wrong in ["step:17", "step:999999"] {
+        assert_eq!(
+            crate::from_step_solid_with_cancel(
+                source.as_bytes(),
+                &SourceSolidId::parse(wrong).unwrap(),
+                &cancelled()
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+    }
 }

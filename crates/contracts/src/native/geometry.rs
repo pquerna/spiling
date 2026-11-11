@@ -115,6 +115,11 @@ impl TryFrom<rpc::SourceProvenance> for SourceProvenance {
             source_name: value.source_name,
             source_unit: value.source_unit.try_into()?,
             uncertainty_mm: value.uncertainty_mm,
+            source_solid: value
+                .source_solid
+                .map(SourceSolidId::parse)
+                .transpose()
+                .map_err(|e| e.message)?,
         };
         checked(value.validate())?;
         Ok(value)
@@ -130,6 +135,7 @@ impl TryFrom<SourceProvenance> for rpc::SourceProvenance {
             source_name: value.source_name,
             source_unit: rpc::SourceUnit::try_from(value.source_unit)? as i32,
             uncertainty_mm: value.uncertainty_mm,
+            source_solid: value.source_solid.map(String::from),
         };
         Ok(value)
     }
@@ -1884,6 +1890,7 @@ mod tests {
                     source_name: "part".into(),
                     source_unit: rpc::SourceUnit::Millimetre as i32,
                     uncertainty_mm: None,
+                    source_solid: None,
                 }),
                 face_count: 1,
                 bounds_mm: Some(AabbMm::new([0.0; 3], [1.0; 3]).unwrap().try_into().unwrap()),

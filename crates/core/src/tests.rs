@@ -14,6 +14,7 @@ pub(crate) fn asset(bytes: Vec<u8>, name: &str) -> Arc<SourceAsset> {
                     source_name: name.to_owned(),
                     source_unit: SourceUnit::Millimetre,
                     uncertainty_mm: Some(0.001),
+                    source_solid: None,
                 },
             },
             bytes,

@@ -943,12 +943,22 @@ pub(super) fn resolve_native_events(
         // ADR012 feature-first heights: horizontal faces and extents of each
         // placed tessellation, merged within the height tolerance. The bed is
         // the first boundary; nothing here is a native event band.
+        // Heights closer than the source's own declared uncertainty are the
+        // same feature (e.g. assembled bodies meant to sit flush); never more
+        // than TOLERANT_HEIGHT_MERGE_LIMIT_MM.
+        let merge_mm = input
+            .occurrences
+            .iter()
+            .filter_map(|occurrence| input.definitions.get(&occurrence.definition_id))
+            .filter_map(|definition| definition.provenance().uncertainty_mm)
+            .fold(FEATURE_HEIGHT_TOLERANCE_MM, f64::max)
+            .min(TOLERANT_HEIGHT_MERGE_LIMIT_MM);
         let mut heights = Vec::new();
         let mut combined: Option<AabbMm> = None;
         for occurrence in input.occurrences {
             check_cancel(cancel)?;
             let model = &models[&occurrence.occurrence_id];
-            heights.extend(model.feature_heights(FEATURE_HEIGHT_TOLERANCE_MM));
+            heights.extend(model.feature_heights(merge_mm));
             let bounds = admission.native_bounds[&occurrence.occurrence_id];
             let placed = admission
                 .surface_fields
@@ -967,18 +977,14 @@ pub(super) fn resolve_native_events(
         }
         heights.sort_by(f64::total_cmp);
         for z in heights {
-            let z = if (z - bed).abs() <= FEATURE_HEIGHT_TOLERANCE_MM {
-                bed
-            } else {
-                z
-            };
+            let z = if (z - bed).abs() <= merge_mm { bed } else { z };
             if z < bed {
                 continue;
             }
             if admission
                 .horizontal_events
                 .last()
-                .is_none_or(|last| z - last > FEATURE_HEIGHT_TOLERANCE_MM)
+                .is_none_or(|last| z - last > merge_mm)
             {
                 admission.horizontal_events.push(z);
             }

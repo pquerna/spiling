@@ -439,18 +439,27 @@ fn load_assets(
         )?));
     }
     let mut source_budget = budgets.source_bytes.min(MAX_RETAINED_SOURCE_BYTES);
+    // Definitions of several solids in one source share its one allocation.
+    let mut loaded = BTreeMap::new();
     for record in &manifest.definitions {
-        let bytes = read_asset(
-            capture,
-            &record.provenance.source_hash,
-            source_budget.min(MAX_SOURCE_BYTES),
-            None,
-            cancel,
-        )?;
-        source_budget -= bytes.capacity();
+        let bytes = match loaded.get(&record.provenance.source_hash) {
+            Some(bytes) => Arc::clone(bytes),
+            None => {
+                let bytes = Arc::new(read_asset(
+                    capture,
+                    &record.provenance.source_hash,
+                    source_budget.min(MAX_SOURCE_BYTES),
+                    None,
+                    cancel,
+                )?);
+                source_budget -= bytes.capacity();
+                loaded.insert(record.provenance.source_hash.clone(), Arc::clone(&bytes));
+                bytes
+            }
+        };
         snapshot.sources.insert(
             record.definition_id.clone(),
-            Arc::new(SourceAsset::new(record.clone(), bytes)?),
+            Arc::new(SourceAsset::shared(record.clone(), bytes)?),
         );
     }
     let mut image_budget = budgets.image_bytes.min(MAX_SURFACE_IMAGE_RETAINED_BYTES);

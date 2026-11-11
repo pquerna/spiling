@@ -4,6 +4,9 @@
 //! Invoked after the emitted-byte/path bijection. The middle actual path point
 //! binds the sole ownership transition; each portion retains its captured domain.
 use super::{cancelled, failed, project_xyz6_point_mm};
+
+/// One XYZ6 command step.
+const XYZ6_QUANTUM_MM: f64 = 0.000_001;
 use crate::planner::support::{
     AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
 };
@@ -307,6 +310,8 @@ pub(super) fn verify(
             }
             // A crossing or finite necessary joint overlap is normal. Positive
             // collinear duplicate commanded centerlines are not another joint.
+            // Strokes meeting end to end may overlap by one XYZ6 quantum where
+            // their nominal joint rounds to adjacent command values.
             for other in &layer.paths {
                 if std::ptr::eq(path, other) {
                     continue;
@@ -315,11 +320,7 @@ pub(super) fn verify(
                 for edge in other.points_mm.windows(2) {
                     let c = project_xyz6_point_mm(edge[0])?;
                     let d = project_xyz6_point_mm(edge[1])?;
-                    if c[fixed] == a[fixed]
-                        && d[fixed] == a[fixed]
-                        && a[along].min(b[along]).max(c[along].min(d[along]))
-                            < a[along].max(b[along]).min(c[along].max(d[along]))
-                    {
+                    if duplicates_collinear([a, b], [c, d], fixed, along) {
                         return Err(failed(
                             "mixed bridge duplicates an existing commanded stroke",
                         ));
@@ -337,9 +338,38 @@ pub(super) fn verify(
     Ok(())
 }
 
+/// Whether command edge `other` repeats part of `stroke` on the same row
+/// rather than meeting it at a joint.
+fn duplicates_collinear(
+    [a, b]: [[f64; 3]; 2],
+    [c, d]: [[f64; 3]; 2],
+    fixed: usize,
+    along: usize,
+) -> bool {
+    let overlap = a[along].max(b[along]).min(c[along].max(d[along]))
+        - a[along].min(b[along]).max(c[along].min(d[along]));
+    c[fixed] == a[fixed]
+        && d[fixed] == a[fixed]
+        && overlap > XYZ6_QUANTUM_MM + super::arithmetic_slack(a[along].abs().max(b[along].abs()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rounded_end_to_end_joint_is_not_a_duplicate_stroke() {
+        // Observed on a real part: bridge from 6.777242, skin to 6.777243.
+        let bridge = [[6.777242, 150.707963, 1.2], [51.426919, 150.707963, 1.2]];
+        let skin = |end: f64| [[end, 150.707963, 1.2], [6.4, 150.707963, 1.2]];
+        assert!(!duplicates_collinear(bridge, skin(6.777243), 1, 0));
+        assert!(!duplicates_collinear(bridge, skin(6.777242), 1, 0));
+        assert!(duplicates_collinear(bridge, skin(6.777244), 1, 0));
+        assert!(duplicates_collinear(bridge, skin(30.0), 1, 0));
+        // Another row is never a duplicate, however long the overlap.
+        let other_row = [[0.0, 150.707964, 1.2], [60.0, 150.707964, 1.2]];
+        assert!(!duplicates_collinear(bridge, other_row, 1, 0));
+    }
 
     #[test]
     fn mixed_row_reconstruction_preserves_the_original_raw_interpolation_order() {

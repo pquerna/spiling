@@ -164,7 +164,8 @@ enum PublicationKind {
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     Import {
         edit: PreparedEdit,
-        definition: Option<DefinitionState>,
+        definitions: Vec<DefinitionState>,
+        artifacts: Vec<(ArtifactId, Artifact)>,
         revision: SceneRevision,
     },
     Open {
@@ -566,19 +567,18 @@ impl Runtime {
                     match publication.kind {
                         PublicationKind::Import {
                             edit,
-                            definition,
+                            definitions,
+                            artifacts,
                             revision,
                         } => {
                             self.project
                                 .commit(edit)
                                 .map_err(|e| format!("core import ACK invariant: {e}"))?;
-                            if let Some(definition) = definition {
+                            for definition in definitions {
                                 self.definitions
                                     .insert(definition.record.definition_id.clone(), definition);
                             }
-                            if let Some(artifact) = publication.artifact {
-                                self.artifacts.insert(active.artifact, artifact);
-                            }
+                            self.artifacts.extend(artifacts);
                             self.revision = revision;
                             Some(JobResult::Scene {
                                 summary: self.summary(),
@@ -994,22 +994,63 @@ impl Runtime {
                 kind: PublicationKind::SurfaceImagePrepared(asset),
                 artifact: None,
             }),
-            (Purpose::Import { pose }, Product::Import(imported)) => {
+            (Purpose::Import { pose }, Product::Import(parts)) => {
                 let revision = self.revision.next()?;
-                placement::scene_bounds(*pose, imported.bounds)?;
-                let edit = self.project.prepare(Edit::Import {
-                    source: imported.source.clone(),
-                    pose: *pose,
-                })?;
-                let (definition, artifact) =
-                    self.prepare_definition(imported, active.artifact, 0)?;
+                // Each source placement keeps its relation to the others; the
+                // requested pose places the whole source.
+                let mut occurrences = Vec::new();
+                for (imported, placements) in &parts {
+                    for placement in placements {
+                        let placed = pose.compose(*placement);
+                        placement::scene_bounds(placed, imported.bounds)?;
+                        occurrences.push((imported.source.clone(), placed));
+                    }
+                }
+                let edit = self
+                    .project
+                    .prepare(Edit::ImportParts { parts: occurrences })?;
+                let mut definitions = Vec::new();
+                let mut artifacts = Vec::new();
+                let mut staged_bytes = 0;
+                let mut staged_vertices = 0;
+                let mut staged_triangles = 0;
+                for (index, (imported, _)) in parts.into_iter().enumerate() {
+                    let artifact_id = if index == 0 {
+                        active.artifact
+                    } else {
+                        ArtifactId::new(allocate(&mut self.next_artifact, "artifact ID")?)?
+                    };
+                    let (definition, artifact) =
+                        self.prepare_definition(imported, artifact_id, staged_bytes)?;
+                    if let Some(definition) = definition {
+                        staged_vertices += definition.vertices;
+                        staged_triangles += definition.triangles;
+                        staged_bytes += definition.bytes;
+                        definitions.push(definition);
+                    }
+                    if let Some(artifact) = artifact {
+                        artifacts.push((artifact_id, artifact));
+                    }
+                }
+                if self.definitions.len() + definitions.len() > MAX_DEFINITIONS as usize
+                    || self.definitions.values().map(|d| d.vertices).sum::<u32>() + staged_vertices
+                        > MAX_DISPLAY_VERTICES
+                    || self.definitions.values().map(|d| d.triangles).sum::<u32>()
+                        + staged_triangles
+                        > MAX_DISPLAY_TRIANGLES
+                    || self.artifacts.len() + artifacts.len()
+                        > (MAX_DEFINITIONS + MAX_TERMINAL_JOBS) as usize
+                {
+                    return Err(resource("import exceeds retained/staged scene budget").into());
+                }
                 Ok(Publication {
                     kind: PublicationKind::Import {
                         edit,
-                        definition,
+                        definitions,
+                        artifacts,
                         revision,
                     },
-                    artifact,
+                    artifact: None,
                 })
             }
             (

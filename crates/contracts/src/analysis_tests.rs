@@ -256,6 +256,7 @@ fn analysis_document_binds_revision_source_hash_and_layout_membership() {
             source_name: "part.step".into(),
             source_unit: SourceUnit::Millimetre,
             uncertainty_mm: None,
+            source_solid: None,
         },
     }];
     let mut layouts = vec![PrintLayoutRecord {

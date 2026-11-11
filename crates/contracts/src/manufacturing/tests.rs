@@ -1169,6 +1169,7 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
                 source_name: "part.step".into(),
                 source_unit: SourceUnit::Millimetre,
                 uncertainty_mm: Some(0.001),
+                source_solid: None,
             },
         }],
         vec![OccurrenceRecord {

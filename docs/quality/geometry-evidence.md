@@ -844,14 +844,19 @@ the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
 
-Current support (planner 78): 12 of the 30 parts compile and complete the
-source-absent reopen, fresh verify and export; PrusaSlicer slices 25. All 12
-take the ADR012 tolerant path, because exact certification still refuses
-every corpus part. Of the 13 parts that import, one (`25`) refuses on a section
-thinner than any admitted bead, and PrusaSlicer also fails on it. Seventeen
-still refuse at import (single-solid assembly wrappers, multi-body parts,
-multi-part assemblies, AP242 or long AP203 schema names); import packaging is
-the binding limit.
+Current support (planner 82): 20 of the 30 parts compile and complete the
+source-absent reopen, fresh verify and export; PrusaSlicer slices 25, and its
+five refusals are all "outside the print volume" on its default bed. Every
+pass takes the ADR012 tolerant path, because exact certification still refuses
+every corpus part. Multi-solid and assembly sources import one definition per
+solid at its source placement and are placed on the bed as one rigid group
+(`--center-all-on-bed`). Remaining refusals: no solid in the file (`00`), a
+part longer than the bed (`01`), import-time kernel or decoder refusals (`16`
+B-spline canonicalization, `17` horn torus, `22` inner loop orientation, `26`
+revolution face with one bound), void-shell solids (`27`), a face the
+tolerant mesher cannot tessellate (`21`), no printable paths (`25`) and a
+compile that exceeds the 300 s job deadline in the exact path before it can
+fall back (`28`).
 
 `SPILING_CORPUS_INFILL=cathedral` runs the same parts with Cathedral infill and
 `SPILING_CORPUS_FRACTION` sets the infill fraction (default 0.15). The same 12

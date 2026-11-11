@@ -103,6 +103,8 @@ enum Operation {
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
     PrepareBed(OccurrenceId, bool),
+    /// Every occurrence of the plate moves as one rigid group.
+    PrepareBedGroup(bool),
     PrepareLayout(LayoutRequest),
     ApplyLayout,
     Remove(OccurrenceId),
@@ -789,6 +791,9 @@ pub fn parse(
                 operations.push(Operation::PrepareLayout(request));
             }
             Some("--apply-layout") => operations.push(Operation::ApplyLayout),
+            Some("--place-all-on-bed" | "--center-all-on-bed") => {
+                operations.push(Operation::PrepareBedGroup(arg == "--center-all-on-bed"));
+            }
             Some("--place-on-bed" | "--center-on-bed") => {
                 let center = arg == "--center-on-bed";
                 let id =
@@ -2852,6 +2857,83 @@ async fn execute(
                 .await?;
                 if !matches!(response, GeometryResponse::SceneChanged { .. }) {
                     return Err("unexpected bed preparation pose response".into());
+                }
+            }
+            Operation::PrepareBedGroup(center) => {
+                label = if center {
+                    "center_all_on_bed"
+                } else {
+                    "place_all_on_bed"
+                };
+                let summary = geometry::scene(client, &session).await?;
+                let (_, occurrences) = geometry::records(client, &summary).await?;
+                if occurrences.is_empty() {
+                    return Err("group bed preparation requires at least one occurrence".into());
+                }
+                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone(), layout_id: current_layout.clone() }).await? {
+                    ManufacturingResponse::Status { intent: Some(intent), info, .. } => (intent, info.revision),
+                    ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
+                    ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
+                    _ => return Err("unexpected manufacturing status response".into()),
+                };
+                let envelope = intent.printer.build_envelope;
+                // The engine certifies each member's native material brackets;
+                // a wide XY envelope at the real bed height only gathers them.
+                let wide = AabbMm {
+                    min: [-1.0e5, -1.0e5, envelope.min[2]],
+                    max: [1.0e5, 1.0e5, 1.0e5],
+                };
+                let mut lower = [f64::INFINITY; 3];
+                let mut upper = [f64::NEG_INFINITY; 3];
+                let mut lift = f64::NEG_INFINITY;
+                for occurrence in &occurrences {
+                    let preparation = client
+                        .prepare_bed_pose(&summary, project_revision, occurrence, wide, false)
+                        .await?;
+                    for axis in 0..3 {
+                        lower[axis] = lower[axis].min(preparation.minimum_lower_mm[axis]);
+                        upper[axis] = upper[axis].max(preparation.maximum_upper_mm[axis]);
+                    }
+                    lift = lift.max(
+                        preparation.pose.translation_mm[2]
+                            - preparation.original_pose.translation_mm[2],
+                    );
+                }
+                let mut delta = [0.0, 0.0, lift];
+                if center {
+                    for axis in 0..2 {
+                        delta[axis] = (envelope.min[axis] + envelope.max[axis]) * 0.5
+                            - (lower[axis] + upper[axis]) * 0.5;
+                    }
+                }
+                if (0..3).any(|axis| {
+                    lower[axis] + delta[axis] < envelope.min[axis]
+                        || upper[axis] + delta[axis] > envelope.max[axis]
+                }) {
+                    return Err("the placed group exceeds the printer build envelope".into());
+                }
+                let mut base = summary.revision;
+                for occurrence in &occurrences {
+                    let mut pose = occurrence.pose;
+                    for axis in 0..3 {
+                        pose.translation_mm[axis] += delta[axis];
+                    }
+                    let project_revision = info(client).await?.revision;
+                    let response = geometry::control(
+                        client,
+                        GeometryCommand::SetInstancePose {
+                            session_id: session.clone(),
+                            base_revision: base,
+                            project_revision,
+                            occurrence_id: occurrence.occurrence_id,
+                            pose,
+                        },
+                    )
+                    .await?;
+                    let GeometryResponse::SceneChanged { summary } = response else {
+                        return Err("unexpected group bed preparation pose response".into());
+                    };
+                    base = summary.revision;
                 }
             }
             Operation::Remove(occurrence_id) => {

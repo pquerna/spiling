@@ -30,6 +30,7 @@ fn manifest() -> ProjectManifest {
                 source_name: "original.step".into(),
                 source_unit: SourceUnit::Millimetre,
                 uncertainty_mm: Some(1e-6),
+                source_solid: None,
             },
         }],
         layouts: vec![PrintLayoutRecord {

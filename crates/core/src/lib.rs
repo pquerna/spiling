@@ -144,10 +144,11 @@ pub struct SourceAsset {
 }
 impl SourceAsset {
     pub fn new(record: StoredDefinition, bytes: Vec<u8>) -> Result<Self, ProjectError> {
-        let asset = Self {
-            record,
-            bytes: Arc::new(bytes),
-        };
+        Self::shared(record, Arc::new(bytes))
+    }
+    /// Another definition of the same source bytes, sharing their allocation.
+    pub fn shared(record: StoredDefinition, bytes: Arc<Vec<u8>>) -> Result<Self, ProjectError> {
+        let asset = Self { record, bytes };
         asset.validate()?;
         Ok(asset)
     }
@@ -164,7 +165,8 @@ impl SourceAsset {
             .map_err(|e| invalid(e.message))?;
         let digest: [u8; 32] = Sha256::digest(self.bytes.as_slice()).into();
         if SourceHash::from_digest(&digest) != self.record.provenance.source_hash
-            || DefinitionId::from_source_sha256(&digest) != self.record.definition_id
+            || DefinitionId::for_source(&digest, self.record.provenance.source_solid.as_ref())
+                != self.record.definition_id
         {
             return Err(error(
                 ProjectErrorCode::CorruptAsset,
@@ -351,6 +353,11 @@ pub enum Edit {
     Import {
         source: Arc<SourceAsset>,
         pose: RigidPoseMm,
+    },
+    /// Every placed solid of one source, as one transaction: each part is a
+    /// definition and the pose of one occurrence of it.
+    ImportParts {
+        parts: Vec<(Arc<SourceAsset>, RigidPoseMm)>,
     },
     Add {
         definition_id: DefinitionId,
@@ -869,6 +876,42 @@ impl Project {
     pub fn placement_draft(&self) -> PlacementDraft {
         PlacementDraft::new(self)
     }
+    fn import_part(
+        &self,
+        snapshot: &mut Snapshot,
+        mut source: Arc<SourceAsset>,
+        pose: RigidPoseMm,
+        next_occurrence: &mut u32,
+    ) -> Result<(), ProjectError> {
+        source.validate()?;
+        // Earlier parts of this same transaction are staged in `snapshot`.
+        let staged = snapshot.sources.get(&source.record.definition_id).cloned();
+        if let Some(retained) = staged.or_else(|| {
+            std::iter::once(&self.current)
+                .chain(self.undo.iter())
+                .chain(self.redo.iter())
+                .find_map(|snapshot| snapshot.sources.get(&source.record.definition_id))
+                .cloned()
+        }) {
+            let old = &retained.record.provenance;
+            let new = &source.record.provenance;
+            if old.source_hash != new.source_hash
+                || old.source_unit != new.source_unit
+                || old.uncertainty_mm != new.uncertainty_mm
+                || old.source_solid != new.source_solid
+                || (!Arc::ptr_eq(&retained.bytes, &source.bytes)
+                    && retained.bytes.as_slice() != source.bytes.as_slice())
+            {
+                return Err(invalid(
+                    "source identity has conflicting native provenance or bytes",
+                ));
+            }
+            source = retained.clone();
+        }
+        let id = source.record.definition_id.clone();
+        snapshot.sources.entry(id.clone()).or_insert(source);
+        add_occurrence(snapshot, id, pose, next_occurrence)
+    }
     pub fn prepare(&self, edit: Edit) -> Result<PreparedEdit, ProjectError> {
         self.writable()?;
         self.revision.next()?;
@@ -1156,30 +1199,16 @@ impl Project {
                     &mut next_process_operation,
                 )?;
             }
-            Edit::Import { mut source, pose } => {
-                source.validate()?;
-                if let Some(retained) = std::iter::once(&self.current)
-                    .chain(self.undo.iter())
-                    .chain(self.redo.iter())
-                    .find_map(|snapshot| snapshot.sources.get(&source.record.definition_id))
-                {
-                    let old = &retained.record.provenance;
-                    let new = &source.record.provenance;
-                    if old.source_hash != new.source_hash
-                        || old.source_unit != new.source_unit
-                        || old.uncertainty_mm != new.uncertainty_mm
-                        || (!Arc::ptr_eq(&retained.bytes, &source.bytes)
-                            && retained.bytes.as_slice() != source.bytes.as_slice())
-                    {
-                        return Err(invalid(
-                            "source identity has conflicting native provenance or bytes",
-                        ));
-                    }
-                    source = retained.clone();
+            Edit::Import { source, pose } => {
+                self.import_part(&mut snapshot, source, pose, &mut next_occurrence)?;
+            }
+            Edit::ImportParts { parts } => {
+                if parts.is_empty() {
+                    return Err(invalid("import requires at least one part"));
                 }
-                let id = source.record.definition_id.clone();
-                snapshot.sources.entry(id.clone()).or_insert(source);
-                add_occurrence(&mut snapshot, id, pose, &mut next_occurrence)?;
+                for (source, pose) in parts {
+                    self.import_part(&mut snapshot, source, pose, &mut next_occurrence)?;
+                }
             }
             Edit::Add {
                 definition_id,
@@ -2305,7 +2334,13 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
         ));
     }
     if sources.len() > MAX_DEFINITIONS as usize
-        || sources.values().map(|s| s.bytes.len()).sum::<usize>() > MAX_RETAINED_SOURCE_BYTES
+        || sources
+            .values()
+            .map(|s| (Arc::as_ptr(&s.bytes), s.bytes.len()))
+            .collect::<BTreeMap<_, _>>()
+            .values()
+            .sum::<usize>()
+            > MAX_RETAINED_SOURCE_BYTES
     {
         return Err(error(
             ProjectErrorCode::ResourceLimit,

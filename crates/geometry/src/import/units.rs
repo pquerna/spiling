@@ -171,7 +171,7 @@ fn unit(
     }
     Ok((length, scale, source))
 }
-fn context_units(
+pub(super) fn context(
     entities: &Entities<'_>,
     id: u64,
     cancel: &AtomicBool,
@@ -280,7 +280,7 @@ pub(super) fn resolve(
             if !references_solid {
                 continue;
             }
-            let current = context_units(
+            let current = context(
                 entities,
                 reference(at(r, 2).map_err(|_| units_error())?).map_err(|_| units_error())?,
                 cancel,

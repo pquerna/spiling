@@ -714,6 +714,7 @@ fn plates(ui: &mut Ui) {
                 source_name: "Gallery specimen".into(),
                 source_unit: spiling_contracts::geometry::SourceUnit::Millimetre,
                 uncertainty_mm: None,
+                source_solid: None,
             },
             face_count: 6,
             bounds_mm: spiling_contracts::geometry::AabbMm {

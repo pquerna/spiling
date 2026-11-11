@@ -120,7 +120,7 @@ message ArtifactPage {
 }
 enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; }
 enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; }
-message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; }
+message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; }
 message DefinitionDisplay {
   oneof kind { uint32 mesh_artifact_id = 1; DomainError unavailable = 2; }
 }

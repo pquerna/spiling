@@ -7,6 +7,7 @@ mod source;
 mod ast;
 pub(crate) mod brep_data_bridge;
 mod closed_spline_decode;
+pub mod structure;
 #[cfg(test)]
 mod tests;
 mod units;
@@ -18,7 +19,7 @@ use solidcore::math::{Point3, Vec3};
 use spiling_contracts::geometry::{
     AnalyticSurfaceDescription, DefinitionId, FaceDomainSummary, FaceGeometryInfo, FaceId,
     FaceInfo, GeometryError, GeometryErrorCode, MAX_NATIVE_FACES, MAX_SOURCE_BYTES, PlaneFrameMm,
-    SourceHash, SourceProvenance, StepEntityId, SurfaceFamily, TorusKind,
+    SourceHash, SourceProvenance, SourceSolidId, StepEntityId, SurfaceFamily, TorusKind,
 };
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 use step_p21::ast::Parameter;
@@ -260,6 +261,7 @@ fn resolve_face(entities: &Entities<'_>, canonical: u64) -> Result<(u64, bool), 
 }
 pub(crate) fn import_step(
     bytes: &[u8],
+    selected: Option<&SourceSolidId>,
     cancel: &AtomicBool,
     face_limit: u32,
     query_proof_byte_limit: usize,
@@ -294,26 +296,36 @@ pub(crate) fn import_step(
             check_cancel(cancel)?;
             if matches!(
                 record.name.as_str(),
-                "BREP_WITH_VOIDS"
-                    | "ORIENTED_CLOSED_SHELL"
-                    | "NEXT_ASSEMBLY_USAGE_OCCURRENCE"
-                    | "ASSEMBLY_COMPONENT_USAGE"
-                    | "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"
-                    | "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"
-                    | "MAPPED_ITEM"
-                    | "REPRESENTATION_MAP"
+                "BREP_WITH_VOIDS" | "ORIENTED_CLOSED_SHELL"
             ) {
                 return Err(unsupported(
-                    "assembly, void-shell or oriented-shell STEP representation",
+                    "void-shell or oriented-shell STEP representation",
                 ));
             }
         }
     }
-    let solids = entities.named("MANIFOLD_SOLID_BREP", cancel)?;
-    if solids.len() != 1 {
-        return Err(unsupported("exactly one MANIFOLD_SOLID_BREP is required"));
-    }
-    let solid_id = solids[0];
+    // Product structure must be coherent even when one solid is imported; its
+    // placements belong to the caller's occurrences, not to this definition.
+    let bodies = structure::bodies(&entities, cancel)?;
+    let solid_id = match selected {
+        None if bodies.len() == 1 => bodies[0].solid.step_entity(),
+        None if bodies.is_empty() => {
+            return Err(unsupported("source contains no placed MANIFOLD_SOLID_BREP"));
+        }
+        None => {
+            return Err(unsupported(
+                "source places several solids; import each one by its solid ID",
+            ));
+        }
+        Some(selected) => {
+            if bodies.len() < 2 || !bodies.iter().any(|body| &body.solid == selected) {
+                return Err(invalid(
+                    "solid selector must name one of several placed source solids",
+                ));
+            }
+            selected.step_entity()
+        }
+    };
     let units::ContextUnits {
         length: source_unit,
         radians_per_angle_unit,
@@ -444,12 +456,13 @@ pub(crate) fn import_step(
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
-        id: DefinitionId::from_source_sha256(&digest),
+        id: DefinitionId::for_source(&digest, selected),
         provenance: SourceProvenance {
             source_hash: SourceHash::from_digest(&digest),
             source_name: String::new(),
             source_unit,
             uncertainty_mm,
+            source_solid: selected.cloned(),
         },
         faces,
         bounds,
@@ -672,7 +685,19 @@ pub fn from_step_bytes_with_limits(
     face_limit: u32,
     query_proof_byte_limit: usize,
 ) -> Result<Definition, GeometryError> {
-    import_step(bytes, cancel, face_limit, query_proof_byte_limit)
+    import_step(bytes, None, cancel, face_limit, query_proof_byte_limit)
+}
+
+/// Read one selected solid of a source that places several, under the
+/// caller's limits. `None` requires a source that places exactly one solid.
+pub fn from_step_solid_with_limits(
+    bytes: &[u8],
+    solid: Option<&SourceSolidId>,
+    cancel: &AtomicBool,
+    face_limit: u32,
+    query_proof_byte_limit: usize,
+) -> Result<Definition, GeometryError> {
+    import_step(bytes, solid, cancel, face_limit, query_proof_byte_limit)
 }
 
 /// Reads a native Definition from STEP byte slice with default settings.
@@ -685,7 +710,22 @@ pub fn from_step_bytes_with_cancel(
     bytes: &[u8],
     cancel: &AtomicBool,
 ) -> Result<Definition, GeometryError> {
-    import_step(bytes, cancel, MAX_NATIVE_FACES, MAX_QUERY_PROOF_BYTES)
+    import_step(bytes, None, cancel, MAX_NATIVE_FACES, MAX_QUERY_PROOF_BYTES)
+}
+
+/// Reads one selected solid with default limits.
+pub fn from_step_solid_with_cancel(
+    bytes: &[u8],
+    solid: &SourceSolidId,
+    cancel: &AtomicBool,
+) -> Result<Definition, GeometryError> {
+    import_step(
+        bytes,
+        Some(solid),
+        cancel,
+        MAX_NATIVE_FACES,
+        MAX_QUERY_PROOF_BYTES,
+    )
 }
 
 /// Reads a native Definition from a STEP file on disk.

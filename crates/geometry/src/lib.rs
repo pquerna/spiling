@@ -53,6 +53,8 @@ pub use compute::{
 };
 pub use import::{
     from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
+    from_step_solid_with_cancel, from_step_solid_with_limits,
+    structure::{SourceBody, source_bodies},
 };
 pub use kernel::{
     BBox3Mm, Definition, KERNEL_APPROXIMATION_TOLERANCE_MM, KERNEL_INTERSECTION_TOLERANCE_MM,

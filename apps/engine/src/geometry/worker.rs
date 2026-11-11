@@ -234,7 +234,8 @@ pub enum Product {
     AnalysisCompleted(Arc<spiling_analysis::run::RunProduct>),
     StorageMaintained(super::storage::MaintenanceProduct),
     OpticalConstruction(spiling_core::OpticalConstructionCandidate),
-    Import(Imported),
+    /// Every placed solid of one source, each with its source placements.
+    Import(Vec<(Imported, Vec<RigidPoseMm>)>),
     Open {
         project: Project,
         imports: Vec<Imported>,
@@ -493,11 +494,11 @@ fn run(
                 &mut display_work,
                 &report,
             )
-            .map(|(product, resident)| {
-                if let Some(resident) = resident {
+            .map(|(parts, residents)| {
+                for resident in residents {
                     pending.insert(resident.definition.id().clone(), resident);
                 }
-                Product::Import(product)
+                Product::Import(parts)
             }),
             Work::Open(request) => open(request, &definitions, &cancel, &mut display_work, &report)
                 .map(
@@ -720,21 +721,32 @@ fn run(
 struct Capacity {
     definitions: u32,
     source_bytes: u32,
+    /// Sources already charged: several solids of one source share its bytes.
+    charged_sources: BTreeSet<SourceHash>,
     query_proof_bytes: usize,
     faces: u32,
     mesh: MeshBudget,
 }
 impl Capacity {
     fn new(definitions: &BTreeMap<DefinitionId, Resident>, budget: MeshBudget) -> Self {
+        let mut charged_sources = BTreeSet::new();
         Self {
             definitions: MAX_DEFINITIONS - definitions.len() as u32,
             source_bytes: (MAX_LIVE_SOURCE_BYTES as usize).saturating_sub(
                 definitions.values().fold(0usize, |bytes, resident| {
+                    let source = if charged_sources
+                        .insert(resident.definition.provenance().source_hash.clone())
+                    {
+                        resident.definition.source_bytes() as usize
+                    } else {
+                        0
+                    };
                     bytes
-                        .saturating_add(resident.definition.source_bytes() as usize)
+                        .saturating_add(source)
                         .saturating_add(resident.definition.retained_query_proof_bytes())
                 }),
             ) as u32,
+            charged_sources,
             query_proof_bytes: MAX_LIVE_SOURCE_BYTES as usize,
             faces: MAX_NATIVE_FACES
                 - definitions
@@ -754,7 +766,12 @@ impl Capacity {
             },
         }
     }
-    fn admit(&mut self, bytes: &[u8], cancel: &AtomicBool) -> Result<Definition, GeometryError> {
+    fn admit(
+        &mut self,
+        bytes: &[u8],
+        solid: Option<&SourceSolidId>,
+        cancel: &AtomicBool,
+    ) -> Result<Definition, GeometryError> {
         check_cancel(cancel)?;
         if self.definitions == 0 {
             return Err(error(
@@ -762,22 +779,28 @@ impl Capacity {
                 "resident/staged native definition cap exceeded",
             ));
         }
-        if bytes.len() > self.source_bytes as usize {
+        let hash = SourceHash::from_bytes(bytes);
+        let charged = if self.charged_sources.contains(&hash) {
+            0
+        } else {
+            bytes.len()
+        };
+        if charged > self.source_bytes as usize {
             return Err(error(
                 GeometryErrorCode::ResourceLimit,
                 "live/staged native source budget exceeded",
             ));
         }
-        let definition = spiling_geometry::from_step_bytes_with_limits(
+        let definition = spiling_geometry::from_step_solid_with_limits(
             bytes,
+            solid,
             cancel,
             self.faces,
             self.query_proof_bytes
-                .min(self.source_bytes as usize - bytes.len()),
+                .min(self.source_bytes as usize - charged),
         )?;
         let query_proof_bytes = definition.retained_query_proof_bytes();
-        let accounted_bytes = bytes
-            .len()
+        let accounted_bytes = charged
             .checked_add(query_proof_bytes)
             .filter(|bytes| *bytes <= self.source_bytes as usize)
             .ok_or_else(|| {
@@ -803,6 +826,7 @@ impl Capacity {
             ));
         }
         self.definitions -= 1;
+        self.charged_sources.insert(hash);
         self.source_bytes -= accounted_bytes as u32;
         self.query_proof_bytes = remaining_proof_bytes;
         self.faces -= faces;
@@ -915,6 +939,7 @@ fn resident(definition: Definition, source: &SourceAsset, display: &ImportedDisp
         mesh_bytes,
     }
 }
+type ImportedParts = (Vec<(Imported, Vec<RigidPoseMm>)>, Vec<Resident>);
 fn import(
     source: NativePath,
     definitions: &BTreeMap<DefinitionId, Resident>,
@@ -923,41 +948,63 @@ fn import(
     cancel: &AtomicBool,
     work: &mut GeometryWorkBudget,
     progress: &dyn Fn(String),
-) -> Result<(Imported, Option<Resident>), JobError> {
+) -> Result<ImportedParts, JobError> {
     check_cancel(cancel)?;
     let mut capacity = Capacity::new(definitions, budget);
     let captured = source::capture(source, capacity.source_bytes.min(MAX_SOURCE_BYTES), cancel)?;
     let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
-    let id = DefinitionId::from_source_sha256(&digest);
-    if reuse.contains(&id)
-        && let Some(resident) = definitions.get(&id)
-    {
-        // Transfer the exact captured allocation, but preserve the first admitted
-        // source's label and immutable record on an exact-byte reimport.
-        let source = Arc::new(SourceAsset::new(resident.record.clone(), captured.bytes)?);
-        validate_provenance(&resident.definition, &source)?;
-        check_cancel(cancel)?;
-        return Ok((
-            imported(&resident.definition, source, ImportedDisplay::Reused),
-            None,
-        ));
+    // A source that places one solid keeps its whole-source identity; each
+    // solid of a multi-solid source is its own definition of the same bytes.
+    let bodies = spiling_geometry::source_bodies(&captured.bytes, cancel)?;
+    if bodies.is_empty() {
+        return Err(error(
+            GeometryErrorCode::UnsupportedGeometry,
+            "source places no MANIFOLD_SOLID_BREP; there is no solid to print",
+        )
+        .into());
     }
-    progress("preparing_native_geometry".into());
-    let definition = capacity.admit(&captured.bytes, cancel)?;
-    let mut provenance = definition.provenance().clone();
-    provenance.source_name = captured.label;
-    let source = Arc::new(SourceAsset::new(
-        StoredDefinition {
-            definition_id: definition.id().clone(),
-            provenance,
-        },
-        captured.bytes,
-    )?);
-    let display = capacity.display(&definition, cancel, work, progress)?;
-    let resident = resident(definition, &source, &display);
-    let imported = imported(&resident.definition, source, display);
+    let selects = bodies.len() > 1;
+    let bytes = Arc::new(captured.bytes);
+    let mut parts = Vec::with_capacity(bodies.len());
+    let mut residents = Vec::new();
+    for body in bodies {
+        check_cancel(cancel)?;
+        let solid = selects.then_some(body.solid);
+        let id = DefinitionId::for_source(&digest, solid.as_ref());
+        if reuse.contains(&id)
+            && let Some(resident) = definitions.get(&id)
+        {
+            // Share the captured allocation, but preserve the first admitted
+            // source's label and immutable record on an exact-byte reimport.
+            let source = Arc::new(SourceAsset::shared(resident.record.clone(), bytes.clone())?);
+            validate_provenance(&resident.definition, &source)?;
+            parts.push((
+                imported(&resident.definition, source, ImportedDisplay::Reused),
+                body.placements,
+            ));
+            continue;
+        }
+        progress("preparing_native_geometry".into());
+        let definition = capacity.admit(&bytes, solid.as_ref(), cancel)?;
+        let mut provenance = definition.provenance().clone();
+        provenance.source_name = captured.label.clone();
+        let source = Arc::new(SourceAsset::shared(
+            StoredDefinition {
+                definition_id: definition.id().clone(),
+                provenance,
+            },
+            bytes.clone(),
+        )?);
+        let display = capacity.display(&definition, cancel, work, progress)?;
+        let resident = resident(definition, &source, &display);
+        parts.push((
+            imported(&resident.definition, source, display),
+            body.placements,
+        ));
+        residents.push(resident);
+    }
     check_cancel(cancel)?;
-    Ok((imported, Some(resident)))
+    Ok((parts, residents))
 }
 fn import_surface_image(
     source: NativePath,
@@ -1060,9 +1107,13 @@ fn open(
     )?;
     drop(loading);
     let mut capacity = Capacity::new(definitions, budget);
-    let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {
-        bytes.saturating_add(source.bytes.len())
-    });
+    let incoming_source_bytes = loaded
+        .sources
+        .values()
+        .map(|source| (Arc::as_ptr(&source.bytes), source.bytes.len()))
+        .collect::<BTreeMap<_, _>>()
+        .values()
+        .sum::<usize>();
     capacity.query_proof_bytes = source_budget
         .checked_sub(incoming_source_bytes)
         .ok_or_else(|| {
@@ -1089,7 +1140,11 @@ fn open(
         } else {
             progress("preparing_native_geometry".into());
             let native = crate::performance::span("open_native");
-            let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
+            let definition = capacity.admit(
+                source.bytes.as_slice(),
+                source.record.provenance.source_solid.as_ref(),
+                cancel,
+            )?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
             validate_analysis_targets(&definition, &loaded, cancel)?;
@@ -1587,7 +1642,7 @@ mod geometry_only_tests {
         let path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
         let cancel = AtomicBool::new(false);
-        let (imported, resident) = import(
+        let (mut parts, mut residents) = import(
             NativePath::from_os_str(path.as_os_str()).unwrap(),
             &BTreeMap::new(),
             &BTreeSet::new(),
@@ -1601,6 +1656,9 @@ mod geometry_only_tests {
             &|_| {},
         )
         .unwrap();
+        assert_eq!((parts.len(), residents.len()), (1, 1));
+        let (imported, placements) = parts.pop().unwrap();
+        assert_eq!(placements, vec![RigidPoseMm::IDENTITY]);
         assert!(matches!(
             imported.display,
             ImportedDisplay::Unavailable(GeometryError {
@@ -1608,7 +1666,7 @@ mod geometry_only_tests {
                 ..
             })
         ));
-        let resident = resident.unwrap();
+        let resident = residents.pop().unwrap();
         assert_eq!(resident.definition.faces().len(), 6);
         let mut work = GeometryWorkBudget::new(20_000_000);
         for (axis, expected_maximum) in [20.0, 10.0, 8.0].into_iter().enumerate() {

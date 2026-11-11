@@ -230,6 +230,77 @@ impl DefinitionId {
         hash.update(source);
         Self(lower_hex(&hash.finalize()))
     }
+    /// One solid selected from a source that places several. A source that
+    /// is one solid keeps [`Self::from_source_sha256`].
+    pub fn from_source_solid(source: &[u8; 32], solid: &SourceSolidId) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"spiling:definition:");
+        hash.update(IMPORT_PROFILE.as_bytes());
+        hash.update(b"\0");
+        hash.update(source);
+        hash.update(b"\0solid:");
+        hash.update(solid.as_str().as_bytes());
+        Self(lower_hex(&hash.finalize()))
+    }
+    /// The identity a definition must have for its source bytes and selector.
+    pub fn for_source(source: &[u8; 32], solid: Option<&SourceSolidId>) -> Self {
+        match solid {
+            Some(solid) => Self::from_source_solid(source, solid),
+            None => Self::from_source_sha256(source),
+        }
+    }
+}
+
+/// The `MANIFOLD_SOLID_BREP` a definition imports from a source that places
+/// more than one solid, as `step:N`. Exact source bytes make it stable.
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+#[ts(type = "string")]
+pub struct SourceSolidId(String);
+impl SourceSolidId {
+    pub fn from_step_entity(entity: u64) -> Result<Self, GeometryError> {
+        if entity == 0 {
+            return Err(invalid("STEP solid entity must be nonzero"));
+        }
+        Ok(Self(format!("step:{entity}")))
+    }
+    pub fn parse(value: impl Into<String>) -> Result<Self, GeometryError> {
+        let value = value.into();
+        let digits = value
+            .strip_prefix("step:")
+            .ok_or_else(|| invalid("invalid source solid ID"))?;
+        let entity = digits
+            .parse::<u64>()
+            .map_err(|_| invalid("invalid source solid entity"))?;
+        if entity == 0 || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid(
+                "source solid entity must be canonical nonzero decimal",
+            ));
+        }
+        Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn step_entity(&self) -> u64 {
+        self.0[5..].parse().expect("validated SourceSolidId")
+    }
+}
+impl TryFrom<String> for SourceSolidId {
+    type Error = GeometryError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+impl From<SourceSolidId> for String {
+    fn from(value: SourceSolidId) -> Self {
+        value.0
+    }
+}
+impl<'de> Deserialize<'de> for SourceSolidId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_checked::<D, String, Self>(deserializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, TS, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -737,6 +808,37 @@ impl RigidPoseMm {
         translation_mm: [0.0; 3],
         rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
     };
+    /// `self` after `inner`: a point placed by `inner`, then by `self`.
+    pub fn compose(self, inner: Self) -> Self {
+        let [ax, ay, az, aw] = self.rotation_xyzw;
+        let [bx, by, bz, bw] = inner.rotation_xyzw;
+        let rotation_xyzw = [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ];
+        let rotated = self.rotate(inner.translation_mm);
+        Self {
+            translation_mm: std::array::from_fn(|i| rotated[i] + self.translation_mm[i]),
+            rotation_xyzw,
+        }
+    }
+    /// Rotate a vector by this pose's rotation, without translation.
+    pub fn rotate(&self, v: [f64; 3]) -> [f64; 3] {
+        let [x, y, z, w] = self.rotation_xyzw;
+        let u = [x, y, z];
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let t = cross(u, v).map(|c| 2.0 * c);
+        let ut = cross(u, t);
+        std::array::from_fn(|i| v[i] + w * t[i] + ut[i])
+    }
     pub fn validate(&self) -> Result<(), GeometryError> {
         let norm = self
             .rotation_xyzw
@@ -907,6 +1009,11 @@ pub struct SourceProvenance {
     pub source_unit: SourceUnit,
     /// Declared source uncertainty, normalized to mm; not a program-created accuracy guarantee.
     pub uncertainty_mm: Option<f64>,
+    /// The selected solid when the source places more than one. Absent for a
+    /// source that is one solid, so its encoding and identity are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_solid: Option<SourceSolidId>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -915,6 +1022,8 @@ struct RawProvenance {
     source_name: String,
     source_unit: SourceUnit,
     uncertainty_mm: Option<f64>,
+    #[serde(default)]
+    source_solid: Option<SourceSolidId>,
 }
 impl TryFrom<RawProvenance> for SourceProvenance {
     type Error = GeometryError;
@@ -924,6 +1033,7 @@ impl TryFrom<RawProvenance> for SourceProvenance {
             source_name: raw.source_name,
             source_unit: raw.source_unit,
             uncertainty_mm: raw.uncertainty_mm,
+            source_solid: raw.source_solid,
         };
         value.validate()?;
         Ok(value)

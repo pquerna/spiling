@@ -68,6 +68,9 @@ pub const MAX_PRINT_LAYERS: u32 = 4096;
 /// ADR012 height tolerance: feature heights closer than this are one layer
 /// boundary. Far below any printable layer, far above CAD export noise.
 pub const FEATURE_HEIGHT_TOLERANCE_MM: f64 = 0.001;
+/// Tolerant feature heights merge within the source's declared uncertainty,
+/// but never further than this.
+pub const TOLERANT_HEIGHT_MERGE_LIMIT_MM: f64 = 0.01;
 /// Job-wide deposition total, a checked count rather than an allocation.
 pub const MAX_DEPOSITION_SEGMENTS: u32 = 2_000_000;
 /// An admitted path may require lift, XY travel and landing. Fixed-dual waste
@@ -4602,7 +4605,8 @@ pub fn input_fingerprint(
             *byte = u8::from_str_radix(&def.provenance.source_hash.as_str()[i * 2..i * 2 + 2], 16)
                 .map_err(|_| invalid("invalid source hash"))?;
         }
-        if DefinitionId::from_source_sha256(&digest) != def.definition_id
+        if DefinitionId::for_source(&digest, def.provenance.source_solid.as_ref())
+            != def.definition_id
             || !ids.insert(&def.definition_id)
         {
             return Err(invalid("duplicate or source-inconsistent definition"));

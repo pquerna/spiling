@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: OSL-3.0
 """Realistic-corpus journey: each STEP through the real Spiling CLI and PrusaSlicer.
 
-Spiling: create + import + intent + center-on-bed + compile + save, then
+Spiling: create + import + intent + center the whole source on the bed + compile + save, then
 source-absent read-only reopen + verify + export. PrusaSlicer: slice the same
 STEP with matched layer height and infill as the printability reference.
 Usage: run.py CORPUS_DIR BIN_DIR INTENT_JSON [RESULTS] [PART_PREFIX...]
@@ -120,7 +120,7 @@ def main():
                       "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
             record["prusa"] = prusa(local, cwd)
             create = run_cli(["create", "p.spil", "--import", "source.step", "--intent", intent,
-                              "--center-on-bed", "1", "--compile", "--save"], cwd)
+                              "--center-all-on-bed", "--compile", "--save"], cwd)
             record["spiling_compile"] = create
             if create["ok"]:
                 os.remove(local)
