@@ -56,7 +56,7 @@ Native acquisition uses the shared search/review page, then a bounded editor wit
 `Projects.SetHardware` works before a manufacturing recipe exists. Core commits
 the complete capture and, when present, the recipe's printer/capture atomically.
 Existing material-profile pins are validated; selecting hardware cannot silently
-discard an incompatible profile. Authoring history restores the exact closure.
+discard an incompatible profile. Captured single-tool material profiles own their resolved nozzle/bed operating targets; these may differ from the installed setup's initial thermal values. Every other installed printer field remains exact, and the material resolver validates the complete capture. Reselecting hardware preserves those bound process temperatures. Authoring history restores the exact closure.
 An identical capture preserves revision and compiled artifact, allowing another
 identical physical instance to be selected locally. A changed capture invalidates
 the artifact; Undo restores its original coherent inputs/artifact. Removing the

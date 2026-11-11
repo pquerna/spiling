@@ -32,6 +32,12 @@ impl Admission<'_> {
         self.native_capture_proposal_bands
             .capacity()
             .saturating_mul(std::mem::size_of::<[f64; 2]>())
+            .saturating_add(self.tolerant.as_ref().map_or(0, |models| {
+                models
+                    .values()
+                    .map(|model| model.retained_bytes())
+                    .sum::<usize>()
+            }))
     }
 }
 
@@ -377,19 +383,23 @@ pub(super) fn admit_with<'a, 'work>(
     if matches!(
         input.intent.recipe.sparse_infill,
         SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
-    ) && (!matches!(input.intent.recipe.supports, SupportPolicy::Disabled)
-        || input
-            .process_document
-            .layers
-            .iter()
-            .any(|layer| layer.enabled && !layer.operations.is_empty())
+    ) && (input
+        .process_document
+        .layers
+        .iter()
+        .any(|layer| layer.enabled && !layer.operations.is_empty())
         || input
             .surface_overlays
             .layers
             .iter()
             .any(|layer| layer.enabled))
     {
-        add("infill_scope", "Two-axis infill currently requires disabled supports and no enabled process or finish layers".into(), None, None);
+        add(
+            "infill_scope",
+            "Two-axis infill currently requires no enabled process or finish layers".into(),
+            None,
+            None,
+        );
     }
     if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
         if let Some(construction) = &job.functional_construction {

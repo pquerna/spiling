@@ -272,6 +272,10 @@ impl Workbench {
             }
         }
         ui::group(ui, "Material and setup");
+        if m.intent.is_none() {
+            ui.weak("Apply a material to create standard settings with automatic supports.");
+        }
+
         if self.material.tool_id.is_none() && ui.button("Choose filament").clicked() {
             self.choose_filament();
         }

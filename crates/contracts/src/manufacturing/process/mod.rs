@@ -207,3 +207,25 @@ impl PreflightReport {
         Ok(())
     }
 }
+
+impl super::ManufacturingIntent {
+    /// Resolve the same-material automatic-support starting construction into
+    /// explicit captured fields. Existing authored/saved policies are unchanged.
+    /// These process defaults are not a physical material calibration.
+    pub fn automatic_support_policy(&self) -> Result<SupportPolicy, ManufacturingError> {
+        if !self.printer.capabilities.generated_supports {
+            return Err(invalid(
+                "the selected printer does not declare generated supports",
+            ));
+        }
+        let height = self.select_layer_height()?.height_mm;
+        let policy = SupportPolicy::Breakaway {
+            density: 0.3,
+            xy_clearance_mm: self.recipe.bead_width_mm * (2.0 / 3.0),
+            z_gap_mm: height,
+            interface_thickness_mm: 2.0 * height,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+}

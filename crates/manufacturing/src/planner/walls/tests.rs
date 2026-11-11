@@ -714,7 +714,7 @@ fn wall_census() {
     }
     println!("\nALL: {passed}/{total} layers pass");
     let mut sorted: Vec<_> = gates.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.1.0));
     for (gate, (count, examples)) in sorted {
         println!("\n{count:6}  {gate}");
         for example in examples {

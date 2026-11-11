@@ -186,11 +186,19 @@ tolerance:
   each bead centreline, with one thinner wall at the narrowest admitted width
   where a section is thinner than a bead. The exact variable-width wall
   planner remains the exact path's.
-- Generated supports clip their columns against the sampled material of every
-  layer they cross. No protected-void masks are added: those stand in for
-  cavity geometry the exact path cannot certify, and here every layer's
-  material is known. A cavity with a floor blocks the column by its floor; a
-  cavity open to the bed is a support corridor.
+- Generated supports use the complete closed-slab projection of the same
+  source-derived facets, plus raw interior sections. Boundary pieces retain
+  their physical height scope and the captured approximation/join enclosure in
+  XYZ; lower/middle/upper samples alone never establish source clearance.
+  Prepared sources stay shared; placement and final clearance stream one
+  expanded piece at a time instead of retaining facet copies per layer.
+  Protected holes exhaust the derived mesh's vertex-height intervals and retain
+  swept boundary association. Only a complete closed derived boundary supplies
+  this inventory. A fully covered bottom cap bounds a pocket mask; otherwise
+  it protects below the opening, including beneath floating through-holes.
+  These are conservative tolerant exclusions, not exact native certificates.
+  Unresolved closure or an unusable corridor refuses rather than returning empty
+  masks. Final actual-bead, lower-anchor and minimum-contact-gap checks still run.
 - The plan carries `PreflightEvidence::Tolerant` and claims no native
   certificate. Fresh independent replay is unchanged.
 

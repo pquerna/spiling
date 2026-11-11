@@ -36,8 +36,7 @@ pub(super) fn verify_two_axis_sparse(
         let mut families = [0u8; MAX_PROCESS_REGIONS];
         for path in layer.paths.iter().filter(|path| {
             path.kind == DepositionKind::SparseFill
-                || web_roof
-                    && path.kind == DepositionKind::Bridge
+                || path.kind == DepositionKind::Bridge
                     && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
         }) {
             cancelled(cancel)?;
@@ -78,7 +77,7 @@ pub(super) fn verify_two_axis_sparse(
             let ends = [a, b];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             let width = constant_width(path)?;
-            // Bridge-role Cathedral roads take the same span rule as every
+            // Bridge-role Grid/Cathedral roads take the same span rule as every
             // other sparse row below, and must really span something.
             let mut spans_gap = false;
             for gap in anchors.gaps_edges(
@@ -128,9 +127,10 @@ pub(super) fn verify_two_axis_sparse(
                     && region.fraction < 1.0
                     && families[region_index] != 3
                 {
-                    return Err(failed(
-                        "two-axis sparse interior is missing an orthogonal line family",
-                    ));
+                    return Err(failed(format!(
+                        "two-axis sparse interior is missing an orthogonal line family: layer {}, region {region_index}",
+                        layer.index
+                    )));
                 }
             }
         }

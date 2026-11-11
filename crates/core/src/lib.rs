@@ -1331,6 +1331,14 @@ impl Project {
                     intent.hardware = capture.clone();
                     if let Some(c) = &capture {
                         intent.printer = c.setup.printer.clone();
+                        if let Some(profile) = &intent.material_profile
+                            && let spiling_contracts::manufacturing::JobWorkflow::CompleteMarlin {
+                                job,
+                            } = &mut intent.printer.workflow
+                        {
+                            job.nozzle_temperature_c = profile.selection.nozzle_temperature_c();
+                            job.bed_temperature_c = profile.selection.bed_temperature_c();
+                        }
                     }
                     intent.validate().map_err(|e| invalid(e.message))?;
                     snapshot.manufacturing_intent = Some(Arc::new(intent));

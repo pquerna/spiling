@@ -2980,3 +2980,126 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
 mod layout;
 #[path = "manufacturing/plates.rs"]
 mod plates;
+
+#[tokio::test]
+async fn setup_and_first_material_create_automatic_supports_and_survive_saved_return() {
+    use spiling_contracts::hardware::*;
+    use std::sync::Arc;
+    let work = Workspace::new();
+    let source = work.source("through-hole.step");
+    let checkpoint = work.0.join("automatic-supports.spil");
+    let mut client = spawn().await;
+    let initial = scene(&mut client).await;
+    let GeometryResponse::OperationAccepted { operation } = client
+        .geometry(GeometryCommand::ImportPart {
+            session_id: initial.session_id,
+            base_revision: initial.revision,
+            source: native(&source),
+            initial_pose: RigidPoseMm {
+                translation_mm: [50.0, 50.0, 2.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("import")
+    };
+    assert_eq!(
+        wait(&mut client, operation.name).await.status,
+        JobStatus::Completed
+    );
+    let catalog = builtin_catalog().unwrap();
+    let hardware = Arc::new(ProjectHardwareCapture {
+        setup: catalog
+            .setups
+            .into_iter()
+            .find(|s| matches!(s.printer.workflow, JobWorkflow::CompleteMarlin { .. }))
+            .unwrap(),
+        plate: catalog.plates[0].clone(),
+        face: "textured".into(),
+        accessories: Vec::new(),
+    });
+    let before = status(&mut client).await.0;
+    client
+        .project(ProjectCommand::SetHardware {
+            layout_id: before.layout_id,
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            capture: Some(hardware.clone()),
+        })
+        .await
+        .unwrap();
+    let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/manufacturing/material-profile-a.json"
+    ))
+    .unwrap();
+    selection.overrides.nozzle_temperature_c = Some(215.0);
+    let before = status(&mut client).await.0;
+    let fixed_scene = scene(&mut client).await;
+    let ManufacturingResponse::Status {
+        intent: Some(created),
+        ..
+    } = client
+        .manufacturing(ManufacturingCommand::ApplyMaterialProfile {
+            tool_id: None,
+            layout_id: before.layout_id,
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            selection: selection.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("first material did not create settings")
+    };
+    assert!(matches!(
+        created.recipe.supports,
+        SupportPolicy::Breakaway { .. }
+    ));
+    assert_eq!(
+        created.material_profile.as_ref().unwrap().selection,
+        selection
+    );
+    assert_eq!(
+        scene(&mut client).await,
+        fixed_scene,
+        "material creation must not remesh"
+    );
+    // Selecting the same physical setup/plate retains profile-owned temperatures.
+    let before = status(&mut client).await.0;
+    client
+        .project(ProjectCommand::SetHardware {
+            layout_id: before.layout_id,
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            capture: Some(hardware),
+        })
+        .await
+        .unwrap();
+    let record = compile(&mut client).await;
+    let bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    assert!(bundle.verification.support_deposition_segments > 0);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|l| &l.paths)
+            .any(|p| p.kind == DepositionKind::SupportInterface)
+    );
+    save(&mut client, &checkpoint).await;
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    let mut returned = spawn().await;
+    assert_eq!(
+        open(&mut returned, &checkpoint, true).await.status,
+        JobStatus::Completed
+    );
+    let (restored, report) = inspect(&mut returned).await;
+    assert_eq!(restored, record);
+    assert!(report.verified && report.support_deposition_segments > 0);
+    let restored_bundle = fetch_bundle(&mut returned, &record).await.unwrap();
+    assert_eq!(restored_bundle.provenance.intent, *created);
+    returned.shutdown().await.unwrap();
+}

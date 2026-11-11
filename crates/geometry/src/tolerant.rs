@@ -21,7 +21,9 @@
 //! the measured gaps and dropped slivers are reported.
 
 mod exact;
+mod support;
 pub use exact::SectionCircle;
+pub use support::{TolerantSupportPiece, TolerantSupportProjection, TolerantVoidProjection};
 
 use crate::{GeometryError, GeometryErrorCode, kernel::Definition};
 use solidcore_mesh::{EdgeOptions, OutputOptions, TessellateOptions, Tolerance};
@@ -93,6 +95,7 @@ pub struct TolerantModel {
     /// profile tolerance, or twice the measured deviation where the mesher
     /// left analytic faces unconverged.
     reach: f64,
+    support_enclosure_mm: f64,
     /// Source faces the mesher could not tessellate; their area is missing.
     pub failed_faces: usize,
 }
@@ -232,14 +235,42 @@ impl TolerantModel {
     }
 
     fn indexed(
-        positions: Vec<[f64; 3]>,
-        triangles: Vec<[u32; 3]>,
+        mut positions: Vec<[f64; 3]>,
+        mut triangles: Vec<[u32; 3]>,
         faces: Vec<u32>,
         surfaces: Vec<Option<exact::Implicit>>,
         policy: TolerantPolicy,
         reach: f64,
         failed_faces: usize,
     ) -> Self {
+        // Exact coordinate welding restores shared mesh-edge identity without
+        // moving geometry or applying an unrecorded repair tolerance. Reuse the
+        // position allocation in place; support topology is checked on demand.
+        let mut vertices = HashMap::new();
+        let mut remap = Vec::with_capacity(positions.len());
+        let mut unique = 0;
+        for index in 0..positions.len() {
+            let point = positions[index];
+            let key = point.map(|v| {
+                if v == 0.0 {
+                    0.0_f64.to_bits()
+                } else {
+                    v.to_bits()
+                }
+            });
+            let id = *vertices.entry(key).or_insert_with(|| {
+                positions[unique] = point;
+                unique += 1;
+                (unique - 1) as u32
+            });
+            remap.push(id);
+        }
+        positions.truncate(unique);
+        for triangle in &mut triangles {
+            *triangle = triangle.map(|v| remap[v as usize]);
+        }
+        drop(vertices);
+        drop(remap);
         let z_min = positions.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
         let z_max = positions
             .iter()
@@ -257,6 +288,13 @@ impl TolerantModel {
                 bucket.push(index as u32);
             }
         }
+        let scale = positions
+            .iter()
+            .flatten()
+            .copied()
+            .map(f64::abs)
+            .fold(1.0, f64::max);
+        let support_enclosure_mm = (reach + policy.join_mm + 32.0 * f64::EPSILON * scale).next_up();
         Self {
             positions,
             triangles,
@@ -266,6 +304,7 @@ impl TolerantModel {
             z_min,
             policy,
             reach,
+            support_enclosure_mm,
             failed_faces,
         }
     }
@@ -319,11 +358,18 @@ impl TolerantModel {
             + self.triangles.capacity() * 12
             + self.faces.capacity() * 4
             + self.surfaces.capacity() * std::mem::size_of::<Option<exact::Implicit>>()
+            + self.buckets.capacity() * std::mem::size_of::<Vec<u32>>()
             + self.buckets.iter().map(|b| b.capacity() * 4).sum::<usize>()
     }
 
     /// The section at definition-local height `z`.
     pub fn section(&self, z: f64) -> Result<TolerantSection, GeometryError> {
+        self.section_with(z, true)
+    }
+
+    // Raw support traces label outgoing segments by triangle identity. Their
+    // connectivity is constant strictly between consecutive mesh vertex heights.
+    fn section_with(&self, z: f64, analytic: bool) -> Result<TolerantSection, GeometryError> {
         let empty = TolerantSection {
             z_mm: z,
             loops: Vec::new(),
@@ -353,7 +399,11 @@ impl TolerantModel {
         let mut points: HashMap<(u32, u32), Crossing> = HashMap::new();
         for &index in &self.buckets[offset as usize] {
             let [a, b, c] = self.triangles[index as usize];
-            let face = self.faces[index as usize];
+            let face = if analytic {
+                self.faces[index as usize]
+            } else {
+                index
+            };
             let mut ends = Vec::with_capacity(2);
             for (p, q) in [(a, b), (b, c), (c, a)] {
                 if above(p) != above(q) {
@@ -378,7 +428,16 @@ impl TolerantModel {
         }
         let points: HashMap<(u32, u32), [f64; 2]> = points
             .into_iter()
-            .map(|(k, (p, first, second))| (k, self.exact_crossing(p, z, first, second)))
+            .map(|(k, (p, first, second))| {
+                (
+                    k,
+                    if analytic {
+                        self.exact_crossing(p, z, first, second)
+                    } else {
+                        p
+                    },
+                )
+            })
             .collect();
         // Chain by crossing identity: open chains from degree-one crossings
         // first, then the remaining closed cycles.
@@ -475,12 +534,18 @@ impl TolerantModel {
             }
         }
         // Validate on the result: drop slivers, then orient by nesting depth.
-        let sliver = self.policy.profile_mm * self.policy.profile_mm;
+        let sliver = if analytic {
+            self.policy.profile_mm * self.policy.profile_mm
+        } else {
+            0.0
+        };
         let mut dropped_slivers = 0;
         let mut loops = Vec::new();
         for (mut points, mut faces) in rings {
             dedupe(&mut points, &mut faces);
-            self.densify(&mut points, &mut faces, z);
+            if analytic {
+                self.densify(&mut points, &mut faces, z);
+            }
             if points.len() < 3 {
                 dropped_slivers += 1;
                 continue;
@@ -519,7 +584,7 @@ impl TolerantModel {
         crossed.dedup();
         let mut circles = Vec::new();
         for face in crossed {
-            if let Some(Some(surface)) = self.surfaces.get(face as usize) {
+            if analytic && let Some(Some(surface)) = self.surfaces.get(face as usize) {
                 surface.circles(z, face, &mut circles);
             }
         }
@@ -717,7 +782,10 @@ fn signed_area(points: &[[f64; 2]]) -> f64 {
     let mut sum = 0.0;
     for i in 0..points.len() {
         let (a, b) = (points[i], points[(i + 1) % points.len()]);
-        sum += a[0] * b[1] - b[0] * a[1];
+        let origin = points[0];
+        let (ax, ay) = (a[0] - origin[0], a[1] - origin[1]);
+        let (bx, by) = (b[0] - origin[0], b[1] - origin[1]);
+        sum += ax * by - bx * ay;
     }
     sum * 0.5
 }

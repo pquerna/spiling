@@ -428,6 +428,7 @@ pub(super) struct SupportInput<'a> {
     /// projection callback refreshes the native proof component after compaction.
     pub(super) native_owned_bytes: usize,
     pub(super) recipe: &'a PlanarPrintRecipe,
+    pub(super) source_z_allowance_mm: f64,
 }
 
 #[derive(Default)]
@@ -547,6 +548,7 @@ pub(super) fn realize(
             mut native_points,
             mut native_owned_bytes,
             recipe,
+            source_z_allowance_mm,
         } = *input;
         let width = recipe.bead_width_mm;
         let mut demands: Vec<Demand> = Vec::new();
@@ -932,11 +934,23 @@ pub(super) fn realize(
         else {
             unreachable!("disabled support demand refused above")
         };
+        let selection_gap_mm = if source_z_allowance_mm > 0.0 {
+            (z_gap_mm + source_z_allowance_mm).next_up()
+        } else {
+            z_gap_mm
+        };
         if tentative {
             for demand in &demands {
                 let path = &layers[demand.target].paths[demand.failure.path];
-                if contact_layer(layers, demand.target, path, z_gap_mm, &mut work, cancel)?
-                    .is_none()
+                if contact_layer(
+                    layers,
+                    demand.target,
+                    path,
+                    selection_gap_mm,
+                    &mut work,
+                    cancel,
+                )?
+                .is_none()
                 {
                     return Ok(SupportAdmission::RefineUnreachableLayer {
                         index: demand.target,
@@ -965,7 +979,13 @@ pub(super) fn realize(
         owned_bytes = owned_bytes.saturating_add(vec_bytes(&demand_bounds));
         // Enclose the half-bead placement search with the existing offset
         // construction allowance before querying any nearby protected void.
-        let search_bound = (width / 2.0 + super::OFFSET_TOLERANCE_MM * 0.5).next_up();
+        // Query every forbidden mask that can meet the proposed full bead and
+        // its clearance, including tolerant source enclosure outside raw bounds.
+        let search_bound = (width / 2.0
+            + xy_clearance_mm
+            + source_z_allowance_mm
+            + super::OFFSET_TOLERANCE_MM * 0.5)
+            .next_up();
         for demand in &demands {
             check_cancel(cancel)?;
             let candidate = &sections[span_at(sections, demand.target as u32)].material;
@@ -1159,7 +1179,7 @@ pub(super) fn realize(
                 layers,
                 demand.target,
                 demanded_path,
-                z_gap_mm,
+                selection_gap_mm,
                 &mut work,
                 cancel,
             )?
@@ -1203,10 +1223,10 @@ pub(super) fn realize(
                 if column.0.is_empty() {
                     break;
                 }
-                for (occupied, height) in section.occupied_pieces() {
+                section.visit_occupied(cancel, |occupied, height| {
                     check_cancel(cancel)?;
                     if column.0.is_empty() {
-                        break;
+                        return Ok(false);
                     }
                     work = work
                         .checked_add(1)
@@ -1220,15 +1240,18 @@ pub(super) fn realize(
                     if let Some([lower, upper]) = height {
                         let bed = layers[0].lower_z_mm;
                         if lower > layers[top].z_mm || upper < bed {
-                            continue;
+                            return Ok(true);
                         }
                     }
                     // Independent certified outer operands may overlap. A single
                     // even-odd normalization would erase their overlap; subtract
                     // each expanded operand instead, borrowing its original rings.
                     super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
-                    let distance =
-                        candidate_clearance_distance(occupied, &column, xy_clearance_mm)?;
+                    let Some(distance) =
+                        candidate_clearance_distance(occupied, &column, xy_clearance_mm)?
+                    else {
+                        return Ok(true);
+                    };
                     let clearance = OwnedMaterial::new(offset_polygon_owned(
                         occupied,
                         distance,
@@ -1264,7 +1287,8 @@ pub(super) fn realize(
                         &interfaces,
                         &[&protected, &column, &clearance],
                     )?;
-                }
+                    Ok(!column.0.is_empty())
+                })?;
             }
             for (mask, scope) in protected.0.iter().zip(&scopes) {
                 if column.0.is_empty() {
@@ -1294,7 +1318,10 @@ pub(super) fn realize(
                     continue;
                 }
                 super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
-                let distance = candidate_clearance_distance(mask, &column, xy_clearance_mm)?;
+                let Some(distance) = candidate_clearance_distance(mask, &column, xy_clearance_mm)?
+                else {
+                    continue;
+                };
                 let clearance = OwnedMaterial::new(offset_polygon_owned(
                     mask,
                     distance,
@@ -1353,7 +1380,7 @@ pub(super) fn realize(
                     foreign_work,
                     cancel,
                 )?;
-                return Err(error(
+                let unresolved = error(
                     ManufacturingErrorCode::NativeAnalysisIndeterminate,
                     format!(
                         "layer {} Z {:.9}: unresolved continuous outer occupancy/protected geometry cannot certify any bed-anchored support corridor; conservative exclusion is not proof of actual collision; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; previous layer {} Z {:.9}, nearest start {:?}, nearest end {:?}; nominal bead width {:.9} mm, XY clearance {:.9} mm, Z gap {:.9} mm, bridge limit {:.9} mm",
@@ -1374,7 +1401,23 @@ pub(super) fn realize(
                         z_gap_mm,
                         recipe.process.max_bridge_span_mm
                     ),
-                ));
+                );
+                // A nearby actual lower footprint can justify trying finer
+                // physical intervals. It grants no anchor/clearance authority.
+                let near = [nearest_a.as_ref(), nearest_b.as_ref()]
+                    .into_iter()
+                    .all(|stroke| stroke.is_some_and(|stroke| stroke.distance_mm <= 2.0 * width));
+                let attached_end = [nearest_a.as_ref(), nearest_b.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|stroke| stroke.distance_mm < (width + stroke.width_mm) * 0.5);
+                if near && attached_end {
+                    return Ok(SupportAdmission::RefineUnreachableLayer {
+                        index: demand.target,
+                        failure: unresolved,
+                    });
+                }
+                return Err(unresolved);
             }
             region::canonicalize(&mut column.material);
             column.bytes = super::native::material_bytes(&mut column.material);
@@ -1417,8 +1460,11 @@ pub(super) fn realize(
                             break;
                         }
                         super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
-                        let distance =
-                            candidate_clearance_distance(polygon, &column, xy_clearance_mm)?;
+                        let Some(distance) =
+                            candidate_clearance_distance(polygon, &column, xy_clearance_mm)?
+                        else {
+                            continue;
+                        };
                         let clearance = OwnedMaterial::new(offset_polygon_owned(
                             polygon,
                             distance,
@@ -1552,13 +1598,12 @@ pub(super) fn realize(
                     foreign_work,
                     cancel,
                 )?;
-                if !support_regions[i].0.is_empty() && paths.is_empty() {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        format!(
-                            "layer {i}: support clearance leaves no printable bead-width support"
-                        ),
-                    ));
+                // A clearance-clipped proposal can leave an unprintable sliver
+                // without carrying any final demand. Omit that proposal, then
+                // require actual lower anchors and complete final object/contact
+                // admission below; a nonempty polygon is not required material.
+                if paths.is_empty() {
+                    break;
                 }
                 if i == 0 {
                     break;
@@ -2781,6 +2826,7 @@ pub(in crate::planner) fn object_volumes(
 
 struct NearestStroke {
     distance_mm: f64,
+    width_mm: f64,
     kind: DepositionKind,
     physical_z_mm: [f64; 2],
     endpoints_mm: [[f64; 3]; 2],
@@ -2791,6 +2837,7 @@ impl std::fmt::Debug for NearestStroke {
         formatter
             .debug_struct("NearestStroke")
             .field("distance_mm", &self.distance_mm)
+            .field("width_mm", &self.width_mm)
             .field("kind", &self.kind)
             .field("physical_z_mm", &self.physical_z_mm)
             .field("endpoints_mm", &self.endpoints_mm)
@@ -2807,7 +2854,8 @@ fn nearest_stroke<'a>(
 ) -> Result<Option<NearestStroke>, ManufacturingError> {
     let mut nearest: Option<NearestStroke> = None;
     for path in paths {
-        for edge in path.points_mm.windows(2) {
+        for local in path.checked_edges()? {
+            let edge = local.points_mm;
             charge_owned_work(work, foreign_work, 1, cancel)?;
             let delta = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
             let length = delta[0].hypot(delta[1]);
@@ -2828,6 +2876,7 @@ fn nearest_stroke<'a>(
             {
                 nearest = Some(NearestStroke {
                     distance_mm: distance,
+                    width_mm: local.width_mm,
                     kind: path.kind,
                     physical_z_mm: path.physical_z_mm,
                     endpoints_mm: [edge[0], edge[1]],
@@ -3042,7 +3091,7 @@ fn candidate_clearance_distance(
     occupied: &Polygon<f64>,
     column: &MultiPolygon<f64>,
     requested: f64,
-) -> Result<f64, ManufacturingError> {
+) -> Result<Option<f64>, ManufacturingError> {
     let a = occupied.bounding_rect().ok_or_else(|| {
         error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -3050,7 +3099,7 @@ fn candidate_clearance_distance(
         )
     })?;
     let Some(b) = column.bounding_rect() else {
-        return Ok(requested);
+        return Ok(None);
     };
     // Offset allowance and Boolean padding only propose a candidate work
     // frame. They do not prove raw-C containment after overlay. Final actual
@@ -3075,7 +3124,16 @@ fn candidate_clearance_distance(
             "support exclusion candidate cannot admit its offset/overlay/XYZ6 work frame",
         ));
     }
-    Ok(distance)
+    // A disjoint outward expanded box cannot affect this candidate. Avoid
+    // offset/overlay work, while final raw-source capsule proof stays separate.
+    if (a.max().x + distance).next_up() < b.min().x
+        || (a.min().x - distance).next_down() > b.max().x
+        || (a.max().y + distance).next_up() < b.min().y
+        || (a.min().y - distance).next_down() > b.max().y
+    {
+        return Ok(None);
+    }
+    Ok(Some(distance))
 }
 
 #[cfg(test)]

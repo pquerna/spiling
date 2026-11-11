@@ -230,6 +230,9 @@ fn occupied_bytes(occupied: &super::ContinuousOccupied) -> usize {
         .capacity()
         .saturating_mul(std::mem::size_of::<super::OccupiedPiece>())
         .saturating_add(occupied.payload_bytes)
+        .saturating_add(
+            occupied.tolerant.capacity() * std::mem::size_of::<super::TolerantOccupied>(),
+        )
 }
 
 /// Caller-owned D/C/M buffers coexist with the next native query. Shared
@@ -3990,12 +3993,12 @@ pub(super) fn certify_support_clearance(
             schedule[span.start as usize].lower_z,
             schedule[(span.end - 1) as usize].z,
         ];
-        for (polygon, piece_scope) in span.occupied_pieces() {
+        span.visit_occupied(cancel, |polygon, piece_scope| {
             let height = piece_scope.map_or(interval, |height| {
                 [interval[0].max(height[0]), interval[1].min(height[1])]
             });
             if height[0] > height[1] {
-                continue;
+                return Ok(true);
             }
             let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
                 lower_mm: height[0],
@@ -4015,7 +4018,8 @@ pub(super) fn certify_support_clearance(
                 support_work,
                 cancel,
             )?;
-        }
+            Ok(true)
+        })?;
     }
     for (polygon, scope) in protected.0.iter().zip(scopes) {
         let applicable =

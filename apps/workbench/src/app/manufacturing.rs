@@ -476,7 +476,7 @@ impl Workbench {
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
                 } else {
-                    ui.weak("Load an explicit inert intent. No printer or material is inferred.");
+                    ui.weak("Choose a printer setup and apply a material to create standard settings. Existing recipe declarations can also be loaded.");
                 }
             }
             if section == 4 {

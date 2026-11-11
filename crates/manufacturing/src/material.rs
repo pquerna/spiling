@@ -75,6 +75,88 @@ pub fn resolve_tool_material_profile(
     Ok(resolved)
 }
 
+/// Create the first complete, explicit recipe from an operator-selected setup
+/// and material. This is creation, never a fallback for omitted wire fields or
+/// an overwrite of an existing recipe. Captured values survive saved return.
+pub fn create_material_intent(
+    hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
+    selection: MaterialProfileSelection,
+) -> Result<ManufacturingIntent, ManufacturingError> {
+    hardware
+        .validate()
+        .map_err(|e| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e))?;
+    selection.validate()?;
+    let mut printer = hardware.setup.printer.clone();
+    let JobWorkflow::CompleteMarlin { job } = &mut printer.workflow else {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::UnsupportedCapability,
+            "standard material settings require an explicitly selected complete single-tool Marlin setup",
+        ));
+    };
+    job.nozzle_temperature_c = selection.nozzle_temperature_c();
+    job.bed_temperature_c = selection.bed_temperature_c();
+    let limits = printer.deposition_limits;
+    let profile_limits = selection.profile.deposition_limits;
+    let min_width = limits
+        .min_bead_width_mm
+        .max(profile_limits.min_bead_width_mm);
+    let max_width = limits
+        .max_bead_width_mm
+        .min(profile_limits.max_bead_width_mm);
+    let min_height = limits
+        .min_bead_height_mm
+        .max(profile_limits.min_bead_height_mm);
+    let max_height = limits
+        .max_bead_height_mm
+        .min(profile_limits.max_bead_height_mm);
+    if min_width > max_width || min_height > max_height || min_height > max_width {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::InvalidSpecification,
+            "selected setup and material have no common bead envelope",
+        ));
+    }
+    let width = (printer.nozzle_diameter_mm * 1.125)
+        .max(min_height)
+        .clamp(min_width, max_width);
+    let height = 0.2_f64.clamp(min_height, max_height.min(width));
+    let material = &selection.profile.material;
+    let mut intent = ManufacturingIntent {
+        hardware: Some(hardware),
+        material_profile: Some(ResolvedMaterialProfile {
+            resolver_version: MATERIAL_RESOLVER_VERSION,
+            selection: selection.clone(),
+        }),
+        recipe: PlanarPrintRecipe {
+            id: "spiling.standard-planar".into(),
+            revision: "1".into(),
+            material_id: material.id.clone(),
+            material_revision: material.revision.clone(),
+            filament_diameter_mm: material.filament_diameter_mm,
+            layer_height_mm: height,
+            layer_height_policy: LayerHeightPolicy::Preferred,
+            native_shape_error_mm: 0.01,
+            bead_width_mm: width,
+            sparse_infill: SparseInfillPolicy::Fine,
+            perimeter_count: 3,
+            infill_fraction: 0.15,
+            top_skin_thickness_mm: 0.8_f64.max(height),
+            bottom_skin_thickness_mm: 0.8_f64.max(height),
+            print_speed_mm_s: selection.print_speed_mm_s(),
+            travel_speed_mm_s: printer.max_feed_mm_s,
+            flow_multiplier: selection.flow_multiplier(),
+            process: selection.process().clone(),
+            supports: SupportPolicy::Disabled,
+            seam_policy: SeamPolicy::Nearest,
+            rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
+            top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
+        },
+        printer,
+    };
+    intent.recipe.supports = intent.automatic_support_policy()?;
+    intent.validate()?;
+    Ok(intent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +287,69 @@ mod tests {
         }
         assert!(original.validate().is_ok());
         assert_eq!(original.material_profile, None);
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+    use spiling_contracts::hardware::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn first_material_creates_portable_defaults_and_keeps_installed_limits_authoritative() {
+        let catalog = builtin_catalog().unwrap();
+        let hardware = Arc::new(ProjectHardwareCapture {
+            setup: catalog
+                .setups
+                .into_iter()
+                .find(|s| matches!(s.printer.workflow, JobWorkflow::CompleteMarlin { .. }))
+                .unwrap(),
+            plate: catalog.plates[0].clone(),
+            face: "textured".into(),
+            accessories: Vec::new(),
+        });
+        let mut selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/manufacturing/material-profile-a.json"
+        ))
+        .unwrap();
+        selection.overrides.nozzle_temperature_c = Some(215.0);
+        let intent = create_material_intent(hardware.clone(), selection.clone()).unwrap();
+        assert!(matches!(
+            intent.recipe.supports,
+            SupportPolicy::Breakaway { .. }
+        ));
+        assert_eq!(intent.hardware, Some(hardware.clone()));
+        intent.validate().unwrap();
+        let restored = decode_intent(&serde_json::to_vec(&intent).unwrap()).unwrap();
+        assert_eq!(restored, intent);
+        let mut forged = intent.clone();
+        forged.printer.max_feed_mm_s *= 0.9;
+        assert!(
+            forged.validate().is_err(),
+            "profile thermal resolution cannot change installed capabilities"
+        );
+        let mut forged = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut forged.printer.workflow {
+            job.nozzle_temperature_c += 1.0;
+        }
+        assert!(
+            forged.validate().is_err(),
+            "thermal target requires captured material authority"
+        );
+        let mut explicit_off = intent.clone();
+        explicit_off.recipe.supports = SupportPolicy::Disabled;
+        let resolved = resolve_material_profile(&explicit_off, selection).unwrap();
+        assert_eq!(
+            resolved.recipe.supports,
+            SupportPolicy::Disabled,
+            "profile changes cannot re-enable authored Off"
+        );
+        let mut wrong = hardware.as_ref().clone();
+        wrong.setup.printer.id.push_str("-other");
+        assert!(
+            create_material_intent(Arc::new(wrong), intent.material_profile.unwrap().selection)
+                .is_err()
+        );
     }
 }

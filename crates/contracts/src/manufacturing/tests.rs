@@ -4599,12 +4599,8 @@ fn web_roof_requires_sparse_single_tool_object_material() {
         z_gap_mm: 0.2,
         interface_thickness_mm: 0.4,
     };
-    assert!(
-        bad.validate()
-            .unwrap_err()
-            .message
-            .contains("disabled supports")
-    );
+    bad.printer.capabilities.generated_supports = true;
+    bad.validate().unwrap();
     let mut dual: ManufacturingIntent = serde_json::from_str(include_str!(
         "../../../../fixtures/manufacturing/fixed-dual.intent.json"
     ))
@@ -4888,4 +4884,59 @@ fn arc_runs_stay_on_one_bounded_circle_and_follow_path_edits() {
     );
     let text = serde_json::to_string(&path).unwrap();
     assert_eq!(serde_json::from_str::<DepositionPath>(&text).unwrap(), path);
+}
+
+#[test]
+fn automatic_support_creation_resolves_selected_height_without_overwriting_authored_off() {
+    let mut value = intent();
+    value.printer.capabilities.generated_supports = true;
+    let authored = value.recipe.supports.clone();
+    let automatic = value.automatic_support_policy().unwrap();
+    assert_eq!(value.recipe.supports, authored);
+    automatic.validate().unwrap();
+    let SupportPolicy::Breakaway {
+        z_gap_mm,
+        interface_thickness_mm,
+        ..
+    } = automatic
+    else {
+        panic!("automatic supports disabled")
+    };
+    assert_eq!(z_gap_mm, value.select_layer_height().unwrap().height_mm);
+    assert!(interface_thickness_mm >= z_gap_mm);
+    value.recipe.supports = automatic;
+    value.validate().unwrap();
+    value.printer.capabilities.generated_supports = false;
+    assert!(value.automatic_support_policy().is_err());
+}
+
+#[test]
+fn tolerant_coverage_can_have_no_native_work_without_fabricating_certificates() {
+    let mut coverage = NativeGeometryCoverageSummary {
+        requested_shape_error_mm: 0.01,
+        achieved_shape_error_mm: 0.01,
+        height_analysis_count: 0,
+        slab_count: 0,
+        certified_layer_count: 1,
+        event_count: 2,
+        geometry_work: 0,
+        height_merge_mm: 0.0025,
+        evidence: PreflightEvidence::Tolerant,
+        source_feature_coverage: NativeFeatureCoverageSummary {
+            disjoint_source_layer_count: 0,
+            invariant_source_union_layer_count: 0,
+            native_interface_complex_layer_count: 0,
+            owned_critical_slab_count: 0,
+        },
+        skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+        support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+    };
+    coverage.validate().unwrap();
+    coverage.evidence = PreflightEvidence::Certified;
+    coverage.height_analysis_count = 1;
+    coverage.slab_count = 1;
+    coverage.source_feature_coverage.disjoint_source_layer_count = 1;
+    assert!(coverage.validate().is_err());
+    coverage.geometry_work = 1;
+    coverage.validate().unwrap();
 }

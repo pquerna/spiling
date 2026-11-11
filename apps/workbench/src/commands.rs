@@ -295,6 +295,17 @@ impl Action {
             Self::Arrange if state.scene.as_ref().is_none_or(|s| s.occurrence_count == 0) => {
                 Some("Import a part first")
             }
+            Self::LoadMaterial
+                if m.intent.is_none()
+                    && project.hardware.as_ref().is_some_and(|h| {
+                        matches!(
+                            h.setup.printer.workflow,
+                            spiling_contracts::manufacturing::JobWorkflow::CompleteMarlin { .. }
+                        )
+                    }) =>
+            {
+                None
+            }
             Self::LoadMaterial | Self::LoadMaterialCatalog
                 if !m.intent.as_ref().is_some_and(|i| {
                     matches!(
@@ -303,7 +314,7 @@ impl Action {
                     )
                 }) =>
             {
-                Some("Apply a complete single-tool Marlin intent first")
+                Some("Choose a complete single-tool Marlin setup or apply an intent first")
             }
             Self::Preflight if m.intent.is_none() => {
                 Some("Apply a complete manufacturing intent first")

@@ -5278,3 +5278,131 @@ fn assert_overhang_reported(result: Result<ManufacturingResult, ManufacturingErr
     );
     assert!(bundle.verification.verified);
 }
+
+#[test]
+fn tolerant_supports_keep_real_anchors_holes_and_closed_pocket_floors() {
+    let cancel = AtomicBool::new(false);
+    let enabled = intent(true);
+    let cases = [
+        (
+            "bed-rooted",
+            NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]),
+        ),
+        (
+            "cantilever",
+            NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]),
+        ),
+        (
+            "through-hole",
+            NativeScene::new(HOLE, &[translated(0.0, 0.0, 2.0)]),
+        ),
+        (
+            "blind-pocket",
+            NativeScene::new(
+                &native_test_source("blind-pocket"),
+                &[translated(0.0, 0.0, 2.0)],
+            ),
+        ),
+    ];
+    for (name, scene) in cases {
+        let input = scene.input(&enabled);
+        let mut work = spiling_geometry::GeometryWorkBudget::compile();
+        let mut plan =
+            plan_with(&input, &cancel, &mut work, true).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(plan.native_geometry.evidence, PreflightEvidence::Tolerant);
+        crate::realization::canonicalize(&mut plan, &enabled, &cancel).unwrap();
+        let program = crate::backend::emit(&plan, &enabled, &cancel).unwrap();
+        let actual = crate::verifier::verify(&program, &plan, &enabled, &cancel)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(actual.verified, "{name}");
+        if name == "bed-rooted" {
+            assert_eq!(actual.support_deposition_segments, 0);
+            assert_eq!(actual.support_deposited_volume_mm3, 0.0);
+            continue;
+        }
+        assert!(actual.support_deposition_segments > 0, "{name}");
+        assert!(
+            plan.layers
+                .iter()
+                .flat_map(|l| &l.paths)
+                .any(|p| p.kind == DepositionKind::SupportInterface),
+            "{name}"
+        );
+        if name == "through-hole" {
+            for path in plan.layers.iter().flat_map(|l| &l.paths).filter(|p| {
+                matches!(
+                    p.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            }) {
+                // The source hole is centered at (10,10), radius 3.0. Check
+                // complete stroke distance, not just its endpoints.
+                for edge in path.points_mm.windows(2) {
+                    let a = [edge[0][0] - 10.0, edge[0][1] - 10.0];
+                    let d = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
+                    let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1]))
+                        .clamp(0.0, 1.0);
+                    assert!(
+                        (a[0] + t * d[0]).hypot(a[1] + t * d[1])
+                            >= 3.0 + enabled.recipe.bead_width_mm * 0.5 + 0.2,
+                        "hole invaded"
+                    );
+                }
+            }
+        }
+        if name == "blind-pocket" {
+            assert!(
+                plan.layers
+                    .iter()
+                    .filter(|l| l.z_mm < 2.0)
+                    .flat_map(|l| &l.paths)
+                    .filter(|p| matches!(
+                        p.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    ))
+                    .flat_map(|p| p.points_mm.windows(2))
+                    .any(|edge| {
+                        let a = [edge[0][0] - 10.0, edge[0][1] - 10.0];
+                        let d = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
+                        let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1]))
+                            .clamp(0.0, 1.0);
+                        (a[0] + t * d[0]).hypot(a[1] + t * d[1]) < 1.0
+                    }),
+                "closed floor falsely projected to bed"
+            );
+        }
+    }
+}
+
+#[test]
+fn tolerant_structured_interiors_keep_automatic_external_supports() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
+    for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+        let mut enabled = intent(true);
+        // Exercise the shipping standard construction, not the region helper's
+        // 0.6 mm / 0.4 mm lattice whose pitch exceeds its 6 mm bridge limit.
+        enabled.recipe.bead_width_mm = 0.45;
+        enabled.recipe.layer_height_mm = 0.2;
+        enabled.recipe.process.max_bridge_span_mm = 10.0;
+        enabled.recipe.sparse_infill = policy;
+        enabled.recipe.infill_fraction = 0.15;
+        let input = scene.input(&enabled);
+        let mut work = spiling_geometry::GeometryWorkBudget::compile();
+        let mut plan = plan_with(&input, &cancel, &mut work, true)
+            .unwrap_or_else(|e| panic!("{policy:?}: {e:?}"));
+        assert!(
+            plan.layers
+                .iter()
+                .flat_map(|l| &l.paths)
+                .any(|p| p.kind == DepositionKind::SparseFill)
+        );
+        crate::realization::canonicalize(&mut plan, &enabled, &cancel).unwrap();
+        let program = crate::backend::emit(&plan, &enabled, &cancel).unwrap();
+        let report = crate::verifier::verify(&program, &plan, &enabled, &cancel).unwrap();
+        assert!(
+            report.verified && report.support_deposition_segments > 0,
+            "{policy:?}"
+        );
+    }
+}

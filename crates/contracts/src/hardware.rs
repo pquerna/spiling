@@ -250,7 +250,19 @@ impl ProjectHardwareCapture {
     }
     pub fn validate_intent(&self, intent: &ManufacturingIntent) -> Result<(), String> {
         self.validate()?;
-        if self.setup.printer != intent.printer {
+        let mut installed = self.setup.printer.clone();
+        // Installed geometry/capabilities stay fixed. A captured material profile
+        // owns the operating thermal targets, not the setup's starting values.
+        if let Some(profile) = &intent.material_profile {
+            profile.validate_for(intent).map_err(|e| e.to_string())?;
+            if let crate::manufacturing::JobWorkflow::CompleteMarlin { job } =
+                &mut installed.workflow
+            {
+                job.nozzle_temperature_c = profile.selection.nozzle_temperature_c();
+                job.bed_temperature_c = profile.selection.bed_temperature_c();
+            }
+        }
+        if installed != intent.printer {
             return Err("manufacturing printer differs from portable hardware capture".into());
         }
         if match &intent.printer.workflow {

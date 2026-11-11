@@ -1261,15 +1261,6 @@ impl ManufacturingIntent {
     }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.printer.validate()?;
-        if matches!(
-            self.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
-        ) && !matches!(self.recipe.supports, SupportPolicy::Disabled)
-        {
-            return Err(invalid(
-                "two-axis infill currently requires disabled supports",
-            ));
-        }
         self.recipe.validate()?;
         if matches!(
             self.recipe.sparse_infill,
@@ -2772,7 +2763,7 @@ impl NativeGeometryCoverageSummary {
             || self.certified_layer_count > MAX_PRINT_LAYERS
             || self.slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
             || self.event_count > 4096
-            || self.geometry_work == 0
+            || (self.geometry_work == 0 && self.evidence == PreflightEvidence::Certified)
             || !matches!(
                 self.evidence,
                 PreflightEvidence::Certified | PreflightEvidence::Tolerant

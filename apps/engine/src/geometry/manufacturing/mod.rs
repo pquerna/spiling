@@ -239,15 +239,31 @@ impl Runtime {
                 selection,
             } => {
                 self.manufacturing_base(&session_id, base_revision)?;
-                let current = self.project.snapshot().manufacturing_intent.clone().ok_or_else(||
-                    ManufacturingError::new(ManufacturingErrorCode::NoIntent,"an explicit printer/recipe intent is required before material selection"))?;
-                let intent = Arc::new(if let Some(tool_id) = tool_id {
-                    spiling_manufacturing::resolve_tool_material_profile(
-                        &current, &tool_id, selection,
-                    )?
+                let snapshot = self.project.snapshot();
+                let resolved = if let Some(current) = &snapshot.manufacturing_intent {
+                    if let Some(tool_id) = tool_id {
+                        spiling_manufacturing::resolve_tool_material_profile(
+                            current, &tool_id, selection,
+                        )?
+                    } else {
+                        spiling_manufacturing::resolve_material_profile(current, selection)?
+                    }
                 } else {
-                    spiling_manufacturing::resolve_material_profile(&current, selection)?
-                });
+                    if tool_id.is_some() {
+                        return Err(ManufacturingError::new(
+                            ManufacturingErrorCode::NoIntent,
+                            "select a loaded-tool construction before applying an addressed tool profile",
+                        ));
+                    }
+                    let hardware = snapshot.hardware.clone().ok_or_else(|| {
+                        ManufacturingError::new(
+                            ManufacturingErrorCode::NoIntent,
+                            "choose a printer setup before applying the first material profile",
+                        )
+                    })?;
+                    spiling_manufacturing::create_material_intent(hardware, selection)?
+                };
+                let intent = Arc::new(resolved);
                 let edit = self
                     .project
                     .prepare(Edit::SetManufacturingIntent { intent })

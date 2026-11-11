@@ -66,9 +66,9 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut pattern, 0, "Rectilinear");
                     ui.selectable_value(&mut pattern, 1, "Grid")
-                        .on_hover_text("Two perpendicular line families in every fine interval. Single tool; supports, process regions and finishes are currently excluded.");
+                        .on_hover_text("Two perpendicular line families in every fine interval. Single tool; process regions and finishes are currently excluded.");
                     ui.selectable_value(&mut pattern, 2, "Cathedral")
-                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes, process modifiers or breakaway supports. Strength and physical printability are unqualified.");
+                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes or process modifiers. Strength and physical printability are unqualified.");
                 });
             if pattern != original {
                 select_infill(&mut intent.recipe, match pattern {
@@ -110,8 +110,6 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                 if let SparseInfillPolicy::CombineEligible { max_height_mm } = &mut intent.recipe.sparse_infill {
                     ui::number(ui, "Maximum height (mm)", max_height_mm, 0.01);
                 }
-            } else if !matches!(intent.recipe.supports, SupportPolicy::Disabled) {
-                ui.colored_label(ui.visuals().warn_fg_color, "Requires supports off");
             }
         });
     ui.add_enabled_ui(intent.material_profile.is_none(), |ui| {
@@ -124,23 +122,23 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         if matches!(intent.recipe.supports, SupportPolicy::Disabled) {
             "Off"
         } else {
-            "Breakaway"
+            "Automatic"
         }
     ))
     .id_salt("support-policy")
     .show(ui, |ui| {
         let mut enabled = matches!(intent.recipe.supports, SupportPolicy::Breakaway { .. });
-        if ui
-            .checkbox(&mut enabled, "Enable breakaway supports")
-            .changed()
-        {
+        let automatic = intent.automatic_support_policy();
+        let response = ui.add_enabled(
+            automatic.is_ok() || enabled,
+            egui::Checkbox::new(&mut enabled, "Automatic supports"),
+        );
+        if let Err(error) = &automatic {
+            response.clone().on_hover_text(error.to_string());
+        }
+        if response.changed() {
             intent.recipe.supports = if enabled {
-                SupportPolicy::Breakaway {
-                    density: 0.0,
-                    xy_clearance_mm: 0.0,
-                    z_gap_mm: 0.0,
-                    interface_thickness_mm: 0.0,
-                }
+                automatic.expect("enabled automatic support construction was resolved")
             } else {
                 SupportPolicy::Disabled
             };
@@ -152,14 +150,17 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             interface_thickness_mm,
         } = &mut intent.recipe.supports
         {
-            ui::percent(ui, "Support density (%)", density);
-            for (label, value) in [
-                ("XY clearance (mm)", xy_clearance_mm),
-                ("Z gap (mm)", z_gap_mm),
-                ("Interface thickness (mm)", interface_thickness_mm),
-            ] {
-                ui::number(ui, label, value, 0.01);
-            }
+            ui.weak("Body and interface · Same material");
+            ui.collapsing("Custom support geometry", |ui| {
+                ui::percent(ui, "Body density (%)", density);
+                for (label, value) in [
+                    ("XY clearance (mm)", xy_clearance_mm),
+                    ("Contact gap (mm)", z_gap_mm),
+                    ("Interface thickness (mm)", interface_thickness_mm),
+                ] {
+                    ui::number(ui, label, value, 0.01);
+                }
+            });
         }
     });
     egui::CollapsingHeader::new("Hatch directions")
@@ -308,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn cathedral_selection_does_not_silently_disable_authored_supports() {
+    fn cathedral_selection_preserves_authored_supports() {
         let mut requested: ManufacturingIntent = serde_json::from_str(include_str!(
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"
         ))
@@ -317,7 +318,7 @@ mod tests {
         assert!(!matches!(supports, SupportPolicy::Disabled));
         select_infill(&mut requested.recipe, SparseInfillPolicy::web_roof());
         assert_eq!(requested.recipe.supports, supports);
-        assert!(prepared(&requested).is_err());
+        prepared(&requested).unwrap();
     }
 
     #[test]

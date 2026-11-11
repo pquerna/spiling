@@ -95,13 +95,15 @@ fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, Manufa
 }
 
 /// One layer as a native-shaped span: material at the layer sample, and an
-/// occupied envelope from sections at the bottom, sample and top.
+/// occupied enclosure streamed from the source over the complete interval when
+/// supports are enabled; sampled occupancy remains for ordinary classification.
 pub(super) fn collect_span(
     occurrences: &[&OccurrenceRecord],
     models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
     native_bounds: &BTreeMap<OccurrenceId, AabbMm>,
     layer: &LayerElevation,
     index: u32,
+    supports: bool,
     cancel: &AtomicBool,
 ) -> Result<native::NativeSpan, ManufacturingError> {
     let (lower, upper, sample) = (layer.lower_z, layer.z, layer.sample);
@@ -117,7 +119,12 @@ pub(super) fn collect_span(
         region::canonicalize(&mut placed);
         let bounds = native_bounds[&occurrence.occurrence_id];
         let height = [lower.max(bounds.min[2]), upper.min(bounds.max[2])];
-        if height[0] <= height[1] {
+        if supports {
+            occupied.tolerant.push(super::TolerantOccupied {
+                model: Arc::clone(model),
+                interval: [lower, upper],
+            });
+        } else if height[0] <= height[1] {
             for z in [lower + inset, sample, upper - inset] {
                 for polygon in section_at(model, z)?.0 {
                     occupied.push(polygon, height, Some(occurrence.occurrence_id))?;
@@ -154,15 +161,91 @@ pub(super) fn collect_span(
     ))
 }
 
-/// Protected-void masks for support from sampled sections: none. Native masks
-/// stand in for cavity geometry the exact path cannot certify. Here every
-/// layer's material is sampled, and the support column is clipped against the
-/// occupied material of every layer it crosses, so a cavity with a floor
-/// blocks the column by that floor and a cavity open to the bed is a real
-/// support corridor.
-pub(super) fn protected_voids() -> super::support::ProtectedVoidSet {
-    super::support::ProtectedVoidSet {
-        regions: MultiPolygon(Vec::new()),
-        scopes: Vec::new(),
+pub(super) fn polygon(points: Vec<[f64; 2]>) -> Polygon<f64> {
+    let mut coords: Vec<geo::Coord<f64>> = points
+        .into_iter()
+        .map(|[x, y]| geo::Coord { x, y })
+        .collect();
+    if let Some(first) = coords.first().copied() {
+        coords.push(first);
     }
+    Polygon::new(LineString(coords), Vec::new())
+}
+
+pub(super) fn project_protected_voids(
+    models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
+    demand_bounds: &[[[f64; 2]; 2]],
+    retained_units: usize,
+    live_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<super::support::ProtectedVoidSet, ManufacturingError> {
+    use geo::{Area, BoundingRect};
+    let mut regions = Vec::new();
+    let mut scopes = Vec::new();
+    let mut points = 0usize;
+    for model in models.values() {
+        check_cancel(cancel)?;
+        let (min, max) = model.bounds();
+        if !demand_bounds
+            .iter()
+            .any(|b| (0..2).all(|a| min[a] <= b[a][1] && max[a] >= b[a][0]))
+        {
+            continue;
+        }
+        for void in model
+            .support_voids(cancel)
+            .map_err(|e| super::native_error(e, "tolerant all-height void projection"))?
+        {
+            check_cancel(cancel)?;
+            let outer = polygon(void.polygon);
+            let Some(bounds) = outer.bounding_rect() else {
+                continue;
+            };
+            if !demand_bounds.iter().any(|b| {
+                bounds.min().x <= b[0][1]
+                    && bounds.max().x >= b[0][0]
+                    && bounds.min().y <= b[1][1]
+                    && bounds.max().y >= b[1][0]
+            }) {
+                continue;
+            }
+            let bottom = polygon(void.bottom);
+            let floor_parts: Vec<_> = void
+                .floor
+                .into_iter()
+                .map(|triangle| polygon(triangle.to_vec()))
+                .collect();
+            let floor = geo::unary_union(&floor_parts);
+            let closed = bottom.unsigned_area() == 0.0
+                || MultiPolygon(vec![bottom]).difference(&floor).0.is_empty();
+            let scope = if closed {
+                spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                    lower_mm: void.height_mm[0],
+                    upper_mm: void.height_mm[1],
+                }
+            } else {
+                spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                    upper_mm: void.height_mm[1],
+                }
+            };
+            points = points
+                .checked_add(outer.exterior().0.len())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "tolerant void projection size overflow",
+                    )
+                })?;
+            super::remaining_geometry_units(
+                retained_units + points,
+                live_bytes.saturating_add(points * std::mem::size_of::<geo::Coord<f64>>()),
+            )?;
+            regions.push(outer);
+            scopes.push(scope);
+        }
+    }
+    Ok(super::support::ProtectedVoidSet {
+        regions: MultiPolygon(regions),
+        scopes,
+    })
 }

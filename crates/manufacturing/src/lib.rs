@@ -6,7 +6,10 @@
 pub mod backend;
 mod material;
 mod selection;
-pub use material::{resolve_material_profile, resolve_tool_material_profile, review_materials};
+pub use material::{
+    create_material_intent, resolve_material_profile, resolve_tool_material_profile,
+    review_materials,
+};
 pub mod planner;
 mod realization;
 mod routing;
@@ -25,9 +28,9 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "84";
+pub const PLANNER_VERSION: &str = "85";
 pub const EMITTER_VERSION: &str = "16";
-pub const VERIFIER_VERSION: &str = "40";
+pub const VERIFIER_VERSION: &str = "41";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

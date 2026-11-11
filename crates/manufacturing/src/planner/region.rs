@@ -1374,6 +1374,18 @@ pub(super) fn append_hatch_row(
                 continue;
             }
         }
+        // A sparse clip that collapses on the actual XYZ6 lattice cannot
+        // deposit material or anchor another road. Omit it before support
+        // demand, rather than request a scaffold for a numerical fragment.
+        // Required skin proposals retain their separate fitting/joining path.
+        if kind == DepositionKind::SparseFill
+            && length.is_finite()
+            && length >= 0.0
+            && program_coordinates::project_xyz6_coordinate_mm(pair[0])?
+                == program_coordinates::project_xyz6_coordinate_mm(pair[1])?
+        {
+            continue;
+        }
         let mandatory_skin = matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin);
         if !length.is_finite() || length <= 0.0 || (length <= 0.000002 && !mandatory_skin) {
             return Err(error(
@@ -1577,6 +1589,38 @@ fn optional_support_rows_omit_uncommandable_proposals_but_preserve_required_skin
             ));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn collapsed_sparse_clip_cannot_create_support_demand_or_nominal_material() {
+    let recipe = super::tests::recipe(0.15);
+    let layer = HatchLayer {
+        roof: None,
+        width_mm: recipe.bead_width_mm,
+        z: recipe.layer_height_mm,
+        lower_z: 0.0,
+        height: recipe.layer_height_mm,
+        axis: HatchAxis::X,
+        top_axis: HatchAxis::X,
+        recipe: &recipe,
+    };
+    let mut paths = Vec::new();
+    let mut segments = 0;
+    append_hatch_row(
+        &[99.274999976, 99.275000012, 100.0, 101.0],
+        4.0,
+        DepositionKind::SparseFill,
+        &layer,
+        false,
+        &mut paths,
+        &mut segments,
+    )
+    .unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(segments, 1);
+    assert_eq!(paths[0].points_mm[0], [100.0, 4.0, layer.z]);
+    assert_eq!(paths[0].points_mm[1], [101.0, 4.0, layer.z]);
 }
 
 #[cfg(test)]

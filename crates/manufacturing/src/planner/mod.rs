@@ -417,25 +417,30 @@ fn plan_with(
             }
         }
     };
-    let outcome = admit_schedule(
-        input,
-        cancel,
-        &mut admission,
-        &prepared_sources,
-        &mut process_captures,
-        &mut schedule,
-        &mut surface_work,
-        &mut support_work,
-        None,
-        native_prefix,
-        &mut span_sizing,
-        &mut slab_pool,
-    );
-    match outcome? {
-        ScheduleAdmission::Complete(plan) => Ok(plan),
-        ScheduleAdmission::RefineUnreachableLayer { failure, .. } => Err(failure),
-        ScheduleAdmission::PrefixAdmitted(_) => {
-            unreachable!("complete schedule must produce a plan")
+    let mut prefix = native_prefix;
+    loop {
+        let outcome = admit_schedule(
+            input,
+            cancel,
+            &mut admission,
+            &prepared_sources,
+            &mut process_captures,
+            &mut schedule,
+            &mut surface_work,
+            &mut support_work,
+            None,
+            prefix.take(),
+            &mut span_sizing,
+            &mut slab_pool,
+        );
+        match outcome? {
+            ScheduleAdmission::Complete(plan) => return Ok(plan),
+            ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
+                refine_deposition_pair(&mut schedule, index, input, failure)?;
+            }
+            ScheduleAdmission::PrefixAdmitted(_) => {
+                unreachable!("complete schedule must produce a plan")
+            }
         }
     }
 }
@@ -664,6 +669,7 @@ fn admit_schedule<'model>(
                     &admission.native_bounds,
                     &schedule[index as usize],
                     index,
+                    !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
                     cancel,
                 )?
             } else {
@@ -2052,6 +2058,12 @@ fn admit_schedule<'model>(
                 native_points: support_native_points,
                 native_owned_bytes: support_native_owned_bytes,
                 recipe,
+                source_z_allowance_mm: admission.tolerant.as_ref().map_or(0.0, |models| {
+                    models
+                        .values()
+                        .map(|model| model.support_margin())
+                        .fold(0.0, f64::max)
+                }),
             },
             &mut segments,
             cancel,
@@ -2362,8 +2374,14 @@ fn admit_schedule<'model>(
              native_owned_bytes,
              support_work,
              native_work| {
-                if admission.tolerant.is_some() {
-                    return Ok(tolerant::protected_voids());
+                if let Some(models) = &admission.tolerant {
+                    return tolerant::project_protected_voids(
+                        models,
+                        demand_bounds,
+                        retained_units,
+                        live_bytes,
+                        cancel,
+                    );
                 }
                 // Carry the complete support receipt into conversion; raw M and
                 // every other live owner coexist with its bounded output/scratch.
@@ -2561,11 +2579,13 @@ fn admit_schedule<'model>(
             })?;
         match support_admission {
             support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
-                let ScheduleNativeAuthority::Tentative { mut stage, .. } = native_coverage else {
-                    unreachable!("only tentative admission requests anchor-driven refinement")
+                let recycled = match native_coverage {
+                    ScheduleNativeAuthority::Tentative { mut stage, .. } => {
+                        *span_sizing = stage.take_span_sizing();
+                        stage.take_recyclable_slabs()
+                    }
+                    ScheduleNativeAuthority::Complete(_) => native::RecyclableSlabs::default(),
                 };
-                *span_sizing = stage.take_span_sizing();
-                let recycled = stage.take_recyclable_slabs();
                 return Ok(ScheduleAdmission::RefineUnreachableLayer {
                     index,
                     failure,
@@ -2696,7 +2716,7 @@ fn admit_schedule<'model>(
                     slab_count: 0,
                     certified_layer_count: count,
                     event_count: admission.horizontal_events.len() as u32,
-                    geometry_work: admission.geometry_work.consumed().max(1),
+                    geometry_work: admission.geometry_work.consumed(),
                     height_merge_mm: input.intent.printer.motion_resolution.z_mm,
                     evidence: PreflightEvidence::Tolerant,
                     skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
@@ -2920,21 +2940,43 @@ fn validate_process_overlap(
 }
 
 impl SectionSpan {
-    fn occupied_pieces(&self) -> impl Iterator<Item = (&geo::Polygon<f64>, Option<[f64; 2]>)> {
-        let borrowed = if self.occupied.is_none() {
-            self.material.0.as_slice()
+    fn visit_occupied(
+        &self,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(&geo::Polygon<f64>, Option<[f64; 2]>) -> Result<bool, ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        use std::ops::ControlFlow;
+        if let Some(outer) = &self.occupied {
+            for piece in &outer.pieces {
+                check_cancel(cancel)?;
+                if !visit(&piece.polygon, Some(piece.height_mm))? {
+                    return Ok(());
+                }
+            }
+            for source in &outer.tolerant {
+                let result = source
+                    .model
+                    .visit_support_projection(source.interval, cancel, |piece| {
+                        match visit(&tolerant::polygon(piece.points), Some(piece.height_mm)) {
+                            Ok(true) => ControlFlow::Continue(()),
+                            Ok(false) => ControlFlow::Break(Ok(())),
+                            Err(error) => ControlFlow::Break(Err(error)),
+                        }
+                    })
+                    .map_err(|e| native_error(e, "tolerant continuous support enclosure"))?;
+                if let ControlFlow::Break(result) = result {
+                    return result;
+                }
+            }
         } else {
-            &[]
-        };
-        self.occupied
-            .iter()
-            .flat_map(|outer| {
-                outer
-                    .pieces
-                    .iter()
-                    .map(|piece| (&piece.polygon, Some(piece.height_mm)))
-            })
-            .chain(borrowed.iter().map(|polygon| (polygon, None)))
+            for polygon in &self.material.0 {
+                check_cancel(cancel)?;
+                if !visit(polygon, None)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2944,8 +2986,17 @@ impl SectionSpan {
 #[derive(Clone, Default)]
 struct ContinuousOccupied {
     pieces: Vec<OccupiedPiece>,
+    tolerant: Vec<TolerantOccupied>,
     point_count: usize,
     payload_bytes: usize,
+}
+
+// Borrow prepared source geometry across layers; expanded facet arrays are
+// query scratch, never a retained copy of the source for each scheduled slab.
+#[derive(Clone)]
+struct TolerantOccupied {
+    model: Arc<spiling_geometry::tolerant::TolerantModel>,
+    interval: [f64; 2],
 }
 
 #[derive(Clone)]
@@ -3374,6 +3425,10 @@ fn scheduled_layers(
         // Reserve the emitter projection and height-construction arithmetic,
         // then put the support stop on the actual XYZ6 lattice. This is an
         // output-representation enclosure, not an extra geometry tolerance.
+        // Source approximation increases the contact-selection minimum, not
+        // the complete source/event-derived schedule. Contact selection can
+        // choose an earlier admissible top without introducing short source
+        // intervals that change otherwise supported object construction.
         row_events.clear();
         for &event in &events {
             check_cancel(cancel)?;
