@@ -123,6 +123,8 @@ pub(super) enum Action {
         role: DepositionKind,
         association: Option<Association>,
         closes_wall: bool,
+        /// The planned arc run this edge starts, if any.
+        arc: Option<ArcRun>,
     },
     Recovery {
         retract: bool,
@@ -189,6 +191,7 @@ impl<'a> Expected<'a> {
                 tool: path_tool,
                 association: None,
                 closes_wall: false,
+                arc: None,
             })
         };
         self.prefix = [None; 8];
@@ -362,6 +365,11 @@ impl Iterator for Expected<'_> {
                     closes_wall: path.owner == Some(DepositionOwner::Wall)
                         && path.points_mm.first() == path.points_mm.last()
                         && self.edge == path.points_mm.len(),
+                    arc: path
+                        .arcs
+                        .iter()
+                        .find(|run| run.first as usize + 2 == self.edge)
+                        .copied(),
                 }));
             }
             self.path += 1;

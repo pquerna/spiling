@@ -160,6 +160,7 @@ mod tests {
                         [position + 1.0, 4.0, 0.2],
                         [position + 2.0, -4.0, 0.2],
                     ],
+                    arcs: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();

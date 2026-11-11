@@ -149,6 +149,7 @@ fn intent(supports: bool) -> ManufacturingIntent {
                 extruders: 1,
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: supports,
+                arc_moves: false,
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,

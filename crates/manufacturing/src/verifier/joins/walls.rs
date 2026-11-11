@@ -1157,6 +1157,7 @@ mod tests {
                 [inset, 20.0 - inset, 0.2],
                 [inset, inset, 0.2],
             ],
+            arcs: Vec::new(),
         }
     }
 

@@ -248,6 +248,120 @@ pub fn commanded_stadium_width_enclosure_mm(
     Ok(bounds)
 }
 
+/// The geometry of one commanded XY circular move (G2/G3): the start and end
+/// as commanded, the center as start plus the commanded I/J offsets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommandedArc {
+    pub center_mm: [f64; 2],
+    /// Distance of the start from the center; firmware moves on this radius.
+    pub radius_mm: f64,
+    /// Distance of the end from the center.
+    pub end_radius_mm: f64,
+    /// Angle swept in the commanded direction, in (0, 2*pi].
+    pub sweep_radians: f64,
+    /// Length along the start radius.
+    pub length_mm: f64,
+    start_angle: f64,
+    clockwise: bool,
+}
+
+impl CommandedArc {
+    /// A horizontal arc from `start` to `end` about `center`. Start and end
+    /// share Z; equal start and end is a full turn.
+    pub fn new(
+        start: [f64; 3],
+        end: [f64; 3],
+        center_mm: [f64; 2],
+        clockwise: bool,
+    ) -> Result<Self, ManufacturingError> {
+        let invalid = || {
+            ManufacturingError::new(
+                ManufacturingErrorCode::InvalidSpecification,
+                "commanded arc is not a finite horizontal circle",
+            )
+        };
+        if start[2] != end[2]
+            || !start
+                .iter()
+                .chain(&end)
+                .chain(&center_mm)
+                .all(|v| v.is_finite())
+        {
+            return Err(invalid());
+        }
+        let radius_mm = (start[0] - center_mm[0]).hypot(start[1] - center_mm[1]);
+        let end_radius_mm = (end[0] - center_mm[0]).hypot(end[1] - center_mm[1]);
+        if !(radius_mm > 0.0 && end_radius_mm > 0.0) {
+            return Err(invalid());
+        }
+        let start_angle = (start[1] - center_mm[1]).atan2(start[0] - center_mm[0]);
+        let end_angle = (end[1] - center_mm[1]).atan2(end[0] - center_mm[0]);
+        let mut sweep = if clockwise {
+            start_angle - end_angle
+        } else {
+            end_angle - start_angle
+        };
+        while sweep <= 0.0 {
+            sweep += std::f64::consts::TAU;
+        }
+        Ok(Self {
+            center_mm,
+            radius_mm,
+            end_radius_mm,
+            sweep_radians: sweep,
+            length_mm: radius_mm * sweep,
+            start_angle,
+            clockwise,
+        })
+    }
+
+    /// Angle swept from the start to `point`'s direction, in [0, 2*pi).
+    pub fn angle_to(&self, point: [f64; 3]) -> f64 {
+        let angle = (point[1] - self.center_mm[1]).atan2(point[0] - self.center_mm[0]);
+        let delta = if self.clockwise {
+            self.start_angle - angle
+        } else {
+            angle - self.start_angle
+        };
+        delta.rem_euclid(std::f64::consts::TAU)
+    }
+
+    /// XY bounds of the swept arc on the start radius.
+    pub fn xy_bounds(&self) -> [[f64; 2]; 2] {
+        let at = |angle: f64| {
+            [
+                self.center_mm[0] + self.radius_mm * angle.cos(),
+                self.center_mm[1] + self.radius_mm * angle.sin(),
+            ]
+        };
+        let direction = if self.clockwise { -1.0 } else { 1.0 };
+        let end = self.start_angle + direction * self.sweep_radians;
+        let mut lo = at(self.start_angle);
+        let mut hi = lo;
+        let mut include = |p: [f64; 2]| {
+            for axis in 0..2 {
+                lo[axis] = lo[axis].min(p[axis]);
+                hi[axis] = hi[axis].max(p[axis]);
+            }
+        };
+        include(at(end));
+        // Every axis extreme the sweep passes.
+        for quarter in 0..4 {
+            let axis_angle = f64::from(quarter) * std::f64::consts::FRAC_PI_2;
+            let delta = if self.clockwise {
+                self.start_angle - axis_angle
+            } else {
+                axis_angle - self.start_angle
+            }
+            .rem_euclid(std::f64::consts::TAU);
+            if delta <= self.sweep_radians {
+                include(at(axis_angle));
+            }
+        }
+        [lo, hi]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +435,21 @@ mod tests {
             failure.code,
             ManufacturingErrorCode::ProgramCoordinateConditioningFailure
         );
+    }
+
+    #[test]
+    fn commanded_arcs_sweep_in_their_direction_and_bound_their_extremes() {
+        let arc = CommandedArc::new([1.0, 0.0, 0.2], [0.0, 1.0, 0.2], [0.0, 0.0], false).unwrap();
+        assert!((arc.sweep_radians - std::f64::consts::FRAC_PI_2).abs() < 1e-15);
+        assert!((arc.length_mm - std::f64::consts::FRAC_PI_2).abs() < 1e-15);
+        assert!((arc.angle_to([0.6, 0.8, 0.2]) - 0.8_f64.atan2(0.6)).abs() < 1e-15);
+        let [lo, hi] = arc.xy_bounds();
+        assert!(lo[0].abs() < 1e-15 && lo[1].abs() < 1e-15 && hi == [1.0, 1.0]);
+        // The same ends clockwise go the long way round.
+        let long = CommandedArc::new([1.0, 0.0, 0.2], [0.0, 1.0, 0.2], [0.0, 0.0], true).unwrap();
+        assert!((long.sweep_radians - 1.5 * std::f64::consts::PI).abs() < 1e-15);
+        let [lo, hi] = long.xy_bounds();
+        assert_eq!([lo, hi], [[-1.0, -1.0], [1.0, 1.0]]);
+        assert!(CommandedArc::new([1.0, 0.0, 0.2], [0.0, 1.0, 0.4], [0.0, 0.0], false).is_err());
     }
 }

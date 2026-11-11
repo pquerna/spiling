@@ -396,6 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DepositionKind::decl(&config),
         WidthProfile::decl(&config),
         DepositionPath::decl(&config),
+        ArcRun::decl(&config),
         SparseBandDecision::decl(&config),
         SparseBandDisposition::decl(&config),
         SparseBandVeto::decl(&config),

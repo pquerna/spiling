@@ -4429,7 +4429,7 @@ mod actual_deposition_tests {
                     width: spiling_contracts::manufacturing::WidthProfile::Constant { width_mm: 0.5 },
                     physical_z_mm: [lower, z],
                     points_mm: vec![[x, 0.0, z], [x + 1.0, 0.0, z]],
-                }], });
+                arcs: Vec::new(), }], });
                 schedule.push(LayerElevation {
                     z,
                     lower_z: lower,

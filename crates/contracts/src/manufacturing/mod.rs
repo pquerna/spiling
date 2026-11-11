@@ -240,6 +240,7 @@ fn components<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<MachineCompo
 // every layer/domain seed borrows both before growing nested table capacity.
 struct SegmentBudget {
     remaining_segments: u32,
+    remaining_arcs: u32,
     remaining_widths: u32,
     remaining_width_bytes: usize,
     remaining_skin_fits: u32,
@@ -249,6 +250,8 @@ impl SegmentBudget {
     fn new() -> Self {
         Self {
             remaining_segments: MAX_DEPOSITION_SEGMENTS,
+            // Every run spans at least two edges.
+            remaining_arcs: MAX_DEPOSITION_SEGMENTS / 2,
             remaining_widths: MAX_DEPOSITION_SEGMENTS,
             remaining_width_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
             remaining_skin_fits: MAX_DEPOSITION_SEGMENTS,
@@ -318,6 +321,31 @@ impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
             ));
         }
         Ok(points)
+    }
+}
+
+struct ArcsSeed<'a>(&'a mut SegmentBudget);
+impl<'de> serde::de::DeserializeSeed<'de> for ArcsSeed<'_> {
+    type Value = Vec<ArcRun>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ArcsSeed<'_> {
+    type Value = Vec<ArcRun>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("arc runs within the cumulative arc budget")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut arcs = Vec::new();
+        while let Some(arc) = seq.next_element::<ArcRun>()? {
+            if self.0.remaining_arcs == 0 {
+                return Err(serde::de::Error::custom("arc run limit exceeded"));
+            }
+            self.0.remaining_arcs -= 1;
+            arcs.push(arc);
+        }
+        Ok(arcs)
     }
 }
 
@@ -464,6 +492,7 @@ enum PathField {
     PhysicalZMm,
     MaterialDomain,
     PointsMm,
+    Arcs,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
@@ -478,6 +507,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
                 "physical_z_mm",
                 "material_domain",
                 "points_mm",
+                "arcs",
             ],
             self,
         )
@@ -495,6 +525,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let mut width = None;
         let mut physical_z_mm = None;
         let mut points_mm = None;
+        let mut arcs = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
                 PathField::MaterialDomain => {
@@ -533,6 +564,12 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     points_mm = Some(map.next_value_seed(PointsSeed(&mut *self.0))?);
                 }
+                PathField::Arcs => {
+                    if arcs.is_some() {
+                        return Err(serde::de::Error::duplicate_field("arcs"));
+                    }
+                    arcs = Some(map.next_value_seed(ArcsSeed(&mut *self.0))?);
+                }
             }
         }
         let path = DepositionPath {
@@ -544,6 +581,8 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
             physical_z_mm: physical_z_mm
                 .ok_or_else(|| serde::de::Error::missing_field("physical_z_mm"))?,
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
+            // An omitted list is an empty one: the path has no arc runs.
+            arcs: arcs.unwrap_or_default(),
         };
         path.validate_owner().map_err(serde::de::Error::custom)?;
         Ok(path)
@@ -760,6 +799,9 @@ pub struct PrinterCapabilities {
     pub extruders: u32,
     pub output_dialect: OutputDialect,
     pub generated_supports: bool,
+    /// The firmware interpolates XY circular moves (G2/G3 with I/J centers).
+    /// Planned arc runs are emitted as arcs only for such a printer.
+    pub arc_moves: bool,
 }
 impl PrinterCapabilities {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -772,6 +814,12 @@ impl PrinterCapabilities {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::UnsupportedCapability,
                 "extruder count must match the selected explicit output dialect",
+            ));
+        }
+        if self.arc_moves && self.output_dialect == OutputDialect::Marlin2FixedDualGcodeV1 {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::UnsupportedCapability,
+                "arc moves are not available in the fixed-dual dialect",
             ));
         }
         Ok(())
@@ -1659,6 +1707,54 @@ pub struct DepositionPath {
     /// Explicit occupied interval; upper endpoint belongs to the owning layer.
     pub physical_z_mm: [f64; 2],
     pub points_mm: Vec<[f64; 3]>,
+    /// Runs of points that lie on one circle, in point order. The points stay
+    /// the path's geometry for every planar check; an arc-capable printer
+    /// receives each run as one circular move.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ArcRun>>", optional)]
+    pub arcs: Vec<ArcRun>,
+}
+
+/// Largest distance of a run's points from its circle. The commanded arc and
+/// the planned points agree within this, the same as the lateral command
+/// allowance for a straight bead.
+pub const MAX_ARC_POINT_DEVIATION_MM: f64 = 0.001;
+/// Largest distance between a run's arc and the chord between two of its
+/// consecutive points: half the default profile tolerance. The points stay a
+/// faithful polyline of the arc for every planar check.
+pub const MAX_ARC_SAGITTA_MM: f64 = 0.005;
+/// Smallest arc radius planned; tighter curves stay chords.
+pub const MIN_ARC_RADIUS_MM: f64 = 0.5;
+/// Largest arc radius planned; flatter curves stay chords.
+pub const MAX_ARC_RADIUS_MM: f64 = 1000.0;
+/// Largest sweep of one run, so a run's direction and extent are never
+/// ambiguous; a full circle is two runs.
+pub const MAX_ARC_SWEEP_RADIANS: f64 = 1.5 * std::f64::consts::PI;
+
+/// Consecutive points `first..=last` of a path on one horizontal circle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ArcRun {
+    pub first: u32,
+    pub last: u32,
+    pub center_mm: [f64; 2],
+    /// Clockwise seen from +Z (G2); otherwise counter-clockwise (G3).
+    pub clockwise: bool,
+}
+impl ArcRun {
+    /// The run's radius: the distance of its first point from the center.
+    pub fn radius_mm(&self, points: &[[f64; 3]]) -> f64 {
+        let p = points[self.first as usize];
+        (p[0] - self.center_mm[0]).hypot(p[1] - self.center_mm[1])
+    }
+    /// Signed angle swept from `a` to `b` about the center, in the run's
+    /// direction; positive for a valid step.
+    pub fn step_radians(&self, a: [f64; 3], b: [f64; 3]) -> f64 {
+        let (ax, ay) = (a[0] - self.center_mm[0], a[1] - self.center_mm[1]);
+        let (bx, by) = (b[0] - self.center_mm[0], b[1] - self.center_mm[1]);
+        let angle = (ax * by - ay * bx).atan2(ax * bx + ay * by);
+        if self.clockwise { -angle } else { angle }
+    }
 }
 impl<'de> Deserialize<'de> for DepositionPath {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -1694,6 +1790,12 @@ impl DepositionPath {
     /// Reverse point order and the per-edge widths that follow those points.
     /// A mixed Regional/Mandatory skin bridge toggles its actual first portion.
     pub fn reverse(&mut self) {
+        let last = (self.points_mm.len() - 1) as u32;
+        for arc in &mut self.arcs {
+            (arc.first, arc.last) = (last - arc.last, last - arc.first);
+            arc.clockwise = !arc.clockwise;
+        }
+        self.arcs.reverse();
         self.points_mm.reverse();
         if let WidthProfile::PerEdge { widths_mm } = &mut self.width {
             widths_mm.reverse();
@@ -1718,11 +1820,92 @@ impl DepositionPath {
         if seam_index == 0 {
             return Ok(());
         }
+        // A run the seam falls inside is split there; the rest move with it.
+        let seam = seam_index as u32;
+        let count = vertices as u32;
+        let mut arcs = Vec::with_capacity(self.arcs.len() + 1);
+        for arc in &self.arcs {
+            let pieces = if arc.first < seam && seam < arc.last {
+                [Some((arc.first, seam)), Some((seam, arc.last))]
+            } else {
+                [Some((arc.first, arc.last)), None]
+            };
+            for (first, last) in pieces.into_iter().flatten() {
+                if last - first < 2 {
+                    continue;
+                }
+                let shift = |i: u32| (i + count - seam) % count;
+                let (first, last) = (shift(first), shift(last));
+                // A run ending on the old closing duplicate ends on the new one.
+                let last = if last == 0 { count } else { last };
+                arcs.push(ArcRun {
+                    first,
+                    last,
+                    ..*arc
+                });
+            }
+        }
+        arcs.sort_by_key(|arc| arc.first);
+        self.arcs = arcs;
         self.points_mm[..vertices].rotate_left(seam_index);
         let closing = self.points_mm[0];
         self.points_mm[vertices] = closing;
         if let WidthProfile::PerEdge { widths_mm } = &mut self.width {
             widths_mm.rotate_left(seam_index);
+        }
+        Ok(())
+    }
+    /// Every run is ordered, disjoint, horizontal, of constant width, within
+    /// its radius limits, turning one way by less than half a turn per edge
+    /// and [`MAX_ARC_SWEEP_RADIANS`] in all, with every point within
+    /// [`MAX_ARC_POINT_DEVIATION_MM`] of the circle through its first point
+    /// and every chord within [`MAX_ARC_SAGITTA_MM`] of the arc.
+    pub fn validate_arcs(&self) -> Result<(), ManufacturingError> {
+        let mut previous_last = 0u32;
+        for (k, arc) in self.arcs.iter().enumerate() {
+            let (first, last) = (arc.first as usize, arc.last as usize);
+            if last >= self.points_mm.len()
+                || arc.last < arc.first + 2
+                || (k > 0 && arc.first < previous_last)
+                || !arc.center_mm.iter().all(|v| v.is_finite())
+            {
+                return Err(invalid(
+                    "arc runs must be ordered, disjoint and span two edges",
+                ));
+            }
+            previous_last = arc.last;
+            let radius = arc.radius_mm(&self.points_mm);
+            if !(MIN_ARC_RADIUS_MM..=MAX_ARC_RADIUS_MM).contains(&radius) {
+                return Err(invalid("arc radius is outside the planned arc limits"));
+            }
+            let z = self.points_mm[first][2];
+            let mut sweep = 0.0;
+            for i in first..last {
+                let (a, b) = (self.points_mm[i], self.points_mm[i + 1]);
+                let step = arc.step_radians(a, b);
+                sweep += step;
+                let deviation =
+                    ((b[0] - arc.center_mm[0]).hypot(b[1] - arc.center_mm[1]) - radius).abs();
+                let half = (b[0] - a[0]).hypot(b[1] - a[1]) * 0.5;
+                let sagitta = radius - (radius * radius - half * half).max(0.0).sqrt();
+                if b[2] != z
+                    || !(step > 0.0 && step < std::f64::consts::PI)
+                    || deviation > MAX_ARC_POINT_DEVIATION_MM
+                    || sagitta > MAX_ARC_SAGITTA_MM
+                {
+                    return Err(invalid(
+                        "arc run points must stay on one horizontal circle, turning one way",
+                    ));
+                }
+                if let WidthProfile::PerEdge { widths_mm } = &self.width
+                    && widths_mm[i] != widths_mm[first]
+                {
+                    return Err(invalid("an arc run has one bead width"));
+                }
+            }
+            if sweep > MAX_ARC_SWEEP_RADIANS {
+                return Err(invalid("arc run sweeps more than its planned limit"));
+            }
         }
         Ok(())
     }
@@ -1732,6 +1915,7 @@ impl DepositionPath {
         }
         self.width
             .validate_for(self.points_mm.len(), self.height_mm())?;
+        self.validate_arcs()?;
         if self.kind == DepositionKind::Bridge
             && !matches!(self.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
             && self.owner != Some(DepositionOwner::Wall)

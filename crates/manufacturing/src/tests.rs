@@ -48,6 +48,7 @@ fn intent() -> ManufacturingIntent {
                 extruders: 1,
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
+                arc_moves: false,
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
@@ -2268,6 +2269,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
         },
         physical_z_mm: [layer.lower_z_mm, layer.z_mm],
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
+        arcs: Vec::new(),
     });
     assert_reemitted_interface_refuses(forged, &intent);
 }
@@ -3125,6 +3127,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -3135,6 +3138,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
+            arcs: Vec::new(),
         },
     ];
     let recipe = &intent.recipe;
@@ -3858,4 +3862,103 @@ fn native_web_roof_retains_local_annular_roots_and_genuine_concave_web_bridges()
                 .contains("web + roof")
         );
     }
+}
+
+#[test]
+fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
+    let cancel = AtomicBool::new(false);
+    let scene = Scene::new(HOLE, &[pose(20.0, 20.0, 0.0)]);
+    let mut lines = intent();
+    lines.printer.capabilities.arc_moves = false;
+    let mut arcs = lines.clone();
+    arcs.printer.capabilities.arc_moves = true;
+    let chords = scene.compile(&lines).unwrap();
+    let curved = scene.compile(&arcs).unwrap();
+    // The plan is the printer's either way; its wall runs sit on the hole's
+    // exact circle, centred on the placed axis.
+    let runs: Vec<&ArcRun> = curved
+        .bundle
+        .plan
+        .layers
+        .iter()
+        .flat_map(|layer| layer.paths.iter().flat_map(|path| &path.arcs))
+        .collect();
+    assert!(!runs.is_empty());
+    let mut centers: Vec<[f64; 2]> = runs.iter().map(|run| run.center_mm).collect();
+    centers.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    centers.dedup();
+    assert_eq!(centers.len(), 1, "{centers:?}");
+    let text =
+        |result: &ManufacturingResult| String::from_utf8(result.program.to_vec().unwrap()).unwrap();
+    let (line_program, arc_program) = (text(&chords), text(&curved));
+    let moves = |program: &str, code: &str| {
+        program
+            .lines()
+            .filter(|line| line.starts_with(code))
+            .count()
+    };
+    assert_eq!(moves(&line_program, "G2 ") + moves(&line_program, "G3 "), 0);
+    assert_eq!(
+        moves(&arc_program, "G2 ") + moves(&arc_program, "G3 "),
+        runs.len()
+    );
+    assert!(moves(&arc_program, "G1 ") < moves(&line_program, "G1 "));
+    assert!(curved.bundle.verification.verified);
+    // An arc follows the circle, so it deposits slightly more than chords.
+    let total = |program: &str| {
+        program
+            .lines()
+            .filter_map(|line| line.split(" E").nth(1))
+            .filter_map(|rest| rest.split(' ').next()?.parse::<f64>().ok())
+            .fold(0.0f64, f64::max)
+    };
+    assert!(total(&arc_program) > total(&line_program));
+
+    // Replay owns the arc semantics: each mutation is refused.
+    let plan = &curved.bundle.plan;
+    let replay = |program: String, intent: &ManufacturingIntent| {
+        crate::verifier::verify(
+            &ChunkSource::from_slice(program.as_bytes(), u64::MAX).unwrap(),
+            plan,
+            intent,
+            &cancel,
+        )
+    };
+    replay(arc_program.clone(), &arcs).unwrap();
+    let first_arc = arc_program
+        .lines()
+        .find(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+        .unwrap()
+        .to_string();
+    let field = |name: char| -> f64 {
+        first_arc
+            .split(' ')
+            .find_map(|word| word.strip_prefix(name)?.parse().ok())
+            .unwrap()
+    };
+    let swap = |from: String, to: String| arc_program.replacen(&from, &to, 1);
+    let i = field('I');
+    let e = field('E');
+    let mutations = [
+        // Another center.
+        swap(format!("I{i:.6}"), format!("I{:.6}", i + 0.01)),
+        // The other direction.
+        swap(
+            first_arc.clone(),
+            if first_arc.starts_with("G2") {
+                first_arc.replacen("G2", "G3", 1)
+            } else {
+                first_arc.replacen("G3", "G2", 1)
+            },
+        ),
+        // Material that does not match the arc's length.
+        swap(format!("E{e:.8}"), format!("E{:.8}", e + 0.001)),
+        // The arc cut short: its chords would be skipped.
+        swap(first_arc.clone(), String::new()),
+    ];
+    for (k, program) in mutations.into_iter().enumerate() {
+        assert!(replay(program, &arcs).is_err(), "mutation {k}");
+    }
+    // A printer without arc moves never accepts one.
+    assert!(replay(arc_program, &lines).is_err());
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod arcs;
 pub(crate) mod boolean;
 use boolean::budget as boolean_budget;
 mod classification;
@@ -86,6 +87,29 @@ type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 /// sections when the exact path refuses on geometry grounds. Cancellation,
 /// resource limits and invalid specifications are never retried.
 pub(crate) fn plan(
+    input: &CompilerInput<'_>,
+    cancel: &AtomicBool,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
+) -> Result<NormalizedPrintPlan, ManufacturingError> {
+    let mut plan = plan_lane(input, cancel, geometry_work)?;
+    // Walls of either lane follow the same BREP circles.
+    let sources: Vec<_> = input
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            input
+                .definitions
+                .get(&occurrence.definition_id)
+                .map(|definition| {
+                    spiling_geometry::tolerant::CircleSource::new(definition, &occurrence.pose)
+                })
+        })
+        .collect();
+    arcs::attach(&mut plan, &sources, cancel)?;
+    Ok(plan)
+}
+
+fn plan_lane(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
@@ -1929,6 +1953,7 @@ fn admit_schedule<'model>(
                     width: path.width.clone(),
                     physical_z_mm: [elevation.lower_z, z],
                     points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
+                    arcs: Vec::new(),
                 });
             }
             let mut coverage = coverage.clone();

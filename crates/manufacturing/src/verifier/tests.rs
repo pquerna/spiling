@@ -150,6 +150,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 extruders: 1,
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
+                arc_moves: false,
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 1.0,
@@ -257,6 +258,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                             [1.0, 5.0, 1.0],
                             [1.0, 1.0, 1.0],
                         ],
+                        arcs: Vec::new(),
                     },
                     DepositionPath {
                         material_domain: None,
@@ -265,6 +267,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                         width: WidthProfile::Constant { width_mm: 1.0 },
                         physical_z_mm: [0.0, 1.0],
                         points_mm: vec![[2.0, 2.0, 1.0], [6.0, 2.0, 1.0]],
+                        arcs: Vec::new(),
                     },
                 ],
             },
@@ -283,6 +286,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                     width: WidthProfile::Constant { width_mm: 1.0 },
                     physical_z_mm: [1.0, 2.0],
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
+                    arcs: Vec::new(),
                 }],
             },
         ],
@@ -556,6 +560,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
             [4.0, 1.0, 1.0],
             [1.0, 1.0, 1.0],
         ],
+        arcs: Vec::new(),
     }];
     refresh_volumes(&intent, &mut plan);
     let program = "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\nG1 X4 Y1 Z1 E2.25 F600\nG1 X1 Y1 Z1 E3 F600\n";
@@ -739,6 +744,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
         width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
+        arcs: Vec::new(),
     }];
     refresh_volumes(&intent, &mut plan);
     let program =
@@ -787,6 +793,7 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
             [1.0, 5.0, 0.2],
             [1.0, 1.0, 0.2],
         ],
+        arcs: Vec::new(),
     });
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
     intent.recipe.process.first_layer_flow_factor = 1.1;
@@ -838,6 +845,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.011_999_49, 1.016_000_49, 0.2]],
+        arcs: Vec::new(),
     });
     let length = distance(
         plan.layers[0].paths[0].points_mm[0],
@@ -869,6 +877,7 @@ fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.000_01],
         points_mm: vec![[1.0, 1.0, 0.000_01], [1.02, 1.0, 0.000_01]],
+        arcs: Vec::new(),
     });
     // E=3e-8 is the ordinary E8 rounding of this nominal stroke, but its
     // independently inverted width is about 0.47124 rather than 0.45 mm.
@@ -889,6 +898,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
         },
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.02, 1.0, 0.2], [1.0, 1.0, 0.2]],
+        arcs: Vec::new(),
     });
     // Nominal widths meet 0.20/mm. Actual E8 commands invert to about
     // 0.450997545 and 0.455003076: their gradient exceeds the frozen limit.
@@ -912,6 +922,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
             [1.015, 1.025_981, 0.2],
             [1.0, 1.0, 0.2],
         ],
+        arcs: Vec::new(),
     });
     // Both stored interior transitions are below 0.20/mm; only last→first
     // violates it. Emission matching the same bad plan is not independent proof.
@@ -989,6 +1000,7 @@ fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         };
         220_000
     ];
@@ -1030,6 +1042,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         };
         40_000
     ];
@@ -1076,6 +1089,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         };
         100_000
     ];
@@ -1368,6 +1382,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -1376,6 +1391,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -1384,6 +1400,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0]],
+            arcs: Vec::new(),
         },
     ];
     plan.layers[0].region_coverage.support_area_mm2 = 4.0;
@@ -1397,6 +1414,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [1.0, 1.5],
         points_mm: vec![[11.0, 1.0, 1.5], [15.0, 1.0, 1.5]],
+        arcs: Vec::new(),
     }];
     refresh_volumes(&intent, &mut plan);
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
@@ -1697,6 +1715,7 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
             [7.0, 5.0, 1.0],
             [7.0, 1.0, 1.0],
         ],
+        arcs: Vec::new(),
     });
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -1818,6 +1837,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
             [2.0, 10.0, 1.0],
             [10.0, 10.0, 1.0],
         ],
+        arcs: Vec::new(),
     });
     plan.layers[0].paths[1].points_mm = vec![[20.0, 2.0, 1.0], [2.0, 2.0, 1.0]];
     refresh_volumes(&intent, &mut plan);
@@ -1999,6 +2019,7 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
                 width: WidthProfile::Constant { width_mm: 1.0 },
                 physical_z_mm: [1.0, 2.0],
                 points_mm: vec![[5.0, 4.0, 2.0], [5.0, 1.0, 2.0]],
+                arcs: Vec::new(),
             });
         }
         refresh_volumes(&intent, &mut plan);
@@ -2300,6 +2321,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[2.0, 2.0, 0.1], [6.0, 2.0, 0.1]],
+        arcs: Vec::new(),
     };
     plan.layers[0].lower_z_mm = 0.0;
     plan.layers[0].z_mm = 0.1;
@@ -2545,6 +2567,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
                 width: WidthProfile::Constant { width_mm: 0.45 },
                 physical_z_mm: [layer.lower_z_mm, layer.z_mm],
                 points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
+                arcs: Vec::new(),
             }];
             layer
         })
@@ -2559,6 +2582,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.1, 0.4],
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
+        arcs: Vec::new(),
     });
     plan.sparse_bands = vec![SparseBandDecision {
         landing_aligned: false,
@@ -2729,6 +2753,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
                 [1.0, 5.0, layer.z_mm],
                 [1.0, 1.0, layer.z_mm],
             ],
+            arcs: Vec::new(),
         }];
     }
     // The lower separator anchor is actual earlier deposition, not a future
@@ -2740,6 +2765,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
+        arcs: Vec::new(),
     });
     plan.layers[0].paths.push(DepositionPath {
         material_domain: None,
@@ -2748,6 +2774,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[1.0, 3.0, 0.1], [5.0, 3.0, 0.1]],
+        arcs: Vec::new(),
     });
     let fine = &mut plan.layers[1];
     fine.paths.extend([
@@ -2760,6 +2787,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -2768,6 +2796,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -2776,6 +2805,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -2784,6 +2814,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.225, 3.0, 0.2], [4.775, 3.0, 0.2]],
+            arcs: Vec::new(),
         },
     ]);
     fine.region_coverage.process_regions = [0.2, 0.4]
@@ -2957,6 +2988,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: fit.fitted_mm.to_vec(),
+        arcs: Vec::new(),
     }];
     layer.skin_command_fits = vec![SkinCommandFitDomain {
         region_index: 0,
@@ -3267,6 +3299,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[x[0], row, 1.0], [x[1], row, 1.0]],
+            arcs: Vec::new(),
         })
         .collect();
     let layer = &mut plan.layers[1];
@@ -3281,6 +3314,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [1.0, 2.0],
         points_mm: vec![[2.0, row, 2.0], [boundary, row, 2.0], [5.4, row, 2.0]],
+        arcs: Vec::new(),
     }];
     layer.region_coverage.wall_area_mm2 = 14.0;
     layer.region_coverage.bottom_skin_area_mm2 = 1.2;

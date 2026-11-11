@@ -2927,6 +2927,7 @@ impl ClassifiedRegions {
                                     } else {
                                         vec![core, transition, skin_end]
                                     },
+                                    arcs: Vec::new(),
                                 }],
                                 whole_rows: Vec::new(),
                                 process_interfaces: Vec::new(),
@@ -4337,6 +4338,7 @@ mod ownership_tests {
             },
             physical_z_mm: [0., h],
             points_mm: vec![[0., y, h], [2.0 * y, y, h]],
+            arcs: Vec::new(),
         });
         let mut workspace = super::super::support::AnchorWorkspace::default();
         let mut work = 0;
@@ -4438,6 +4440,7 @@ mod skin_bridge_tests {
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [5.0, 5.4],
             points_mm: points.iter().map(|p| [p[0], p[1], 5.4]).collect(),
+            arcs: Vec::new(),
         }
     }
 
@@ -4562,6 +4565,7 @@ mod skin_bridge_tests {
             width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [floor - 0.0983, floor],
             points_mm: vec![[98.9, y, floor], [121.1, y, floor]],
+            arcs: Vec::new(),
         })
         .to_vec();
         previous.push(DepositionPath {
@@ -4574,6 +4578,7 @@ mod skin_bridge_tests {
                 [100., 101.6750000119207, floor],
                 [120., 101.6750000119207, floor],
             ],
+            arcs: Vec::new(),
         });
         let required = vec![DepositionPath {
             material_domain: None,
@@ -4585,6 +4590,7 @@ mod skin_bridge_tests {
                 transition,
                 [transition[0], 101.90000000596024, transition[2]],
             ],
+            arcs: Vec::new(),
         }];
         let mut workspace = AnchorWorkspace::default();
         let mut work = 0;
@@ -4755,6 +4761,7 @@ mod split_skin_tests {
                         width: WidthProfile::Constant { width_mm: 0.45 },
                         physical_z_mm: [0., 0.2],
                         points_mm: vec![[a[0], a[1], 0.2], [b[0], b[1], 0.2]],
+                        arcs: Vec::new(),
                     }
                 };
                 let mut previous = vec![

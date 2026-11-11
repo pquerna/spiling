@@ -117,16 +117,22 @@ height bounds the layer, so no section is taken through a degenerate plane.
 
 ### Curves in the plan and the program
 
-- A deposition path is a sequence of segments, each a line or a planar circular
-  arc at constant Z (end point, centre, direction). Arcs come from analytic
-  section curves; wall offsets of an arc stay arcs; fills stay lines.
+- A deposition path keeps its points and gains arc runs: ranges of points on
+  one horizontal circle (center, direction). Every planar check still uses
+  the points, which stay within half the profile tolerance of the arc; a run
+  only states that they share an exact circle.
+- Run centers come from the source BREP's analytic surfaces of revolution
+  about a vertical axis, placed with the occurrence, not from fitting the
+  polyline. Walls offset from such a circle stay concentric, so their runs
+  reproduce the BREP's curve.
 - Printers declare arc support as a capability (for example Marlin
   `ARC_SUPPORT`, Klipper `[gcode_arcs]`). With it the emitter writes `G2`/`G3`
-  with `I`/`J`. Without it the emitter linearizes each arc to `ε_xy`. The plan
-  is the same either way.
-- The verifier decodes `G2`/`G3`, checks the endpoint against the plan on the
-  output lattice, checks that the centre is equidistant from both endpoints
-  within the lattice error, and computes extrusion from arc length.
+  with `I`/`J`, extrusion from arc length. Without it the emitter writes the
+  run's chords. The plan is the same either way.
+- The verifier decodes `G2`/`G3` and checks centre, direction and end against
+  the run on the output lattice and every planned point against the decoded
+  circle, then replays the run's edges with arc-length extrusion through the
+  ordinary per-edge checks.
 
 ### What other slicers do
 
@@ -214,7 +220,8 @@ material, time and travel counts on the same parts.
 3. Import packaging: single-solid assembly wrappers, multi-body parts, AP242,
    assemblies as plate occurrences. Delivered: one definition per solid at its
    source placement; overlapping occurrences slice as a union.
-4. Arc segments in the plan, emitter and verifier, from analytic walls.
+4. Arc runs in the plan, emitter and verifier, centered on the BREP's
+   analytic circles: delivered for walls.
 5. Height smoothing and slope adaptation.
 
 ## Alternatives rejected

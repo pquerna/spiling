@@ -585,6 +585,7 @@ mod tests {
             width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: interval,
             points_mm: points,
+            arcs: Vec::new(),
         };
         let base = MaterialConstructionRole::FunctionalBase;
         let region = MaterialConstructionRole::FunctionalRegion;

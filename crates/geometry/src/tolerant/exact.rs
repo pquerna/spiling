@@ -197,6 +197,17 @@ impl Implicit {
         }
     }
 
+    /// Whether every horizontal section is a set of concentric circles.
+    pub(super) fn has_vertical_axis(&self) -> bool {
+        match self {
+            Self::Plane { .. } => false,
+            Self::Sphere { .. } => true,
+            Self::Cylinder { axis, .. } | Self::Cone { axis, .. } | Self::Torus { axis, .. } => {
+                axis[2].abs() >= 1.0 - 1e-12
+            }
+        }
+    }
+
     pub(super) fn is_plane(&self) -> bool {
         matches!(self, Self::Plane { .. })
     }

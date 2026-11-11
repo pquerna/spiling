@@ -1453,6 +1453,7 @@ fn push_path(
             _ => None,
         },
         points_mm,
+        arcs: Vec::new(),
     });
     Ok(())
 }

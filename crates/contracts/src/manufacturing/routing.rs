@@ -1050,6 +1050,7 @@ mod uniform_family_tests {
             width: WidthProfile::Constant { width_mm: 0.4 },
             physical_z_mm: [0.0, 0.2],
             points_mm: vec![[x - 1.0, y, 0.2], [x + 1.0, y, 0.2]],
+            arcs: Vec::new(),
         }
     }
 
@@ -1613,6 +1614,7 @@ mod mixed_width_tests {
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.2],
             points_mm: vec![[21.0, 21.0, 0.2], [22.0, 21.0, 0.2]],
+            arcs: Vec::new(),
         };
         assert_eq!(job.tool_for_path(&path).unwrap(), 1);
         path.width = WidthProfile::Constant { width_mm: 0.45 };
@@ -1761,6 +1763,7 @@ mod reservation_projection_tests {
                             [b.min[0] + 1.0, 0.5, 0.2],
                             [b.max[0] - 0.3, 1.0, 0.2],
                         ],
+                        arcs: Vec::new(),
                     };
                     for variant in 0..7 {
                         let expected = pairwise(&job, &path).map_err(|e| e.code);
@@ -1789,6 +1792,7 @@ mod reservation_projection_tests {
             physical_z_mm: [0.0, 0.2],
             width: WidthProfile::Constant { width_mm: 0.4 },
             points_mm: vec![[-19.5, 0.0, 0.2], [-19.0, 1.0, 0.2]],
+            arcs: Vec::new(),
         };
         job.assignments[1].work_envelope_mm = a.work_envelope_mm;
         assert!(

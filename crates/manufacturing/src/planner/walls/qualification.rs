@@ -1894,6 +1894,7 @@ mod tests {
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.2],
             points_mm: points.iter().map(|p| [p[0], p[1], 0.2]).collect(),
+            arcs: Vec::new(),
         }
     }
 

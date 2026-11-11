@@ -847,3 +847,44 @@ test("page hashes do not authorize forged visibility spans or ordinal gaps", asy
     await assert.rejects(decodeReplayDisplay(golden, altered), ReplayDecodeError);
   }
 });
+
+test("an arc's edges may share its source line, and only depositions may", async () => {
+  // Split the golden's first deposition at its midpoint into two records on
+  // one source line, as one arc command replays as its planned edges.
+  const body = await decodeReplayDisplay(golden, descriptor);
+  let deposition = 1;
+  while (body.kind(deposition) === 0) deposition++;
+  const split = async (line: (previous: number) => number) => {
+    const bytes = new ArrayBuffer(golden.byteLength + REPLAY_RECORD_BYTES);
+    const raw = new Uint8Array(bytes),
+      data = new DataView(bytes);
+    const at = REPLAY_HEADER_BYTES + deposition * REPLAY_RECORD_BYTES;
+    raw.set(new Uint8Array(golden, 0, at + REPLAY_RECORD_BYTES));
+    raw.set(new Uint8Array(golden, at), at + REPLAY_RECORD_BYTES);
+    const from = body.position(deposition - 1),
+      to = body.position(deposition);
+    for (let axis = 0; axis < 3; axis++) {
+      data.setFloat64(at + axis * 8, (from[axis]! + to[axis]!) / 2, true);
+    }
+    const e = (body.extrusion(deposition - 1) + body.extrusion(deposition)) / 2;
+    data.setFloat64(at + 24, e, true);
+    const end = at + REPLAY_RECORD_BYTES;
+    data.setUint32(end + 40, line(data.getUint32(at + 40, true)), true);
+    data.setUint32(8, body.eventCount + 1, true);
+    data.setUint32(16, data.getUint32(16, true) + 1, true);
+    const value = structuredClone(descriptor);
+    value.info.event_count += 1;
+    value.info.deposition_count += 1;
+    value.resource.size_bytes = String(bytes.byteLength);
+    return decodeReplayDisplay(bytes, await rehash(bytes, value));
+  };
+  const arc = await split((line) => line);
+  assert.equal(arc.sourceLine(deposition + 1), arc.sourceLine(deposition));
+  // Lines still never go back, and a travel never shares its line.
+  await assert.rejects(split((line) => line - 1), ReplayDecodeError);
+  const bytes = golden.slice(0);
+  const data = new DataView(bytes);
+  const at = REPLAY_HEADER_BYTES + deposition * REPLAY_RECORD_BYTES;
+  data.setUint32(at + 40, data.getUint32(at - REPLAY_RECORD_BYTES + 40, true), true);
+  await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes)), ReplayDecodeError);
+});

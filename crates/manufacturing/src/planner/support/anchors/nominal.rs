@@ -263,6 +263,7 @@ mod tests {
                     },
                     physical_z_mm: [0.0, if index % 3 == 0 { 0.1 } else { 0.2 }],
                     points_mm: vec![[offset, -1.0, 0.2], [offset, 0.0, 0.2], [offset, 1.0, 0.2]],
+                    arcs: Vec::new(),
                 }
             })
             .collect()
@@ -450,6 +451,7 @@ mod tests {
                     [index as f64 * 2.0, -0.1, 0.1],
                     [index as f64 * 2.0, 0.1, 0.1],
                 ],
+                arcs: Vec::new(),
             })
             .collect::<Vec<_>>();
         let metadata = (paths.len() * size_of::<NominalPath<'_>>()

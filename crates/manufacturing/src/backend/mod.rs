@@ -5,7 +5,7 @@
 use crate::{check_cancel, error};
 use spiling_chunks::{ChunkSource, ChunkWriter};
 use spiling_contracts::manufacturing::program_coordinates::{
-    project_xyz6_coordinate_mm, project_xyz6_point_mm,
+    self, project_xyz6_coordinate_mm, project_xyz6_point_mm,
 };
 use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
@@ -188,6 +188,75 @@ pub fn emit(
                     let e = if routed.is_some() { rounded } else { e };
                     writeln!(program, "G1 E{e:.8} F{feed:.6}").map_err(limit)?;
                     emitted_extrusion = rounded;
+                }
+                Event::Arc(target, center, clockwise, e, speed) => {
+                    // Arcs come only from a printer declaring arc moves and
+                    // never from routed jobs (rejected by validation).
+                    let from = position.ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "deposition before positioning",
+                        )
+                    })?;
+                    let to = project_xyz6_point_mm(target)?;
+                    writable_position(to, intent)?;
+                    let arc = program_coordinates::CommandedArc::new(from, to, center, clockwise)?;
+                    let [lo, hi] = arc.xy_bounds();
+                    writable_position([lo[0], lo[1], to[2]], intent)?;
+                    writable_position([hi[0], hi[1], to[2]], intent)?;
+                    deposits += 1;
+                    built_top = built_top.max(to[2]);
+                    if deposits > MAX_DEPOSITION_SEGMENTS {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "actual model/waste or travel segment budget exceeded",
+                        ));
+                    }
+                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    if !feed.is_finite()
+                        || feed <= 0.0
+                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "actual emitted feed exceeds printer limit or precision",
+                        ));
+                    }
+                    let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
+                    let delta = rounded - emitted_extrusion;
+                    if !rounded.is_finite()
+                        || arc.length_mm < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                        || delta <= 0.0
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::UnsupportedGeometry,
+                            "arc deposition collapses at serialized precision",
+                        ));
+                    }
+                    let flow_limit = intent.process_for_tool(None)?.max_volumetric_flow_mm3_s;
+                    let flow = delta * filament_area * feed / 60.0 / arc.length_mm;
+                    let rounding_slack = (flow_limit * 0.000002
+                        + 0.00000001 * filament_area * speed)
+                        / arc.length_mm;
+                    if !flow.is_finite() || flow > flow_limit + rounding_slack {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "actual decoded deposition flow exceeds printer limit",
+                        ));
+                    }
+                    writeln!(
+                        program,
+                        "{} X{:.6} Y{:.6} Z{:.6} I{:.6} J{:.6} E{e:.8} F{feed:.6}",
+                        if clockwise { "G2" } else { "G3" },
+                        to[0],
+                        to[1],
+                        to[2],
+                        center[0] - from[0],
+                        center[1] - from[1],
+                    )
+                    .map_err(limit)?;
+                    emitted_extrusion = rounded;
+                    position = Some(to);
                 }
                 Event::Travel(target, speed)
                 | Event::Deposit(target, _, speed)

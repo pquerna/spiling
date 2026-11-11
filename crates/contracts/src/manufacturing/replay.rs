@@ -262,6 +262,11 @@ fn e8_ticks(value: f64) -> Result<i64, ManufacturingError> {
 }
 
 /// Validate one bounded immutable artifact without allocating event objects.
+/// Model, support, interface and separator deposition records.
+fn deposits(kind: u8) -> bool {
+    matches!(kind, 1..=5 | 8..=10 | 13)
+}
+
 pub fn validate_replay_display(
     bytes: &[u8],
     descriptor: &ReplayDisplayDescriptor,
@@ -309,6 +314,7 @@ pub fn validate_replay_reader(
     let mut previous = [0.0; 3];
     let mut previous_e = 0.0;
     let mut previous_line = 0;
+    let mut previous_deposits = false;
     let mut layer = 0;
     let mut layer_deposition = false;
     let mut depositions = 0;
@@ -365,7 +371,10 @@ pub fn validate_replay_reader(
                 })
             || !feed.is_finite()
             || if kind == 14 { feed != 0.0 } else { feed <= 0.0 }
-            || line <= previous_line
+            // One arc command replays as its planned edges: consecutive
+            // depositions may share its line. Lines never go back.
+            || line < previous_line
+            || (line == previous_line && !(previous_deposits && deposits(kind)))
             || line > MAX_MANUFACTURING_PROGRAM_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
             || kind > 15
@@ -617,6 +626,7 @@ pub fn validate_replay_reader(
         previous = position;
         previous_e = e;
         previous_line = line;
+        previous_deposits = deposits(kind);
     }
     let mut trailing = [0];
     if reader
@@ -719,6 +729,54 @@ mod tests {
         };
         descriptor.pages = index_replay(std::io::Cursor::new(&bytes), &descriptor.info).unwrap();
         (bytes, descriptor)
+    }
+    #[test]
+    fn arc_edges_may_share_a_line_only_between_depositions() {
+        // Records: position, E, kind, source line.
+        let build = |records: &[([f64; 3], f64, u8, u32)]| {
+            let mut bytes = vec![0; REPLAY_HEADER_BYTES];
+            bytes[..4].copy_from_slice(b"SPLR");
+            bytes[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
+            bytes[6..8].copy_from_slice(&96u16.to_le_bytes());
+            let depositions = records.iter().filter(|r| r.2 != 0).count() as u32;
+            let travels = records.len() as u32 - depositions;
+            for (offset, value) in [
+                (8, records.len() as u32),
+                (12, 80),
+                (16, depositions),
+                (20, travels),
+                (24, 1),
+            ] {
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            for axis in 0..3 {
+                bytes[56 + axis * 8..64 + axis * 8].copy_from_slice(&1.0f64.to_le_bytes());
+            }
+            for (index, (position, e, kind, line)) in records.iter().enumerate() {
+                for value in position {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes.extend_from_slice(&e.to_le_bytes());
+                bytes.extend_from_slice(&600.0f64.to_le_bytes());
+                bytes.extend_from_slice(&line.to_le_bytes());
+                bytes.extend_from_slice(&0u16.to_le_bytes());
+                append_association(&mut bytes, index, *kind, position[2]);
+            }
+            let (_, mut descriptor) = encoded();
+            descriptor.info.event_count = records.len() as u32;
+            descriptor.info.deposition_count = depositions;
+            descriptor.info.travel_count = travels;
+            descriptor.resource.size_bytes = bytes.len().to_string();
+            rebind(&bytes, &mut descriptor);
+            validate_replay_display(&bytes, &descriptor)
+        };
+        let start = ([0.0; 3], 0.0, 0, 5);
+        // One arc command replayed as two planned edges.
+        build(&[start, ([1.0; 3], 1.0, 1, 6), ([1.0, 0.0, 1.0], 2.0, 1, 6)]).unwrap();
+        // Lines never go back, and a travel never shares a deposition's line.
+        assert!(build(&[start, ([1.0; 3], 1.0, 1, 6), ([1.0, 0.0, 1.0], 2.0, 1, 5)]).is_err());
+        assert!(build(&[start, ([1.0; 3], 1.0, 1, 6), ([0.0; 3], 1.0, 0, 6)]).is_err());
+        assert!(build(&[([0.0; 3], 0.0, 0, 6), ([1.0; 3], 1.0, 1, 6)]).is_err());
     }
     fn append_association(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64) {
         let associated = matches!(kind, 1..=5 | 8..=10 | 13);

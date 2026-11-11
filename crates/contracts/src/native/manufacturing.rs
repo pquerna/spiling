@@ -790,6 +790,7 @@ impl TryFrom<rpc::PrinterCapabilities> for PrinterCapabilities {
                     .map_err(|e| e.to_string())?
                     .try_into()?,
                 generated_supports: value.generated_supports,
+                arc_moves: value.arc_moves,
             },
             Self::validate,
         )
@@ -804,6 +805,7 @@ impl TryFrom<PrinterCapabilities> for rpc::PrinterCapabilities {
             extruders: value.extruders,
             output_dialect: rpc::OutputDialect::try_from(value.output_dialect)? as i32,
             generated_supports: value.generated_supports,
+            arc_moves: value.arc_moves,
         })
     }
 }

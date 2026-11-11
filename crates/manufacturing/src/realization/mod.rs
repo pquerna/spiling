@@ -17,6 +17,9 @@ pub(crate) enum Event {
     Travel([f64; 3], f64),
     Extrusion(f64, f64), // stationary absolute E, speed
     Deposit([f64; 3], f64, f64),
+    /// One planned arc run: target, commanded center, clockwise, absolute E
+    /// and speed. Only for a printer that declares arc moves.
+    Arc([f64; 3], [f64; 2], bool, f64, f64),
     Waste([f64; 3], f64, f64),
     Barrier,
     SelectTool(u8),
@@ -313,8 +316,49 @@ pub(crate) fn stream(
                     flow *= process.policy.bridge_flow_factor;
                 }
                 let height = path.height_mm();
-                for edge in path.checked_edges()? {
+                let mut runs = if intent.printer.capabilities.arc_moves && routed.is_none() {
+                    path.arcs.as_slice()
+                } else {
+                    &[]
+                }
+                .iter()
+                .peekable();
+                let mut resume = 0usize;
+                for (index, edge) in path.checked_edges()?.enumerate() {
                     check_cancel(cancel)?;
+                    if index < resume {
+                        continue;
+                    }
+                    if let Some(run) = runs.next_if(|run| run.first as usize == index) {
+                        let (first, last) = (run.first as usize, run.last as usize);
+                        let from = project_xyz6_point_mm(path.points_mm[first])?;
+                        let to = project_xyz6_point_mm(path.points_mm[last])?;
+                        let center = [
+                            program_coordinates::project_xyz6_coordinate_mm(run.center_mm[0])?,
+                            program_coordinates::project_xyz6_coordinate_mm(run.center_mm[1])?,
+                        ];
+                        let arc = program_coordinates::CommandedArc::new(
+                            from,
+                            to,
+                            center,
+                            run.clockwise,
+                        )?;
+                        let area = ((edge.width_mm - height) * height
+                            + std::f64::consts::PI * (height * 0.5).powi(2))
+                            * flow;
+                        // The bead follows the commanded arc, so its length
+                        // owns the extrusion.
+                        extrusion += arc.length_mm * area / filament_area;
+                        emit(Event::Arc(
+                            path.points_mm[last],
+                            center,
+                            run.clockwise,
+                            extrusion,
+                            speed,
+                        ))?;
+                        resume = last;
+                        continue;
+                    }
                     let from = project_xyz6_point_mm(edge.points_mm[0])?;
                     let to = project_xyz6_point_mm(edge.points_mm[1])?;
                     let command_length = distance(from, to);

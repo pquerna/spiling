@@ -440,6 +440,7 @@ mod tests {
                 [2.0000004, 1.0, physical[1]],
                 [2.0000004, 11.0, physical[1]],
             ],
+            arcs: Vec::new(),
         }
     }
     #[test]

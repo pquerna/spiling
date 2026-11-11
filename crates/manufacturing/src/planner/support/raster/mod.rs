@@ -570,6 +570,7 @@ fn wall_piece(
             physical_z_mm: [lower_z, z],
             owner: None,
             points_mm: vec![from, to],
+            arcs: Vec::new(),
         });
     }
     Ok(())

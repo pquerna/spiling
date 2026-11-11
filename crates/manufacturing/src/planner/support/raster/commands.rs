@@ -273,6 +273,7 @@ mod tests {
             physical_z_mm: [0.0, 0.2],
             owner: None,
             points_mm: ring.0.iter().map(|p| [p.x, p.y, 0.2]).collect(),
+            arcs: Vec::new(),
         }
     }
     fn attempt(

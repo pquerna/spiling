@@ -52,7 +52,7 @@ fn intent() -> ManufacturingIntent {
             "coordinate_frame":"right_handed_millimetres",
             "build_envelope":{"min":[-20.0,-20.0,0.0],"max":[200.0,200.0,100.0]},
             "components":[{"id":"bed","role":"bed","pose":{"translation_mm":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"shape":{"kind":"box","bounds_mm":{"min":[-20.0,-20.0,-1.0],"max":[200.0,200.0,0.0]}}}],
-            "capabilities":{"motion_space":"cartesian_xyz","extruders":1,"output_dialect":"cartesian_absolute_gcode_v1","generated_supports":false},
+            "capabilities":{"motion_space":"cartesian_xyz","extruders":1,"output_dialect":"cartesian_absolute_gcode_v1","generated_supports":false,"arc_moves":false},
             "workflow":{"kind":"diagnostic_body_only"},
             "motion_resolution":{"xy_mm":0.0125,"z_mm":0.0025},
             "deposition_limits":{"min_bead_width_mm":0.3,"max_bead_width_mm":0.75,"min_bead_height_mm":0.0025,"max_bead_height_mm":0.3},
@@ -2462,17 +2462,31 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         let mut program_lines = program_text.lines();
         let mut previous_line = 0;
         let mut actual_separators = 0;
-        for event in motion[REPLAY_HEADER_BYTES..]
+        let events: Vec<&[u8; REPLAY_RECORD_BYTES]> = motion[REPLAY_HEADER_BYTES..]
             .as_chunks::<REPLAY_RECORD_BYTES>()
             .0
-        {
+            .iter()
+            .collect();
+        let mut line = "";
+        for (index, event) in events.iter().enumerate() {
             let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
-            let line = program_lines
-                .nth((source_line - previous_line - 1) as usize)
-                .unwrap();
-            previous_line = source_line;
-            assert!(line.starts_with("G0 ") || line.starts_with("G1 "));
+            // Records sharing a line are one arc command's planned edges.
+            if source_line != previous_line {
+                line = program_lines
+                    .nth((source_line - previous_line - 1) as usize)
+                    .unwrap();
+                previous_line = source_line;
+            }
+            let arc = line.starts_with("G2 ") || line.starts_with("G3 ");
+            assert!(line.starts_with("G0 ") || line.starts_with("G1 ") || arc);
+            let last_of_line = events.get(index + 1).is_none_or(|next| {
+                u32::from_le_bytes(next[40..44].try_into().unwrap()) != source_line
+            });
+            assert!(arc || last_of_line, "only an arc spans several records");
             for (axis, offset) in [('X', 0), ('Y', 8), ('Z', 16), ('E', 24), ('F', 32)] {
+                if !last_of_line && !matches!(axis, 'Z' | 'F') {
+                    continue;
+                }
                 if let Some(value) = line
                     .split_ascii_whitespace()
                     .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
@@ -2486,7 +2500,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
             // SPLR's documented separator-wall role, not a perimeter/bridge alias.
             if event[46] == 13 {
                 actual_separators += 1;
-                assert!(line.starts_with("G1 "));
+                assert!(line.starts_with("G1 ") || arc);
             }
         }
         assert_eq!(actual_separators, separator_segments);

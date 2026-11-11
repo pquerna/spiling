@@ -358,6 +358,7 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
                     width: WidthProfile::Constant { width_mm: 0.4 },
                     physical_z_mm: [1.8, 2.0],
                     points_mm: ring.0.iter().map(|p| [p.x, p.y, 2.0]).collect(),
+                    arcs: Vec::new(),
                 });
                 boundary += 1;
             }

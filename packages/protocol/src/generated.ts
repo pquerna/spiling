@@ -798,7 +798,12 @@ export type FixedDualVerification = { selection_count: number, tools: [RoutedToo
 
 export type HomingCoordinateContract = "marlin_native_cartesian";
 
-export type PrinterCapabilities = { motion_space: MotionSpace, extruders: number, output_dialect: OutputDialect, generated_supports: boolean, };
+export type PrinterCapabilities = { motion_space: MotionSpace, extruders: number, output_dialect: OutputDialect, generated_supports: boolean,
+/**
+ * The firmware interpolates XY circular moves (G2/G3 with I/J centers).
+ * Planned arc runs are emitted as arcs only for such a printer.
+ */
+arc_moves: boolean, };
 
 export type MachineComponentRole = "bed" | "toolhead" | "fixture";
 
@@ -918,7 +923,19 @@ owner: DepositionOwner | null, width: WidthProfile,
 /**
  * Explicit occupied interval; upper endpoint belongs to the owning layer.
  */
-physical_z_mm: [number, number], points_mm: Array<[number, number, number]>, };
+physical_z_mm: [number, number], points_mm: Array<[number, number, number]>,
+/**
+ * Runs of points that lie on one circle, in point order. The points stay
+ * the path's geometry for every planar check; an arc-capable printer
+ * receives each run as one circular move.
+ */
+arcs?: Array<ArcRun>, };
+
+export type ArcRun = { first: number, last: number, center_mm: [number, number],
+/**
+ * Clockwise seen from +Z (G2); otherwise counter-clockwise (G3).
+ */
+clockwise: boolean, };
 
 export type SparseBandDecision = { first_layer: number, last_layer: number, owner: DepositionOwner | null, disposition: SparseBandDisposition,
 /**

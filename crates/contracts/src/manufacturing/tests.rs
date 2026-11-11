@@ -1108,6 +1108,7 @@ fn intent() -> ManufacturingIntent {
                 extruders: 1,
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
+                arc_moves: false,
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
@@ -1867,6 +1868,7 @@ fn plan() -> NormalizedPrintPlan {
                     [20.0, 20.0, 5.2],
                     [10.0, 10.0, 5.2],
                 ],
+                arcs: Vec::new(),
             }],
         }],
     }
@@ -2377,6 +2379,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
                 _ => None,
             },
             points_mm: vec![[30.0, 30.0, 5.2], [31.0, 31.0, 5.2]],
+            arcs: Vec::new(),
         });
         if matches!(
             kind,
@@ -2761,6 +2764,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                                 }
                             })
                             .collect(),
+                        arcs: Vec::new(),
                     })
                     .collect(),
             }
@@ -3047,6 +3051,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
+        arcs: Vec::new(),
     });
     mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
     mixed.layers[0]
@@ -3813,6 +3818,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
+        arcs: Vec::new(),
     });
     planned.validate(&intent()).unwrap();
     assert_eq!(
@@ -3972,6 +3978,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
+        arcs: Vec::new(),
     });
     captured.verification.deposition_segments += 1;
     let rebind = |bundle: &mut ManufacturingBundle| {
@@ -4269,6 +4276,7 @@ fn varying_width_path() -> DepositionPath {
             [10.0, 20.0, 5.2],
             [10.0, 10.0, 5.2],
         ],
+        arcs: Vec::new(),
     }
 }
 
@@ -4802,4 +4810,82 @@ fn motion_resolution_bounds_what_a_printer_can_declare() {
     assert!(value.validate().is_err());
     value.printer.deposition_limits.min_bead_height_mm = 0.0025;
     assert!(value.validate().is_ok());
+}
+
+fn arc_wall(points: usize, radius: f64) -> DepositionPath {
+    let mut points_mm: Vec<[f64; 3]> = (0..points)
+        .map(|k| {
+            let t = std::f64::consts::TAU * k as f64 / points as f64;
+            [10.0 + radius * t.cos(), 10.0 + radius * t.sin(), 0.2]
+        })
+        .collect();
+    points_mm.push(points_mm[0]);
+    DepositionPath {
+        material_domain: None,
+        kind: DepositionKind::Perimeter,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 0.45 },
+        physical_z_mm: [0.0, 0.2],
+        points_mm,
+        arcs: Vec::new(),
+    }
+}
+
+#[test]
+fn arc_runs_stay_on_one_bounded_circle_and_follow_path_edits() {
+    let run = |first: u32, last: u32, clockwise: bool| ArcRun {
+        first,
+        last,
+        center_mm: [10.0, 10.0],
+        clockwise,
+    };
+    let mut path = arc_wall(120, 5.0);
+    path.arcs = vec![run(0, 80, false), run(80, 120, false)];
+    path.validate_arcs().unwrap();
+    // Each rule refuses on its own.
+    let refused = |edit: &dyn Fn(&mut DepositionPath)| {
+        let mut bad = path.clone();
+        edit(&mut bad);
+        assert!(bad.validate_arcs().is_err());
+    };
+    refused(&|p| p.arcs = vec![run(0, 1, false)]);
+    refused(&|p| p.arcs = vec![run(0, 80, false), run(70, 120, false)]);
+    refused(&|p| p.arcs = vec![run(0, 100, false)]);
+    refused(&|p| p.arcs[0].clockwise = true);
+    refused(&|p| p.arcs[0].center_mm[0] += 0.01);
+    refused(&|p| p.points_mm[40][2] += 0.1);
+    refused(&|p| p.arcs = vec![run(0, 200, false)]);
+    let mut coarse = arc_wall(12, 5.0);
+    coarse.arcs = vec![run(0, 6, false)];
+    assert!(
+        coarse.validate_arcs().is_err(),
+        "chords sag beyond the limit"
+    );
+    let mut tight = arc_wall(120, 0.4);
+    tight.arcs = vec![run(0, 60, false)];
+    assert!(tight.validate_arcs().is_err(), "radius below the limit");
+
+    // Reversal flips direction and indices; seam rotation splits a run.
+    let mut reversed = path.clone();
+    reversed.reverse();
+    reversed.validate_arcs().unwrap();
+    assert_eq!(reversed.arcs, [run(0, 40, true), run(40, 120, true)]);
+    let mut rotated = path.clone();
+    rotated.rotate_closed(30).unwrap();
+    rotated.validate_arcs().unwrap();
+    assert_eq!(
+        rotated.arcs,
+        [run(0, 50, false), run(50, 90, false), run(90, 120, false)]
+    );
+    // A missing list is an empty one, and an empty list is not written.
+    let mut plain = path.clone();
+    plain.arcs.clear();
+    let text = serde_json::to_string(&plain).unwrap();
+    assert!(!text.contains("arcs"));
+    assert_eq!(
+        serde_json::from_str::<DepositionPath>(&text).unwrap(),
+        plain
+    );
+    let text = serde_json::to_string(&path).unwrap();
+    assert_eq!(serde_json::from_str::<DepositionPath>(&text).unwrap(), path);
 }

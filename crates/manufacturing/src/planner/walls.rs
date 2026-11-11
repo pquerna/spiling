@@ -615,6 +615,7 @@ pub(super) fn plan_classic_walls(
                     width: WidthProfile::Constant { width_mm: bead },
                     physical_z_mm: [request.lower_z, request.upper_z],
                     points_mm: points,
+                    arcs: Vec::new(),
                 });
             }
         }
@@ -1138,6 +1139,7 @@ fn assemble(
                 width,
                 physical_z_mm: [lower_z, upper_z],
                 points_mm,
+                arcs: Vec::new(),
             };
             let original = fitting::OriginalPath {
                 edges,

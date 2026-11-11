@@ -208,6 +208,7 @@ export async function decodeReplayDisplay(
     lastLayer = 0,
     layerDepositions = 0,
     lastLine = 0,
+    lastDeposits = false,
     lastE = 0;
   let process = 0;
   let retractedE: number | undefined;
@@ -244,7 +245,11 @@ export async function decodeReplayDisplay(
     )
       fail("invalid extrusion or feed");
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_PROGRAM_BYTES);
-    if (line <= lastLine) fail("source line sequence is not increasing");
+    // One arc command replays as its planned edges: consecutive depositions
+    // may share its line. Lines never go back.
+    const deposits = (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13;
+    if (line < lastLine || (line === lastLine && !(lastDeposits && deposits)))
+      fail("source line sequence is not increasing");
     const associated =
       (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13 || kind === 15;
     if (kind > 15 || flags !== ((kind === 14 || index === 0 ? 0 : 1) | (associated ? 2 : 0)))
@@ -418,6 +423,7 @@ export async function decodeReplayDisplay(
     }
     lastE = e;
     lastLine = line;
+    lastDeposits = deposits;
   }
   if (
     deposition !== info.deposition_count ||

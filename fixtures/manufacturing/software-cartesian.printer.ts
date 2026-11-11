@@ -30,6 +30,7 @@ const printer = {
     extruders: 1,
     output_dialect: "cartesian_absolute_gcode_v1",
     generated_supports: false,
+    arc_moves: false,
   },
   workflow: { kind: "diagnostic_body_only" },
   nozzle_diameter_mm: 0.4,

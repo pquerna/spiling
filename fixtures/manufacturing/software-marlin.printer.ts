@@ -15,6 +15,8 @@ const printer = {
     ...diagnosticPrinter.capabilities,
     output_dialect: "marlin2_single_extruder_gcode_v1",
     generated_supports: true,
+    // Marlin 2 builds ARC_SUPPORT by default; arcs are G2/G3 with I/J.
+    arc_moves: true,
   },
   workflow: {
     kind: "complete_marlin",

@@ -779,6 +779,7 @@ fn reserve_regional_material(
                 },
                 physical_z_mm: p.physical_z_mm,
                 points_mm: vec![ends[0], ends[1]],
+                arcs: Vec::new(),
             };
             remainder.points_mm[low_index][along] = fitted_span[1];
             paths.push(remainder);

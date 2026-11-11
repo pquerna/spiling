@@ -282,6 +282,7 @@ pub(super) fn construct(
                 physical_z_mm: [lower_z, z],
                 owner: None,
                 points_mm: Vec::from(ends),
+                arcs: Vec::new(),
             });
         }
     }

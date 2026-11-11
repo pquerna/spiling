@@ -844,13 +844,15 @@ the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
 
-Current support (planner 83): 20 of the 30 parts compile and complete the
+Current support (planner 84): 20 of the 30 parts compile and complete the
 source-absent reopen, fresh verify and export; PrusaSlicer slices 25, and its
 five refusals are all "outside the print volume" on its default bed. Every
 pass takes the ADR012 tolerant path, because exact certification still refuses
 every corpus part; the exact attempt resolves at the printer's motion step and
 runs each extent query under a defect fuse, so it no longer delays the
-fallback. Multi-solid and assembly sources import one definition per solid at
+fallback. The corpus intent's Marlin reference printer declares arc moves, so
+wall runs on the BREP's vertical-axis circles go out as G2/G3 and replay
+checks each one against its planned points. Multi-solid and assembly sources import one definition per solid at
 its source placement and are placed on the bed as one rigid group
 (`--center-all-on-bed`). Remaining refusals: no solid in the file (`00`), a
 part longer than the bed (`01`), import-time kernel or decoder refusals (`16`

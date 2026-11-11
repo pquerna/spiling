@@ -569,6 +569,47 @@ impl TolerantModel {
     }
 }
 
+/// The analytic surfaces of a placed definition whose horizontal sections are
+/// circles: the exact centers and radii arcs in a layer can lie on. Built once
+/// per occurrence; independent of which lane sliced the part.
+#[derive(Debug, Clone)]
+pub struct CircleSource {
+    surfaces: Vec<(u32, exact::Implicit)>,
+}
+impl CircleSource {
+    pub fn new(definition: &Definition, pose: &spiling_contracts::geometry::RigidPoseMm) -> Self {
+        let surfaces = definition
+            .faces()
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, face)| {
+                let surface = face
+                    .geometry
+                    .analytic
+                    .as_ref()
+                    .and_then(exact::Implicit::from_analytic)?
+                    .placed(pose);
+                surface
+                    .has_vertical_axis()
+                    .then_some((ordinal as u32, surface))
+            })
+            .collect();
+        Self { surfaces }
+    }
+
+    /// Circles of every such surface at height `z`. A trimmed face need not
+    /// reach `z`; consumers match real geometry against these candidates.
+    pub fn circles_at(&self, z: f64, out: &mut Vec<SectionCircle>) {
+        for (face, surface) in &self.surfaces {
+            surface.circles(z, *face, out);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.surfaces.is_empty()
+    }
+}
+
 /// Rotate `v` by the pose's unit quaternion: v' = v + 2w(q x v) + 2 q x (q x v).
 fn rotate(pose: &spiling_contracts::geometry::RigidPoseMm, v: [f64; 3]) -> [f64; 3] {
     let [qx, qy, qz, qw] = pose.rotation_xyzw;

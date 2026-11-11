@@ -41,7 +41,7 @@ pub fn validate_replay_index(
             .ok_or_else(|| corrupt("replay index ordinal overflow"))?;
         if page.first_event != first
             || page.event_count != remaining.min(u64::from(REPLAY_PAGE_EVENTS)) as u32
-            || page.first_line <= line
+            || page.first_line < line
             || page.last_line < page.first_line
             || !page.physical_z_mm.iter().all(|n| n.is_finite())
             || page.physical_z_mm[0] > page.physical_z_mm[1]

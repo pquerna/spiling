@@ -121,6 +121,7 @@ message PrinterCapabilities {
   uint32 extruders = 2;
   OutputDialect output_dialect = 3;
   bool generated_supports = 4;
+  bool arc_moves = 5;
 }
 enum MachineComponentRole {
   MACHINE_COMPONENT_ROLE_UNSPECIFIED = 0;

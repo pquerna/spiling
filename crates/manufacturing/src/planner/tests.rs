@@ -34,6 +34,7 @@ fn image_contact_floor_separates_native_anchor_bootstrap_from_real_contact_deman
         physical_z_mm: physical,
         owner: None,
         points_mm: vec![[2.531302, y, physical[1]], [17.535041, y, physical[1]]],
+        arcs: Vec::new(),
     };
     let previous = stroke(0.3, [4.399999, 4.6], DepositionKind::Perimeter);
     let contact = stroke(-0.5, [4.1, 4.399999], DepositionKind::SupportInterface);
@@ -963,6 +964,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[2.0, 0.0, 0.4], [2.0, 10.0, 0.4]],
+            arcs: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -971,6 +973,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
             width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[8.0, 0.0, 0.4], [8.0, 10.0, 0.4]],
+            arcs: Vec::new(),
         },
     ];
     let gaps = query
@@ -1000,6 +1003,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
             [4.0, 6.0, 0.4],
             [4.0, 4.0, 0.4],
         ],
+        arcs: Vec::new(),
     }];
     let gaps = query
         .gaps(
@@ -1071,6 +1075,7 @@ fn exact_deposited_capsules_keep_curved_caps_and_bounded_work() {
         width: WidthProfile::Constant { width_mm: 0.6 },
         physical_z_mm: [0.0, 0.4],
         points_mm: vec![[0.0, 0.0, 0.4], [0.0, 10.0, 0.4]],
+        arcs: Vec::new(),
     }];
     let gaps = query
         .gaps(
@@ -1134,6 +1139,7 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
         width: WidthProfile::Constant { width_mm: 0.6 },
         physical_z_mm: [0.4, 0.8],
         points_mm: vec![[x, 0.3, 0.8], [x, 9.7, 0.8]],
+        arcs: Vec::new(),
     });
     let tangent = query
         .gaps(
@@ -1183,6 +1189,7 @@ fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
         width: WidthProfile::Constant { width_mm: 0.6 },
         physical_z_mm: [0.4, 0.8],
         points_mm: vec![[0.0, 0.0, 0.8], [2.0, 0.0, 0.8]],
+        arcs: Vec::new(),
     }];
     let contact = [DepositionPath {
         material_domain: None,
@@ -1191,6 +1198,7 @@ fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
         width: WidthProfile::Constant { width_mm: 0.6 },
         physical_z_mm: [0.2, 0.6],
         points_mm: vec![[8.0, 0.0, 0.6], [10.0, 0.0, 0.6]],
+        arcs: Vec::new(),
     }];
     let mut query = super::support::AnchorWorkspace::default();
     let cancel = AtomicBool::new(false);

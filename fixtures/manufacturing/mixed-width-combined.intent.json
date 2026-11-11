@@ -79,7 +79,8 @@
       "motion_space": "cartesian_xyz",
       "extruders": 2,
       "output_dialect": "marlin2_fixed_dual_gcode_v1",
-      "generated_supports": false
+      "generated_supports": false,
+      "arc_moves": false
     },
     "workflow": {
       "kind": "fixed_dual_marlin",
