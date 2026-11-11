@@ -2,28 +2,18 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Empirical Challenger Suite for Milestone M1
-//! Covers:
-//! 1. StepEntityId edge cases, string conversions, large ints, serde, FaceId conversions
-//! 2. Definition arena borrow methods: face_surface, edge_curve, edgeuse_uv_trim_curve
-//!    with valid and non-existent IDs (out-of-bounds, u32::MAX) -> zero panic
-//! 3. retained_query_proof_bytes monotonicity, determinism, non-zero bounds, resource limits
-//! 4. Complete 14 adversarial mutated fixtures from fixtures/geometry/manifest.json
-//! 5. Inch-to-millimetre dimensional regression
-//! 6. Cancellation and resource limit enforcement
-//! 7. Thread transfer (Send) and upstream Sync analysis
+//! Native arena handles, rejected inputs, units and cancellation.
+//! Source-ID wire/range behavior belongs to contracts; actual byte-limit
+//! refusal lives in adversarial_m1. Oversized source/material coverage belongs
+//! to the explicit geometry_stress target rather than memory-size ratios.
 
 mod common;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-use spiling_contracts::geometry::{
-    FaceId, GeometryErrorCode, MAX_SOURCE_BYTES, SourceUnit, StepEntityId,
-};
+use spiling_contracts::geometry::{GeometryErrorCode, MAX_SOURCE_BYTES, SourceUnit};
 use spiling_geometry::{from_step_bytes, from_step_bytes_with_cancel, from_step_file};
-
-const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry")
@@ -32,117 +22,6 @@ fn fixtures_dir() -> PathBuf {
 fn load_fixture(name: &str) -> Vec<u8> {
     std::fs::read(fixtures_dir().join(name))
         .unwrap_or_else(|e| panic!("failed to read fixture {name}: {e}"))
-}
-
-// =========================================================================
-// Category 1: StepEntityId Empirical Challenge
-// =========================================================================
-
-#[test]
-fn challenge_step_entity_id_zero() {
-    let id0 = StepEntityId(0);
-    assert_eq!(id0.0, 0);
-    assert_eq!(id0.get(), 0);
-    assert_eq!(id0.to_string(), "step:0");
-    assert_eq!(format!("{id0}"), "step:0");
-    assert_eq!(u64::from(id0), 0);
-    assert_eq!(StepEntityId::from(0u64), id0);
-
-    // JSON serialization
-    let json = serde_json::to_string(&id0).expect("serialize id 0");
-    assert_eq!(json, "0");
-    let back: StepEntityId = serde_json::from_str(&json).expect("deserialize id 0");
-    assert_eq!(back, id0);
-
-    // Conversion to FaceId: must be rejected because entity 0 is invalid in STEP
-    assert!(
-        FaceId::try_from(id0).is_err(),
-        "FaceId::try_from must reject StepEntityId(0)"
-    );
-    assert!(
-        FaceId::from_step_entity_id(id0).is_err(),
-        "FaceId::from_step_entity_id must reject StepEntityId(0)"
-    );
-
-    // Note invariant observation: FaceId::parse("step:0") returns Err (canonical nonzero decimal rule)
-    let parse_res = FaceId::parse("step:0");
-    assert!(
-        parse_res.is_err(),
-        "FaceId::parse rejects step:0 per contract rule"
-    );
-}
-
-#[test]
-fn challenge_step_entity_id_extremes_and_overflow() {
-    let test_ids = [
-        1u64,
-        42u64,
-        1_000_000_000u64,
-        9_007_199_254_740_991u64, // JS MAX_SAFE_INTEGER
-        9_007_199_254_740_993u64, // JS MAX_SAFE_INTEGER + 2
-        u32::MAX as u64,
-        u64::MAX - 1,
-        u64::MAX,
-    ];
-
-    for &val in &test_ids {
-        let id = StepEntityId::new(val);
-        assert_eq!(id.get(), val);
-        assert_eq!(id.0, val);
-        assert_eq!(u64::from(id), val);
-        assert_eq!(StepEntityId::from(val), id);
-
-        let expected_str = format!("step:{val}");
-        assert_eq!(id.to_string(), expected_str);
-
-        // JSON serde
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, val.to_string());
-        let deser: StepEntityId = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, id);
-
-        // FaceId conversions
-        let face_id: FaceId = id.try_into().unwrap();
-        assert_eq!(face_id.as_str(), expected_str);
-        assert_eq!(face_id.step_entity(), val);
-
-        let back1 = StepEntityId::try_from(&face_id).unwrap();
-        assert_eq!(back1, id);
-        let back2 = StepEntityId::try_from(face_id.clone()).unwrap();
-        assert_eq!(back2, id);
-
-        // FaceId::parse should succeed for positive canonical decimal
-        let parsed = FaceId::parse(&expected_str).unwrap();
-        assert_eq!(parsed, face_id);
-    }
-}
-
-#[test]
-fn challenge_face_id_invalid_strings() {
-    let invalid_strings = [
-        "",
-        "step",
-        "step:",
-        "face:128",
-        "step:-1",
-        "step:0",
-        "step:00",
-        "step:01",
-        "step: 128",
-        "step:128 ",
-        "step:128\n",
-        "step:abc",
-        "step:128.5",
-        "step:18446744073709551616", // u64::MAX + 1 overflow
-        "step:999999999999999999999999999999",
-    ];
-
-    for s in invalid_strings {
-        assert!(
-            FaceId::parse(s).is_err(),
-            "FaceId::parse should reject invalid string: '{s}'"
-        );
-    }
 }
 
 // =========================================================================
@@ -262,61 +141,6 @@ fn challenge_definition_send_across_threads() {
     assert_eq!(
         bounds, expected,
         "thread transfer preserves the import enclosure"
-    );
-}
-
-// =========================================================================
-// Category 3: retained_query_proof_bytes Monotonicity & Invariants
-// =========================================================================
-
-#[test]
-fn challenge_retained_query_proof_bytes_monotonicity_and_bounds() {
-    let box_mm = from_step_bytes(&load_fixture("box-mm.step")).expect("box-mm");
-    let box_inch = from_step_bytes(&load_fixture("box-inch.step")).expect("box-inch");
-    let cylinder = from_step_bytes(&load_fixture("cylinder.step")).expect("cylinder");
-    let through_hole = from_step_bytes(&load_fixture("through-hole.step")).expect("through-hole");
-    let plate = from_step_bytes(&load_fixture("perforated-plate.step")).expect("plate");
-
-    let b_box_mm = box_mm.retained_query_proof_bytes();
-    let b_box_inch = box_inch.retained_query_proof_bytes();
-    let b_cylinder = cylinder.retained_query_proof_bytes();
-    let b_through_hole = through_hole.retained_query_proof_bytes();
-    let b_plate = plate.retained_query_proof_bytes();
-
-    // 1. Non-zero byte bound
-    assert!(b_box_mm > 0, "box_mm retained bytes must be > 0");
-    assert!(b_box_inch > 0, "box_inch retained bytes must be > 0");
-    assert!(b_cylinder > 0, "cylinder retained bytes must be > 0");
-    assert!(
-        b_through_hole > 0,
-        "through-hole retained bytes must be > 0"
-    );
-    assert!(b_plate > 0, "plate retained bytes must be > 0");
-
-    // 2. Determinism: repeated calculation gives identical bytes
-    assert_eq!(box_mm.retained_query_proof_bytes(), b_box_mm);
-    assert_eq!(plate.retained_query_proof_bytes(), b_plate);
-
-    // 3. Topology scaling: box-mm (6 planar faces) vs through-hole (8 faces, internal void)
-    assert!(
-        b_through_hole > b_box_mm,
-        "through-hole ({b_through_hole}) must retain more query bytes than simple box ({b_box_mm})"
-    );
-
-    // 4. Perforated plate (512 holes, 1000+ faces) must retain orders of magnitude more bytes
-    assert!(
-        b_plate > b_through_hole * 10,
-        "perforated plate ({b_plate}) must retain significantly more bytes than through-hole ({b_through_hole})"
-    );
-
-    // 5. Invariant limit check: all standard models fit within MAX_QUERY_PROOF_BYTES (32MB)
-    assert!(
-        b_box_mm <= MAX_QUERY_PROOF_BYTES,
-        "box_mm must fit within MAX_QUERY_PROOF_BYTES"
-    );
-    assert!(
-        b_plate <= MAX_QUERY_PROOF_BYTES,
-        "plate must fit within MAX_QUERY_PROOF_BYTES ({b_plate} vs {MAX_QUERY_PROOF_BYTES})"
     );
 }
 

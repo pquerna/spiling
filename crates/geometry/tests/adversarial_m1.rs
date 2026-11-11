@@ -9,8 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use spiling_contracts::geometry::{
-    FaceId, GeometryErrorCode, SectionCurve2d, SectionSpan2d, SourceEdgeId, SourceFaceId,
-    StepEntityId,
+    GeometryErrorCode, SectionCurve2d, SectionSpan2d, SourceEdgeId, SourceFaceId,
 };
 use spiling_geometry::{SurfaceParameterMap, from_step_bytes, from_step_bytes_with_limits};
 
@@ -170,35 +169,6 @@ fn challenge1d_section_curve_malformed_json_rejection() {
             "malformed json '{bad}' should fail to deserialize"
         );
     }
-}
-
-#[test]
-fn challenge1e_step_entity_id_zero_edge_case() {
-    // StepEntityId(0) represents #0 which is invalid in STEP
-    let zero_id = StepEntityId::new(0);
-    assert!(
-        FaceId::try_from(zero_id).is_err(),
-        "FaceId::try_from must reject StepEntityId(0)"
-    );
-    assert!(
-        FaceId::from_step_entity_id(zero_id).is_err(),
-        "FaceId::from_step_entity_id must reject StepEntityId(0)"
-    );
-
-    // FaceId::parse specifically rejects "step:0" because entity must be nonzero decimal:
-    let parse_res = FaceId::parse("step:0");
-    assert!(
-        parse_res.is_err(),
-        "FaceId::parse rejects step:0 because entities must be nonzero"
-    );
-
-    // Valid StepEntityId converts and roundtrips through serde:
-    let valid_id = StepEntityId::new(42);
-    let face_id: FaceId = valid_id.try_into().unwrap();
-    assert_eq!(face_id.as_str(), "step:42");
-    let json = serde_json::to_string(&face_id).unwrap();
-    let deser: FaceId = serde_json::from_str(&json).unwrap();
-    assert_eq!(deser, face_id);
 }
 
 // =========================================================================

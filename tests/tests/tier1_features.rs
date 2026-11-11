@@ -12,56 +12,7 @@ use spiling_geometry::*;
 use std::f64::consts::PI;
 use std::sync::atomic::AtomicBool;
 
-// =========================================================================
-// Feature 1: StepEntityId & arena identifiers
-// =========================================================================
-
-#[test]
-fn test_f01_step_entity_id_constructor() {
-    let id = StepEntityId(42);
-    assert_eq!(id.0, 42);
-}
-
-#[test]
-fn test_f01_step_entity_id_display_formatting() {
-    let id = StepEntityId(101);
-    assert_eq!(format!("{id}"), "step:101");
-}
-
-#[test]
-fn test_f01_step_entity_id_ordering_and_hash() {
-    use std::collections::BTreeSet;
-    let mut set = BTreeSet::new();
-    set.insert(StepEntityId(50));
-    set.insert(StepEntityId(10));
-    set.insert(StepEntityId(30));
-    let ordered: Vec<_> = set.into_iter().collect();
-    assert_eq!(
-        ordered,
-        vec![StepEntityId(10), StepEntityId(30), StepEntityId(50)]
-    );
-}
-
-#[test]
-fn test_f01_step_entity_id_transparent_serde() {
-    let id = StepEntityId(9999);
-    let serialized = serde_json::to_string(&id).unwrap();
-    assert_eq!(serialized, "9999");
-    let deserialized: StepEntityId = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(deserialized, id);
-}
-
-#[test]
-fn test_f01_source_face_and_edge_ids() {
-    let face_id = SourceFaceId(7);
-    let edge_id = SourceEdgeId(13);
-    assert_eq!(face_id.0, 7);
-    assert_eq!(edge_id.0, 13);
-    let ser_face = serde_json::to_string(&face_id).unwrap();
-    assert_eq!(ser_face, "7");
-    let ser_edge = serde_json::to_string(&edge_id).unwrap();
-    assert_eq!(ser_edge, "13");
-}
+// Source-ID wire/range behavior is tested by spiling-contracts.
 
 // =========================================================================
 // Feature 2: Definition solidcore::Brep ownership
@@ -214,29 +165,6 @@ fn test_f04_kernel_tolerance_scale() {
 // =========================================================================
 // Feature 5: Retained query proof byte accounting
 // =========================================================================
-
-#[test]
-fn test_f05_positive_byte_budget_tracking() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert!(
-        def.retained_query_proof_bytes() >= 512,
-        "definition must allocate byte budget"
-    );
-}
-
-#[test]
-fn test_f05_complexity_increases_retained_bytes() {
-    let b_box = import_test_step(&fixture_bytes("box-mm.step"))
-        .unwrap()
-        .retained_query_proof_bytes();
-    let b_hole = import_test_step(&fixture_bytes("through-hole.step"))
-        .unwrap()
-        .retained_query_proof_bytes();
-    assert!(
-        b_hole >= b_box,
-        "through hole with 7 faces must retain more or equal bytes than 6-face box"
-    );
-}
 
 #[test]
 fn test_f05_section_retained_bytes() {
@@ -794,20 +722,6 @@ fn test_f18_through_hole_analytic_jet() {
 // =========================================================================
 
 #[test]
-fn test_f19_curve_domain_box() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def, "box-mm.step").unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 4);
-}
-
-#[test]
-fn test_f19_curve_domain_cylinder() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def, "cylinder.step").unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 16);
-}
-
-#[test]
 fn test_f19_curve_bounds_enclosure() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let bounds = def.bounds_mm();
@@ -817,20 +731,6 @@ fn test_f19_curve_bounds_enclosure() {
         assert!(pt[1] >= bounds.min[1] - 1e-6 && pt[1] <= bounds.max[1] + 1e-6);
         assert!(pt[2] >= bounds.min[2] - 1e-6 && pt[2] <= bounds.max[2] + 1e-6);
     }
-}
-
-#[test]
-fn test_f19_curve_segment_count() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    assert_source_face_identity(&def, "box-mm.step");
-}
-
-#[test]
-fn test_f19_curve_continuity() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def, "box-mm.step").unwrap();
-    let pts = &sec.loops()[0].points_mm;
-    assert_close(pts[0][0], pts[pts.len() - 1][0], 1e-4, "closure X");
 }
 
 // =========================================================================
@@ -1022,39 +922,11 @@ fn test_f23_section_curve2d_serde_roundtrip() {
 // =========================================================================
 
 #[test]
-fn test_f24_loop_points_discretization_present() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def, "box-mm.step").unwrap();
-    for l in sec.loops() {
-        assert!(l.points_mm.len() >= 4);
-    }
-}
-
-#[test]
 fn test_f24_loop_is_hole_flag() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let sec = section_midplane(&def, "through-hole.step").unwrap();
     assert!(!sec.loops()[0].is_hole);
     assert!(sec.loops()[1].is_hole);
-}
-
-#[test]
-fn test_f24_loop_points_closure() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def, "box-mm.step").unwrap();
-    let pts = &sec.loops()[0].points_mm;
-    let first = pts[0];
-    let last = pts[pts.len() - 1];
-    for axis in 0..3 {
-        assert_close(first[axis], last[axis], 1e-4, "loop closure");
-    }
-}
-
-#[test]
-fn test_f24_cylinder_loop_polyline_density() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def, "cylinder.step").unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 16);
 }
 
 #[test]
@@ -1300,18 +1172,114 @@ fn test_f30_ribbed_bracket_chains_loops() {
 // Feature 31: Adaptive polyline chord sampling
 // =========================================================================
 
-#[test]
-fn test_f31_box_chord_sampling() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_at_z(&def, 4.0).unwrap();
-    assert!(sec.achieved_chord_error_mm() <= 0.005);
+/// Independent fixture dimensions, not the section's own error report or point count.
+fn analytic_profile_matches(points: &[[f64; 3]], circular: bool) -> bool {
+    let tolerance = SECTION_SAMPLING_TOLERANCE_MM;
+    if points.len() < 4 || points.iter().flatten().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let first = points[0];
+    let last = points[points.len() - 1];
+    if (0..3).any(|axis| (first[axis] - last[axis]).abs() > SECTION_PLANE_TOLERANCE_MM)
+        || points
+            .iter()
+            .any(|p| (p[2] - 4.0).abs() > SECTION_PLANE_TOLERANCE_MM)
+    {
+        return false;
+    }
+    let expected_area = if circular { 25.0 * PI } else { 200.0 };
+    let perimeter = if circular { 10.0 * PI } else { 60.0 };
+    let area = points
+        .windows(2)
+        .map(|p| p[0][0] * p[1][1] - p[1][0] * p[0][1])
+        .sum::<f64>()
+        * 0.5;
+    if (area - expected_area).abs() > perimeter * tolerance + PI * tolerance.powi(2) {
+        return false;
+    }
+    points.windows(2).all(|edge| {
+        if circular {
+            // A norm is convex: max radius occurs at an endpoint; min radius
+            // occurs at the segment's closest point to the known circle center.
+            if edge
+                .iter()
+                .any(|p| (p[0].hypot(p[1]) - 5.0).abs() > tolerance)
+            {
+                return false;
+            }
+            let delta = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
+            let length2 = delta[0].powi(2) + delta[1].powi(2);
+            let t = if length2 > 0.0 {
+                (-(edge[0][0] * delta[0] + edge[0][1] * delta[1]) / length2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let radius = (edge[0][0] + t * delta[0]).hypot(edge[0][1] + t * delta[1]);
+            (radius - 5.0).abs() <= tolerance
+        } else {
+            // Each straight edge stays on one known side of the rectangle;
+            // skipping a corner cannot pass merely by retaining enough points.
+            edge.iter().all(|p| {
+                (-tolerance..=20.0 + tolerance).contains(&p[0])
+                    && (-tolerance..=10.0 + tolerance).contains(&p[1])
+            }) && [(0, 0.0), (0, 20.0), (1, 0.0), (1, 10.0)]
+                .iter()
+                .any(|&(axis, boundary)| {
+                    edge.iter().all(|p| (p[axis] - boundary).abs() <= tolerance)
+                })
+        }
+    })
 }
 
 #[test]
-fn test_f31_cylinder_chord_sampling() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_at_z(&def, 4.0).unwrap();
-    assert!(sec.achieved_chord_error_mm() <= 0.005);
+fn section_polylines_follow_independent_box_and_circle_boundaries() {
+    for (fixture, circular) in [("box-mm.step", false), ("cylinder.step", true)] {
+        let def = import_test_step(&fixture_bytes(fixture)).unwrap();
+        let sec = section_at_z(&def, 4.0).unwrap();
+        assert_eq!(
+            sec.loops().len(),
+            1,
+            "one connected solid section: {fixture}"
+        );
+        assert!(!sec.loops()[0].is_hole);
+        assert!(sec.achieved_chord_error_mm() <= SECTION_SAMPLING_TOLERANCE_MM);
+        assert!(
+            analytic_profile_matches(&sec.loops()[0].points_mm, circular),
+            "{fixture}: actual section violates independent dimensions/chord/plane/closure/area"
+        );
+    }
+}
+
+#[test]
+fn analytic_profile_oracle_rejects_wrong_scale_coarse_chords_and_missing_corners() {
+    let circle = |segments: usize, radius: f64, z: f64| -> Vec<[f64; 3]> {
+        (0..=segments)
+            .map(|i| {
+                let angle = 2.0 * PI * i as f64 / segments as f64;
+                [radius * angle.cos(), radius * angle.sin(), z]
+            })
+            .collect()
+    };
+    assert!(analytic_profile_matches(&circle(128, 5.0, 4.0), true));
+    // Sixteen on-circle samples passed the retired >=16 assertions, but leave
+    // ~0.096mm chord error against the required 0.005mm bound.
+    assert!(!analytic_profile_matches(&circle(16, 5.0, 4.0), true));
+    assert!(!analytic_profile_matches(&circle(128, 4.9, 4.0), true));
+    assert!(!analytic_profile_matches(&circle(128, 5.0, 4.1), true));
+    let rectangle = vec![
+        [0.0, 0.0, 4.0],
+        [20.0, 0.0, 4.0],
+        [20.0, 10.0, 4.0],
+        [0.0, 10.0, 4.0],
+        [0.0, 0.0, 4.0],
+    ];
+    assert!(analytic_profile_matches(&rectangle, false));
+    let mut missing_corner = rectangle.clone();
+    missing_corner.remove(2);
+    assert!(!analytic_profile_matches(&missing_corner, false));
+    let mut reversed = rectangle;
+    reversed.reverse();
+    assert!(!analytic_profile_matches(&reversed, false));
 }
 
 #[test]
@@ -1372,13 +1340,6 @@ fn test_f31_housing_product_profile_fidelity() {
             }
         }
     }
-}
-
-#[test]
-fn test_f31_point_density_on_curves() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_at_z(&def, 4.0).unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 20);
 }
 
 // =========================================================================

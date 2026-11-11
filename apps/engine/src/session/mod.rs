@@ -4,7 +4,7 @@
 
 use crate::geometry::JobId;
 use parking_lot::{Condvar, Mutex};
-use spiling_contracts::geometry::{JOB_CANCEL_AFTER_MS, JOB_CANCEL_GRACE_MS};
+use spiling_contracts::geometry::JOB_CANCEL_GRACE_MS;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -12,9 +12,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 struct Active {
-    limit: Option<Duration>,
+    deadline: Option<Instant>,
     id: JobId,
-    accepted: Instant,
     cancel_at: Option<Instant>,
     committing: bool,
     cancel: Arc<AtomicBool>,
@@ -54,12 +53,9 @@ pub struct Watchdog {
 }
 impl Watchdog {
     pub fn new() -> Self {
-        Self::with_deadlines(
-            Duration::from_millis(JOB_CANCEL_AFTER_MS.into()),
-            Duration::from_millis(JOB_CANCEL_GRACE_MS.into()),
-        )
+        Self::with_grace(Duration::from_millis(JOB_CANCEL_GRACE_MS.into()))
     }
-    fn with_deadlines(cancel_after: Duration, grace: Duration) -> Self {
+    fn with_grace(grace: Duration) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 active: None,
@@ -76,9 +72,9 @@ impl Watchdog {
                 }
                 let deadline = if let Some(active) = &mut state.active {
                     let now = Instant::now();
-                    let automatic =
-                        active.accepted + active.limit.unwrap_or(cancel_after).min(cancel_after);
-                    if active.cancel_at.is_none() && now >= automatic {
+                    if active.cancel_at.is_none()
+                        && active.deadline.is_some_and(|deadline| now >= deadline)
+                    {
                         active.cancel_at = Some(now);
                         if !active.committing {
                             active.cancel.store(true, Ordering::Release);
@@ -96,7 +92,7 @@ impl Watchdog {
                         }
                         Some(deadline)
                     } else {
-                        Some(automatic)
+                        active.deadline
                     }
                 } else {
                     None
@@ -123,9 +119,8 @@ impl Watchdog {
         let mut state = self.shared.state.lock();
         assert!(state.active.is_none());
         state.active = Some(Active {
-            limit,
+            deadline: limit.map(|limit| Instant::now() + limit),
             id,
-            accepted: Instant::now(),
             cancel_at: None,
             committing: false,
             cancel,
@@ -207,30 +202,63 @@ mod tests {
         let Ok(mode) = std::env::var("SPILING_WATCHDOG_TEST_CHILD") else {
             return;
         };
-        let owner = Watchdog::with_deadlines(Duration::from_millis(50), Duration::from_millis(50));
+        let owner = Watchdog::with_grace(Duration::from_millis(50));
         let id = JobId::new(1).unwrap();
-        owner.start(id, Arc::new(AtomicBool::new(false)));
+        let flag = Arc::new(AtomicBool::new(false));
+        if mode == "limited" {
+            owner.start_with_limit(id, flag.clone(), Some(Duration::from_millis(50)));
+        } else {
+            owner.start(id, flag.clone());
+            assert!(
+                owner
+                    .shared
+                    .state
+                    .lock()
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .deadline
+                    .is_none()
+            );
+        }
+        if mode == "unlimited" {
+            // Exceed this watchdog's grace without requesting cancellation.
+            // Ordinary work must remain active; grace starts only on cancellation.
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!flag.load(Ordering::Acquire));
+            assert!(owner.begin_commit(id));
+            owner.finish(id);
+            return;
+        }
         if mode == "committing" {
             assert!(owner.begin_commit(id));
+        }
+        if mode != "limited" {
             owner.cancel(id);
+            assert_eq!(flag.load(Ordering::Acquire), mode != "committing");
         }
         std::thread::sleep(Duration::from_secs(2));
         panic!("watchdog failed to terminate a missing ACK");
     }
 
     #[test]
-    fn idle_and_unacknowledged_promotion_deadlines_terminate_process() {
-        for mode in ["idle", "committing"] {
+    fn ordinary_work_has_no_deadline_but_cancellation_and_explicit_limits_remain_supervised() {
+        for mode in ["unlimited", "limited", "cancelled", "committing"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "session::tests::deadline_child", "--nocapture"])
                 .env("SPILING_WATCHDOG_TEST_CHILD", mode)
                 .output()
                 .unwrap();
-            assert_eq!(output.status.code(), Some(70));
-            assert!(
-                std::str::from_utf8(&output.stderr)
-                    .unwrap()
-                    .contains("job_cancel_deadline")
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(if mode == "unlimited" { 0 } else { 70 }),
+                "{mode}: {stderr}"
+            );
+            assert_eq!(
+                stderr.contains("job_cancel_deadline"),
+                mode != "unlimited",
+                "{mode}: {stderr}"
             );
         }
     }

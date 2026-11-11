@@ -205,8 +205,8 @@ buffers and metadata coexistence are admitted before growth or publication.
 Opaque Boolean-kernel transients and host-process memory remain distinct from
 these application-owned receipts. Native byte allowances and depth, chord,
 plane and shape-error gates are unchanged. Work units are heterogeneous, not a
-universal wall-clock estimate. The engine allows five minutes per accepted native
-job, with a separate ten-second cancellation acknowledgement grace.
+universal wall-clock estimate. Ordinary native jobs have no elapsed-time ceiling. Explicit study limits and
+operator cancellation retain a separate ten-second acknowledgement grace.
 
 ## One schedule, two references
 

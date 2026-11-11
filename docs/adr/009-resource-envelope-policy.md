@@ -35,8 +35,25 @@ Keep three contracts separate:
   overflow/allocation refusal and cancellation;
 - responsiveness, including worker isolation, stage reporting and cancellation.
 
-Default envelopes bound resource admission while allowing valid work to finish;
-responsiveness remains a separate obligation:
+Small fixed byte allowances and elapsed-time thresholds are not geometric or
+manufacturing validity rules. Bound in-flight buffers, queues and uploads; use
+backpressure and spill/stream derived data rather than rejecting a complete job
+at a buffer-sized aggregate threshold. Resident cache and worker allocations
+should adapt to actual machine/container headroom, with explicit operator
+constraints, while checked record sizes, offsets and fallible allocations remain
+mandatory. Existing aggregate source, scratch and display ceilings are capacity
+debt, not intended product-size targets; removing them requires the actual
+owning consumer changes, not setting constants to the largest integer.
+
+Ordinary native jobs and their watches have no elapsed-time deadline. Only an
+explicit study limit requests automatic cancellation. User cancellation,
+owner-loss/shutdown and durable commit/ACK supervision remain active. The
+acknowledgement grace bounds recovery after cancellation; it is not a runtime
+allowance for a healthy job. External test campaign deadlines are explicit
+operator constraints and never qualify a product rejection as correct.
+
+Current transitional geometry-library envelopes remain enforced; responsiveness
+is a separate obligation:
 
 | Envelope                                  | Default                                        |
 | ----------------------------------------- | ---------------------------------------------- |
@@ -63,8 +80,8 @@ rebuilt by an open operation as well as all faces and refinement attempts.
 Deliberate exhaustion, overflow, cancellation and stale-result tests keep their narrow
 selectors; ordinary positive tests use the default policy. Heterogeneous work
 units do not share a universal CPU duration. Memory, allocation, overflow, finite
-output and genuine convergence/depth safeguards remain enforced. Monitoring
-does not remove the engine's separately owned watchdog/cancellation policy.
+output and genuine convergence/depth safeguards remain enforced. The engine watchdog supervises explicit cancellation and selected study limits;
+ordinary operation runtime is not bounded by a hidden default timer.
 
 Manufacturing passes its captured guard into planar/cylindrical finish and
 surface-color face certification as well as native material queries. The

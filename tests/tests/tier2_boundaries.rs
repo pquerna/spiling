@@ -65,44 +65,7 @@ fn native_cap_queries_preserve_unresolved_regular_and_empty_distinctions() {
     }
 }
 
-// =========================================================================
-// Feature 1 Corner Cases: Large entity IDs, u32 limits, float loss prevention
-// =========================================================================
-
-#[test]
-fn test_f01_corner_max_step_entity_id() {
-    let large_id = 9_007_199_254_740_993u64;
-    let id = StepEntityId(large_id);
-    assert_eq!(id.0, large_id);
-    let serialized = serde_json::to_string(&id).unwrap();
-    assert_eq!(serialized, "9007199254740993");
-    let deserialized: StepEntityId = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(deserialized.0, large_id);
-}
-
-#[test]
-fn test_f01_corner_zero_step_entity_id() {
-    let id = StepEntityId(0);
-    assert_eq!(format!("{id}"), "step:0");
-}
-
-#[test]
-fn test_f01_corner_u64_max_entity_id() {
-    let id = StepEntityId(u64::MAX);
-    assert_eq!(id.0, u64::MAX);
-}
-
-#[test]
-fn test_f01_corner_source_face_id_max() {
-    let id = SourceFaceId(u32::MAX);
-    assert_eq!(id.0, u32::MAX);
-}
-
-#[test]
-fn test_f01_corner_source_edge_id_max() {
-    let id = SourceEdgeId(u32::MAX);
-    assert_eq!(id.0, u32::MAX);
-}
+// Source-ID wire/range boundaries are tested by spiling-contracts.
 
 // =========================================================================
 // Feature 2 Corner Cases: Definition edge cases
@@ -121,15 +84,6 @@ fn test_f02_corner_bounds_non_cube() {
 }
 
 #[test]
-fn test_f02_corner_definition_cloning_independence() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let bounds1 = def.bounds_mm();
-    let bounds2 = def.bounds_mm();
-    assert_eq!(bounds1.min, bounds2.min);
-    assert_eq!(bounds1.max, bounds2.max);
-}
-
-#[test]
 fn test_f02_corner_multi_thread_definition_access() {
     use std::sync::Arc;
     let def = Arc::new(import_test_step(&fixture_bytes("cylinder.step")).unwrap());
@@ -143,15 +97,6 @@ fn test_f02_corner_multi_thread_definition_access() {
     }
 }
 
-#[test]
-fn test_f02_corner_proof_bytes_positive() {
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-ribbed-bracket-mm.step",
-    ))
-    .unwrap();
-    assert!(def.retained_query_proof_bytes() > 1000);
-}
-
 // =========================================================================
 // Feature 3 Corner Cases: Unknown handles and bounds
 // =========================================================================
@@ -162,12 +107,6 @@ fn test_f03_corner_unknown_face_id() {
     let bad_id = FaceId::from_step_entity_id(StepEntityId(999999)).unwrap();
     let err = inspect_face(&def, &bad_id).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::UnknownHandle);
-}
-
-#[test]
-fn test_f03_corner_empty_handle() {
-    let err = FaceId::from_step_entity_id(StepEntityId(0)).unwrap_err();
-    assert_eq!(err.code, GeometryErrorCode::InvalidGeometry);
 }
 
 #[test]
@@ -867,20 +806,6 @@ fn test_f18_corner_box_inch_identical_geometry() {
 // =========================================================================
 // Feature 19 Corner Cases: Curve domains and limits
 // =========================================================================
-
-#[test]
-fn test_f19_corner_box_polyline_density() {
-    let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
-    let sec = section_midplane(&def, "box-mm.step").unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 4);
-}
-
-#[test]
-fn test_f19_corner_cylinder_polyline_density() {
-    let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
-    let sec = section_midplane(&def, "cylinder.step").unwrap();
-    assert!(sec.loops()[0].points_mm.len() >= 16);
-}
 
 #[test]
 fn test_f19_corner_points_finite() {

@@ -50,13 +50,20 @@ build is required. A suitable Vulkan driver must be installed separately.
 | `pnpm package`                    | Clean-source release binaries, source/notices, portable archive and Linux Debian package |
 | `node tools/run.mjs provenance`   | Collect native dependency and data-tool provenance/notices                               |
 
-`pnpm test` builds its matching engine prerequisite, then runs tooling and material-catalog tests,
-every Rust workspace test target (`--no-fail-fast`), the CLI smoke, TypeScript
-protocol tests and the independent G-code observer tests sequentially. Failures
+`pnpm test` builds its matching engine/CLI prerequisite once, then checks generated
+contracts and runs tooling and material-catalog tests,
+every Rust workspace test target (`--no-fail-fast`), the real engine-client
+saved/source-absent replay journey, the CLI fresh-process replay/export/Undo journey,
+the CLI smoke, TypeScript protocol tests and the independent G-code observer tests sequentially. Failures
 are summarized together and keep the overall command unsuccessful; later suites
 still run. A failed prerequisite build or an operator interruption stops the run.
 Keep the complete output when handing a failing gate to its owning module.
 `pnpm test:native` separately exercises the actual-child host regressions.
+Other ignored CLI/client tests remain opt-in; building the engine does not execute
+them. The aggregate gate explicitly selects these two saved-project journeys.
+The CLI smoke reuses that executable pair; standalone `pnpm smoke:cli` prepares
+its own contracts and binaries. Generated-contract drift remains a reported
+suite failure while the independent behavioral suites continue.
 
 Select checks by the product failure or supporting invariant they detect, an
 independent expectation and distinct coverage. Default geometry tests retain
@@ -64,6 +71,16 @@ ordinary source/hole identity, material sections, finite source-bound display,
 typed budget refusal and cancellation with source reuse. Do not prescribe mesh
 triangle counts or optimizer order where the contract permits alternatives.
 Wire formats, immutable hashes and same-producer determinism remain exact.
+Source-ID serialization/range rules belong to contracts tests, not repeated
+geometry integrations. Section fidelity checks actual coordinates and segment
+deviation against analytic source dimensions; point density alone is no oracle.
+Resource tests distinguish explicitly selected constrained-call refusal from
+ordinary product capacity. Keep allocation/overflow safety and cancellation;
+replace fixed total-job memory/time rejection with bounded buffering, streaming
+and machine-aware residency as the owning path changes. Do not require a shape
+to allocate more than another shape or preserve a small quota as a correctness
+oracle. Ordinary native jobs have no automatic elapsed-time ceiling; test-run
+supervision remains an explicit harness constraint.
 
 Product acceptance exercises the actually eligible geometry route and checks
 material, voids and complete emitted beads against an independent expectation.

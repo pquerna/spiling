@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
-import { copyNotices, run, runTestSuites } from "./run.mjs";
+import { copyNotices, run, runTestSuites, workspaceTests } from "./run.mjs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,6 +68,69 @@ test("independent suites finish sequentially", async () => {
     ],
   ]);
   assert.deepEqual(visits, ["first start", "first end", "second"]);
+});
+
+test("workspace gate prepares binaries and contracts once and retains independent consumer failures", async (context) => {
+  context.mock.method(console, "error", () => {});
+  for (const failingAction of ["test", "run"]) {
+    const calls = [];
+    const suiteFailure = new Error(`${failingAction} failed`);
+    await assert.rejects(
+      workspaceTests(async (command, args) => {
+        calls.push({ command, args });
+        if (
+          command === "cargo" &&
+          args[0] === failingAction &&
+          (failingAction !== "test" || args.includes("--workspace"))
+        )
+          throw suiteFailure;
+      }),
+      (error) => {
+        assert.deepEqual(error.errors, [suiteFailure]);
+        return true;
+      },
+    );
+    const count = (command, predicate) =>
+      calls.filter((c) => c.command === command && predicate(c.args)).length;
+    assert.equal(
+      count("cargo", (args) => args[0] === "build"),
+      1,
+    );
+    assert.equal(
+      count("cargo", (args) => args.includes("generate") && args.includes("--check")),
+      1,
+    );
+    assert.equal(
+      count("node", (args) => args.includes("tools/generate-hardware-catalog.mjs")),
+      failingAction === "run" ? 0 : 1,
+    );
+    assert.equal(
+      count("node", (args) => args.includes("tools/smoke-cli.mjs")),
+      1,
+    );
+    assert.equal(
+      count("pnpm", (args) => args.includes("@spiling/protocol")),
+      1,
+    );
+    assert.equal(
+      count("node", (args) => args.includes("tools/gcode-parity/test.mjs")),
+      1,
+    );
+    for (const name of [
+      "tests::real::manufacturing_bundle_survives_save_restart_and_source_removal",
+      "manufacturing_fresh_process_replay_export_invalidation_and_undo",
+    ]) {
+      assert.equal(
+        count(
+          "cargo",
+          (args) => args.includes(name) && args.includes("--ignored") && args.includes("--exact"),
+        ),
+        1,
+      );
+    }
+    assert.equal(calls[0].command, "cargo");
+    assert.equal(calls[0].args[0], "build");
+  }
 });
 
 test("every failed suite remains fatal after later suites run", async (context) => {

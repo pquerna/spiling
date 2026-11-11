@@ -22,22 +22,6 @@ fn identities_are_canonical_and_content_scoped() {
     for text in ["", "a", &"A".repeat(64), &"g".repeat(64)] {
         assert!(DefinitionId::parse(text).is_err());
     }
-    let face = FaceId::from_step_entity(9_007_199_254_740_993).unwrap();
-    assert_eq!(
-        serde_json::to_string(&face).unwrap(),
-        "\"step:9007199254740993\""
-    );
-    assert_eq!(face.step_entity(), 9_007_199_254_740_993);
-    for text in [
-        "step:0",
-        "step:01",
-        "step:+1",
-        "step:18446744073709551616",
-        "1",
-        "step:1.0",
-    ] {
-        assert!(FaceId::parse(text).is_err());
-    }
     assert!(SessionId::parse("00000000-0000-0000-0000-000000000000").is_err());
     assert!(SessionId::parse("550E8400-E29B-41D4-A716-446655440000").is_err());
     let session = SessionId::new();
@@ -54,6 +38,101 @@ fn identities_are_canonical_and_content_scoped() {
         GeometryErrorCode::ResourceLimit
     );
     assert_eq!(SceneRevision::ZERO.next().unwrap(), SceneRevision(1));
+}
+
+#[test]
+fn source_ids_preserve_integer_wire_values_and_face_identity() {
+    // In particular, these IDs must never pass through an f64/JavaScript number.
+    for value in [
+        0,
+        1,
+        42,
+        u32::MAX as u64,
+        (1 << 53) - 1,
+        (1 << 53) + 1,
+        u64::MAX,
+    ] {
+        let id = StepEntityId::new(value);
+        assert_eq!(id.get(), value);
+        assert_eq!(u64::from(StepEntityId::from(value)), value);
+        assert_eq!(id.to_string(), format!("step:{value}"));
+        assert_eq!(serde_json::to_string(&id).unwrap(), value.to_string());
+        assert_eq!(
+            serde_json::from_str::<StepEntityId>(&value.to_string())
+                .unwrap()
+                .get(),
+            value
+        );
+        if value != 0 {
+            let name = format!("step:{value}");
+            let face = FaceId::try_from(id).unwrap();
+            assert_eq!(face.as_str(), name);
+            assert_eq!(FaceId::try_from(&id).unwrap(), face);
+            assert_eq!(FaceId::parse(&name).unwrap(), face);
+            assert_eq!(StepEntityId::try_from(&face).unwrap().get(), value);
+            assert_eq!(StepEntityId::try_from(face.clone()).unwrap().get(), value);
+            let json = serde_json::to_string(&name).unwrap();
+            assert_eq!(serde_json::to_string(&face).unwrap(), json);
+            assert_eq!(serde_json::from_str::<FaceId>(&json).unwrap(), face);
+        }
+    }
+    for value in [0, u32::MAX] {
+        let face = SourceFaceId::new(value);
+        let edge = SourceEdgeId::new(value);
+        assert_eq!(serde_json::to_string(&face).unwrap(), value.to_string());
+        assert_eq!(serde_json::to_string(&edge).unwrap(), value.to_string());
+        assert_eq!(
+            serde_json::from_str::<SourceFaceId>(&value.to_string()).unwrap(),
+            face
+        );
+        assert_eq!(
+            serde_json::from_str::<SourceEdgeId>(&value.to_string()).unwrap(),
+            edge
+        );
+    }
+}
+
+#[test]
+fn source_face_ids_reject_zero_noncanonical_and_out_of_range_inputs() {
+    for zero in [
+        FaceId::from_step_entity(0),
+        FaceId::try_from(StepEntityId(0)),
+        FaceId::try_from(&StepEntityId(0)),
+    ] {
+        assert_eq!(zero.unwrap_err().code, GeometryErrorCode::InvalidGeometry);
+    }
+    for text in [
+        "",
+        "step",
+        "step:",
+        "face:128",
+        "step:-1",
+        "step:0",
+        "step:00",
+        "step:01",
+        "step:+1",
+        "step: 128",
+        "step:128 ",
+        "step:128\n",
+        "step:abc",
+        "step:128.5",
+        "1",
+        "step:1.0",
+        "step:18446744073709551616",
+        "step:999999999999999999999999999999",
+    ] {
+        assert!(FaceId::parse(text).is_err(), "accepted {text:?}");
+        assert!(
+            serde_json::from_str::<FaceId>(&serde_json::to_string(text).unwrap()).is_err(),
+            "deserialized {text:?}"
+        );
+    }
+    for json in ["-1", "1.5", "18446744073709551616", "\"42\""] {
+        assert!(
+            serde_json::from_str::<StepEntityId>(json).is_err(),
+            "accepted {json}"
+        );
+    }
 }
 
 #[test]

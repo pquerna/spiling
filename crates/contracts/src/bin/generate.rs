@@ -543,7 +543,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("ARTIFACT_PAGE_SIZE", u64::from(ARTIFACT_PAGE_SIZE)),
         ("MAX_TERMINAL_JOBS", u64::from(MAX_TERMINAL_JOBS)),
         ("JOB_POLL_INTERVAL_MS", u64::from(JOB_POLL_INTERVAL_MS)),
-        ("JOB_CANCEL_AFTER_MS", u64::from(JOB_CANCEL_AFTER_MS)),
         ("JOB_CANCEL_GRACE_MS", u64::from(JOB_CANCEL_GRACE_MS)),
         (
             "MAX_ACTIVE_GEOMETRY_JOBS",

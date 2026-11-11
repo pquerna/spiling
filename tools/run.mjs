@@ -105,8 +105,8 @@ async function hostTriple() {
   return host;
 }
 
-async function contracts(check = false) {
-  await run("cargo", [
+async function contracts(check = false, execute = run) {
+  await execute("cargo", [
     "run",
     "--locked",
     "-p",
@@ -116,15 +116,15 @@ async function contracts(check = false) {
     "--",
     ...(check ? ["--check"] : []),
   ]);
-  await run("node", [
+  await execute("node", [
     "--experimental-strip-types",
     "tools/generate-hardware-catalog.mjs",
     ...(check ? ["--check"] : []),
   ]);
 }
 
-async function stageEngine(release = false) {
-  await run("cargo", [
+async function stageEngine(release = false, execute = run) {
+  await execute("cargo", [
     "build",
     "--locked",
     "-p",
@@ -509,10 +509,88 @@ async function check() {
   await run("pnpm", ["exec", "prettier", "--check", "."]);
 }
 
-async function cliSmoke() {
-  await contracts(true);
-  await stageEngine();
-  await run("node", ["--import", "tsx", "tools/smoke-cli.mjs"]);
+async function cliSmoke(execute = run) {
+  await execute("node", ["--import", "tsx", "tools/smoke-cli.mjs"]);
+}
+
+// Prepare one coherent executable pair, then collect every independent failure.
+// Standalone commands still own their own prerequisites.
+export async function workspaceTests(execute = run) {
+  await stageEngine(false, execute);
+  const nativeTests = {
+    env: {
+      ...testEnvironment,
+      SPILING_TEST_ENGINE: join(cargoTarget, "debug", `spiling-engine${binSuffix}`),
+    },
+  };
+  await runTestSuites([
+    ["generated contracts", () => contracts(true, execute)],
+    [
+      "tooling",
+      () =>
+        execute("node", [
+          "--test",
+          "tools/run.test.mjs",
+          "tools/compare-open-bench.test.mjs",
+          "tools/compare-slice-bench.test.mjs",
+        ]),
+    ],
+    ["material catalogs", () => execute("node", ["--test", "tools/material-catalogs.test.mjs"])],
+    [
+      "Rust workspace",
+      () =>
+        execute("cargo", ["test", "--locked", "--workspace", "--no-fail-fast"], {
+          env: testEnvironment,
+        }),
+    ],
+    [
+      "saved-project client",
+      () =>
+        execute(
+          "cargo",
+          [
+            "test",
+            "--locked",
+            "-p",
+            "spiling-engine-client",
+            "--lib",
+            "tests::real::manufacturing_bundle_survives_save_restart_and_source_removal",
+            "--",
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+          ],
+          nativeTests,
+        ),
+    ],
+    [
+      "saved-project CLI",
+      () =>
+        execute(
+          "cargo",
+          [
+            "test",
+            "--locked",
+            "-p",
+            "spiling-cli",
+            "--test",
+            "project",
+            "manufacturing_fresh_process_replay_export_invalidation_and_undo",
+            "--",
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+          ],
+          nativeTests,
+        ),
+    ],
+    ["CLI smoke", () => cliSmoke(execute)],
+    ["TypeScript protocol", () => execute("pnpm", ["--filter", "@spiling/protocol", "test"])],
+    [
+      "G-code parity",
+      () => execute("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]),
+    ],
+  ]);
 }
 
 async function sliceBenchmark() {
@@ -724,35 +802,11 @@ async function main() {
       await run("node", ["--test", "tools/gcode-parity/test.mjs"]);
       break;
     case "test":
-      await stageEngine();
-      await runTestSuites([
-        [
-          "tooling",
-          () =>
-            run("node", [
-              "--test",
-              "tools/run.test.mjs",
-              "tools/compare-open-bench.test.mjs",
-              "tools/compare-slice-bench.test.mjs",
-            ]),
-        ],
-        ["material catalogs", () => run("node", ["--test", "tools/material-catalogs.test.mjs"])],
-        [
-          "Rust workspace",
-          () =>
-            run("cargo", ["test", "--locked", "--workspace", "--no-fail-fast"], {
-              env: testEnvironment,
-            }),
-        ],
-        ["CLI smoke", cliSmoke],
-        ["TypeScript protocol", () => run("pnpm", ["--filter", "@spiling/protocol", "test"])],
-        [
-          "G-code parity",
-          () => run("node", ["--import", "tsx", "--test", "tools/gcode-parity/test.mjs"]),
-        ],
-      ]);
+      await workspaceTests();
       break;
     case "smoke:cli":
+      await contracts(true);
+      await stageEngine();
       await cliSmoke();
       break;
     case "bench:smoke":
