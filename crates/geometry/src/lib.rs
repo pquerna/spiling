@@ -43,7 +43,8 @@ pub use analysis::{
     capture_projected_voids, certify_endpoint_ownership, certify_endpoint_stratum_ownership,
     certify_native_collar_incidence, certify_native_critical_collar,
     certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
-    certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
+    certify_planar_capsule_clearance, certify_planar_capsule_clearance_prepared,
+    certify_planar_capsule_pair_clearance, prepare_planar_forbidden, PreparedPlanarForbidden,
     material_projected_bounds, placed_bounds, placed_material_bounds, prepare_solid,
     projected_bounds, projected_protected_void_envelopes,
 };

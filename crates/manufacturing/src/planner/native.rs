@@ -4062,7 +4062,9 @@ fn certify_polygon_capsules(
         height: scope,
         label,
     } = *forbidden;
-    let mut encoded = None;
+    // Encode and validate the borrowed forbidden polygon lazily, once per scan.
+    let encoded = std::cell::OnceCell::<Vec<spiling_geometry::SectionLoopMm>>::new();
+    let mut prepared = None;
     for layer in layers {
         charge_support_clearance(support_work, cancel)?;
         for path in &layer.paths {
@@ -4090,12 +4092,27 @@ fn certify_polygon_capsules(
                     continue;
                 }
                 let (segment, endpoint_error_mm) = emitted_xy_segment(edge)?;
-                if encoded.is_none() {
-                    encoded = Some(encode_polygons(std::iter::once(polygon), 0.0, cancel)?);
+                if encoded.get().is_none() {
+                    let _ = encoded.set(encode_polygons(std::iter::once(polygon), 0.0, cancel)?);
                 }
-                spiling_geometry::certify_planar_capsule_clearance(
+                let loops = encoded.get().expect("encoded actual forbidden polygon");
+                if prepared.is_none() {
+                    prepared = Some(
+                        spiling_geometry::prepare_planar_forbidden(loops, native_work, cancel)
+                            .map_err(|failure| {
+                                super::native_error(
+                                    failure,
+                                    &format!(
+                                        "actual emitted support layer {} against {label}",
+                                        layer.index
+                                    ),
+                                )
+                            })?,
+                    );
+                }
+                spiling_geometry::certify_planar_capsule_clearance_prepared(
                     segment,
-                    encoded.as_ref().expect("encoded actual forbidden polygon"),
+                    prepared.as_ref().expect("prepared actual forbidden polygon"),
                     spiling_geometry::PlanarCapsuleClearancePolicy {
                         radius_mm: local.width_mm * 0.5,
                         required_gap_mm: clearance,

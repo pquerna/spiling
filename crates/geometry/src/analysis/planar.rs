@@ -252,6 +252,90 @@ pub fn certify_planar_capsule_clearance(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<PlanarCapsuleClearance, GeometryError> {
+    let required = capsule_requirement(segment_xy_mm, policy, work, cancel)?;
+    if forbidden.is_empty() {
+        return Ok(PlanarCapsuleClearance {
+            minimum_gap_mm: None,
+        });
+    }
+    validate_forbidden(forbidden, work, cancel)?;
+    capsule_clearance_core(segment_xy_mm, forbidden, policy, required, work, cancel)
+}
+
+/// A forbidden filled polygon validated once, with its exact XY bounds.
+pub struct PreparedPlanarForbidden<'a> {
+    loops: &'a [SectionLoopMm],
+    bounds: Option<[[f64; 2]; 2]>,
+}
+
+/// Validate `forbidden` exactly as [`certify_planar_capsule_clearance`] does,
+/// once for any number of capsules.
+pub fn prepare_planar_forbidden<'a>(
+    forbidden: &'a [SectionLoopMm],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedPlanarForbidden<'a>, GeometryError> {
+    validate_forbidden(forbidden, work, cancel)?;
+    let bounds = forbidden
+        .iter()
+        .flat_map(|ring| &ring.points_mm)
+        .fold(None, |bounds: Option<[[f64; 2]; 2]>, p| {
+            Some(bounds.map_or([[p[0], p[1]], [p[0], p[1]]], |[lo, hi]| {
+                [[lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]]
+            }))
+        });
+    Ok(PreparedPlanarForbidden {
+        loops: forbidden,
+        bounds,
+    })
+}
+
+/// The same whole-capsule proof against a prepared polygon. When an outward
+/// enclosed axis gap between the segment's and the polygon's bounds already
+/// meets the requirement, that gap lower-bounds every boundary distance and
+/// places the whole centerline outside the filled polygon.
+pub fn certify_planar_capsule_clearance_prepared(
+    segment_xy_mm: [[f64; 2]; 2],
+    forbidden: &PreparedPlanarForbidden<'_>,
+    policy: PlanarCapsuleClearancePolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PlanarCapsuleClearance, GeometryError> {
+    let required = capsule_requirement(segment_xy_mm, policy, work, cancel)?;
+    let Some([lo, hi]) = forbidden.bounds else {
+        return Ok(PlanarCapsuleClearance {
+            minimum_gap_mm: None,
+        });
+    };
+    let s = segment_xy_mm;
+    let gap = (0..2)
+        .flat_map(|axis| {
+            let (smin, smax) = (s[0][axis].min(s[1][axis]), s[0][axis].max(s[1][axis]));
+            [
+                Interval::point(smin).sub(Interval::point(hi[axis])).lo,
+                Interval::point(lo[axis]).sub(Interval::point(smax)).lo,
+            ]
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    if gap.is_finite() && gap > 0.0 && gap >= required.hi {
+        let reserve =
+            Interval::point(policy.radius_mm).add(Interval::point(policy.endpoint_error_mm));
+        let minimum = Interval::point(gap).sub(reserve).lo;
+        if minimum >= policy.required_gap_mm {
+            return Ok(PlanarCapsuleClearance {
+                minimum_gap_mm: Some(minimum),
+            });
+        }
+    }
+    capsule_clearance_core(segment_xy_mm, forbidden.loops, policy, required, work, cancel)
+}
+
+fn capsule_requirement(
+    segment_xy_mm: [[f64; 2]; 2],
+    policy: PlanarCapsuleClearancePolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Interval, GeometryError> {
     work.charge(1, cancel)?;
     if segment_xy_mm.iter().flatten().any(|x| !x.is_finite())
         || [
@@ -275,11 +359,14 @@ pub fn certify_planar_capsule_clearance(
             "support capsule clearance overflows",
         ));
     }
-    if forbidden.is_empty() {
-        return Ok(PlanarCapsuleClearance {
-            minimum_gap_mm: None,
-        });
-    }
+    Ok(required)
+}
+
+fn validate_forbidden(
+    forbidden: &[SectionLoopMm],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
     // Validate all input before a geometric early refusal, so a malformed later
     // polygon is never disguised as a corridor-clearance limitation.
     for ring in forbidden {
@@ -300,6 +387,18 @@ pub fn certify_planar_capsule_clearance(
             }
         }
     }
+    Ok(())
+}
+
+fn capsule_clearance_core(
+    segment_xy_mm: [[f64; 2]; 2],
+    forbidden: &[SectionLoopMm],
+    policy: PlanarCapsuleClearancePolicy,
+    required: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PlanarCapsuleClearance, GeometryError> {
+    let reserve = Interval::point(policy.radius_mm).add(Interval::point(policy.endpoint_error_mm));
     let mut lower = f64::INFINITY;
     for ring in forbidden {
         for edge in ring.points_mm.windows(2) {
@@ -365,6 +464,63 @@ mod tests {
             required_gap_mm: 0.125,
             endpoint_error_mm: 0.0,
         }
+    }
+    #[test]
+    fn prepared_bounds_proof_accepts_exactly_what_the_full_proof_accepts() {
+        let mask = [
+            rectangle([[0.0, 10.0], [0.0, 10.0]], false),
+            rectangle([[3.0, 7.0], [3.0, 7.0]], true),
+        ];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        let prepared = prepare_planar_forbidden(&mask, &mut work, &cancel).unwrap();
+        let mut checked = 0;
+        for i in -40..=40 {
+            for j in -40..=40 {
+                let (x, y) = (5.0 + f64::from(i) * 0.2, 5.0 + f64::from(j) * 0.2);
+                for d in [[0.0, 0.0], [0.25, 0.0], [0.0, 0.3], [3.0, 1.0]] {
+                    let segment = [[x, y], [x + d[0], y + d[1]]];
+                    let full = certify_planar_capsule_clearance(
+                        segment, &mask, policy(), &mut work, &cancel,
+                    );
+                    let fast = certify_planar_capsule_clearance_prepared(
+                        segment, &prepared, policy(), &mut work, &cancel,
+                    );
+                    assert_eq!(full.is_ok(), fast.is_ok(), "{segment:?}");
+                    if let (Ok(full), Ok(fast)) = (full, fast) {
+                        let (full, fast) =
+                            (full.minimum_gap_mm().unwrap(), fast.minimum_gap_mm().unwrap());
+                        assert!(fast >= policy().required_gap_mm);
+                        let inside = |p: [f64; 2]| p.iter().all(|v| (0.0..=10.0).contains(v));
+                        if inside(segment[0]) || inside(segment[1]) {
+                            // Inside the polygon's bounds: the full proof itself.
+                            assert_eq!(fast, full);
+                            continue;
+                        }
+                        // Accepted capsules here lie outside the outer square; any
+                        // sampled centerline distance bounds the true minimum.
+                        let sampled = (0..=64)
+                            .map(|k| {
+                                let t = f64::from(k) / 64.0;
+                                let p = [x + t * d[0], y + t * d[1]];
+                                let q = [p[0].clamp(0.0, 10.0), p[1].clamp(0.0, 10.0)];
+                                (p[0] - q[0]).hypot(p[1] - q[1])
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        assert!(fast <= sampled - policy().radius_mm + 1e-12, "{segment:?}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+        let empty = prepare_planar_forbidden(&[], &mut work, &cancel).unwrap();
+        assert!(certify_planar_capsule_clearance_prepared(
+            [[0.0, 0.0], [1.0, 0.0]], &empty, policy(), &mut work, &cancel,
+        )
+        .unwrap()
+        .minimum_gap_mm()
+        .is_none());
     }
     #[test]
     fn filled_material_and_thin_crossings_are_not_boundary_only_clearance() {
