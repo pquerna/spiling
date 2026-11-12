@@ -72,6 +72,8 @@ pub(super) fn component_admission<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError> {
+    // One borrowed lower set for every endpoint, row and stroke query below.
+    let mut lower = strokes::LowerStrokes::new(previous.clone(), contacts.clone());
     for path in &mut candidate.paths {
         let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) = path.owner else {
             continue;
@@ -87,15 +89,14 @@ pub(super) fn component_admission<'a>(
         let t = (transition[along] - a[along]) / (b[along] - a[along]);
         anchors.set_budget(budget);
         let mut endpoint = None;
-        for gap in anchors.gaps(
+        for gap in lower.gaps(
             AnchorCandidate {
                 endpoints_mm: [a, b],
                 bead_width_mm: region::constant_width(path)?,
             },
-            previous
-                .clone()
-                .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-            std::iter::empty(),
+            path.physical_z_mm[0],
+            false,
+            anchors,
             work,
             cancel,
         )? {
@@ -133,7 +134,7 @@ pub(super) fn component_admission<'a>(
                     "corridor raster retention accounting mismatch",
                 )
             })?;
-        coalesce_bridge_rows(
+        coalesce_bridge_rows_with(
             candidate,
             BridgeRowContext {
                 axis,
@@ -144,6 +145,7 @@ pub(super) fn component_admission<'a>(
             },
             previous.clone(),
             contacts.clone(),
+            &mut lower,
             anchors,
             work,
             cancel,
@@ -183,17 +185,14 @@ pub(super) fn component_admission<'a>(
         anchors.set_budget(query_budget);
         let mut bridge = false;
         let mut demand = false;
-        for gap in anchors.gaps(
+        for gap in lower.gaps(
             AnchorCandidate {
                 endpoints_mm: [a, b],
                 bead_width_mm: region::constant_width(path)?,
             },
-            previous
-                .clone()
-                .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-            contacts
-                .clone()
-                .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
+            path.physical_z_mm[0],
+            true,
+            anchors,
             work,
             cancel,
         )? {
@@ -2322,9 +2321,29 @@ fn coalesce_bridge_rows<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
-    let mut joined = false;
-    // One borrowed lower set for every row proof on both axes.
     let mut lower = strokes::LowerStrokes::new(previous.clone(), contacts.clone());
+    coalesce_bridge_rows_with(
+        candidate, context, previous, contacts, &mut lower, anchors, work, cancel,
+    )
+}
+
+/// Bridge-row coalescing over one borrowed lower set shared by every row proof.
+#[allow(clippy::too_many_arguments)]
+fn coalesce_bridge_rows_with<'a, P, C>(
+    candidate: &mut RasterCandidate,
+    context: BridgeRowContext<'_>,
+    previous: P,
+    contacts: C,
+    lower: &mut strokes::LowerStrokes<'a, P, C>,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError>
+where
+    P: Iterator<Item = &'a DepositionPath> + Clone,
+    C: Iterator<Item = &'a DepositionPath> + Clone,
+{
+    let mut joined = false;
     for axis in [context.axis, context.axis.orthogonal()] {
         let fixed = usize::from(axis == region::HatchAxis::X);
         if !candidate.whole_rows.iter().any(|row| {
@@ -2343,7 +2362,7 @@ fn coalesce_bridge_rows<'a>(
             },
             previous.clone(),
             contacts.clone(),
-            &mut lower,
+            lower,
             anchors,
             work,
             cancel,
@@ -2671,19 +2690,22 @@ where
                 let mut start = ((required_start - extension_start) / length).clamp(0.0, 1.0);
                 let mut end = ((required_end - extension_start) / length).clamp(0.0, 1.0);
                 let mut anchored = true;
-                let gaps = anchors.gaps(
-                    whole,
-                    previous
-                        .clone()
-                        .filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]),
-                    contacts.clone().filter(|lower| {
-                        contact_extension
-                            && support_role(lower.kind)
-                            && lower.physical_z_mm[1] <= row.physical_z_mm[0]
-                    }),
-                    work,
-                    cancel,
-                )?;
+                let gaps = if contact_extension {
+                    anchors.gaps(
+                        whole,
+                        previous
+                            .clone()
+                            .filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]),
+                        contacts.clone().filter(|lower| {
+                            support_role(lower.kind)
+                                && lower.physical_z_mm[1] <= row.physical_z_mm[0]
+                        }),
+                        work,
+                        cancel,
+                    )?
+                } else {
+                    lower.gaps(whole, row.physical_z_mm[0], false, anchors, work, cancel)?
+                };
                 for gap in gaps {
                     if gap.start <= start && start < gap.end {
                         anchored &= gap.left;

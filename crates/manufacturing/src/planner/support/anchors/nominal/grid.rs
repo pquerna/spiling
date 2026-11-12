@@ -40,7 +40,7 @@ pub(super) struct EdgeGrid {
     stamp: Vec<u32>,
     query: u32,
     pub(super) hits: Vec<u32>,
-    prefixes: Vec<(u64, Vec<usize>)>,
+    prefixes: Vec<((u64, bool), Vec<usize>)>,
 }
 
 impl EdgeGrid {
@@ -230,8 +230,12 @@ impl EdgeGrid {
     }
 
     /// Prefix of z-eligible inventory edges before each path for one query floor.
-    pub(super) fn prefix(&mut self, lower_z: f64, nominal: &[super::NominalPath<'_>]) -> usize {
-        let key = lower_z.to_bits();
+    pub(super) fn prefix(
+        &mut self,
+        floor: super::LowerFloor,
+        nominal: &[super::NominalPath<'_>],
+    ) -> usize {
+        let key = (floor.z.to_bits(), floor.contacts);
         if let Some(position) = self.prefixes.iter().position(|(bits, _)| *bits == key) {
             return position;
         }
@@ -239,7 +243,7 @@ impl EdgeGrid {
         let mut total = 0usize;
         prefix.push(0);
         for (index, path) in nominal.iter().enumerate() {
-            if path.eligible(lower_z) {
+            if path.eligible(floor) {
                 total += (self.first_edge[index + 1] - self.first_edge[index]) as usize;
             }
             prefix.push(total);
@@ -260,7 +264,7 @@ impl EdgeGrid {
     pub(super) fn collect(
         &mut self,
         candidate: AnchorCandidate,
-        lower_z: f64,
+        floor: super::LowerFloor,
         nominal: &[super::NominalPath<'_>],
     ) {
         self.hits.clear();
@@ -293,7 +297,7 @@ impl EdgeGrid {
                 }
                 *slot = query;
                 let edge = &self.edges[index as usize];
-                if !nominal[edge.path as usize].eligible(lower_z) {
+                if !nominal[edge.path as usize].eligible(floor) {
                     continue;
                 }
                 let (c, d) = (edge.c, edge.d);
