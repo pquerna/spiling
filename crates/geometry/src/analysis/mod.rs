@@ -51,7 +51,8 @@ pub(crate) use placed::{analyze_placed_slab, section_placed_with_work};
 pub use planar::{
     PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm,
     certify_planar_capsule_clearance, certify_planar_capsule_clearance_prepared,
-    certify_planar_capsule_pair_clearance, prepare_planar_forbidden, PreparedPlanarForbidden,
+    certify_planar_capsule_pair_clearance, planar_bounds_clear, prepare_planar_forbidden,
+    PreparedPlanarForbidden,
 };
 pub use slab::analyze_height_domain;
 pub(crate) use slab::{HeightFunctional, analyze_slab};
