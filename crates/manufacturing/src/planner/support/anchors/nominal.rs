@@ -37,15 +37,28 @@ struct NominalPath<'a> {
     edges: usize,
 }
 
+/// Query floor: direct previous strokes ending exactly at `z`, plus contact
+/// strokes ending at or below it unless the query is direct-only.
+#[derive(Clone, Copy)]
+pub(in crate::planner::support) struct LowerFloor {
+    pub(in crate::planner::support) z: f64,
+    pub(in crate::planner::support) contacts: bool,
+}
+
+impl LowerFloor {
+    fn admits(self, direct: bool, top: f64) -> bool {
+        if direct {
+            top == self.z
+        } else {
+            self.contacts && top <= self.z
+        }
+    }
+}
+
 impl NominalPath<'_> {
     /// The same physical-floor filter the block scan applies per block.
-    fn eligible(&self, lower_z: f64) -> bool {
-        let top = self.path.physical_z_mm[1];
-        if self.direct {
-            top == lower_z
-        } else {
-            top <= lower_z
-        }
+    fn eligible(&self, floor: LowerFloor) -> bool {
+        floor.admits(self.direct, self.path.physical_z_mm[1])
     }
 }
 
@@ -275,14 +288,14 @@ impl<'a> NominalAnchorPaths<'a> {
         paths: &'s [NominalPath<'a>],
         grid: &'s grid::EdgeGrid,
         prefix: &'s [usize],
-        lower_z: f64,
+        floor: LowerFloor,
     ) -> impl Iterator<Item = AnchorInput> + 's {
         let mut hits = grid.hits.iter().copied().peekable();
         let mut whole = grid
             .whole
             .iter()
             .copied()
-            .filter(move |&path| paths[path as usize].eligible(lower_z))
+            .filter(move |&path| paths[path as usize].eligible(floor))
             .peekable();
         let mut charged = 0usize;
         let mut pending: Option<AnchorInput> = None;
@@ -350,17 +363,11 @@ impl<'a> NominalAnchorPaths<'a> {
     fn inputs(
         &self,
         candidate: AnchorCandidate,
-        lower_z: f64,
+        floor: LowerFloor,
     ) -> impl Iterator<Item = AnchorInput> + '_ {
         self.blocks
             .iter()
-            .filter(move |block| {
-                if block.direct {
-                    block.top_z == lower_z
-                } else {
-                    block.top_z <= lower_z
-                }
-            })
+            .filter(move |block| floor.admits(block.direct, block.top_z))
             .flat_map(move |block| {
                 let rejected = rejects(candidate, block.bounds, block.radius);
                 rejected
@@ -414,6 +421,21 @@ impl AnchorWorkspace {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
+        let floor = LowerFloor {
+            z: lower_z,
+            contacts: true,
+        };
+        self.gaps_floor(candidate, floor, paths, work, cancel)
+    }
+
+    pub(in crate::planner::support) fn gaps_floor(
+        &mut self,
+        candidate: AnchorCandidate,
+        floor: LowerFloor,
+        paths: &mut NominalAnchorPaths<'_>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
         let limit = self.record_limit;
         self.record_limit -= paths.reserved_records;
         let [a, b] = candidate.endpoints_mm;
@@ -430,17 +452,13 @@ impl AnchorWorkspace {
             && (a[0] != b[0] || a[1] != b[1]);
         let result = if indexed {
             let grid = paths.grid.as_mut().expect("checked edge grid");
-            let prefix = grid.prefix(lower_z, &paths.paths);
-            grid.collect(candidate, lower_z, &paths.paths);
-            let inputs = NominalAnchorPaths::grid_inputs(
-                &paths.paths,
-                grid,
-                grid.prefix_at(prefix),
-                lower_z,
-            );
+            let prefix = grid.prefix(floor, &paths.paths);
+            grid.collect(candidate, floor, &paths.paths);
+            let inputs =
+                NominalAnchorPaths::grid_inputs(&paths.paths, grid, grid.prefix_at(prefix), floor);
             self.gaps_inputs(candidate, inputs, work, cancel)
         } else {
-            self.gaps_inputs(candidate, paths.inputs(candidate, lower_z), work, cancel)
+            self.gaps_inputs(candidate, paths.inputs(candidate, floor), work, cancel)
         }
         .map(|_| ());
         self.record_limit = limit;
@@ -595,7 +613,10 @@ mod tests {
                     endpoints_mm: [[10_000.0, 0.0, 0.4], [10_001.0, 0.0, 0.4]],
                     bead_width_mm: 0.4,
                 },
-                0.2,
+                LowerFloor {
+                    z: 0.2,
+                    contacts: true,
+                },
             )
             .map(|input| match input {
                 AnchorInput::Skipped(edges) => edges,
@@ -806,7 +827,9 @@ mod tests {
                 NominalAnchorPaths::new(previous.iter(), contacts.iter(), &screened, &cancel)
                     .unwrap()
                     .unwrap();
-            prepared.force_index(&cancel);
+            if trial % 2 == 0 {
+                prepared.force_index(&cancel);
+            }
             for _ in 0..400 {
                 let a = [next() * 70.0 - 35.0, next() * 70.0 - 35.0, 0.0];
                 let length = next() * 30.0 + 0.05;
@@ -830,6 +853,7 @@ mod tests {
                     bead_width_mm: [0.2, 0.4, 0.6][(next() * 3.0) as usize % 3],
                 };
                 let lower_z = tops[(next() * 3.0) as usize % 3];
+                let with_contacts = next() < 0.7;
                 let (mut expected_work, mut actual_work) = (7usize, 7usize);
                 let fields = |gaps: &[AnchorGap]| {
                     gaps.iter()
@@ -852,14 +876,18 @@ mod tests {
                             .filter(|path| path.physical_z_mm[1] == lower_z),
                         contacts
                             .iter()
-                            .filter(|path| path.physical_z_mm[1] <= lower_z),
+                            .filter(|path| with_contacts && path.physical_z_mm[1] <= lower_z),
                         &mut expected_work,
                         &cancel,
                     )
                     .map(fields)
                     .map_err(|e| (e.code, e.message));
+                let floor = LowerFloor {
+                    z: lower_z,
+                    contacts: with_contacts,
+                };
                 let actual = screened
-                    .gaps_nominal(candidate, lower_z, &mut prepared, &mut actual_work, &cancel)
+                    .gaps_floor(candidate, floor, &mut prepared, &mut actual_work, &cancel)
                     .map(fields)
                     .map_err(|e| (e.code, e.message));
                 assert_eq!(actual, expected, "trial {trial}");

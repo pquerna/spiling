@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::anchors::{AnchorGap, InventoryStats, NominalAnchorPaths};
+use super::anchors::{AnchorGap, InventoryStats, LowerFloor, NominalAnchorPaths};
 use super::{AnchorCandidate, AnchorWorkspace};
 use crate::check_cancel;
 use crate::planner::OFFSET_TOLERANCE_MM;
@@ -154,6 +154,40 @@ where
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// Gaps of one candidate against direct previous strokes ending at
+    /// `lower_z`, plus contact strokes at or below it when `contacts`. The
+    /// result equals the filtered linear query over the same borrowed paths.
+    pub(in crate::planner) fn gaps<'w>(
+        &mut self,
+        candidate: AnchorCandidate,
+        lower_z: f64,
+        contacts: bool,
+        anchors: &'w mut AnchorWorkspace,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&'w [AnchorGap], ManufacturingError> {
+        if self.admit_inventory(anchors, cancel)? {
+            let inventory = self.inventory.as_mut().expect("admitted anchor inventory");
+            inventory.index_for(1, cancel)?;
+            let floor = LowerFloor {
+                z: lower_z,
+                contacts,
+            };
+            return anchors.gaps_floor(candidate, floor, inventory, work, cancel);
+        }
+        anchors.gaps(
+            candidate,
+            self.previous
+                .clone()
+                .filter(move |lower| lower.physical_z_mm[1] == lower_z),
+            self.contacts
+                .clone()
+                .filter(move |lower| contacts && lower.physical_z_mm[1] <= lower_z),
+            work,
+            cancel,
+        )
     }
 
     pub(in crate::planner) fn analyze(

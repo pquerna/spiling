@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 
 mod batch;
 mod nominal;
-pub(super) use nominal::{InventoryStats, NominalAnchorPaths};
+pub(super) use nominal::{InventoryStats, LowerFloor, NominalAnchorPaths};
 
 /// Anchor candidate-pair work is counted, not capped (ADR009); only
 /// arithmetic overflow refuses.
