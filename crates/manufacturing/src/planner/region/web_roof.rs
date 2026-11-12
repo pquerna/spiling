@@ -117,7 +117,6 @@ fn charge(work: &mut usize, amount: usize, cancel: &AtomicBool) -> Result<(), Ma
     check_cancel(cancel)?;
     *work = work
         .checked_add(amount)
-        .filter(|n| *n <= 128_000_000)
         .ok_or_else(|| resource("web + roof clipping work budget exceeded"))?;
     Ok(())
 }

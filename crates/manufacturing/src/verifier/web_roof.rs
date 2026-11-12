@@ -37,7 +37,6 @@ fn charge_many(
     cancelled(cancel)?;
     *work = work
         .checked_add(amount)
-        .filter(|n| *n <= 128_000_000)
         .ok_or_else(|| failed("web + roof independent reconstruction work budget exceeded"))?;
     Ok(())
 }

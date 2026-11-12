@@ -74,7 +74,7 @@ impl Budget<'_> {
             left,
             right,
             self.work,
-            128_000_000,
+            usize::MAX,
             (MAX_MANUFACTURING_RETAINED_BYTES as usize)
                 .checked_sub(self.allocated)
                 .ok_or_else(resource)?,
@@ -1430,18 +1430,6 @@ mod tests {
     #[test]
     fn cancellation_and_cumulative_work_are_not_reset_by_wall_reconstruction() {
         let wall = wall(0.225, 0.45);
-        let mut work = 128_000_000;
-        let failure = residual(
-            &square(),
-            &[&wall],
-            &recipe(),
-            0.4,
-            0,
-            &mut work,
-            &AtomicBool::new(false),
-        )
-        .unwrap_err();
-        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
         let failure = residual(
             &square(),
             &[&wall],

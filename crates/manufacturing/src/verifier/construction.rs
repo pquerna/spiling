@@ -50,10 +50,8 @@ pub(super) fn verify(
     if plan.material_domains.is_empty() {
         return Ok(());
     }
-    let remaining = 128_000_000usize
-        .checked_sub(*charged)
-        .ok_or_else(|| failed("material verification geometry budget exhausted"))?;
-    let mut work = GeometryWorkBudget::new(remaining as u64);
+    // Verification work is counted for cancellation, not capped (ADR009).
+    let mut work = GeometryWorkBudget::monitored();
     let outcome = (|| {
         let domains: Vec<_> = plan
             .material_domains
@@ -79,15 +77,12 @@ pub(super) fn verify(
                 let pairs = count(a)
                     .checked_mul(count(b))
                     .ok_or_else(|| failed("material verification work overflow"))?;
-                *charged = charged
-                    .checked_add(pairs)
-                    .filter(|v| *v <= 128_000_000)
-                    .ok_or_else(|| {
-                        ManufacturingError::new(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "material verification work budget exceeded",
-                        )
-                    })?;
+                *charged = charged.checked_add(pairs).ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "material verification work budget exceeded",
+                    )
+                })?;
                 if a.physical_z_mm[0] < b.physical_z_mm[1]
                     && b.physical_z_mm[0] < a.physical_z_mm[1]
                     && am.intersection(bm).unsigned_area() > 0.0
@@ -129,15 +124,12 @@ pub(super) fn verify(
                         .flat_map(|r| r.lines())
                     {
                         cancelled(cancel)?;
-                        *charged = charged
-                            .checked_add(1)
-                            .filter(|v| *v <= 128_000_000)
-                            .ok_or_else(|| {
-                                ManufacturingError::new(
-                                    ManufacturingErrorCode::ResourceLimit,
-                                    "material verification boundary budget exceeded",
-                                )
-                            })?;
+                        *charged = charged.checked_add(1).ok_or_else(|| {
+                            ManufacturingError::new(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "material verification boundary budget exceeded",
+                            )
+                        })?;
                         if Euclidean.distance(&line, &boundary) + plan.offset_tolerance_mm
                             < edge.width_mm * 0.5
                                 + program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
@@ -167,12 +159,6 @@ pub(super) fn verify(
                         })?;
                         spiling_geometry::certify_planar_capsule_clearance(xy, forbidden, PlanarCapsuleClearancePolicy { radius_mm:edge.width_mm*0.5, required_gap_mm:0.0, endpoint_error_mm:endpoint_error }, &mut work,cancel)
                         .map_err(|e|ManufacturingError::new(match e.code { spiling_contracts::geometry::GeometryErrorCode::Cancelled=>ManufacturingErrorCode::Cancelled, spiling_contracts::geometry::GeometryErrorCode::ResourceLimit=>ManufacturingErrorCode::ResourceLimit, _=>ManufacturingErrorCode::VerificationFailed },format!("actual {:?} bead {xy:?} width={} intrudes into {:?} material: {e}",domain.reference.role,edge.width_mm,other.reference.role)))?;
-                        if (*charged as u64).saturating_add(work.consumed()) > 128_000_000 {
-                            return Err(ManufacturingError::new(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "shared emitted-geometry work budget exceeded",
-                            ));
-                        }
                     }
                 }
             }

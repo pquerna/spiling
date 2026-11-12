@@ -17,7 +17,8 @@ R = os.path.abspath(sys.argv[2])  # directory holding spiling-cli and spiling-en
 INTENT_SRC = os.path.abspath(sys.argv[3])
 OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
 ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
-TIMEOUT = 900
+# Seconds per CLI step before the part is recorded as a timeout.
+TIMEOUT = int(os.environ.get("SPILING_CORPUS_TIMEOUT", "900"))
 CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 # "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
@@ -43,7 +44,10 @@ def intent_file():
 
 def engine_peak(proc):
     peak = 0
+    deadline = time.time() + TIMEOUT
     while proc.poll() is None:
+        if time.time() > deadline:
+            raise subprocess.TimeoutExpired(proc.args, TIMEOUT)
         for pid in os.listdir("/proc"):
             if not pid.isdigit():
                 continue

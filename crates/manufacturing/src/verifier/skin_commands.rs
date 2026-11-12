@@ -18,10 +18,7 @@ fn resource() -> ManufacturingError {
     )
 }
 fn charge(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
-    *work = work
-        .checked_add(count)
-        .filter(|n| *n <= 128_000_000)
-        .ok_or_else(resource)?;
+    *work = work.checked_add(count).ok_or_else(resource)?;
     Ok(())
 }
 fn add_bytes(total: &mut usize, bytes: usize) -> Result<(), ManufacturingError> {

@@ -827,7 +827,6 @@ pub(super) fn verify_earlier_fine_paths(
 pub(super) fn charge(work: &mut usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(1)
-        .filter(|n| *n <= 128_000_000)
         .ok_or_else(|| failed("independent interface capsule work budget exceeded"))?;
     Ok(())
 }

@@ -11,11 +11,9 @@ mod batch;
 mod nominal;
 pub(super) use nominal::NominalAnchorPaths;
 
-/// Cumulative candidate-pair work, scaled with the job-wide deposition cap
-/// (1,280 pairs per admitted segment, the original 128M at 100k segments).
-/// Pair checks within a layer are currently all-pairs, so time grows with
-/// rows per layer; the bound is a guard, not a throughput target.
-pub(super) const MAX_ANCHOR_PAIR_WORK: usize = MAX_DEPOSITION_SEGMENTS as usize * 1_280;
+/// Anchor candidate-pair work is counted, not capped (ADR009); only
+/// arithmetic overflow refuses.
+pub(super) const MAX_ANCHOR_PAIR_WORK: usize = usize::MAX;
 
 /// Exact centerline intersection with previous nominal deposited capsules plus
 /// separately certified positive-area overlap of actual candidate endpoint disks.

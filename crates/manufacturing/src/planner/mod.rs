@@ -46,7 +46,10 @@ use std::{
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
-const MAX_BOOLEAN_PAIRS: usize = 16_384_000_000;
+/// Planar work is counted, not capped (ADR009): the counter gives cancellation
+/// points and accounting, and only arithmetic overflow can refuse. Time is the
+/// operator's to spend; memory is bounded separately by byte admission.
+const MAX_BOOLEAN_PAIRS: usize = usize::MAX;
 // Geometry retention uses coordinate-equivalent reservation units (including
 // opaque proof bytes), NOT the independent 100k published-command ceiling.
 // This coarse arithmetic bound never replaces actual allocated-byte admission.

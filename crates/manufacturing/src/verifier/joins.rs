@@ -14,15 +14,12 @@ mod rows;
 mod walls;
 
 fn charge(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
-    *work = work
-        .checked_add(count)
-        .filter(|total| *total <= 128_000_000)
-        .ok_or_else(|| {
-            ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "functional join replay work exceeded",
-            )
-        })?;
+    *work = work.checked_add(count).ok_or_else(|| {
+        ManufacturingError::new(
+            ManufacturingErrorCode::ResourceLimit,
+            "functional join replay work exceeded",
+        )
+    })?;
     Ok(())
 }
 

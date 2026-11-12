@@ -13,15 +13,12 @@ use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
 fn charge(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
-    *work = work
-        .checked_add(count)
-        .filter(|n| *n <= 128_000_000)
-        .ok_or_else(|| {
-            ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "diaphragm emitted-geometry work limit exceeded",
-            )
-        })?;
+    *work = work.checked_add(count).ok_or_else(|| {
+        ManufacturingError::new(
+            ManufacturingErrorCode::ResourceLimit,
+            "diaphragm emitted-geometry work limit exceeded",
+        )
+    })?;
     Ok(())
 }
 fn ring(points: &[[f64; 2]]) -> LineString<f64> {

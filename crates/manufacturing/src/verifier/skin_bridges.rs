@@ -13,15 +13,12 @@ use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
 fn charge(work: &mut usize, n: usize) -> Result<(), ManufacturingError> {
-    *work = work
-        .checked_add(n)
-        .filter(|n| *n <= 128_000_000)
-        .ok_or_else(|| {
-            ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "mixed bridge verification work exceeded",
-            )
-        })?;
+    *work = work.checked_add(n).ok_or_else(|| {
+        ManufacturingError::new(
+            ManufacturingErrorCode::ResourceLimit,
+            "mixed bridge verification work exceeded",
+        )
+    })?;
     Ok(())
 }
 
