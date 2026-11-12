@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bench.py OUT.json PART... : supports-on compile of each corpus part through the real CLI/engine, in parallel.
 Records wall seconds, compile elapsed, outcome, program hash and manufacturing summary. Standard library only."""
-import json, os, subprocess, sys, time, hashlib, shutil
+import json, os, subprocess, sys, time, hashlib, shutil, threading
 from concurrent.futures import ThreadPoolExecutor
 WT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.environ.get("AR_BIN", os.path.join(WT, "target", "profiling"))
@@ -16,13 +16,17 @@ def one(prefix):
     shutil.copy(os.path.join(CORPUS, name), os.path.join(d, "source.step"))
     t = time.time()
     with open(os.path.join(d, "out.json"), "w") as out, open(os.path.join(d, "err.txt"), "w") as err:
-        try:
-            rc = subprocess.run([os.path.join(BIN, "spiling-cli"), "project", "create", "p.spil", "--import", "source.step",
+        proc = subprocess.Popen([os.path.join(BIN, "spiling-cli"), "project", "create", "p.spil", "--import", "source.step",
                                  "--intent", INTENT, "--center-all-on-bed", "--compile", "--engine", os.path.join(BIN, "spiling-engine")],
-                                cwd=d, stdout=out, stderr=err, timeout=TIMEOUT).returncode
-        except subprocess.TimeoutExpired:
-            rc = "timeout"
-    rec = {"part": prefix, "wall_s": round(time.time() - t, 2), "rc": rc, "ok": rc == 0}
+                                cwd=d, stdout=out, stderr=err)
+        timer = threading.Timer(TIMEOUT, proc.kill); timer.start()
+        # wait4 reports the CLI's rusage including the engine it reaps: CPU seconds
+        # resist contention from concurrent benchmark sets far better than wall time.
+        _, status, usage = os.wait4(proc.pid, 0)
+        timer.cancel(); proc.returncode = os.waitstatus_to_exitcode(status)
+        rc = proc.returncode if proc.returncode >= 0 else "timeout"
+    rec = {"part": prefix, "wall_s": round(time.time() - t, 2), "cpu_s": round(usage.ru_utime + usage.ru_stime, 2),
+           "rc": rc, "ok": rc == 0}
     err_code = None
     for line in open(os.path.join(d, "err.txt")):
         try: r = json.loads(line)
@@ -39,7 +43,7 @@ def one(prefix):
         rec["program"] = a["program"]["hash"][:16]
         for k in ["deposition_segments", "filament_length_mm", "support_filament_length_mm", "support_deposition_segments", "layers", "paths", "deposited_volume_mm3"]:
             rec[k] = s.get(k)
-    rec["s"] = rec.get("compile_s", rec["wall_s"])
+    rec["s"] = rec["cpu_s"]
     return rec
 
 parts = sys.argv[2:]
@@ -47,7 +51,8 @@ with ThreadPoolExecutor(len(parts)) as ex:
     recs = list(ex.map(one, parts))
 json.dump(recs, open(sys.argv[1], "w"), indent=1)
 for r in recs:
-    print(f"{r['part']} {r['code']:<32} {r['s']:8.1f}s {r.get('program','')}")
+    print(f"{r['part']} {r['code']:<32} cpu {r['cpu_s']:8.1f}s wall {r['wall_s']:8.1f}s {r.get('program','')}")
 print(f"METRIC total_s={sum(r['s'] for r in recs):.1f}")
+print(f"METRIC wall_total_s={sum(r['wall_s'] for r in recs):.1f}")
 print(f"METRIC max_s={max(r['s'] for r in recs):.1f}")
 print(f"METRIC ok={sum(r['ok'] for r in recs)}")
