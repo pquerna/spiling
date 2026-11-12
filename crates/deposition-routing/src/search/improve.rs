@@ -16,7 +16,6 @@ struct Scratch {
     covered: (usize, usize),
     added: Vec<f64>,
     flipped: Vec<f64>,
-    right: Vec<f64>,
 }
 impl Scratch {
     fn new(n: usize) -> Self {
@@ -25,7 +24,6 @@ impl Scratch {
             covered: (0, 0),
             added: vec![0.; n + 1],
             flipped: vec![0.; n + 1],
-            right: vec![0.; n + 1],
         }
     }
 }
@@ -197,6 +195,67 @@ impl<'a, 't> Order<'a, 't> {
             }
         }
     }
+    /// Best insertion before position j for j in `range` (every j < n).
+    /// added = left + (last's exit to j) - incoming[j], flipped likewise with
+    /// first's exit and entry. Second prices are non-negative and rounding is
+    /// monotone, so a point whose first price alone cannot beat the current
+    /// best is skipped without its second price; decisions are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_insertions(
+        &self,
+        scratch: &Scratch,
+        range: Range<usize>,
+        removed: f64,
+        first: usize,
+        last: usize,
+        may_flip: bool,
+        best: &mut (f64, usize, bool),
+    ) {
+        const LANES: usize = 8;
+        let point = self.exit[last];
+        let entry = self.entry[first];
+        let process = |j: usize, best: &mut (f64, usize, bool)| {
+            let base = self.incoming[j];
+            let to = [self.entries[0][j], self.entries[1][j], self.entries[2][j]];
+            let left = scratch.left[j];
+            if removed - (left - base) > best.0 {
+                let added = left + self.pricing.seconds(to, point) - base;
+                if removed - added > best.0 {
+                    *best = (removed - added, j, false);
+                }
+            }
+            if may_flip {
+                let left = scratch.flipped[j];
+                if removed - (left - base) > best.0 {
+                    let flipped = left + self.pricing.seconds(to, entry) - base;
+                    if removed - flipped > best.0 {
+                        *best = (removed - flipped, j, true);
+                    }
+                }
+            }
+        };
+        let mut j = range.start;
+        while j + LANES <= range.end {
+            let window = j..j + LANES;
+            let base: &[f64; LANES] = self.incoming[window.clone()].try_into().unwrap();
+            let left: &[f64; LANES] = scratch.left[window.clone()].try_into().unwrap();
+            let flipped: &[f64; LANES] = scratch.flipped[window].try_into().unwrap();
+            let mut any = false;
+            for lane in 0..LANES {
+                any |= removed - (left[lane] - base[lane]) > best.0;
+                any |= may_flip & (removed - (flipped[lane] - base[lane]) > best.0);
+            }
+            if any {
+                for k in j..j + LANES {
+                    process(k, best);
+                }
+            }
+            j += LANES;
+        }
+        for k in j..range.end {
+            process(k, best);
+        }
+    }
     /// Move [i, i+len) to the best permitted insertion point; a single
     /// reversible path may be inserted flipped. Returns the new position.
     fn try_move(&mut self, i: usize, len: usize, scratch: &mut Scratch) -> Option<usize> {
@@ -226,32 +285,9 @@ impl<'a, 't> Order<'a, 't> {
         let may_flip = len == 1 && self.reversible(first);
         // All segment lengths share their first visit's entry.
         self.ensure_left(scratch, low, high, self.entry[first]);
-        // added[j] = left + (last's exit to j) - incoming[j], for j < n.
-        let inner = low..high.min(n - 1) + 1;
-        let point = self.exit[last];
-        let added = &mut scratch.added[inner.clone()];
-        self.price_from(
-            [
-                &self.entries[0][inner.clone()],
-                &self.entries[1][inner.clone()],
-                &self.entries[2][inner.clone()],
-            ],
-            point,
-            added,
-        );
-        for ((a, left), base) in added
-            .iter_mut()
-            .zip(&scratch.left[inner.clone()])
-            .zip(&self.incoming[inner.clone()])
-        {
-            *a = left + *a - base;
-        }
-        if high == n {
-            scratch.added[n] = scratch.left[n];
-        }
         if may_flip {
             // Flipped: (j-1 or start) to first's exit, then first's entry to j.
-            let (entry, exit) = (self.entry[first], self.exit[first]);
+            let exit = self.exit[first];
             let mut a = low;
             if a == 0 {
                 scratch.flipped[0] = self.between(self.start, exit);
@@ -269,38 +305,27 @@ impl<'a, 't> Order<'a, 't> {
                     &mut scratch.flipped[a..b],
                 );
             }
-            let flipped = &mut scratch.flipped[inner.clone()];
-            let right = &mut scratch.right[inner.clone()];
-            self.price_from(
-                [
-                    &self.entries[0][inner.clone()],
-                    &self.entries[1][inner.clone()],
-                    &self.entries[2][inner.clone()],
-                ],
-                entry,
-                right,
-            );
-            for ((f, r), base) in flipped
-                .iter_mut()
-                .zip(right.iter())
-                .zip(&self.incoming[inner.clone()])
-            {
-                *f = *f + *r - base;
-            }
         }
+        // Points before and after the segment, in ascending order; the last
+        // point (append) has no following visit.
         let mut best = (1e-9, usize::MAX, false);
-        for j in low..=high {
-            if (first..=last + 1).contains(&j) {
-                continue;
-            }
-            let added = scratch.added[j];
+        let tail = high == n && last + 1 < n;
+        let inner_high = high.min(n - 1);
+        for range in [
+            low..first.min(inner_high + 1),
+            (last + 2).max(low)..inner_high + 1,
+        ] {
+            self.scan_insertions(scratch, range, removed, first, last, may_flip, &mut best);
+        }
+        if tail {
+            let added = scratch.left[n];
             if removed - added > best.0 {
-                best = (removed - added, j, false);
+                best = (removed - added, n, false);
             }
             if may_flip {
-                let flipped = scratch.flipped[j];
+                let flipped = scratch.flipped[n];
                 if removed - flipped > best.0 {
-                    best = (removed - flipped, j, true);
+                    best = (removed - flipped, n, true);
                 }
             }
         }
@@ -408,30 +433,52 @@ impl<'a, 't> Order<'a, 't> {
             ),
             None => new.fill(0.),
         }
-        let after = i + 2..(end + 1).min(n);
-        let right = &mut scratch.right[after.clone()];
-        self.price_from(
-            [
-                &self.entries[0][after.clone()],
-                &self.entries[1][after.clone()],
-                &self.entries[2][after.clone()],
-            ],
-            self.entry[i],
-            right,
-        );
+        // The second price is non-negative: only run ends whose first price
+        // leaves a gain above the threshold need it.
         let mut best = (1e-9, usize::MAX);
         let first = self.incoming[i];
-        for k in runs {
-            let (next, right) = if k + 1 < n {
-                (self.incoming[k + 1], scratch.right[k + 1])
-            } else {
-                (0., 0.)
-            };
+        let entry = self.entry[i];
+        let process = |k: usize, best: &mut (f64, usize)| {
+            let next = if k + 1 < n { self.incoming[k + 1] } else { 0. };
             let old = first + next;
-            let new = scratch.added[k] + right;
-            if old - new > best.0 {
-                best = (old - new, k);
+            let partial = scratch.added[k];
+            if old - partial <= best.0 {
+                return;
             }
+            let right = if k + 1 < n {
+                let to = [
+                    self.entries[0][k + 1],
+                    self.entries[1][k + 1],
+                    self.entries[2][k + 1],
+                ];
+                self.pricing.seconds(to, entry)
+            } else {
+                0.
+            };
+            let new = partial + right;
+            if old - new > best.0 {
+                *best = (old - new, k);
+            }
+        };
+        // Windows where no run end can beat the best skip to the next.
+        const LANES: usize = 8;
+        let mut k = runs.start;
+        while k + LANES < runs.end.min(n) {
+            let next: &[f64; LANES] = self.incoming[k + 1..k + 1 + LANES].try_into().unwrap();
+            let partial: &[f64; LANES] = scratch.added[k..k + LANES].try_into().unwrap();
+            let mut any = false;
+            for lane in 0..LANES {
+                any |= first + next[lane] - partial[lane] > best.0;
+            }
+            if any {
+                for run in k..k + LANES {
+                    process(run, &mut best);
+                }
+            }
+            k += LANES;
+        }
+        for run in k..runs.end {
+            process(run, &mut best);
         }
         if best.1 == usize::MAX {
             return None;
