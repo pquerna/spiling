@@ -24,9 +24,75 @@ mod contact_extensions;
 mod proximity;
 mod raster;
 
+#[derive(Clone)]
 struct Demand {
     target: usize,
     failure: strokes::Failure,
+}
+
+/// One layer's actual-stroke admission from an earlier pass of the same
+/// lane: the layer handed to support, its admitted result and the records
+/// the iteration appended. Valid only while its inputs are bit-identical.
+struct ReplayEntry {
+    before: PrintLayer,
+    after: PrintLayer,
+    exhausted: bool,
+    demand: Option<Demand>,
+    bridge_roles: Vec<(usize, DepositionKind)>,
+    joined: bool,
+    segments: [usize; 2],
+    retained: [usize; 2],
+    constructed_points: [usize; 2],
+}
+
+impl ReplayEntry {
+    fn bytes(&self) -> usize {
+        layer_payload_bytes([&self.before, &self.after].into_iter())
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(vec_bytes(&self.bridge_roles))
+    }
+}
+
+/// Per-layer support admission kept across schedule retries. A refinement
+/// changes the schedule from one index upward; layers whose complete skin
+/// horizon lies below it see bit-identical layers, neighbors and raster
+/// context, so their admission is replayed instead of recomputed.
+#[derive(Default)]
+pub(super) struct SupportReplay {
+    schedule: Vec<[u64; 4]>,
+    entries: Vec<ReplayEntry>,
+    bytes: usize,
+}
+
+impl SupportReplay {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Layers below the returned index may replay: their schedule entries
+    /// and every top-skin neighbor are unchanged since the recorded pass.
+    fn valid_prefix(&self, schedule: &[super::LayerElevation], top_skin_mm: f64) -> usize {
+        let changed = schedule
+            .iter()
+            .zip(&self.schedule)
+            .position(|(layer, recorded)| elevation_bits(layer) != *recorded)
+            .unwrap_or(schedule.len().min(self.schedule.len()));
+        (0..self.entries.len().min(changed))
+            .find(|index| {
+                super::physical_neighbor(schedule, *index as u32, top_skin_mm, true)
+                    .is_none_or(|above| above as usize >= changed)
+            })
+            .unwrap_or(self.entries.len().min(changed))
+    }
+}
+
+fn elevation_bits(layer: &super::LayerElevation) -> [u64; 4] {
+    [
+        layer.z.to_bits(),
+        layer.lower_z.to_bits(),
+        layer.sample.to_bits(),
+        layer.height.to_bits(),
+    ]
 }
 
 pub(super) struct RasterCandidate {
@@ -432,6 +498,9 @@ pub(super) struct SupportInput<'a> {
     pub(super) native_owned_bytes: usize,
     pub(super) recipe: &'a PlanarPrintRecipe,
     pub(super) source_z_allowance_mm: f64,
+    /// Sections are a function of the schedule entry alone and each layer of
+    /// its skin horizon, so per-layer admission may replay across retries.
+    pub(super) replay: bool,
 }
 
 #[derive(Default)]
@@ -445,6 +514,7 @@ pub(super) struct SupportWork {
     /// Their unanchored strokes print as authored and are reported, the
     /// build-plate-only outcome, instead of requesting refinement again.
     pub(super) exhausted: std::collections::BTreeSet<u64>,
+    pub(super) replay: SupportReplay,
 }
 
 impl SupportWork {
@@ -552,6 +622,14 @@ pub(super) fn realize(
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
     let sup_clock = std::time::Instant::now();
+    let replaying = input.replay && !tentative;
+    let replay_old = if replaying {
+        std::mem::take(&mut work_bank.replay)
+    } else {
+        SupportReplay::default()
+    };
+    let mut replay_new = None;
+    let exhausted_layers = &work_bank.exhausted;
     let outcome = (|| {
         let SupportInput {
             sections,
@@ -560,7 +638,19 @@ pub(super) fn realize(
             mut native_owned_bytes,
             recipe,
             source_z_allowance_mm,
+            replay: _,
         } = *input;
+        let mut replay_limit = if replaying {
+            replay_old.valid_prefix(schedule, recipe.top_skin_thickness_mm)
+        } else {
+            0
+        };
+        native_owned_bytes = native_owned_bytes.saturating_add(replay_old.bytes);
+        let mut replay_entries = replay_old.entries.into_iter();
+        let mut recorded: Vec<ReplayEntry> = Vec::new();
+        let mut recorded_bytes = 0usize;
+        let mut recording = replaying;
+        let first_before = layers.first().filter(|_| recording).cloned();
         let width = recipe.bead_width_mm;
         let mut demands: Vec<Demand> = Vec::new();
         let mut constructed_points = layers.iter().try_fold(0usize, |total, layer| {
@@ -609,7 +699,89 @@ pub(super) fn realize(
         {
             return Err(super::bonds::unresolved(first));
         }
+        drop(replay_entries.next());
+        if let (Some(before), Some(after)) = (first_before, layers.first()) {
+            recorded.push(ReplayEntry {
+                before,
+                after: after.clone(),
+                exhausted: false,
+                demand: None,
+                bridge_roles: Vec::new(),
+                joined: false,
+                segments: [0; 2],
+                retained: [0; 2],
+                constructed_points: [0; 2],
+            });
+        }
         for index in 1..layers.len() {
+            check_cancel(cancel)?;
+            let exhausted_here = exhausted_layers.contains(&layers[index].z_mm.to_bits());
+            let old_entry = replay_entries.next();
+            if index < replay_limit
+                && let Some(entry) = old_entry
+                && entry.exhausted == exhausted_here
+                && entry.before == layers[index]
+            {
+                // Bit-identical inputs: apply the recorded admission.
+                let live = native_owned_bytes
+                    + layer_payload_bytes(layers.iter())
+                    + vec_bytes(&joined_layers)
+                    + vec_bytes(&demands)
+                    + vec_bytes(&original_bridge_roles);
+                *segments = (*segments + entry.segments[1])
+                    .checked_sub(entry.segments[0])
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "replayed support segment accounting underflow",
+                        )
+                    })?;
+                retained = (retained + entry.retained[1])
+                    .checked_sub(entry.retained[0])
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "replayed support retained accounting underflow",
+                        )
+                    })?;
+                constructed_points = (constructed_points + entry.constructed_points[1])
+                    .checked_sub(entry.constructed_points[0])
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "replayed support constructed accounting underflow",
+                        )
+                    })?;
+                if retained > super::MAX_RETAINED_GEOMETRY_UNITS {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "replayed support retained point limit exceeded",
+                    ));
+                }
+                layers[index] = entry.after.clone();
+                joined_layers[index] = entry.joined;
+                if let Some(demand) = &entry.demand {
+                    reserve_owned(&mut demands, 1, live)?;
+                    demands.push(demand.clone());
+                }
+                reserve_owned(&mut original_bridge_roles, entry.bridge_roles.len(), live)?;
+                for &(path, kind) in &entry.bridge_roles {
+                    original_bridge_roles.push((index, path, kind));
+                }
+                recorded.push(entry);
+                continue;
+            }
+            replay_limit = replay_limit.min(index);
+            let replay_before = recording.then(|| {
+                (
+                    layers[index].clone(),
+                    *segments,
+                    retained,
+                    constructed_points,
+                    demands.len(),
+                    original_bridge_roles.len(),
+                )
+            });
             owned_bytes = native_owned_bytes
                 + layer_payload_bytes(layers.iter())
                 + vec_bytes(&joined_layers)
@@ -933,6 +1105,53 @@ pub(super) fn realize(
                 original_bridge_roles.push((index, path, layer.paths[path].kind));
                 layer.paths[path].kind = DepositionKind::Bridge;
             }
+            if let Some((before, segments_before, retained_before, constructed_before, demand_at, roles_at)) =
+                replay_before
+            {
+                let entry = ReplayEntry {
+                    before,
+                    after: layer.clone(),
+                    exhausted: exhausted_here,
+                    demand: demands.get(demand_at).cloned(),
+                    bridge_roles: original_bridge_roles[roles_at..]
+                        .iter()
+                        .map(|&(_, path, kind)| (path, kind))
+                        .collect(),
+                    joined: joined_layers[index],
+                    segments: [segments_before, *segments],
+                    retained: [retained_before, retained],
+                    constructed_points: [constructed_before, constructed_points],
+                };
+                // Optional: kept only while it fits beside the live working set.
+                let bytes = entry.bytes();
+                let live = native_owned_bytes
+                    .saturating_add(layer_payload_bytes(layers.iter()))
+                    .saturating_add(recorded_bytes)
+                    .saturating_add(bytes);
+                if super::remaining_geometry_units(retained, live).is_ok() {
+                    recorded_bytes += bytes;
+                    recorded.push(entry);
+                } else {
+                    recording = false;
+                    recorded = Vec::new();
+                    recorded_bytes = 0;
+                }
+            }
+        }
+        drop(replay_entries);
+        if std::env::var_os("SPILING_PASS_TRACE").is_some() {
+            eprintln!("REPLAY layers={} replayed={}", layers.len(), replay_limit.min(layers.len()));
+        }
+        if recording {
+            let bytes = recorded
+                .iter()
+                .map(ReplayEntry::bytes)
+                .fold(0usize, usize::saturating_add);
+            replay_new = Some(SupportReplay {
+                schedule: schedule.iter().map(elevation_bits).collect(),
+                entries: recorded,
+                bytes,
+            });
         }
         super::trace_stage("sup_strokes", sup_clock);
         if demands.is_empty() {
@@ -2163,6 +2382,9 @@ pub(super) fn realize(
         )?;
         Ok(SupportAdmission::Complete)
     })();
+    if let Some(replay) = replay_new {
+        work_bank.replay = replay;
+    }
     work_bank.finish(work, foreign_work, anchor_work)?;
     outcome
 }

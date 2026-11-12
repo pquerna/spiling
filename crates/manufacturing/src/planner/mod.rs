@@ -2226,6 +2226,9 @@ fn admit_schedule<'model>(
                         .map(|model| model.support_margin())
                         .fold(0.0, f64::max)
                 }),
+                replay: admission.tolerant.is_some()
+                    && web_roof.is_none()
+                    && construction.domains.is_empty(),
             },
             &mut segments,
             cancel,
