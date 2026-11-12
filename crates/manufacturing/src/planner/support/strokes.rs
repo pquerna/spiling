@@ -179,9 +179,6 @@ where
             ..
         } = self;
         let mut prepared = if admitted { inventory.as_mut() } else { None };
-        if let Some(prepared) = prepared.as_mut() {
-            prepared.index_for(paths.len(), cancel)?;
-        }
         for (path_index, path) in paths.iter().enumerate() {
             check_cancel(cancel)?;
             let mut has_bridge = false;
@@ -196,6 +193,7 @@ where
                     bead_width_mm: width_mm,
                 };
                 let gaps = if let Some(prepared) = prepared.as_mut() {
+                    prepared.index_for(1, cancel)?;
                     anchors.gaps_nominal(
                         candidate,
                         path.physical_z_mm[0],
