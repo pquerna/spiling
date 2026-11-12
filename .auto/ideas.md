@@ -76,3 +76,10 @@ sweep_active, material_bytes, remaining_geometry_budget) 5–8%. Planner is full
 - H1 Avoid MultiPolygon clones in hot paths (support column polygons, section material clones).
 - H2 mimalloc as global allocator in the engine.
 - H3 Build with target-cpu=native for profiling comparisons only (not for shipping).
+
+## Parallelism rule (owner, 2026-11-12)
+Every rayon loop must first be evaluated as a CubeCL kernel: data-parallel numeric work (distance
+matrices, k-nearest lists, point-in-polygon, capsule/segment screens, interval candidates) goes to
+CubeCL so it scales with GPU/SIMD width; rayon is for coarse irregular tasks (per-layer walls,
+per-layer routing), possibly with CubeCL screens inside. Record the CubeCL evaluation in the log
+entry of any rayon experiment.
