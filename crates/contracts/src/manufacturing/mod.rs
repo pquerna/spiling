@@ -2407,9 +2407,9 @@ pub struct PlanarRegionCoverage {
     pub nominal_deposition_volume_mm3: f64,
     pub support_area_mm2: f64,
     pub support_nominal_deposition_volume_mm3: f64,
-    /// With supports disabled, the unanchored span of the first stroke found
-    /// printing over nothing on this layer, as PrusaSlicer prints overhangs
-    /// without support. Zero when every stroke is anchored.
+    /// The unanchored span of a stroke printed over nothing on this layer:
+    /// with supports disabled, or with supports on where the part itself
+    /// blocks every column from the build plate. Zero otherwise.
     pub unsupported_overhang_mm: f64,
     #[serde(deserialize_with = "process_regions")]
     pub process_regions: Vec<ProcessRegionCoverage>,
@@ -2631,8 +2631,6 @@ impl PlanarRegionCoverage {
                     || self.protected_hole_area_mm2 != 0.0
                     || self.intentional_void_area_mm2 != 0.0))
             || (self.support_area_mm2 == 0.0) != (self.support_nominal_deposition_volume_mm3 == 0.0)
-            || (!matches!(recipe.supports, SupportPolicy::Disabled)
-                && self.unsupported_overhang_mm != 0.0)
             || (matches!(recipe.supports, SupportPolicy::Disabled)
                 && (self.support_area_mm2 != 0.0
                     || self.support_nominal_deposition_volume_mm3 != 0.0))

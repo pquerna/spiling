@@ -198,13 +198,15 @@ pub(super) fn plan(
             ));
         }
         let path_index = paths.len();
-        correspondence.extend((0..edge_widths.len()).map(|edge_index| BoundaryCorrespondence {
-            path_index,
-            edge_index,
-            supports: [chain.boundary; 2],
-            facing_boundary: Some(chain.boundary),
-            ordinal: chain.lane,
-        }));
+        correspondence.extend(
+            (0..edge_widths.len()).map(|edge_index| BoundaryCorrespondence {
+                path_index,
+                edge_index,
+                supports: [chain.boundary; 2],
+                facing_boundary: Some(chain.boundary),
+                ordinal: chain.lane,
+            }),
+        );
         let constant = edge_widths.iter().all(|w| *w == edge_widths[0]);
         paths.push(DepositionPath {
             material_domain: None,
@@ -220,7 +222,10 @@ pub(super) fn plan(
                 }
             },
             physical_z_mm: [request.lower_z, request.upper_z],
-            points_mm: points.iter().map(|p| [p[0], p[1], request.upper_z]).collect(),
+            points_mm: points
+                .iter()
+                .map(|p| [p[0], p[1], request.upper_z])
+                .collect(),
             arcs: Vec::new(),
         });
     }
@@ -358,7 +363,11 @@ fn trace_edge(
         } else {
             // A junction too thin for any bead lends nothing to a corner
             // edge; take the other end's beads instead.
-            let (near, far) = if t < 0.5 { (ends[0], ends[1]) } else { (ends[1], ends[0]) };
+            let (near, far) = if t < 0.5 {
+                (ends[0], ends[1])
+            } else {
+                (ends[1], ends[0])
+            };
             Ok(if near.count > 0 { near } else { far })
         }
     };
@@ -392,13 +401,13 @@ fn trace_edge(
     // recipe's wall count, at the inherited width.
     let recipe_lanes = request.recipe.perimeter_count as usize;
     let lane_limit = |beading: Beading| {
-        if central || beading.count == 0 { beading.lanes() } else { recipe_lanes }
+        if central || beading.count == 0 {
+            beading.lanes()
+        } else {
+            recipe_lanes
+        }
     };
-    let lanes = samples
-        .iter()
-        .map(|s| lane_limit(s.1))
-        .max()
-        .unwrap_or(0);
+    let lanes = samples.iter().map(|s| lane_limit(s.1)).max().unwrap_or(0);
     for side in 0..2 {
         let support = edge.supports[side];
         for lane in 0..lanes {
@@ -411,7 +420,11 @@ fn trace_edge(
                 let foot = support.foot(p);
                 let length = norm(sub(p, foot));
                 let d = beading.offset(lane);
-                if length <= d { p } else { add(foot, mul(sub(p, foot), d / length)) }
+                if length <= d {
+                    p
+                } else {
+                    add(foot, mul(sub(p, foot), d / length))
+                }
             };
             let mut current: Option<Piece> = None;
             for window in 0..samples.len() {
@@ -616,7 +629,13 @@ fn enforce_minimum(points: &mut Vec<[f64; 2]>, widths: &mut Vec<f64>, minimum: f
             continue;
         }
         let last = points.len() - 1;
-        let drop = if i + 1 < last { i + 1 } else if i > 0 { i } else { last };
+        let drop = if i + 1 < last {
+            i + 1
+        } else if i > 0 {
+            i
+        } else {
+            last
+        };
         points.remove(drop);
         widths.remove(drop);
         if drop == i && i > 0 {
@@ -688,7 +707,14 @@ fn cover(
     // Narrower than the narrowest bead is not printable by anything: not the
     // material's tips, and not a sliver left between beads.
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
-    let open = |region: &MultiPolygon<f64>, work: &mut usize, offset: &mut dyn FnMut(&MultiPolygon<f64>, f64, &mut usize) -> Result<MultiPolygon<f64>, ManufacturingError>| -> Result<MultiPolygon<f64>, ManufacturingError> {
+    let open = |region: &MultiPolygon<f64>,
+                work: &mut usize,
+                offset: &mut dyn FnMut(
+        &MultiPolygon<f64>,
+        f64,
+        &mut usize,
+    ) -> Result<MultiPolygon<f64>, ManufacturingError>|
+     -> Result<MultiPolygon<f64>, ManufacturingError> {
         let eroded = offset(region, -reach_radius, work)?;
         offset(&eroded, reach_radius, work)
     };
@@ -730,7 +756,10 @@ fn capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Polygon<f64> {
     let length = norm(d);
     let angle = if length > 0.0 { d[1].atan2(d[0]) } else { 0.0 };
     let mut ring = Vec::with_capacity(2 * SIDES + 3);
-    for (centre, start) in [(b, angle - std::f64::consts::FRAC_PI_2), (a, angle + std::f64::consts::FRAC_PI_2)] {
+    for (centre, start) in [
+        (b, angle - std::f64::consts::FRAC_PI_2),
+        (a, angle + std::f64::consts::FRAC_PI_2),
+    ] {
         for i in 0..=SIDES {
             let theta = start + std::f64::consts::PI * i as f64 / SIDES as f64;
             ring.push(Coord {

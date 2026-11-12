@@ -679,8 +679,13 @@ fn wall_census() {
                     failed = true;
                     break;
                 };
-                let piece = geo::Simplify::simplify(&super::super::tolerant::polygons(&section), 0.005);
-                material = if material.0.is_empty() { piece } else { geo::BooleanOps::union(&material, &piece) };
+                let piece =
+                    geo::Simplify::simplify(&super::super::tolerant::polygons(&section), 0.005);
+                material = if material.0.is_empty() {
+                    piece
+                } else {
+                    geo::BooleanOps::union(&material, &piece)
+                };
             }
             if failed {
                 z += step;
@@ -688,7 +693,8 @@ fn wall_census() {
             }
             if models.len() > 1 {
                 // As the tolerant path fuses touching solids.
-                let admit = |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
+                let admit =
+                    |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
                 let grown = region::offset_admitted(&material, 0.0025, admit, &cancel).unwrap();
                 material = region::offset_admitted(&grown, -0.0025, admit, &cancel).unwrap();
             }

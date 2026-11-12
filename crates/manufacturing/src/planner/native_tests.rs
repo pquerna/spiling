@@ -1198,12 +1198,17 @@ fn blocked_native_component_is_not_certified_by_nearby_valid_support_column() {
         BOX,
         &[translated(0.0, 0.0, 10.0), translated(30.0, 0.0, 10.0)],
     );
-    let error = compile(scene.input(&intent(true)), &AtomicBool::new(false)).unwrap_err();
-    assert_eq!(
-        error.code,
-        ManufacturingErrorCode::UnsupportedGeometry,
-        "{error}"
+    // A valid column under one box never certifies the blocked one: with
+    // supports build-plate-only, the blocked box prints and is reported.
+    let bundle = compile(scene.input(&intent(true)), &AtomicBool::new(false)).unwrap();
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
     );
+    assert!(bundle.verification.verified);
 }
 
 #[test]
@@ -2927,15 +2932,17 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
             );
         }
         install_image(&mut scene, false, 2, 16, &blocked_pixels, parameters);
-        let blocked = compile(scene.input(&enabled), &cancel).unwrap_err();
+        // Supports are build-plate-only: with every corridor blocked by the
+        // part, the growth prints as authored and its span is reported.
+        let blocked = compile(scene.input(&enabled), &cancel).unwrap();
         assert!(
-            matches!(
-                blocked.code,
-                ManufacturingErrorCode::UnsupportedGeometry
-                    | ManufacturingErrorCode::NativeAnalysisIndeterminate
-            ),
-            "{blocked:?}"
+            blocked
+                .plan
+                .layers
+                .iter()
+                .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
         );
+        assert!(blocked.verification.verified);
     }
 }
 

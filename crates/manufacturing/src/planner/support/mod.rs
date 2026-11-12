@@ -1186,6 +1186,7 @@ pub(super) fn realize(
             else {
                 return Err(unreachable_layer_error(layers, demand, z_gap_mm)?);
             };
+            let previous_top = contact_tops[demand.target];
             contact_tops[demand.target] = Some(top);
             let interface_bottom = layers[top].z_mm - interface_thickness_mm;
             // Realized object D supplies a conservative support candidate only
@@ -1417,7 +1418,15 @@ pub(super) fn realize(
                         failure: unresolved,
                     });
                 }
-                return Err(unresolved);
+                // The part blocks every column from the bed (an overhang over
+                // its own floor). Support resting on the part is not built
+                // yet; print the overhang as authored and report it.
+                drop(unresolved);
+                contact_tops[demand.target] = previous_top;
+                let coverage = &mut layers[demand.target].region_coverage;
+                coverage.unsupported_overhang_mm =
+                    coverage.unsupported_overhang_mm.max(demand.failure.span);
+                continue;
             }
             region::canonicalize(&mut column.material);
             column.bytes = super::native::material_bytes(&mut column.material);
@@ -1645,13 +1654,20 @@ pub(super) fn realize(
             *segments += path_segments(&paths);
             anchors.set_budget(0);
             domains.set_anchor_owned_bytes(anchors.retained_bytes());
-            layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
             layer.region_coverage.support_nominal_deposition_volume_mm3 =
                 paths.iter().try_fold(0.0, |sum, path| {
                     Ok::<_, ManufacturingError>(
                         sum + region::nominal_volume(path, layer.index, recipe)?,
                     )
                 })?;
+            // Support area describes support actually deposited: a region the
+            // raster could not stroke deposits nothing and claims no area.
+            layer.region_coverage.support_area_mm2 =
+                if layer.region_coverage.support_nominal_deposition_volume_mm3 == 0.0 {
+                    0.0
+                } else {
+                    support_regions[i].unsigned_area()
+                };
             object_start[i] = paths.len();
             let live_bytes = domains
                 .owned_bytes()
@@ -1981,47 +1997,13 @@ pub(super) fn realize(
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
+            // Build plate only: a stroke no support could reach still prints
+            // as authored and is reported, never refused.
             if let Some(failure) = admission.failure {
-                let path = &layer.paths[begin + failure.path];
-                let a = path.points_mm[failure.first];
-                let b = path.points_mm[failure.last];
-                let t = (failure.start + failure.end) * 0.5;
-                let point = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-                let nearest_contact = nearest_stroke(
-                    point,
-                    contact_paths.iter().filter(|path| support_role(path.kind)),
-                    &mut work,
-                    foreign_work,
-                    cancel,
-                )?;
-                let nearest_object = nearest_stroke(
-                    point,
-                    prior[index - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| !support_role(path.kind)),
-                    &mut work,
-                    foreign_work,
-                    cancel,
-                )?;
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    format!(
-                        "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, physical {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
-                        layer.z_mm,
-                        recipe.rectilinear_axis,
-                        path.kind,
-                        path.physical_z_mm,
-                        a,
-                        b,
-                        failure.start,
-                        failure.end,
-                        failure.span,
-                        contact_tops[index],
-                        nearest_contact,
-                        nearest_object,
-                    ),
-                ));
+                layer.region_coverage.unsupported_overhang_mm = layer
+                    .region_coverage
+                    .unsupported_overhang_mm
+                    .max(failure.span);
             }
             for path in admission.bridges {
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
@@ -2066,8 +2048,12 @@ pub(super) fn realize(
                     );
                 }
             }
+            // No support was emitted under this layer after all: there is no
+            // contact gap to prove, and its strokes are reported unsupported.
+            if !support_top.is_finite() {
+                continue;
+            }
             if !object_bottom.is_finite()
-                || !support_top.is_finite()
                 || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)?
                     < z_gap_mm
             {

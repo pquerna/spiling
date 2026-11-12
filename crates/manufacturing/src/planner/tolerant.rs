@@ -149,7 +149,8 @@ pub(super) fn collect_span(
         // closing by half the profile tolerance fuses them and moves nothing
         // farther than that.
         let fuse = 0.5 * super::OFFSET_TOLERANCE_MM;
-        let admit = |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
+        let admit =
+            |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
         let grown = region::offset_admitted(&material, fuse, admit, cancel)?;
         material = region::offset_admitted(&grown, -fuse, admit, cancel)?;
     }
