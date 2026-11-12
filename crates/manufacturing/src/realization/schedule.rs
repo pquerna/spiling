@@ -132,6 +132,17 @@ pub(super) fn apply(
             });
         }
     }
+    if routed.is_none()
+        && let Some(path) = std::env::var_os("SPILING_ROUTING_DUMP")
+    {
+        dump(
+            std::path::Path::new(&path),
+            &machine,
+            &tasks,
+            (count as u64).saturating_mul(WORK_PER_PATH),
+        );
+    }
+    let started = std::time::Instant::now();
     let scheduled = routing::schedule(
         &tasks,
         &machine,
@@ -142,6 +153,18 @@ pub(super) fn apply(
         cancel,
     );
     drop(tasks);
+    // Research instrumentation (autoresearch routing track only).
+    if std::env::var_os("SPILING_ROUTING_STATS").is_some()
+        && let Ok(scheduled) = &scheduled
+    {
+        eprintln!(
+            "{{\"event\":\"routing_stats\",\"tasks\":{count},\"route_s\":{},\"travel_mm\":{},\"travel_s\":{},\"work\":{}}}",
+            started.elapsed().as_secs_f64(),
+            scheduled.cost.travel_mm,
+            scheduled.cost.travel_s,
+            scheduled.work,
+        );
+    }
     let scheduled = match scheduled {
         Ok(scheduled) => scheduled,
         Err(routing::Error::Cancelled) => return check_cancel(cancel),
@@ -299,4 +322,76 @@ fn attachment_dependencies(
         edges.dedup();
     }
     Ok(graph)
+}
+
+/// Research instrumentation (autoresearch routing track only): single-tool
+/// scheduler inputs for the offline `route_replay` example.
+fn dump(
+    path: &std::path::Path,
+    machine: &routing::Machine,
+    tasks: &[routing::Task<'_>],
+    budget: u64,
+) {
+    let mut b: Vec<u8> = b"SPRD1".to_vec();
+    let f = |b: &mut Vec<u8>, v: f64| b.extend_from_slice(&v.to_le_bytes());
+    let u = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
+    b.push(u8::from(machine.start.is_some()));
+    for v in machine.start.unwrap_or_default() {
+        f(&mut b, v);
+    }
+    f(&mut b, machine.travel.speed_mm_s);
+    f(&mut b, machine.travel.lift_mm);
+    b.push(u8::from(machine.travel.retraction.is_some()));
+    let r = machine.travel.retraction.unwrap_or(routing::Retraction {
+        minimum_mm: 0.,
+        seconds: 0.,
+        lift_mm: 0.,
+    });
+    f(&mut b, r.minimum_mm);
+    f(&mut b, r.seconds);
+    f(&mut b, r.lift_mm);
+    b.extend_from_slice(&budget.to_le_bytes());
+    u(&mut b, tasks.len() as u32);
+    for t in tasks {
+        match t.ends {
+            routing::Ends::Open {
+                first,
+                last,
+                reversible,
+            } => {
+                b.push(0);
+                for v in first.into_iter().chain(last) {
+                    f(&mut b, v);
+                }
+                b.push(u8::from(reversible));
+            }
+            routing::Ends::Loop { seams } => {
+                b.push(1);
+                u(&mut b, seams.len() as u32);
+                for v in seams.iter().flatten() {
+                    f(&mut b, *v);
+                }
+            }
+        }
+        u(&mut b, t.tool);
+        u(&mut b, t.barrier);
+        u(&mut b, t.prerequisites.len() as u32);
+        for q in t.prerequisites {
+            u(&mut b, *q);
+        }
+        f(&mut b, t.duration_s);
+        match t.seam_policy {
+            None => b.push(0),
+            Some(SeamPolicy::Nearest) => b.push(1),
+            Some(SeamPolicy::PreferredBuildDirection { xy }) => {
+                b.push(2);
+                f(&mut b, xy[0]);
+                f(&mut b, xy[1]);
+            }
+            Some(SeamPolicy::Distributed) => b.push(3),
+        }
+        f(&mut b, t.physical_z_mm[0]);
+        f(&mut b, t.physical_z_mm[1]);
+    }
+    let _ = std::fs::write(path, b);
 }
