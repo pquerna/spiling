@@ -6,7 +6,7 @@ manufactured beyond declared tolerances or weakening any proof/verification. Wor
 uncapped (ADR009); slowness is fixed by algorithms, memoization, parallelism and CubeCL screening.
 
 ## Metrics
-- Primary: `total_s` (sum of per-part compile seconds over the benchmark set), lower is better.
+- Primary: `total_s` (sum of per-part engine+CLI CPU seconds via wait4 rusage; robust to concurrent benchmark sets over the benchmark set), lower is better.
 - Secondary: `max_s` (slowest part), `ok` (parts compiling; must not drop).
 Parts run concurrently, one engine each; the planner is single-threaded today, so per-part time is a
 CPU-work proxy. Parallelism ideas are judged on per-part wall time with the set still concurrent.
