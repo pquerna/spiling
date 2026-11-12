@@ -61,6 +61,9 @@ impl ReplayEntry {
 pub(super) struct SupportReplay {
     schedule: Vec<[u64; 4]>,
     entries: Vec<ReplayEntry>,
+    /// Demand corridor after occupied-section clipping, by target layer:
+    /// demanded path, contact top and the clipped column.
+    columns: std::collections::BTreeMap<usize, (usize, usize, MultiPolygon<f64>)>,
     bytes: usize,
 }
 
@@ -629,6 +632,8 @@ pub(super) fn realize(
         SupportReplay::default()
     };
     let mut replay_new = None;
+    let mut columns_new = std::collections::BTreeMap::new();
+    let mut columns_bytes = 0usize;
     let exhausted_layers = &work_bank.exhausted;
     let outcome = (|| {
         let SupportInput {
@@ -647,6 +652,7 @@ pub(super) fn realize(
         };
         native_owned_bytes = native_owned_bytes.saturating_add(replay_old.bytes);
         let mut replay_entries = replay_old.entries.into_iter();
+        let column_replay = replay_old.columns;
         let mut recorded: Vec<ReplayEntry> = Vec::new();
         let mut recorded_bytes = 0usize;
         let mut recording = replaying;
@@ -1139,6 +1145,9 @@ pub(super) fn realize(
             }
         }
         drop(replay_entries);
+        // Layers below this index equal the recorded pass's after admission.
+        let column_valid = replay_limit.min(layers.len());
+        let mut recording_columns = recording;
         if std::env::var_os("SPILING_PASS_TRACE").is_some() {
             eprintln!("REPLAY layers={} replayed={}", layers.len(), replay_limit.min(layers.len()));
         }
@@ -1150,6 +1159,7 @@ pub(super) fn realize(
             replay_new = Some(SupportReplay {
                 schedule: schedule.iter().map(elevation_bits).collect(),
                 entries: recorded,
+                columns: Default::default(),
                 bytes,
             });
         }
@@ -1438,126 +1448,161 @@ pub(super) fn realize(
             // AFTER actual deposited strokes prove demand; it is never an anchor map.
             // The half-bead search expansion permits a real support bead under an
             // outer edge; subsequent C/nominal-D clipping and actual proofs own it.
-            let demanded_section = &sections[span_at(sections, demand.target as u32)];
-            let candidate = &demanded_section.material;
-            remaining_geometry_budget(
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected],
-            )?;
-            charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
-            // Beveled corners bound this placement search without constructing a
-            // fine round-disk Minkowski sum. Search geometry is never occupied C.
-            let mut column = OwnedMaterial::new(
-                candidate
-                    .buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel)),
-            );
-            check_cancel(cancel)?;
-            region::check_size(&column)?;
-            let mut proximity = index_column(
-                &column,
-                retained,
-                owned_bytes,
-                &support_regions,
-                &interfaces,
-                &[&protected, &column],
-            )?;
-            // Certify a fixed-XY corridor all the way to the bed before publishing.
-            // Top-down publication before lower clipping leaves floating components.
-            for section in &sections[..=span_at(sections, top as u32)] {
-                if column.0.is_empty() {
-                    break;
-                }
-                // Independent certified outer operands may overlap. Even-odd
-                // normalization would erase their overlap; the staged pieces are
-                // instead offset together, whose positive-winding convolution is
-                // their union, and that union is subtracted once per section.
-                let mut batch = PieceBatch::default();
-                // Bounds-only rejection before a piece is constructed. It makes
-                // exactly the per-piece decisions below with a distance bound.
-                let screen = std::cell::Cell::new(ColumnScreen::new(&column, xy_clearance_mm)?);
-                let scanned = std::cell::Cell::new(0usize);
-                let bed = layers[0].lower_z_mm;
-                let top_z = layers[top].z_mm;
-                let screen_piece = |bounds: [[f64; 2]; 2], height: Option<[f64; 2]>| {
-                    check_cancel(cancel)?;
-                    scanned.set(scanned.get().saturating_add(1));
-                    if let Some([lower, upper]) = height
-                        && (lower > top_z || upper < bed)
-                    {
-                        return Ok(false);
-                    }
-                    Ok(!screen.get().is_some_and(|screen| screen.rejects(bounds)))
-                };
-                let visited = section.visit_occupied_screened(cancel, screen_piece, |occupied, height| {
-                    check_cancel(cancel)?;
-                    if column.0.is_empty() {
-                        return Ok(false);
-                    }
-                    if let Some([lower, upper]) = height
-                        && (lower > top_z || upper < bed)
-                    {
-                        return Ok(true);
-                    }
-                    super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
-                    let Some(distance) =
-                        candidate_clearance_distance(occupied, &column, xy_clearance_mm)?
-                    else {
-                        return Ok(true);
-                    };
-                    if proximity.separated(occupied, separation_reach(distance)) {
-                        return Ok(true);
-                    }
-                    batch.stage(
-                        occupied,
-                        retained,
-                        owned_bytes.saturating_add(proximity.bytes()),
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                    )?;
-                    if batch.points >= PieceBatch::FLUSH_POINTS {
-                        subtract_batch(
-                            &mut batch,
-                            &mut column,
-                            &mut proximity,
-                            xy_clearance_mm,
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &protected,
-                            &mut work,
-                            foreign_work,
-                            cancel,
-                        )?;
-                        screen.set(ColumnScreen::new(&column, xy_clearance_mm)?);
-                    }
-                    Ok(!column.0.is_empty())
-                });
-                work = work.checked_add(scanned.get()).ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative continuous occupied scope work counter overflow",
-                    )
-                })?;
-                visited?;
-                subtract_batch(
-                    &mut batch,
-                    &mut column,
-                    &mut proximity,
-                    xy_clearance_mm,
+            // A replayed demand's layer and every section below it are bit-identical
+            // to the recorded pass, so its corridor clipped by all occupied sections
+            // is too; protected voids are still applied below.
+            let replayed_column = column_replay
+                .get(&demand.target)
+                .filter(|(path, recorded_top, _)| {
+                    demand.target < column_valid
+                        && *path == demand.failure.path
+                        && *recorded_top == top
+                })
+                .map(|(_, _, material)| material.clone());
+            let mut column = if let Some(material) = replayed_column {
+                OwnedMaterial::new(material)
+            } else {
+                let demanded_section = &sections[span_at(sections, demand.target as u32)];
+                let candidate = &demanded_section.material;
+                remaining_geometry_budget(
                     retained,
                     owned_bytes,
                     &support_regions,
                     &interfaces,
-                    &protected,
-                    &mut work,
-                    foreign_work,
-                    cancel,
+                    &[&protected],
                 )?;
+                charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
+                // Beveled corners bound this placement search without constructing a
+                // fine round-disk Minkowski sum. Search geometry is never occupied C.
+                let mut column = OwnedMaterial::new(
+                    candidate
+                        .buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel)),
+                );
+                check_cancel(cancel)?;
+                region::check_size(&column)?;
+                let mut proximity = index_column(
+                    &column,
+                    retained,
+                    owned_bytes,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column],
+                )?;
+                // Certify a fixed-XY corridor all the way to the bed before publishing.
+                // Top-down publication before lower clipping leaves floating components.
+                for section in &sections[..=span_at(sections, top as u32)] {
+                    if column.0.is_empty() {
+                        break;
+                    }
+                    // Independent certified outer operands may overlap. Even-odd
+                    // normalization would erase their overlap; the staged pieces are
+                    // instead offset together, whose positive-winding convolution is
+                    // their union, and that union is subtracted once per section.
+                    let mut batch = PieceBatch::default();
+                    // Bounds-only rejection before a piece is constructed. It makes
+                    // exactly the per-piece decisions below with a distance bound.
+                    let screen = std::cell::Cell::new(ColumnScreen::new(&column, xy_clearance_mm)?);
+                    let scanned = std::cell::Cell::new(0usize);
+                    let bed = layers[0].lower_z_mm;
+                    let top_z = layers[top].z_mm;
+                    let screen_piece = |bounds: [[f64; 2]; 2], height: Option<[f64; 2]>| {
+                        check_cancel(cancel)?;
+                        scanned.set(scanned.get().saturating_add(1));
+                        if let Some([lower, upper]) = height
+                            && (lower > top_z || upper < bed)
+                        {
+                            return Ok(false);
+                        }
+                        Ok(!screen.get().is_some_and(|screen| screen.rejects(bounds)))
+                    };
+                    let visited = section.visit_occupied_screened(cancel, screen_piece, |occupied, height| {
+                        check_cancel(cancel)?;
+                        if column.0.is_empty() {
+                            return Ok(false);
+                        }
+                        if let Some([lower, upper]) = height
+                            && (lower > top_z || upper < bed)
+                        {
+                            return Ok(true);
+                        }
+                        super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
+                        let Some(distance) =
+                            candidate_clearance_distance(occupied, &column, xy_clearance_mm)?
+                        else {
+                            return Ok(true);
+                        };
+                        if proximity.separated(occupied, separation_reach(distance)) {
+                            return Ok(true);
+                        }
+                        batch.stage(
+                            occupied,
+                            retained,
+                            owned_bytes.saturating_add(proximity.bytes()),
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column],
+                        )?;
+                        if batch.points >= PieceBatch::FLUSH_POINTS {
+                            subtract_batch(
+                                &mut batch,
+                                &mut column,
+                                &mut proximity,
+                                xy_clearance_mm,
+                                retained,
+                                owned_bytes,
+                                &support_regions,
+                                &interfaces,
+                                &protected,
+                                &mut work,
+                                foreign_work,
+                                cancel,
+                            )?;
+                            screen.set(ColumnScreen::new(&column, xy_clearance_mm)?);
+                        }
+                        Ok(!column.0.is_empty())
+                    });
+                    work = work.checked_add(scanned.get()).ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "cumulative continuous occupied scope work counter overflow",
+                        )
+                    })?;
+                    visited?;
+                    subtract_batch(
+                        &mut batch,
+                        &mut column,
+                        &mut proximity,
+                        xy_clearance_mm,
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &protected,
+                        &mut work,
+                        foreign_work,
+                        cancel,
+                    )?;
+                }
+                column
+            };
+            if recording_columns {
+                let bytes = column.bytes.saturating_add(std::mem::size_of::<(usize, usize, MultiPolygon<f64>)>());
+                if super::remaining_geometry_units(
+                    retained,
+                    owned_bytes.saturating_add(columns_bytes).saturating_add(bytes),
+                )
+                .is_ok()
+                {
+                    columns_bytes += bytes;
+                    columns_new.insert(
+                        demand.target,
+                        (demand.failure.path, top, column.material.clone()),
+                    );
+                } else {
+                    recording_columns = false;
+                    columns_new.clear();
+                    columns_bytes = 0;
+                }
             }
             // A complete pass may also hold voids claimed only by higher
             // demands. Each would be skipped there iff it cannot reach this
@@ -2382,7 +2427,9 @@ pub(super) fn realize(
         )?;
         Ok(SupportAdmission::Complete)
     })();
-    if let Some(replay) = replay_new {
+    if let Some(mut replay) = replay_new {
+        replay.columns = columns_new;
+        replay.bytes = replay.bytes.saturating_add(columns_bytes);
         work_bank.replay = replay;
     }
     work_bank.finish(work, foreign_work, anchor_work)?;
