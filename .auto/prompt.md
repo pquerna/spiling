@@ -39,3 +39,11 @@ Never `cargo fmt --all`.
 
 ## What's Been Tried
 (see log.jsonl; summarize wins/dead ends here as they happen)
+- Routing (autoresearch/routing): search-local sqrt pricing, coordinate-major vectorizable insertion and
+  reversal scans, and second-price skipping (prices are non-negative + monotone rounding) took paired
+  routing CPU 209.6 s -> 18.2 s (1.3% of compile) with bit-identical decisions to sqrt pricing. Route quality:
+  the search is chaotic on big layers (per-layer travel swings +-25% from ulp changes), so compare travel over
+  shuffled-input seeds (`ROUTE_SEED` in examples/route_replay.rs on SPILING_ROUTING_DUMP inputs), not one run.
+  Dead ends: k-nearest neighbour lists for Or-opt (k=10..24) lose 1.6-3.3% travel because exhaustive
+  insertion finds long-jump repairs; neighbour-limited 2-opt alone is -0.2%; squared-distance prefilter
+  (no sqrt pass) is slower than the amortized sqrt pass; snapshot restore after kicks ~3-5% of routing only.
