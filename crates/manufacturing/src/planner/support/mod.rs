@@ -21,6 +21,7 @@ pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
+mod proximity;
 mod raster;
 
 struct Demand {
@@ -1216,7 +1217,8 @@ pub(super) fn realize(
             );
             check_cancel(cancel)?;
             region::check_size(&column)?;
-            remaining_geometry_budget(
+            let mut proximity = index_column(
+                &column,
                 retained,
                 owned_bytes,
                 &support_regions,
@@ -1258,6 +1260,10 @@ pub(super) fn realize(
                     else {
                         return Ok(true);
                     };
+                    if proximity.separated(occupied, separation_reach(distance)) {
+                        return Ok(true);
+                    }
+                    let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
                     let clearance = OwnedMaterial::new(offset_polygon_owned(
                         occupied,
                         distance,
@@ -1292,6 +1298,15 @@ pub(super) fn realize(
                         &support_regions,
                         &interfaces,
                         &[&protected, &column, &clearance],
+                    )?;
+                    drop(clearance);
+                    proximity = index_column(
+                        &column,
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column],
                     )?;
                     Ok(!column.0.is_empty())
                 })?;
@@ -1446,6 +1461,14 @@ pub(super) fn realize(
                 &[&protected, &column],
             )?;
             let mut column = column.into_shared();
+            let mut proximity = index_column(
+                &column,
+                retained,
+                owned_bytes,
+                &support_regions,
+                &interfaces,
+                &[&protected, &column],
+            )?;
             let mut shared_union = None;
             let mut next_nominal = 0;
             // A weak source can outlive its last strong geometry owner. Reserve
@@ -1479,6 +1502,10 @@ pub(super) fn realize(
                         else {
                             continue;
                         };
+                        if proximity.separated(polygon, separation_reach(distance)) {
+                            continue;
+                        }
+                        let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
                         let clearance = OwnedMaterial::new(offset_polygon_owned(
                             polygon,
                             distance,
@@ -1519,6 +1546,15 @@ pub(super) fn realize(
                         )?;
                         column = next.into_shared();
                         shared_union = None;
+                        drop(clearance);
+                        proximity = index_column(
+                            &column,
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column],
+                        )?;
                     }
                     next_nominal += 1;
                 }
@@ -3076,6 +3112,32 @@ fn remaining_geometry_budget(
         native.saturating_add(units),
         owned_bytes.saturating_add(bytes),
     )
+}
+
+/// A clearance offset reaches at most its circumscribed disk plus overlay
+/// padding beyond `distance`; twice the offset tolerance encloses both.
+fn separation_reach(distance: f64) -> f64 {
+    (distance + 2.0 * super::OFFSET_TOLERANCE_MM).next_up()
+}
+
+/// Admit the transient column edge index alongside the live owners it serves.
+fn index_column(
+    column: &MultiPolygon<f64>,
+    retained: usize,
+    owned_bytes: usize,
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
+    temporary: &[&OwnedMaterial],
+) -> Result<proximity::ColumnProximity, ManufacturingError> {
+    let estimate = proximity::ColumnProximity::bytes_for(column);
+    remaining_geometry_budget(
+        retained,
+        owned_bytes.saturating_add(estimate),
+        support,
+        interfaces,
+        temporary,
+    )?;
+    Ok(proximity::ColumnProximity::new(column))
 }
 
 fn candidate_clearance_distance(
