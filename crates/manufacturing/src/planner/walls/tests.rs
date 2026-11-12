@@ -620,6 +620,7 @@ fn wall_census() {
         .collect();
     files.sort();
     let (mut total, mut passed) = (0usize, 0usize);
+    let mut planning_total = 0.0f64;
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if only
@@ -666,6 +667,7 @@ fn wall_census() {
         );
         let (min, max) = bounds;
         let (mut part_total, mut part_passed) = (0usize, 0usize);
+        let mut part_planning = 0.0f64;
         let started = std::time::Instant::now();
         // Sample at most 60 layers evenly so one tall part cannot dominate.
         let layers = ((max[2] - min[2]) / 0.2).floor().max(1.0);
@@ -705,6 +707,7 @@ fn wall_census() {
             }
             part_total += 1;
             let required = region::RequiredMaterial::from_section(&material);
+            let planning = std::time::Instant::now();
             let result = plan_section_walls(
                 WallRequest {
                     material: &material,
@@ -721,6 +724,7 @@ fn wall_census() {
                 &mut 0,
                 &cancel,
             );
+            part_planning += planning.elapsed().as_secs_f64();
             match result {
                 Ok(_) => part_passed += 1,
                 Err(e) => {
@@ -750,13 +754,14 @@ fn wall_census() {
             z += step;
         }
         println!(
-            "PART {name}: {part_passed}/{part_total} layers in {:.1} s",
+            "PART {name}: {part_passed}/{part_total} layers in {:.1} s (walls {part_planning:.2} s)",
             started.elapsed().as_secs_f64()
         );
+        planning_total += part_planning;
         total += part_total;
         passed += part_passed;
     }
-    println!("\nALL: {passed}/{total} layers pass");
+    println!("\nALL: {passed}/{total} layers pass, walls {planning_total:.2} s");
     let mut sorted: Vec<_> = gates.into_iter().collect();
     sorted.sort_by_key(|a| std::cmp::Reverse(a.1.0));
     for (gate, (count, examples)) in sorted {
