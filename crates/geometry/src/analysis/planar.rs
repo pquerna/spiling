@@ -227,6 +227,28 @@ pub fn certify_planar_capsule_pair_clearance(
     }
     let [a, b] = capsules[0].segment_xy_mm;
     let [c, d] = capsules[1].segment_xy_mm;
+    // An outward enclosed axis gap between the segments' bounds lower-bounds
+    // their distance; when it already meets the requirement, it is the proof.
+    let axis_gap = (0..2)
+        .flat_map(|axis| {
+            [
+                Interval::point(c[axis].min(d[axis]))
+                    .sub(Interval::point(a[axis].max(b[axis])))
+                    .lo,
+                Interval::point(a[axis].min(b[axis]))
+                    .sub(Interval::point(c[axis].max(d[axis])))
+                    .lo,
+            ]
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    if axis_gap > 0.0 && axis_gap >= required.hi {
+        let gap = Interval::point(axis_gap).sub(reserve).lo;
+        if gap >= required_gap_mm {
+            return Ok(PlanarCapsuleClearance {
+                minimum_gap_mm: Some(gap),
+            });
+        }
+    }
     let lower = segment_distance_lower(a, b, c, d)?;
     let gap = Interval::point(lower).sub(reserve).lo;
     if lower < required.hi || gap < required_gap_mm {
@@ -635,6 +657,44 @@ mod tests {
                 .code,
             GeometryErrorCode::AnalysisIndeterminate
         );
+    }
+    #[test]
+    fn capsule_pair_bounds_gap_accepts_only_what_the_distance_proof_accepts() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        let base = [[0.0, 0.0], [2.0, 1.0]];
+        for i in -30..=30 {
+            for j in -30..=30 {
+                let o = [f64::from(i) * 0.11, f64::from(j) * 0.07];
+                for d in [[0.0, 0.0], [1.0, 0.0], [0.3, -0.8], [-1.5, 1.5]] {
+                    let other = [o, [o[0] + d[0], o[1] + d[1]]];
+                    let capsules = [
+                        PlanarCapsuleMm { segment_xy_mm: base, radius_mm: 0.2, endpoint_error_mm: 1e-6 },
+                        PlanarCapsuleMm { segment_xy_mm: other, radius_mm: 0.25, endpoint_error_mm: 2e-6 },
+                    ];
+                    let reserve = Interval::point(0.2)
+                        .add(Interval::point(0.25))
+                        .add(Interval::point(1e-6))
+                        .add(Interval::point(2e-6));
+                    let required = reserve.add(Interval::point(0.15));
+                    let lower = segment_distance_lower(base[0], base[1], other[0], other[1]).unwrap();
+                    let reference = lower >= required.hi
+                        && Interval::point(lower).sub(reserve).lo >= 0.15;
+                    let result =
+                        certify_planar_capsule_pair_clearance(capsules, 0.15, &mut work, &cancel);
+                    if result.is_ok() {
+                        // The bounds gap is itself a lower bound of the distance.
+                        let gap = result.unwrap().minimum_gap_mm().unwrap();
+                        assert!(gap >= 0.15 && gap <= Interval::point(lower).sub(reserve).hi + 1e-9);
+                        if !reference {
+                            panic!("bounds path accepted beyond the distance proof: {other:?}");
+                        }
+                    } else {
+                        assert!(!reference, "{other:?}");
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn crossing_capsules_are_not_separated_by_distant_endpoints() {
