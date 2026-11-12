@@ -1231,6 +1231,11 @@ pub(super) fn realize(
                 if column.0.is_empty() {
                     break;
                 }
+                // Independent certified outer operands may overlap. Even-odd
+                // normalization would erase their overlap; the staged pieces are
+                // instead offset together, whose positive-winding convolution is
+                // their union, and that union is subtracted once per section.
+                let mut batch = PieceBatch::default();
                 section.visit_occupied(cancel, |occupied, height| {
                     check_cancel(cancel)?;
                     if column.0.is_empty() {
@@ -1251,9 +1256,6 @@ pub(super) fn realize(
                             return Ok(true);
                         }
                     }
-                    // Independent certified outer operands may overlap. A single
-                    // even-odd normalization would erase their overlap; subtract
-                    // each expanded operand instead, borrowing its original rings.
                     super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
                     let Some(distance) =
                         candidate_clearance_distance(occupied, &column, xy_clearance_mm)?
@@ -1263,53 +1265,46 @@ pub(super) fn realize(
                     if proximity.separated(occupied, separation_reach(distance)) {
                         return Ok(true);
                     }
-                    let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
-                    let clearance = OwnedMaterial::new(offset_polygon_owned(
+                    batch.stage(
                         occupied,
-                        distance,
                         retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                        cancel,
-                    )?);
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance],
-                    )?;
-                    charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)?;
-                    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance, &next],
-                    )?;
-                    column = next;
-                    region::check_size(&column)?;
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance],
-                    )?;
-                    drop(clearance);
-                    proximity = index_column(
-                        &column,
-                        retained,
-                        owned_bytes,
+                        owned_bytes.saturating_add(proximity.bytes()),
                         &support_regions,
                         &interfaces,
                         &[&protected, &column],
                     )?;
+                    if batch.points >= PieceBatch::FLUSH_POINTS {
+                        subtract_batch(
+                            &mut batch,
+                            &mut column,
+                            &mut proximity,
+                            xy_clearance_mm,
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &protected,
+                            &mut work,
+                            foreign_work,
+                            cancel,
+                        )?;
+                    }
                     Ok(!column.0.is_empty())
                 })?;
+                subtract_batch(
+                    &mut batch,
+                    &mut column,
+                    &mut proximity,
+                    xy_clearance_mm,
+                    retained,
+                    owned_bytes,
+                    &support_regions,
+                    &interfaces,
+                    &protected,
+                    &mut work,
+                    foreign_work,
+                    cancel,
+                )?;
             }
             for (mask, scope) in protected.0.iter().zip(&scopes) {
                 if column.0.is_empty() {
@@ -3036,6 +3031,40 @@ fn offset_polygon_owned(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Offset admission inventories shared support, interfaces and temporary material without retaining them"
+)]
+fn offset_owned(
+    region: &MultiPolygon<f64>,
+    distance: f64,
+    retained: usize,
+    owned_bytes: usize,
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
+    temporary: &[&OwnedMaterial],
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    let (units, bytes) = geometry_receipt(support, interfaces, temporary);
+    region::offset_admitted(
+        region,
+        distance,
+        |scratch, scratch_bytes, overlay| {
+            super::remaining_geometry_units(
+                retained.saturating_add(units).saturating_add(scratch),
+                owned_bytes
+                    .saturating_add(bytes)
+                    .saturating_add(scratch_bytes),
+            )?;
+            if let Some((a, b)) = overlay {
+                boolean_budget(a, b, cancel)?;
+            }
+            Ok(())
+        },
+        cancel,
+    )
+}
+
 fn vec_bytes<T>(values: &Vec<T>) -> usize {
     values.capacity().saturating_mul(std::mem::size_of::<T>())
 }
@@ -3114,6 +3143,228 @@ fn remaining_geometry_budget(
     )
 }
 
+/// Exclusion pieces staged against one column for a single union subtraction.
+struct PieceBatch {
+    pieces: MultiPolygon<f64>,
+    frame: Option<[[f64; 2]; 2]>,
+    points: usize,
+    bytes: usize,
+}
+
+impl Default for PieceBatch {
+    fn default() -> Self {
+        Self {
+            pieces: MultiPolygon(Vec::new()),
+            frame: None,
+            points: 0,
+            bytes: 0,
+        }
+    }
+}
+
+impl PieceBatch {
+    /// Flush granularity bounds the staged copy, not total work.
+    const FLUSH_POINTS: usize = 1 << 14;
+
+    fn stage(
+        &mut self,
+        piece: &Polygon<f64>,
+        retained: usize,
+        owned_bytes: usize,
+        support: &[Rc<OwnedMaterial>],
+        interfaces: &[Rc<OwnedMaterial>],
+        temporary: &[&OwnedMaterial],
+    ) -> Result<(), ManufacturingError> {
+        let points = piece.exterior().0.len()
+            + piece.interiors().iter().map(|r| r.0.len()).sum::<usize>();
+        let bytes = std::mem::size_of::<Polygon<f64>>()
+            + piece.interiors().len() * std::mem::size_of::<geo::LineString<f64>>()
+            + points * std::mem::size_of::<geo::Coord<f64>>();
+        let records = (self.pieces.0.len() + 1)
+            .max(self.pieces.0.capacity())
+            .saturating_mul(2 * std::mem::size_of::<Polygon<f64>>());
+        remaining_geometry_budget(
+            retained.saturating_add(self.points).saturating_add(points),
+            owned_bytes
+                .saturating_add(self.bytes)
+                .saturating_add(bytes)
+                .saturating_add(records),
+            support,
+            interfaces,
+            temporary,
+        )?;
+        let b = piece.bounding_rect().ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "native outer operand has no finite bounds",
+            )
+        })?;
+        self.frame = Some(union_frame(
+            self.frame,
+            [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+        ));
+        self.pieces.0.push(piece.clone());
+        self.points += points;
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    fn owned_bytes(&self) -> usize {
+        self.bytes
+            .saturating_add(self.pieces.0.capacity() * std::mem::size_of::<Polygon<f64>>())
+    }
+}
+
+/// Positive-winding union of possibly overlapping pieces, each oriented with
+/// its material on the left; overlaps are never XOR-normalized.
+fn union_pieces(pieces: &MultiPolygon<f64>) -> MultiPolygon<f64> {
+    use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
+    use i_overlay::float::overlay::FloatOverlay;
+    let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
+    for polygon in &pieces.0 {
+        for (index, ring) in std::iter::once(polygon.exterior())
+            .chain(polygon.interiors())
+            .enumerate()
+        {
+            let mut points: Vec<[f64; 2]> = ring.0.iter().map(|c| [c.x, c.y]).collect();
+            if points.len() > 1 && points.first() == points.last() {
+                points.pop();
+            }
+            let twice_area: f64 = (0..points.len())
+                .map(|i| {
+                    let a = points[i];
+                    let b = points[(i + 1) % points.len()];
+                    a[0] * b[1] - b[0] * a[1]
+                })
+                .sum();
+            if (twice_area < 0.0) == (index == 0) {
+                points.reverse();
+            }
+            paths.push(points);
+        }
+    }
+    let shapes = FloatOverlay::with_subj(&paths).overlay(OverlayRule::Subject, FillRule::Positive);
+    MultiPolygon(
+        shapes
+            .into_iter()
+            .map(|shape| {
+                let mut rings = shape.into_iter().map(|ring| {
+                    let mut line =
+                        geo::LineString(ring.into_iter().map(geo::Coord::from).collect());
+                    line.close();
+                    line
+                });
+                Polygon::new(
+                    rings.next().unwrap_or(geo::LineString::empty()),
+                    rings.collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn union_frame(frame: Option<[[f64; 2]; 2]>, other: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+    match frame {
+        None => other,
+        Some(f) => [
+            [f[0][0].min(other[0][0]), f[0][1].min(other[0][1])],
+            [f[1][0].max(other[1][0]), f[1][1].max(other[1][1])],
+        ],
+    }
+}
+
+// Subtracting the union of staged clearances equals subtracting each in turn.
+// One distance from the batch frame united with the column frame is at least
+// every per-piece distance, so the batch removes a superset, never less.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Batch subtraction inventories shared support, interfaces and temporary material"
+)]
+fn subtract_batch(
+    batch: &mut PieceBatch,
+    column: &mut OwnedMaterial,
+    proximity: &mut proximity::ColumnProximity,
+    xy_clearance_mm: f64,
+    retained: usize,
+    owned_bytes: usize,
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
+    protected: &OwnedMaterial,
+    work: &mut usize,
+    foreign_work: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let staged = std::mem::take(batch);
+    let (Some(frame), Some(b)) = (staged.frame, column.bounding_rect()) else {
+        return Ok(());
+    };
+    let distance = clearance_distance_in_frame(
+        frame,
+        [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+        xy_clearance_mm,
+    )?;
+    let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
+    // Union the raw pieces first: (A ∪ B) ⊕ D = (A ⊕ D) ∪ (B ⊕ D), and stacked
+    // facet hulls then cross only their few own edges, not offset cycles.
+    let merged = if staged.pieces.0.len() > 1 {
+        let (units, bytes) = geometry_receipt(support, interfaces, &[protected, column]);
+        // Packed overlay input and output each hold at most twice the staged
+        // coordinates before the merged pieces replace the staged copy.
+        super::remaining_geometry_units(
+            retained.saturating_add(units).saturating_add(3 * staged.points),
+            owned_bytes
+                .saturating_add(bytes)
+                .saturating_add(3 * staged.owned_bytes()),
+        )?;
+        boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
+        let merged = union_pieces(&staged.pieces);
+        region::check_size(&merged)?;
+        merged
+    } else {
+        staged.pieces.clone()
+    };
+    let clearance = OwnedMaterial::new(offset_owned(
+        &merged,
+        distance,
+        retained.saturating_add(staged.points),
+        owned_bytes.saturating_add(staged.owned_bytes()),
+        support,
+        interfaces,
+        &[protected, column],
+        cancel,
+    )?);
+    drop(staged);
+    drop(merged);
+    remaining_geometry_budget(
+        retained,
+        owned_bytes,
+        support,
+        interfaces,
+        &[protected, column, &clearance],
+    )?;
+    charge_boolean(column, &clearance, work, foreign_work, cancel)?;
+    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
+    remaining_geometry_budget(
+        retained,
+        owned_bytes,
+        support,
+        interfaces,
+        &[protected, column, &clearance, &next],
+    )?;
+    *column = next;
+    region::check_size(column)?;
+    drop(clearance);
+    *proximity = index_column(
+        column,
+        retained,
+        owned_bytes,
+        support,
+        interfaces,
+        &[protected, column],
+    )?;
+    Ok(())
+}
+
 /// A clearance offset reaches at most its circumscribed disk plus overlay
 /// padding beyond `distance`; twice the offset tolerance encloses both.
 fn separation_reach(distance: f64) -> f64 {
@@ -3154,13 +3405,35 @@ fn candidate_clearance_distance(
     let Some(b) = column.bounding_rect() else {
         return Ok(None);
     };
+    let distance = clearance_distance_in_frame(
+        [[a.min().x, a.min().y], [a.max().x, a.max().y]],
+        [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+        requested,
+    )?;
+    // A disjoint outward expanded box cannot affect this candidate. Avoid
+    // offset/overlay work, while final raw-source capsule proof stays separate.
+    if (a.max().x + distance).next_up() < b.min().x
+        || (a.min().x - distance).next_down() > b.max().x
+        || (a.max().y + distance).next_up() < b.min().y
+        || (a.min().y - distance).next_down() > b.max().y
+    {
+        return Ok(None);
+    }
+    Ok(Some(distance))
+}
+
+fn clearance_distance_in_frame(
+    a: [[f64; 2]; 2],
+    b: [[f64; 2]; 2],
+    requested: f64,
+) -> Result<f64, ManufacturingError> {
     // Offset allowance and Boolean padding only propose a candidate work
     // frame. They do not prove raw-C containment after overlay. Final actual
     // XYZ6 support capsules have a separate shared geometry proof.
     let reserve = super::OFFSET_TOLERANCE_MM + 2.0f64.sqrt() * (super::LAYER_QUANTIZATION_MM * 0.5);
     let base = (requested + reserve).next_up();
-    let min = [a.min().x.min(b.min().x), a.min().y.min(b.min().y)];
-    let max = [a.max().x.max(b.max().x), a.max().y.max(b.max().y)];
+    let min = [a[0][0].min(b[0][0]), a[0][1].min(b[0][1])];
+    let max = [a[1][0].max(b[1][0]), a[1][1].max(b[1][1])];
     let padding = super::boolean::overlay_padding(
         min.map(|v| (v - base - super::OFFSET_TOLERANCE_MM).next_down()),
         max.map(|v| (v + base + super::OFFSET_TOLERANCE_MM).next_up()),
@@ -3177,16 +3450,7 @@ fn candidate_clearance_distance(
             "support exclusion candidate cannot admit its offset/overlay/XYZ6 work frame",
         ));
     }
-    // A disjoint outward expanded box cannot affect this candidate. Avoid
-    // offset/overlay work, while final raw-source capsule proof stays separate.
-    if (a.max().x + distance).next_up() < b.min().x
-        || (a.min().x - distance).next_down() > b.max().x
-        || (a.max().y + distance).next_up() < b.min().y
-        || (a.min().y - distance).next_down() > b.max().y
-    {
-        return Ok(None);
-    }
-    Ok(Some(distance))
+    Ok(distance)
 }
 
 #[cfg(test)]
