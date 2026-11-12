@@ -6,16 +6,15 @@
 use super::boolean_budget;
 use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
 use crate::{check_cancel, error};
-use geo::algorithm::convex_hull::quick_hull;
 use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::{
     Area, BooleanOps, BoundingRect, Contains, Coord, LineString, MultiPolygon, Point, Polygon,
-    unary_union,
 };
 use spiling_contracts::geometry::RigidPoseMm;
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+mod convolution;
 mod hatch;
 
 /// Borrowed mandatory coverage operand. Requested relief may contain fine
@@ -240,34 +239,13 @@ fn offset_polygons(
     if !distance.is_finite() {
         return Err(unsupported("offset distance is not finite"));
     }
-    let radius = distance.abs();
-    // A circumscribed disk reserves half the existing offset error budget for
-    // ordinary Boolean arithmetic. Fourfold symmetry retains cardinal supports.
-    let radial_error = OFFSET_TOLERANCE_MM * 0.5;
-    let angle = (radius / (radius + radial_error)).acos();
-    let required = (std::f64::consts::PI / angle).ceil();
-    if !required.is_finite() || required > 4096.0 {
-        return Err(resource("offset disk subdivision exceeds work limit"));
-    }
-    let sides = (required as usize).max(4).div_ceil(4) * 4;
-    let circumradius = radius / (std::f64::consts::PI / sides as f64).cos();
-    if !circumradius.is_finite() || circumradius - radius > radial_error {
-        return Err(resource("offset disk cannot meet the radial error budget"));
-    }
+    let sides = offset_disk_sides(distance.abs())?;
     offset_admit(admit, sides, coordinate_bytes(sides)?, None)?;
-    let disk = (0..sides)
-        .map(|index| {
-            let angle = std::f64::consts::TAU * (index as f64 + 0.5) / sides as f64;
-            Coord {
-                x: circumradius * angle.cos(),
-                y: circumradius * angle.sin(),
-            }
-        })
-        .collect::<Vec<_>>();
+    let disk = offset_disk(distance.abs())?;
     let disk_bytes = coordinate_bytes(disk.capacity())?;
     let mut result = if distance < 0.0 {
-        // S eroded by a disk is S minus its boundary neighborhood. Preserve
-        // exactly the existing per-island Boolean operands and float frames.
+        // Erode each island independently, preserving the existing per-island
+        // semantics for islands that touch.
         let mut eroded_polygons = MultiPolygon(Vec::new());
         for polygon in polygons {
             check_cancel(cancel)?;
@@ -276,39 +254,17 @@ fn offset_polygons(
                 disk_bytes,
                 super::native::material_bytes(&mut eroded_polygons),
             ])?;
-            let mut tube = boundary_tube(polygon, &disk, retained, retained_bytes, admit, cancel)?;
-            let tube_bytes = super::native::material_bytes(&mut tube);
-            let source_points = polygon_points(polygon);
-            let scratch = retained + point_count(&tube) + source_points;
-            offset_admit(
-                admit,
-                scratch,
-                offset_bytes(&[
-                    retained_bytes,
-                    tube_bytes,
-                    cloned_polygons_bytes(std::slice::from_ref(polygon))?,
-                ])?,
-                None,
-            )?;
-            let mut source = MultiPolygon(vec![polygon.clone()]);
-            let scratch_bytes = offset_bytes(&[
+            let mut eroded = convolution::offset(
+                std::slice::from_ref(polygon),
+                &disk,
+                true,
+                retained,
                 retained_bytes,
-                tube_bytes,
-                super::native::material_bytes(&mut source),
-            ])?;
-            offset_admit(admit, scratch, scratch_bytes, Some((&source, &tube)))?;
-            let mut eroded = source.difference(&tube);
-            check_cancel(cancel)?;
-            check_size(&eroded)?;
-            let eroded_bytes = super::native::material_bytes(&mut eroded);
-            offset_admit(
                 admit,
-                scratch + point_count(&eroded),
-                offset_bytes(&[scratch_bytes, eroded_bytes])?,
-                None,
+                cancel,
             )?;
-            drop(source);
-            drop(tube);
+            check_cancel(cancel)?;
+            let eroded_bytes = super::native::material_bytes(&mut eroded);
             let units = retained + point_count(&eroded);
             reserve_offset_polygons(
                 &mut eroded_polygons.0,
@@ -321,38 +277,8 @@ fn offset_polygons(
         }
         eroded_polygons
     } else {
-        let points = polygons.iter().map(polygon_points).sum::<usize>();
-        offset_admit(
-            admit,
-            sides + points,
-            offset_bytes(&[disk_bytes, cloned_polygons_bytes(polygons)?])?,
-            None,
-        )?;
-        let mut expanded = MultiPolygon(polygons.to_vec());
-        for polygon in polygons {
-            let retained = sides + point_count(&expanded);
-            let retained_bytes =
-                offset_bytes(&[disk_bytes, super::native::material_bytes(&mut expanded)])?;
-            let mut tube = boundary_tube(polygon, &disk, retained, retained_bytes, admit, cancel)?;
-            let scratch = retained + point_count(&tube);
-            let scratch_bytes =
-                offset_bytes(&[retained_bytes, super::native::material_bytes(&mut tube)])?;
-            offset_admit(admit, scratch, scratch_bytes, Some((&expanded, &tube)))?;
-            let mut replacement = expanded.union(&tube);
-            offset_admit(
-                admit,
-                scratch + point_count(&replacement),
-                offset_bytes(&[
-                    scratch_bytes,
-                    super::native::material_bytes(&mut replacement),
-                ])?,
-                None,
-            )?;
-            expanded = replacement;
-            check_cancel(cancel)?;
-            check_size(&expanded)?;
-        }
-        expanded
+        // Dilation distributes over union: one overlay of every ring's cycle.
+        convolution::offset(polygons, &disk, false, sides, disk_bytes, admit, cancel)?
     };
     drop(disk);
     check_cancel(cancel)?;
@@ -384,6 +310,40 @@ fn offset_polygons(
     )?;
     canonicalize(&mut result);
     Ok(result)
+}
+
+/// Circumscribed disk sides for `radius`: a circumscribed disk reserves half
+/// the existing offset error budget for ordinary Boolean arithmetic. Fourfold
+/// symmetry retains cardinal supports and makes the disk centrally symmetric,
+/// so erosion is the complement of the complement's dilation.
+fn offset_disk_sides(radius: f64) -> Result<usize, ManufacturingError> {
+    let radial_error = OFFSET_TOLERANCE_MM * 0.5;
+    let angle = (radius / (radius + radial_error)).acos();
+    let required = (std::f64::consts::PI / angle).ceil();
+    if !required.is_finite() || required > 4096.0 {
+        return Err(resource("offset disk subdivision exceeds work limit"));
+    }
+    let sides = (required as usize).max(4).div_ceil(4) * 4;
+    let circumradius = radius / (std::f64::consts::PI / sides as f64).cos();
+    if !circumradius.is_finite() || circumradius - radius > radial_error {
+        return Err(resource("offset disk cannot meet the radial error budget"));
+    }
+    Ok(sides)
+}
+
+/// Counterclockwise circumscribed disk vertices at `(k + 1/2)·2π/sides`.
+fn offset_disk(radius: f64) -> Result<Vec<Coord<f64>>, ManufacturingError> {
+    let sides = offset_disk_sides(radius)?;
+    let circumradius = radius / (std::f64::consts::PI / sides as f64).cos();
+    Ok((0..sides)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * (index as f64 + 0.5) / sides as f64;
+            Coord {
+                x: circumradius * angle.cos(),
+                y: circumradius * angle.sin(),
+            }
+        })
+        .collect())
 }
 
 fn polygon_points(polygon: &Polygon<f64>) -> usize {
@@ -472,165 +432,6 @@ fn reserve_offset_polygons(
         .checked_mul(std::mem::size_of::<Polygon<f64>>())
         .ok_or_else(|| resource("offset polygon capacity byte overflow"))?;
     offset_admit(admit, units, offset_bytes(&[live_bytes, actual])?, None)
-}
-
-fn boundary_tube(
-    polygon: &Polygon<f64>,
-    disk: &[Coord<f64>],
-    external: usize,
-    external_bytes: usize,
-    admit: &mut impl FnMut(
-        usize,
-        usize,
-        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
-    ) -> Result<(), ManufacturingError>,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let mut primitives = MultiPolygon(Vec::new());
-    let mut retained_points = 0usize;
-    let mut retained_capacity = 0usize;
-    let mut payload_bytes = 0usize;
-    let construction_points = disk
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| resource("offset capsule construction point overflow"))?;
-    // The pinned hull partitions input in place; its output fits every input
-    // point plus closure, with a power-of-two capacity. No source ring is hulled.
-    let hull_capacity = construction_points
-        .checked_add(1)
-        .and_then(usize::checked_next_power_of_two)
-        .ok_or_else(|| resource("offset capsule hull capacity overflow"))?;
-    offset_admit(
-        admit,
-        external + construction_points,
-        offset_bytes(&[external_bytes, coordinate_bytes(construction_points)?])?,
-        None,
-    )?;
-    let mut construction = Vec::new();
-    construction
-        .try_reserve_exact(construction_points)
-        .map_err(|_| resource("offset capsule construction allocation refused"))?;
-    for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-        let mut start = 0;
-        while start + 1 < ring.0.len() {
-            check_cancel(cancel)?;
-            let a = ring.0[start];
-            let mut end = start + 1;
-            // Exact monotone coalescing applies ONLY to construction capsules,
-            // never to authoritative original material coordinates.
-            while end + 1 < ring.0.len() {
-                check_cancel(cancel)?;
-                let b = ring.0[end];
-                let c = ring.0[end + 1];
-                if RobustKernel::orient2d(a, b, c) != Orientation::Collinear
-                    || b.x < a.x.min(c.x)
-                    || b.x > a.x.max(c.x)
-                    || b.y < a.y.min(c.y)
-                    || b.y > a.y.max(c.y)
-                {
-                    break;
-                }
-                end += 1;
-            }
-            let segment = [a, ring.0[end]];
-            start = end;
-            let units = external + retained_capacity + construction.capacity() + hull_capacity;
-            let live_bytes = offset_bytes(&[
-                external_bytes,
-                payload_bytes,
-                primitives
-                    .0
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<Polygon<f64>>())
-                    .ok_or_else(|| resource("offset primitive container byte overflow"))?,
-                coordinate_bytes(construction.capacity())?,
-                coordinate_bytes(hull_capacity)?,
-            ])?;
-            reserve_offset_polygons(&mut primitives.0, 1, units, live_bytes, admit)?;
-            offset_admit(
-                admit,
-                units,
-                offset_bytes(&[
-                    external_bytes,
-                    payload_bytes,
-                    primitives
-                        .0
-                        .capacity()
-                        .checked_mul(std::mem::size_of::<Polygon<f64>>())
-                        .ok_or_else(|| resource("offset primitive container byte overflow"))?,
-                    coordinate_bytes(construction.capacity())?,
-                    coordinate_bytes(hull_capacity)?,
-                ])?,
-                None,
-            )?;
-            construction.clear();
-            construction.extend(segment.iter().flat_map(|endpoint| {
-                disk.iter().map(move |delta| Coord {
-                    x: endpoint.x + delta.x,
-                    y: endpoint.y + delta.y,
-                })
-            }));
-            let mut capsule = Polygon::new(quick_hull(&mut construction), Vec::new());
-            retained_points = retained_points
-                .checked_add(capsule.exterior().0.len())
-                .filter(|count| *count <= MAX_RETAINED_GEOMETRY_UNITS)
-                .ok_or_else(|| resource("offset primitive point limit exceeded"))?;
-            retained_capacity = retained_capacity
-                .checked_add(capsule.exterior().0.capacity())
-                .ok_or_else(|| resource("offset primitive capacity overflow"))?;
-            payload_bytes = payload_bytes
-                .checked_add(super::native::polygon_bytes(&mut capsule))
-                .ok_or_else(|| resource("offset primitive payload byte overflow"))?;
-            let count = primitives.0.len() + 1;
-            if count
-                .checked_mul(count)
-                .is_none_or(|pairs| pairs > MAX_BOOLEAN_PAIRS)
-            {
-                return Err(resource("offset primitive pair admission limit exceeded"));
-            }
-            offset_admit(
-                admit,
-                external + construction.capacity() + retained_capacity,
-                offset_bytes(&[
-                    external_bytes,
-                    coordinate_bytes(construction.capacity())?,
-                    payload_bytes,
-                    primitives
-                        .0
-                        .capacity()
-                        .checked_mul(std::mem::size_of::<Polygon<f64>>())
-                        .ok_or_else(|| resource("offset primitive container byte overflow"))?,
-                ])?,
-                None,
-            )?;
-            primitives.0.push(capsule);
-        }
-    }
-    drop(construction);
-    check_size(&primitives)?;
-    let primitive_bytes = super::native::material_bytes(&mut primitives);
-    offset_admit(
-        admit,
-        external + retained_capacity,
-        offset_bytes(&[external_bytes, primitive_bytes])?,
-        Some((&primitives, &primitives)),
-    )?;
-    check_cancel(cancel)?;
-    // Keep the same ONE unary union and float frame; no incremental overlays.
-    let mut tube = unary_union(&primitives.0);
-    check_cancel(cancel)?;
-    check_size(&tube)?;
-    offset_admit(
-        admit,
-        external + retained_capacity + point_count(&tube),
-        offset_bytes(&[
-            external_bytes,
-            primitive_bytes,
-            super::native::material_bytes(&mut tube),
-        ])?,
-        None,
-    )?;
-    Ok(tube)
 }
 
 pub(super) fn canonicalize(region: &mut MultiPolygon<f64>) {
