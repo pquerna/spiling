@@ -211,12 +211,19 @@ pub(super) fn offset(
     let mut result = MultiPolygon(
         shapes
             .into_iter()
+            // Snap-rounding residue: see `SNAP_RESIDUE_MM2`. Only the side
+            // that keeps dilation a superset and erosion a subset is dropped.
+            .filter(|shape| !erode || shape.first().is_none_or(|outer| !residue(outer)))
             .map(|shape| {
-                let mut rings = shape.into_iter().map(|ring| {
-                    let mut line = LineString(ring.into_iter().map(Coord::from).collect());
-                    line.close();
-                    line
-                });
+                let mut rings = shape
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, ring)| erode || *index == 0 || !residue(ring))
+                    .map(|(_, ring)| {
+                        let mut line = LineString(ring.into_iter().map(Coord::from).collect());
+                        line.close();
+                        line
+                    });
                 Polygon::new(rings.next().unwrap_or(LineString::empty()), rings.collect())
             })
             .collect(),
@@ -229,6 +236,28 @@ pub(super) fn offset(
         None,
     )?;
     Ok(result)
+}
+
+/// Rings below this area (a square one thousandth of the offset tolerance on
+/// a side) are integer snap-rounding residue of nearly coincident cycle
+/// segments, e.g. one-grid-step triangles, not representable geometry. A
+/// dilation drops such holes (filling them keeps it a superset) and an
+/// erosion drops such islands (keeping it a subset); the opposite side is
+/// never dropped.
+const SNAP_RESIDUE_MM2: f64 = (OFFSET_TOLERANCE_MM * 1e-3) * (OFFSET_TOLERANCE_MM * 1e-3);
+
+fn residue(ring: &[[f64; 2]]) -> bool {
+    let Some(origin) = ring.first() else {
+        return true;
+    };
+    let twice = (0..ring.len())
+        .map(|index| {
+            let a = ring[index];
+            let b = ring[(index + 1) % ring.len()];
+            (a[0] - origin[0]) * (b[1] - origin[1]) - (b[0] - origin[0]) * (a[1] - origin[1])
+        })
+        .sum::<f64>();
+    0.5 * twice.abs() < SNAP_RESIDUE_MM2
 }
 
 fn signed_area(ring: &[Coord<f64>]) -> f64 {
