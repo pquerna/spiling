@@ -38,4 +38,5 @@ Never `cargo fmt --all`.
 - Simpler with equal speed = keep. Ugly complexity for <2% = discard.
 
 ## What's Been Tried
+- Round 1 (main 84a42f09): convolution offsets, routing scans, wall memo/prefill = 0.305x CPU. Now support::realize dominates (strokes::analyze, column Booleans), then classification.
 (see log.jsonl; summarize wins/dead ends here as they happen)
