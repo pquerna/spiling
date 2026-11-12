@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::anchors::{AnchorGap, NominalAnchorPaths};
+use super::anchors::{AnchorGap, InventoryStats, NominalAnchorPaths};
 use super::{AnchorCandidate, AnchorWorkspace};
 use crate::check_cancel;
 use crate::planner::OFFSET_TOLERANCE_MM;
@@ -68,102 +68,198 @@ pub(in crate::planner) fn analyze<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Admission, ManufacturingError> {
-    let mut result = Admission {
-        bridges: Vec::new(),
-        failure: None,
-    };
-    if paths.is_empty() {
-        return Ok(result);
+    LowerStrokes::new(previous, contacts).analyze(paths, recipe, anchors, work, cancel)
+}
+
+/// One fixed borrowed previous/contact lower set for repeated stroke analyses.
+/// Each analysis admits the nominal inventory against the workspace exactly as
+/// a fresh inventory would be admitted; an admitted inventory is built at most
+/// once and released as soon as an analysis would not admit it.
+pub(in crate::planner) struct LowerStrokes<'a, P, C> {
+    previous: P,
+    contacts: C,
+    large: Option<bool>,
+    stats: Option<Option<InventoryStats>>,
+    inventory: Option<NominalAnchorPaths<'a>>,
+}
+
+impl<'a, P, C> LowerStrokes<'a, P, C>
+where
+    P: Iterator<Item = &'a DepositionPath> + Clone,
+    C: Iterator<Item = &'a DepositionPath> + Clone,
+{
+    pub(in crate::planner) fn new(previous: P, contacts: C) -> Self {
+        Self {
+            previous,
+            contacts,
+            large: None,
+            stats: None,
+            inventory: None,
+        }
     }
-    let mut prepared = if previous
-        .clone()
-        .chain(contacts.clone())
-        .take(MIN_ANCHOR_INVENTORY_PATHS)
-        .count()
-        == MIN_ANCHOR_INVENTORY_PATHS
-    {
-        NominalAnchorPaths::new(previous.clone(), contacts.clone(), anchors, cancel)?
-    } else {
-        None
-    };
-    if let Some(prepared) = prepared.as_mut() {
-        prepared.index_for(paths.len(), cancel)?;
+
+    fn admit_inventory(
+        &mut self,
+        anchors: &AnchorWorkspace,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        let large = match self.large {
+            Some(large) => large,
+            None => {
+                let large = self
+                    .previous
+                    .clone()
+                    .chain(self.contacts.clone())
+                    .take(MIN_ANCHOR_INVENTORY_PATHS)
+                    .count()
+                    == MIN_ANCHOR_INVENTORY_PATHS;
+                self.large = Some(large);
+                large
+            }
+        };
+        if !large {
+            return Ok(false);
+        }
+        let stats = match self.stats {
+            Some(stats) => stats,
+            None => {
+                let stats =
+                    InventoryStats::new(self.previous.clone(), self.contacts.clone(), cancel)?;
+                self.stats = Some(stats);
+                stats
+            }
+        };
+        let Some(stats) = stats.filter(|stats| stats.admits(anchors)) else {
+            self.inventory = None;
+            return Ok(false);
+        };
+        if self.inventory.is_none() {
+            self.inventory = Some(NominalAnchorPaths::build(
+                self.previous.clone(),
+                self.contacts.clone(),
+                stats,
+                cancel,
+            )?);
+        }
+        if !self
+            .inventory
+            .as_ref()
+            .is_some_and(|inventory| inventory.admitted(anchors))
+        {
+            self.inventory = None;
+            return Ok(false);
+        }
+        Ok(true)
     }
-    for (path_index, path) in paths.iter().enumerate() {
-        check_cancel(cancel)?;
-        let mut has_bridge = false;
-        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
-            let a = path.points_mm[first];
-            let b = path.points_mm[last];
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-            let mut bridge = false;
-            let mut demand = false;
-            let candidate = AnchorCandidate {
-                endpoints_mm: [a, b],
-                bead_width_mm: width_mm,
-            };
-            let gaps = if let Some(prepared) = prepared.as_mut() {
-                anchors.gaps_nominal(candidate, path.physical_z_mm[0], prepared, work, cancel)?
-            } else {
-                anchors.gaps(
-                    candidate,
-                    previous
-                        .clone()
-                        .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                    contacts
-                        .clone()
-                        .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
-                    work,
-                    cancel,
-                )?
-            };
-            for gap in gaps {
-                let start = gap.start;
-                let end = gap.end;
-                let span = (end - start) * length;
-                if path.kind == DepositionKind::SeparatorWall
-                    && !matches!(
-                        gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
-                        GapKind::Supported
-                    )
-                {
-                    return Err(crate::error(
-                        spiling_contracts::manufacturing::ManufacturingErrorCode::UnsupportedGeometry,
-                        "UnsupportedInterface: permanent separator needs actual lower strokes; Bridge/support substitution is not authorized",
-                    ));
-                }
-                match gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm) {
-                    GapKind::Supported => {}
-                    // Preserve eligible contact provenance. Only a consumed,
-                    // explicitly constructed Bridge uses bridge process here;
-                    // ordinary contact-supported rows stay ordinary.
-                    GapKind::Contact => bridge |= path.kind == DepositionKind::Bridge,
-                    GapKind::Bridge => bridge = true,
-                    GapKind::Demand => {
-                        demand = true;
-                        if result.failure.is_none() {
-                            result.failure = Some(Failure {
-                                path: path_index,
-                                first,
-                                last,
-                                width_mm,
-                                start,
-                                end,
-                                span,
-                            });
+
+    pub(in crate::planner) fn analyze(
+        &mut self,
+        paths: &[DepositionPath],
+        recipe: &PlanarPrintRecipe,
+        anchors: &mut AnchorWorkspace,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Admission, ManufacturingError> {
+        let mut result = Admission {
+            bridges: Vec::new(),
+            failure: None,
+        };
+        if paths.is_empty() {
+            return Ok(result);
+        }
+        let admitted = self.admit_inventory(anchors, cancel)?;
+        let Self {
+            previous,
+            contacts,
+            inventory,
+            ..
+        } = self;
+        let mut prepared = if admitted { inventory.as_mut() } else { None };
+        if let Some(prepared) = prepared.as_mut() {
+            prepared.index_for(paths.len(), cancel)?;
+        }
+        for (path_index, path) in paths.iter().enumerate() {
+            check_cancel(cancel)?;
+            let mut has_bridge = false;
+            for (first, last, width_mm) in StrokeRuns::for_path(path)? {
+                let a = path.points_mm[first];
+                let b = path.points_mm[last];
+                let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+                let mut bridge = false;
+                let mut demand = false;
+                let candidate = AnchorCandidate {
+                    endpoints_mm: [a, b],
+                    bead_width_mm: width_mm,
+                };
+                let gaps = if let Some(prepared) = prepared.as_mut() {
+                    anchors.gaps_nominal(
+                        candidate,
+                        path.physical_z_mm[0],
+                        prepared,
+                        work,
+                        cancel,
+                    )?
+                } else {
+                    anchors.gaps(
+                        candidate,
+                        previous
+                            .clone()
+                            .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                        contacts
+                            .clone()
+                            .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
+                        work,
+                        cancel,
+                    )?
+                };
+                for gap in gaps {
+                    let start = gap.start;
+                    let end = gap.end;
+                    let span = (end - start) * length;
+                    if path.kind == DepositionKind::SeparatorWall
+                        && !matches!(
+                            gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
+                            GapKind::Supported
+                        )
+                    {
+                        return Err(crate::error(
+                            spiling_contracts::manufacturing::ManufacturingErrorCode::UnsupportedGeometry,
+                            "UnsupportedInterface: permanent separator needs actual lower strokes; Bridge/support substitution is not authorized",
+                        ));
+                    }
+                    match gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm) {
+                        GapKind::Supported => {}
+                        // Preserve eligible contact provenance. Only a consumed,
+                        // explicitly constructed Bridge uses bridge process here;
+                        // ordinary contact-supported rows stay ordinary.
+                        GapKind::Contact => bridge |= path.kind == DepositionKind::Bridge,
+                        GapKind::Bridge => bridge = true,
+                        GapKind::Demand => {
+                            demand = true;
+                            if result.failure.is_none() {
+                                result.failure = Some(Failure {
+                                    path: path_index,
+                                    first,
+                                    last,
+                                    width_mm,
+                                    start,
+                                    end,
+                                    span,
+                                });
+                            }
                         }
                     }
                 }
+                if !demand {
+                    has_bridge |= bridge;
+                }
             }
-            if !demand {
-                has_bridge |= bridge;
+            if has_bridge {
+                result.bridges.push(path_index);
             }
         }
-        if has_bridge {
-            result.bridges.push(path_index);
-        }
+        Ok(result)
     }
-    Ok(result)
 }
 
 /// Maximal straight strokes, including across the seam of a closed contour.

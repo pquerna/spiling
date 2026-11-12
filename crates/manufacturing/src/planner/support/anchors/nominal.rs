@@ -12,6 +12,9 @@ pub(in crate::planner::support) struct NominalAnchorPaths<'a> {
     reserved_records: usize,
     /// Optional transient query index; selection only, released with the inventory.
     grid: Option<grid::EdgeGrid>,
+    stats: InventoryStats,
+    /// Candidate runs analyzed against this inventory, for the index heuristic.
+    queries: usize,
 }
 
 const BLOCK_PATHS: usize = 16;
@@ -46,11 +49,19 @@ impl NominalPath<'_> {
     }
 }
 
-impl<'a> NominalAnchorPaths<'a> {
-    pub(in crate::planner::support) fn new(
-        previous: impl Iterator<Item = &'a DepositionPath> + Clone,
-        contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
-        workspace: &AnchorWorkspace,
+/// Inventory shape of one borrowed lower set; admission against a workspace
+/// is a pure function of these counts and that workspace's current capacities.
+#[derive(Clone, Copy)]
+pub(in crate::planner::support) struct InventoryStats {
+    count: usize,
+    edges: usize,
+    block_count: usize,
+}
+
+impl InventoryStats {
+    pub(in crate::planner::support) fn new<'a>(
+        previous: impl Iterator<Item = &'a DepositionPath>,
+        contacts: impl Iterator<Item = &'a DepositionPath>,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, ManufacturingError> {
         let mut count = 0usize;
@@ -59,9 +70,8 @@ impl<'a> NominalAnchorPaths<'a> {
         let mut block_len = 0usize;
         let mut physical_owner = None;
         for (path, direct) in previous
-            .clone()
             .map(|path| (path, true))
-            .chain(contacts.clone().map(|path| (path, false)))
+            .chain(contacts.map(|path| (path, false)))
         {
             check_cancel(cancel)?;
             if block_len == BLOCK_PATHS || physical_owner != Some((direct, path.physical_z_mm[1])) {
@@ -80,25 +90,78 @@ impl<'a> NominalAnchorPaths<'a> {
         if count < 8 {
             return Ok(None);
         }
-        let records = count
-            .saturating_mul(size_of::<NominalPath<'a>>())
-            .saturating_add(block_count * size_of::<NominalBlock>())
-            .div_ceil(size_of::<[f64; 2]>());
-        let required = growth_capacity(workspace.intervals.capacity(), edges)
-            .saturating_add(growth_capacity(workspace.uncovered.capacity(), edges + 1))
-            .saturating_add(records);
-        if required > workspace.record_limit {
+        Ok(Some(Self {
+            count,
+            edges,
+            block_count,
+        }))
+    }
+
+    fn records(&self) -> usize {
+        self.count
+            .saturating_mul(size_of::<NominalPath<'_>>())
+            .saturating_add(self.block_count * size_of::<NominalBlock>())
+            .div_ceil(size_of::<[f64; 2]>())
+    }
+
+    fn required(&self, workspace: &AnchorWorkspace) -> usize {
+        growth_capacity(workspace.intervals.capacity(), self.edges)
+            .saturating_add(growth_capacity(
+                workspace.uncovered.capacity(),
+                self.edges + 1,
+            ))
+            .saturating_add(self.records())
+    }
+
+    /// Admission before allocating inventory metadata.
+    pub(in crate::planner::support) fn admits(&self, workspace: &AnchorWorkspace) -> bool {
+        self.required(workspace) <= workspace.record_limit
+    }
+}
+
+impl<'a> NominalAnchorPaths<'a> {
+    pub(in crate::planner::support) fn new(
+        previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+        contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+        workspace: &AnchorWorkspace,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, ManufacturingError> {
+        let Some(stats) = InventoryStats::new(previous.clone(), contacts.clone(), cancel)? else {
+            return Ok(None);
+        };
+        if !stats.admits(workspace) {
             return Ok(None);
         }
+        let inventory = Self::build(previous, contacts, stats, cancel)?;
+        Ok(inventory.admitted(workspace).then_some(inventory))
+    }
+
+    /// Admission with the actual allocated metadata, as a fresh build would see it.
+    pub(in crate::planner::support) fn admitted(&self, workspace: &AnchorWorkspace) -> bool {
+        self.stats.admits(workspace)
+            && self
+                .stats
+                .required(workspace)
+                .saturating_sub(self.stats.records())
+                .saturating_add(self.reserved_records)
+                <= workspace.record_limit
+    }
+
+    pub(in crate::planner::support) fn build(
+        previous: impl Iterator<Item = &'a DepositionPath>,
+        contacts: impl Iterator<Item = &'a DepositionPath>,
+        stats: InventoryStats,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
         let mut paths = Vec::new();
         let mut blocks: Vec<NominalBlock> = Vec::new();
-        paths.try_reserve_exact(count).map_err(|_| {
+        paths.try_reserve_exact(stats.count).map_err(|_| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
                 "nominal anchor path inventory allocation refused",
             )
         })?;
-        blocks.try_reserve_exact(block_count).map_err(|_| {
+        blocks.try_reserve_exact(stats.block_count).map_err(|_| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
                 "nominal anchor block inventory allocation refused",
@@ -109,13 +172,6 @@ impl<'a> NominalAnchorPaths<'a> {
             .saturating_mul(size_of::<NominalPath<'a>>())
             .saturating_add(blocks.capacity() * size_of::<NominalBlock>())
             .div_ceil(size_of::<[f64; 2]>());
-        if required
-            .saturating_sub(records)
-            .saturating_add(reserved_records)
-            > workspace.record_limit
-        {
-            return Ok(None);
-        }
         for (path, direct) in previous
             .map(|path| (path, true))
             .chain(contacts.map(|path| (path, false)))
@@ -176,12 +232,14 @@ impl<'a> NominalAnchorPaths<'a> {
                 edges,
             });
         }
-        Ok(Some(Self {
+        Ok(Self {
             paths,
             blocks,
             reserved_records,
             grid: None,
-        }))
+            stats,
+            queries: 0,
+        })
     }
 
     /// Build the edge grid when the expected block scans outweigh indexing.
@@ -191,11 +249,12 @@ impl<'a> NominalAnchorPaths<'a> {
         candidates: usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
+        self.queries = self.queries.saturating_add(candidates);
         if self.grid.is_some() {
             return Ok(());
         }
         let edges = self.blocks.iter().map(|block| block.edges).sum::<usize>();
-        if candidates.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4) {
+        if self.queries.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4) {
             return Ok(());
         }
         self.grid = grid::EdgeGrid::new(self.paths.iter().map(|path| path.path), cancel)?;
