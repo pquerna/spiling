@@ -418,7 +418,7 @@ fn plan_with(
         match outcome? {
             ScheduleAdmission::PrefixAdmitted(capture) => break Some(capture),
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
-                refine_deposition_pair(&mut schedule, index, input, failure)?;
+                exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
             }
             ScheduleAdmission::Complete(_) => {
                 unreachable!("tentative prefix cannot publish a plan")
@@ -444,7 +444,7 @@ fn plan_with(
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
-                refine_deposition_pair(&mut schedule, index, input, failure)?;
+                exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
             }
             ScheduleAdmission::PrefixAdmitted(_) => {
                 unreachable!("complete schedule must produce a plan")
@@ -3250,6 +3250,32 @@ fn deposition_probe(
         native_top_mm: schedule[after - 1].z,
         scope,
     }))
+}
+
+/// Refine the schedule at an unreachable layer. When it can be refined no
+/// further and supports are enabled, mark the layer exhausted so the retry
+/// prints its overhang as authored; a second request for it still refuses.
+fn exhaust_or_refine(
+    schedule: &mut Vec<LayerElevation>,
+    index: usize,
+    input: &CompilerInput<'_>,
+    failure: ManufacturingError,
+    support_work: &mut support::SupportWork,
+) -> Result<(), ManufacturingError> {
+    let z = schedule.get(index).map(|layer| layer.z.to_bits());
+    match refine_deposition_pair(schedule, index, input, failure) {
+        Err(failure)
+            if failure.code != ManufacturingErrorCode::ResourceLimit
+                && failure.code != ManufacturingErrorCode::Cancelled
+                && !matches!(input.intent.recipe.supports, SupportPolicy::Disabled) =>
+        {
+            match z {
+                Some(z) if support_work.exhausted.insert(z) => Ok(()),
+                _ => Err(failure),
+            }
+        }
+        other => other,
+    }
 }
 
 fn refine_deposition_pair(

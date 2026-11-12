@@ -438,6 +438,10 @@ pub(super) struct SupportWork {
     /// This receipt survives every compile-local schedule retry.
     pub(super) support_owned: usize,
     pub(super) anchors: usize,
+    /// Deposition Z (bits) of layers the schedule can refine no further.
+    /// Their unanchored strokes print as authored and are reported, the
+    /// build-plate-only outcome, instead of requesting refinement again.
+    pub(super) exhausted: std::collections::BTreeSet<u64>,
 }
 
 impl SupportWork {
@@ -871,13 +875,15 @@ pub(super) fn realize(
                 }
             }
             if let Some(failure) = admission.failure.take() {
-                if matches!(recipe.supports, SupportPolicy::Disabled) {
-                    if tentative && index > 0 {
+                let exhausted = work_bank.exhausted.contains(&layer.z_mm.to_bits());
+                if matches!(recipe.supports, SupportPolicy::Disabled) || exhausted {
+                    if tentative && index > 0 && !exhausted {
                         let failure =
                             admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
                         return Ok(SupportAdmission::RefineUnreachableLayer { index, failure });
                     }
-                    // Supports are off: print the overhang as PrusaSlicer
+                    // Supports are off, or no finer schedule can anchor or
+                    // support this layer: print the overhang as PrusaSlicer
                     // does and report it, rather than refuse the part.
                     layer.region_coverage.unsupported_overhang_mm = layer
                         .region_coverage
