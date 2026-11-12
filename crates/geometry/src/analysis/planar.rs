@@ -284,6 +284,33 @@ pub fn certify_planar_capsule_clearance(
     capsule_clearance_core(segment_xy_mm, forbidden, policy, required, work, cancel)
 }
 
+/// True when every point within `reserve_mm` of box `a` is at least
+/// `required_gap_mm` from every point of box `b`, by an outward enclosed axis
+/// gap. A capsule whose centerline lies in `a` with radius plus endpoint error
+/// at most `reserve_mm` is then clear of anything inside `b`.
+pub fn planar_bounds_clear(
+    a: [[f64; 2]; 2],
+    b: [[f64; 2]; 2],
+    reserve_mm: f64,
+    required_gap_mm: f64,
+) -> bool {
+    let required = Interval::point(reserve_mm).add(Interval::point(required_gap_mm)).hi;
+    let gap = (0..2)
+        .flat_map(|axis| {
+            [
+                Interval::point(b[0][axis]).sub(Interval::point(a[1][axis])).lo,
+                Interval::point(a[0][axis]).sub(Interval::point(b[1][axis])).lo,
+            ]
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    a.iter().chain(&b).flatten().all(|v| v.is_finite())
+        && reserve_mm >= 0.0
+        && required_gap_mm >= 0.0
+        && required.is_finite()
+        && gap > 0.0
+        && gap >= required
+}
+
 /// A forbidden filled polygon validated once, with its exact XY bounds.
 pub struct PreparedPlanarForbidden<'a> {
     loops: &'a [SectionLoopMm],
@@ -695,6 +722,16 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn bounds_clearance_requires_the_whole_reserve_and_gap() {
+        let a = [[0.0, 0.0], [1.0, 1.0]];
+        let b = [[1.5, 0.0], [2.0, 1.0]];
+        assert!(planar_bounds_clear(a, b, 0.2, 0.25));
+        assert!(planar_bounds_clear(b, a, 0.2, 0.25));
+        assert!(!planar_bounds_clear(a, b, 0.3, 0.25));
+        assert!(!planar_bounds_clear(a, [[0.5, 0.5], [3.0, 3.0]], 0.0, 0.0));
+        assert!(!planar_bounds_clear(a, [[f64::NAN, 0.0], [2.0, 1.0]], 0.0, 0.0));
     }
     #[test]
     fn crossing_capsules_are_not_separated_by_distant_endpoints() {

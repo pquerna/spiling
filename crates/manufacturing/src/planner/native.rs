@@ -4049,6 +4049,34 @@ pub(super) fn certify_support_clearance(
     Ok(())
 }
 
+/// Outward enclosure of an emitted XYZ6 centerline point's displacement from
+/// its binary64 source plus its remaining physical-decimal endpoint error
+/// (each at most about one half micrometre per axis). Bounds screens only.
+const XYZ6_SCREEN_SLACK_MM: f64 = 1e-5;
+
+/// Raw XY bounds of a validated path and its largest bead width.
+fn path_xy_bounds(path: &DepositionPath) -> Option<([[f64; 2]; 2], f64)> {
+    let width = match &path.width {
+        WidthProfile::Constant { width_mm } => *width_mm,
+        WidthProfile::PerEdge { widths_mm } => widths_mm.iter().copied().fold(0.0, f64::max),
+    };
+    let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+    for p in &path.points_mm {
+        for axis in 0..2 {
+            bounds[0][axis] = bounds[0][axis].min(p[axis]);
+            bounds[1][axis] = bounds[1][axis].max(p[axis]);
+        }
+    }
+    (width.is_finite() && bounds.iter().flatten().all(|v| v.is_finite())).then_some((bounds, width))
+}
+
+fn edge_xy_bounds(edge: &[[f64; 3]]) -> [[f64; 2]; 2] {
+    [
+        [edge[0][0].min(edge[1][0]), edge[0][1].min(edge[1][1])],
+        [edge[0][0].max(edge[1][0]), edge[0][1].max(edge[1][1])],
+    ]
+}
+
 fn certify_polygon_capsules(
     layers: &[PrintLayer],
     forbidden: &ForbiddenPolygonScope<'_>,
@@ -4062,6 +4090,8 @@ fn certify_polygon_capsules(
         height: scope,
         label,
     } = *forbidden;
+    let forbidden_bounds = geo::BoundingRect::bounding_rect(polygon)
+        .map(|b| [[b.min().x, b.min().y], [b.max().x, b.max().y]]);
     // Encode and validate the borrowed forbidden polygon lazily, once per scan.
     let encoded = std::cell::OnceCell::<Vec<spiling_geometry::SectionLoopMm>>::new();
     let mut prepared = None;
@@ -4075,7 +4105,20 @@ fn certify_polygon_capsules(
             ) {
                 continue;
             }
-            for local in path.checked_edges()? {
+            let edges = path.checked_edges()?;
+            if forbidden_bounds.is_some_and(|forbidden| {
+                path_xy_bounds(path).is_some_and(|(bounds, width)| {
+                    spiling_geometry::planar_bounds_clear(
+                        bounds,
+                        forbidden,
+                        width * 0.5 + XYZ6_SCREEN_SLACK_MM,
+                        clearance,
+                    )
+                })
+            }) {
+                continue;
+            }
+            for local in edges {
                 let edge = local.points_mm;
                 charge_support_clearance(support_work, cancel)?;
                 let [lower, upper] =
@@ -4317,6 +4360,7 @@ fn certify_deposited_clearance(
                     support.height_mm(),
                 )?;
                 let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
+                let support_bounds = edge_xy_bounds(support_edge);
                 for object_layer in objects {
                     charge_support_clearance(work, cancel)?;
                     for object in &object_layer.paths {
@@ -4330,6 +4374,15 @@ fn certify_deposited_clearance(
                         for object_local in object.checked_edges()? {
                             let object_edge = object_local.points_mm;
                             charge_support_clearance(work, cancel)?;
+                            if spiling_geometry::planar_bounds_clear(
+                                support_bounds,
+                                edge_xy_bounds(object_edge),
+                                (support_local.width_mm + object_local.width_mm) * 0.5
+                                    + 2.0 * XYZ6_SCREEN_SLACK_MM,
+                                xy_gap,
+                            ) {
+                                continue;
+                            }
                             let object_height = project_xyz6_segment_bead_height_mm(
                                 object_edge[0][2],
                                 object_edge[1][2],
