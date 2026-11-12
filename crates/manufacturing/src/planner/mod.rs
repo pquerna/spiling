@@ -316,6 +316,7 @@ fn plan_with(
     let mut support_work = support::SupportWork::default();
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
+    let mut wall_memo = WallMemo::default();
     let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
     let outside = native_retry_outside_bytes(
         &prepared_sources,
@@ -368,6 +369,7 @@ fn plan_with(
             None,
             &mut span_sizing,
             &mut slab_pool,
+            &mut wall_memo,
         );
         if let Ok(ScheduleAdmission::RefineUnreachableLayer { recycled, .. }) = &mut outcome {
             let outside = native_retry_outside_bytes(
@@ -435,6 +437,7 @@ fn plan_with(
             prefix.take(),
             &mut span_sizing,
             &mut slab_pool,
+            &mut wall_memo,
         );
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
@@ -580,6 +583,7 @@ fn admit_schedule<'model>(
     native_prefix: Option<NativeScheduleCapture>,
     span_sizing: &mut native::NativeSpanSizing,
     pool: &mut native::NativeSlabPool,
+    wall_memo: &mut WallMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let recipe = &input.intent.recipe;
     let continuing = native_prefix.is_some();
@@ -1431,7 +1435,17 @@ fn admit_schedule<'model>(
                                 )
                             })?;
 
-                        let layout = construction.walls(
+                        // Retries of the schedule (support refinement) replan every
+                        // layer; identical material at the same envelope reuses its walls.
+                        let memo_key = (required_owner.is_none() && construction_phase.is_none())
+                            .then_some(envelope_key);
+                        let remembered = memo_key
+                            .and_then(|key| wall_memo.find(&sections[current].material, key));
+                        let layout = match remembered {
+                            Some(plan) => plan,
+                            None => {
+                                let plan = Arc::new(
+                            construction.walls(
                         walls::WallRequest {
                             material: &sections[current].material,
                             required: &required_material,
@@ -1452,7 +1466,14 @@ fn admit_schedule<'model>(
                             failure.message
                         );
                         failure
-                    })?;
+                    })?,
+                                );
+                                if let Some(key) = memo_key {
+                                    wall_memo.insert(&sections[current].material, key, &plan);
+                                }
+                                plan
+                            }
+                        };
                         let new_wall_bytes = layout
                             .retained_bytes
                             .checked_add(2 * std::mem::size_of::<usize>())
@@ -1480,7 +1501,6 @@ fn admit_schedule<'model>(
                                     "wall cache retained-byte overflow",
                                 )
                             })?;
-                        let layout = Arc::new(layout);
                         retained_points += layout.point_count();
                         wall_cache.insert(layout_key, Arc::clone(&layout));
                         wall_layout = Some(layout);
@@ -2617,6 +2637,10 @@ fn admit_schedule<'model>(
                 let startup_layout = startup_key.and_then(|key| wall_cache.remove(&key));
                 drop(wall_layouts);
                 drop(wall_cache);
+                // The handoff owns its layout alone; the memo keeps no copy.
+                if let (Some(key), Some(layout)) = (startup_key, &startup_layout) {
+                    wall_memo.forget(&sections[span_at(&sections, 0)].material, key.2, layout);
+                }
                 let startup_wall = startup_key
                     .zip(startup_layout)
                     .filter(|(_, layout)| Arc::strong_count(layout) == 1)
@@ -3981,6 +4005,66 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
 
 /// For each span, the first span whose material is bit-identical (itself when
 /// none earlier is). Hashing only buckets candidates; equality decides.
+fn material_hash(material: &MultiPolygon<f64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for polygon in &material.0 {
+        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+            ring.0.len().hash(&mut hasher);
+            for c in &ring.0 {
+                c.x.to_bits().hash(&mut hasher);
+                c.y.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// Wall plans by bit-identical material and width envelope, kept across
+/// schedule retries of one lane. Hashing only buckets; equality decides.
+#[derive(Default)]
+pub(super) struct WallMemo {
+    plans: std::collections::HashMap<
+        u64,
+        Vec<(Arc<MultiPolygon<f64>>, [u64; 3], Arc<walls::WallPlan>)>,
+    >,
+}
+
+impl WallMemo {
+    fn find(
+        &self,
+        material: &Arc<MultiPolygon<f64>>,
+        key: [u64; 3],
+    ) -> Option<Arc<walls::WallPlan>> {
+        self.plans
+            .get(&material_hash(material))?
+            .iter()
+            .find(|(m, k, _)| *k == key && (Arc::ptr_eq(m, material) || m.0 == material.0))
+            .map(|(_, _, plan)| Arc::clone(plan))
+    }
+    fn forget(
+        &mut self,
+        material: &Arc<MultiPolygon<f64>>,
+        key: [u64; 3],
+        plan: &Arc<walls::WallPlan>,
+    ) {
+        if let Some(bucket) = self.plans.get_mut(&material_hash(material)) {
+            bucket.retain(|(_, k, p)| !(*k == key && Arc::ptr_eq(p, plan)));
+        }
+    }
+    fn insert(
+        &mut self,
+        material: &Arc<MultiPolygon<f64>>,
+        key: [u64; 3],
+        plan: &Arc<walls::WallPlan>,
+    ) {
+        self.plans
+            .entry(material_hash(material))
+            .or_default()
+            .push((Arc::clone(material), key, Arc::clone(plan)));
+    }
+}
+
 fn material_twins(
     sections: &[SectionSpan],
     cancel: &AtomicBool,
