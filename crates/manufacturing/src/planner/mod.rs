@@ -1235,6 +1235,7 @@ fn admit_schedule<'model>(
         let mut wall_layout = None;
         let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
         let mut wall_cache = BTreeMap::<WallCacheKey, Arc<walls::WallPlan>>::new();
+        let material_twin = material_twins(&sections, cancel)?;
         let mut first_wall_key = None;
         let mut retained_wall_bytes = 0usize;
         // Same conservative sparse-BTree node convention as native::output_bytes:
@@ -1387,7 +1388,14 @@ fn admit_schedule<'model>(
                     envelope[1].to_bits(),
                     limits.min_bead_width_mm.max(actual_height).to_bits(),
                 ];
-                let layout_key = (current, required_owner, envelope_key, construction_phase);
+                // Identical material plans identical walls: key by the first span
+                // with bit-equal material so repeated prismatic layers share one plan.
+                let wall_span = if required_owner.is_none() {
+                    material_twin[current]
+                } else {
+                    current
+                };
+                let layout_key = (wall_span, required_owner, envelope_key, construction_phase);
                 if index == 0 {
                     first_wall_key = Some(layout_key);
                 }
@@ -3969,6 +3977,41 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
         support_nominal_deposition_volume_mm3: 0.0,
         unsupported_overhang_mm: 0.0,
     }
+}
+
+/// For each span, the first span whose material is bit-identical (itself when
+/// none earlier is). Hashing only buckets candidates; equality decides.
+fn material_twins(
+    sections: &[SectionSpan],
+    cancel: &AtomicBool,
+) -> Result<Vec<usize>, ManufacturingError> {
+    use std::hash::{Hash, Hasher};
+    let mut first = std::collections::HashMap::<u64, Vec<usize>>::new();
+    let mut twins = Vec::with_capacity(sections.len());
+    for (index, span) in sections.iter().enumerate() {
+        check_cancel(cancel)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for polygon in &span.material.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                ring.0.len().hash(&mut hasher);
+                for c in &ring.0 {
+                    c.x.to_bits().hash(&mut hasher);
+                    c.y.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        let bucket = first.entry(hasher.finish()).or_default();
+        let twin = bucket
+            .iter()
+            .copied()
+            .find(|&j| sections[j].material.0 == span.material.0)
+            .unwrap_or(index);
+        if twin == index {
+            bucket.push(index);
+        }
+        twins.push(twin);
+    }
+    Ok(twins)
 }
 
 fn span_at(sections: &[SectionSpan], index: u32) -> usize {
