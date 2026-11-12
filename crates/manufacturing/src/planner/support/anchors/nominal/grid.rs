@@ -275,6 +275,12 @@ impl EdgeGrid {
             return;
         }
         let (a2, b2) = ([a[0], a[1]], [b[0], b[1]]);
+        // Unit direction and the candidate's own extent in that frame:
+        // (start along, across, end along).
+        let delta = [b2[0] - a2[0], b2[1] - a2[1]];
+        let length = delta[0].hypot(delta[1]);
+        let unit = [delta[0] / length, delta[1] / length];
+        let frame = ([dot(unit, a2), cross(unit, a2), dot(unit, b2)], unit);
         let mut hits = std::mem::take(&mut self.hits);
         let query = self.query;
         let mut stamp = std::mem::take(&mut self.stamp);
@@ -299,6 +305,18 @@ impl EdgeGrid {
                 {
                     continue;
                 }
+                // Conservative oriented slab: an edge wholly beyond the
+                // candidate's reach on one side cannot meet either footprint.
+                let reach = endpoint_reach + COVER_SLACK_MM;
+                let across = [cross(frame.1, c), cross(frame.1, d)];
+                let along = [dot(frame.1, c), dot(frame.1, d)];
+                if across[0].min(across[1]) > frame.0[1] + reach
+                    || across[0].max(across[1]) < frame.0[1] - reach
+                    || along[0].min(along[1]) > frame.0[2] + reach
+                    || along[0].max(along[1]) < frame.0[0] - reach
+                {
+                    continue;
+                }
                 hits.push(index);
             }
         });
@@ -306,4 +324,11 @@ impl EdgeGrid {
         hits.sort_unstable();
         self.hits = hits;
     }
+}
+
+fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[1] - a[1] * b[0]
 }
