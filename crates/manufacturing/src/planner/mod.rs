@@ -323,6 +323,7 @@ fn plan_with(
     let mut slab_pool = native::NativeSlabPool::default();
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
+    let mut survival_memo = neighborhood::SurvivalMemo::default();
     let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
     let outside = native_retry_outside_bytes(
         &prepared_sources,
@@ -379,6 +380,7 @@ fn plan_with(
             &mut slab_pool,
             &mut wall_memo,
             &mut void_memo,
+            &mut survival_memo,
         );
         trace_pass("probe", trace_layers, trace_start, &outcome);
         if let Ok(ScheduleAdmission::RefineUnreachableLayer { recycled, .. }) = &mut outcome {
@@ -476,6 +478,7 @@ fn plan_with(
                 &mut slab_pool,
                 &mut wall_memo,
                 &mut void_memo,
+                &mut survival_memo,
             );
             trace_pass("retry", trace_layers, trace_start, &outcome);
             match outcome {
@@ -507,6 +510,7 @@ fn plan_with(
             &mut slab_pool,
             &mut wall_memo,
             &mut void_memo,
+            &mut survival_memo,
         );
         trace_pass("complete", trace_layers, trace_start, &outcome);
         match outcome? {
@@ -692,6 +696,7 @@ fn admit_schedule<'model>(
     pool: &mut native::NativeSlabPool,
     wall_memo: &mut WallMemo,
     void_memo: &mut tolerant::VoidMemo,
+    survival_memo: &mut neighborhood::SurvivalMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let stage_clock = std::time::Instant::now();
     let recipe = &input.intent.recipe;
@@ -1344,6 +1349,18 @@ fn admit_schedule<'model>(
     let mut segments = 0usize;
     let skin_inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
     let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset, *surface_work)?;
+    // Tolerant sections are a function of their schedule entries alone.
+    if admission.tolerant.is_some() {
+        neighborhoods.attach_memo(survival_memo, schedule.len(), &|index| {
+            let layer = &schedule[index as usize];
+            [
+                layer.z.to_bits(),
+                layer.lower_z.to_bits(),
+                layer.sample.to_bits(),
+                layer.height.to_bits(),
+            ]
+        });
+    }
     let outcome = (|| {
         let mut key = None;
         let mut classified = None;

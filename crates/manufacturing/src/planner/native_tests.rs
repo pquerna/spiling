@@ -4025,6 +4025,7 @@ fn startup_wall_handoff_preserves_fresh_complete_admission_and_pressure_release(
             &mut pool,
             &mut WallMemo::default(),
             &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap() else {
             panic!("box startup must be admitted without refinement");
@@ -4092,6 +4093,7 @@ fn startup_wall_handoff_preserves_fresh_complete_admission_and_pressure_release(
             &mut pool,
             &mut WallMemo::default(),
             &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap() else {
             panic!("full admission must complete");
@@ -4186,6 +4188,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
             &mut slab_pool,
             &mut WallMemo::default(),
             &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap()
         {

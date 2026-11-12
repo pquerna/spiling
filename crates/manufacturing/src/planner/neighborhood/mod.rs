@@ -103,8 +103,88 @@ impl Deref for Material<'_> {
     }
 }
 
+/// Survival results by section range, kept across schedule retries of one
+/// lane. A range's result depends only on its own sections and their aligned
+/// dyadic decomposition, so it is reused verbatim while every section in the
+/// range keeps its span and schedule entries; nothing is approximated.
+#[derive(Default)]
+pub(super) struct SurvivalMemo {
+    spans: Vec<Vec<[u64; 4]>>,
+    entries: std::collections::BTreeMap<(usize, usize), (Arc<MultiPolygon<f64>>, usize, usize)>,
+    bytes: usize,
+}
+
+impl SurvivalMemo {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+    /// Drop results whose range changed, then describe `sections`. Recorded
+    /// spans beyond a truncated pass stay valid while the schedule entries
+    /// they were sectioned from are unchanged.
+    fn rebind(
+        &mut self,
+        sections: &[SectionSpan],
+        layers: usize,
+        elevation: &dyn Fn(u32) -> [u64; 4],
+    ) {
+        let describe = |start: u32, end: u32| -> Vec<[u64; 4]> {
+            std::iter::once([u64::from(start), u64::from(end), 0, 0])
+                .chain((start..end).map(elevation))
+                .collect()
+        };
+        let mut spans: Vec<Vec<[u64; 4]>> = sections
+            .iter()
+            .map(|span| describe(span.start, span.end))
+            .collect();
+        let mut changed = spans
+            .iter()
+            .zip(&self.spans)
+            .position(|(new, old)| new != old)
+            .unwrap_or(spans.len().min(self.spans.len()));
+        if changed == spans.len() {
+            let mut next = spans.last().map_or(0, |span| span[0][1]);
+            for old in self.spans.drain(changed..) {
+                let [start, end, ..] = old[0];
+                if start != next || end > layers as u64 || old != describe(start as u32, end as u32) {
+                    break;
+                }
+                next = end;
+                spans.push(old);
+            }
+            changed = spans.len();
+        }
+        let mut released = 0usize;
+        self.entries.retain(|(_, upper), (_, _, bytes)| {
+            let keep = *upper < changed;
+            if !keep {
+                released += *bytes;
+            }
+            keep
+        });
+        self.bytes -= released;
+        self.spans = spans;
+    }
+}
+
+fn shared_bytes(material: &MultiPolygon<f64>) -> usize {
+    material
+        .0
+        .iter()
+        .map(|polygon| {
+            std::iter::once(polygon.exterior())
+                .chain(polygon.interiors())
+                .map(|ring| ring.0.capacity() * std::mem::size_of::<Coord<f64>>())
+                .sum::<usize>()
+                + polygon.interiors().len() * std::mem::size_of::<geo::LineString<f64>>()
+                + std::mem::size_of::<geo::Polygon<f64>>()
+        })
+        .sum::<usize>()
+        + super::native::MATERIAL_ARC_BYTES
+}
+
 pub(super) struct SkinNeighborhoods<'a> {
     sections: &'a [SectionSpan],
+    memo: Option<&'a mut SurvivalMemo>,
     // Raw final-D survival is independent of every neighbor's wall allocation.
     // Raw and cleared complete-tree slots share one allocation and retention pool.
     fill_clearance_mm: f64,
@@ -162,6 +242,7 @@ impl<'a> SkinNeighborhoods<'a> {
         nodes.resize_with(count, || Cached::Missing);
         Ok(Self {
             sections,
+            memo: None,
             fill_clearance_mm,
             nodes,
             base,
@@ -172,6 +253,17 @@ impl<'a> SkinNeighborhoods<'a> {
             retained_owned_byte_capacity: MAX_MANUFACTURING_RETAINED_BYTES as usize,
             work,
         })
+    }
+    /// Reuse survival results of earlier passes whose ranges are unchanged.
+    /// The memo's bytes are part of every later admission's external usage.
+    pub(super) fn attach_memo(
+        &mut self,
+        memo: &'a mut SurvivalMemo,
+        layers: usize,
+        elevation: &dyn Fn(u32) -> [u64; 4],
+    ) {
+        memo.rebind(self.sections, layers, elevation);
+        self.memo = Some(memo);
     }
     pub(super) fn work_mut(&mut self) -> &mut usize {
         &mut self.work
@@ -219,7 +311,9 @@ impl<'a> SkinNeighborhoods<'a> {
 
         let external = Usage {
             points: retained_points,
-            bytes: external_owned_bytes,
+            bytes: external_owned_bytes
+                .checked_add(self.memo.as_ref().map_or(0, |memo| memo.bytes))
+                .ok_or_else(|| resource("skin neighborhood live byte overflow"))?,
         };
         self.admit(external, Usage::default(), cancel)?;
         let Some(neighbor) = neighbor else {
@@ -228,6 +322,79 @@ impl<'a> SkinNeighborhoods<'a> {
         if current >= self.sections.len() || neighbor >= self.sections.len() {
             return Err(resource("skin neighborhood span index out of range"));
         }
+        let range = (current.min(neighbor), current.max(neighbor));
+        if let Some((material, points, _)) =
+            self.memo.as_ref().and_then(|memo| memo.entries.get(&range))
+        {
+            return Ok(Material {
+                storage: Storage::Cached(Arc::clone(material)),
+                points: *points,
+                owned_bytes: 0,
+            });
+        }
+        let result = self.survival_range(current, neighbor, external, cancel)?;
+        self.remember(range, result, external, cancel)
+    }
+    /// Keep a computed range result when it fits beside the live working set.
+    fn remember(
+        &mut self,
+        range: (usize, usize),
+        result: Material<'a>,
+        external: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<Material<'a>, ManufacturingError> {
+        if self.memo.is_none() || matches!(result.storage, Storage::Borrowed(_)) {
+            return Ok(result);
+        }
+        let points = result.points;
+        let shared = match result.storage {
+            Storage::Cached(material) => material,
+            Storage::Temporary(material) => Arc::new(material),
+            Storage::Borrowed(_) => unreachable!("borrowed leaves are returned above"),
+        };
+        let bytes = shared_bytes(&shared);
+        let admitted = self
+            .try_admit(
+                external,
+                Usage {
+                    points: 0,
+                    bytes,
+                },
+                cancel,
+            )?
+            .is_some();
+        let memo = self.memo.as_mut().expect("memo checked above");
+        if admitted {
+            memo.bytes = memo.bytes.saturating_add(bytes);
+            memo.entries
+                .insert(range, (Arc::clone(&shared), points, bytes));
+            return Ok(Material {
+                storage: Storage::Cached(shared),
+                points,
+                owned_bytes: 0,
+            });
+        }
+        let owned_bytes = bytes - super::native::MATERIAL_ARC_BYTES;
+        Ok(match Arc::try_unwrap(shared) {
+            Ok(material) => Material {
+                storage: Storage::Temporary(material),
+                points,
+                owned_bytes,
+            },
+            Err(shared) => Material {
+                storage: Storage::Cached(shared),
+                points,
+                owned_bytes: 0,
+            },
+        })
+    }
+    fn survival_range(
+        &mut self,
+        current: usize,
+        neighbor: usize,
+        external: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<Material<'a>, ManufacturingError> {
         self.intern_leaves(external, cancel)?;
         let end = current
             .max(neighbor)
