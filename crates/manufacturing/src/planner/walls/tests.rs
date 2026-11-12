@@ -628,19 +628,43 @@ fn wall_census() {
         {
             continue;
         }
-        let Ok(definition) =
-            spiling_geometry::from_step_bytes_with_cancel(&std::fs::read(&path).unwrap(), &cancel)
-        else {
+        // Every placed solid, as the engine imports multi-body sources; each
+        // layer's material is the union of their sections.
+        let bytes = std::fs::read(&path).unwrap();
+        let Ok(bodies) = spiling_geometry::source_bodies(&bytes, &cancel) else {
             continue;
         };
-        let Ok(model) = spiling_geometry::tolerant::TolerantModel::build(
-            &definition,
-            Default::default(),
-            &cancel,
-        ) else {
+        let mut models = Vec::new();
+        for body in &bodies {
+            let Ok(definition) =
+                spiling_geometry::from_step_solid_with_cancel(&bytes, &body.solid, &cancel)
+            else {
+                continue;
+            };
+            let Ok(model) = spiling_geometry::tolerant::TolerantModel::build(
+                &definition,
+                Default::default(),
+                &cancel,
+            ) else {
+                continue;
+            };
+            for pose in &body.placements {
+                models.push(model.placed(pose));
+            }
+        }
+        if models.is_empty() {
             continue;
-        };
-        let (min, max) = model.bounds();
+        }
+        let bounds = models.iter().map(|m| m.bounds()).fold(
+            ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+            |(lo, hi), (a, b)| {
+                (
+                    std::array::from_fn(|i| lo[i].min(a[i])),
+                    std::array::from_fn(|i| hi[i].max(b[i])),
+                )
+            },
+        );
+        let (min, max) = bounds;
         let (mut part_total, mut part_passed) = (0usize, 0usize);
         let started = std::time::Instant::now();
         // Sample at most 60 layers evenly so one tall part cannot dominate.
@@ -648,12 +672,26 @@ fn wall_census() {
         let step = 0.2 * (layers / 60.0).ceil().max(1.0);
         let mut z = min[2] + 0.1;
         while z < max[2] {
-            let Ok(section) = model.section(z) else {
+            let mut material = MultiPolygon(Vec::new());
+            let mut failed = false;
+            for model in &models {
+                let Ok(section) = model.section(z) else {
+                    failed = true;
+                    break;
+                };
+                let piece = geo::Simplify::simplify(&super::super::tolerant::polygons(&section), 0.005);
+                material = if material.0.is_empty() { piece } else { geo::BooleanOps::union(&material, &piece) };
+            }
+            if failed {
                 z += step;
                 continue;
-            };
-            let mut material = super::super::tolerant::polygons(&section);
-            material = geo::Simplify::simplify(&material, 0.005);
+            }
+            if models.len() > 1 {
+                // As the tolerant path fuses touching solids.
+                let admit = |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
+                let grown = region::offset_admitted(&material, 0.0025, admit, &cancel).unwrap();
+                material = region::offset_admitted(&grown, -0.0025, admit, &cancel).unwrap();
+            }
             region::canonicalize(&mut material);
             if material.0.is_empty() {
                 z += step;
@@ -672,7 +710,7 @@ fn wall_census() {
                     lower_z: z - 0.1,
                     upper_z: z + 0.1,
                     retained_points: region::point_count(&material),
-                    classic: false,
+                    classic: std::env::var("SPILING_WALL_GENERATOR").as_deref() == Ok("arachne"),
                 },
                 &mut 0,
                 &cancel,

@@ -143,6 +143,16 @@ pub(super) fn collect_span(
         contribution_bytes = contribution_bytes.saturating_add(bytes);
         contributions.push((occurrence.occurrence_id, Arc::new(placed), bytes));
     }
+    if contributions.len() > 1 {
+        // Solids that touch (a shared face, a vertex on a face) print fused.
+        // Their union can leave them as separate rings a few nanometres apart;
+        // closing by half the profile tolerance fuses them and moves nothing
+        // farther than that.
+        let fuse = 0.5 * super::OFFSET_TOLERANCE_MM;
+        let admit = |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
+        let grown = region::offset_admitted(&material, fuse, admit, cancel)?;
+        material = region::offset_admitted(&grown, -fuse, admit, cancel)?;
+    }
     region::canonicalize(&mut material);
     region::check_size(&material)?;
     // Overlapping occurrences share material: the source area is the union's.
