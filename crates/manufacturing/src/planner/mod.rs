@@ -1240,6 +1240,19 @@ fn admit_schedule<'model>(
         let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
         let mut wall_cache = BTreeMap::<WallCacheKey, Arc<walls::WallPlan>>::new();
         let material_twin = material_twins(&sections, cancel)?;
+        prefill_walls(
+            input,
+            schedule,
+            &sections,
+            &native_surfaces,
+            &construction,
+            &material_twin,
+            retained_points,
+            admission.tolerant.is_some(),
+            wall_memo,
+            neighborhoods.work_mut(),
+            cancel,
+        )?;
         let mut first_wall_key = None;
         let mut retained_wall_bytes = 0usize;
         // Same conservative sparse-BTree node convention as native::output_bytes:
@@ -1394,7 +1407,7 @@ fn admit_schedule<'model>(
                 ];
                 // Identical material plans identical walls: key by the first span
                 // with bit-equal material so repeated prismatic layers share one plan.
-                let wall_span = if required_owner.is_none() {
+                let wall_span = if required_owner.is_none() && construction.domains.is_empty() {
                     material_twin[current]
                 } else {
                     current
@@ -1437,8 +1450,10 @@ fn admit_schedule<'model>(
 
                         // Retries of the schedule (support refinement) replan every
                         // layer; identical material at the same envelope reuses its walls.
-                        let memo_key = (required_owner.is_none() && construction_phase.is_none())
-                            .then_some(envelope_key);
+                        let memo_key = (required_owner.is_none()
+                            && construction_phase.is_none()
+                            && construction.domains.is_empty())
+                        .then_some(envelope_key);
                         let remembered = memo_key
                             .and_then(|key| wall_memo.find(&sections[current].material, key));
                         let layout = match remembered {
@@ -4005,6 +4020,102 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
 
 /// For each span, the first span whose material is bit-identical (itself when
 /// none earlier is). Hashing only buckets candidates; equality decides.
+/// Walls are a pure function of material and width envelope (only their XY
+/// geometry is shared; layer Z is applied later). Plan every distinct pair
+/// the schedule will need, in parallel, so the ordered pass finds them in the
+/// memo. A pair whose planning refuses is left for the ordered pass, which
+/// reports it at its layer.
+#[allow(clippy::too_many_arguments)]
+fn prefill_walls(
+    input: &CompilerInput<'_>,
+    schedule: &[LayerElevation],
+    sections: &[SectionSpan],
+    native_surfaces: &[NativeSurfaceSpan],
+    construction: &color::Construction,
+    material_twin: &[usize],
+    retained_points: usize,
+    classic: bool,
+    wall_memo: &mut WallMemo,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use rayon::prelude::*;
+    if !construction.domains.is_empty() {
+        return Ok(());
+    }
+    let limits = input.intent.effective_deposition_limits();
+    let mut seen = std::collections::HashSet::new();
+    let mut wanted = Vec::new();
+    // A probe pass sections only a prefix of the schedule.
+    let covered = sections.last().map_or(0, |span| span.end as usize);
+    for (index, elevation) in schedule.iter().enumerate().take(covered) {
+        check_cancel(cancel)?;
+        let index = index as u32;
+        let current = span_at(sections, index);
+        if sections[current].material.0.is_empty() {
+            continue;
+        }
+        let native_index = native_surfaces.partition_point(|span| span.end <= index);
+        let native_span = native_surfaces
+            .get(native_index)
+            .filter(|span| span.start <= index);
+        if native_span.is_some_and(|span| !span.image_islands.is_empty()) {
+            continue;
+        }
+        let actual_height = elevation.z - elevation.lower_z;
+        let envelope = walls::width_envelope(&limits, actual_height)?;
+        let key = [
+            envelope[0].to_bits(),
+            envelope[1].to_bits(),
+            limits.min_bead_width_mm.max(actual_height).to_bits(),
+        ];
+        if wall_memo.find(&sections[current].material, key).is_some()
+            || !seen.insert((material_twin[current], key))
+        {
+            continue;
+        }
+        wanted.push((index, current, native_index, key));
+    }
+    let planned: Vec<_> = wanted
+        .par_iter()
+        .map(|&(index, current, native_index, key)| {
+            let elevation = &schedule[index as usize];
+            let native_span = native_surfaces
+                .get(native_index)
+                .filter(|span| span.start <= index);
+            let mut work = 0usize;
+            let plan =
+                required_material(&sections[current].material, native_span, &mut work, cancel)
+                    .and_then(|required| {
+                        construction.walls(
+                            walls::WallRequest {
+                                material: &sections[current].material,
+                                required: &required,
+                                recipe: &input.intent.recipe,
+                                limits: &limits,
+                                nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
+                                lower_z: elevation.lower_z,
+                                upper_z: elevation.z,
+                                retained_points,
+                                owned_bytes: 0,
+                                classic,
+                            },
+                            &mut work,
+                            cancel,
+                        )
+                    });
+            (current, key, plan.ok(), work)
+        })
+        .collect();
+    for (current, key, plan, spent) in planned {
+        *work = work.saturating_add(spent);
+        if let Some(plan) = plan {
+            wall_memo.insert(&sections[current].material, key, &Arc::new(plan));
+        }
+    }
+    check_cancel(cancel)
+}
+
 fn material_hash(material: &MultiPolygon<f64>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -4020,14 +4131,13 @@ fn material_hash(material: &MultiPolygon<f64>) -> u64 {
     hasher.finish()
 }
 
+type MemoEntry = (Arc<MultiPolygon<f64>>, [u64; 3], Arc<walls::WallPlan>);
+
 /// Wall plans by bit-identical material and width envelope, kept across
 /// schedule retries of one lane. Hashing only buckets; equality decides.
 #[derive(Default)]
 pub(super) struct WallMemo {
-    plans: std::collections::HashMap<
-        u64,
-        Vec<(Arc<MultiPolygon<f64>>, [u64; 3], Arc<walls::WallPlan>)>,
-    >,
+    plans: std::collections::HashMap<u64, Vec<MemoEntry>>,
 }
 
 impl WallMemo {

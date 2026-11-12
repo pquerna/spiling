@@ -498,6 +498,10 @@ fn trace_edge(
     Ok(())
 }
 
+type StitchKey = ((i64, i64), usize);
+type OffsetFn<'a> = dyn FnMut(&MultiPolygon<f64>, f64, &mut usize) -> Result<MultiPolygon<f64>, ManufacturingError>
+    + 'a;
+
 /// Join pieces of one lane whose ends coincide. Pieces of adjacent cells
 /// meet at one point in exact arithmetic, but the two cells of a segment and
 /// its endpoint compute it from different feet, and Voronoi vertices are
@@ -526,7 +530,8 @@ fn stitch(
         .filter(|piece| piece.points.len() >= 2)
         .map(Some)
         .collect();
-    let mut ends: HashMap<((i64, i64), usize), Vec<(usize, bool)>> = HashMap::new();
+    // (grid cell, lane) -> (piece, at its end).
+    let mut ends: HashMap<StitchKey, Vec<(usize, bool)>> = HashMap::new();
     for (index, piece) in pieces.iter().enumerate() {
         let piece = piece.as_ref().expect("fresh piece");
         ends.entry((cell(piece.points[0]), piece.lane))
@@ -753,11 +758,7 @@ fn cover(
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
     let open = |region: &MultiPolygon<f64>,
                 work: &mut usize,
-                offset: &mut dyn FnMut(
-        &MultiPolygon<f64>,
-        f64,
-        &mut usize,
-    ) -> Result<MultiPolygon<f64>, ManufacturingError>|
+                offset: &mut OffsetFn<'_>|
      -> Result<MultiPolygon<f64>, ManufacturingError> {
         let eroded = offset(region, -reach_radius, work)?;
         offset(&eroded, reach_radius, work)
