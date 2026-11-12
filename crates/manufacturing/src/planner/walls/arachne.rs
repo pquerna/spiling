@@ -498,15 +498,24 @@ fn trace_edge(
     Ok(())
 }
 
-/// Join pieces whose ends coincide exactly. Pieces of one lane from adjacent
-/// cells share their end points bit for bit; degenerate pieces (one point)
-/// only mark a junction and are dropped.
+/// Join pieces of one lane whose ends coincide. Pieces of adjacent cells
+/// meet at one point in exact arithmetic, but the two cells of a segment and
+/// its endpoint compute it from different feet, and Voronoi vertices are
+/// quantized, so the ends can differ by a micrometre fraction. Ends within
+/// `STITCH_MM` join, at the earlier piece's point; degenerate pieces (one
+/// point) only mark a junction and are dropped.
 fn stitch(
     pieces: Vec<Piece>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Piece>, ManufacturingError> {
-    let key = |p: [f64; 2]| (p[0].to_bits(), p[1].to_bits());
+    const STITCH_MM: f64 = 0.000_1;
+    let cell = |p: [f64; 2]| {
+        (
+            (p[0] / STITCH_MM).floor() as i64,
+            (p[1] / STITCH_MM).floor() as i64,
+        )
+    };
     let mut pieces: Vec<Option<Piece>> = pieces
         .into_iter()
         .map(|mut piece| {
@@ -517,16 +526,47 @@ fn stitch(
         .filter(|piece| piece.points.len() >= 2)
         .map(Some)
         .collect();
-    let mut ends: HashMap<((u64, u64), usize), Vec<(usize, bool)>> = HashMap::new();
+    let mut ends: HashMap<((i64, i64), usize), Vec<(usize, bool)>> = HashMap::new();
     for (index, piece) in pieces.iter().enumerate() {
         let piece = piece.as_ref().expect("fresh piece");
-        ends.entry((key(piece.points[0]), piece.lane))
+        ends.entry((cell(piece.points[0]), piece.lane))
             .or_default()
             .push((index, false));
-        ends.entry((key(*piece.points.last().unwrap()), piece.lane))
+        ends.entry((cell(*piece.points.last().unwrap()), piece.lane))
             .or_default()
             .push((index, true));
     }
+    // The unused piece end nearest `p` on this lane, within the tolerance.
+    let find = |pieces: &[Option<Piece>], p: [f64; 2], lane: usize| {
+        let (cx, cy) = cell(p);
+        let mut best: Option<(f64, usize, bool)> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let Some(candidates) = ends.get(&((cx + dx, cy + dy), lane)) else {
+                    continue;
+                };
+                for &(index, at_end) in candidates {
+                    let Some(piece) = &pieces[index] else {
+                        continue;
+                    };
+                    let q = if at_end {
+                        *piece.points.last().unwrap()
+                    } else {
+                        piece.points[0]
+                    };
+                    let d = norm(sub(p, q));
+                    if d <= STITCH_MM && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, index, at_end));
+                    }
+                }
+            }
+        }
+        best.map(|(_, index, at_end)| (index, at_end))
+    };
+    let closes = |chain: &Piece| {
+        chain.points.len() > 2
+            && norm(sub(*chain.points.last().unwrap(), chain.points[0])) <= STITCH_MM
+    };
     let mut chains = Vec::new();
     for start in 0..pieces.len() {
         check_cancel(cancel)?;
@@ -537,17 +577,11 @@ fn stitch(
         // Extend forward from the tail, then backward from the head.
         for _direction in 0..2 {
             loop {
-                let tail = *chain.points.last().unwrap();
-                if chain.points.len() > 2 && tail == chain.points[0] {
+                if closes(&chain) {
                     break;
                 }
-                let Some(candidates) = ends.get(&(key(tail), chain.lane)) else {
-                    break;
-                };
-                let Some(&(next, at_end)) = candidates
-                    .iter()
-                    .find(|(index, _)| pieces[*index].is_some())
-                else {
+                let tail = *chain.points.last().unwrap();
+                let Some((next, at_end)) = find(&pieces, tail, chain.lane) else {
                     break;
                 };
                 let mut piece = pieces[next].take().expect("unused piece");
@@ -558,11 +592,15 @@ fn stitch(
                 chain.points.extend_from_slice(&piece.points[1..]);
                 chain.widths.extend_from_slice(&piece.widths[1..]);
             }
-            if chain.points.len() > 2 && chain.points.first() == chain.points.last() {
+            if closes(&chain) {
                 break;
             }
             chain.points.reverse();
             chain.widths.reverse();
+        }
+        if closes(&chain) {
+            let first = chain.points[0];
+            *chain.points.last_mut().unwrap() = first;
         }
         chains.push(chain);
     }
