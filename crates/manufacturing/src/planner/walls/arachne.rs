@@ -763,19 +763,27 @@ fn cover(
         let eroded = offset(region, -reach_radius, work)?;
         offset(&eroded, reach_radius, work)
     };
-    let printable = open(request.material, work, offset)?;
-    let mut fill = open(&request.material.difference(&beads), work, offset)?;
+    let unbeaded = request.material.difference(&beads);
+    let mut fill = open(&unbeaded, work, offset)?;
     // The fill boundary inherits every bead cap's arc vertices; it only
     // clips infill rows, so half the profile tolerance is its precision.
     fill = geo::Simplify::simplify(&fill, 0.5 * super::super::OFFSET_TOLERANCE_MM);
     fill.0.retain(|polygon| polygon.unsigned_area() > 0.0);
     region::canonicalize(&mut fill);
-    let missing = printable.difference(&beads).difference(&fill);
     // A generator failure leaves printable material unprinted: a void that
     // holds the narrowest bead. Voids thinner than that (the centre of a wide
     // wedge, the corner between two round bead ends) no bead and no infill
-    // line could fill, so they are not a defect.
-    let printable_void = open(&missing, work, offset)?;
+    // line could fill, so they are not a defect. An opening is the union of
+    // the disk translates inside its operand, and a translate inside the
+    // material lies inside the material's own opening, so opening the
+    // unprinted material equals opening its printable part. The opening is
+    // empty exactly when the erosion is; dilate only to measure a void.
+    let missing = unbeaded.difference(&fill);
+    let eroded = offset(&missing, -reach_radius, work)?;
+    if eroded.0.is_empty() {
+        return Ok(fill);
+    }
+    let printable_void = offset(&eroded, reach_radius, work)?;
     if printable_void.unsigned_area() > 1e-6 {
         #[cfg(test)]
         dump(request, paths, &fill, &printable_void);
