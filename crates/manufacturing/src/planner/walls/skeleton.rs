@@ -231,8 +231,9 @@ pub(super) fn construct(
     // Constructor is O(n log n), with <=3n cells, <6n vertices and <18n
     // half-edges. Keep a conservative 8 KiB/site estimate for the live external
     // constructor/diagram throughout extraction, even after its events are freed.
-    // Add our known site/ring/sweep-index/degree-remap scratch separately. Graph
-    // buffers and old+new capacities during growth are admitted in addition.
+    // Add our known site/ring/sweep-index/degree-remap/row-index scratch
+    // separately. Graph buffers and old+new capacities during growth are
+    // admitted in addition.
     // These are bounded staging estimates, not a hard external allocator RSS
     // limit or a promise of internal cancellation.
     let staging = constructor_staging(count, ring_count)?;
@@ -325,6 +326,7 @@ pub(super) fn construct(
     validate_diagram(&diagram, count, work, cancel)?;
     // Only retained interior edges allocate graph storage. Degrees also serve
     // as the dense remap table; their <=6n entries are included in staging.
+    let rows = SiteRows::new(&sites, work, cancel)?;
     let mut edges = Vec::new();
     let mut degrees = vec![0usize; diagram.num_vertices()];
     let mut retained_vertices = 0usize;
@@ -396,7 +398,7 @@ pub(super) fn construct(
         // zero-radius endpoint. Its strict interior point labels the entire
         // open arc's component in the validated integer arrangement. This is
         // computational graph filtering ONLY, never commanded-bead authority.
-        if !inside_material(qmiddle, &sites, work, cancel)? {
+        if !inside_material(qmiddle, &sites, &rows, work, cancel)? {
             continue;
         }
         let next_vertices = retained_vertices
@@ -636,17 +638,98 @@ fn inside_ring(
     Ok(inside)
 }
 
+/// Quantized sites bucketed by their closed y-range. A horizontal ray from
+/// `p` can only cross, or touch, a site whose closed y-range contains `p.y`;
+/// every such site shares `p`'s bucket, because the bucket function is
+/// monotone in y. Classification therefore visits a superset of the sites
+/// that can contribute or refuse, and the parity is that of all sites.
+struct SiteRows {
+    origin: f64,
+    height: f64,
+    /// CSR offsets into `sites`, one row per bucket plus the end.
+    offsets: Vec<usize>,
+    sites: Vec<u32>,
+}
+
+impl SiteRows {
+    fn new(
+        sites: &[Site],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        check_cancel(cancel)?;
+        boolean::charge(work, sites.len().saturating_mul(4))?;
+        let range = |s: &Site| {
+            let [a, b] = s.q.map(|p| f64::from(p[1]));
+            (a.min(b), a.max(b))
+        };
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut spans = 0.0;
+        for site in sites {
+            let (a, b) = range(site);
+            lo = lo.min(a);
+            hi = hi.max(b);
+            spans += b - a;
+        }
+        let n = sites.len().max(1) as f64;
+        // Rows at least as tall as the mean site span over four: at most
+        // about six entries per site in total, whatever the shapes.
+        let height = (((hi - lo) / n).max(spans / (4.0 * n))).ceil().max(1.0);
+        let rows = if sites.is_empty() {
+            1
+        } else {
+            ((hi - lo) / height).floor() as usize + 1
+        };
+        let row = |y: f64| (((y - lo) / height).floor().max(0.0) as usize).min(rows - 1);
+        let mut offsets = vec![0usize; rows + 1];
+        for site in sites {
+            let (a, b) = range(site);
+            for r in row(a)..=row(b) {
+                offsets[r + 1] += 1;
+            }
+        }
+        for r in 0..rows {
+            offsets[r + 1] += offsets[r];
+        }
+        boolean::charge(work, offsets[rows])?;
+        let mut cursor = offsets.clone();
+        let mut entries = vec![0u32; offsets[rows]];
+        for (index, site) in sites.iter().enumerate() {
+            let (a, b) = range(site);
+            for r in row(a)..=row(b) {
+                entries[cursor[r]] = index as u32;
+                cursor[r] += 1;
+            }
+        }
+        Ok(Self {
+            origin: lo,
+            height,
+            offsets,
+            sites: entries,
+        })
+    }
+
+    fn row(&self, y: f64) -> &[u32] {
+        let rows = self.offsets.len() - 1;
+        let r = (((y - self.origin) / self.height).floor().max(0.0) as usize).min(rows - 1);
+        &self.sites[self.offsets[r]..self.offsets[r + 1]]
+    }
+}
+
 fn inside_material(
     p: [f64; 2],
     sites: &[Site],
+    rows: &SiteRows,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    check_cancel(cancel)?;
+    let row = rows.row(p[1]);
+    boolean::charge(work, row.len().max(1))?;
     let mut inside = false;
-    for site in sites {
-        check_cancel(cancel)?;
-        boolean::charge(work, 1)?;
-        inside ^= ray_crossing(p, coordinates(site, true))?;
+    for &site in row {
+        inside ^= ray_crossing(p, coordinates(&sites[site as usize], true))?;
     }
     Ok(inside)
 }
@@ -915,7 +998,7 @@ fn lerp(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
 }
 fn constructor_staging(count: usize, rings: usize) -> Result<usize, ManufacturingError> {
     count
-        .checked_mul(8192 + size_of::<Site>() + 7 * size_of::<usize>())
+        .checked_mul(8192 + size_of::<Site>() + 13 * size_of::<usize>())
         .and_then(|b| b.checked_add(rings.checked_mul(size_of::<Ring>())?))
         .ok_or_else(storage)
 }
