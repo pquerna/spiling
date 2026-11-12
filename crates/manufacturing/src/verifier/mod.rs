@@ -140,9 +140,17 @@ fn verify_wall_gradient(
     let transition = ((previous.length_lower + next.length_lower).next_down() * 0.5).next_down();
     let allowed = (program_coordinates::MAX_WALL_WIDTH_GRADIENT * transition).next_down();
     if change > allowed {
-        return Err(failed(
-            "decoded continuing wall width exceeds the maximum command-space gradient",
-        ));
+        return Err(failed(format!(
+            "decoded continuing wall width exceeds the maximum command-space gradient: widths [{:.6}, {:.6}] -> [{:.6}, {:.6}] mm over edges of at least {:.6} and {:.6} mm (change {:.6} > allowed {:.6})",
+            previous.width[0],
+            previous.width[1],
+            next.width[0],
+            next.width[1],
+            previous.length_lower,
+            next.length_lower,
+            change,
+            allowed
+        )));
     }
     Ok(())
 }

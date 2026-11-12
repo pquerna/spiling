@@ -701,7 +701,13 @@ fn limit_gradient(points: &[[f64; 2]], widths: &mut [f64], closed: bool) {
     }
     let length = |i: usize| norm(sub(points[i + 1], points[i]));
     let lengths: Vec<f64> = (0..n).map(length).collect();
-    let allowed = |a: usize, b: usize| gradient * 0.5 * (lengths[a] + lengths[b]);
+    // Decoded widths differ from planned ones by a little: arc runs take their
+    // extrusion from the source circle's swept length. Reserve one micrometre
+    // per transition so short edges stay inside the verifier's gradient.
+    const DECODE_SLACK_MM: f64 = 0.001;
+    let allowed = |a: usize, b: usize| {
+        (gradient * 0.5 * (lengths[a] + lengths[b]) - DECODE_SLACK_MM).max(0.0)
+    };
     for _ in 0..if closed { 3 } else { 1 } {
         for i in 1..n {
             widths[i] = widths[i].min(widths[i - 1] + allowed(i - 1, i));
