@@ -267,7 +267,7 @@ impl<'a> NominalAnchorPaths<'a> {
             return Ok(());
         }
         let edges = self.blocks.iter().map(|block| block.edges).sum::<usize>();
-        if self.queries < 32
+        if self.queries < 4
             && self.queries.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4)
         {
             return Ok(());
