@@ -668,6 +668,7 @@ fn wall_census() {
         let (min, max) = bounds;
         let (mut part_total, mut part_passed) = (0usize, 0usize);
         let mut part_planning = 0.0f64;
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
         let started = std::time::Instant::now();
         // Sample at most 60 layers evenly so one tall part cannot dominate.
         let layers = ((max[2] - min[2]) / 0.2).floor().max(1.0);
@@ -726,7 +727,21 @@ fn wall_census() {
             );
             part_planning += planning.elapsed().as_secs_f64();
             match result {
-                Ok(_) => part_passed += 1,
+                Ok(plan) => {
+                    part_passed += 1;
+                    use std::hash::{Hash, Hasher};
+                    for path in &plan.paths {
+                        for p in &path.points_mm {
+                            p.map(f64::to_bits).hash(&mut digest);
+                        }
+                        format!("{:?}", path.width).hash(&mut digest);
+                    }
+                    for ring in geo::BooleanOps::rings(&plan.fill) {
+                        for c in &ring.0 {
+                            [c.x.to_bits(), c.y.to_bits()].hash(&mut digest);
+                        }
+                    }
+                }
                 Err(e) => {
                     println!(
                         "REFUSE {name} z={z:.2} {:?}: {}",
@@ -754,8 +769,9 @@ fn wall_census() {
             z += step;
         }
         println!(
-            "PART {name}: {part_passed}/{part_total} layers in {:.1} s (walls {part_planning:.2} s)",
-            started.elapsed().as_secs_f64()
+            "PART {name}: {part_passed}/{part_total} layers in {:.1} s (walls {part_planning:.2} s) plans {:016x}",
+            started.elapsed().as_secs_f64(),
+            std::hash::Hasher::finish(&digest)
         );
         planning_total += part_planning;
         total += part_total;
