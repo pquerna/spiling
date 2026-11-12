@@ -11,7 +11,7 @@ const SEGMENT: usize = 3;
 
 pub(super) struct Order<'a, 't> {
     tasks: &'a [Task<'t>],
-    travel: &'a Travel,
+    pricing: Pricing,
     members: Vec<u32>,
     start: Option<PointMm>,
     /// (local task, reverse, seam) in deposition order.
@@ -38,7 +38,7 @@ impl<'a, 't> Order<'a, 't> {
         let n = visits.len();
         let mut order = Self {
             tasks,
-            travel,
+            pricing: Pricing::new(travel),
             members: members.to_vec(),
             start,
             visits,
@@ -87,13 +87,15 @@ impl<'a, 't> Order<'a, 't> {
             seam,
         })
     }
+    #[inline(always)]
     fn between(&self, from: Option<PointMm>, to: PointMm) -> f64 {
-        from.map_or(0., |from| gap_seconds(self.travel, from, to))
+        from.map_or(0., |from| self.pricing.seconds(from, to))
     }
     fn leaving(&self, position: Option<usize>) -> Option<PointMm> {
         position.map_or(self.start, |p| Some(self.exit[p]))
     }
     /// Modelled seconds from position `a`'s exit (or the start) to `b`'s entry.
+    #[inline(always)]
     fn gap(&self, a: Option<usize>, b: usize) -> f64 {
         self.between(self.leaving(a), self.entry[b])
     }

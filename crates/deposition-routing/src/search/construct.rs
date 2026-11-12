@@ -13,6 +13,7 @@ pub(super) fn nearest<'a, 't>(
 ) -> Result<Order<'a, 't>, Error> {
     let tasks = context.tasks;
     let travel = &context.machine.travel;
+    let pricing = Pricing::new(travel);
     let n = members.len();
     // Prerequisites inside this group; others are met by group order.
     let mut waiting = vec![0u32; n];
@@ -39,7 +40,7 @@ pub(super) fn nearest<'a, 't>(
                 continue;
             }
             let mut offer = |reverse: bool, seam: u32, entry: PointMm, exit: PointMm| {
-                let seconds = position.map_or(0., |from| gap_seconds(travel, from, entry));
+                let seconds = position.map_or(0., |from| pricing.seconds(from, entry));
                 if best.is_none_or(|b| {
                     seconds
                         .total_cmp(&b.0)
