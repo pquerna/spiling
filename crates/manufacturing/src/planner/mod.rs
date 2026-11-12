@@ -2989,12 +2989,34 @@ impl SectionSpan {
     fn visit_occupied(
         &self,
         cancel: &AtomicBool,
+        visit: impl FnMut(&geo::Polygon<f64>, Option<[f64; 2]>) -> Result<bool, ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        self.visit_occupied_screened(cancel, |_, _| Ok(true), visit)
+    }
+
+    /// `screen` sees each piece's XY bounds and height scope before the piece
+    /// is constructed; `Ok(false)` skips it. Only a consumer that provably
+    /// ignores the piece may decline it; proofs must not.
+    fn visit_occupied_screened(
+        &self,
+        cancel: &AtomicBool,
+        mut screen: impl FnMut([[f64; 2]; 2], Option<[f64; 2]>) -> Result<bool, ManufacturingError>,
         mut visit: impl FnMut(&geo::Polygon<f64>, Option<[f64; 2]>) -> Result<bool, ManufacturingError>,
     ) -> Result<(), ManufacturingError> {
+        use geo::BoundingRect;
         use std::ops::ControlFlow;
+        let rect = |polygon: &geo::Polygon<f64>| {
+            polygon.bounding_rect().map_or(
+                [[f64::NAN; 2]; 2],
+                |b| [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+            )
+        };
         if let Some(outer) = &self.occupied {
             for piece in &outer.pieces {
                 check_cancel(cancel)?;
+                if !screen(rect(&piece.polygon), Some(piece.height_mm))? {
+                    continue;
+                }
                 if !visit(&piece.polygon, Some(piece.height_mm))? {
                     return Ok(());
                 }
@@ -3002,13 +3024,21 @@ impl SectionSpan {
             for source in &outer.tolerant {
                 let result = source
                     .model
-                    .visit_support_projection(source.interval, cancel, |piece| {
-                        match visit(&tolerant::polygon(piece.points), Some(piece.height_mm)) {
-                            Ok(true) => ControlFlow::Continue(()),
-                            Ok(false) => ControlFlow::Break(Ok(())),
+                    .visit_support_projection_screened(
+                        source.interval,
+                        cancel,
+                        |bounds, height| match screen(bounds, Some(height)) {
+                            Ok(keep) => ControlFlow::Continue(keep),
                             Err(error) => ControlFlow::Break(Err(error)),
-                        }
-                    })
+                        },
+                        |piece| {
+                            match visit(&tolerant::polygon(piece.points), Some(piece.height_mm)) {
+                                Ok(true) => ControlFlow::Continue(()),
+                                Ok(false) => ControlFlow::Break(Ok(())),
+                                Err(error) => ControlFlow::Break(Err(error)),
+                            }
+                        },
+                    )
                     .map_err(|e| native_error(e, "tolerant continuous support enclosure"))?;
                 if let ControlFlow::Break(result) = result {
                     return result;
@@ -3017,6 +3047,9 @@ impl SectionSpan {
         } else {
             for polygon in &self.material.0 {
                 check_cancel(cancel)?;
+                if !screen(rect(polygon), None)? {
+                    continue;
+                }
                 if !visit(polygon, None)? {
                     break;
                 }
