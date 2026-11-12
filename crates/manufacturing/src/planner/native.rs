@@ -3488,6 +3488,7 @@ pub(super) fn project_protected_voids(
     Ok(super::support::ProtectedVoidSet {
         regions: MultiPolygon(regions),
         scopes,
+        unclaimed: Vec::new(),
     })
 }
 

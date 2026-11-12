@@ -4024,6 +4024,8 @@ fn startup_wall_handoff_preserves_fresh_complete_admission_and_pressure_release(
             &mut sizing,
             &mut pool,
             &mut WallMemo::default(),
+            &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap() else {
             panic!("box startup must be admitted without refinement");
@@ -4090,6 +4092,8 @@ fn startup_wall_handoff_preserves_fresh_complete_admission_and_pressure_release(
             &mut sizing,
             &mut pool,
             &mut WallMemo::default(),
+            &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap() else {
             panic!("full admission must complete");
@@ -4183,6 +4187,8 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
             &mut span_sizing,
             &mut slab_pool,
             &mut WallMemo::default(),
+            &mut tolerant::VoidMemo::default(),
+            &mut neighborhood::SurvivalMemo::default(),
         )
         .unwrap()
         {
@@ -4232,7 +4238,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
                 assert!(!capture.stage.source_captures().is_empty());
                 break;
             }
-            ScheduleAdmission::Complete(_) => {
+            ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
                 panic!("tentative actual paths cannot publish a plan")
             }
         }
