@@ -2329,6 +2329,8 @@ fn coalesce_bridge_rows<'a>(
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
     let mut joined = false;
+    // One borrowed lower set for every row proof on both axes.
+    let mut lower = strokes::LowerStrokes::new(previous.clone(), contacts.clone());
     for axis in [context.axis, context.axis.orthogonal()] {
         let fixed = usize::from(axis == region::HatchAxis::X);
         if !candidate.whole_rows.iter().any(|row| {
@@ -2347,6 +2349,7 @@ fn coalesce_bridge_rows<'a>(
             },
             previous.clone(),
             contacts.clone(),
+            &mut lower,
             anchors,
             work,
             cancel,
@@ -2355,15 +2358,20 @@ fn coalesce_bridge_rows<'a>(
     Ok(joined)
 }
 
-fn coalesce_bridge_rows_on_axis<'a>(
+fn coalesce_bridge_rows_on_axis<'a, P, C>(
     candidate: &mut RasterCandidate,
     context: BridgeRowContext<'_>,
-    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
-    contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+    previous: P,
+    contacts: C,
+    lower: &mut strokes::LowerStrokes<'a, P, C>,
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<bool, ManufacturingError> {
+) -> Result<bool, ManufacturingError>
+where
+    P: Iterator<Item = &'a DepositionPath> + Clone,
+    C: Iterator<Item = &'a DepositionPath> + Clone,
+{
     let BridgeRowContext {
         axis,
         demanded_reorientation,
@@ -2636,15 +2644,8 @@ fn coalesce_bridge_rows_on_axis<'a>(
             row.owner = core_owner;
             let contact_extension = demanded_reorientation
                 && matches!(core_owner, Some(DepositionOwner::MandatorySkin { .. }));
-            let required_proof = strokes::analyze(
-                std::slice::from_ref(&row),
-                previous.clone(),
-                contacts.clone(),
-                recipe,
-                anchors,
-                work,
-                cancel,
-            )?;
+            let required_proof =
+                lower.analyze(std::slice::from_ref(&row), recipe, anchors, work, cancel)?;
             // A short one-ended overhang may already satisfy ordinary support.
             // In a staged orthogonal proposal it still needs a real second
             // anchor before demand-bound band selection can consume it as Bridge.
@@ -2706,15 +2707,7 @@ fn coalesce_bridge_rows_on_axis<'a>(
                 }
                 row.points_mm[0][along] = extension_start + start * length;
                 row.points_mm[1][along] = extension_start + end * length;
-                strokes::analyze(
-                    std::slice::from_ref(&row),
-                    previous.clone(),
-                    contacts.clone(),
-                    recipe,
-                    anchors,
-                    work,
-                    cancel,
-                )?
+                lower.analyze(std::slice::from_ref(&row), recipe, anchors, work, cancel)?
             } else {
                 if count < 2 || required_proof.bridges.is_empty() {
                     continue;
