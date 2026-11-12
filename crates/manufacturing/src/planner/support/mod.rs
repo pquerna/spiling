@@ -1235,22 +1235,31 @@ pub(super) fn realize(
                 // instead offset together, whose positive-winding convolution is
                 // their union, and that union is subtracted once per section.
                 let mut batch = PieceBatch::default();
-                section.visit_occupied(cancel, |occupied, height| {
+                // Bounds-only rejection before a piece is constructed. It makes
+                // exactly the per-piece decisions below with a distance bound.
+                let screen = std::cell::Cell::new(ColumnScreen::new(&column, xy_clearance_mm)?);
+                let scanned = std::cell::Cell::new(0usize);
+                let bed = layers[0].lower_z_mm;
+                let top_z = layers[top].z_mm;
+                let screen_piece = |bounds: [[f64; 2]; 2], height: Option<[f64; 2]>| {
+                    check_cancel(cancel)?;
+                    scanned.set(scanned.get().saturating_add(1));
+                    if let Some([lower, upper]) = height
+                        && (lower > top_z || upper < bed)
+                    {
+                        return Ok(false);
+                    }
+                    Ok(!screen.get().is_some_and(|screen| screen.rejects(bounds)))
+                };
+                let visited = section.visit_occupied_screened(cancel, screen_piece, |occupied, height| {
                     check_cancel(cancel)?;
                     if column.0.is_empty() {
                         return Ok(false);
                     }
-                    work = work.checked_add(1).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "cumulative continuous occupied scope work counter overflow",
-                        )
-                    })?;
-                    if let Some([lower, upper]) = height {
-                        let bed = layers[0].lower_z_mm;
-                        if lower > layers[top].z_mm || upper < bed {
-                            return Ok(true);
-                        }
+                    if let Some([lower, upper]) = height
+                        && (lower > top_z || upper < bed)
+                    {
+                        return Ok(true);
                     }
                     super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
                     let Some(distance) =
@@ -1284,9 +1293,17 @@ pub(super) fn realize(
                             foreign_work,
                             cancel,
                         )?;
+                        screen.set(ColumnScreen::new(&column, xy_clearance_mm)?);
                     }
                     Ok(!column.0.is_empty())
+                });
+                work = work.checked_add(scanned.get()).ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "cumulative continuous occupied scope work counter overflow",
+                    )
                 })?;
+                visited?;
                 subtract_batch(
                     &mut batch,
                     &mut column,
@@ -3149,6 +3166,54 @@ fn remaining_geometry_budget(
     )
 }
 
+/// Column bounds and one clearance distance bounding every per-piece distance
+/// for pieces inside `frame` (overlay padding is monotone in the work frame).
+#[derive(Clone, Copy)]
+struct ColumnScreen {
+    column: [[f64; 2]; 2],
+    frame: [[f64; 2]; 2],
+    reach: f64,
+}
+
+impl ColumnScreen {
+    /// Margin of the bounding frame around the column; pieces beyond it fall
+    /// back to the exact per-piece computation.
+    const FRAME_MM: f64 = 1024.0;
+
+    fn new(column: &MultiPolygon<f64>, requested: f64) -> Result<Option<Self>, ManufacturingError> {
+        let Some(b) = column.bounding_rect() else {
+            return Ok(None);
+        };
+        let column = [[b.min().x, b.min().y], [b.max().x, b.max().y]];
+        let frame = [
+            column[0].map(|v| v - Self::FRAME_MM),
+            column[1].map(|v| v + Self::FRAME_MM),
+        ];
+        let Ok(reach) = clearance_distance_in_frame(frame, frame, requested) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            column,
+            frame,
+            reach,
+        }))
+    }
+
+    /// True only when `candidate_clearance_distance` would return `None`.
+    fn rejects(&self, piece: [[f64; 2]; 2]) -> bool {
+        let (a, b, d) = (piece, self.column, self.reach);
+        a.iter().flatten().all(|v| v.is_finite())
+            && a[0][0] >= self.frame[0][0]
+            && a[0][1] >= self.frame[0][1]
+            && a[1][0] <= self.frame[1][0]
+            && a[1][1] <= self.frame[1][1]
+            && ((a[1][0] + d).next_up() < b[0][0]
+                || (a[0][0] - d).next_down() > b[1][0]
+                || (a[1][1] + d).next_up() < b[0][1]
+                || (a[0][1] - d).next_down() > b[1][1])
+    }
+}
+
 /// Exclusion pieces staged against one column for a single union subtraction.
 struct PieceBatch {
     pieces: MultiPolygon<f64>,
@@ -3184,7 +3249,7 @@ impl PieceBatch {
         let points = piece.exterior().0.len()
             + piece.interiors().iter().map(|r| r.0.len()).sum::<usize>();
         let bytes = std::mem::size_of::<Polygon<f64>>()
-            + piece.interiors().len() * std::mem::size_of::<geo::LineString<f64>>()
+            + std::mem::size_of_val(piece.interiors())
             + points * std::mem::size_of::<geo::Coord<f64>>();
         let records = (self.pieces.0.len() + 1)
             .max(self.pieces.0.capacity())

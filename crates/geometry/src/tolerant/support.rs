@@ -98,6 +98,31 @@ fn padded(points: Vec<[f64; 2]>, margin: f64) -> Vec<[f64; 2]> {
     )
 }
 
+/// Exact bounds of `padded(points, margin)`: hull extremes are input extremes.
+fn padded_bounds(points: &[[f64; 2]], margin: f64) -> [[f64; 2]; 2] {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in points {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min((p[axis] + -margin).next_down());
+            hi[axis] = hi[axis].max((p[axis] + margin).next_up());
+        }
+    }
+    [lo, hi]
+}
+
+fn bounds(points: &[[f64; 2]]) -> [[f64; 2]; 2] {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in points {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(p[axis]);
+            hi[axis] = hi[axis].max(p[axis]);
+        }
+    }
+    [lo, hi]
+}
+
 fn clip(triangle: [[f64; 3]; 3], interval: [f64; 2]) -> Vec<[f64; 3]> {
     let mut points = triangle.to_vec();
     for (z, above) in [(interval[0], true), (interval[1], false)] {
@@ -165,6 +190,20 @@ impl TolerantModel {
         &self,
         interval: [f64; 2],
         cancel: &AtomicBool,
+        visit: impl FnMut(TolerantSupportPiece) -> ControlFlow<E>,
+    ) -> Result<ControlFlow<E>, GeometryError> {
+        self.visit_support_projection_screened(interval, cancel, |_, _| ControlFlow::Continue(true), visit)
+    }
+
+    /// As [`Self::visit_support_projection`], but first offers each piece's
+    /// exact XY bounds and height scope to `screen`; `Continue(false)` skips
+    /// constructing that piece. The skipped piece is still part of the
+    /// projection: only a consumer that provably ignores it may decline it.
+    pub fn visit_support_projection_screened<E>(
+        &self,
+        interval: [f64; 2],
+        cancel: &AtomicBool,
+        mut screen: impl FnMut([[f64; 2]; 2], [f64; 2]) -> ControlFlow<E, bool>,
         mut visit: impl FnMut(TolerantSupportPiece) -> ControlFlow<E>,
     ) -> Result<ControlFlow<E>, GeometryError> {
         if !interval.iter().all(|z| z.is_finite()) || interval[0] > interval[1] {
@@ -200,20 +239,29 @@ impl TolerantModel {
                 // Try the coarse interior exclusion first. One contour copy lets
                 // a stopped consumer avoid constructing all boundary expansions;
                 // no per-layer facet copies are retained by the planner.
-                if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
-                    points: l.points.clone(),
-                    height_mm: interval,
-                })? {
-                    return Ok(ControlFlow::Break(result));
+                match screen(bounds(&l.points), interval) {
+                    ControlFlow::Break(result) => return Ok(ControlFlow::Break(result)),
+                    ControlFlow::Continue(false) => {}
+                    ControlFlow::Continue(true) => {
+                        if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
+                            points: l.points.clone(),
+                            height_mm: interval,
+                        })? {
+                            return Ok(ControlFlow::Break(result));
+                        }
+                    }
                 }
 
                 for i in 0..l.points.len() {
                     cancelled(cancel)?;
+                    let edge = [l.points[i], l.points[(i + 1) % l.points.len()]];
+                    match screen(padded_bounds(&edge, margin), interval) {
+                        ControlFlow::Break(result) => return Ok(ControlFlow::Break(result)),
+                        ControlFlow::Continue(false) => continue,
+                        ControlFlow::Continue(true) => {}
+                    }
                     if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
-                        points: padded(
-                            vec![l.points[i], l.points[(i + 1) % l.points.len()]],
-                            margin,
-                        ),
+                        points: padded(edge.to_vec(), margin),
                         height_mm: interval,
                     })? {
                         return Ok(ControlFlow::Break(result));
@@ -253,16 +301,19 @@ impl TolerantModel {
                         (low - margin).next_down().max(interval[0]),
                         (high + margin).next_up().min(interval[1]),
                     ];
-                    if scope[0] <= scope[1]
-                        && let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
-                            points: padded(
-                                points.into_iter().map(|p| [p[0], p[1]]).collect(),
-                                margin,
-                            ),
+                    if scope[0] <= scope[1] {
+                        let xy: Vec<[f64; 2]> = points.into_iter().map(|p| [p[0], p[1]]).collect();
+                        match screen(padded_bounds(&xy, margin), scope) {
+                            ControlFlow::Break(result) => return Ok(ControlFlow::Break(result)),
+                            ControlFlow::Continue(false) => continue,
+                            ControlFlow::Continue(true) => {}
+                        }
+                        if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
+                            points: padded(xy, margin),
                             height_mm: scope,
-                        })?
-                    {
-                        return Ok(ControlFlow::Break(result));
+                        })? {
+                            return Ok(ControlFlow::Break(result));
+                        }
                     }
                 }
             }

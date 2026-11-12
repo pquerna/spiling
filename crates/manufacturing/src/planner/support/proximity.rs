@@ -148,7 +148,7 @@ impl ColumnProximity {
                         continue;
                     }
                     let d2 = segment_distance_squared(a, b, edge.a, edge.b);
-                    if !(d2 > reach2) {
+                    if d2.partial_cmp(&reach2) != Some(std::cmp::Ordering::Greater) {
                         return false;
                     }
                 }
