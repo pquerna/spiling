@@ -10,7 +10,8 @@ Usage: run.py CORPUS_DIR BIN_DIR INTENT_JSON [RESULTS] [PART_PREFIX...]
 CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
 Writes one JSON record per part to results.ndjson. Standard library only.
 """
-import json, os, re, shutil, subprocess, sys, time, hashlib
+import json, os, re, shutil, subprocess, sys, time, hashlib, threading
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.abspath(sys.argv[1])
 R = os.path.abspath(sys.argv[2])  # directory holding spiling-cli and spiling-engine
@@ -19,6 +20,9 @@ OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
 ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
 # Seconds per CLI step before the part is recorded as a timeout.
 TIMEOUT = int(os.environ.get("SPILING_CORPUS_TIMEOUT", "900"))
+# Parts compiled concurrently; each engine is one process (mostly one core).
+JOBS = int(os.environ.get("SPILING_CORPUS_JOBS", "8"))
+LOCK = threading.Lock()
 CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 # "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
@@ -112,51 +116,58 @@ def prusa(step, cwd):
     return info
 
 
+def part(name, intent, results):
+    src = os.path.join(ROOT, "step", name)
+    cwd = os.path.join(WORK, name)
+    shutil.rmtree(cwd, ignore_errors=True)
+    os.makedirs(cwd)
+    local = os.path.join(cwd, "source.step")
+    shutil.copy(src, local)
+    record = {"part": name, "bytes": os.path.getsize(src),
+              "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
+    record["prusa"] = prusa(local, cwd)
+    create = run_cli(["create", "p.spil", "--import", "source.step", "--intent", intent,
+                      "--center-all-on-bed", "--compile", "--save"], cwd)
+    record["spiling_compile"] = create
+    if create["ok"]:
+        os.remove(local)
+        ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
+        record["spiling_return"] = ret
+        if ret["ok"]:
+            stdout = open(os.path.join(cwd, "open.stdout.json")).read()
+            m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
+            record["deposition_segments"] = int(m.group(1)) if m else None
+            m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
+            record["filament_mm"] = float(m.group(1)) if m else None
+            plan = json.load(open(os.path.join(cwd, "out", "plan.json")))
+            layers = plan["layers"]
+            spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
+            record["layers"] = len(layers)
+            record["overhang_layers"] = sum(1 for v in spans if v > 0)
+            record["max_overhang_mm"] = round(max(spans, default=0), 3)
+            record["ceiling_layers"] = sum(
+                1 for l in layers
+                if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
+    with LOCK:
+        results.write(json.dumps(record) + "\n")
+        results.flush()
+    c = record["spiling_compile"]
+    print(name, "prusa", record["prusa"]["ok"], "| spiling", c["ok"],
+          (c["error"] or {}).get("code"), "| return", (record.get("spiling_return") or {}).get("ok"),
+          flush=True)
+
+
+
 def main():
     os.makedirs(WORK, exist_ok=True)
     intent = intent_file()
     steps = sorted(os.listdir(os.path.join(ROOT, "step")))
     if ONLY:
         steps = [s for s in steps if any(s.startswith(o) for o in ONLY)]
-    with open(OUT, "a") as results:
-        for name in steps:
-            src = os.path.join(ROOT, "step", name)
-            cwd = os.path.join(WORK, name)
-            shutil.rmtree(cwd, ignore_errors=True)
-            os.makedirs(cwd)
-            local = os.path.join(cwd, "source.step")
-            shutil.copy(src, local)
-            record = {"part": name, "bytes": os.path.getsize(src),
-                      "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
-            record["prusa"] = prusa(local, cwd)
-            create = run_cli(["create", "p.spil", "--import", "source.step", "--intent", intent,
-                              "--center-all-on-bed", "--compile", "--save"], cwd)
-            record["spiling_compile"] = create
-            if create["ok"]:
-                os.remove(local)
-                ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
-                record["spiling_return"] = ret
-                if ret["ok"]:
-                    stdout = open(os.path.join(cwd, "open.stdout.json")).read()
-                    m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
-                    record["deposition_segments"] = int(m.group(1)) if m else None
-                    m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
-                    record["filament_mm"] = float(m.group(1)) if m else None
-                    plan = json.load(open(os.path.join(cwd, "out", "plan.json")))
-                    layers = plan["layers"]
-                    spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
-                    record["layers"] = len(layers)
-                    record["overhang_layers"] = sum(1 for v in spans if v > 0)
-                    record["max_overhang_mm"] = round(max(spans, default=0), 3)
-                    record["ceiling_layers"] = sum(
-                        1 for l in layers
-                        if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
-            results.write(json.dumps(record) + "\n")
-            results.flush()
-            c = record["spiling_compile"]
-            print(name, "prusa", record["prusa"]["ok"], "| spiling", c["ok"],
-                  (c["error"] or {}).get("code"), "| return", (record.get("spiling_return") or {}).get("ok"),
-                  flush=True)
+    with open(OUT, "a") as results, ThreadPoolExecutor(JOBS) as pool:
+        # Each part is single-threaded work in its own engine process; run
+        # them side by side so the run takes the slowest part, not the sum.
+        list(pool.map(lambda name: part(name, intent, results), steps))
 
 
 main()
