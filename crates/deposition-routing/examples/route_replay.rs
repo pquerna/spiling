@@ -95,6 +95,37 @@ fn main() {
                 z,
             });
         }
+        // ROUTE_SEED=s (s>0) permutes the input order (prerequisites remapped)
+        // so search quality can be compared over several trajectories.
+        let seed: u64 = std::env::var("ROUTE_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if seed > 0 {
+            let mut random = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut permutation: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                permutation.swap(i, (random % (i as u64 + 1)) as usize);
+            }
+            let mut new_index = vec![0u32; n];
+            for (new, old) in permutation.iter().enumerate() {
+                new_index[*old] = new as u32;
+            }
+            let mut slots: Vec<Option<OwnedTask>> = owned.into_iter().map(Some).collect();
+            owned = permutation
+                .iter()
+                .map(|old| {
+                    let mut task = slots[*old].take().unwrap();
+                    for q in &mut task.prerequisites {
+                        *q = new_index[*q as usize];
+                    }
+                    task
+                })
+                .collect();
+        }
         let tasks: Vec<Task<'_>> = owned
             .iter()
             .map(|t| Task {
@@ -142,6 +173,30 @@ fn main() {
         )
         .unwrap();
         let seconds = started.elapsed().as_secs_f64();
+        if std::env::var_os("ROUTE_GROUPS").is_some() {
+            let mut position = machine.start;
+            for group in &schedule.groups {
+                let mut travel = 0.;
+                for visit in &schedule.visits[group.visits.clone()] {
+                    let (entry, exit) = match tasks[visit.task as usize].ends {
+                        Ends::Open { first, last, .. } if visit.reverse => (last, first),
+                        Ends::Open { first, last, .. } => (first, last),
+                        Ends::Loop { seams } => {
+                            (seams[visit.seam as usize], seams[visit.seam as usize])
+                        }
+                    };
+                    if let Some(from) = position {
+                        travel += gap_seconds(&machine.travel, from, entry);
+                    }
+                    position = Some(exit);
+                }
+                println!(
+                    "group\t{}\t{}\t{travel:.4}",
+                    group.barrier,
+                    group.visits.len()
+                );
+            }
+        }
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         for v in &schedule.visits {
             for x in [v.task, v.reverse as u32, v.seam] {
