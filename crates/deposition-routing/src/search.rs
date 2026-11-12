@@ -27,6 +27,44 @@ impl Context<'_, '_> {
     }
 }
 
+/// Search-local gap pricing: the frozen travel model with a plain square root
+/// instead of the frozen `hypot`. It only ranks candidate orders; the frozen
+/// cost re-prices whatever order the search returns.
+#[derive(Clone, Copy)]
+pub(crate) struct Pricing {
+    lift: f64,
+    speed: f64,
+    minimum: f64,
+    retraction: f64,
+}
+impl Pricing {
+    pub fn new(travel: &Travel) -> Self {
+        let (minimum, retraction) = travel.retraction.map_or((f64::INFINITY, 0.), |r| {
+            (r.minimum_mm, r.seconds + 2. * r.lift_mm / travel.speed_mm_s)
+        });
+        Self {
+            lift: 2. * travel.lift_mm,
+            speed: travel.speed_mm_s,
+            minimum,
+            retraction,
+        }
+    }
+    #[inline(always)]
+    pub fn seconds(&self, a: PointMm, b: PointMm) -> f64 {
+        let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        if d == 0. {
+            return 0.;
+        }
+        let extra = if d >= self.minimum {
+            self.retraction
+        } else {
+            0.
+        };
+        (d + self.lift) / self.speed + extra
+    }
+}
+
 pub(crate) type Groups = Vec<(u32, u32, Range<usize>)>;
 
 /// Tasks bucketed by barrier (ascending), then by tool.
