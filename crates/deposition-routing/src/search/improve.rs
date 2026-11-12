@@ -9,6 +9,27 @@ use super::*;
 const KICKS: usize = 48;
 const SEGMENT: usize = 3;
 
+/// Per-visit buffers for the insertion scan, indexed by insertion point.
+struct Scratch {
+    left: Vec<f64>,
+    /// Half-open range of insertion points whose `left` is current.
+    covered: (usize, usize),
+    added: Vec<f64>,
+    flipped: Vec<f64>,
+    right: Vec<f64>,
+}
+impl Scratch {
+    fn new(n: usize) -> Self {
+        Self {
+            left: vec![0.; n + 1],
+            covered: (0, 0),
+            added: vec![0.; n + 1],
+            flipped: vec![0.; n + 1],
+            right: vec![0.; n + 1],
+        }
+    }
+}
+
 pub(super) struct Order<'a, 't> {
     tasks: &'a [Task<'t>],
     pricing: Pricing,
@@ -18,6 +39,9 @@ pub(super) struct Order<'a, 't> {
     visits: Vec<(u32, bool, u32)>,
     entry: Vec<PointMm>,
     exit: Vec<PointMm>,
+    /// Coordinate-major copies of `exit` and `entry` for vectorized scans.
+    exits: [Vec<f64>; 3],
+    entries: [Vec<f64>; 3],
     /// Position by local task, maintained with the changed visit range.
     at: Vec<usize>,
     /// Incoming gap seconds for each visit, using the same frozen pricing.
@@ -44,6 +68,8 @@ impl<'a, 't> Order<'a, 't> {
             visits,
             entry: vec![[0.; 3]; n],
             exit: vec![[0.; 3]; n],
+            exits: std::array::from_fn(|_| vec![0.; n]),
+            entries: std::array::from_fn(|_| vec![0.; n]),
             at: vec![0; n],
             incoming: vec![0.; n],
             prerequisites,
@@ -72,6 +98,10 @@ impl<'a, 't> Order<'a, 't> {
                     seam,
                 },
             );
+            for axis in 0..3 {
+                self.entries[axis][i] = self.entry[i][axis];
+                self.exits[axis][i] = self.exit[i][axis];
+            }
         }
         for i in range.start..range.end.saturating_add(1).min(self.visits.len()) {
             self.incoming[i] = self.gap(i.checked_sub(1), i);
@@ -115,9 +145,61 @@ impl<'a, 't> Order<'a, 't> {
     fn may_run_reverse(&self, position: usize) -> bool {
         self.reversible(position) || matches!(self.task(position).ends, Ends::Loop { .. })
     }
+    /// Seconds from each exit in `from` to `point`, written to `out`.
+    #[inline(always)]
+    fn price_from(&self, from: [&[f64]; 3], point: PointMm, out: &mut [f64]) {
+        let pricing = self.pricing;
+        for (((o, x), y), z) in out.iter_mut().zip(from[0]).zip(from[1]).zip(from[2]) {
+            *o = pricing.seconds([*x, *y, *z], point);
+        }
+    }
+    /// `scratch.left[j]`: seconds from the visit before insertion point j (or
+    /// the start) to `point`, for every j in [low, high]. Kept across segment
+    /// lengths while the order is unchanged.
+    fn ensure_left(&self, scratch: &mut Scratch, low: usize, high: usize, point: PointMm) {
+        let (covered_low, covered_high) = scratch.covered;
+        let mut fill = |a: usize, b: usize| {
+            if a >= b {
+                return;
+            }
+            let mut a = a;
+            if a == 0 {
+                scratch.left[0] = self.between(self.start, point);
+                a = 1;
+            }
+            if a < b {
+                self.price_from(
+                    [
+                        &self.exits[0][a - 1..b - 1],
+                        &self.exits[1][a - 1..b - 1],
+                        &self.exits[2][a - 1..b - 1],
+                    ],
+                    point,
+                    &mut scratch.left[a..b],
+                );
+            }
+        };
+        if covered_low >= covered_high {
+            fill(low, high + 1);
+            scratch.covered = (low, high + 1);
+        } else {
+            fill(low, covered_low.max(low));
+            fill(covered_high.min(high + 1).max(low), high + 1);
+            scratch.covered = (covered_low.min(low), covered_high.max(high + 1));
+            if low > covered_high || high + 1 < covered_low {
+                // Disjoint ranges leave a gap; cover it too.
+                let (a, b) = if low > covered_high {
+                    (covered_high, low)
+                } else {
+                    (high + 1, covered_low)
+                };
+                fill(a, b);
+            }
+        }
+    }
     /// Move [i, i+len) to the best permitted insertion point; a single
     /// reversible path may be inserted flipped. Returns the new position.
-    fn try_move(&mut self, i: usize, len: usize, to_first: &mut [Option<f64>]) -> Option<usize> {
+    fn try_move(&mut self, i: usize, len: usize, scratch: &mut Scratch) -> Option<usize> {
         let n = self.visits.len();
         let (first, last) = (i, i + len - 1);
         let prev = i.checked_sub(1);
@@ -138,28 +220,85 @@ impl<'a, 't> Order<'a, 't> {
                 }
             }
         }
+        if low > high {
+            return None;
+        }
         let may_flip = len == 1 && self.reversible(first);
+        // All segment lengths share their first visit's entry.
+        self.ensure_left(scratch, low, high, self.entry[first]);
+        // added[j] = left + (last's exit to j) - incoming[j], for j < n.
+        let inner = low..high.min(n - 1) + 1;
+        let point = self.exit[last];
+        let added = &mut scratch.added[inner.clone()];
+        self.price_from(
+            [
+                &self.entries[0][inner.clone()],
+                &self.entries[1][inner.clone()],
+                &self.entries[2][inner.clone()],
+            ],
+            point,
+            added,
+        );
+        for ((a, left), base) in added
+            .iter_mut()
+            .zip(&scratch.left[inner.clone()])
+            .zip(&self.incoming[inner.clone()])
+        {
+            *a = left + *a - base;
+        }
+        if high == n {
+            scratch.added[n] = scratch.left[n];
+        }
+        if may_flip {
+            // Flipped: (j-1 or start) to first's exit, then first's entry to j.
+            let (entry, exit) = (self.entry[first], self.exit[first]);
+            let mut a = low;
+            if a == 0 {
+                scratch.flipped[0] = self.between(self.start, exit);
+                a = 1;
+            }
+            let b = high + 1;
+            if a < b {
+                self.price_from(
+                    [
+                        &self.exits[0][a - 1..b - 1],
+                        &self.exits[1][a - 1..b - 1],
+                        &self.exits[2][a - 1..b - 1],
+                    ],
+                    exit,
+                    &mut scratch.flipped[a..b],
+                );
+            }
+            let flipped = &mut scratch.flipped[inner.clone()];
+            let right = &mut scratch.right[inner.clone()];
+            self.price_from(
+                [
+                    &self.entries[0][inner.clone()],
+                    &self.entries[1][inner.clone()],
+                    &self.entries[2][inner.clone()],
+                ],
+                entry,
+                right,
+            );
+            for ((f, r), base) in flipped
+                .iter_mut()
+                .zip(right.iter())
+                .zip(&self.incoming[inner.clone()])
+            {
+                *f = *f + *r - base;
+            }
+        }
         let mut best = (1e-9, usize::MAX, false);
-        for (offset, cached) in to_first.get_mut(low..=high)?.iter_mut().enumerate() {
-            let j = low + offset;
+        for j in low..=high {
             if (first..=last + 1).contains(&j) {
                 continue;
             }
-            // j-1 is never inside the segment: those j are excluded above.
-            let u = j.checked_sub(1);
-            let v = (j < n).then_some(j);
-            let base = v.map_or(0., |v| self.incoming[v]);
-            // All segment lengths share their first visit. Reuse this side
-            // of the insertion across lengths while the order is unchanged.
-            let left = *cached.get_or_insert_with(|| self.gap(u, first));
-            let added = left + v.map_or(0., |v| self.gap(Some(last), v)) - base;
+            let added = scratch.added[j];
             if removed - added > best.0 {
                 best = (removed - added, j, false);
             }
             if may_flip {
-                let flipped = self.between(self.leaving(u), self.exit[first])
-                    + v.map_or(0., |v| self.between(Some(self.entry[first]), self.entry[v]))
-                    - base;
+                let flipped = scratch.flipped[j];
                 if removed - flipped > best.0 {
                     best = (removed - flipped, j, true);
                 }
@@ -310,7 +449,7 @@ impl<'a, 't> Order<'a, 't> {
     fn descend(&mut self, context: &mut Context<'_, '_>, seeds: &[usize]) -> Result<bool, Error> {
         let n = self.visits.len();
         let mut queued = vec![false; n];
-        let mut to_first = vec![None; n + 1];
+        let mut scratch = Scratch::new(n);
         let mut queue = std::collections::VecDeque::new();
         let wake = |order: &Self,
                     around: usize,
@@ -333,9 +472,9 @@ impl<'a, 't> Order<'a, 't> {
             }
             let i = self.at[l as usize];
             let mut changed = None;
-            to_first.fill(None);
+            scratch.covered = (0, 0);
             for len in 1..=SEGMENT.min(n - i) {
-                if let Some(t) = self.try_move(i, len, &mut to_first) {
+                if let Some(t) = self.try_move(i, len, &mut scratch) {
                     changed = Some([t, t + len]);
                     break;
                 }
@@ -470,7 +609,7 @@ mod tests {
                     let i = step * 7 % N;
                     match step % 5 {
                         0 => {
-                            order.try_move(i, (step % 3 + 1).min(N - i), &mut [None; N + 1]);
+                            order.try_move(i, (step % 3 + 1).min(N - i), &mut Scratch::new(N));
                         }
                         1 => {
                             order.try_entry(i);

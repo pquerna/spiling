@@ -53,15 +53,14 @@ impl Pricing {
     pub fn seconds(&self, a: PointMm, b: PointMm) -> f64 {
         let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
         let d = (dx * dx + dy * dy + dz * dz).sqrt();
-        if d == 0. {
-            return 0.;
-        }
+        // Branch-free selects so slice passes vectorize.
         let extra = if d >= self.minimum {
             self.retraction
         } else {
             0.
         };
-        (d + self.lift) / self.speed + extra
+        let seconds = (d + self.lift) / self.speed + extra;
+        if d == 0. { 0. } else { seconds }
     }
 }
 
