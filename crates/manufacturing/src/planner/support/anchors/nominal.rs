@@ -4,10 +4,14 @@
 use super::*;
 use std::mem::size_of;
 
+mod grid;
+
 pub(in crate::planner::support) struct NominalAnchorPaths<'a> {
     paths: Vec<NominalPath<'a>>,
     blocks: Vec<NominalBlock>,
     reserved_records: usize,
+    /// Optional transient query index; selection only, released with the inventory.
+    grid: Option<grid::EdgeGrid>,
 }
 
 const BLOCK_PATHS: usize = 16;
@@ -28,6 +32,18 @@ struct NominalPath<'a> {
     bounds: [[f64; 2]; 2],
     radius: f64,
     edges: usize,
+}
+
+impl NominalPath<'_> {
+    /// The same physical-floor filter the block scan applies per block.
+    fn eligible(&self, lower_z: f64) -> bool {
+        let top = self.path.physical_z_mm[1];
+        if self.direct {
+            top == lower_z
+        } else {
+            top <= lower_z
+        }
+    }
 }
 
 impl<'a> NominalAnchorPaths<'a> {
@@ -164,7 +180,110 @@ impl<'a> NominalAnchorPaths<'a> {
             paths,
             blocks,
             reserved_records,
+            grid: None,
         }))
+    }
+
+    /// Build the edge grid when the expected block scans outweigh indexing.
+    /// Selection only; any decision here leaves every query result unchanged.
+    pub(in crate::planner::support) fn index_for(
+        &mut self,
+        candidates: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        if self.grid.is_some() {
+            return Ok(());
+        }
+        let edges = self.blocks.iter().map(|block| block.edges).sum::<usize>();
+        if candidates.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4) {
+            return Ok(());
+        }
+        self.grid = grid::EdgeGrid::new(self.paths.iter().map(|path| path.path), cancel)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn force_index(&mut self, cancel: &AtomicBool) {
+        self.grid = grid::EdgeGrid::new(self.paths.iter().map(|path| path.path), cancel).unwrap();
+        assert!(self.grid.is_some());
+    }
+
+    /// Ordered grid selection: z-eligible edges before each admitted edge or
+    /// whole-enumerated path are charged as skipped work at the same position.
+    fn grid_inputs<'s>(
+        paths: &'s [NominalPath<'a>],
+        grid: &'s grid::EdgeGrid,
+        prefix: &'s [usize],
+        lower_z: f64,
+    ) -> impl Iterator<Item = AnchorInput> + 's {
+        let mut hits = grid.hits.iter().copied().peekable();
+        let mut whole = grid
+            .whole
+            .iter()
+            .copied()
+            .filter(move |&path| paths[path as usize].eligible(lower_z))
+            .peekable();
+        let mut charged = 0usize;
+        let mut pending: Option<AnchorInput> = None;
+        let mut current = None;
+        let mut finished = false;
+        std::iter::from_fn(move || {
+            loop {
+                if let Some(item) = pending.take() {
+                    return Some(item);
+                }
+                if let Some(item) = current.as_mut().and_then(Iterator::next) {
+                    return Some(AnchorInput::Edge(item));
+                }
+                current = None;
+                if finished {
+                    return None;
+                }
+                let next_hit = hits.peek().copied();
+                let hit_path = next_hit.map(|edge| grid.edges[edge as usize].path);
+                let take_whole = match (hit_path, whole.peek().copied()) {
+                    (Some(hit), Some(path)) => path < hit,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                let skipped = if take_whole {
+                    let path = whole.next().expect("peeked whole path") as usize;
+                    let prepared = &paths[path];
+                    let skipped = prefix[path] - charged;
+                    charged = prefix[path + 1];
+                    current = Some(nominal_edges(
+                        std::iter::once(prepared.path),
+                        prepared.direct,
+                    ));
+                    skipped
+                } else if let Some(edge) = next_hit {
+                    hits.next();
+                    let record = grid.edges[edge as usize];
+                    let path = record.path as usize;
+                    let position = prefix[path] + (edge - grid.first_edge[path]) as usize;
+                    let skipped = position - charged;
+                    charged = position + 1;
+                    pending = Some(AnchorInput::Edge((
+                        Ok([
+                            [record.c[0], record.c[1], 0.0],
+                            [record.d[0], record.d[1], 0.0],
+                        ]),
+                        paths[path].direct,
+                        record.width,
+                    )));
+                    skipped
+                } else {
+                    finished = true;
+                    let total = prefix[paths.len()];
+                    let skipped = total - charged;
+                    charged = total;
+                    skipped
+                };
+                if skipped > 0 {
+                    return Some(AnchorInput::Skipped(skipped));
+                }
+            }
+        })
     }
 
     fn inputs(
@@ -230,15 +349,39 @@ impl AnchorWorkspace {
         &mut self,
         candidate: AnchorCandidate,
         lower_z: f64,
-        paths: &NominalAnchorPaths<'_>,
+        paths: &mut NominalAnchorPaths<'_>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
         let limit = self.record_limit;
         self.record_limit -= paths.reserved_records;
-        let result = self
-            .gaps_inputs(candidate, paths.inputs(candidate, lower_z), work, cancel)
-            .map(|_| ());
+        let [a, b] = candidate.endpoints_mm;
+        let radius = candidate.bead_width_mm * 0.5;
+        // The grid's no-side-effect argument needs a bounded valid query; any
+        // other query keeps the ordered block scan and its typed refusals.
+        let indexed = paths.grid.is_some()
+            && radius.is_finite()
+            && radius > 0.0
+            && radius <= grid::INDEXED_MAGNITUDE_MM
+            && [a[0], a[1], b[0], b[1]]
+                .iter()
+                .all(|x| x.abs() <= grid::INDEXED_MAGNITUDE_MM)
+            && (a[0] != b[0] || a[1] != b[1]);
+        let result = if indexed {
+            let grid = paths.grid.as_mut().expect("checked edge grid");
+            let prefix = grid.prefix(lower_z, &paths.paths);
+            grid.collect(candidate, lower_z, &paths.paths);
+            let inputs = NominalAnchorPaths::grid_inputs(
+                &paths.paths,
+                grid,
+                grid.prefix_at(prefix),
+                lower_z,
+            );
+            self.gaps_inputs(candidate, inputs, work, cancel)
+        } else {
+            self.gaps_inputs(candidate, paths.inputs(candidate, lower_z), work, cancel)
+        }
+        .map(|_| ());
         self.record_limit = limit;
         result?;
         Ok(&self.uncovered)
@@ -273,9 +416,45 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut scalar = AnchorWorkspace::default();
         let mut screened = AnchorWorkspace::default();
-        let prepared = NominalAnchorPaths::new(paths.iter(), contacts.iter(), &screened, &cancel)
-            .unwrap()
-            .unwrap();
+        let mut prepared =
+            NominalAnchorPaths::new(paths.iter(), contacts.iter(), &screened, &cancel)
+                .unwrap()
+                .unwrap();
+        for indexed in [false, true] {
+            if indexed {
+                prepared.force_index(&cancel);
+            }
+            compare_queries(paths, contacts, &mut prepared, &mut scalar, &mut screened);
+        }
+        let prepared = &mut prepared;
+        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
+        assert_eq!(
+            screened
+                .gaps_nominal(
+                    AnchorCandidate {
+                        endpoints_mm: [[0.0, 0.0, 0.4], [1.0, 0.0, 0.4]],
+                        bead_width_mm: 0.4
+                    },
+                    0.2,
+                    prepared,
+                    &mut 0,
+                    &AtomicBool::new(true),
+                )
+                .unwrap_err()
+                .code,
+            ManufacturingErrorCode::Cancelled,
+        );
+        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
+    }
+
+    fn compare_queries(
+        paths: &[DepositionPath],
+        contacts: &[DepositionPath],
+        prepared: &mut NominalAnchorPaths<'_>,
+        scalar: &mut AnchorWorkspace,
+        screened: &mut AnchorWorkspace,
+    ) {
+        let cancel = AtomicBool::new(false);
         for lower_z in [f64::from_bits(1), 0.1, 0.2, 0.3] {
             for offset in [0.0, 9.8, 20.0, 310.0, 1000.0] {
                 let candidate = AnchorCandidate {
@@ -297,7 +476,7 @@ mod tests {
                     let actual = screened.gaps_nominal(
                         candidate,
                         lower_z,
-                        &prepared,
+                        prepared,
                         &mut actual_work,
                         &cancel,
                     );
@@ -329,24 +508,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
-        assert_eq!(
-            screened
-                .gaps_nominal(
-                    AnchorCandidate {
-                        endpoints_mm: [[0.0, 0.0, 0.4], [1.0, 0.0, 0.4]],
-                        bead_width_mm: 0.4
-                    },
-                    0.2,
-                    &prepared,
-                    &mut 0,
-                    &AtomicBool::new(true),
-                )
-                .unwrap_err()
-                .code,
-            ManufacturingErrorCode::Cancelled,
-        );
-        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
     }
 
     #[test]
@@ -478,10 +639,11 @@ mod tests {
                 + growth_capacity(screened.intervals.capacity(), 1000)
                 + growth_capacity(screened.uncovered.capacity(), 1001);
             screened.set_budget(budget);
-            let prepared =
+            let mut prepared =
                 NominalAnchorPaths::new(paths.iter(), std::iter::empty(), &screened, &cancel)
                     .unwrap()
                     .unwrap();
+            prepared.force_index(&cancel);
             let mut scalar = AnchorWorkspace::default();
             scalar
                 .intervals
@@ -493,7 +655,7 @@ mod tests {
                 .gaps(candidate, paths.iter(), std::iter::empty(), &mut 0, &cancel)
                 .unwrap();
             let actual = screened
-                .gaps_nominal(candidate, 0.1, &prepared, &mut 0, &cancel)
+                .gaps_nominal(candidate, 0.1, &mut prepared, &mut 0, &cancel)
                 .unwrap();
             assert_eq!(actual.len(), 1001);
             assert_eq!(actual.len(), expected.len());
@@ -508,6 +670,144 @@ mod tests {
     }
 
     #[test]
+    fn edge_grid_matches_scalar_on_random_inventories() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let tops = [0.2, 0.4, 0.6];
+        for trial in 0..12 {
+            let mut make = |count: usize| {
+                (0..count)
+                    .map(|_| {
+                        let top = tops[(next() * 3.0) as usize % 3];
+                        let points = 2 + (next() * 6.0) as usize;
+                        let mut point = [next() * 60.0 - 30.0, next() * 60.0 - 30.0];
+                        let mut points_mm = vec![[point[0], point[1], top]];
+                        for _ in 1..points {
+                            let length = if next() < 0.5 {
+                                next() * 2.0
+                            } else {
+                                next() * 40.0
+                            };
+                            let angle = if next() < 0.5 {
+                                (next() * 4.0).floor() * std::f64::consts::FRAC_PI_2
+                            } else {
+                                next() * std::f64::consts::TAU
+                            };
+                            point = [
+                                point[0] + length * angle.cos(),
+                                point[1] + length * angle.sin(),
+                            ];
+                            // Snap to a decimal grid so exact tangencies occur.
+                            point = point.map(|x| (x * 10.0).round() / 10.0);
+                            points_mm.push([point[0], point[1], top]);
+                        }
+                        let edges = points_mm.len() - 1;
+                        DepositionPath {
+                            material_domain: None,
+                            kind: DepositionKind::SparseFill,
+                            owner: None,
+                            width: if next() < 0.5 {
+                                WidthProfile::Constant { width_mm: 0.4 }
+                            } else {
+                                WidthProfile::PerEdge {
+                                    widths_mm: (0..edges)
+                                        .map(|i| 0.2 + 0.2 * (i % 3) as f64)
+                                        .collect(),
+                                }
+                            },
+                            physical_z_mm: [top - 0.2, top],
+                            points_mm,
+                            arcs: Vec::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut previous = make(300);
+            let contacts = make(100);
+            if trial % 3 == 1 {
+                // Zero-length edge and malformed width stay in ordered enumeration.
+                let point = previous[17].points_mm[0];
+                previous[17].points_mm.insert(0, point);
+                previous[17].width = WidthProfile::Constant { width_mm: 0.4 };
+            }
+            if trial % 3 == 2 {
+                previous[250].width = WidthProfile::Constant { width_mm: f64::NAN };
+            }
+            let cancel = AtomicBool::new(false);
+            let mut scalar = AnchorWorkspace::default();
+            let mut screened = AnchorWorkspace::default();
+            let mut prepared =
+                NominalAnchorPaths::new(previous.iter(), contacts.iter(), &screened, &cancel)
+                    .unwrap()
+                    .unwrap();
+            prepared.force_index(&cancel);
+            for _ in 0..400 {
+                let a = [next() * 70.0 - 35.0, next() * 70.0 - 35.0, 0.0];
+                let length = next() * 30.0 + 0.05;
+                let angle = if next() < 0.5 {
+                    (next() * 4.0).floor() * std::f64::consts::FRAC_PI_2
+                } else {
+                    next() * std::f64::consts::TAU
+                };
+                let b = [
+                    ((a[0] + length * angle.cos()) * 10.0).round() / 10.0,
+                    ((a[1] + length * angle.sin()) * 10.0).round() / 10.0,
+                    0.0,
+                ];
+                let a = [
+                    (a[0] * 10.0).round() / 10.0,
+                    (a[1] * 10.0).round() / 10.0,
+                    0.0,
+                ];
+                let candidate = AnchorCandidate {
+                    endpoints_mm: [a, b],
+                    bead_width_mm: [0.2, 0.4, 0.6][(next() * 3.0) as usize % 3],
+                };
+                let lower_z = tops[(next() * 3.0) as usize % 3];
+                let (mut expected_work, mut actual_work) = (7usize, 7usize);
+                let fields = |gaps: &[AnchorGap]| {
+                    gaps.iter()
+                        .map(|gap| {
+                            (
+                                gap.start.to_bits(),
+                                gap.end.to_bits(),
+                                gap.left,
+                                gap.right,
+                                gap.direct_ends,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let expected = scalar
+                    .gaps(
+                        candidate,
+                        previous
+                            .iter()
+                            .filter(|path| path.physical_z_mm[1] == lower_z),
+                        contacts
+                            .iter()
+                            .filter(|path| path.physical_z_mm[1] <= lower_z),
+                        &mut expected_work,
+                        &cancel,
+                    )
+                    .map(fields)
+                    .map_err(|e| (e.code, e.message));
+                let actual = screened
+                    .gaps_nominal(candidate, lower_z, &mut prepared, &mut actual_work, &cancel)
+                    .map(fields)
+                    .map_err(|e| (e.code, e.message));
+                assert_eq!(actual, expected, "trial {trial}");
+                assert_eq!(actual_work, expected_work, "trial {trial}");
+            }
+        }
+    }
+
+    #[test]
     fn nominal_block_tangency_matches_adjacent_scalar_queries() {
         let mut paths = paths();
         for path in &mut paths {
@@ -516,12 +816,16 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut scalar = AnchorWorkspace::default();
         let mut screened = AnchorWorkspace::default();
-        let prepared =
+        let mut prepared =
             NominalAnchorPaths::new(paths.iter(), std::iter::empty(), &screened, &cancel)
                 .unwrap()
                 .unwrap();
         let tangent = paths[31].points_mm[0][0] + (0.4 * 0.5 + 0.8 * 0.5);
-        for position in [tangent.next_down(), tangent, tangent.next_up(), f64::MAX] {
+        let positions = [tangent.next_down(), tangent, tangent.next_up(), f64::MAX];
+        for (step, position) in positions.into_iter().cycle().take(8).enumerate() {
+            if step == 4 {
+                prepared.force_index(&cancel);
+            }
             let candidate = AnchorCandidate {
                 endpoints_mm: [[position, -0.25, 0.4], [position, 0.25, 0.4]],
                 bead_width_mm: 0.4,
@@ -554,7 +858,7 @@ mod tests {
             );
             let actual = fields(
                 screened
-                    .gaps_nominal(candidate, 0.2, &prepared, &mut actual_work, &cancel)
+                    .gaps_nominal(candidate, 0.2, &mut prepared, &mut actual_work, &cancel)
                     .unwrap(),
             );
             assert_eq!(actual, expected);
