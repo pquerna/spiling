@@ -949,9 +949,9 @@ export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "chan
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number,
 /**
- * With supports disabled, the unanchored span of the first stroke found
- * printing over nothing on this layer, as PrusaSlicer prints overhangs
- * without support. Zero when every stroke is anchored.
+ * The unanchored span of a stroke printed over nothing on this layer:
+ * with supports disabled, or with supports on where the part itself
+ * blocks every column from the build plate. Zero otherwise.
  */
 unsupported_overhang_mm: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
 
