@@ -11,10 +11,6 @@ mod batch;
 mod nominal;
 pub(super) use nominal::NominalAnchorPaths;
 
-/// Anchor candidate-pair work is counted, not capped (ADR009); only
-/// arithmetic overflow refuses.
-pub(super) const MAX_ANCHOR_PAIR_WORK: usize = usize::MAX;
-
 /// Exact centerline intersection with previous nominal deposited capsules plus
 /// separately certified positive-area overlap of actual candidate endpoint disks.
 /// No source-material anchor, polygonized circle or overlay tolerance expansion.
@@ -233,20 +229,15 @@ enum AnchorInput {
     Skipped(usize),
 }
 fn charge_pairs(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
-    if let Some(next) = work
-        .checked_add(count)
-        .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
-    {
+    if let Some(next) = work.checked_add(count) {
         *work = next;
         return Ok(());
     }
     // Match the per-edge counter at its first refusal, including partial batches.
-    if *work <= MAX_ANCHOR_PAIR_WORK {
-        *work = MAX_ANCHOR_PAIR_WORK;
-    }
+    *work = usize::MAX;
     Err(error(
         ManufacturingErrorCode::ResourceLimit,
-        "cumulative deposited-stroke anchor work budget exceeded",
+        "cumulative deposited-stroke anchor work counter overflow",
     ))
 }
 
@@ -822,12 +813,7 @@ mod dimension_tests {
                         .inputs(candidate)
                         .any(|entry| matches!(entry, AnchorInput::Skipped(_)))
                 );
-                for initial in [
-                    0,
-                    MAX_ANCHOR_PAIR_WORK - 64,
-                    MAX_ANCHOR_PAIR_WORK - 63,
-                    MAX_ANCHOR_PAIR_WORK,
-                ] {
+                for initial in [0, usize::MAX - 64, usize::MAX - 63, usize::MAX] {
                     let (mut original, mut indexed) =
                         (AnchorWorkspace::default(), AnchorWorkspace::default());
                     let (mut old_work, mut new_work) = (initial, initial);

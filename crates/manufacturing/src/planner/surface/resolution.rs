@@ -107,10 +107,7 @@ fn emit(
     let (classification, lower, upper) =
         if let Some((wall, boundary)) = wall.filter(|_| w.native_edge_parameter.is_some()) {
             let cost = wall.correspondence.len();
-            if work
-                .checked_add(cost)
-                .is_none_or(|n| n > super::super::MAX_BOOLEAN_PAIRS)
-            {
+            if work.checked_add(cost).is_none() {
                 record.coverage_complete = false;
                 return Ok(false);
             }
@@ -226,10 +223,7 @@ pub(in crate::planner) fn collect_resolution(
                 )
             })
             .and_then(|n| n.checked_mul(4));
-        if scan
-            .and_then(|n| work.checked_add(n))
-            .is_none_or(|n| n > super::super::MAX_BOOLEAN_PAIRS)
-        {
+        if scan.and_then(|n| work.checked_add(n)).is_none() {
             record.coverage_complete = false;
             records.push(record);
             continue;

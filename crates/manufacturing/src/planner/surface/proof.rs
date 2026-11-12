@@ -9,15 +9,12 @@ use geo::{Coord, Line, LineString, MultiPolygon};
 use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use std::sync::atomic::AtomicBool;
 pub(super) fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
-    *work = work
-        .checked_add(amount)
-        .filter(|v| *v <= super::super::MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "cumulative surface boundary proof work budget exceeded",
-            )
-        })?;
+    *work = work.checked_add(amount).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "cumulative surface boundary proof work counter overflow",
+        )
+    })?;
     Ok(())
 }
 fn on_open_segment(a: Coord<f64>, b: Coord<f64>, p: Coord<f64>) -> bool {
@@ -218,11 +215,7 @@ fn admit_index(count: usize, work: &usize) -> Result<(), ManufacturingError> {
         .and_then(|n| n.checked_mul(6))
         .and_then(|n| n.checked_add(count.checked_mul(2)?))
         .ok_or_else(proof_overflow)?;
-    if bytes > allowance
-        || work
-            .checked_add(preparation)
-            .is_none_or(|n| n > super::super::MAX_BOOLEAN_PAIRS)
-    {
+    if bytes > allowance || work.checked_add(preparation).is_none() {
         return Err(proof_overflow());
     }
     Ok(())

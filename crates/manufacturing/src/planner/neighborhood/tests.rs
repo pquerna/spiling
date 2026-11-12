@@ -216,7 +216,6 @@ fn sliding_512_vertex_annuli_keep_expected_minimum_radius_and_protected_hole() {
                 <= MAX_RETAINED_GEOMETRY_UNITS
         );
     }
-    assert!(*index.work_mut() < MAX_BOOLEAN_PAIRS);
     assert!(index.retained_points() > 0);
 }
 
@@ -469,7 +468,7 @@ fn comb(teeth: usize, transpose: bool) -> MultiPolygon<f64> {
 #[test]
 fn genuine_dense_comb_intersections_exhaust_shared_work_without_cache_publication() {
     let spans = sections([comb(2300, false), comb(2300, true)]);
-    let mut index = SkinNeighborhoods::new(&spans, 0.0, MAX_BOOLEAN_PAIRS - 1_000_000).unwrap();
+    let mut index = SkinNeighborhoods::new(&spans, 0.0, usize::MAX - 1_000_000).unwrap();
     let failure = index
         .survival(
             0,
@@ -482,7 +481,6 @@ fn genuine_dense_comb_intersections_exhaust_shared_work_without_cache_publicatio
         .unwrap();
     assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
     assert_eq!(index.retained_points(), 0);
-    assert!(*index.work_mut() <= MAX_BOOLEAN_PAIRS);
 }
 
 #[test]
@@ -892,7 +890,7 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
     drop(result);
     let mut spent = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
     // Exhaust the same cumulative counter before a missing derived leaf.
-    *spent.work_mut() = MAX_BOOLEAN_PAIRS;
+    *spent.work_mut() = usize::MAX;
     assert_eq!(
         spent
             .survival(

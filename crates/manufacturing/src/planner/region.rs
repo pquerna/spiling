@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 use super::boolean_budget;
-use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
+use super::{MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
 use crate::{check_cancel, error};
 use geo::algorithm::convex_hull::quick_hull;
 use geo::kernels::{Kernel, Orientation, RobustKernel};
@@ -581,13 +581,6 @@ fn boundary_tube(
             payload_bytes = payload_bytes
                 .checked_add(super::native::polygon_bytes(&mut capsule))
                 .ok_or_else(|| resource("offset primitive payload byte overflow"))?;
-            let count = primitives.0.len() + 1;
-            if count
-                .checked_mul(count)
-                .is_none_or(|pairs| pairs > MAX_BOOLEAN_PAIRS)
-            {
-                return Err(resource("offset primitive pair admission limit exceeded"));
-            }
             offset_admit(
                 admit,
                 external + construction.capacity() + retained_capacity,
@@ -1308,8 +1301,7 @@ pub(super) fn bridge_rows<'a>(
 fn charge_bridge_rows(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(amount)
-        .filter(|value| *value <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| resource("bridge row ownership work limit exceeded"))?;
+        .ok_or_else(|| resource("bridge row ownership work counter overflow"))?;
     Ok(())
 }
 

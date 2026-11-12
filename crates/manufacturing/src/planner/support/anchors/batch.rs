@@ -181,12 +181,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         for (row, candidate) in candidates.into_iter().enumerate() {
-            for initial in [
-                0,
-                MAX_ANCHOR_PAIR_WORK - 128,
-                MAX_ANCHOR_PAIR_WORK - 127,
-                MAX_ANCHOR_PAIR_WORK,
-            ] {
+            for initial in [0, usize::MAX - 128, usize::MAX - 127, usize::MAX] {
                 let mut scalar = AnchorWorkspace::default();
                 let mut screened = AnchorWorkspace::default();
                 let mut scalar_work = initial;

@@ -282,7 +282,7 @@ mod tests {
                     endpoints_mm: [[offset - 2.0, 0.0, 0.4], [offset + 2.0, 0.0, 0.4]],
                     bead_width_mm: 0.4,
                 };
-                for initial in [0, MAX_ANCHOR_PAIR_WORK - 3, MAX_ANCHOR_PAIR_WORK] {
+                for initial in [0, usize::MAX - 3, usize::MAX] {
                     let mut expected_work = initial;
                     let mut actual_work = initial;
                     let expected = scalar.gaps(

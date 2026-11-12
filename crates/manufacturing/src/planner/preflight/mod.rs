@@ -867,22 +867,11 @@ pub(super) fn admit_with<'a, 'work>(
             result.bounds = Some(placed);
         }
     }
-    let mut exclusion_work = 0usize;
     for occurrence_id in result.surface_fields.keys() {
         for (other, bounds) in &occurrence_bounds {
             check_cancel(cancel)?;
             if occurrence_id == other {
                 continue;
-            }
-            exclusion_work += 1;
-            if exclusion_work > super::MAX_BOOLEAN_PAIRS {
-                add(
-                    "resource_limit",
-                    "Surface occurrence exclusion work budget exceeded".into(),
-                    Some(*occurrence_id),
-                    None,
-                );
-                break;
             }
             if surface::intersects(occurrence_bounds[occurrence_id], *bounds) {
                 add("surface_occurrence_exclusion", "Finished occurrence conservative expanded bounds intersect another occurrence; overlapping finishes are not admitted".into(), Some(*occurrence_id), None);
@@ -1301,15 +1290,12 @@ pub(super) fn charge_capture_proposal_work(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    *work = work
-        .checked_add(amount)
-        .filter(|work| *work <= super::MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "cumulative native capture proposal work exceeded",
-            )
-        })?;
+    *work = work.checked_add(amount).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "cumulative native capture proposal work counter overflow",
+        )
+    })?;
     Ok(())
 }
 
@@ -1656,7 +1642,7 @@ mod tests {
             );
             assert!(bands.is_empty());
         }
-        let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
+        let mut exhausted_work = usize::MAX;
         assert_eq!(
             insert_native_event_band(
                 &mut bands,

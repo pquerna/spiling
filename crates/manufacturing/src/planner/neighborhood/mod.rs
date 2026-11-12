@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 //! Job-local physical-horizon intersections of immutable final-D material.
-use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS, SectionSpan, classification, region};
+use super::{MAX_RETAINED_GEOMETRY_UNITS, SectionSpan, classification, region};
 use crate::{check_cancel, error};
 use geo::{Coord, MultiPolygon};
 use spiling_contracts::manufacturing::{
@@ -829,8 +829,7 @@ fn checked_points(
 fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(amount)
-        .filter(|n| *n <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| resource("skin neighborhood work budget exceeded"))?;
+        .ok_or_else(|| resource("skin neighborhood work counter overflow"))?;
     Ok(())
 }
 fn resource(message: &str) -> ManufacturingError {

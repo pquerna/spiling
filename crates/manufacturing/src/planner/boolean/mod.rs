@@ -4,7 +4,7 @@
 //! Carrier-independent conservative overlay work admission. Coarse safe inputs
 //! allocate nothing; sampled boundary neighborhoods use an explicitly charged
 //! edge sweep, not whole-capsule Cartesian products. No material is changed.
-use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS};
+use super::MAX_RETAINED_GEOMETRY_UNITS;
 use crate::{check_cancel, error};
 use geo::{MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::{
@@ -30,9 +30,7 @@ fn resource(message: &str) -> ManufacturingError {
 #[inline]
 pub(super) fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     let before = *work;
-    if let Some(total) = before.checked_add(amount)
-        && total <= MAX_BOOLEAN_PAIRS
-    {
+    if let Some(total) = before.checked_add(amount) {
         *work = total;
         Ok(())
     } else {
@@ -45,7 +43,7 @@ pub(super) fn charge(work: &mut usize, amount: usize) -> Result<(), Manufacturin
 #[inline(never)]
 fn charge_exceeded(before: usize, amount: usize) -> ManufacturingError {
     resource(&format!(
-        "planar Boolean work budget exceeded; consumed {before}, requested {amount}, limit {MAX_BOOLEAN_PAIRS}"
+        "planar Boolean work counter overflow; consumed {before}, requested {amount}"
     ))
 }
 
@@ -80,10 +78,7 @@ fn sift<T>(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let allowance = 3 * (usize::BITS - end.leading_zeros()) as usize;
-    if work
-        .checked_add(allowance)
-        .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
-    {
+    if work.checked_add(allowance).is_some() {
         let mut consumed = 0;
         let result = sift_inner::<_, true>(edges, root, end, key, &mut consumed, cancel);
         charge(work, consumed)?;
@@ -167,7 +162,7 @@ fn sweep_active<T>(
         .len()
         .checked_mul(2)
         .and_then(|allowance| work.checked_add(allowance))
-        .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
+        .is_some()
     {
         let mut consumed = 0;
         let result = sweep_active_inner::<_, true>(active, edge, bounds, &mut consumed, cancel);
@@ -216,12 +211,7 @@ pub(super) fn budget(
     } else {
         &b.0[..]
     };
-    polygon_budget(
-        a.0.iter().chain(other.iter()),
-        &mut 0,
-        MAX_BOOLEAN_PAIRS,
-        cancel,
-    )
+    polygon_budget(a.0.iter().chain(other.iter()), &mut 0, usize::MAX, cancel)
 }
 
 /// Charge a sequence of overlays against one ceiling without billing remote
@@ -244,18 +234,12 @@ pub(crate) fn budget_limited(
     left: &MultiPolygon<f64>,
     right: &MultiPolygon<f64>,
     work: &mut usize,
-    limit: usize,
     available_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    let offset = MAX_BOOLEAN_PAIRS
-        .checked_sub(limit)
-        .ok_or_else(|| resource("Boolean caller ceiling exceeds the shared maximum"))?;
-    let mut bounded = offset
-        .checked_add(*work)
-        .filter(|total| *total <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| resource("Boolean caller work limit exceeded"))?;
+    // Ring inventory is published with the sweep, not before byte admission.
+    let mut counted = *work;
     let other = if std::ptr::eq(left, right) {
         &right.0[..0]
     } else {
@@ -265,7 +249,7 @@ pub(crate) fn budget_limited(
     let mut count = 0usize;
     for polygon in polygons.clone() {
         for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            charge(&mut bounded, 1)?;
+            charge(&mut counted, 1)?;
             count = count
                 .checked_add(ring.0.len().saturating_sub(1))
                 .ok_or_else(|| resource("Boolean caller edge count overflow"))?;
@@ -275,8 +259,8 @@ pub(crate) fn budget_limited(
         .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
         .filter(|bytes| *bytes <= available_bytes)
         .ok_or_else(|| resource("Boolean caller scratch byte limit exceeded"))?;
-    let result = polygon_budget(polygons, &mut bounded, 256, cancel);
-    *work = bounded - offset;
+    let result = polygon_budget(polygons, &mut counted, 256, cancel);
+    *work = counted;
     result
 }
 
@@ -377,12 +361,10 @@ fn polygon_budget<'a>(
         return Ok(());
     }
     let padding = overlay_padding(min, max)?;
-    if let Some(pairs) = count.checked_mul(count).filter(|pairs| {
-        *pairs <= coarse_pair_limit
-            && work
-                .checked_add(*pairs)
-                .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
-    }) {
+    if let Some(pairs) = count
+        .checked_mul(count)
+        .filter(|pairs| *pairs <= coarse_pair_limit && work.checked_add(*pairs).is_some())
+    {
         charge(work, pairs)?;
         return Ok(()); // Every unordered candidate is covered by this coarse bound.
     }
@@ -398,12 +380,9 @@ fn polygon_budget<'a>(
         .filter(|bytes| *bytes <= MAX_MANUFACTURING_RETAINED_BYTES as usize)
         .ok_or_else(|| resource("Boolean broad-phase scratch byte limit exceeded"))?;
     let sort_bound = sort_work(count)?;
-    if work
-        .checked_add(sort_bound)
-        .is_none_or(|v| v > MAX_BOOLEAN_PAIRS)
-    {
+    if work.checked_add(sort_bound).is_none() {
         return Err(resource(
-            "Boolean broad-phase construction/sort work limit exceeded",
+            "Boolean broad-phase construction/sort work counter overflow",
         ));
     }
     let mut edges = Vec::with_capacity(count);
@@ -475,12 +454,11 @@ mod tests {
                     )))
                     .collect(),
             );
-            // Exercise a real remaining-work boundary, not an incidental
-            // historical global ceiling. Leave enough for preparation; dense
+            // Exercise the counter overflow boundary. Leave enough for preparation; dense
             // intra-operand pairs must still exhaust the cumulative allowance.
             let edges: usize = dense.0.iter().map(|p| p.exterior().0.len() - 1).sum();
-            let allowance = (edges * edges / 4).min(MAX_BOOLEAN_PAIRS / 2);
-            let mut work = MAX_BOOLEAN_PAIRS - allowance;
+            let allowance = (edges * edges / 4).min(usize::MAX / 2);
+            let mut work = usize::MAX - allowance;
             assert_eq!(
                 budget_accumulated(
                     &dense,

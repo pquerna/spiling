@@ -194,10 +194,7 @@ pub(super) fn all_certified(
     let Some(bound) = preflight_work_bound(paths, permissions, work, cancel)? else {
         return Ok(false);
     };
-    let Some(stop_at) = work
-        .checked_add(bound.min(MAX_EARLY_CERTIFICATE_WORK))
-        .filter(|total| *total <= super::super::MAX_BOOLEAN_PAIRS)
-    else {
+    let Some(stop_at) = work.checked_add(bound.min(MAX_EARLY_CERTIFICATE_WORK)) else {
         return Ok(false);
     };
     for (index, path) in paths.iter().enumerate().skip(1) {
@@ -226,12 +223,9 @@ fn preflight_work_bound(
     cancel: &AtomicBool,
 ) -> Result<Option<usize>, ManufacturingError> {
     let inventory = paths.len().checked_add(permissions.len());
-    if inventory.is_none_or(|count| {
-        count > MAX_EARLY_CERTIFICATE_WORK
-            || work
-                .checked_add(count)
-                .is_none_or(|total| total > super::super::MAX_BOOLEAN_PAIRS)
-    }) {
+    if inventory
+        .is_none_or(|count| count > MAX_EARLY_CERTIFICATE_WORK || work.checked_add(count).is_none())
+    {
         return Ok(None);
     }
     let mut permission_work = 0usize;
@@ -665,12 +659,12 @@ mod tests {
                 stroke(&[[107.0, 119.0], [113.0, 119.0]], 0.45),
             ];
             let cancel = AtomicBool::new(false);
-            let mut work = super::super::super::MAX_BOOLEAN_PAIRS;
+            let mut work = usize::MAX;
             assert!(!all_certified(&paths, &[], &request, &mut work, &cancel).unwrap());
-            assert_eq!(work, super::super::super::MAX_BOOLEAN_PAIRS);
+            assert_eq!(work, usize::MAX);
             work -= paths.len();
             assert!(!all_certified(&paths, &[], &request, &mut work, &cancel).unwrap());
-            assert_eq!(work, super::super::super::MAX_BOOLEAN_PAIRS);
+            assert_eq!(work, usize::MAX);
             request.owned_bytes = MAX_MANUFACTURING_RETAINED_BYTES as usize;
             work = 0;
             assert!(!all_certified(&paths, &[], &request, &mut work, &cancel).unwrap());
@@ -735,7 +729,7 @@ mod tests {
                 )
                 .unwrap()
             );
-            work = super::super::super::MAX_BOOLEAN_PAIRS;
+            work = usize::MAX;
             let failure = certificate(
                 &paths[..1],
                 &paths[1],
@@ -746,7 +740,7 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
-            assert_eq!(work, super::super::super::MAX_BOOLEAN_PAIRS);
+            assert_eq!(work, usize::MAX);
         });
     }
 }

@@ -163,7 +163,7 @@ fn native_island_ownership_is_exact_cancellable_and_never_exempts_other_ribs() {
             .code,
         ManufacturingErrorCode::Cancelled
     );
-    let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
+    let mut exhausted_work = usize::MAX;
     assert_eq!(
         field
             .owns_native_island(&native.0[0], 2.0, &mut exhausted_work, &cancel)
@@ -256,7 +256,7 @@ fn required_mixed_face_material_keeps_all_ribs_and_only_omits_image_displacement
         .code,
         ManufacturingErrorCode::ResourceLimit,
     );
-    let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
+    let mut exhausted_work = usize::MAX;
     assert_eq!(
         realize_required(
             native.clone(),
@@ -426,7 +426,7 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
         bad[0].unavailable > 0
             || bad[0].max_residual_lower_mm > good[0].max_residual_lower_mm + SURFACE_TOLERANCE_MM
     );
-    let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
+    let mut exhausted_work = usize::MAX;
     let incomplete = collect_resolution(
         ResolutionGeometry {
             wall: &first,

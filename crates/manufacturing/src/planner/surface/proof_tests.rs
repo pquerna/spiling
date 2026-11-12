@@ -85,7 +85,6 @@ fn varying_native_edge_layers_preserve_exact_holes_with_shared_work() {
         certify_simple(&material, &mut work, &cancel).unwrap();
         assert_eq!(material.0[0].interiors(), std::slice::from_ref(&hole));
     }
-    assert!(work < super::super::super::MAX_BOOLEAN_PAIRS);
 }
 #[test]
 fn swept_candidates_match_exhaustive_crossings_contacts_and_simplicity() {
@@ -155,14 +154,14 @@ fn index_honors_cumulative_admission_cancellation_and_fresh_recovery() {
     );
 
     // A valid query cannot restart a caller's exhausted shared allowance.
-    let mut exhausted = super::super::super::MAX_BOOLEAN_PAIRS;
+    let mut exhausted = usize::MAX;
     assert_eq!(
         certify_retention(&original, &derived, &mut exhausted, &cancel)
             .unwrap_err()
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
-    assert_eq!(exhausted, super::super::super::MAX_BOOLEAN_PAIRS);
+    assert_eq!(exhausted, usize::MAX);
     let mut cancelled_work = 0;
     assert_eq!(
         certify_retention(

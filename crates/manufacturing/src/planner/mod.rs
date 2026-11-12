@@ -46,10 +46,6 @@ use std::{
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
-/// Planar work is counted, not capped (ADR009): the counter gives cancellation
-/// points and accounting, and only arithmetic overflow can refuse. Time is the
-/// operator's to spend; memory is bounded separately by byte admission.
-const MAX_BOOLEAN_PAIRS: usize = usize::MAX;
 // Geometry retention uses coordinate-equivalent reservation units (including
 // opaque proof bytes), NOT the independent 100k published-command ceiling.
 // This coarse arithmetic bound never replaces actual allocated-byte admission.
@@ -4203,11 +4199,10 @@ fn required_material<'a>(
                 .and_then(|work| work.checked_add(requested.0.len()))
                 .and_then(|work| work.checked_add(region::point_count(required)))
                 .and_then(|work| work.checked_add(required.0.len()))
-                .filter(|work| *work <= MAX_BOOLEAN_PAIRS)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "required material attribution work budget exceeded",
+                        "required material attribution work counter overflow",
                     )
                 })?;
             let witness = Point(source.exterior().0[0]);

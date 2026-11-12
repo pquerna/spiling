@@ -1416,7 +1416,7 @@ mod tests {
             .code,
             ManufacturingErrorCode::ResourceLimit
         );
-        let mut exhausted_work = super::super::super::MAX_BOOLEAN_PAIRS;
+        let mut exhausted_work = usize::MAX;
         assert_eq!(
             construct(
                 &ordinary,
