@@ -117,6 +117,11 @@ fn plan_lane(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
+    // One pipeline: every job the tolerance policy covers slices through it.
+    // Only features not yet ported keep the exact lane.
+    if tolerant_supported(input).is_ok() {
+        return plan_with(input, cancel, geometry_work, true);
+    }
     match plan_with(input, cancel, geometry_work, false) {
         // A job whose features tolerant mode cannot take keeps the exact
         // refusal, which says more than "not available within tolerance".
