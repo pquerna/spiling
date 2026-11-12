@@ -113,7 +113,16 @@ fn plan_lane(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    match plan_with(input, cancel, geometry_work, false) {
+    let trace_start = std::time::Instant::now();
+    let exact_attempt = plan_with(input, cancel, geometry_work, false);
+    if std::env::var_os("SPILING_PASS_TRACE").is_some() {
+        eprintln!(
+            "PLAN exact secs={:.2} {:?}",
+            trace_start.elapsed().as_secs_f64(),
+            exact_attempt.as_ref().err().map(|e| (e.code, e.message.chars().take(120).collect::<String>()))
+        );
+    }
+    match exact_attempt {
         // A job whose features tolerant mode cannot take keeps the exact
         // refusal, which says more than "not available within tolerance".
         Err(exact) if geometry_refusal(&exact) && tolerant_supported(input).is_ok() => {
@@ -313,6 +322,7 @@ fn plan_with(
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
     let mut wall_memo = WallMemo::default();
+    let mut void_memo = tolerant::VoidMemo::default();
     let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
     let outside = native_retry_outside_bytes(
         &prepared_sources,
@@ -352,6 +362,8 @@ fn plan_with(
         else {
             break None;
         };
+        let trace_start = std::time::Instant::now();
+        let trace_layers = schedule.len();
         let mut outcome = admit_schedule(
             input,
             cancel,
@@ -366,7 +378,9 @@ fn plan_with(
             &mut span_sizing,
             &mut slab_pool,
             &mut wall_memo,
+            &mut void_memo,
         );
+        trace_pass("probe", trace_layers, trace_start, &outcome);
         if let Ok(ScheduleAdmission::RefineUnreachableLayer { recycled, .. }) = &mut outcome {
             let outside = native_retry_outside_bytes(
                 &prepared_sources,
@@ -420,6 +434,8 @@ fn plan_with(
     };
     let mut prefix = native_prefix;
     loop {
+        let trace_start = std::time::Instant::now();
+        let trace_layers = schedule.len();
         let outcome = admit_schedule(
             input,
             cancel,
@@ -434,7 +450,9 @@ fn plan_with(
             &mut span_sizing,
             &mut slab_pool,
             &mut wall_memo,
+            &mut void_memo,
         );
+        trace_pass("complete", trace_layers, trace_start, &outcome);
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
@@ -445,6 +463,35 @@ fn plan_with(
             }
         }
     }
+}
+
+fn trace_stage(name: &str, start: std::time::Instant) {
+    if std::env::var_os("SPILING_PASS_TRACE").is_some() {
+        eprintln!("STAGE {name} at={:.2}", start.elapsed().as_secs_f64());
+    }
+}
+
+fn trace_pass(
+    kind: &str,
+    layers: usize,
+    start: std::time::Instant,
+    outcome: &Result<ScheduleAdmission, ManufacturingError>,
+) {
+    if std::env::var_os("SPILING_PASS_TRACE").is_none() {
+        return;
+    }
+    let what = match outcome {
+        Ok(ScheduleAdmission::Complete(_)) => "complete".to_owned(),
+        Ok(ScheduleAdmission::PrefixAdmitted(_)) => "prefix".to_owned(),
+        Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure, .. }) => {
+            format!("refine {index}: {}", failure.message.chars().take(90).collect::<String>())
+        }
+        Err(failure) => format!("error {:?}", failure.code),
+    };
+    eprintln!(
+        "PASS {kind} layers={layers} secs={:.2} {what}",
+        start.elapsed().as_secs_f64()
+    );
 }
 
 fn native_retry_outside_bytes(
@@ -580,7 +627,9 @@ fn admit_schedule<'model>(
     span_sizing: &mut native::NativeSpanSizing,
     pool: &mut native::NativeSlabPool,
     wall_memo: &mut WallMemo,
+    void_memo: &mut tolerant::VoidMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
+    let stage_clock = std::time::Instant::now();
     let recipe = &input.intent.recipe;
     let continuing = native_prefix.is_some();
     for capture in process_captures.iter_mut() {
@@ -1033,6 +1082,7 @@ fn admit_schedule<'model>(
         }
         index = end;
     }
+    trace_stage("sections", stage_clock);
     let native_retained_points = retained_points;
     let mut native_coverage = if probe.is_some() {
         ScheduleNativeAuthority::Tentative {
@@ -1054,7 +1104,8 @@ fn admit_schedule<'model>(
         .try_fold(
             native_coverage
                 .retained_bytes()
-                .saturating_add(pool.retained_bytes()),
+                .saturating_add(pool.retained_bytes())
+                .saturating_add(void_memo.retained_bytes()),
             |bytes, source| bytes.checked_add(source.retained_bytes()),
         )
         .ok_or_else(|| {
@@ -1249,6 +1300,7 @@ fn admit_schedule<'model>(
             neighborhoods.work_mut(),
             cancel,
         )?;
+        trace_stage("prefill_walls", stage_clock);
         let mut first_wall_key = None;
         let mut retained_wall_bytes = 0usize;
         // Same conservative sparse-BTree node convention as native::output_bytes:
@@ -2027,6 +2079,7 @@ fn admit_schedule<'model>(
                 region_coverage: coverage,
             });
         }
+        trace_stage("layers", stage_clock);
 
         drop(classified);
         drop(wall_layout);
@@ -2092,6 +2145,7 @@ fn admit_schedule<'model>(
         }
 
         support_work.planar = *neighborhoods.work_mut();
+        trace_stage("pre_support", stage_clock);
         let support_admission = support::realize(
             &mut layers,
             &support::SupportInput {
@@ -2419,6 +2473,7 @@ fn admit_schedule<'model>(
                 if let Some(models) = &admission.tolerant {
                     return tolerant::project_protected_voids(
                         models,
+                        void_memo,
                         demand_bounds,
                         retained_units,
                         live_bytes,
@@ -2619,6 +2674,7 @@ fn admit_schedule<'model>(
                     "completed support outside-owner accounting mismatch",
                 )
             })?;
+        trace_stage("support", stage_clock);
         match support_admission {
             support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
                 let recycled = match native_coverage {

@@ -183,18 +183,84 @@ pub(super) fn polygon(points: Vec<[f64; 2]>) -> Polygon<f64> {
     Polygon::new(LineString(coords), Vec::new())
 }
 
+struct ProjectedVoid {
+    outer: Polygon<f64>,
+    bounds: geo::Rect<f64>,
+    scope: spiling_geometry::ProtectedVoidHeightScope,
+}
+
+/// Each occurrence's all-height void projections, independent of demand.
+/// The facet inventory never changes across schedule retries of one lane, so
+/// a model is projected once, on its first relevant demand, and its admitted
+/// outer masks are reused by every later pass.
+#[derive(Default)]
+pub(super) struct VoidMemo {
+    models: BTreeMap<OccurrenceId, Vec<ProjectedVoid>>,
+    points: usize,
+    bytes: usize,
+}
+
+impl VoidMemo {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+fn project_model(
+    model: &TolerantModel,
+    cancel: &AtomicBool,
+) -> Result<Vec<ProjectedVoid>, ManufacturingError> {
+    use geo::{Area, BoundingRect};
+    let mut projected = Vec::new();
+    for void in model
+        .support_voids(cancel)
+        .map_err(|e| super::native_error(e, "tolerant all-height void projection"))?
+    {
+        check_cancel(cancel)?;
+        let outer = polygon(void.polygon);
+        let Some(bounds) = outer.bounding_rect() else {
+            continue;
+        };
+        let bottom = polygon(void.bottom);
+        let floor_parts: Vec<_> = void
+            .floor
+            .into_iter()
+            .map(|triangle| polygon(triangle.to_vec()))
+            .collect();
+        let floor = geo::unary_union(&floor_parts);
+        let closed = bottom.unsigned_area() == 0.0
+            || MultiPolygon(vec![bottom]).difference(&floor).0.is_empty();
+        let scope = if closed {
+            spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                lower_mm: void.height_mm[0],
+                upper_mm: void.height_mm[1],
+            }
+        } else {
+            spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                upper_mm: void.height_mm[1],
+            }
+        };
+        projected.push(ProjectedVoid {
+            outer,
+            bounds,
+            scope,
+        });
+    }
+    Ok(projected)
+}
+
 pub(super) fn project_protected_voids(
     models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
+    memo: &mut VoidMemo,
     demand_bounds: &[[[f64; 2]; 2]],
     retained_units: usize,
     live_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<super::support::ProtectedVoidSet, ManufacturingError> {
-    use geo::{Area, BoundingRect};
     let mut regions = Vec::new();
     let mut scopes = Vec::new();
     let mut points = 0usize;
-    for model in models.values() {
+    for (occurrence_id, model) in models {
         check_cancel(cancel)?;
         let (min, max) = model.bounds();
         if !demand_bounds
@@ -203,15 +269,27 @@ pub(super) fn project_protected_voids(
         {
             continue;
         }
-        for void in model
-            .support_voids(cancel)
-            .map_err(|e| super::native_error(e, "tolerant all-height void projection"))?
-        {
+        if !memo.models.contains_key(occurrence_id) {
+            let projected = project_model(model, cancel)?;
+            let added_points = projected
+                .iter()
+                .map(|void| void.outer.exterior().0.len())
+                .sum::<usize>();
+            let added_bytes = projected.capacity() * std::mem::size_of::<ProjectedVoid>()
+                + added_points * std::mem::size_of::<geo::Coord<f64>>();
+            let memo_points = memo.points.saturating_add(added_points);
+            let memo_bytes = memo.bytes.saturating_add(added_bytes);
+            super::remaining_geometry_units(
+                retained_units.saturating_add(memo_points),
+                live_bytes.saturating_add(memo_bytes),
+            )?;
+            memo.points = memo_points;
+            memo.bytes = memo_bytes;
+            memo.models.insert(*occurrence_id, projected);
+        }
+        for void in &memo.models[occurrence_id] {
             check_cancel(cancel)?;
-            let outer = polygon(void.polygon);
-            let Some(bounds) = outer.bounding_rect() else {
-                continue;
-            };
+            let bounds = void.bounds;
             if !demand_bounds.iter().any(|b| {
                 bounds.min().x <= b[0][1]
                     && bounds.max().x >= b[0][0]
@@ -220,27 +298,8 @@ pub(super) fn project_protected_voids(
             }) {
                 continue;
             }
-            let bottom = polygon(void.bottom);
-            let floor_parts: Vec<_> = void
-                .floor
-                .into_iter()
-                .map(|triangle| polygon(triangle.to_vec()))
-                .collect();
-            let floor = geo::unary_union(&floor_parts);
-            let closed = bottom.unsigned_area() == 0.0
-                || MultiPolygon(vec![bottom]).difference(&floor).0.is_empty();
-            let scope = if closed {
-                spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                    lower_mm: void.height_mm[0],
-                    upper_mm: void.height_mm[1],
-                }
-            } else {
-                spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
-                    upper_mm: void.height_mm[1],
-                }
-            };
             points = points
-                .checked_add(outer.exterior().0.len())
+                .checked_add(void.outer.exterior().0.len())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -249,10 +308,12 @@ pub(super) fn project_protected_voids(
                 })?;
             super::remaining_geometry_units(
                 retained_units + points,
-                live_bytes.saturating_add(points * std::mem::size_of::<geo::Coord<f64>>()),
+                live_bytes
+                    .saturating_add(memo.bytes)
+                    .saturating_add(points * std::mem::size_of::<geo::Coord<f64>>()),
             )?;
-            regions.push(outer);
-            scopes.push(scope);
+            regions.push(void.outer.clone());
+            scopes.push(void.scope);
         }
     }
     Ok(super::support::ProtectedVoidSet {

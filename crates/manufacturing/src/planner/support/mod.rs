@@ -545,6 +545,7 @@ pub(super) fn realize(
     let mut work = work_bank.planar;
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
+    let sup_clock = std::time::Instant::now();
     let outcome = (|| {
         let SupportInput {
             sections,
@@ -927,6 +928,7 @@ pub(super) fn realize(
                 layer.paths[path].kind = DepositionKind::Bridge;
             }
         }
+        super::trace_stage("sup_strokes", sup_clock);
         if demands.is_empty() {
             return Ok(SupportAdmission::Complete);
         }
@@ -1013,6 +1015,7 @@ pub(super) fn realize(
         }
         let native_points_before = native_points;
         let native_bytes_before = native_owned_bytes;
+        super::trace_stage("sup_pre_voids", sup_clock);
         let projected = project_voids(
             &demand_bounds,
             retained,
@@ -1602,6 +1605,7 @@ pub(super) fn realize(
             }
             owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
         }
+        super::trace_stage("sup_columns", sup_clock);
         drop(nominal);
         let mut retained = base_retained;
         // Support centers stay half a bead inside the clipped support region. This
@@ -1722,6 +1726,7 @@ pub(super) fn realize(
             paths.append(&mut layer.paths);
             layer.paths = paths;
         }
+        super::trace_stage("sup_raster", sup_clock);
         // Restore original object roles before reevaluating the actual emitted
         // support/contact strokes. A supported contour is not a fake Bridge.
         support_metadata_bytes =
@@ -2114,6 +2119,7 @@ pub(super) fn realize(
         // Offset/overlay corridor masks only propose candidates. Certify every
         // final actual emitted support capsule against the unchanged raw all-Z C
         // and scoped positive void masks, after both raster/anchor alternatives.
+        super::trace_stage("sup_contacts", sup_clock);
         super::native::certify_support_clearance(
             layers,
             &super::native::SupportClearanceGeometry {
