@@ -75,7 +75,7 @@ pub(in crate::planner) fn analyze<'a>(
     if paths.is_empty() {
         return Ok(result);
     }
-    let prepared = if previous
+    let mut prepared = if previous
         .clone()
         .chain(contacts.clone())
         .take(MIN_ANCHOR_INVENTORY_PATHS)
@@ -86,6 +86,9 @@ pub(in crate::planner) fn analyze<'a>(
     } else {
         None
     };
+    if let Some(prepared) = prepared.as_mut() {
+        prepared.index_for(paths.len(), cancel)?;
+    }
     for (path_index, path) in paths.iter().enumerate() {
         check_cancel(cancel)?;
         let mut has_bridge = false;
@@ -99,7 +102,7 @@ pub(in crate::planner) fn analyze<'a>(
                 endpoints_mm: [a, b],
                 bead_width_mm: width_mm,
             };
-            let gaps = if let Some(prepared) = &prepared {
+            let gaps = if let Some(prepared) = prepared.as_mut() {
                 anchors.gaps_nominal(candidate, path.physical_z_mm[0], prepared, work, cancel)?
             } else {
                 anchors.gaps(
