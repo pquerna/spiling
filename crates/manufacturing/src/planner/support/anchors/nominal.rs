@@ -254,7 +254,9 @@ impl<'a> NominalAnchorPaths<'a> {
             return Ok(());
         }
         let edges = self.blocks.iter().map(|block| block.edges).sum::<usize>();
-        if self.queries.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4) {
+        if self.queries < 32
+            && self.queries.saturating_mul(self.blocks.len()) <= edges.saturating_mul(4)
+        {
             return Ok(());
         }
         self.grid = grid::EdgeGrid::new(self.paths.iter().map(|path| path.path), cancel)?;
