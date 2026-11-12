@@ -310,6 +310,9 @@ fn reserve_component_record<T>(
 pub(super) struct ProtectedVoidSet {
     pub regions: MultiPolygon<f64>,
     pub scopes: Vec<spiling_geometry::ProtectedVoidHeightScope>,
+    /// Truncated retries only: projected voids outside every demand this
+    /// pass saw. A complete pass may include them through higher demands.
+    pub unclaimed: Vec<(Polygon<f64>, spiling_geometry::ProtectedVoidHeightScope)>,
 }
 
 /// Admission inputs shared by whole-row ownership and deposited-anchor proof.
@@ -493,6 +496,8 @@ fn exclude_object_raster_work(
 
 pub(super) enum SupportAdmission {
     Complete,
+    /// A truncated retry cannot decide what the complete pass would.
+    Undecided,
     RefineUnreachableLayer {
         index: usize,
         failure: ManufacturingError,
@@ -513,6 +518,7 @@ pub(super) fn realize(
     cancel: &AtomicBool,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     tentative: bool,
+    truncated: bool,
     work_bank: &mut SupportWork,
     mut raster: impl FnMut(
         usize,
@@ -1047,7 +1053,15 @@ pub(super) fn realize(
         let ProtectedVoidSet {
             regions: protected,
             scopes,
+            unclaimed,
         } = projected;
+        // Truncated-retry gate operands stay live through the demand loop.
+        native_owned_bytes = unclaimed.iter().fold(native_owned_bytes, |bytes, (mask, _)| {
+            bytes.saturating_add(
+                (mask.exterior().0.capacity() * std::mem::size_of::<geo::Coord<f64>>())
+                    .saturating_add(std::mem::size_of::<(Polygon<f64>, spiling_geometry::ProtectedVoidHeightScope)>()),
+            )
+        });
         let protected = OwnedMaterial::new(protected);
         if protected.0.len() != scopes.len() {
             return Err(error(
@@ -1135,7 +1149,11 @@ pub(super) fn realize(
                 continue;
             }
             let mut floor: Option<f64> = None;
-            for object in &layers[section.start as usize..section.end as usize] {
+            // A truncated retry's spans may extend past its output layers.
+            let objects = layers
+                .get(section.start as usize..(section.end as usize).min(layers.len()))
+                .unwrap_or(&[]);
+            for object in objects {
                 super::native::charge_support_clearance(&mut work, cancel)?;
                 if object.paths.is_empty() {
                     continue;
@@ -1322,6 +1340,21 @@ pub(super) fn realize(
                     cancel,
                 )?;
             }
+            // A complete pass may also hold voids claimed only by higher
+            // demands. Each would be skipped there iff it cannot reach this
+            // column, whose bounds only shrink below; otherwise only the
+            // complete pass can decide.
+            if !column.0.is_empty() {
+                for (mask, scope) in &unclaimed {
+                    check_cancel(cancel)?;
+                    if void_reaches_corridor(scope, layers[0].lower_z_mm, layers[top].z_mm)
+                        && candidate_clearance_distance(mask, &column, xy_clearance_mm)?
+                            .is_some()
+                    {
+                        return Ok(SupportAdmission::Undecided);
+                    }
+                }
+            }
             for (mask, scope) in protected.0.iter().zip(&scopes) {
                 if column.0.is_empty() {
                     break;
@@ -1333,17 +1366,7 @@ pub(super) fn realize(
                         "cumulative protected-void scope work counter overflow",
                     )
                 })?;
-                let corridor_lower = layers[0].lower_z_mm;
-                let corridor_upper = layers[top].z_mm;
-                let relevant = match scope {
-                    spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
-                        *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
-                    }
-                    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
-                        *upper_mm >= corridor_lower
-                    }
-                };
-                if !relevant {
+                if !void_reaches_corridor(scope, layers[0].lower_z_mm, layers[top].z_mm) {
                     continue;
                 }
                 super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
@@ -1606,6 +1629,11 @@ pub(super) fn realize(
             owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
         }
         super::trace_stage("sup_columns", sup_clock);
+        if truncated {
+            // No demand in range refines; only the complete pass decides
+            // the rest of the schedule and publishes support.
+            return Ok(SupportAdmission::Undecided);
+        }
         drop(nominal);
         let mut retained = base_retained;
         // Support centers stay half a bead inside the clipped support region. This
@@ -3466,6 +3494,21 @@ fn index_column(
         temporary,
     )?;
     Ok(proximity::ColumnProximity::new(column))
+}
+
+fn void_reaches_corridor(
+    scope: &spiling_geometry::ProtectedVoidHeightScope,
+    corridor_lower: f64,
+    corridor_upper: f64,
+) -> bool {
+    match scope {
+        spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
+            *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
+        }
+        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
+            *upper_mm >= corridor_lower
+        }
+    }
 }
 
 fn candidate_clearance_distance(

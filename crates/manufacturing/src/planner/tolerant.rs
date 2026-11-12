@@ -253,20 +253,22 @@ pub(super) fn project_protected_voids(
     models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
     memo: &mut VoidMemo,
     demand_bounds: &[[[f64; 2]; 2]],
+    truncated: bool,
     retained_units: usize,
     live_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<super::support::ProtectedVoidSet, ManufacturingError> {
     let mut regions = Vec::new();
     let mut scopes = Vec::new();
+    let mut unclaimed = Vec::new();
     let mut points = 0usize;
     for (occurrence_id, model) in models {
         check_cancel(cancel)?;
         let (min, max) = model.bounds();
-        if !demand_bounds
+        let claimed_model = demand_bounds
             .iter()
-            .any(|b| (0..2).all(|a| min[a] <= b[a][1] && max[a] >= b[a][0]))
-        {
+            .any(|b| (0..2).all(|a| min[a] <= b[a][1] && max[a] >= b[a][0]));
+        if !claimed_model && !truncated {
             continue;
         }
         if !memo.models.contains_key(occurrence_id) {
@@ -290,12 +292,32 @@ pub(super) fn project_protected_voids(
         for void in &memo.models[occurrence_id] {
             check_cancel(cancel)?;
             let bounds = void.bounds;
-            if !demand_bounds.iter().any(|b| {
-                bounds.min().x <= b[0][1]
-                    && bounds.max().x >= b[0][0]
-                    && bounds.min().y <= b[1][1]
-                    && bounds.max().y >= b[1][0]
-            }) {
+            if !claimed_model
+                || !demand_bounds.iter().any(|b| {
+                    bounds.min().x <= b[0][1]
+                        && bounds.max().x >= b[0][0]
+                        && bounds.min().y <= b[1][1]
+                        && bounds.max().y >= b[1][0]
+                })
+            {
+                if truncated {
+                    // Gate operands only; never subtracted. Admitted like masks.
+                    points = points
+                        .checked_add(void.outer.exterior().0.len())
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "tolerant void projection size overflow",
+                            )
+                        })?;
+                    super::remaining_geometry_units(
+                        retained_units + points,
+                        live_bytes
+                            .saturating_add(memo.bytes)
+                            .saturating_add(points * std::mem::size_of::<geo::Coord<f64>>()),
+                    )?;
+                    unclaimed.push((void.outer.clone(), void.scope));
+                }
                 continue;
             }
             points = points
@@ -319,5 +341,6 @@ pub(super) fn project_protected_voids(
     Ok(super::support::ProtectedVoidSet {
         regions: MultiPolygon(regions),
         scopes,
+        unclaimed,
     })
 }
