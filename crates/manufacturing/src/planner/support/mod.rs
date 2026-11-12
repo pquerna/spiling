@@ -934,11 +934,10 @@ pub(super) fn realize(
         else {
             unreachable!("disabled support demand refused above")
         };
-        let selection_gap_mm = if source_z_allowance_mm > 0.0 {
-            (z_gap_mm + source_z_allowance_mm).next_up()
-        } else {
-            z_gap_mm
-        };
+        // The gap is measured against the sliced object layers, which ADR012
+        // places within the recorded tolerance of the BREP; widening it by the
+        // whole enclosure margin would drop a full layer below every contact.
+        let selection_gap_mm = z_gap_mm;
         if tentative {
             for demand in &demands {
                 let path = &layers[demand.target].paths[demand.failure.path];
