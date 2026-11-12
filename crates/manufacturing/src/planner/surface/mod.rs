@@ -220,15 +220,12 @@ impl PreparedFinish {
                     "continuous finish occupied-envelope staging budget exceeded",
                 )
             })?;
-        *work = work
-            .checked_add(5)
-            .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "continuous finish envelope work budget exceeded",
-                )
-            })?;
+        *work = work.checked_add(5).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "continuous finish envelope work counter overflow",
+            )
+        })?;
         let mut envelope = geo::Polygon::new(
             geo::LineString::from(vec![
                 (bounds.min[0], bounds.min[1]),

@@ -353,11 +353,7 @@ fn consumed_contact_bridge_revalidation_requires_complete_actual_gap_proof() {
 fn demanded_skin_contact_extension_preserves_work_retention_and_cancellation_bounds() {
     for case in 0..3 {
         let mut scene = scene(ProcessSkinKind::TopSkin, region::HatchAxis::X, false);
-        let mut work = if case == 0 {
-            anchors::MAX_ANCHOR_PAIR_WORK
-        } else {
-            0
-        };
+        let mut work = if case == 0 { usize::MAX } else { 0 };
         let failure = component_admission(
             (
                 &mut scene.candidate,

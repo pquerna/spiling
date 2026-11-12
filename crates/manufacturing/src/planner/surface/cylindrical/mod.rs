@@ -514,12 +514,9 @@ pub(super) fn realize(
         .checked_mul(field.count as usize * 16)
         .and_then(|v| v.checked_add(capacity))
         .ok_or_else(|| resource("cylindrical sampling work overflow"))?;
-    if work
-        .checked_add(sampling_work)
-        .is_none_or(|v| v > super::super::MAX_BOOLEAN_PAIRS)
-    {
+    if work.checked_add(sampling_work).is_none() {
         return Err(resource(
-            "cumulative cylindrical sampling work budget exceeded",
+            "cumulative cylindrical sampling work counter overflow",
         ));
     }
     let mut points = Vec::with_capacity(capacity);
@@ -1054,7 +1051,7 @@ mod tests {
             .code,
             ManufacturingErrorCode::ResourceLimit
         );
-        let mut exhausted = super::super::super::MAX_BOOLEAN_PAIRS;
+        let mut exhausted = usize::MAX;
         assert_eq!(
             realize(
                 source,

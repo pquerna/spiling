@@ -427,12 +427,7 @@ mod tests {
         let ring = circle();
         let centers = MultiPolygon(vec![Polygon::new(ring.clone(), vec![])]);
         for (retained, mut work, cancel, expected) in [
-            (
-                0,
-                super::super::super::super::MAX_BOOLEAN_PAIRS,
-                false,
-                ManufacturingErrorCode::ResourceLimit,
-            ),
+            (0, usize::MAX, false, ManufacturingErrorCode::ResourceLimit),
             (
                 super::super::super::super::MAX_RETAINED_GEOMETRY_UNITS,
                 0,

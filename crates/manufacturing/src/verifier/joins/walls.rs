@@ -74,7 +74,6 @@ impl Budget<'_> {
             left,
             right,
             self.work,
-            usize::MAX,
             (MAX_MANUFACTURING_RETAINED_BYTES as usize)
                 .checked_sub(self.allocated)
                 .ok_or_else(resource)?,

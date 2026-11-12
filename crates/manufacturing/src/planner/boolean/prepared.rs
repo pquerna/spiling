@@ -151,12 +151,9 @@ impl Workspace {
 
 fn admit_host_sort(count: usize, work: &usize) -> Result<(), ManufacturingError> {
     let bound = sort_work(count)?;
-    if work
-        .checked_add(bound)
-        .is_none_or(|v| v > MAX_BOOLEAN_PAIRS)
-    {
+    if work.checked_add(bound).is_none() {
         return Err(resource(
-            "Boolean broad-phase construction/sort work limit exceeded",
+            "Boolean broad-phase construction/sort work counter overflow",
         ));
     }
     Ok(())
@@ -193,12 +190,10 @@ fn admit_query(
     // Explicit repeated kernel construction/NlogN obligation, including
     // small coarse-safe queries. Cached HOST order never prepares the kernel.
     charge(work, sort_work(count)?)?;
-    if let Some(pairs) = count.checked_mul(count).filter(|pairs| {
-        *pairs <= 256
-            && work
-                .checked_add(*pairs)
-                .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
-    }) {
+    if let Some(pairs) = count
+        .checked_mul(count)
+        .filter(|pairs| *pairs <= 256 && work.checked_add(*pairs).is_some())
+    {
         charge(work, pairs)?;
         return Ok(None);
     }
@@ -357,13 +352,7 @@ mod tests {
             .budget_pair(&prepared, &other, 1_000_000, &mut work, &cancel)
             .unwrap();
         let failure = workspace
-            .budget_pair(
-                &prepared,
-                &other,
-                1_000_000,
-                &mut (MAX_BOOLEAN_PAIRS - 1),
-                &cancel,
-            )
+            .budget_pair(&prepared, &other, 1_000_000, &mut (usize::MAX - 1), &cancel)
             .unwrap_err();
         assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
         assert_eq!(

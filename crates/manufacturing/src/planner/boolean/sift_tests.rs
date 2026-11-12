@@ -89,7 +89,7 @@ fn batched_sift_matches_checked_work_order_and_every_refusal_boundary() {
         for remaining in 0..=full_work + 1 {
             let mut expected = source.clone();
             let mut actual = source.clone();
-            let mut expected_work = MAX_BOOLEAN_PAIRS - remaining;
+            let mut expected_work = usize::MAX - remaining;
             let mut actual_work = expected_work;
             let expected_trace = RefCell::new(Vec::new());
             let actual_trace = RefCell::new(Vec::new());
@@ -132,14 +132,9 @@ fn batched_sift_matches_checked_work_order_and_every_refusal_boundary() {
 fn batched_sift_settles_exact_work_on_mid_sift_cancellation() {
     let source: Vec<_> = (0..256).map(|index| (index, (index % 23) as f64)).collect();
     for (after, initial_work) in [0, 1, 2, 3, 10, 100, 1_000].into_iter().flat_map(|after| {
-        [
-            0,
-            MAX_BOOLEAN_PAIRS - 192,
-            MAX_BOOLEAN_PAIRS - 2,
-            usize::MAX,
-        ]
-        .into_iter()
-        .map(move |work| (after, work))
+        [0, usize::MAX - 192, usize::MAX - 2, usize::MAX]
+            .into_iter()
+            .map(move |work| (after, work))
     }) {
         let expected_cancel = AtomicBool::new(after == 0);
         let actual_cancel = AtomicBool::new(after == 0);
@@ -200,7 +195,7 @@ fn batched_sift_allowance_and_arithmetic_failure_preserve_checked_behavior() {
             assert!(consumed <= 3 * (usize::BITS - count.leading_zeros()) as usize);
         }
     }
-    for initial_work in [0, MAX_BOOLEAN_PAIRS, usize::MAX] {
+    for initial_work in [0, usize::MAX] {
         let mut expected_work = initial_work;
         let mut actual_work = initial_work;
         let expected = checked_sift::<f64>(

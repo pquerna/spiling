@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 use super::boolean_budget;
-use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
+use super::{MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
 use crate::{check_cancel, error};
 use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::{
@@ -1109,8 +1109,7 @@ pub(super) fn bridge_rows<'a>(
 fn charge_bridge_rows(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     *work = work
         .checked_add(amount)
-        .filter(|value| *value <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| resource("bridge row ownership work limit exceeded"))?;
+        .ok_or_else(|| resource("bridge row ownership work counter overflow"))?;
     Ok(())
 }
 

@@ -1234,15 +1234,12 @@ pub(super) fn realize(
                     if column.0.is_empty() {
                         return Ok(false);
                     }
-                    work = work
-                        .checked_add(1)
-                        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-                        .ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "cumulative continuous occupied scope work exceeded",
-                            )
-                        })?;
+                    work = work.checked_add(1).ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "cumulative continuous occupied scope work counter overflow",
+                        )
+                    })?;
                     if let Some([lower, upper]) = height {
                         let bed = layers[0].lower_z_mm;
                         if lower > layers[top].z_mm || upper < bed {
@@ -1301,15 +1298,12 @@ pub(super) fn realize(
                     break;
                 }
                 check_cancel(cancel)?;
-                work = work
-                    .checked_add(1)
-                    .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "cumulative protected-void scope work budget exceeded",
-                        )
-                    })?;
+                work = work.checked_add(1).ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "cumulative protected-void scope work counter overflow",
+                    )
+                })?;
                 let corridor_lower = layers[0].lower_z_mm;
                 let corridor_upper = layers[top].z_mm;
                 let relevant = match scope {
@@ -2455,15 +2449,12 @@ fn coalesce_bridge_rows_on_axis<'a>(
             .flat_map(|interface| interface.endpoint_bonds.iter().flatten())
         {
             check_cancel(cancel)?;
-            *work = work
-                .checked_add(1)
-                .filter(|n| *n <= anchors::MAX_ANCHOR_PAIR_WORK)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative bridge witness ownership work budget exceeded",
-                    )
-                })?;
+            *work = work.checked_add(1).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "cumulative bridge witness ownership work counter overflow",
+                )
+            })?;
             if matches_skin_witness(&candidate.paths[index], bond) {
                 // The actual continuous wall connection is already chosen.
                 // Freeze construction, not lower-anchor/support admission.
@@ -2505,15 +2496,12 @@ fn coalesce_bridge_rows_on_axis<'a>(
         let begin = pieces.partition_point(|piece| piece.0 < key);
         let end = pieces.partition_point(|piece| piece.0 <= key);
         // Each piece is visited at most twice while finding disjoint groups.
-        *work = work
-            .checked_add((end - begin) * 2)
-            .filter(|n| *n <= anchors::MAX_ANCHOR_PAIR_WORK)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "cumulative bridge row ownership work budget exceeded",
-                )
-            })?;
+        *work = work.checked_add((end - begin) * 2).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "cumulative bridge row ownership work counter overflow",
+            )
+        })?;
         let mut cursor = begin;
         let mut previous_required_end = None;
         let mut previous_emitted_end = None;
@@ -2911,12 +2899,11 @@ fn charge_owned_work(
         )
     })?;
     let next = work.checked_add(amount)
-        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
         .ok_or_else(|| error(
             ManufacturingErrorCode::ResourceLimit,
             format!(
-                "cumulative planar work budget exceeded in support; global {}, support-owned {owned}, requested {amount}, global limit {}",
-                *work, super::MAX_BOOLEAN_PAIRS,
+                "cumulative planar work counter overflow in support; global {}, support-owned {owned}, requested {amount}",
+                *work,
             ),
         ))?;
     *work = next;
@@ -3133,14 +3120,14 @@ mod tests {
     use geo::{line_string, polygon};
 
     #[test]
-    fn support_owned_work_retains_the_global_planar_cap() {
+    fn support_owned_work_refuses_global_planar_counter_overflow() {
         let material = MultiPolygon(vec![polygon![
             (x: 0.0, y: 0.0), (x: 3.0, y: 0.0),
             (x: 3.0, y: 2.0), (x: 0.0, y: 2.0),
         ]]);
         let pairs = region::point_count(&material).pow(2);
         let mut bank = SupportWork {
-            planar: super::super::MAX_BOOLEAN_PAIRS - pairs + 1,
+            planar: usize::MAX - pairs + 1,
             ..SupportWork::default()
         };
         let mut work = bank.planar;

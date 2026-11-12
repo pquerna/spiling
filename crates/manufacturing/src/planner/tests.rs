@@ -1712,7 +1712,6 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
             assert!(neighborhoods.retained_points() <= pool);
         }
     }
-    assert!(*neighborhoods.work_mut() <= MAX_BOOLEAN_PAIRS);
 }
 
 #[test]

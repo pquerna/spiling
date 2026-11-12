@@ -2609,15 +2609,12 @@ fn merge_work(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    *work = work
-        .checked_add(amount)
-        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native M component work budget exceeded",
-            )
-        })?;
+    *work = work.checked_add(amount).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "native M component work counter overflow",
+        )
+    })?;
     Ok(())
 }
 
@@ -3318,15 +3315,12 @@ pub(super) fn project_protected_voids(
             + spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM;
         for demand in demand_bounds {
             check_cancel(cancel)?;
-            *support_work = support_work
-                .checked_add(1)
-                .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "cumulative native void/demand projection work budget exceeded",
-                    )
-                })?;
+            *support_work = support_work.checked_add(1).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "cumulative native void/demand projection work counter overflow",
+                )
+            })?;
             if (0..2).all(|axis| {
                 bounds.min[axis] - reserve <= demand[axis][1]
                     && bounds.max[axis] + reserve >= demand[axis][0]
@@ -4149,15 +4143,12 @@ pub(super) fn charge_support_clearance(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    *work = work
-        .checked_add(1)
-        .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "cumulative actual support-clearance scan work exceeded",
-            )
-        })?;
+    *work = work.checked_add(1).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "cumulative actual support-clearance scan work counter overflow",
+        )
+    })?;
     Ok(())
 }
 
@@ -4833,7 +4824,7 @@ mod capture_proposal_tests {
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"
         ))
         .unwrap();
-        let mut work = super::super::MAX_BOOLEAN_PAIRS;
+        let mut work = usize::MAX;
         assert_eq!(
             span_end(
                 &schedule,
@@ -4847,7 +4838,7 @@ mod capture_proposal_tests {
             .code,
             ManufacturingErrorCode::ResourceLimit
         );
-        assert_eq!(work, super::super::MAX_BOOLEAN_PAIRS);
+        assert_eq!(work, usize::MAX);
         let mut work = 17;
         assert_eq!(
             span_end(

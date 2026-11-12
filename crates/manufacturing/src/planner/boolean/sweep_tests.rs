@@ -84,7 +84,7 @@ fn batched_sweep_matches_independent_checked_scans_and_every_refusal_boundary() 
             let mut actual = expected.clone();
             let expected_trace = RefCell::new(Vec::new());
             let actual_trace = RefCell::new(Vec::new());
-            let mut expected_work = MAX_BOOLEAN_PAIRS - remaining;
+            let mut expected_work = usize::MAX - remaining;
             let mut actual_work = expected_work;
             let expected_result = checked_sweep(
                 &mut expected,
@@ -137,9 +137,9 @@ fn prepared_batched_sweep_matches_index_oracle_counts_and_partial_boxes() {
         let boxes = inventory(count);
         for initial_work in [
             0,
-            MAX_BOOLEAN_PAIRS,
-            MAX_BOOLEAN_PAIRS - 1,
-            MAX_BOOLEAN_PAIRS - 2 * count,
+            usize::MAX,
+            usize::MAX - 1,
+            usize::MAX - 2 * count,
             usize::MAX,
         ] {
             let mut expected: Vec<_> = (0..count).collect();
@@ -182,12 +182,7 @@ fn batched_sweep_settles_cancellation_and_overflow_fallback_exactly() {
         max: [1.0, 1.0],
     };
     for after in [0, 1, 2, 3, 256, 512] {
-        for initial_work in [
-            0,
-            MAX_BOOLEAN_PAIRS - 1024,
-            MAX_BOOLEAN_PAIRS - 1,
-            usize::MAX,
-        ] {
+        for initial_work in [0, usize::MAX - 1024, usize::MAX - 1, usize::MAX] {
             let expected_cancel = AtomicBool::new(after == 0);
             let actual_cancel = AtomicBool::new(after == 0);
             let expected_trace = RefCell::new(Vec::new());
