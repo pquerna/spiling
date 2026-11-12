@@ -372,26 +372,63 @@ impl<'a, 't> Order<'a, 't> {
         }
     }
     /// Reverse [i, k] when every member may reverse and none depends on another.
-    fn try_reverse(&mut self, i: usize) -> Option<usize> {
+    fn try_reverse(&mut self, i: usize, scratch: &mut Scratch) -> Option<usize> {
         let n = self.visits.len();
         if !self.may_run_reverse(i) {
             return None;
         }
-        let mut best = (1e-9, usize::MAX);
-        let prev = self.leaving(i.checked_sub(1));
-        for k in i + 1..n {
-            let l = self.visits[k].0 as usize;
-            if !self.may_run_reverse(k)
+        // Runs [i, k] for k in i+1..end may reverse.
+        let mut end = i + 1;
+        while end < n {
+            let l = self.visits[end].0 as usize;
+            if !self.may_run_reverse(end)
                 || self.prerequisites[l]
                     .iter()
-                    .any(|q| (i..k).contains(&self.at[*q as usize]))
+                    .any(|q| (i..end).contains(&self.at[*q as usize]))
             {
                 break;
             }
-            let after = (k + 1 < n).then(|| self.entry[k + 1]);
-            let old = self.incoming[i] + self.incoming.get(k + 1).copied().unwrap_or(0.);
-            let new = self.between(prev, self.exit[k])
-                + after.map_or(0., |p| self.between(Some(self.entry[i]), p));
+            end += 1;
+        }
+        if end == i + 1 {
+            return None;
+        }
+        // new[k] = (previous exit to k's exit) + (i's entry to k+1's entry).
+        let runs = i + 1..end;
+        let new = &mut scratch.added[runs.clone()];
+        match self.leaving(i.checked_sub(1)) {
+            Some(prev) => self.price_from(
+                [
+                    &self.exits[0][runs.clone()],
+                    &self.exits[1][runs.clone()],
+                    &self.exits[2][runs.clone()],
+                ],
+                prev,
+                new,
+            ),
+            None => new.fill(0.),
+        }
+        let after = i + 2..(end + 1).min(n);
+        let right = &mut scratch.right[after.clone()];
+        self.price_from(
+            [
+                &self.entries[0][after.clone()],
+                &self.entries[1][after.clone()],
+                &self.entries[2][after.clone()],
+            ],
+            self.entry[i],
+            right,
+        );
+        let mut best = (1e-9, usize::MAX);
+        let first = self.incoming[i];
+        for k in runs {
+            let (next, right) = if k + 1 < n {
+                (self.incoming[k + 1], scratch.right[k + 1])
+            } else {
+                (0., 0.)
+            };
+            let old = first + next;
+            let new = scratch.added[k] + right;
             if old - new > best.0 {
                 best = (old - new, k);
             }
@@ -483,7 +520,7 @@ impl<'a, 't> Order<'a, 't> {
                 changed = Some([i, i]);
             }
             if changed.is_none()
-                && let Some(k) = self.try_reverse(i)
+                && let Some(k) = self.try_reverse(i, &mut scratch)
             {
                 changed = Some([i, k]);
             }
@@ -615,7 +652,7 @@ mod tests {
                             order.try_entry(i);
                         }
                         2 => {
-                            order.try_reverse(i);
+                            order.try_reverse(i, &mut Scratch::new(N));
                         }
                         3 => {
                             order.kick(&mut random);
