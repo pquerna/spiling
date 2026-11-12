@@ -6,8 +6,8 @@
 use super::{check_cancel, error};
 use spiling_contracts::{geometry::*, project::ProjectRevision};
 use spiling_geometry::{
-    BoundsPolicy, Definition, GeometryWorkBudget,
-    tolerant::{TolerantModel, TolerantPolicy},
+    BoundsPolicy, GeometryWorkBudget, source::SourceDefinition as Definition,
+    tolerant::TolerantPolicy,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -117,7 +117,7 @@ fn exact_brackets(
 ) -> Result<[[f64; 3]; 4], GeometryError> {
     let mut work = GeometryWorkBudget::query();
     let source = spiling_geometry::prepare_solid(
-        definition,
+        definition.native()?,
         spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
         &mut work,
         cancel,
@@ -172,7 +172,7 @@ fn exact_brackets(
         )?;
         work.charge(fuse.consumed(), cancel)?;
         if support.definition_id() != &request.definition_id
-            || !support.is_compatible_with_definition(definition)
+            || !support.is_compatible_with_definition(definition.native()?)
             || support.placed_pose() != query_pose
             || support.world_direction() != direction
         {
@@ -231,7 +231,7 @@ fn tolerant_brackets(
     request: &Request,
     cancel: &AtomicBool,
 ) -> Result<[[f64; 3]; 4], GeometryError> {
-    let model = TolerantModel::build(definition, TolerantPolicy::default(), cancel)?;
+    let model = definition.prepare(TolerantPolicy::default(), cancel)?;
     if model.failed_faces > 0 {
         return Err(error(
             GeometryErrorCode::UnsupportedGeometry,

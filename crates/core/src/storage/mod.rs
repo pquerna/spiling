@@ -32,6 +32,7 @@ use std::{
 };
 
 const SOURCE: u16 = 1;
+const NORMALIZED_SOURCE: u16 = 9;
 const MANUFACTURING: u16 = 2;
 const IMAGE: u16 = 3;
 const PALETTE_ORIGINAL: u16 = 4;
@@ -319,6 +320,9 @@ fn expected_members(manifest: &ProjectManifest) -> BTreeSet<Member> {
     }
     for definition in &manifest.definitions {
         result.insert(member(SOURCE, &definition.provenance.source_hash));
+        if let Some(normalized) = &definition.provenance.normalized {
+            result.insert(member(NORMALIZED_SOURCE, &normalized.hash));
+        }
     }
     for layout in &manifest.layouts {
         if let Some(artifact) = &layout.manufacturing_artifact {
@@ -445,49 +449,73 @@ fn load_assets(
     let mut loaded = BTreeMap::new();
     let reusable: BTreeMap<_, _> = reuse_sources
         .iter()
-        .map(|source| {
-            (
+        .flat_map(|source| {
+            std::iter::once((
                 source.record.provenance.source_hash.clone(),
                 Arc::clone(&source.bytes),
+            ))
+            .chain(
+                source
+                    .record
+                    .provenance
+                    .normalized
+                    .as_ref()
+                    .zip(source.normalized.as_ref())
+                    .map(|(record, bytes)| (record.hash.clone(), Arc::clone(bytes))),
             )
         })
         .collect();
-    for record in &manifest.definitions {
-        let bytes = match loaded.get(&record.provenance.source_hash) {
-            Some(bytes) => Arc::clone(bytes),
-            None if reusable.contains_key(&record.provenance.source_hash) => {
-                let bytes = &reusable[&record.provenance.source_hash];
-                let id = object_id(&record.provenance.source_hash);
-                if capture.object_length(id).map_err(ptac_error)? != bytes.len() {
-                    return Err(error(
-                        ProjectErrorCode::CorruptAsset,
-                        "retained source length differs from saved object",
-                    ));
-                }
-                // Freshly verify the actual saved chunks and object hash even
-                // when the immutable in-memory payload can be shared.
-                capture
-                    .stream_object(id, MAX_SOURCE_BYTES as usize, cancel, |_| Ok(()))
-                    .map_err(ptac_error)?;
-                loaded.insert(record.provenance.source_hash.clone(), Arc::clone(bytes));
-                Arc::clone(bytes)
+    let mut load_source = |hash: &SourceHash| -> Result<Arc<Vec<u8>>, ProjectError> {
+        if let Some(bytes) = loaded.get(hash) {
+            return Ok(Arc::clone(bytes));
+        }
+        let bytes = if let Some(bytes) = reusable.get(hash) {
+            let id = object_id(hash);
+            if capture.object_length(id).map_err(ptac_error)? != bytes.len() {
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "retained source length differs from saved object",
+                ));
             }
-            None => {
-                let bytes = Arc::new(read_asset(
-                    capture,
-                    &record.provenance.source_hash,
-                    source_budget.min(MAX_SOURCE_BYTES as usize),
-                    None,
-                    cancel,
-                )?);
-                source_budget -= bytes.capacity();
-                loaded.insert(record.provenance.source_hash.clone(), Arc::clone(&bytes));
-                bytes
-            }
+            // Reuse ownership only after freshly verifying actual saved bytes.
+            capture
+                .stream_object(id, MAX_SOURCE_BYTES as usize, cancel, |_| Ok(()))
+                .map_err(ptac_error)?;
+            Arc::clone(bytes)
+        } else {
+            let bytes = Arc::new(read_asset(
+                capture,
+                hash,
+                source_budget.min(MAX_SOURCE_BYTES as usize),
+                None,
+                cancel,
+            )?);
+            source_budget = source_budget.checked_sub(bytes.capacity()).ok_or_else(|| {
+                error(
+                    ProjectErrorCode::ResourceLimit,
+                    "source exceeds current memory admission",
+                )
+            })?;
+            bytes
         };
+        loaded.insert(hash.clone(), Arc::clone(&bytes));
+        Ok(bytes)
+    };
+    for record in &manifest.definitions {
+        let bytes = load_source(&record.provenance.source_hash)?;
+        let normalized = record
+            .provenance
+            .normalized
+            .as_ref()
+            .map(|record| load_source(&record.hash))
+            .transpose()?;
         snapshot.sources.insert(
             record.definition_id.clone(),
-            Arc::new(SourceAsset::shared(record.clone(), bytes)?),
+            Arc::new(SourceAsset::with_normalized(
+                record.clone(),
+                bytes,
+                normalized,
+            )?),
         );
     }
     let mut image_budget = budgets.image_bytes.min(MAX_SURFACE_IMAGE_RETAINED_BYTES);
@@ -788,6 +816,14 @@ fn snapshot_objects(snapshot: &Snapshot) -> Result<BTreeMap<Member, StoredBytes>
         );
     }
     for asset in snapshot.sources.values() {
+        if let (Some(record), Some(bytes)) =
+            (&asset.record.provenance.normalized, &asset.normalized)
+        {
+            objects.insert(
+                member(NORMALIZED_SOURCE, &record.hash),
+                bytes.clone().into(),
+            );
+        }
         objects.insert(
             member(SOURCE, &asset.record.provenance.source_hash),
             asset.bytes.clone().into(),
@@ -856,6 +892,9 @@ pub(crate) fn retained_source_allocations(
     {
         for asset in snapshot.sources.values() {
             sources.insert(Arc::as_ptr(&asset.bytes), asset.bytes.capacity());
+            if let Some(bytes) = &asset.normalized {
+                sources.insert(Arc::as_ptr(bytes), bytes.capacity());
+            }
         }
     }
     Ok(sources)
@@ -1041,7 +1080,7 @@ pub fn save(
                     StoredBytes::Chunks(program)
                 } else {
                     let budget = match member.role.get() {
-                        SOURCE => &mut budgets.source_bytes,
+                        SOURCE | NORMALIZED_SOURCE => &mut budgets.source_bytes,
                         MANUFACTURING | PROGRAM => &mut budgets.manufacturing_bytes,
                         IMAGE => &mut budgets.image_bytes,
                         MATERIALS => &mut budgets.material_bytes,

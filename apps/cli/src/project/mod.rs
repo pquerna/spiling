@@ -99,7 +99,7 @@ enum Operation {
     OpticalAccept(Option<OpticalChoice>),
     OpticalReport,
     ApplyOptical(u16, [OpticalMaterialBinding; 2]),
-    Import(NativePath),
+    Import(NativePath, ModelImportOptions),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
     PrepareBed(OccurrenceId, bool),
@@ -246,6 +246,7 @@ pub fn parse(
     let target = path(&mut args, "project .spil file")?;
     let mut read_only = mode == "inspect";
     let mut operations = Vec::new();
+    let mut import_options = ModelImportOptions::default();
     let mut plane = None;
     let mut output = None;
     let mut manufacturing_output = None;
@@ -825,7 +826,21 @@ pub fn parse(
                 set_once(&mut replay_output, PathBuf::from(value), "--replay-out")?;
                 operations.push(Operation::ExportReplay);
             }
-            Some("--import") => operations.push(Operation::Import(path(&mut args, "--import")?)),
+            Some("--import-units") => {
+                import_options.stl_unit = Some(match text(&mut args, "--import-units")?.as_str() {
+                    "mm" => SourceUnit::Millimetre,
+                    "m" => SourceUnit::Metre,
+                    "inch" => SourceUnit::Inch,
+                    _ => return Err("--import-units expects mm, m or inch".into()),
+                })
+            }
+            Some("--source-plate") => {
+                import_options.source_plate = Some(text(&mut args, "--source-plate")?.parse()?)
+            }
+            Some("--import") => operations.push(Operation::Import(
+                path(&mut args, "--import")?,
+                std::mem::take(&mut import_options),
+            )),
             Some("--add") => {
                 let id = DefinitionId::parse(text(&mut args, "--add")?)?;
                 let pose: RigidPoseMm = serde_json::from_str(&text(&mut args, "--add pose")?)?;
@@ -2749,7 +2764,7 @@ async fn execute(
                 }));
                 verification = Some(inspection);
             }
-            Operation::Import(source) => {
+            Operation::Import(source, options) => {
                 label = "import";
                 let response = geometry::control(
                     client,
@@ -2757,6 +2772,7 @@ async fn execute(
                         session_id: session.clone(),
                         base_revision,
                         source,
+                        options,
                         initial_pose: RigidPoseMm::IDENTITY,
                     },
                 )

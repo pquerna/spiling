@@ -133,7 +133,7 @@ fn scaled_box(size: [f64; 3]) -> Vec<u8> {
 
 struct Scene {
     project: ProjectId,
-    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     intent: ManufacturingIntent,
@@ -145,9 +145,8 @@ impl Scene {
     /// One scaled box on the single-tool complete workflow.
     fn sized_box(size: [f64; 3], infill: f64, layer: f64, cancel: &AtomicBool) -> Result<Self> {
         let step = scaled_box(size);
-        let definition = Arc::new(spiling_geometry::from_step_bytes_with_cancel(
-            &step, cancel,
-        )?);
+        let definition: Arc<spiling_geometry::source::SourceDefinition> =
+            Arc::new(spiling_geometry::from_step_bytes_with_cancel(&step, cancel)?.into());
         let mut intent = decode_intent(SINGLE_TOOL)?;
         intent.recipe.infill_fraction = infill;
         intent.recipe.layer_height_mm = layer;
@@ -187,9 +186,8 @@ impl Scene {
         } else {
             vec![BORE, BOX]
         } {
-            let definition = Arc::new(spiling_geometry::from_step_bytes_with_cancel(
-                bytes, cancel,
-            )?);
+            let definition: Arc<spiling_geometry::source::SourceDefinition> =
+                Arc::new(spiling_geometry::from_step_bytes_with_cancel(bytes, cancel)?.into());
             ids.push(definition.id().clone());
             definitions.insert(definition.id().clone(), definition);
         }

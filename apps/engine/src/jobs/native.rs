@@ -717,6 +717,7 @@ mod tests {
                     session_id: session,
                     base_revision: scene,
                     source: NativePath::from_os_str(source.as_os_str()).unwrap(),
+                    options: spiling_contracts::geometry::ModelImportOptions::default(),
                     initial_pose: RigidPoseMm::IDENTITY,
                 }),
                 project,

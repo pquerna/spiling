@@ -84,6 +84,7 @@ async fn start_import(client: &mut EngineClient, source: NativePath, pose: Rigid
             session_id: summary.session_id,
             base_revision: summary.revision,
             source,
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: pose,
         },
     )

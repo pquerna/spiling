@@ -137,6 +137,7 @@ impl SurfaceImageAsset {
 
 #[derive(Debug, Clone)]
 pub struct SourceAsset {
+    pub normalized: Option<Arc<Vec<u8>>>,
     pub record: StoredDefinition,
     pub bytes: Arc<Vec<u8>>,
 }
@@ -146,7 +147,18 @@ impl SourceAsset {
     }
     /// Another definition of the same source bytes, sharing their allocation.
     pub fn shared(record: StoredDefinition, bytes: Arc<Vec<u8>>) -> Result<Self, ProjectError> {
-        let asset = Self { record, bytes };
+        Self::with_normalized(record, bytes, None)
+    }
+    pub fn with_normalized(
+        record: StoredDefinition,
+        bytes: Arc<Vec<u8>>,
+        normalized: Option<Arc<Vec<u8>>>,
+    ) -> Result<Self, ProjectError> {
+        let asset = Self {
+            record,
+            bytes,
+            normalized,
+        };
         asset.validate()?;
         Ok(asset)
     }
@@ -157,14 +169,27 @@ impl SourceAsset {
                 "source asset is empty or exceeds the immutable object representation",
             ));
         }
+        match (&self.record.provenance.normalized, &self.normalized) {
+            (None, None) => {}
+            (Some(record), Some(bytes))
+                if !bytes.is_empty()
+                    && bytes.len() <= MAX_SOURCE_BYTES as usize
+                    && SourceHash::from_digest(&Sha256::digest(bytes.as_slice()).into())
+                        == record.hash => {}
+            _ => {
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "normalized source closure/hash mismatch",
+                ));
+            }
+        }
         self.record
             .provenance
             .validate()
             .map_err(|e| invalid(e.message))?;
         let digest: [u8; 32] = Sha256::digest(self.bytes.as_slice()).into();
         if SourceHash::from_digest(&digest) != self.record.provenance.source_hash
-            || DefinitionId::for_source(&digest, self.record.provenance.source_solid.as_ref())
-                != self.record.definition_id
+            || self.record.provenance.definition_id() != self.record.definition_id
         {
             return Err(error(
                 ProjectErrorCode::CorruptAsset,
@@ -923,6 +948,7 @@ impl Project {
                 || old.source_unit != new.source_unit
                 || old.uncertainty_mm != new.uncertainty_mm
                 || old.source_solid != new.source_solid
+                || old.normalized != new.normalized
                 || (!Arc::ptr_eq(&retained.bytes, &source.bytes)
                     && retained.bytes.as_slice() != source.bytes.as_slice())
             {

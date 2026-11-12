@@ -709,6 +709,7 @@ fn plates(ui: &mut Ui) {
         definitions: vec![spiling_contracts::geometry::DefinitionRecord {
             definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32]),
             provenance: spiling_contracts::geometry::SourceProvenance {
+                normalized: None,
                 source_hash: spiling_contracts::geometry::SourceHash::parse("01".repeat(32))
                     .unwrap(),
                 source_name: "Gallery specimen".into(),

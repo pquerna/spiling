@@ -455,6 +455,7 @@ mod tests {
             },
             pose: RigidPoseMm::IDENTITY,
             provenance: SourceProvenance {
+                normalized: None,
                 source_hash: SourceHash::from_bytes(b"native source"),
                 source_name: "part.step".into(),
                 source_unit: SourceUnit::Millimetre,

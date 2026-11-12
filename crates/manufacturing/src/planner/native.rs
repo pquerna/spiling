@@ -3378,7 +3378,11 @@ pub(super) fn project_protected_voids(
                     )
                 })?;
             if projected.definition_id() != captured.capture.definition_id()
-                || !projected.is_compatible_with_definition(definition)
+                || !projected.is_compatible_with_definition(
+                    definition
+                        .native()
+                        .map_err(|e| super::native_error(e, "native void source"))?,
+                )
                 || projected.placed_pose() != captured.capture.placed_pose()
                 || projected.world_height_interval_mm()
                     != captured.capture.world_height_interval_mm()
@@ -4156,7 +4160,9 @@ fn certify_polygon_capsules(
                 }
                 spiling_geometry::certify_planar_capsule_clearance_prepared(
                     segment,
-                    prepared.as_ref().expect("prepared actual forbidden polygon"),
+                    prepared
+                        .as_ref()
+                        .expect("prepared actual forbidden polygon"),
                     spiling_geometry::PlanarCapsuleClearancePolicy {
                         radius_mm: local.width_mm * 0.5,
                         required_gap_mm: clearance,

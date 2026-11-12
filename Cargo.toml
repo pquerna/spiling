@@ -4,7 +4,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
+members = ["crates/model-import", "crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
 default-members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
 exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
 
@@ -53,6 +53,9 @@ solidcraft-geom = { version = "=0.18.1", path = "vendor/solidcraft/crates/geom" 
 solidcraft-step = { version = "=0.18.1", path = "vendor/solidcraft/crates/step" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
+spiling-model-import = { path = "crates/model-import" }
+quick-xml = "=0.41.0"
+zip = { version = "=4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 spiling-core = { path = "crates/core" }
 spiling-manufacturing = { path = "crates/manufacturing" }
 

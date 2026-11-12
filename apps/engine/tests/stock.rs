@@ -492,6 +492,7 @@ async fn matched_stock_recipe_reaches_actual_replay_export_and_source_free_recom
             session_id: session.clone(),
             base_revision: scene(&c).await.revision,
             source: native(&source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm {
                 translation_mm: [20.0, 20.0, 0.0],
                 ..RigidPoseMm::IDENTITY

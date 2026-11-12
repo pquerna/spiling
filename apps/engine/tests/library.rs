@@ -677,6 +677,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
             session_id: client.hello().session_id.clone(),
             base_revision: scene_revision(&client).await,
             source: native(&source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         })
         .await

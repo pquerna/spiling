@@ -26,6 +26,7 @@ fn manifest() -> ProjectManifest {
         definitions: vec![StoredDefinition {
             definition_id: definition_id.clone(),
             provenance: SourceProvenance {
+                normalized: None,
                 source_hash: SourceHash::from_digest(&digest),
                 source_name: "original.step".into(),
                 source_unit: SourceUnit::Millimetre,

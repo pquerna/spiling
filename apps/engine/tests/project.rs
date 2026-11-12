@@ -1532,6 +1532,7 @@ async fn import(client: &mut EngineClient, source: &Path, pose: RigidPoseMm) -> 
             session_id: summary.session_id,
             base_revision: summary.revision,
             source: native(source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: pose,
         })
         .await
@@ -2154,6 +2155,7 @@ async fn writer_lock_read_only_snapshot_and_killed_writer_have_actual_process_li
             session_id: before.session_id.clone(),
             base_revision: before.revision,
             source: native(&fixture("cylinder.step")),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         },
         GeometryCommand::AddInstance {

@@ -7,6 +7,7 @@ use spiling_contracts::geometry::*;
 use std::{fs::OpenOptions, io::Read, path::PathBuf, sync::atomic::AtomicBool};
 
 pub struct Captured {
+    pub mesh_format: Option<MeshSourceFormat>,
     pub bytes: Vec<u8>,
     pub label: String,
 }
@@ -98,5 +99,19 @@ pub fn capture(
         ));
     }
     check_cancel(cancel)?;
-    Ok(Captured { bytes, label })
+    let mesh_format = match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("stl") => Some(MeshSourceFormat::Stl),
+        Some("3mf") => Some(MeshSourceFormat::ThreeMf),
+        _ => None,
+    };
+    Ok(Captured {
+        bytes,
+        label,
+        mesh_format,
+    })
 }

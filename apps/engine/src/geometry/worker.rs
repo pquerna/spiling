@@ -16,8 +16,9 @@ use spiling_core::{
     ManufacturingAsset, Project, SaveSnapshot, SourceAsset, SurfaceImageAsset,
     storage::{self, SaveReceipt, SaveStage, Storage},
 };
+use spiling_geometry::source::SourceDefinition as Definition;
 use spiling_geometry::{
-    Definition, GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
+    GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
     MeshArtifact, PreparedSectionSource,
 };
 use std::{
@@ -62,6 +63,7 @@ impl LiveSnapshot {
 pub type Live = Arc<Mutex<LiveSnapshot>>;
 
 pub struct ImportRequest {
+    pub options: ModelImportOptions,
     pub source: NativePath,
     pub allowed_reuse: BTreeSet<DefinitionId>,
     pub budget: MeshBudget,
@@ -382,14 +384,18 @@ fn run(
                 .get(&request.reference.definition_id)
                 .ok_or_else(|| JobError::from(super::unknown()))
                 .and_then(|resident| {
-                    super::analysis::prepare_fastener(&resident.definition, request, &cancel)
+                    super::analysis::prepare_fastener(
+                        resident.definition.native()?,
+                        request,
+                        &cancel,
+                    )
                 })
                 .map(Product::AnalysisFastenerPrepared),
             Work::PrepareAnalysisFace(request) => definitions
                 .get(&request.reference.definition_id)
                 .ok_or_else(|| JobError::from(super::unknown()))
                 .and_then(|resident| {
-                    super::analysis::prepare_face(&resident.definition, request, &cancel)
+                    super::analysis::prepare_face(resident.definition.native()?, request, &cancel)
                 })
                 .map(Product::AnalysisFacePrepared),
             Work::GetAnalysisResult(asset) => Ok(Product::AnalysisCompleted(Arc::new(
@@ -409,7 +415,7 @@ fn run(
                 })
                 .and_then(|resident| {
                     spiling_analysis::run::execute(
-                        &resident.definition,
+                        resident.definition.native()?,
                         &capture,
                         &mut analysis_operator,
                         &cancel,
@@ -791,6 +797,19 @@ impl Capacity {
             self.faces,
             self.source_bytes,
         )?;
+        self.retain_definition(definition.into(), cancel)
+    }
+    fn retain_definition(
+        &mut self,
+        definition: Definition,
+        cancel: &AtomicBool,
+    ) -> Result<Definition, GeometryError> {
+        if self.definitions == 0 {
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "resident/staged source definition cap exceeded",
+            ));
+        }
         let query_proof_bytes = definition.retained_query_proof_bytes();
         let remaining_bytes = self
             .source_bytes
@@ -821,8 +840,7 @@ impl Capacity {
         work: &mut GeometryWorkBudget,
         progress: &dyn Fn(String),
     ) -> Result<MeshArtifact, GeometryError> {
-        let mesh = spiling_geometry::tessellate_with_work(
-            definition,
+        let mesh = definition.display(
             DisplayProfile::MeshTrimmedMm005V2,
             cancel,
             self.mesh,
@@ -948,6 +966,7 @@ fn import(
 ) -> Result<ImportedParts, JobError> {
     let ImportRequest {
         source,
+        options,
         allowed_reuse: reuse,
         budget,
         retained_source_bytes,
@@ -960,6 +979,24 @@ fn import(
     let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
     // A source that places one solid keeps its whole-source identity; each
     // solid of a multi-solid source is its own definition of the same bytes.
+    if captured.mesh_format.is_some() {
+        return import_mesh(
+            captured,
+            capacity,
+            &options,
+            (definitions, &reuse),
+            cancel,
+            work,
+            progress,
+        );
+    }
+    if options != ModelImportOptions::default() {
+        return Err(error(
+            GeometryErrorCode::UnsupportedGeometry,
+            "STL units and source plates do not apply to STEP imports",
+        )
+        .into());
+    }
     let bodies = spiling_geometry::source_bodies(&captured.bytes, cancel)?;
     if bodies.is_empty() {
         return Err(error(
@@ -1010,6 +1047,101 @@ fn import(
         residents.push(resident);
     }
     check_cancel(cancel)?;
+    Ok((parts, residents))
+}
+fn import_mesh(
+    captured: source::Captured,
+    mut capacity: Capacity,
+    options: &ModelImportOptions,
+    reuse: (&BTreeMap<DefinitionId, Resident>, &BTreeSet<DefinitionId>),
+    cancel: &AtomicBool,
+    work: &mut GeometryWorkBudget,
+    progress: &dyn Fn(String),
+) -> Result<ImportedParts, JobError> {
+    use spiling_geometry::source::{HybridDefinition, SourceDefinition};
+    progress("preparing_source_geometry".into());
+    let decoded = spiling_geometry::source::decode_container(
+        &captured.bytes,
+        &captured.label,
+        captured
+            .mesh_format
+            .expect("mesh dispatch carries a selected decoder"),
+        capacity.source_bytes,
+        options,
+        cancel,
+    )?;
+    let bytes = Arc::new(captured.bytes);
+    capacity.charge_source(&bytes)?;
+    let source_hash = SourceHash::from_digest(&Sha256::digest(bytes.as_slice()).into());
+    let mut parts = Vec::new();
+    let mut residents = Vec::new();
+    for mut decoded in decoded {
+        decoded.notes.push(format!(
+            "Analytic recovery deviation: {} mm.",
+            decoded.complex.error_mm
+        ));
+        check_cancel(cancel)?;
+        let normalized = Arc::new(decoded.complex.encode()?);
+        capacity.charge_source(&normalized)?;
+        let provenance = SourceProvenance {
+            source_hash: source_hash.clone(),
+            source_name: captured.label.clone(),
+            source_unit: decoded.source_unit,
+            uncertainty_mm: None,
+            source_solid: None,
+            normalized: Some(NormalizedSource {
+                hash: SourceHash::from_digest(&Sha256::digest(normalized.as_slice()).into()),
+                format: decoded.format,
+                selector: decoded.selector,
+                notes: decoded.notes,
+            }),
+        };
+        let id = provenance.definition_id();
+        if reuse.1.contains(&id)
+            && let Some(resident) = reuse.0.get(&id)
+        {
+            let source = Arc::new(SourceAsset::with_normalized(
+                resident.record.clone(),
+                bytes.clone(),
+                Some(normalized),
+            )?);
+            validate_provenance(&resident.definition, &source)?;
+            parts.push((
+                imported(&resident.definition, source, ImportedDisplay::Reused),
+                decoded.placements,
+            ));
+            continue;
+        }
+        if capacity.definitions == 0 || decoded.complex.faces.len() > capacity.faces as usize {
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "source definition/region capacity exceeded",
+            )
+            .into());
+        }
+        let definition = SourceDefinition::Hybrid(HybridDefinition {
+            id: provenance.definition_id(),
+            provenance: provenance.clone(),
+            bounds: decoded.complex.bounds()?,
+            complex: decoded.complex,
+        });
+        let definition = capacity.retain_definition(definition, cancel)?;
+        let source = Arc::new(SourceAsset::with_normalized(
+            StoredDefinition {
+                definition_id: definition.id().clone(),
+                provenance,
+            },
+            bytes.clone(),
+            Some(normalized),
+        )?);
+        let display = capacity.display(&definition, cancel, work, progress)?;
+        let resident = resident(definition, &source, &display);
+        parts.push((
+            imported(&resident.definition, source, display),
+            decoded.placements,
+        ));
+        residents.push(resident);
+    }
     Ok((parts, residents))
 }
 fn import_surface_image(
@@ -1105,13 +1237,17 @@ fn open(
     )?;
     drop(loading);
     let mut capacity = Capacity::new(definitions, budget, source_budget);
-    capacity.charged_sources.extend(
-        reuse_sources
-            .iter()
-            .map(|source| Arc::as_ptr(&source.bytes)),
-    );
+    capacity
+        .charged_sources
+        .extend(reuse_sources.iter().flat_map(|source| {
+            std::iter::once(Arc::as_ptr(&source.bytes))
+                .chain(source.normalized.as_ref().map(Arc::as_ptr))
+        }));
     for source in loaded.sources.values() {
         capacity.charge_source(&source.bytes)?;
+        if let Some(bytes) = &source.normalized {
+            capacity.charge_source(bytes)?;
+        }
     }
     let mut pending = BTreeMap::new();
     let mut imports = Vec::with_capacity(loaded.sources.len());
@@ -1131,11 +1267,17 @@ fn open(
         } else {
             progress("preparing_native_geometry".into());
             let native = crate::performance::span("open_native");
-            let definition = capacity.admit(
-                source.bytes.as_slice(),
-                source.record.provenance.source_solid.as_ref(),
-                cancel,
-            )?;
+            let definition = match &source.normalized {
+                Some(bytes) => capacity.retain_definition(
+                    Definition::restore(source.record.provenance.clone(), bytes, cancel)?,
+                    cancel,
+                )?,
+                None => capacity.admit(
+                    source.bytes.as_slice(),
+                    source.record.provenance.source_solid.as_ref(),
+                    cancel,
+                )?,
+            };
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
             validate_analysis_targets(&definition, &loaded, cancel)?;
@@ -1192,17 +1334,25 @@ fn validate_analysis_targets(
         }
         if &record.case.definition_id == definition.id() {
             for load in &record.case.loads {
-                super::analysis::validate_contact(definition, load, cancel)?;
+                super::analysis::validate_contact(
+                    definition.native().map_err(super::project_geometry_error)?,
+                    load,
+                    cancel,
+                )?;
             }
             for fastener in &record.case.fasteners {
-                super::analysis::validate_fastener(definition, fastener, cancel)?;
+                super::analysis::validate_fastener(
+                    definition.native().map_err(super::project_geometry_error)?,
+                    fastener,
+                    cancel,
+                )?;
             }
         }
     }
     for asset in loaded.analysis_results.values() {
         if &asset.summary.case.case.definition_id == definition.id() {
             super::analysis::validate_mesh_profile(
-                definition,
+                definition.native().map_err(super::project_geometry_error)?,
                 &asset.summary.mesh_geometry,
                 cancel,
             )?;
@@ -1293,49 +1443,55 @@ fn section(
         let (remaining_uses, source) = sources
             .get_mut(&occurrence.definition_id)
             .expect("section occurrence was counted");
-        if source.is_none() {
-            // Raw sections need native coefficient correspondence, not material
-            // charts/vertex plans or their independent manufacturing admission.
-            let prepared = spiling_geometry::prepare_section_source(
-                &definition.definition,
-                (source_limit - prepared_bytes).min(
-                    remaining_section_capacity(prepared_bytes, builder.retained_bytes())?
-                        .checked_sub(MAX_PREPARED_SECTION_BYTES - source_limit)
-                        .ok_or_else(|| {
-                            error(
-                                GeometryErrorCode::ResourceLimit,
-                                "native section has no query headroom",
-                            )
-                        })?,
-                ),
-                cancel,
-                &mut work,
-            )?;
-            prepared_bytes = prepared_bytes
-                .checked_add(prepared.retained_bytes())
-                .filter(|bytes| *bytes <= source_limit)
-                .ok_or_else(|| {
-                    error(
-                        GeometryErrorCode::ResourceLimit,
-                        "prepared native section sources exceed shared job capacity",
-                    )
-                })?;
-            *source = Some(prepared);
-        }
-        // Geometry owns the actual stored pose, plane pullback, metric error and
-        // canonical world loops. Only immutable source preparation is reused;
-        // sampled loops are consumed before another occurrence is queried.
-        let native = source
-            .as_ref()
-            .expect("native section source was prepared")
-            .section_placed_with_work(
-                occurrence.pose,
-                plane,
-                remaining_section_capacity(prepared_bytes, builder.retained_bytes())? as u32,
-                &mut work,
-                cancel,
-            )?;
-        let loops = native.into_loops();
+        let loops = if matches!(definition.definition.as_ref(), Definition::Hybrid(_)) {
+            definition
+                .definition
+                .section_placed(occurrence.pose, plane, cancel)?
+        } else {
+            if source.is_none() {
+                // Raw sections need native coefficient correspondence, not material
+                // charts/vertex plans or their independent manufacturing admission.
+                let prepared = spiling_geometry::prepare_section_source(
+                    definition.definition.native()?,
+                    (source_limit - prepared_bytes).min(
+                        remaining_section_capacity(prepared_bytes, builder.retained_bytes())?
+                            .checked_sub(MAX_PREPARED_SECTION_BYTES - source_limit)
+                            .ok_or_else(|| {
+                                error(
+                                    GeometryErrorCode::ResourceLimit,
+                                    "native section has no query headroom",
+                                )
+                            })?,
+                    ),
+                    cancel,
+                    &mut work,
+                )?;
+                prepared_bytes = prepared_bytes
+                    .checked_add(prepared.retained_bytes())
+                    .filter(|bytes| *bytes <= source_limit)
+                    .ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::ResourceLimit,
+                            "prepared native section sources exceed shared job capacity",
+                        )
+                    })?;
+                *source = Some(prepared);
+            }
+            // Geometry owns the actual stored pose, plane pullback, metric error and
+            // canonical world loops. Only immutable source preparation is reused;
+            // sampled loops are consumed before another occurrence is queried.
+            let native = source
+                .as_ref()
+                .expect("native section source was prepared")
+                .section_placed_with_work(
+                    occurrence.pose,
+                    plane,
+                    remaining_section_capacity(prepared_bytes, builder.retained_bytes())? as u32,
+                    &mut work,
+                    cancel,
+                )?;
+            native.into_loops()
+        };
         let mut live_loop_bytes = loops
             .capacity()
             .saturating_mul(std::mem::size_of::<spiling_geometry::SectionLoopMm>())
@@ -1368,11 +1524,10 @@ fn section(
                 .saturating_mul(std::mem::size_of::<[f64; 3]>());
         }
         *remaining_uses -= 1;
-        if *remaining_uses == 0 {
-            prepared_bytes -= source
-                .take()
-                .expect("last section use retains its source")
-                .retained_bytes();
+        if *remaining_uses == 0
+            && let Some(source) = source.take()
+        {
+            prepared_bytes -= source.retained_bytes();
         }
     }
     check_cancel(cancel)?;
@@ -1637,6 +1792,7 @@ mod geometry_only_tests {
         let cancel = AtomicBool::new(false);
         let (mut parts, mut residents) = import(
             ImportRequest {
+                options: ModelImportOptions::default(),
                 source: NativePath::from_os_str(path.as_os_str()).unwrap(),
                 allowed_reuse: BTreeSet::new(),
                 retained_source_bytes: 0,
@@ -1669,7 +1825,7 @@ mod geometry_only_tests {
             let mut direction = [0.0; 3];
             direction[axis] = 1.0;
             let bounds = spiling_geometry::placed_bounds(
-                &resident.definition,
+                resident.definition.native().unwrap(),
                 RigidPoseMm::IDENTITY,
                 direction,
                 BoundsPolicy {

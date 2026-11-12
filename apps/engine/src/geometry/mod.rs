@@ -1411,6 +1411,7 @@ impl Runtime {
                 session_id,
                 base_revision,
                 source,
+                options,
                 initial_pose,
             } => {
                 self.base(&session_id, base_revision)?;
@@ -1443,6 +1444,7 @@ impl Runtime {
                     move |_, _, _| {
                         Work::Import(worker::ImportRequest {
                             source,
+                            options,
                             allowed_reuse,
                             retained_source_bytes,
                             budget: worker::MeshBudget {

@@ -251,7 +251,7 @@ impl Picker {
             Self::OpenReadOnly => "Open Spiling project read-only (.spil)",
             Self::Recover => "Recover previous save from a Spiling project (.spil)",
             Self::Save => "Save Spiling project to a new .spil file",
-            Self::Import => "Import a native STEP part",
+            Self::Import => "Import STEP, STL or 3MF",
             Self::Image => "Import height image PNG or canonical PGM",
             Self::Intent => "Load inert manufacturing intent JSON",
             Self::Material => "Select material and setup profile JSON",
@@ -275,6 +275,10 @@ enum Action {
         target: Option<NativePath>,
     },
     Import(NativePath),
+    ImportWithOptions {
+        source: NativePath,
+        options: spiling_contracts::geometry::ModelImportOptions,
+    },
     LoadIntent(NativePath),
     SetLibraryLocation(NativePath),
     LoadMaterial(NativePath),
@@ -296,7 +300,7 @@ impl Action {
             Self::New => "Create a new project",
             Self::Open { .. } => "Open another project",
             Self::Save { .. } => "Save project",
-            Self::Import(_) => "Import part",
+            Self::Import(_) | Self::ImportWithOptions { .. } => "Import part",
             Self::ImportImage { .. } => "Import image and apply relief",
             Self::SetLibraryLocation(_) => "Choose My library",
             Self::LoadIntent(_) => "Load manufacturing intent",
@@ -484,7 +488,7 @@ impl Host {
         ctx: &egui::Context,
         picker: Picker,
     ) -> Result<(), String> {
-        self.choose_native(parent, ctx, picker, None)
+        self.choose_native(parent, ctx, picker, None, None)
     }
     pub fn choose_image(
         &mut self,
@@ -493,7 +497,15 @@ impl Host {
         request: crate::assets::ImageRequest,
     ) -> Result<(), String> {
         request.parameters.validate().map_err(|e| e.to_string())?;
-        self.choose_native(parent, ctx, Picker::Image, Some(request))
+        self.choose_native(parent, ctx, Picker::Image, Some(request), None)
+    }
+    pub fn choose_model(
+        &mut self,
+        parent: &eframe::Frame,
+        ctx: &egui::Context,
+        options: spiling_contracts::geometry::ModelImportOptions,
+    ) -> Result<(), String> {
+        self.choose_native(parent, ctx, Picker::Import, None, Some(options))
     }
     fn choose_native(
         &mut self,
@@ -501,6 +513,7 @@ impl Host {
         ctx: &egui::Context,
         picker: Picker,
         image: Option<crate::assets::ImageRequest>,
+        import_options: Option<spiling_contracts::geometry::ModelImportOptions>,
     ) -> Result<(), String> {
         self.next_picker += 1;
         let id = self.next_picker;
@@ -529,7 +542,7 @@ impl Host {
                         if picker == Picker::AnalysisModel {
                             "Analysis model JSON"
                         } else if picker == Picker::Import {
-                            "STEP"
+                            "Model · STEP / STL / 3MF"
                         } else if picker == Picker::Image {
                             "Height image PNG / PGM"
                         } else if picker == Picker::MaterialCatalog {
@@ -540,7 +553,7 @@ impl Host {
                             "Manufacturing intent JSON"
                         },
                         if picker == Picker::Import {
-                            &["step", "stp", "STEP", "STP"][..]
+                            &["step", "stp", "stl", "3mf", "STEP", "STP", "STL", "3MF"][..]
                         } else if picker == Picker::Image {
                             &["png", "pgm"][..]
                         } else {
@@ -577,6 +590,10 @@ impl Host {
                                     source,
                                     request: Box::new(request),
                                 })
+                                .map_err(|e| e.to_string())
+                        } else if let Some(options) = import_options {
+                            NativePath::from_os_str(file.path().as_os_str())
+                                .map(|source| Action::ImportWithOptions { source, options })
                                 .map_err(|e| e.to_string())
                         } else {
                             selected_action(picker, file.path())
@@ -1736,6 +1753,13 @@ impl Actor {
         self.execute(action, false).await;
     }
     async fn execute(&mut self, action: Action, discard: bool) {
+        let (action, import_options) = match action {
+            Action::ImportWithOptions { source, options } => (Action::Import(source), options),
+            action => (
+                action,
+                spiling_contracts::geometry::ModelImportOptions::default(),
+            ),
+        };
         if let Action::ImportImage { source, request } = action {
             self.project_edit(ProjectCommand::ImportSurfaceImageFinish {
                 session_id: request.session,
@@ -1839,6 +1863,7 @@ impl Actor {
                         session_id,
                         base_revision,
                         source,
+                        options: import_options,
                         initial_pose: RigidPoseMm::IDENTITY,
                     })
                     .await;
@@ -1862,7 +1887,8 @@ impl Actor {
             | Action::SetLibraryLocation(_)
             | Action::LoadMaterialCatalog(_)
             | Action::Export(_)
-            | Action::ImportImage { .. } => {
+            | Action::ImportImage { .. }
+            | Action::ImportWithOptions { .. } => {
                 unreachable!()
             }
         };

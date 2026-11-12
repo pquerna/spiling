@@ -151,6 +151,7 @@ async fn import(client: &mut EngineClient, source: &Path) {
             session_id: s.session_id,
             base_revision: s.revision,
             source: native(source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         })
         .await
@@ -2995,6 +2996,7 @@ async fn setup_and_first_material_create_automatic_supports_and_survive_saved_re
             session_id: initial.session_id,
             base_revision: initial.revision,
             source: native(&source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm {
                 translation_mm: [50.0, 50.0, 2.0],
                 rotation_xyzw: [0.0, 0.0, 0.0, 1.0],

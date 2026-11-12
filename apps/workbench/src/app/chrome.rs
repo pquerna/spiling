@@ -209,6 +209,39 @@ impl Workbench {
                     ] {
                         self.button(ui, action);
                     }
+                    ui.menu_button("Model import options", |ui| {
+                        egui::ComboBox::from_id_salt("import_stl_units")
+                            .selected_text(match self.import_options.stl_unit {
+                                None | Some(SourceUnit::Millimetre) => "STL · mm",
+                                Some(SourceUnit::Inch) => "STL · inch",
+                                Some(SourceUnit::Metre) => "STL · m",
+                                _ => "STL units",
+                            })
+                            .show_ui(ui, |ui| {
+                                for (unit, label) in [
+                                    (None, "Millimetres (default)"),
+                                    (Some(SourceUnit::Inch), "Inches"),
+                                    (Some(SourceUnit::Metre), "Metres"),
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.import_options.stl_unit,
+                                        unit,
+                                        label,
+                                    );
+                                }
+                            });
+                        let mut selected = self.import_options.source_plate.is_some();
+                        if ui.checkbox(&mut selected, "Select 3MF plate").changed() {
+                            self.import_options.source_plate = selected.then_some(1);
+                        }
+                        if let Some(plate) = &mut self.import_options.source_plate {
+                            ui.horizontal(|ui| {
+                                ui.label("Source plate");
+                                ui.add(egui::DragValue::new(plate).range(1..=u32::MAX));
+                            });
+                        }
+                        self.button(ui, Action::Import);
+                    });
                     ui.separator();
                     self.button(ui, Action::Library);
                     ui.menu_button("Import profiles", |ui| {

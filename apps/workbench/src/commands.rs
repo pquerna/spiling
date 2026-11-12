@@ -204,7 +204,7 @@ impl Action {
             Self::Recover => "Recover previous checkpoint…",
             Self::Save => "Save",
             Self::SaveAs => "Save As .spil…",
-            Self::Import => "Import STEP…",
+            Self::Import => "Import model…",
             Self::LoadIntent => "Load intent JSON…",
             Self::LoadMaterial => "Load material profile…",
             Self::LoadMaterialCatalog => "Browse material catalog…",

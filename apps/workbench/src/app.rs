@@ -93,6 +93,7 @@ pub struct Workbench {
     queued_geometry: Option<GeometryCommand>,
     queued_host: Option<Command>,
     queued_picker: Option<Picker>,
+    import_options: ModelImportOptions,
     queued_manufacturing: Option<spiling_contracts::manufacturing::ManufacturingCommand>,
     queued_project: Option<spiling_contracts::project::ProjectCommand>,
     work_area: WorkArea,
@@ -174,6 +175,7 @@ impl Workbench {
             queued_geometry: None,
             queued_host: None,
             queued_picker: None,
+            import_options: ModelImportOptions::default(),
             queued_manufacturing: None,
             queued_project: None,
             work_area: WorkArea::default(),
@@ -375,7 +377,9 @@ impl Workbench {
             {
                 host.choose(frame, ctx, Picker::Save)
             }
-            Action::Import => host.choose(frame, ctx, Picker::Import),
+            Action::Import => {
+                host.choose_model(frame, ctx, std::mem::take(&mut self.import_options))
+            }
             Action::LoadIntent => host.choose(frame, ctx, Picker::Intent),
             Action::LoadMaterial => host.choose(frame, ctx, Picker::Material),
             Action::LoadMaterialCatalog => host.choose(frame, ctx, Picker::MaterialCatalog),

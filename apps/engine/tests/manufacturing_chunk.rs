@@ -57,6 +57,7 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
             session_id: session_id.clone(),
             base_revision: summary.revision,
             source: NativePath::from_os_str(source.as_os_str()).unwrap(),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         })
         .await

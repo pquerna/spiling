@@ -55,7 +55,7 @@ impl Rect {
 }
 fn input<'a>(
     capture: &'a CompileRequest,
-    definitions: &'a BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: &'a BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
 ) -> spiling_manufacturing::CompilerInput<'a> {
     spiling_manufacturing::CompilerInput {
         project_id: &capture.project_id,
@@ -129,7 +129,7 @@ fn candidate(
 
 fn prepare_single(
     mut r: Request,
-    definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(String),
     budget: u32,
@@ -545,7 +545,7 @@ fn prepare_single(
 /// one aggregate candidate budget. Nothing here changes the authoritative project.
 pub(super) fn prepare(
     mut r: Request,
-    definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(String),
 ) -> Result<LayoutProposal, JobError> {

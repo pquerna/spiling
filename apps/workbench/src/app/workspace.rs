@@ -113,6 +113,17 @@ impl Workbench {
                         .id_salt(occurrence.occurrence_id)
                         .default_open(scene.occurrences.len() == 1)
                         .show(ui, |ui| {
+                            if let Some(source) = &definition.record.provenance.normalized {
+                                ui.collapsing("Import details", |ui| {
+                                    ui.label(format!(
+                                        "{:?} · {:?}",
+                                        source.format, definition.record.provenance.source_unit
+                                    ));
+                                    for note in &source.notes {
+                                        ui.weak(note);
+                                    }
+                                });
+                            }
                             if ui
                                 .selectable_label(
                                     self.occurrence.as_ref() == Some(&occurrence.occurrence_id),

@@ -10,6 +10,7 @@ pub(crate) fn asset(bytes: Vec<u8>, name: &str) -> Arc<SourceAsset> {
             StoredDefinition {
                 definition_id: DefinitionId::from_source_sha256(&digest),
                 provenance: SourceProvenance {
+                    normalized: None,
                     source_hash: SourceHash::from_digest(&digest),
                     source_name: name.to_owned(),
                     source_unit: SourceUnit::Millimetre,

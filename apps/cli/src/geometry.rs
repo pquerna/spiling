@@ -531,6 +531,7 @@ pub async fn run(
                 session_id: session.clone(),
                 base_revision: summary.revision,
                 source: part.source,
+                options: spiling_contracts::geometry::ModelImportOptions::default(),
                 initial_pose: part.pose,
             },
         )
@@ -907,6 +908,7 @@ mod tests {
                 session_id: session.clone(),
                 base_revision: before.revision,
                 source: NativePath::from_os_str(fixtures.join("box-mm.step").as_os_str()).unwrap(),
+                options: spiling_contracts::geometry::ModelImportOptions::default(),
                 initial_pose: RigidPoseMm::IDENTITY,
             },
         )
@@ -950,6 +952,7 @@ mod tests {
                 base_revision: before_failure.revision,
                 source: NativePath::from_os_str(fixtures.join("truncated.step").as_os_str())
                     .unwrap(),
+                options: spiling_contracts::geometry::ModelImportOptions::default(),
                 initial_pose: RigidPoseMm::IDENTITY,
             },
         )
