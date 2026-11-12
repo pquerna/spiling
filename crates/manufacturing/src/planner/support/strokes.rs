@@ -47,6 +47,7 @@ pub(crate) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> Ga
     }
 }
 
+#[derive(Clone)]
 pub(in crate::planner) struct Failure {
     pub(in crate::planner) path: usize,
     pub(in crate::planner) first: usize,

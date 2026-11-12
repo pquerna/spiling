@@ -313,6 +313,8 @@ fn plan_with(
     let mut span_sizing = native::NativeSpanSizing::default();
     let mut slab_pool = native::NativeSlabPool::default();
     let mut wall_memo = WallMemo::default();
+    let mut void_memo = tolerant::VoidMemo::default();
+    let mut survival_memo = neighborhood::SurvivalMemo::default();
     let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
     let outside = native_retry_outside_bytes(
         &prepared_sources,
@@ -366,6 +368,8 @@ fn plan_with(
             &mut span_sizing,
             &mut slab_pool,
             &mut wall_memo,
+            &mut void_memo,
+            &mut survival_memo,
         );
         if let Ok(ScheduleAdmission::RefineUnreachableLayer { recycled, .. }) = &mut outcome {
             let outside = native_retry_outside_bytes(
@@ -413,13 +417,70 @@ fn plan_with(
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
                 exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
             }
-            ScheduleAdmission::Complete(_) => {
+            ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
                 unreachable!("tentative prefix cannot publish a plan")
             }
         }
     };
     let mut prefix = native_prefix;
+    // After a complete-pass refinement only the refined neighborhood changed.
+    // Tolerant lanes first retry a truncated schedule through that
+    // neighborhood: its layers, demands and columns there equal the complete
+    // pass's, so a refinement it finds is the complete pass's first one.
+    // Anything else falls through to the complete pass, which decides.
+    let truncate_retries = admission.tolerant.is_some()
+        && matches!(
+            input.intent.recipe.supports,
+            SupportPolicy::Breakaway { .. }
+        )
+        && !matches!(
+            input.intent.recipe.sparse_infill,
+            SparseInfillPolicy::WebRoof { .. }
+        );
+    let mut refined = None;
     loop {
+        if let Some(index) = refined.take()
+            && let Some(probe) = deposition_probe(
+                input,
+                &admission,
+                &process_captures,
+                &schedule,
+                AnchorProbeScope::RefinedLayer {
+                    end: index + RETRY_WINDOW_LAYERS,
+                },
+                &mut surface_work,
+                cancel,
+            )?
+        {
+            let outcome = admit_schedule(
+                input,
+                cancel,
+                &mut admission,
+                &prepared_sources,
+                &mut process_captures,
+                &mut schedule,
+                &mut surface_work,
+                &mut support_work,
+                Some(probe),
+                None,
+                &mut span_sizing,
+                &mut slab_pool,
+                &mut wall_memo,
+                &mut void_memo,
+                &mut survival_memo,
+            );
+            match outcome {
+                Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure, .. }) => {
+                    exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
+                    refined = Some(index);
+                    continue;
+                }
+                Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
+                    return Err(failure);
+                }
+                _ => {}
+            }
+        }
         let outcome = admit_schedule(
             input,
             cancel,
@@ -434,18 +495,25 @@ fn plan_with(
             &mut span_sizing,
             &mut slab_pool,
             &mut wall_memo,
+            &mut void_memo,
+            &mut survival_memo,
         );
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
                 exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
+                refined = truncate_retries.then_some(index);
             }
-            ScheduleAdmission::PrefixAdmitted(_) => {
+            ScheduleAdmission::PrefixAdmitted(_) | ScheduleAdmission::RetryUndecided => {
                 unreachable!("complete schedule must produce a plan")
             }
         }
     }
 }
+
+/// Output layers a truncated retry keeps above its refined index: the split
+/// may move the next demand up by one layer.
+const RETRY_WINDOW_LAYERS: usize = 3;
 
 fn native_retry_outside_bytes(
     sources: &PreparedSources<'_>,
@@ -480,6 +548,8 @@ enum ScheduleAdmission {
         recycled: native::RecyclableSlabs,
     },
     Complete(NormalizedPrintPlan),
+    /// A truncated retry found no refinement the complete pass would make.
+    RetryUndecided,
 }
 
 struct OrdinaryTemplate {
@@ -580,9 +650,13 @@ fn admit_schedule<'model>(
     span_sizing: &mut native::NativeSpanSizing,
     pool: &mut native::NativeSlabPool,
     wall_memo: &mut WallMemo,
+    void_memo: &mut tolerant::VoidMemo,
+    survival_memo: &mut neighborhood::SurvivalMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let recipe = &input.intent.recipe;
     let continuing = native_prefix.is_some();
+    let truncated =
+        probe.is_some_and(|probe| matches!(probe.scope, AnchorProbeScope::RefinedLayer { .. }));
     for capture in process_captures.iter_mut() {
         capture.applied = false;
     }
@@ -1054,7 +1128,8 @@ fn admit_schedule<'model>(
         .try_fold(
             native_coverage
                 .retained_bytes()
-                .saturating_add(pool.retained_bytes()),
+                .saturating_add(pool.retained_bytes())
+                .saturating_add(void_memo.retained_bytes()),
             |bytes, source| bytes.checked_add(source.retained_bytes()),
         )
         .ok_or_else(|| {
@@ -1227,6 +1302,18 @@ fn admit_schedule<'model>(
     let mut segments = 0usize;
     let skin_inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
     let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset, *surface_work)?;
+    // Tolerant sections are a function of their schedule entries alone.
+    if admission.tolerant.is_some() {
+        neighborhoods.attach_memo(survival_memo, schedule.len(), &|index| {
+            let layer = &schedule[index as usize];
+            [
+                layer.z.to_bits(),
+                layer.lower_z.to_bits(),
+                layer.sample.to_bits(),
+                layer.height.to_bits(),
+            ]
+        });
+    }
     let outcome = (|| {
         let mut key = None;
         let mut classified = None;
@@ -2106,11 +2193,15 @@ fn admit_schedule<'model>(
                         .map(|model| model.support_margin())
                         .fold(0.0, f64::max)
                 }),
+                replay: admission.tolerant.is_some()
+                    && web_roof.is_none()
+                    && construction.domains.is_empty(),
             },
             &mut segments,
             cancel,
             admission.geometry_work,
-            probe.is_some(),
+            probe.is_some() && !truncated,
+            truncated,
             support_work,
             |index,
              axis,
@@ -2419,7 +2510,9 @@ fn admit_schedule<'model>(
                 if let Some(models) = &admission.tolerant {
                     return tolerant::project_protected_voids(
                         models,
+                        void_memo,
                         demand_bounds,
+                        truncated,
                         retained_units,
                         live_bytes,
                         cancel,
@@ -2620,6 +2713,17 @@ fn admit_schedule<'model>(
                 )
             })?;
         match support_admission {
+            support::SupportAdmission::Complete | support::SupportAdmission::Undecided
+                if truncated =>
+            {
+                if let ScheduleNativeAuthority::Tentative { mut stage, .. } = native_coverage {
+                    *span_sizing = stage.take_span_sizing();
+                }
+                return Ok(ScheduleAdmission::RetryUndecided);
+            }
+            support::SupportAdmission::Undecided => {
+                unreachable!("only truncated retries leave support undecided")
+            }
             support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
                 let recycled = match native_coverage {
                     ScheduleNativeAuthority::Tentative { mut stage, .. } => {
@@ -3236,6 +3340,9 @@ fn unreachable_support_end(
 enum AnchorProbeScope {
     UnreachableSupport,
     StartupPair { top_mm: f64 },
+    /// Output layers below `end` after a complete-pass refinement. Support
+    /// keeps complete-pass semantics; only a refinement it finds is a decision.
+    RefinedLayer { end: usize },
 }
 
 impl AnchorProbeScope {
@@ -3252,6 +3359,7 @@ impl AnchorProbeScope {
                 preflight::charge_capture_proposal_work(work, 1, cancel)?;
                 Ok(schedule.partition_point(|layer| layer.lower_z < top_mm))
             }
+            Self::RefinedLayer { end } => Ok(end.min(schedule.len())),
         }
     }
 }
