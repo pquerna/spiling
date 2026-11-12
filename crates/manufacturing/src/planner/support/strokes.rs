@@ -12,7 +12,9 @@ use spiling_contracts::manufacturing::{
 };
 use std::sync::atomic::AtomicBool;
 
-const MIN_ANCHOR_INVENTORY_PATHS: usize = 512;
+/// Lower capsule edges above which a nominal inventory replaces the
+/// per-run linear scan. Selection only; both routes give identical results.
+const MIN_ANCHOR_INVENTORY_EDGES: usize = 512;
 
 pub(crate) enum GapKind {
     Supported,
@@ -106,13 +108,15 @@ where
         let large = match self.large {
             Some(large) => large,
             None => {
+                let mut edges = 0usize;
                 let large = self
                     .previous
                     .clone()
                     .chain(self.contacts.clone())
-                    .take(MIN_ANCHOR_INVENTORY_PATHS)
-                    .count()
-                    == MIN_ANCHOR_INVENTORY_PATHS;
+                    .any(|path| {
+                        edges = edges.saturating_add(path.points_mm.len().saturating_sub(1));
+                        edges >= MIN_ANCHOR_INVENTORY_EDGES
+                    });
                 self.large = Some(large);
                 large
             }
