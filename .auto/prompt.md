@@ -40,4 +40,11 @@ Never `cargo fmt --all`.
 ## What's Been Tried
 - Round 2 shipped (main 88b7bf80): anchor edge grid for stroke analysis (0.847x, identical programs).
 - Round 1 (main 84a42f09): convolution offsets, routing scans, wall memo/prefill = 0.305x CPU. Now support::realize dominates (strokes::analyze, column Booleans), then classification.
+- Walls track (branch autoresearch/walls-main, 0.957x vs main e506f08f, identical programs): y-bucketed
+  site rows for skeleton inside_material; cover void gate via erosion emptiness (no material opening);
+  per-sample radius in trace_edge, running width max/short-circuit in simplify, Fx hasher in stitch;
+  capsule union on i_overlay's serial solver (nested rayon fragment split cost CPU inside prefill).
+  Dead end: one NonZero material-minus-capsules overlay is no faster than union+difference.
+  Walls now ~15% of part-13 CPU: skeleton 40% (boostvoronoi falls through lazy to exact
+  ExtendedInt circle formation ~95% of the time), capsule union ~30%.
 (see log.jsonl; summarize wins/dead ends here as they happen)

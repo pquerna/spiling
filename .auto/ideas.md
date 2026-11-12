@@ -58,6 +58,12 @@ sweep_active, material_bytes, remaining_geometry_budget) 5–8%. Planner is full
 - F1 inside_material / ray_crossing: replace per-vertex ray casting over all edges with one
   edge-indexed sweep or y-bucket grid (O(log n) per query).
 - F2 Feed boostvoronoi integer input once per layer; reuse across identical layers (B1 covers).
+- F3 (done: y-bucket rows; G3 CubeCL PIP unnecessary, PIP now <1% of walls.) Next skeleton lever is
+  boostvoronoi's lazy->exact circle-formation fallback (~95% of lazy pss/sss calls end in ExtendedInt):
+  find which site configurations fail the 128-ulp check (near-collinear consecutive sites? origin-near
+  results?) and fix upstream or condition input semantically.
+- F4 Other nested-rayon i_overlay calls inside parallel stages (convolution offsets, geo Booleans in
+  cover) could pick the serial solver when rayon::current_thread_index() is Some; small today.
 
 ## G. CubeCL (aggressive; screen on GPU, decide exactly on CPU)
 - G1 GPU broad phase for strokes::analyze: candidate-vs-previous capsule bbox overlap masks via the
