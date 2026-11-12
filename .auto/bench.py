@@ -10,7 +10,8 @@ INTENT = os.path.join(WT, ".auto", "intent.json")
 RUN = os.environ.get("AR_RUN", "/tmp/ar-run-" + os.path.basename(WT))
 TIMEOUT = int(os.environ.get("AR_TIMEOUT", "1800"))
 
-def one(prefix):
+def one(job):
+    prefix, BIN, RUN = job
     name = next(n for n in sorted(os.listdir(CORPUS)) if n.startswith(prefix))
     d = os.path.join(RUN, prefix); shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
     shutil.copy(os.path.join(CORPUS, name), os.path.join(d, "source.step"))
@@ -47,12 +48,26 @@ def one(prefix):
     return rec
 
 parts = sys.argv[2:]
-with ThreadPoolExecutor(len(parts)) as ex:
-    recs = list(ex.map(one, parts))
+# AR_BASE_BIN: also run these baseline binaries concurrently (paired A/B under identical contention).
+BASE = os.environ.get("AR_BASE_BIN")
+jobs = [(p, BIN, RUN) for p in parts] + ([(p, BASE, RUN + "-base") for p in parts] if BASE else [])
+with ThreadPoolExecutor(len(jobs)) as ex:
+    allrecs = list(ex.map(one, jobs))
+recs, base = allrecs[:len(parts)], allrecs[len(parts):]
 json.dump(recs, open(sys.argv[1], "w"), indent=1)
+if base:
+    json.dump(base, open(sys.argv[1].replace(".json", "-base.json"), "w"), indent=1)
+    for r, b in zip(recs, base):
+        if r.get("program") != b.get("program") or r["code"] != b["code"]:
+            print(f"differs from base: {r['part']} {b['code']}->{r['code']} {b.get('program')}->{r.get('program')}")
 for r in recs:
     print(f"{r['part']} {r['code']:<32} cpu {r['cpu_s']:8.1f}s wall {r['wall_s']:8.1f}s {r.get('program','')}")
 print(f"METRIC total_s={sum(r['s'] for r in recs):.1f}")
 print(f"METRIC wall_total_s={sum(r['wall_s'] for r in recs):.1f}")
 print(f"METRIC max_s={max(r['s'] for r in recs):.1f}")
 print(f"METRIC ok={sum(r['ok'] for r in recs)}")
+if base:
+    t, tb = sum(r['s'] for r in recs), sum(b['s'] for b in base)
+    print(f"METRIC base_total_s={tb:.1f}")
+    print(f"METRIC ratio={t/tb:.4f}")
+    print("per-part ratio: " + " ".join(f"{r['part']}:{r['s']/max(b['s'],1e-9):.2f}" for r, b in zip(recs, base)))
