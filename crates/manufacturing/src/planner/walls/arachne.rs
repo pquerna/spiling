@@ -408,6 +408,14 @@ fn trace_edge(
         }
     };
     let lanes = samples.iter().map(|s| lane_limit(s.1)).max().unwrap_or(0);
+    // Each sample's medial point and radius, shared by every lane and side.
+    let at: Vec<([f64; 2], f64)> = samples
+        .iter()
+        .map(|&(t, _)| {
+            let p = edge.at(t);
+            (p, radius(edge, p))
+        })
+        .collect();
     for side in 0..2 {
         let support = edge.supports[side];
         for lane in 0..lanes {
@@ -415,8 +423,7 @@ fn trace_edge(
             let exists = |t: f64, beading: Beading| {
                 lane < lane_limit(beading) && radius(edge, edge.at(t)) >= beading.offset(lane)
             };
-            let point = |t: f64, beading: Beading| -> [f64; 2] {
-                let p = edge.at(t);
+            let point = |p: [f64; 2], beading: Beading| -> [f64; 2] {
                 let foot = support.foot(p);
                 let length = norm(sub(p, foot));
                 let d = beading.offset(lane);
@@ -427,11 +434,15 @@ fn trace_edge(
                 }
             };
             let mut current: Option<Piece> = None;
+            let exists_at = |index: usize| {
+                let beading = samples[index].1;
+                lane < lane_limit(beading) && at[index].1 >= beading.offset(lane)
+            };
             for window in 0..samples.len() {
                 let (t, beading) = samples[window];
-                let here = exists(t, beading);
+                let here = exists_at(window);
                 if let Some(previous) = window.checked_sub(1).map(|i| samples[i])
-                    && exists(previous.0, previous.1) != here
+                    && exists_at(window - 1) != here
                     && previous.1.count == beading.count
                 {
                     // The rib reaches the lane between these samples: the
@@ -464,7 +475,7 @@ fn trace_edge(
                         lane,
                         boundary: support.boundary_index,
                     });
-                    piece.points.push(point(t, beading));
+                    piece.points.push(point(at[window].0, beading));
                     piece.widths.push(beading.width);
                 } else if let Some(piece) = current.take() {
                     pieces.push(piece);
@@ -477,7 +488,7 @@ fn trace_edge(
     }
     if central {
         let mut current: Option<Piece> = None;
-        for &(t, beading) in &samples {
+        for (index, &(_, beading)) in samples.iter().enumerate() {
             if beading.centre() && beading.count > 0 {
                 let piece = current.get_or_insert_with(|| Piece {
                     points: Vec::new(),
@@ -485,7 +496,7 @@ fn trace_edge(
                     lane: beading.lanes(),
                     boundary: edge.supports[0].boundary_index,
                 });
-                piece.points.push(edge.at(t));
+                piece.points.push(at[index].0);
                 piece.widths.push(beading.width);
             } else if let Some(piece) = current.take() {
                 pieces.push(piece);
@@ -499,6 +510,33 @@ fn trace_edge(
 }
 
 type StitchKey = ((i64, i64), usize);
+
+/// Multiplicative (Fx-style) hashing of the few integer words of a stitch
+/// key; the default SipHash dominated stitching.
+#[derive(Default)]
+struct StitchHasher(u64);
+
+impl std::hash::Hasher for StitchHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_i64(&mut self, value: i64) {
+        self.write_u64(value as u64);
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+}
+
+type StitchHash = std::hash::BuildHasherDefault<StitchHasher>;
 type OffsetFn<'a> = dyn FnMut(&MultiPolygon<f64>, f64, &mut usize) -> Result<MultiPolygon<f64>, ManufacturingError>
     + 'a;
 
@@ -530,8 +568,9 @@ fn stitch(
         .filter(|piece| piece.points.len() >= 2)
         .map(Some)
         .collect();
-    // (grid cell, lane) -> (piece, at its end).
-    let mut ends: HashMap<StitchKey, Vec<(usize, bool)>> = HashMap::new();
+    // (grid cell, lane) -> (piece, at its end). Only looked up, never
+    // iterated, so the hasher cannot affect the result.
+    let mut ends: HashMap<StitchKey, Vec<(usize, bool)>, StitchHash> = HashMap::default();
     for (index, piece) in pieces.iter().enumerate() {
         let piece = piece.as_ref().expect("fresh piece");
         ends.entry((cell(piece.points[0]), piece.lane))
@@ -625,30 +664,34 @@ fn simplify(
     let mut kept_widths = vec![widths[0]];
     let last = points.len() - 1;
     let mut anchor = 0;
+    // Largest width change since the anchor, over every point after it.
+    let mut width_change = 0.0f64;
     for i in 1..last {
         let a = points[anchor];
-        let b = points[i + 1];
-        let chord = sub(b, a);
-        let length = norm(chord);
-        let deviation = (anchor + 1..=i)
-            .map(|j| {
-                if length == 0.0 {
+        width_change = width_change.max((widths[i] - widths[anchor]).abs());
+        let far_enough = norm(sub(points[i], a)) >= minimum;
+        if !far_enough {
+            continue;
+        }
+        // Within half the profile tolerance: the centreline by its deviation,
+        // a bead edge by half its width change.
+        let deviates = width_change > 0.01 || {
+            let chord = sub(points[i + 1], a);
+            let length = norm(chord);
+            (anchor + 1..=i).any(|j| {
+                let deviation = if length == 0.0 {
                     norm(sub(points[j], a))
                 } else {
                     cross(chord, sub(points[j], a)).abs() / length
-                }
+                };
+                deviation > 0.005
             })
-            .fold(0.0, f64::max);
-        let width_change = (anchor + 1..=i)
-            .map(|j| (widths[j] - widths[anchor]).abs())
-            .fold(0.0, f64::max);
-        let far_enough = norm(sub(points[i], a)) >= minimum;
-        // Within half the profile tolerance: the centreline by its deviation,
-        // a bead edge by half its width change.
-        if far_enough && (deviation > 0.005 || width_change > 0.01) {
+        };
+        if deviates {
             kept_points.push(points[i]);
             kept_widths.push(widths[i]);
             anchor = i;
+            width_change = 0.0;
         }
     }
     let end = if closed { kept_points[0] } else { points[last] };
