@@ -795,7 +795,7 @@ fn cover(
         }
     }
     boolean::charge(work, capsules.len().saturating_mul(64))?;
-    let beads = geo::unary_union(&capsules);
+    let beads = union_capsules(&capsules);
     // Narrower than the narrowest bead is not printable by anything: not the
     // material's tips, and not a sliver left between beads.
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
@@ -844,6 +844,44 @@ fn cover(
         )));
     }
     Ok(fill)
+}
+
+/// The union of counterclockwise capsules, as `geo::unary_union` forms it
+/// (one positive-winding overlay of every ring) but on the serial solver.
+/// Walls are already planned in parallel per layer; i_overlay's own rayon
+/// fragment split only added scheduling work. The split marks are gathered
+/// in the same group order either way, so the overlay is the same.
+fn union_capsules(capsules: &[Polygon<f64>]) -> MultiPolygon<f64> {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::core::solver::Solver;
+    use i_overlay::float::overlay::{FloatOverlay, OverlayOptions};
+    let subject: Vec<Vec<[f64; 2]>> = capsules
+        .iter()
+        .map(|capsule| {
+            let ring = &capsule.exterior().0;
+            ring[..ring.len() - 1].iter().map(|c| [c.x, c.y]).collect()
+        })
+        .collect();
+    let serial = Solver {
+        multithreading: None,
+        ..Solver::AUTO
+    };
+    let shapes = FloatOverlay::with_subj_custom(&subject, OverlayOptions::default(), serial)
+        .overlay(OverlayRule::Subject, FillRule::Positive);
+    MultiPolygon(
+        shapes
+            .into_iter()
+            .map(|shape| {
+                let mut rings = shape.into_iter().map(|ring| {
+                    let mut line = LineString(ring.into_iter().map(Coord::from).collect());
+                    line.close();
+                    line
+                });
+                Polygon::new(rings.next().unwrap_or(LineString::empty()), rings.collect())
+            })
+            .collect(),
+    )
 }
 
 fn capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Polygon<f64> {
