@@ -4238,7 +4238,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
                 assert!(!capture.stage.source_captures().is_empty());
                 break;
             }
-            ScheduleAdmission::Complete(_) => {
+            ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
                 panic!("tentative actual paths cannot publish a plan")
             }
         }

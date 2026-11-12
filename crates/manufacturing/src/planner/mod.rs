@@ -2767,6 +2767,9 @@ fn admit_schedule<'model>(
             support::SupportAdmission::Complete | support::SupportAdmission::Undecided
                 if truncated =>
             {
+                if let ScheduleNativeAuthority::Tentative { mut stage, .. } = native_coverage {
+                    *span_sizing = stage.take_span_sizing();
+                }
                 return Ok(ScheduleAdmission::RetryUndecided);
             }
             support::SupportAdmission::Undecided => {

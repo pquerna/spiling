@@ -705,7 +705,13 @@ pub(super) fn realize(
         {
             return Err(super::bonds::unresolved(first));
         }
-        drop(replay_entries.next());
+        // Every replay above builds on this layer's admitted result.
+        if replay_entries
+            .next()
+            .is_none_or(|entry| Some(&entry.after) != layers.first())
+        {
+            replay_limit = 0;
+        }
         if let (Some(before), Some(after)) = (first_before, layers.first()) {
             recorded.push(ReplayEntry {
                 before,
