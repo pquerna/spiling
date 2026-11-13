@@ -165,10 +165,11 @@ Marlin-class firmware that declares arc support, off by default for Klipper.
 
 ## Tolerant mode as delivered
 
-Step 1 is a job-wide mode, not yet per face. When the exact native path
-refuses for a geometric reason or exhausts its proof work, and the job uses no
-finish or fixed-dual routing, the planner reslices the whole job within
-tolerance:
+Step 1 is a job-wide mode, not yet per face. Every job slices within
+tolerance unless it uses fixed-dual routing or a permanent process interface;
+those still take the exact native path first and reslice within tolerance only
+when it refuses for a geometric reason or exhausts its proof work and their
+features allow it:
 
 - Sections take their topology from the BREP's own watertight tessellation
   at half the profile tolerance: which faces a plane crosses and in what
@@ -199,6 +200,12 @@ tolerance:
   These are conservative tolerant exclusions, not exact native certificates.
   Unresolved closure or an unusable corridor refuses rather than returning empty
   masks. Final actual-bead, lower-anchor and minimum-contact-gap checks still run.
+- Surface finishes displace the finished occurrence's own tolerant section,
+  kept apart from the union of unfinished occurrences. Eligible carriers and
+  their neighbours are analytic planes and vertical cylinders, so the section
+  lies on the BREP to rounding and the finish construction's retention,
+  simplicity and positive-addition checks run on it unchanged, within the
+  separate 0.001 mm finish bound. A section that fails them refuses.
 - The plan carries `PreflightEvidence::Tolerant` and claims no native
   certificate. Fresh independent replay is unchanged.
 

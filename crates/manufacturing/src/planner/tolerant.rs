@@ -10,7 +10,7 @@
 use super::{ContinuousOccupied, LayerElevation, native, region};
 use crate::{check_cancel, error};
 use geo::{BooleanOps, LineString, MultiPolygon, Polygon};
-use spiling_contracts::geometry::{AabbMm, OccurrenceId, OccurrenceRecord};
+use spiling_contracts::geometry::{OccurrenceId, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
 use spiling_geometry::tolerant::{TolerantModel, TolerantSection};
 use std::collections::BTreeMap;
@@ -100,7 +100,7 @@ fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, Manufa
 pub(super) fn collect_span(
     occurrences: &[&OccurrenceRecord],
     models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
-    native_bounds: &BTreeMap<OccurrenceId, AabbMm>,
+    admission: &super::preflight::Admission,
     layer: &LayerElevation,
     index: u32,
     supports: bool,
@@ -111,13 +111,16 @@ pub(super) fn collect_span(
     let mut material = MultiPolygon(Vec::new());
     let mut contributions = Vec::with_capacity(occurrences.len());
     let mut contribution_bytes = 0usize;
+    let mut finished = Vec::new();
+    let mut finished_bytes = 0usize;
+    let mut finished_area_mm2 = 0.0;
     let mut occupied = ContinuousOccupied::default();
     for occurrence in occurrences {
         check_cancel(cancel)?;
         let model = &models[&occurrence.occurrence_id];
         let mut placed = section_at(model, sample)?;
         region::canonicalize(&mut placed);
-        let bounds = native_bounds[&occurrence.occurrence_id];
+        let bounds = admission.native_bounds[&occurrence.occurrence_id];
         let height = [lower.max(bounds.min[2]), upper.min(bounds.max[2])];
         if supports {
             occupied.tolerant.push(super::TolerantOccupied {
@@ -132,6 +135,20 @@ pub(super) fn collect_span(
             }
         }
         if placed.0.is_empty() {
+            continue;
+        }
+        if admission
+            .surface_fields
+            .contains_key(&occurrence.occurrence_id)
+        {
+            // Finished occurrences stay their own M: preflight keeps their
+            // expanded bounds clear of every other occurrence, and D = M
+            // plus the finish displacement is realized per layer.
+            finished_area_mm2 += geo::Area::unsigned_area(&placed);
+            finished_bytes = finished_bytes
+                .saturating_add(native::material_bytes(&mut placed))
+                .saturating_add(native::MATERIAL_ARC_BYTES);
+            finished.push((occurrence.occurrence_id, Arc::new(placed)));
             continue;
         }
         material = if material.0.is_empty() {
@@ -157,14 +174,19 @@ pub(super) fn collect_span(
     region::canonicalize(&mut material);
     region::check_size(&material)?;
     // Overlapping occurrences share material: the source area is the union's.
-    let source_area_mm2 = geo::Area::unsigned_area(&material);
+    let source_area_mm2 = geo::Area::unsigned_area(&material) + finished_area_mm2;
     let material_bytes = native::material_bytes(&mut material);
-    let point_count = region::point_count(&material);
+    let point_count = finished
+        .iter()
+        .map(|(_, placed)| region::point_count(placed))
+        .fold(region::point_count(&material), usize::saturating_add);
     Ok(native::NativeSpan::tolerant(
         index + 1,
         Arc::new(material),
         contributions,
         contribution_bytes,
+        finished,
+        finished_bytes,
         Arc::new(occupied),
         source_area_mm2,
         point_count,

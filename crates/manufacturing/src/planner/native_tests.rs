@@ -1803,34 +1803,50 @@ fn native_surface_pose_holes_and_other_occurrence_exclusion_preserve_authority()
             .abs()
             < 1e-5
     );
-    // Compare inverse-translated contour vertices, not source-only path counts.
-    for path in &finished.plan.layers[0].paths {
-        if path.kind != DepositionKind::Perimeter {
-            continue;
-        }
-        let counterpart = moved.plan.layers[0]
+    // Compare inverse-translated contours, not source-only path counts. The
+    // translated copy is sectioned from its own placed tessellation, so its
+    // perimeters match the original's within the profile tolerance, both ways.
+    let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+    let perimeters = |plan: &NormalizedPrintPlan, dx: f64, dy: f64| -> Vec<Vec<[f64; 2]>> {
+        plan.layers[0]
             .paths
             .iter()
-            .find(|p| {
-                p.kind == path.kind
-                    && p.points_mm.len() == path.points_mm.len()
-                    && p.points_mm.iter().any(|q| {
-                        (q[0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
-                            && (q[1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
-                    })
+            .filter(|path| path.kind == DepositionKind::Perimeter)
+            .map(|path| {
+                path.points_mm
+                    .iter()
+                    .map(|p| [p[0] - dx, p[1] - dy])
+                    .collect()
             })
-            .unwrap();
-        let n = path.points_mm.len() - 1;
-        let seam = counterpart.points_mm[..n]
-            .iter()
-            .position(|q| {
-                (q[0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
-                    && (q[1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
+            .collect()
+    };
+    let distance = |p: [f64; 2], path: &[[f64; 2]]| {
+        path.windows(2)
+            .map(|edge| {
+                let (a, b) = (edge[0], edge[1]);
+                let d = [b[0] - a[0], b[1] - a[1]];
+                let length = d[0] * d[0] + d[1] * d[1];
+                let t = if length == 0.0 {
+                    0.0
+                } else {
+                    (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / length).clamp(0.0, 1.0)
+                };
+                (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
             })
-            .unwrap();
-        for (i, a) in path.points_mm[..n].iter().enumerate() {
-            let b = counterpart.points_mm[(i + seam) % n];
-            assert!((a[0] - (b[0] - 23.0)).abs() < 1e-5 && (a[1] - (b[1] - 17.0)).abs() < 1e-5);
+            .fold(f64::INFINITY, f64::min)
+    };
+    let original_walls = perimeters(&finished.plan, 0.0, 0.0);
+    let moved_walls = perimeters(&moved.plan, 23.0, 17.0);
+    assert_eq!(original_walls.len(), moved_walls.len());
+    for (from, to) in [
+        (&original_walls, &moved_walls),
+        (&moved_walls, &original_walls),
+    ] {
+        for path in from {
+            assert!(
+                to.iter()
+                    .any(|other| path.iter().all(|p| distance(*p, other) <= profile))
+            );
         }
     }
     let quarter = std::f64::consts::FRAC_1_SQRT_2;
@@ -2179,14 +2195,11 @@ fn independent_cylindrical_ribs_change_ordinary_walls_accounting_and_actual_repl
     );
     for (plain, textured) in original.plan.layers.iter().zip(&finished.plan.layers) {
         let coverage = &textured.region_coverage;
-        // The finish leaves the source section unchanged. Until finishes run on
-        // the single lane, the finished job's exact section and the plain job's
-        // sliced one agree within the profile tolerance along the circle.
-        let area = plain.region_coverage.section_area_mm2;
-        let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+        // The finish leaves the source section unchanged: both jobs slice the
+        // same placed tessellation, and the finish only adds material.
         assert!(
-            (coverage.source_section_area_mm2 - area).abs()
-                <= profile * 2.0 * (std::f64::consts::PI * area).sqrt()
+            (coverage.source_section_area_mm2 - plain.region_coverage.section_area_mm2).abs()
+                < 1e-9
         );
         assert!(coverage.surface_added_area_mm2 > 0.0);
         assert!(
@@ -2419,10 +2432,11 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
             && check.code == "native_conditioning_failure"
             && check.evidence == PreflightEvidence::Indeterminate
     }));
-    assert_eq!(
-        compile(scene.input(&intent), &cancel).unwrap_err().code,
-        ManufacturingErrorCode::NativeConditioningFailure
-    );
+    // Compile slices within tolerance; the finish's own arithmetic reserve
+    // still refuses the placement explicitly, before any output exists.
+    let refused = compile(scene.input(&intent), &cancel).unwrap_err();
+    assert_eq!(refused.code, ManufacturingErrorCode::UnsupportedGeometry);
+    assert!(refused.message.contains("arithmetic"), "{refused:?}");
 }
 
 fn image_parameters(depth: f64, margin: f64) -> spiling_contracts::surface::ImageReliefParameters {
@@ -2756,9 +2770,11 @@ fn wall_peak_in_u_band(
     };
     let mut peak = f64::NEG_INFINITY;
     for path in layer.paths.iter().filter(|path| {
+        // A wall run over air is a Bridge that follows the contour; straight
+        // two-point bridge rows are fill, not the first wall.
         path.kind == DepositionKind::Perimeter
             || (path.kind == DepositionKind::Bridge
-                && path.points_mm.first() == path.points_mm.last())
+                && (path.points_mm.first() == path.points_mm.last() || path.points_mm.len() > 2))
     }) {
         for edge in path.points_mm.windows(2) {
             let a = projected(&edge[0]);

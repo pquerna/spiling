@@ -88,13 +88,15 @@ pub(super) struct NativeSpan {
 }
 
 impl NativeSpan {
-    /// A one-layer ADR012 tolerant span: no invariance, inner prism or finish.
+    /// A one-layer ADR012 tolerant span: no invariance or inner prism.
     #[expect(clippy::too_many_arguments)]
     pub(super) fn tolerant(
         end: u32,
         material: Arc<MultiPolygon<f64>>,
         contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>,
         contribution_bytes: usize,
+        finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)>,
+        finished_bytes: usize,
         occupied: Arc<super::ContinuousOccupied>,
         source_area_mm2: f64,
         point_count: usize,
@@ -105,14 +107,14 @@ impl NativeSpan {
             invariant: false,
             inner_material: None,
             material,
-            finished: Vec::new(),
+            finished,
             contributions,
             contribution_bytes,
             occupied,
             source_area_mm2,
             point_count,
             material_bytes,
-            finished_bytes: 0,
+            finished_bytes,
         }
     }
 }
@@ -1916,27 +1918,7 @@ fn capture_base(
     loop {
         check_cancel(cancel)?;
         let (interval, sample) = native_span_reference(schedule, index, end)?;
-        let layer = &schedule[index as usize];
-        let mut refinement_cause = None;
-        for (occurrence_id, fields) in &admission.surface_fields {
-            for field in fields {
-                if let Some(allowed) = field.allowed_vertical_error() {
-                    let bound = field.vertical_error_bound(layer.lower_z, layer.z, layer.sample)?;
-                    if bound > allowed {
-                        refinement_cause = Some(error(
-                            ManufacturingErrorCode::NativeShapeErrorExceeded,
-                            format!(
-                                "surface field at layer {index}, interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}: vertical error bound {bound:.17e} mm exceeds policy {allowed:.17e} mm",
-                                layer.lower_z,
-                                layer.z,
-                                layer.sample,
-                                occurrence_id.get()
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
+        let mut refinement_cause = surface_vertical_error(admission, schedule, index)?;
         let initial_bytes = occurrences
             .len()
             .checked_mul(
@@ -3154,6 +3136,58 @@ pub(super) fn split_layer(
         ));
     }
     split_resolved_layer(schedule, index, 0.0, context)
+}
+
+/// The first mapped field whose vertical error over this scheduled layer
+/// exceeds its declared bound, as the refinement cause. Both lanes refine the
+/// layer until none does.
+pub(super) fn surface_vertical_error(
+    admission: &preflight::Admission,
+    schedule: &[LayerElevation],
+    index: u32,
+) -> Result<Option<ManufacturingError>, ManufacturingError> {
+    let layer = &schedule[index as usize];
+    for (occurrence_id, fields) in &admission.surface_fields {
+        for field in fields {
+            if let Some(allowed) = field.allowed_vertical_error() {
+                let bound = field.vertical_error_bound(layer.lower_z, layer.z, layer.sample)?;
+                if bound > allowed {
+                    return Ok(Some(error(
+                        ManufacturingErrorCode::NativeShapeErrorExceeded,
+                        format!(
+                            "surface field at layer {index}, interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}: vertical error bound {bound:.17e} mm exceeds policy {allowed:.17e} mm",
+                            layer.lower_z,
+                            layer.z,
+                            layer.sample,
+                            occurrence_id.get()
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Split one tolerant layer for a mapped field's vertical error, at the
+/// captured process minimum, keeping the cause in any refusal.
+pub(super) fn refine_surface_layer(
+    schedule: &mut Vec<LayerElevation>,
+    index: u32,
+    minimum_height_mm: f64,
+    cause: &ManufacturingError,
+) -> Result<(), ManufacturingError> {
+    split_resolved_layer(
+        schedule,
+        index,
+        minimum_height_mm,
+        "surface field vertical error",
+    )
+    .map_err(|mut failure| {
+        failure.message.push_str("; ");
+        failure.message.push_str(&cause.to_string());
+        failure
+    })
 }
 
 fn split_resolved_layer(
