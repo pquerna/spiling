@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+repository = "https://codeberg.org/eadf/cpp_map_rs"
+registry = "crates.io"
+version = "0.2.0"
+snapshot_revision = "1912fd11818b599948ecafdfa6f9af3bc56eec7e"
+registry_checksum = "ec1940c0c538b9de163cd9523bf2801fdea188bba1c5978c9b8750a8a9c7d500"
+license = "MIT OR Apache-2.0"
+consumer = "boostvoronoi 0.12.1 beach line (crates/manufacturing wall skeleton)"
+
+[[changes]]
+paths = ["src/skiplist.rs", "src/skiplist/skiplist_impl.rs", "src/skiplist/insert.rs", "src/skiplist/extend.rs"]
+reason = "Draw skip-list node levels from a fixed-seed generator owned by each list instead of a thread-local OS-seeded rand::ThreadRng. boostvoronoi's beach-line comparator is not a strict total order on degenerate inputs, so the random tower heights changed which keys a search probed and the constructed segment-Voronoi diagram differed between runs of one input."
+
+[[changes]]
+paths = ["Cargo.toml"]
+reason = "Standalone manifest from the published Cargo.toml.orig: drop the now-unused rand runtime dependency, the release profile and the example and integration-test targets that are not vendored."

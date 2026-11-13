@@ -6,7 +6,7 @@
 resolver = "3"
 members = ["crates/model-import", "crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
 default-members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
-exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step"]
+exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step", "vendor/cpp_map"]
 
 [workspace.package]
 version = "0.1.0"
@@ -59,6 +59,12 @@ quick-xml = "=0.41.0"
 zip = { version = "=4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 spiling-core = { path = "crates/core" }
 spiling-manufacturing = { path = "crates/manufacturing" }
+
+# boostvoronoi's beach line uses cpp_map; the checked-in copy replaces its
+# OS-seeded skip-list levels with a fixed seed so diagrams are deterministic.
+# Snapshot and change record: vendor/cpp_map/UPSTREAM.toml.
+[patch.crates-io]
+cpp_map = { path = "vendor/cpp_map" }
 
 [profile.dev]
 debug = 0

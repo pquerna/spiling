@@ -1272,10 +1272,7 @@ dependencies = [
 [[package]]
 name = "cpp_map"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec1940c0c538b9de163cd9523bf2801fdea188bba1c5978c9b8750a8a9c7d500"
 dependencies = [
- "rand 0.9.5",
  "smallvec",
  "thiserror 2.0.21",
 ]
