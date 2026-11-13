@@ -32,6 +32,9 @@ struct Beading {
     count: usize,
     width: f64,
     residual: bool,
+    /// One bead widened over a feature thinner than the narrowest bead.
+    /// Corner edges treat it as no beads, as before widening.
+    thin: bool,
 }
 
 impl Beading {
@@ -41,6 +44,17 @@ impl Beading {
     /// Arachne redistributes it, within the maximum width.
     fn at(radius: f64, request: &WallRequest<'_>) -> Result<Self, ManufacturingError> {
         let allocation = allocate(radius, request)?;
+        if allocation.count == 0 && 2.0 * radius >= min_feature_mm(request) {
+            // Thinner than the narrowest bead but not below the minimum
+            // feature: one bead at the narrowest width, as Arachne widens
+            // thin features, reported as widened.
+            return Ok(Self {
+                count: 1,
+                width: admitted_width_range(request)?[0],
+                residual: false,
+                thin: true,
+            });
+        }
         if allocation.residual {
             let [minimum, maximum] = admitted_width_range(request)?;
             let thickness = 2.0 * radius;
@@ -51,6 +65,7 @@ impl Beading {
                     count: allocation.count,
                     width: widened,
                     residual: false,
+                    thin: false,
                 });
             }
         }
@@ -58,6 +73,7 @@ impl Beading {
             count: allocation.count,
             width: allocation.width,
             residual: allocation.residual,
+            thin: false,
         })
     }
     /// Lanes on each side of the medial axis.
@@ -72,6 +88,21 @@ impl Beading {
     fn centre(self) -> bool {
         !self.residual && self.count % 2 == 1
     }
+}
+
+/// Thinnest material that still gets a bead: a quarter nozzle, Arachne's
+/// minimum feature size. Thinner material is omitted and reported.
+fn min_feature_mm(request: &WallRequest<'_>) -> f64 {
+    0.25 * request.nozzle_diameter_mm
+}
+
+/// Thin-feature decisions of one wall plan, for the layer report.
+#[derive(Default)]
+struct ThinFeatures {
+    /// Centre bead length widened to the narrowest bead.
+    widened_mm: f64,
+    /// Material thinner than the minimum feature, left without a bead.
+    omitted_area_mm2: f64,
 }
 
 /// One traced bead piece: points and the width at each point.
@@ -162,6 +193,7 @@ pub(super) fn plan(
     let inherited = inherit(&graph, &contour, &request)?;
 
     let mut pieces = Vec::new();
+    let mut thin = ThinFeatures::default();
     for (index, edge) in graph.edges.iter().enumerate() {
         check_cancel(cancel)?;
         boolean::charge(work, 16)?;
@@ -172,6 +204,7 @@ pub(super) fn plan(
             [inherited[edge.vertex_ids[0]], inherited[edge.vertex_ids[1]]],
             &request,
             &mut pieces,
+            &mut thin,
         )?;
     }
     let mut chains = stitch(pieces, work, cancel)?;
@@ -229,9 +262,8 @@ pub(super) fn plan(
             arcs: Vec::new(),
         });
     }
-    if paths.is_empty() {
-        return Err(unsupported("section has no printable wall bead"));
-    }
+    // A section thinner than the minimum feature everywhere has no bead;
+    // `cover` still proves no printable material is left unfilled.
     let mut fill = cover(&request, &paths, &mut offset, work, cancel)?;
 
     let retained_bytes = std::mem::size_of::<WallPlan>()
@@ -267,6 +299,8 @@ pub(super) fn plan(
         section_area_mm2,
         wall_area_mm2,
         protected_hole_area_mm2,
+        thin_widened_mm: thin.widened_mm,
+        thin_omitted_area_mm2: thin.omitted_area_mm2,
     })
 }
 
@@ -327,6 +361,7 @@ fn inherit(
         count: 2 * request.recipe.perimeter_count as usize,
         width: source_width_mm(request)?,
         residual: true,
+        thin: false,
     };
     Ok(value.into_iter().map(|b| b.unwrap_or(full)).collect())
 }
@@ -345,6 +380,7 @@ fn trace_edge(
     ends: [Beading; 2],
     request: &WallRequest<'_>,
     pieces: &mut Vec<Piece>,
+    thin: &mut ThinFeatures,
 ) -> Result<(), ManufacturingError> {
     let length = norm(sub(edge.endpoints[1], edge.endpoints[0]));
     let mut steps = (length / SAMPLE_MM).ceil().max(1.0) as usize;
@@ -368,7 +404,11 @@ fn trace_edge(
             } else {
                 (ends[1], ends[0])
             };
-            Ok(if near.count > 0 { near } else { far })
+            Ok(if near.count > 0 && !near.thin {
+                near
+            } else {
+                far
+            })
         }
     };
     // Samples, refined so a bead-count change and every lane's end are found
@@ -401,7 +441,7 @@ fn trace_edge(
     // recipe's wall count, at the inherited width.
     let recipe_lanes = request.recipe.perimeter_count as usize;
     let lane_limit = |beading: Beading| {
-        if central || beading.count == 0 {
+        if central || beading.count == 0 || beading.thin {
             beading.lanes()
         } else {
             recipe_lanes
@@ -487,6 +527,14 @@ fn trace_edge(
         }
     }
     if central {
+        for (index, pair) in samples.windows(2).enumerate() {
+            let step = norm(sub(at[index + 1].0, at[index].0));
+            if pair[0].1.thin && pair[1].1.thin {
+                thin.widened_mm += step;
+            } else if pair[0].1.count == 0 && pair[1].1.count == 0 {
+                thin.omitted_area_mm2 += step * (at[index].1 + at[index + 1].1);
+            }
+        }
         let mut current: Option<Piece> = None;
         for (index, &(_, beading)) in samples.iter().enumerate() {
             if beading.centre() && beading.count > 0 {

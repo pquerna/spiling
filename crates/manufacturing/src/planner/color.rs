@@ -465,6 +465,8 @@ impl Construction {
             retained_points,
             section_area_mm2: request.material.unsigned_area(),
             wall_area_mm2,
+            thin_widened_mm: 0.0,
+            thin_omitted_area_mm2: 0.0,
             protected_hole_area_mm2: request
                 .material
                 .0

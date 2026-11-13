@@ -77,6 +77,8 @@ mod tests {
                 section_area_mm2: 0.0,
                 wall_area_mm2: 0.0,
                 protected_hole_area_mm2: 0.0,
+                thin_widened_mm: 0.0,
+                thin_omitted_area_mm2: 0.0,
             }),
             &first(),
         )

@@ -261,6 +261,24 @@ pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
             ),
         );
     }
+    if r.thin_widened_mm > 0.0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Thin feature widened · {:.3} mm of bead at the narrowest width",
+                r.thin_widened_mm
+            ),
+        );
+    }
+    if r.thin_omitted_area_mm2 > 0.0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Thin feature omitted · {:.4} mm² below a quarter nozzle",
+                r.thin_omitted_area_mm2
+            ),
+        );
+    }
     if r.support_omitted_wall_mm > 0.0 {
         ui.colored_label(
             ui.visuals().warn_fg_color,

@@ -372,6 +372,8 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
             section_area_mm2: 0.0,
             wall_area_mm2: 0.0,
             protected_hole_area_mm2: 0.0,
+            thin_widened_mm: 0.0,
+            thin_omitted_area_mm2: 0.0,
         }
     };
     let first = associate(region::offset(&realized, -0.2, &cancel).unwrap());
@@ -465,6 +467,8 @@ fn inactive_finish_does_not_require_another_occurrences_wall_boundary() {
         section_area_mm2: 0.0,
         wall_area_mm2: 0.0,
         protected_hole_area_mm2: 0.0,
+        thin_widened_mm: 0.0,
+        thin_omitted_area_mm2: 0.0,
     };
     let absent = MultiPolygon(vec![]);
     let cancel = AtomicBool::new(false);

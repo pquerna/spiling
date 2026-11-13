@@ -61,6 +61,10 @@ pub(super) struct WallPlan {
     pub(super) section_area_mm2: f64,
     pub(super) wall_area_mm2: f64,
     pub(super) protected_hole_area_mm2: f64,
+    /// Centre bead length widened to the narrowest bead over thinner features.
+    pub(super) thin_widened_mm: f64,
+    /// Material thinner than the minimum feature, left unprinted.
+    pub(super) thin_omitted_area_mm2: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +520,8 @@ pub(super) fn plan_material_domain_walls<'a>(
         section_area_mm2,
         wall_area_mm2,
         protected_hole_area_mm2,
+        thin_widened_mm: 0.0,
+        thin_omitted_area_mm2: 0.0,
     })
 }
 

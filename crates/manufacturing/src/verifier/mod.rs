@@ -1575,6 +1575,8 @@ pub(crate) fn verify_actual(
     let mut largest_recorded_span = 0.0_f64;
     let mut omitted_wall_layers = 0usize;
     let mut omitted_wall_mm = 0.0_f64;
+    let (mut widened_layers, mut widened_mm) = (0usize, 0.0_f64);
+    let (mut thin_layers, mut thin_area_mm2) = (0usize, 0.0_f64);
     for layer in &plan.layers {
         cancelled(cancel)?;
         let span = layer.region_coverage.unsupported_overhang_mm;
@@ -1587,6 +1589,22 @@ pub(crate) fn verify_actual(
             omitted_wall_layers += 1;
             omitted_wall_mm += omitted;
         }
+        let widened = layer.region_coverage.thin_widened_mm;
+        if widened > 0.0 {
+            widened_layers += 1;
+            widened_mm += widened;
+        }
+        let thin = layer.region_coverage.thin_omitted_area_mm2;
+        if thin > 0.0 {
+            thin_layers += 1;
+            thin_area_mm2 += thin;
+        }
+    }
+    if thin_layers > 0 {
+        report.limitations.insert(0, format!("Features thinner than a quarter nozzle omitted on {thin_layers} layers; {thin_area_mm2:.4} mm2 of section area in total."));
+    }
+    if widened_layers > 0 {
+        report.limitations.insert(0, format!("Wall beads widened to the narrowest admitted bead over thinner features on {widened_layers} layers; {widened_mm:.3} mm in total, depositing beyond the source boundary there."));
     }
     if omitted_wall_layers > 0 {
         report.limitations.insert(0, format!("Support wall omitted on {omitted_wall_layers} layers where no minimum-length command fits the support domain; {omitted_wall_mm:.4} mm in total."));

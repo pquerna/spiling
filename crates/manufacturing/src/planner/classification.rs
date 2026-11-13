@@ -335,6 +335,8 @@ impl ClassifiedRegions {
             support_nominal_deposition_volume_mm3: 0.0,
             unsupported_overhang_mm: 0.0,
             support_omitted_wall_mm: 0.0,
+            thin_widened_mm: layout.thin_widened_mm,
+            thin_omitted_area_mm2: layout.thin_omitted_area_mm2,
         };
         let mut result = Self {
             layout,
@@ -1258,12 +1260,9 @@ impl ClassifiedRegions {
                 });
             }
         }
-        if paths.is_empty() {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "section has no printable nominal deposition paths",
-            ));
-        }
+        // A section thinner than the minimum feature everywhere deposits
+        // nothing; its walls proved no printable material was left and
+        // reported the omitted area.
         // Final actual-stroke volume is computed once after support/recovery,
         // including constructed separator endpoints and genuine Bridge process.
         let fits = self.fit_skin_commands(
@@ -4264,6 +4263,8 @@ mod ownership_tests {
                 section_area_mm2: 100.,
                 wall_area_mm2: 0.,
                 protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
                 retained_points: 0,
                 retained_bytes: 0,
             });
@@ -4312,6 +4313,8 @@ mod ownership_tests {
             section_area_mm2: fill.unsigned_area(),
             wall_area_mm2: 0.,
             protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
             retained_points: 0,
             retained_bytes: 0,
         });
@@ -4542,6 +4545,8 @@ mod skin_bridge_tests {
                 section_area_mm2: 1.,
                 wall_area_mm2: 0.,
                 protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
                 retained_points: 0,
                 retained_bytes: 0,
             }),
@@ -4742,6 +4747,8 @@ mod split_skin_tests {
                         section_area_mm2: material.unsigned_area(),
                         wall_area_mm2: 0.,
                         protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
                     }),
                     bottom: MultiPolygon(Vec::new()),
                     top: material,

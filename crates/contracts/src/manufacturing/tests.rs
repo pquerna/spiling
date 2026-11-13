@@ -1206,6 +1206,8 @@ fn coverage() -> PlanarRegionCoverage {
         support_nominal_deposition_volume_mm3: 0.0,
         unsupported_overhang_mm: 0.0,
         support_omitted_wall_mm: 0.0,
+        thin_widened_mm: 0.0,
+        thin_omitted_area_mm2: 0.0,
         process_regions: vec![],
         process_interfaces: vec![],
         separator_area_mm2: 0.0,

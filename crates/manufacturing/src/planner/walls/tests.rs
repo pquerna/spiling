@@ -5,6 +5,10 @@ use super::*;
 use geo::{Coord, Distance, Euclidean, Line, polygon};
 
 fn plan(section: &MultiPolygon<f64>) -> WallPlan {
+    plan_with(section, false)
+}
+
+fn plan_with(section: &MultiPolygon<f64>, arachne: bool) -> WallPlan {
     let mut recipe = crate::planner::tests::recipe(0.25);
     recipe.bead_width_mm = 0.45;
     recipe.layer_height_mm = 0.2;
@@ -16,7 +20,12 @@ fn plan(section: &MultiPolygon<f64>) -> WallPlan {
         max_bead_height_mm: 0.30,
     };
     let required = region::RequiredMaterial::from_section(section);
-    plan_material_domain_walls(
+    let generator = if arachne {
+        plan_section_walls
+    } else {
+        plan_material_domain_walls
+    };
+    generator(
         WallRequest {
             material: section,
             required: &required,
@@ -699,4 +708,28 @@ fn near_degenerate_circles() -> MultiPolygon<f64> {
         Polygon::new(geo::LineString(points), Vec::new())
     };
     MultiPolygon(vec![ring([92.9765, 110.353]), ring([127.7295, 110.353])])
+}
+
+#[test]
+fn thin_features_widen_to_the_narrowest_bead_or_are_reported_omitted() {
+    let strip = |width: f64| MultiPolygon(vec![polygon![
+        (x: 0.0, y: 0.0),
+        (x: 20.0, y: 0.0),
+        (x: 20.0, y: width),
+        (x: 0.0, y: width),
+    ]]);
+    // Narrower than the narrowest bead, wider than a quarter nozzle.
+    let widened = plan_with(&strip(0.25), true);
+    assert_eq!(widened.paths.len(), 1);
+    assert!(widened.thin_widened_mm > 19.0, "{}", widened.thin_widened_mm);
+    assert_eq!(widened.thin_omitted_area_mm2, 0.0);
+    // Thinner than a quarter nozzle: nothing printed, the area reported.
+    let omitted = plan_with(&strip(0.05), true);
+    assert!(omitted.paths.is_empty());
+    assert!(omitted.fill.0.is_empty());
+    assert!(
+        (omitted.thin_omitted_area_mm2 - 1.0).abs() < 0.05,
+        "{}",
+        omitted.thin_omitted_area_mm2
+    );
 }

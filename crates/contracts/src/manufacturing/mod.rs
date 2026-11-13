@@ -2430,6 +2430,13 @@ pub struct PlanarRegionCoverage {
     /// command fits inside the support center domain within the wall error
     /// bound there; the wall is split around it. Zero otherwise.
     pub support_omitted_wall_mm: f64,
+    /// Wall bead length widened to the narrowest admitted bead over a feature
+    /// thinner than it but at least the minimum feature (a quarter nozzle).
+    /// The bead deposits beyond the source boundary there. Zero otherwise.
+    pub thin_widened_mm: f64,
+    /// Section area of features thinner than the minimum feature, left
+    /// unprinted on this layer. Zero otherwise.
+    pub thin_omitted_area_mm2: f64,
     #[serde(deserialize_with = "process_regions")]
     pub process_regions: Vec<ProcessRegionCoverage>,
     #[serde(deserialize_with = "process_interfaces")]
@@ -2628,6 +2635,8 @@ impl PlanarRegionCoverage {
             self.support_nominal_deposition_volume_mm3,
             self.unsupported_overhang_mm,
             self.support_omitted_wall_mm,
+            self.thin_widened_mm,
+            self.thin_omitted_area_mm2,
         ];
         let partition = self.wall_area_mm2
             + self.bottom_skin_area_mm2
@@ -3539,6 +3548,11 @@ impl NormalizedPrintPlan {
                     }
                 }
             };
+            // A section thinner than the minimum feature everywhere prints
+            // nothing, reported as omitted.
+            if layer.paths.is_empty() && layer.region_coverage.thin_omitted_area_mm2 > 0.0 {
+                continue;
+            }
             if layer.paths.is_empty() {
                 let SupportPolicy::Breakaway { .. } = intent.recipe.supports else {
                     return Err(invalid(

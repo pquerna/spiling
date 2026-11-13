@@ -389,8 +389,10 @@ fn grid(value: f64) -> Result<i64, ManufacturingError> {
 fn raw(integer: i64) -> f64 {
     integer as f64 / 1_000_000.0
 }
+/// Never looser than the verifier's arithmetic slack: an end the verifier
+/// would place outside a row must not be admitted here.
 fn slack(value: f64) -> f64 {
-    128.0 * f64::EPSILON * value.abs().max(1.0)
+    32.0 * f64::EPSILON * value.abs().max(1.0)
 }
 
 fn consider_start(first: i64, last: i64, preferred: i64, selected: &mut Option<i64>) {

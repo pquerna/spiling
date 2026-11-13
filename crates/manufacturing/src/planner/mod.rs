@@ -3704,6 +3704,8 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
         support_nominal_deposition_volume_mm3: 0.0,
         unsupported_overhang_mm: 0.0,
         support_omitted_wall_mm: 0.0,
+        thin_widened_mm: 0.0,
+        thin_omitted_area_mm2: 0.0,
     }
 }
 

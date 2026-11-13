@@ -986,6 +986,8 @@ mod actual_deposition_tests {
                 support_nominal_deposition_volume_mm3: support_area * volume,
                 unsupported_overhang_mm: 0.0,
                 support_omitted_wall_mm: 0.0,
+                thin_widened_mm: 0.0,
+                thin_omitted_area_mm2: 0.0,
                 process_regions: if object_area > 0.0 {
                     vec![ProcessRegionCoverage {
                         functional_solid_zone: None,

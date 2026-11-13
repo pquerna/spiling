@@ -993,7 +993,18 @@ unsupported_overhang_mm: number,
  * command fits inside the support center domain within the wall error
  * bound there; the wall is split around it. Zero otherwise.
  */
-support_omitted_wall_mm: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
+support_omitted_wall_mm: number,
+/**
+ * Wall bead length widened to the narrowest admitted bead over a feature
+ * thinner than it but at least the minimum feature (a quarter nozzle).
+ * The bead deposits beyond the source boundary there. Zero otherwise.
+ */
+thin_widened_mm: number,
+/**
+ * Section area of features thinner than the minimum feature, left
+ * unprinted on this layer. Zero otherwise.
+ */
+thin_omitted_area_mm2: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, web_roof_domains: Array<WebRoofDomain>, };
 
 export type WebRoofCeiling = { roof_z_mm: number, extent: Array<DiaphragmPolygonMm>, };
 
