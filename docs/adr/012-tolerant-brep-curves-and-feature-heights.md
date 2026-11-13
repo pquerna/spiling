@@ -48,8 +48,7 @@ polylines and the program is G0/G1 only.
 4. **Integrity and determinism.** Hash-bound sources and results, atomic saves,
    the same output for the same input.
 5. **Honest provenance.** Results say which tolerance applied and where any
-   fallback was used. A layer whose exact certificate also succeeds may carry a
-   "certified" mark. Certification is never a gate.
+   fallback was used. Certification is never a gate.
 
 ### One tolerance policy, set by the printer
 
@@ -66,7 +65,7 @@ records the values it used:
 | Height `ε_z`   | the printer's Z motion resolution                 | Merging near-coincident feature heights into one event       |
 
 Two heights closer than one Z step are one commanded height, so they are one
-layer boundary in both the exact and tolerant paths; no layer is thinner than a
+layer boundary; no layer is thinner than a
 Z step, and a printer may not declare a minimum bead height below it. Proofs
 and refinement stop once their uncertainty is below the tolerance that governs
 them: a difference the printer cannot realize is decided by rule, recorded, and
@@ -155,9 +154,9 @@ Marlin-class firmware that declares arc support, off by default for Klipper.
   its own tessellation when its intersection cannot be traced, reported per
   layer; there is still no whole-part mesh path and no second material source.
   `AGENTS.md` and the geometry rules are updated with this change.
-- Existing exact paths remain and supply the "certified" mark. Proof-only
-  refusals (exact closure, interval separation, unmergeable heights) stop being
-  terminal.
+- Proof-only refusals (exact closure, interval separation, unmergeable
+  heights) stop being terminal. The exact native lane was removed once every
+  feature ran within tolerance; there is no "certified" mark.
 - Plan, contracts, verifier, SPLR and TypeScript consumers change together for
   segment kinds; format numbers stay as the pre-release policy says.
 - Some existing tests assert proof refusals as expected behaviour. They are
@@ -165,11 +164,9 @@ Marlin-class firmware that declares arc support, off by default for Klipper.
 
 ## Tolerant mode as delivered
 
-Step 1 is a job-wide mode, not yet per face. Every job slices within
-tolerance unless it uses fixed-dual routing or a permanent process interface;
-those still take the exact native path first and reslice within tolerance only
-when it refuses for a geometric reason or exhausts its proof work and their
-features allow it:
+Step 1 is a job-wide mode, not yet per face. It is the only slicing
+pipeline: every job, STEP or mesh-backed, slices within tolerance. The exact
+native lane, its proofs and its fallback retry are gone.
 
 - Sections take their topology from the BREP's own watertight tessellation
   at half the profile tolerance: which faces a plane crosses and in what
@@ -183,10 +180,14 @@ features allow it:
   vertices that lie on the BREP. Each segment keeps its face.
 - Feature heights are flat faces and part extremes, merged within `ε_z`; a
   height within `ε_z` of the bed is bed contact.
+- A span holds its first section over each following layer whose own
+  section agrees with it within `ε_xy` (compared against the held section, so
+  error never accumulates), so a source prism slices as one span. Mapped image
+  finishes keep one-layer spans for their per-layer vertical-error check.
 - Walls are classic constant-width perimeters, the section offset inward to
   each bead centreline, with one thinner wall at the narrowest admitted width
-  where a section is thinner than a bead. The exact variable-width wall
-  planner remains the exact path's.
+  where a section is thinner than a bead. Fixed-dual material domains keep the
+  variable-width skeleton planner with its material-boundary fit.
 - Generated supports use the complete closed-slab projection of the same
   source-derived facets, plus raw interior sections. Boundary pieces retain
   their physical height scope and the captured approximation/join enclosure in
@@ -206,22 +207,23 @@ features allow it:
   lies on the BREP to rounding and the finish construction's retention,
   simplicity and positive-addition checks run on it unchanged, within the
   separate 0.001 mm finish bound. A section that fails them refuses.
+- Permanent process interfaces and combined sparse bands need material over
+  their whole height. It is the section minus the projection of every
+  boundary facet crossing the interval's interior, padded by the support
+  enclosure; flat faces within `ε_z` of either end bound the interval rather
+  than cross it. The construction's domain grown by the bead radius must lie
+  in it within `ε_xy`, or the plate refuses and the band stays fine.
+- Fixed-dual surface and functional constructions bind one material domain
+  per run of spans whose material agrees within `ε_xy`, over the run's height.
 - The plan carries `PreflightEvidence::Tolerant` and claims no native
   certificate. Fresh independent replay is unchanged.
 
-The exact attempt that precedes it resolves at the same printer step: part
-extents to the XY and Z step, height events to the Z step, and bed placement to
-a contact gap of one Z step. Each exact directional-bounds query also runs under
-a defect fuse (2^26 work units, above every successful query in the corpus); a
-query that cannot prune a face falls back like any other exact refusal, so the
-exact path never delays the tolerant one.
-
-Two outcomes apply in both modes. With supports disabled, an unanchored stroke
+Two outcomes apply. With supports disabled, an unanchored stroke
 prints, as other slicers do, and its span is reported on the layer as
 `unsupported_overhang_mm`. A fill, skin or bridge row shorter than one minimum
 command is omitted, since it holds less material than the profile tolerance.
 
-Cathedral (`web_roof`) infill builds on general parts in both modes; the
+Cathedral (`web_roof`) infill builds on general parts; the
 [manufacturing contract](../protocol/manufacturing.md#web-and-roof-infill) owns
 its construction.
 
@@ -233,7 +235,7 @@ material, time and travel counts on the same parts.
 
 1. Tolerance policy and height merging (`ε_z`, `τ`), with tolerant section
    chaining. Delivered as the job-wide tolerant mode above; `ε_z` is the
-   printer's Z step in both paths, recorded as `height_merge_mm`.
+   printer's Z step, recorded as `height_merge_mm`.
 2. Sections with BREP geometry: delivered for analytic faces, which report
    their exact circles. Freeform tracing to `ε_xy`, tolerant seam and
    edge correspondence within `τ`, and per-face fallback remain.

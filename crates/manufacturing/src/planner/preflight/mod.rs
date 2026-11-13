@@ -4,7 +4,7 @@
 use super::surface;
 use crate::{CompilerInput, check_cancel, error};
 use spiling_contracts::geometry::{
-    AabbMm, GeometryErrorCode, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId, OccurrenceRecord,
+    AabbMm, GeometryErrorCode, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId,
 };
 use spiling_contracts::manufacturing::*;
 use spiling_geometry::tolerant::{TolerantModel, TolerantPolicy};
@@ -15,42 +15,20 @@ pub(super) struct Admission<'work> {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
     pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
-    pub native_event_bands: Vec<[f64; 2]>,
-    /// Literal native candidates delimit queries only, never physical planes.
-    pub native_capture_proposal_bands: Vec<[f64; 2]>,
-    pub material_domains: BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
     pub geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
-    /// ADR012 tolerant mode: each occurrence's tessellation placed in world
-    /// coordinates. None runs the exact native path.
-    pub tolerant: Option<BTreeMap<OccurrenceId, std::sync::Arc<TolerantModel>>>,
+    /// ADR012: each occurrence's tessellation placed in world coordinates.
+    pub models: BTreeMap<OccurrenceId, std::sync::Arc<TolerantModel>>,
 }
 
 impl Admission<'_> {
-    pub(super) fn native_capture_proposal_bytes(&self) -> usize {
-        self.native_capture_proposal_bands
-            .capacity()
-            .saturating_mul(std::mem::size_of::<[f64; 2]>())
-            .saturating_add(self.tolerant.as_ref().map_or(0, |models| {
-                models
-                    .values()
-                    .map(|model| model.retained_bytes())
-                    .sum::<usize>()
-            }))
+    pub(super) fn model_bytes(&self) -> usize {
+        self.models
+            .values()
+            .map(|model| model.retained_bytes())
+            .sum::<usize>()
     }
-}
-
-#[derive(Clone, Copy)]
-enum NativeEventRole {
-    Critical,
-    LowerSupport,
-    UpperSupport,
-}
-
-struct LowerTerminalRouting<'a> {
-    analysis: &'a spiling_geometry::HeightAnalysis,
-    lower_support: [f64; 2],
 }
 
 /// The selected printer's motion step on one world axis.
@@ -63,185 +41,12 @@ fn axis_resolution(input: &CompilerInput<'_>, axis: usize) -> f64 {
     }
 }
 
-/// A terminal touches the bed when it is within one Z step of it and inside
-/// the shape budget.
-fn terminal_inside_bed_envelope(
-    bracket: [f64; 2],
-    bed: f64,
-    z_step: f64,
-    shape_budget: f64,
-) -> bool {
-    bed.is_finite()
-        && shape_budget.is_finite()
-        && shape_budget > 0.0
-        && bracket.iter().all(|height| height.is_finite())
-        && bracket[0] <= bracket[1]
-        && bracket
-            .into_iter()
-            .all(|height| (height - bed).abs() <= z_step && (height - bed).abs() <= shape_budget)
-}
-
-impl<'a> LowerTerminalRouting<'a> {
-    fn capture(
-        analysis: &'a spiling_geometry::HeightAnalysis,
-        occurrence: &OccurrenceRecord,
-        bounds: AabbMm,
-        domain: [[f64; 2]; 2],
-        bed: f64,
-        policy: spiling_geometry::AnalysisPolicy,
-    ) -> Option<Self> {
-        let terminal = analysis.global_lower_terminal_bracket_mm()?;
-        let support = analysis.global_lower_terminal_support_bracket_mm()?;
-        let captured_policy = analysis.policy();
-        if analysis.definition_id() != &occurrence.definition_id
-            || analysis.pose() != Some(occurrence.pose)
-            || analysis.height_interval_mm() != [bounds.min[2], bounds.max[2]]
-            || [domain[0][0], domain[1][1]] != analysis.height_interval_mm()
-            || captured_policy.maximum_height_uncertainty_mm != policy.maximum_height_uncertainty_mm
-            || captured_policy.maximum_shape_error_mm != policy.maximum_shape_error_mm
-            || !bed.is_finite()
-            || !domain.iter().flatten().all(|height| height.is_finite())
-            || domain.iter().any(|band| band[0] > band[1])
-            || domain[0][0] < bed
-            || support[0] < bed
-            || !terminal_inside_bed_envelope(
-                domain[0],
-                bed,
-                policy.maximum_height_uncertainty_mm,
-                policy.maximum_shape_error_mm,
-            )
-            || !terminal_inside_bed_envelope(
-                support,
-                bed,
-                policy.maximum_height_uncertainty_mm,
-                policy.maximum_shape_error_mm,
-            )
-            || !terminal_inside_bed_envelope(
-                terminal,
-                bed,
-                policy.maximum_height_uncertainty_mm,
-                policy.maximum_shape_error_mm,
-            )
-        {
-            return None;
-        }
-        Some(Self {
-            analysis,
-            lower_support: domain[0],
-        })
-    }
-
-    fn requires_plane(
-        &self,
-        bracket: [f64; 2],
-        role: NativeEventRole,
-        work: &mut spiling_geometry::GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, ManufacturingError> {
-        work.charge(1, cancel)
-            .map_err(|e| super::native_error(e, "native terminal event routing"))?;
-        Ok(match role {
-            NativeEventRole::Critical => !self
-                .analysis
-                .is_global_lower_terminal_event_mm(bracket, work, cancel)
-                .map_err(|e| super::native_error(e, "native terminal event ownership"))?,
-            NativeEventRole::LowerSupport => bracket != self.lower_support,
-            NativeEventRole::UpperSupport => true,
-        })
-    }
-}
-
-fn native_event_storage_bytes(admission: &Admission, required_capacity: usize) -> usize {
-    admission
-        .native_capture_proposal_bytes()
-        .saturating_add(
-            admission
-                .native_event_bands
-                .capacity()
-                .saturating_mul(std::mem::size_of::<[f64; 2]>()),
-        )
-        .saturating_add(required_capacity.saturating_mul(std::mem::size_of::<[f64; 2]>()))
-        .saturating_add(
-            admission
-                .horizontal_events
-                .capacity()
-                .saturating_mul(std::mem::size_of::<f64>()),
-        )
-}
-
-fn insert_native_event_band(
-    bands: &mut Vec<[f64; 2]>,
-    bracket: [f64; 2],
-    resident_bytes: usize,
-    maximum_bytes: usize,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    charge_capture_proposal_work(work, bands.len().max(1).ilog2() as usize + 2, cancel)?;
-    let Err(position) = bands.binary_search_by(|old| {
-        old[0]
-            .total_cmp(&bracket[0])
-            .then(old[1].total_cmp(&bracket[1]))
-    }) else {
-        return Ok(());
-    };
-    reserve_native_event_growth(bands, resident_bytes, maximum_bytes, work, cancel)?;
-    charge_capture_proposal_work(work, bands.len() - position + 1, cancel)?;
-    bands.insert(position, bracket);
-    Ok(())
-}
-
-fn reserve_native_event_growth<T>(
-    records: &mut Vec<T>,
-    resident_bytes: usize,
-    maximum_bytes: usize,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    if records.len() >= MAX_PRINT_LAYERS as usize {
-        return Err(error(
-            ManufacturingErrorCode::ResourceLimit,
-            "native event-band coverage exceeds the layer schedule budget",
-        ));
-    }
-    if records.len() == records.capacity() {
-        let next_capacity = records
-            .capacity()
-            .max(1)
-            .saturating_mul(2)
-            .min(MAX_PRINT_LAYERS as usize);
-        let replacement_bytes = next_capacity.saturating_mul(std::mem::size_of::<T>());
-        if resident_bytes.saturating_add(replacement_bytes) > maximum_bytes {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native event records exceed coexisting height-query capacity",
-            ));
-        }
-        charge_capture_proposal_work(work, records.len(), cancel)?;
-        records
-            .try_reserve_exact(next_capacity - records.len())
-            .map_err(|_| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "native event-band allocation refused",
-                )
-            })?;
-        if records.capacity() > next_capacity {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native event-band allocator exceeds admitted capacity",
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub fn preflight(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreflightReport, ManufacturingError> {
     let mut work = spiling_geometry::GeometryWorkBudget::compile();
-    Ok(admit(input, cancel, &mut work)?.0.report)
+    Ok(admit(input, cancel, &mut work)?.report)
 }
 
 /// Native/finish bounds for packing heuristics. Complete candidate compilation and
@@ -258,7 +63,7 @@ pub fn layout_footprints(
         ));
     }
     let mut work = spiling_geometry::GeometryWorkBudget::compile();
-    let (admission, _) = admit(input, cancel, &mut work)?;
+    let admission = admit(input, cancel, &mut work)?;
     for check in &admission.report.checks {
         if check.required
             && matches!(
@@ -306,32 +111,13 @@ pub fn layout_footprints(
         .collect()
 }
 
-pub(super) fn admit<'a, 'work>(
-    input: &'a CompilerInput<'_>,
+/// ADR012 preflight: bounds and material extents come from each
+/// occurrence's placed tessellation.
+pub(super) fn admit<'work>(
+    input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
-) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
-    let prepared = input.definitions.values().any(|d| {
-        matches!(
-            d.as_ref(),
-            spiling_geometry::source::SourceDefinition::Hybrid(_)
-        )
-    });
-    if prepared {
-        super::tolerant_supported(input)?;
-    }
-    admit_with(input, cancel, geometry_work, prepared)
-}
-
-/// Preflight in exact or ADR012 tolerant mode. Tolerant mode takes bounds and
-/// material extents from each occurrence's placed tessellation instead of
-/// exact native analysis; every other check is unchanged.
-pub(super) fn admit_with<'a, 'work>(
-    input: &'a CompilerInput<'_>,
-    cancel: &AtomicBool,
-    geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
-    tolerant: bool,
-) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
+) -> Result<Admission<'work>, ManufacturingError> {
     check_cancel(cancel)?;
     let mut tolerant_models: BTreeMap<spiling_contracts::geometry::DefinitionId, TolerantModel> =
         BTreeMap::new();
@@ -339,12 +125,9 @@ pub(super) fn admit_with<'a, 'work>(
         bounds: None,
         horizontal_events: Vec::new(),
         native_bounds: BTreeMap::new(),
-        native_event_bands: Vec::new(),
-        native_capture_proposal_bands: Vec::new(),
-        material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
         geometry_work,
-        tolerant: tolerant.then(BTreeMap::new),
+        models: BTreeMap::new(),
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -553,8 +336,6 @@ pub(super) fn admit_with<'a, 'work>(
     let mut occurrence_bounds = BTreeMap::new();
     let mut surface_samples = 0usize;
     let envelope = input.intent.printer.build_envelope;
-    let mut geometry_sources = BTreeMap::new();
-    let mut remaining_prepared = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
     'occurrences: for occurrence in input.occurrences.iter().take(MAX_OCCURRENCES as usize) {
         check_cancel(cancel)?;
         if let Err(e) = occurrence.pose.validate() {
@@ -608,164 +389,51 @@ pub(super) fn admit_with<'a, 'work>(
                 );
             }
         }
-        let mut placed = if let Some(models) = result.tolerant.as_mut() {
-            if !tolerant_models.contains_key(&occurrence.definition_id) {
-                match definition.prepare(TolerantPolicy::default(), cancel) {
-                    Ok(model) if model.failed_faces == 0 => {
-                        tolerant_models.insert(occurrence.definition_id.clone(), model);
-                    }
-                    Ok(model) => {
-                        add(
-                            "native_unsupported_geometry",
-                            format!(
-                                "{} source faces could not be tessellated within the profile tolerance",
-                                model.failed_faces
-                            ),
-                            Some(occurrence.occurrence_id),
-                            None,
-                        );
-                        continue 'occurrences;
-                    }
-                    Err(e) if e.code == GeometryErrorCode::Cancelled => {
-                        return Err(super::native_error(e, "tolerant tessellation"));
-                    }
-                    Err(e) => {
-                        add(
-                            native_check_code(e.code),
-                            e.to_string(),
-                            Some(occurrence.occurrence_id),
-                            None,
-                        );
-                        continue 'occurrences;
-                    }
+        if !tolerant_models.contains_key(&occurrence.definition_id) {
+            match definition.prepare(TolerantPolicy::default(), cancel) {
+                Ok(model) if model.failed_faces == 0 => {
+                    tolerant_models.insert(occurrence.definition_id.clone(), model);
+                }
+                Ok(model) => {
+                    add(
+                        "native_unsupported_geometry",
+                        format!(
+                            "{} source faces could not be tessellated within the profile tolerance",
+                            model.failed_faces
+                        ),
+                        Some(occurrence.occurrence_id),
+                        None,
+                    );
+                    continue 'occurrences;
+                }
+                Err(e) if e.code == GeometryErrorCode::Cancelled => {
+                    return Err(super::native_error(e, "tolerant tessellation"));
+                }
+                Err(e) => {
+                    add(
+                        native_check_code(e.code),
+                        e.to_string(),
+                        Some(occurrence.occurrence_id),
+                        None,
+                    );
+                    continue 'occurrences;
                 }
             }
-            let model = tolerant_models[&occurrence.definition_id].placed(&occurrence.pose);
-            let margin = model.policy().profile_mm;
-            let (min, max) = model.bounds();
-            // Tessellation vertices lie on the surface; chords can cut inside
-            // curved walls by at most the profile tolerance laterally. Z stays
-            // at the vertex extremes so bed contact remains exactly at the bed.
-            let placed = AabbMm {
-                min: [min[0] - margin, min[1] - margin, min[2]],
-                max: [max[0] + margin, max[1] + margin, max[2]],
-            };
-            result.material_domains.insert(
-                occurrence.occurrence_id,
-                [[min[2], min[2]], [max[2], max[2]]],
-            );
-            models.insert(occurrence.occurrence_id, std::sync::Arc::new(model));
-            placed
-        } else {
-            let definition = definition
-                .native()
-                .map_err(|e| super::native_error(e, "native capability"))?;
-            if !geometry_sources.contains_key(&occurrence.definition_id) {
-                let source = match spiling_geometry::prepare_solid(
-                    definition,
-                    remaining_prepared,
-                    result.geometry_work,
-                    cancel,
-                ) {
-                    Ok(source) => source,
-                    Err(e)
-                        if matches!(
-                            e.code,
-                            GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
-                        ) =>
-                    {
-                        return Err(super::native_error(
-                            e,
-                            "native material geometry preparation",
-                        ));
-                    }
-                    Err(e) => {
-                        add(
-                            native_check_code(e.code),
-                            e.to_string(),
-                            Some(occurrence.occurrence_id),
-                            None,
-                        );
-                        continue 'occurrences;
-                    }
-                };
-                remaining_prepared = remaining_prepared
-                    .checked_sub(source.retained_bytes())
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "aggregate native material geometry capacity exceeded",
-                        )
-                    })?;
-                geometry_sources.insert(occurrence.definition_id.clone(), source);
-            }
-            let query_bytes = super::geometry_query_limit(&geometry_sources)?;
-            let mut placed = AabbMm {
-                min: [0.0; 3],
-                max: [0.0; 3],
-            };
-            for axis in 0..3 {
-                let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
-                // A defect fuse per query; a fused query is a ResourceLimit
-                // refusal, which the planner retries in the tolerant lane.
-                let mut fuse = spiling_geometry::GeometryWorkBudget::exact_bounds_fuse();
-                let query = geometry_sources[&occurrence.definition_id].placed_material_bounds(
-                    occurrence.pose,
-                    direction,
-                    // Extents need not be finer than the printer can move.
-                    spiling_geometry::BoundsPolicy {
-                        maximum_endpoint_uncertainty_mm: axis_resolution(input, axis),
-                    },
-                    query_bytes,
-                    &mut fuse,
-                    cancel,
-                );
-                result
-                    .geometry_work
-                    .charge(fuse.consumed(), cancel)
-                    .map_err(|e| super::native_error(e, "material projected bounds"))?;
-                let extent = match query {
-                    Ok(extent) => {
-                        if extent.definition_id() != &occurrence.definition_id
-                            || !extent.is_compatible_with_definition(definition)
-                            || extent.placed_pose() != occurrence.pose
-                            || extent.world_direction() != direction
-                        {
-                            return Err(error(
-                                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                                "material support lost its native producer/source/pose/query binding",
-                            ));
-                        }
-                        extent.bounds()
-                    }
-                    Err(e)
-                        if matches!(
-                            e.code,
-                            GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
-                        ) =>
-                    {
-                        return Err(super::native_error(e, "material projected bounds"));
-                    }
-                    Err(e) => {
-                        add(
-                            native_check_code(e.code),
-                            e.to_string(),
-                            Some(occurrence.occurrence_id),
-                            None,
-                        );
-                        continue 'occurrences;
-                    }
-                };
-                placed.min[axis] = extent.minimum[0];
-                placed.max[axis] = extent.maximum[1];
-                if axis == 2 {
-                    result
-                        .material_domains
-                        .insert(occurrence.occurrence_id, [extent.minimum, extent.maximum]);
-                }
-            }
-            placed
+        }
+        let model = tolerant_models[&occurrence.definition_id].placed(&occurrence.pose);
+        let margin = model.policy().profile_mm;
+        let (min, max) = model.bounds();
+        // Tessellation vertices lie on the surface; chords can cut inside
+        // curved walls by at most the profile tolerance laterally. Z stays
+        // at the vertex extremes so bed contact remains exactly at the bed.
+        let placed = AabbMm {
+            min: [min[0] - margin, min[1] - margin, min[2]],
+            max: [max[0] + margin, max[1] + margin, max[2]],
         };
+        result
+            .models
+            .insert(occurrence.occurrence_id, std::sync::Arc::new(model));
+        let mut placed = placed;
         result
             .native_bounds
             .insert(occurrence.occurrence_id, placed);
@@ -979,7 +647,7 @@ pub(super) fn admit_with<'a, 'work>(
         });
     }
     result.report.validate()?;
-    Ok((result, geometry_sources))
+    Ok(result)
 }
 
 /// Deep Compile-only discovery. An uncertainty endpoint remains bookkeeping
@@ -987,312 +655,54 @@ pub(super) fn admit_with<'a, 'work>(
 pub(super) fn resolve_native_events(
     input: &CompilerInput<'_>,
     admission: &mut Admission,
-    geometry_sources: &super::PreparedSources<'_>,
     proposal_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
-    if let Some(models) = &admission.tolerant {
-        // ADR012 feature-first heights: horizontal faces and extents of each
-        // placed tessellation, merged within the height tolerance. The bed is
-        // the first boundary; nothing here is a native event band.
-        // ADR012: heights closer than the printer's Z step are one commanded
-        // height, e.g. assembled bodies meant to sit flush.
-        let merge_mm = input.intent.printer.motion_resolution.z_mm;
-        let mut heights = Vec::new();
-        let mut combined: Option<AabbMm> = None;
-        for occurrence in input.occurrences {
-            check_cancel(cancel)?;
-            let model = &models[&occurrence.occurrence_id];
-            heights.extend(model.feature_heights(merge_mm));
-            let bounds = admission.native_bounds[&occurrence.occurrence_id];
-            let placed = admission
-                .surface_fields
-                .get(&occurrence.occurrence_id)
-                .map_or(bounds, |fields| surface::expanded(bounds, fields));
-            match &mut combined {
-                Some(all) => {
-                    all.include(placed.min)
-                        .and_then(|_| all.include(placed.max))
-                        .map_err(|e| {
-                            error(ManufacturingErrorCode::InvalidSpecification, e.to_string())
-                        })?;
-                }
-                None => combined = Some(placed),
-            }
-        }
-        heights.sort_by(f64::total_cmp);
-        for z in heights {
-            let z = if (z - bed).abs() <= merge_mm { bed } else { z };
-            if z < bed {
-                continue;
-            }
-            if admission
-                .horizontal_events
-                .last()
-                .is_none_or(|last| z - last > merge_mm)
-            {
-                admission.horizontal_events.push(z);
-            }
-        }
-        admission.bounds = combined;
-        *proposal_work = proposal_work.saturating_add(admission.horizontal_events.len());
-        return Ok(());
-    }
-    // Heights resolve to the printer's Z step: two events closer than one step
-    // are one commanded height on this machine.
-    let policy = spiling_geometry::AnalysisPolicy {
-        maximum_height_uncertainty_mm: axis_resolution(input, 2),
-        maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,
-    };
-    let mut completed_bounds: Option<AabbMm> = None;
-    let mut required_bands = Vec::new();
-    let query_pool_bytes = super::geometry_query_limit(geometry_sources)?;
+    // ADR012 feature-first heights: horizontal faces and extents of each
+    // placed tessellation, merged within the height tolerance. The bed is
+    // the first boundary; nothing here is a native event band.
+    // ADR012: heights closer than the printer's Z step are one commanded
+    // height, e.g. assembled bodies meant to sit flush.
+    let merge_mm = input.intent.printer.motion_resolution.z_mm;
+    let mut heights = Vec::new();
+    let mut combined: Option<AabbMm> = None;
     for occurrence in input.occurrences {
         check_cancel(cancel)?;
+        let model = &admission.models[&occurrence.occurrence_id];
+        heights.extend(model.feature_heights(merge_mm));
         let bounds = admission.native_bounds[&occurrence.occurrence_id];
-        let query_bytes = query_pool_bytes
-            .checked_sub(native_event_storage_bytes(
-                admission,
-                required_bands.capacity(),
-            ))
-            .filter(|bytes| *bytes > 0)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "native event storage exhausts shared query capacity",
-                )
-            })?;
-        let analysis = geometry_sources[&occurrence.definition_id]
-            .analyze_placed_height_domain(
-                occurrence.pose,
-                [bounds.min[2], bounds.max[2]],
-                policy,
-                query_bytes,
-                admission.geometry_work,
-                cancel,
-            )
-            .map_err(|e| super::native_error(e, "complete native height analysis"))?;
-        if analysis.definition_id() != &occurrence.definition_id
-            || analysis.pose() != Some(occurrence.pose)
-            || analysis.height_interval_mm() != [bounds.min[2], bounds.max[2]]
-        {
-            return Err(error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                format!(
-                    "occurrence {} has no captured complete terminal-event coverage",
-                    occurrence.occurrence_id.get()
-                ),
-            ));
-        }
-        // Covered literal F candidates remain deferred G obligations. Preserve
-        // their neighborhoods as query-sizing hints without adding slicing
-        // planes or treating a candidate as an actual material critical root.
-        let candidates = analysis.event_brackets_mm();
-        let count = admission
-            .native_capture_proposal_bands
-            .len()
-            .checked_add(candidates.len())
-            .filter(|count| *count <= MAX_PRINT_LAYERS as usize)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "native capture proposal count exceeds the layer schedule budget",
-                )
-            })?;
-        for bracket in candidates {
-            charge_capture_proposal_work(proposal_work, 1, cancel)?;
-            if !bracket.iter().all(|z| z.is_finite()) || bracket[0] > bracket[1] {
-                return Err(error(
-                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                    "native capture proposal has an invalid literal event bracket",
-                ));
-            }
-        }
-        let growing = count > admission.native_capture_proposal_bands.capacity();
-        let replacement_bytes = if growing {
-            count.saturating_mul(std::mem::size_of::<[f64; 2]>())
-        } else {
-            0
-        };
-        if analysis
-            .retained_bytes()
-            .saturating_add(native_event_storage_bytes(
-                admission,
-                required_bands.capacity(),
-            ))
-            .saturating_add(replacement_bytes)
-            > query_pool_bytes
-        {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposals exceed coexisting height-query capacity",
-            ));
-        }
-        charge_capture_proposal_work(
-            proposal_work,
-            candidates.len().saturating_add(if growing {
-                admission.native_capture_proposal_bands.len()
-            } else {
-                0
-            }),
-            cancel,
-        )?;
-        admission
-            .native_capture_proposal_bands
-            .try_reserve_exact(candidates.len())
-            .map_err(|_| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "native capture proposal allocation refused",
-                )
-            })?;
-        if admission.native_capture_proposal_bands.capacity() > MAX_PRINT_LAYERS as usize
-            || analysis
-                .retained_bytes()
-                .saturating_add(native_event_storage_bytes(
-                    admission,
-                    required_bands.capacity(),
-                ))
-                > query_pool_bytes
-        {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposal allocator exceeds coexisting capacity",
-            ));
-        }
-        admission
-            .native_capture_proposal_bands
-            .extend_from_slice(candidates);
-        let domain = admission.material_domains[&occurrence.occurrence_id];
-        let lower_terminal = if admission.report.disposition == PreflightDisposition::Admitted {
-            LowerTerminalRouting::capture(&analysis, occurrence, bounds, domain, bed, policy)
-        } else {
-            None
-        };
-        charge_capture_proposal_work(proposal_work, analysis.event_brackets_mm().len(), cancel)?;
-        let events = analysis
-            .material_plane_event_brackets_mm()
-            .map(|band| (band, NativeEventRole::Critical))
-            .chain([
-                (domain[0], NativeEventRole::LowerSupport),
-                (domain[1], NativeEventRole::UpperSupport),
-            ]);
-        for (bracket, role) in events {
-            charge_capture_proposal_work(proposal_work, 1, cancel)?;
-            if !bracket.iter().all(|z| z.is_finite())
-                || bracket[0] > bracket[1]
-                || bracket[1] - bracket[0] > policy.maximum_height_uncertainty_mm
-                || bracket[1] - bracket[0] > policy.maximum_shape_error_mm
-            {
-                return Err(error(
-                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                    format!(
-                        "occurrence {} has an unresolved native event band {bracket:?}",
-                        occurrence.occurrence_id.get()
-                    ),
-                ));
-            }
-            let resident = analysis
-                .retained_bytes()
-                .saturating_add(native_event_storage_bytes(
-                    admission,
-                    required_bands.capacity(),
-                ));
-            insert_native_event_band(
-                &mut admission.native_event_bands,
-                bracket,
-                resident,
-                query_pool_bytes,
-                proposal_work,
-                cancel,
-            )?;
-            let requires_plane = match lower_terminal.as_ref() {
-                Some(routing) => {
-                    routing.requires_plane(bracket, role, admission.geometry_work, cancel)?
-                }
-                None => true,
-            };
-            if requires_plane {
-                let resident =
-                    analysis
-                        .retained_bytes()
-                        .saturating_add(native_event_storage_bytes(
-                            admission,
-                            required_bands.capacity(),
-                        ));
-                insert_native_event_band(
-                    &mut required_bands,
-                    bracket,
-                    resident,
-                    query_pool_bytes,
-                    proposal_work,
-                    cancel,
-                )?;
-            }
-        }
         let placed = admission
             .surface_fields
             .get(&occurrence.occurrence_id)
             .map_or(bounds, |fields| surface::expanded(bounds, fields));
-        if let Some(combined) = &mut completed_bounds {
-            combined
-                .include(placed.min)
-                .and_then(|_| combined.include(placed.max))
-                .map_err(|e| {
-                    error(
-                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                        e.to_string(),
-                    )
-                })?;
-        } else {
-            completed_bounds = Some(placed);
+        match &mut combined {
+            Some(all) => {
+                all.include(placed.min)
+                    .and_then(|_| all.include(placed.max))
+                    .map_err(|e| {
+                        error(ManufacturingErrorCode::InvalidSpecification, e.to_string())
+                    })?;
+            }
+            None => combined = Some(placed),
         }
     }
-    // Union overlapping scheduling covers only. Atomic source candidates and
-    // their existence/incidence obligations remain in the geometry capture.
-    // Neither root identity nor an increased uncertainty allowance is implied.
-    let maximum_cover_width = policy
-        .maximum_height_uncertainty_mm
-        .min(policy.maximum_shape_error_mm);
-    charge_capture_proposal_work(proposal_work, required_bands.len(), cancel)?;
-    for bracket in scheduling_event_covers(&required_bands, maximum_cover_width) {
-        check_cancel(cancel)?;
-        let z = if bracket[0] <= bed
-            && bracket[1] >= bed
-            && (bracket[0] - bed).abs().max((bracket[1] - bed).abs())
-                <= policy.maximum_shape_error_mm
-        {
-            bed
-        } else {
-            bracket[1]
-        };
-        charge_capture_proposal_work(
-            proposal_work,
-            admission.horizontal_events.len().max(1).ilog2() as usize + 2,
-            cancel,
-        )?;
-        if let Err(position) = admission
+    heights.sort_by(f64::total_cmp);
+    for z in heights {
+        let z = if (z - bed).abs() <= merge_mm { bed } else { z };
+        if z < bed {
+            continue;
+        }
+        if admission
             .horizontal_events
-            .binary_search_by(|old| old.total_cmp(&z))
+            .last()
+            .is_none_or(|last| z - last > merge_mm)
         {
-            let resident = native_event_storage_bytes(admission, required_bands.capacity());
-            reserve_native_event_growth(
-                &mut admission.horizontal_events,
-                resident,
-                query_pool_bytes,
-                proposal_work,
-                cancel,
-            )?;
-            charge_capture_proposal_work(
-                proposal_work,
-                admission.horizontal_events.len() - position + 1,
-                cancel,
-            )?;
-            admission.horizontal_events.insert(position, z);
+            admission.horizontal_events.push(z);
         }
     }
-    admission.bounds = completed_bounds;
+    admission.bounds = combined;
+    *proposal_work = proposal_work.saturating_add(admission.horizontal_events.len());
     Ok(())
 }
 
@@ -1311,31 +721,6 @@ pub(super) fn charge_capture_proposal_work(
     Ok(())
 }
 
-/// Sorted, validated candidate bands become bounded scheduling-set covers.
-/// A disjoint gap, however small, never supplies shared event identity.
-fn scheduling_event_covers(
-    bands: &[[f64; 2]],
-    maximum_width: f64,
-) -> impl Iterator<Item = [f64; 2]> + '_ {
-    let mut bands = bands.iter().copied();
-    let mut pending = None;
-    std::iter::from_fn(move || {
-        let mut cover = pending.take().or_else(|| bands.next())?;
-        for candidate in bands.by_ref() {
-            let upper = cover[1].max(candidate[1]);
-            // Containment adds no uncertainty. An expanding union keeps a
-            // strict margin so rounded subtraction cannot admit an overwide set.
-            if candidate[0] <= cover[1] && (upper <= cover[1] || upper - cover[0] < maximum_width) {
-                cover[1] = upper;
-            } else {
-                pending = Some(candidate);
-                break;
-            }
-        }
-        Some(cover)
-    })
-}
-
 fn native_check_code(code: GeometryErrorCode) -> &'static str {
     match code {
         GeometryErrorCode::ConditioningFailure => "native_conditioning_failure",
@@ -1346,351 +731,5 @@ fn native_check_code(code: GeometryErrorCode) -> &'static str {
         GeometryErrorCode::KernelFailure => "native_kernel_failure",
         GeometryErrorCode::SingularGeometry => "native_singular_geometry",
         _ => "native_invalid_geometry",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::LAYER_QUANTIZATION_MM;
-    use super::*;
-
-    #[test]
-    fn terminal_bed_envelope_checks_each_bracket_and_shape_budget_independently() {
-        let bed = 2.0;
-        let shape = 0.25 * LAYER_QUANTIZATION_MM;
-        assert!(terminal_inside_bed_envelope(
-            [bed, bed],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            shape
-        ));
-        assert!(terminal_inside_bed_envelope(
-            [bed - shape * 0.5, bed + shape * 0.5],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            shape,
-        ));
-        assert!(!terminal_inside_bed_envelope(
-            [bed, bed + shape * 2.0],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            shape,
-        ));
-        assert!(!terminal_inside_bed_envelope(
-            [bed, bed + LAYER_QUANTIZATION_MM * 2.0],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            0.05,
-        ));
-        assert!(!terminal_inside_bed_envelope(
-            [bed + shape, bed],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            shape
-        ));
-        assert!(!terminal_inside_bed_envelope(
-            [bed, f64::NAN],
-            bed,
-            LAYER_QUANTIZATION_MM,
-            shape
-        ));
-    }
-
-    #[test]
-    fn terminal_routing_retains_nonmembers_thin_events_and_foreign_capture_refusals() {
-        let cancel = AtomicBool::new(false);
-        let definition = spiling_geometry::from_step_bytes_with_cancel(
-            include_bytes!("../../../../../fixtures/geometry/cylinder.step"),
-            &cancel,
-        )
-        .unwrap();
-        let angle = 1.0_f64.to_radians();
-        let component = (angle * 0.5).sin() / 2.0_f64.sqrt();
-        let mut pose = spiling_contracts::geometry::RigidPoseMm {
-            translation_mm: [0.0; 3],
-            rotation_xyzw: [component, component, 0.0, (angle * 0.5).cos()],
-        };
-        let mut work = spiling_geometry::GeometryWorkBudget::query();
-        let bounds_policy = spiling_geometry::BoundsPolicy {
-            maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
-        };
-        let initial = spiling_geometry::placed_material_bounds(
-            &definition,
-            pose,
-            [0.0, 0.0, 1.0],
-            bounds_policy,
-            &mut work,
-            &cancel,
-        )
-        .unwrap()
-        .bounds();
-        pose.translation_mm[2] = -initial.minimum[0];
-        let support = spiling_geometry::placed_material_bounds(
-            &definition,
-            pose,
-            [0.0, 0.0, 1.0],
-            bounds_policy,
-            &mut work,
-            &cancel,
-        )
-        .unwrap()
-        .bounds();
-        let bounds = AabbMm {
-            min: [0.0, 0.0, support.minimum[0]],
-            max: [0.0, 0.0, support.maximum[1]],
-        };
-        let domain = [support.minimum, support.maximum];
-        let policy = spiling_geometry::AnalysisPolicy {
-            maximum_height_uncertainty_mm: LAYER_QUANTIZATION_MM,
-            maximum_shape_error_mm: 0.05,
-        };
-        let analysis = spiling_geometry::analyze_placed_height_domain(
-            &definition,
-            pose,
-            [bounds.min[2], bounds.max[2]],
-            policy,
-            &mut work,
-            &cancel,
-        )
-        .unwrap();
-        let occurrence = OccurrenceRecord {
-            occurrence_id: OccurrenceId::new(1).unwrap(),
-            definition_id: definition.id().clone(),
-            pose,
-        };
-        let routing =
-            LowerTerminalRouting::capture(&analysis, &occurrence, bounds, domain, 0.0, policy)
-                .expect("same-source qualified terminal inside the existing placement envelope");
-        let original = analysis.event_brackets_mm().to_vec();
-        let terminal = analysis.global_lower_terminal_bracket_mm().unwrap();
-        let mut members = 0;
-        for band in analysis.material_plane_event_brackets_mm() {
-            let member = analysis
-                .is_global_lower_terminal_event_mm(band, &mut work, &cancel)
-                .unwrap();
-            assert_eq!(
-                routing
-                    .requires_plane(band, NativeEventRole::Critical, &mut work, &cancel)
-                    .unwrap(),
-                !member
-            );
-            members += usize::from(member);
-        }
-        assert!(members > 0);
-        let owned_band = original
-            .iter()
-            .copied()
-            .find(|band| {
-                analysis
-                    .is_global_lower_terminal_event_mm(*band, &mut work, &cancel)
-                    .unwrap()
-            })
-            .unwrap();
-        assert!(
-            routing
-                .requires_plane(
-                    owned_band,
-                    NativeEventRole::UpperSupport,
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap(),
-            "identical numbers do not erase another event role"
-        );
-        assert!(
-            !routing
-                .requires_plane(domain[0], NativeEventRole::LowerSupport, &mut work, &cancel)
-                .unwrap()
-        );
-        assert_eq!(
-            routing
-                .requires_plane(domain[0], NativeEventRole::Critical, &mut work, &cancel)
-                .unwrap(),
-            !analysis
-                .is_global_lower_terminal_event_mm(domain[0], &mut work, &cancel)
-                .unwrap()
-        );
-        assert!(
-            routing
-                .requires_plane(domain[1], NativeEventRole::UpperSupport, &mut work, &cancel)
-                .unwrap()
-        );
-        let nonmember = [terminal[1].next_up(); 2];
-        assert!(
-            routing
-                .requires_plane(nonmember, NativeEventRole::Critical, &mut work, &cancel)
-                .unwrap()
-        );
-        assert!(
-            routing
-                .requires_plane(nonmember, NativeEventRole::LowerSupport, &mut work, &cancel)
-                .unwrap()
-        );
-        let thin = [[0.5, 0.5], [0.5000001, 0.5000001]];
-        for band in thin {
-            assert!(
-                routing
-                    .requires_plane(band, NativeEventRole::Critical, &mut work, &cancel)
-                    .unwrap()
-            );
-        }
-        assert_eq!(
-            scheduling_event_covers(&thin, LAYER_QUANTIZATION_MM).collect::<Vec<_>>(),
-            thin
-        );
-        for events in [
-            vec![nonmember[1]],
-            thin.iter().map(|band| band[1]).collect(),
-        ] {
-            // Planes closer than one Z step are one commanded height: the
-            // schedule never contains a layer thinner than that step.
-            let schedule = crate::planner::layer_schedule(0.0, 1.0, 0.2, &events).unwrap();
-            assert!(
-                schedule
-                    .iter()
-                    .all(|layer| layer.height > crate::planner::REFERENCE_Z_STEP_MM)
-            );
-        }
-        let mut foreign = occurrence.clone();
-        foreign.pose.translation_mm[0] += 1.0;
-        assert!(
-            LowerTerminalRouting::capture(&analysis, &foreign, bounds, domain, 0.0, policy)
-                .is_none()
-        );
-        let mut all_bands = Vec::new();
-        let mut required_bands = Vec::new();
-        let mut proposal_work = 0;
-        insert_native_event_band(
-            &mut all_bands,
-            owned_band,
-            0,
-            4096,
-            &mut proposal_work,
-            &cancel,
-        )
-        .unwrap();
-        insert_native_event_band(
-            &mut all_bands,
-            owned_band,
-            4096,
-            4096,
-            &mut proposal_work,
-            &cancel,
-        )
-        .unwrap();
-        insert_native_event_band(
-            &mut required_bands,
-            owned_band,
-            0,
-            4096,
-            &mut proposal_work,
-            &cancel,
-        )
-        .unwrap();
-        assert_eq!(required_bands, all_bands);
-        let other = spiling_geometry::from_step_bytes_with_cancel(
-            include_bytes!("../../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
-        .unwrap();
-        foreign = occurrence.clone();
-        foreign.definition_id = other.id().clone();
-        assert!(
-            LowerTerminalRouting::capture(&analysis, &foreign, bounds, domain, 0.0, policy)
-                .is_none()
-        );
-        let mut incomplete = domain;
-        incomplete[0][0] = incomplete[0][0].next_up();
-        assert!(
-            LowerTerminalRouting::capture(&analysis, &occurrence, bounds, incomplete, 0.0, policy)
-                .is_none()
-        );
-        assert!(
-            LowerTerminalRouting::capture(&analysis, &occurrence, bounds, domain, -1.0, policy)
-                .is_none()
-        );
-        assert_eq!(analysis.event_brackets_mm(), original);
-        for (mut budget, cancellation, expected) in [
-            (
-                spiling_geometry::GeometryWorkBudget::new(0),
-                AtomicBool::new(false),
-                ManufacturingErrorCode::ResourceLimit,
-            ),
-            (
-                spiling_geometry::GeometryWorkBudget::query(),
-                AtomicBool::new(true),
-                ManufacturingErrorCode::Cancelled,
-            ),
-        ] {
-            assert_eq!(
-                routing
-                    .requires_plane(
-                        owned_band,
-                        NativeEventRole::Critical,
-                        &mut budget,
-                        &cancellation,
-                    )
-                    .unwrap_err()
-                    .code,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn event_band_storage_preserves_capacity_work_and_cancellation_refusals() {
-        let mut bands = Vec::new();
-        for (limit, cancel) in [(0, AtomicBool::new(false)), (1024, AtomicBool::new(true))] {
-            let result =
-                insert_native_event_band(&mut bands, [0.0, 0.0], 0, limit, &mut 0, &cancel)
-                    .unwrap_err();
-            assert_eq!(
-                result.code,
-                if limit == 0 {
-                    ManufacturingErrorCode::ResourceLimit
-                } else {
-                    ManufacturingErrorCode::Cancelled
-                }
-            );
-            assert!(bands.is_empty());
-        }
-        let mut exhausted_work = usize::MAX;
-        assert_eq!(
-            insert_native_event_band(
-                &mut bands,
-                [0.0, 0.0],
-                0,
-                1024,
-                &mut exhausted_work,
-                &AtomicBool::new(false)
-            )
-            .unwrap_err()
-            .code,
-            ManufacturingErrorCode::ResourceLimit
-        );
-        assert!(bands.is_empty());
-    }
-
-    #[test]
-    fn scheduling_covers_merge_overlap_without_erasing_a_disjoint_ulp_gap() {
-        let next = 1.0_f64.next_up();
-        let bands = [[0.0, 0.6], [0.2, 0.4], [0.4, 1.0], [next, 1.2]];
-        let covers: Vec<_> = scheduling_event_covers(&bands, 1.1).collect();
-        assert_eq!(covers, [[0.0, 1.0], [next, 1.2]]);
-    }
-
-    #[test]
-    fn scheduling_covers_keep_the_policy_ceiling_and_every_candidate() {
-        let bands = [[0.0, 0.75], [0.5, 1.25], [1.0, 1.375]];
-        let covers: Vec<_> = scheduling_event_covers(&bands, 1.0).collect();
-        assert_eq!(covers, [[0.0, 0.75], [0.5, 1.375]]);
-        for band in bands {
-            assert!(
-                covers
-                    .iter()
-                    .any(|cover| cover[0] <= band[0] && cover[1] >= band[1])
-            );
-        }
-        assert!(covers.iter().all(|cover| cover[1] - cover[0] <= 1.0));
     }
 }

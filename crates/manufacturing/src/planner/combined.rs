@@ -108,10 +108,7 @@ pub(super) fn combine(
     neighborhoods: &mut super::SkinNeighborhoods<'_>,
     retained_points: usize,
     outside_layer_payload_bytes: usize,
-    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-    native_live_bytes: usize,
-    native_sources: &[spiling_geometry::NativeUnionSourceCapture],
-    tolerant: Option<&super::TolerantModels>,
+    models: &super::TolerantModels,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let SparseInfillPolicy::CombineEligible { max_height_mm } = intent.recipe.sparse_infill else {
@@ -160,15 +157,12 @@ pub(super) fn combine(
         let span = super::span_at(sections, first as u32);
         let section = &sections[span];
         let neighborhood = first - 1..=last + 1;
-        // Tolerant spans are one layer each; a band may cross them while they
-        // print one source prism, and then queries its full-height inner material.
-        let reason = if (!section.invariant
-            && section.inner_material.is_none()
-            && tolerant.is_none())
-            || (first..=last).any(|i| {
-                let other = super::span_at(sections, i as u32);
-                other != span && !super::same_prism(section, &sections[other])
-            }) {
+        // A band may cross spans that print one source prism; it then queries
+        // its full-height inner material below.
+        let reason = if (first..=last).any(|i| {
+            let other = super::span_at(sections, i as u32);
+            other != span && !super::same_prism(section, &sections[other])
+        }) {
             Some(SparseBandVeto::ChangingDomain)
         } else if has_support
             || neighborhood.clone().any(|i| {
@@ -374,21 +368,15 @@ pub(super) fn combine(
                 )?;
                 continue;
             }
-            if !section.invariant
-                && !inner_material_admits(
-                    section,
-                    &interior.domain,
-                    &interior.coverage,
-                    [lower_z, z],
-                    width,
-                    intent,
-                    native_sources,
-                    tolerant,
-                    native_live_bytes,
-                    geometry_work,
-                    cancel,
-                )?
-            {
+            if !inner_material_admits(
+                &interior.domain,
+                &interior.coverage,
+                [lower_z, z],
+                width,
+                intent,
+                models,
+                cancel,
+            )? {
                 record(
                     plan,
                     first,
@@ -510,24 +498,18 @@ pub(super) fn combine(
                         budget,
                         cancel,
                     )?;
-                    if !section.invariant {
+                    {
                         // Include whole anchor extensions in the full-height
                         // query. The earlier interior-only receipt cannot grant
                         // authority to copied rows outside that center domain.
                         let domain = aligned_row_domain(&coarse, width, budget, cancel)?;
                         if !inner_material_admits(
-                            section,
                             &domain,
                             &interior.coverage,
                             [lower_z, z],
                             width,
                             intent,
-                            native_sources,
-                            tolerant,
-                            native_live_bytes
-                                .saturating_add(super::bonds::path_bytes(&coarse))
-                                .saturating_add(region::cloned_polygons_bytes(&domain.0)?),
-                            geometry_work,
+                            models,
                             cancel,
                         )? {
                             record(
@@ -1067,21 +1049,18 @@ fn record(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Full-height inner material for a plate or band: `eligible` grown by the
+/// bead and XYZ6 projection radius lies in the contributors' material over
+/// the whole interval (`tolerant::inner_material_admits`).
 pub(super) fn inner_material_admits(
-    section: &SectionSpan,
     eligible: &geo::MultiPolygon<f64>,
     coverage: &ProcessRegionCoverage,
     physical_z: [f64; 2],
     width_mm: f64,
     intent: &ManufacturingIntent,
-    sources: &[spiling_geometry::NativeUnionSourceCapture],
-    tolerant: Option<&super::TolerantModels>,
-    live_bytes: usize,
-    work: &mut spiling_geometry::GeometryWorkBudget,
+    models: &super::TolerantModels,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
-    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_bead_height_mm;
     if coverage.contributions.is_empty() {
         return Ok(false);
     }
@@ -1099,69 +1078,13 @@ pub(super) fn inner_material_admits(
     let projection_radius =
         (((0.5e-6_f64).next_up() + 4.0 * ulp).next_up() * 2.0_f64.sqrt().next_up()).next_up();
     let radius = (width_mm * 0.5 + projection_radius).next_up();
-    let Some(captures) = &section.inner_material else {
-        let Some(models) = tolerant else {
-            return Ok(false);
-        };
-        return super::tolerant::inner_material_admits(
-            models,
-            coverage.contributions.iter().map(|c| c.occurrence_id),
-            eligible,
-            physical_z,
-            radius,
-            intent.printer.motion_resolution.z_mm,
-            cancel,
-        );
-    };
-    let outer_z = project_xyz6_bead_height_mm(physical_z[1], physical_z[1] - physical_z[0])?;
-    for contribution in &coverage.contributions {
-        let Some(capture) = captures.iter().find(|capture| {
-            capture.source().occurrence_id() == contribution.occurrence_id
-                && capture.source().definition_id() == &contribution.definition_id
-        }) else {
-            return Ok(false);
-        };
-        let Some(domain) = section.process_domains.iter().find(|domain| {
-            domain.coverage.contributions.iter().any(|source| {
-                source.occurrence_id == contribution.occurrence_id
-                    && source.definition_id == contribution.definition_id
-            })
-        }) else {
-            return Ok(false);
-        };
-        let expected = sources
-            .iter()
-            .find(|source| {
-                source.occurrence_id() == contribution.occurrence_id
-                    && source.definition_id() == &contribution.definition_id
-            })
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                    "inner-material source lost its completed native binding",
-                )
-            })?;
-        let actual = super::native::encode_polygons(
-            domain.material.0.iter(),
-            capture.sample_world_z_mm(),
-            cancel,
-        )?;
-        let candidate =
-            super::native::encode_polygons(eligible.0.iter(), capture.sample_world_z_mm(), cancel)?;
-        let byte_limit = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES.saturating_sub(
-            live_bytes
-                .saturating_add(super::native::loop_bytes(&actual))
-                .saturating_add(super::native::loop_bytes(&candidate)),
-        );
-        if capture
-            .certify_region(
-                expected, &actual, &candidate, outer_z, radius, byte_limit, work, cancel,
-            )
-            .map_err(|failure| super::native_error(failure, "full-height native inner material"))?
-            .is_none()
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    super::tolerant::inner_material_admits(
+        models,
+        coverage.contributions.iter().map(|c| c.occurrence_id),
+        eligible,
+        physical_z,
+        radius,
+        intent.printer.motion_resolution.z_mm,
+        cancel,
+    )
 }

@@ -5,7 +5,6 @@
 use super::*;
 use classification::{ClassifiedRegions, WallPlan};
 use geo::{Coord, LineString, Polygon};
-use spiling_contracts::geometry::PlaneMm;
 use std::collections::BTreeSet;
 
 #[test]
@@ -159,7 +158,7 @@ pub(super) fn wall_plan<'a>(
         min_bead_height_mm: 0.000001,
         max_bead_height_mm: 0.6,
     };
-    walls::plan_section_walls(
+    walls::plan_material_domain_walls(
         walls::WallRequest {
             material: section,
             required,
@@ -170,7 +169,6 @@ pub(super) fn wall_plan<'a>(
             lower_z: 0.0,
             upper_z: recipe.layer_height_mm,
             retained_points,
-            classic: false,
         },
         &mut 0,
         cancel,
@@ -461,8 +459,6 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         SectionSpan {
             start: 0,
             end: 6,
-            invariant: true,
-            inner_material: None,
             material: Arc::new(rectangle(20.0, 10.0)),
             process_domains: Vec::new(),
             occupied: None,
@@ -471,8 +467,6 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         SectionSpan {
             start: 6,
             end: 12,
-            invariant: true,
-            inner_material: None,
             material: Arc::new(rectangle(10.0, 10.0)),
             process_domains: Vec::new(),
             occupied: None,
@@ -686,17 +680,14 @@ fn native_section_consumer_preserves_hole_ownership_in_sparse_and_skin_paths() {
     let bytes = include_bytes!("../../../../fixtures/geometry/through-hole.step");
     let cancel = AtomicBool::new(false);
     let definition = spiling_geometry::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
-    let native = spiling_geometry::section_with_byte_limit(
+    let model = spiling_geometry::tolerant::TolerantModel::build(
         &definition,
-        PlaneMm {
-            origin_mm: [0.0, 0.0, 0.2],
-            normal: [0.0, 0.0, 1.0],
-        },
+        spiling_geometry::tolerant::TolerantPolicy::default(),
         &cancel,
-        4 * 1024 * 1024,
     )
     .unwrap();
-    let section = region::from_native(&native, &RigidPoseMm::IDENTITY, 0.2, &cancel).unwrap();
+    let mut section = super::tolerant::section_at(&model, 0.2).unwrap();
+    region::canonicalize(&mut section);
     assert_eq!(section.0.len(), 1);
     assert_eq!(section.0[0].interiors().len(), 1);
     let void = empty();
@@ -1471,8 +1462,6 @@ fn skin_horizon_intersects_varying_local_boundaries_under_cumulative_work_cap() 
                 occupied: None,
                 start: index,
                 end: index + 1,
-                invariant: true,
-                inner_material: None,
                 source_area_mm2: material.unsigned_area(),
                 material: Arc::new(material),
                 process_domains: Vec::new(),
@@ -1534,8 +1523,6 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
                 occupied: None,
                 start: index as u32,
                 end: index as u32 + 1,
-                invariant: true,
-                inner_material: None,
                 source_area_mm2: material.unsigned_area(),
                 material: Arc::new(material),
                 process_domains: Vec::new(),
@@ -1724,8 +1711,6 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
             occupied: None,
             start: index,
             end: index + 1,
-            invariant: true,
-            inner_material: None,
             material: Arc::new(section.clone()),
             process_domains: Vec::new(),
             source_area_mm2: 200.0,
@@ -1747,8 +1732,6 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
             occupied: None,
             start: index,
             end: index + 1,
-            invariant: true,
-            inner_material: None,
             material: Arc::new(cached.clone()),
             process_domains: Vec::new(),
             source_area_mm2: cached.unsigned_area(),

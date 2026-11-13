@@ -48,30 +48,6 @@ impl StartupWall {
             .retained_bytes
             .saturating_add(2 * std::mem::size_of::<usize>())
     }
-
-    pub fn retained_bytes(&self) -> usize {
-        self.layout_bytes()
-            .saturating_add(std::mem::size_of::<Self>())
-    }
-
-    pub fn retain_for(
-        owner: &mut Option<Self>,
-        mandatory: usize,
-        additional: usize,
-        limit: usize,
-    ) -> usize {
-        let bytes = owner.as_ref().map_or(0, Self::retained_bytes);
-        if mandatory
-            .checked_add(additional)
-            .and_then(|total| total.checked_add(bytes))
-            .is_none_or(|total| total > limit)
-        {
-            *owner = None;
-            0
-        } else {
-            bytes
-        }
-    }
 }
 
 #[cfg(test)]
@@ -122,8 +98,6 @@ mod tests {
         let mut sections = vec![SectionSpan {
             start: 0,
             end: 1,
-            invariant: true,
-            inner_material: None,
             material: Arc::new(MultiPolygon(Vec::new())),
             process_domains: Vec::new(),
             occupied: None,
@@ -140,28 +114,5 @@ mod tests {
         schedule[0] = first();
         schedule[0].sample = schedule[0].sample.next_down();
         assert!(!wall.matches(&sections, &schedule));
-    }
-
-    #[test]
-    fn startup_handoff_releases_before_capacity_pressure_and_overflow() {
-        let mut owner = Some(wall());
-        let bytes = owner.as_ref().unwrap().retained_bytes();
-        assert_eq!(
-            StartupWall::retain_for(&mut owner, 100, 200, 300 + bytes),
-            bytes
-        );
-        assert!(owner.is_some());
-        assert_eq!(
-            StartupWall::retain_for(&mut owner, 100, 200, 299 + bytes),
-            0
-        );
-        assert!(owner.is_none());
-        assert_eq!(StartupWall::retain_for(&mut owner, 100, 200, 300), 0);
-        owner = Some(wall());
-        assert_eq!(
-            StartupWall::retain_for(&mut owner, usize::MAX, 1, usize::MAX),
-            0
-        );
-        assert!(owner.is_none());
     }
 }
