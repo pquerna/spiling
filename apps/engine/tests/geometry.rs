@@ -1587,6 +1587,7 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
         .await
         .unwrap();
     assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
+    assert!(matches!(prepared.basis, BedPoseBasis::NativeBounded));
     // Independent analytic support: radius 5, source axial height [0,8].
     let true_minimum_z = prepared.pose.translation_mm[2] - 5.0 * angle.sin();
     assert!(

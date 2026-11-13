@@ -18,6 +18,21 @@ Decoders validate with byte reads before constructing borrowing typed views. The
 
 ## SPLM mesh, version 1
 
+The ordinary native scene uses `mesh-tolerant-mm-0.05-v1`: complete source-face
+meshing at the ADR012 half-profile chord target, measured native face/edge
+deviation within the display budget, closed oriented triangle incidence after
+exact coordinate welding, and independently checked packed reconstruction.
+Its carrier/trim deviation fields report the native mesher's sampled surface
+and edge estimates, not interval certificates or material authority. Failed or
+missing faces, invalid topology, excessive measured deviation, cancellation and
+resource refusal never publish a partial successful mesh.
+
+The explicitly requested `mesh-trimmed-mm-0.05-v2` route retains independent
+coefficient carrier/trim certification. Both profiles use the same checked
+binary layout, source-face table, revision-aware picking and separate f32 error
+budget. Profile identity distinguishes their evidence; tolerant preview cannot
+be promoted into exact placement, source sections or manufacturing authority.
+
 | Byte offset | Field                                       |
 | ----------- | ------------------------------------------- |
 | 0..4        | ASCII `SPLM`                                |

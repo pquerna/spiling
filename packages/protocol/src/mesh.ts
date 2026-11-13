@@ -12,6 +12,7 @@ import {
   MESH_CARRIER_TOLERANCE_MM,
   MESH_HEADER_BYTES,
   MESH_PROFILE,
+  MESH_PREVIEW_PROFILE,
   MESH_QUANTIZATION_TOLERANCE_MM,
   MESH_SCHEMA_VERSION,
   MESH_SURFACE_TOLERANCE_MM,
@@ -85,7 +86,10 @@ function descriptor(metadata: MeshChunkMetadata, expected: MeshIdentity): void {
     metadata.definition_id !== expected.definition_id
   )
     fail("descriptor identity mismatch");
-  if (metadata.schema_version !== MESH_SCHEMA_VERSION || metadata.mesh_profile !== MESH_PROFILE)
+  if (
+    metadata.schema_version !== MESH_SCHEMA_VERSION ||
+    (metadata.mesh_profile !== MESH_PROFILE && metadata.mesh_profile !== MESH_PREVIEW_PROFILE)
+  )
     fail("unsupported schema or mesh profile");
   uint(
     metadata.chunk_count,

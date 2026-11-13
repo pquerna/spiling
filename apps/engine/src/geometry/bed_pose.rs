@@ -5,10 +5,7 @@
 //! Read-only, revision-captured material support queries. Core still owns Apply.
 use super::{check_cancel, error};
 use spiling_contracts::{geometry::*, project::ProjectRevision};
-use spiling_geometry::{
-    BoundsPolicy, GeometryWorkBudget, source::SourceDefinition as Definition,
-    tolerant::TolerantPolicy,
-};
+use spiling_geometry::{BoundsPolicy, GeometryWorkBudget, source::SourceDefinition as Definition};
 use std::sync::atomic::AtomicBool;
 
 pub(super) struct Request {
@@ -42,25 +39,32 @@ pub(super) fn prepare(
             "invalid native contact request",
         ));
     }
+    let (brackets, basis) = match definition {
+        Definition::Native(_) => match native_brackets(definition, &request, cancel) {
+            Ok(Some(brackets)) => (brackets, BedPoseBasis::NativeBounded),
+            Ok(None) => tolerant_model_brackets(definition, &request, cancel)?,
+            Err(failure)
+                if matches!(
+                    failure.code,
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable
+                        | GeometryErrorCode::AnalysisIndeterminate
+                        | GeometryErrorCode::ConditioningFailure
+                        | GeometryErrorCode::UnsupportedGeometry
+                        | GeometryErrorCode::UnsupportedOperation
+                ) =>
+            {
+                tolerant_model_brackets(definition, &request, cancel)?
+            }
+            Err(failure) => return Err(failure),
+        },
+        Definition::Hybrid(_) => tolerant_model_brackets(definition, &request, cancel)?,
+    };
     let [
         minimum_lower_mm,
         minimum_upper_mm,
         maximum_lower_mm,
         maximum_upper_mm,
-    ] = match exact_brackets(definition, &request, cancel) {
-        Ok(brackets) => brackets,
-        Err(exact) if tolerant_retry(&exact) => tolerant_brackets(definition, &request, cancel)
-            .map_err(|tolerant| {
-                error(
-                    tolerant.code,
-                    format!(
-                        "{} (exact native bounds also refused: {})",
-                        tolerant.message, exact.message
-                    ),
-                )
-            })?,
-        Err(exact) => return Err(exact),
-    };
+    ] = brackets;
     // Use the same directed arithmetic as the checked proposal contract.
     // A blanket reserve based on unrelated XY/envelope magnitudes invents a
     // positive material birth above the bed even when contact is exact.
@@ -83,6 +87,7 @@ pub(super) fn prepare(
         -request.envelope_mm.min[2],
     )[1];
     let result = BedPosePreparation {
+        basis,
         session_id: request.session_id,
         scene_revision: request.scene_revision,
         project_revision: request.project_revision,
@@ -109,29 +114,16 @@ pub(super) fn prepare(
     Ok(result)
 }
 
-/// Exact native placement brackets: minimum lower/upper and maximum lower/upper.
-fn exact_brackets(
+/// Native placement brackets: minimum lower/upper and maximum lower/upper.
+/// Raw tolerant-mesh extrema cannot certify contact between sampled vertices;
+/// unresolved native support refuses rather than publishing singleton evidence.
+fn native_brackets(
     definition: &Definition,
     request: &Request,
     cancel: &AtomicBool,
-) -> Result<[[f64; 3]; 4], GeometryError> {
+) -> Result<Option<[[f64; 3]; 4]>, GeometryError> {
     let mut work = GeometryWorkBudget::query();
-    let source = spiling_geometry::prepare_solid(
-        definition.native()?,
-        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
-        &mut work,
-        cancel,
-    )?;
-    // Share immutable native trim domains; admit each query's scratch beside
-    // their retained capacities in the same geometry pool.
-    let query_bytes = spiling_geometry::MAX_PREPARED_SECTION_BYTES
-        .checked_sub(source.retained_bytes())
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "bed preparation source and query geometry exceed simultaneous storage",
-            )
-        })?;
+    let native = definition.native()?;
     let mut minimum_lower_mm = [0.0; 3];
     let mut minimum_upper_mm = [0.0; 3];
     let mut maximum_lower_mm = [0.0; 3];
@@ -153,32 +145,35 @@ fn exact_brackets(
         if axis == 2 {
             query_pose.translation_mm[2] = 0.0;
         }
-        // Each axis runs under its own defect fuse; a fused query falls back
-        // to tolerant brackets like any other exact refusal.
-        let mut fuse = GeometryWorkBudget::exact_bounds_fuse();
-        let support = source.placed_material_bounds(
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: if axis == 2 {
+                request.contact_tolerance_mm * 0.5
+            } else {
+                request.contact_tolerance_mm
+            },
+        };
+        let Some(support) = spiling_geometry::placed_native_support(
+            native,
             query_pose,
             direction,
-            BoundsPolicy {
-                maximum_endpoint_uncertainty_mm: if axis == 2 {
-                    request.contact_tolerance_mm * 0.5
-                } else {
-                    request.contact_tolerance_mm
-                },
-            },
-            query_bytes,
-            &mut fuse,
+            policy,
+            spiling_geometry::MAX_DIRECTIONAL_SCRATCH_BYTES,
+            &mut work,
             cancel,
-        )?;
-        work.charge(fuse.consumed(), cancel)?;
+        )?
+        else {
+            return Ok(None);
+        };
         if support.definition_id() != &request.definition_id
-            || !support.is_compatible_with_definition(definition.native()?)
+            || !support.is_compatible_with_definition(native)
             || support.placed_pose() != query_pose
             || support.world_direction() != direction
+            || support.policy().maximum_endpoint_uncertainty_mm
+                != policy.maximum_endpoint_uncertainty_mm
         {
             return Err(error(
                 GeometryErrorCode::AnalysisIndeterminate,
-                "material support lost its native producer/source/pose/query binding",
+                "source support lost its native source/pose/query binding",
             ));
         }
         let bounds = support.bounds();
@@ -200,48 +195,34 @@ fn exact_brackets(
         maximum_lower_mm[axis] = maximum[0];
         maximum_upper_mm[axis] = maximum[1];
     }
-    Ok([
+    Ok(Some([
         minimum_lower_mm,
         minimum_upper_mm,
         maximum_lower_mm,
         maximum_upper_mm,
-    ])
+    ]))
 }
 
-/// Exact bounds that refused for a geometric reason, not cancellation or a
-/// bad request, fall back to ADR012 tolerant bounds.
-fn tolerant_retry(error: &GeometryError) -> bool {
-    !matches!(
-        error.code,
-        GeometryErrorCode::Cancelled
-            | GeometryErrorCode::InvalidPose
-            | GeometryErrorCode::StaleRevision
-            | GeometryErrorCode::UnknownHandle
-            | GeometryErrorCode::Busy
-            | GeometryErrorCode::SourceIo
-            | GeometryErrorCode::SourceChanged
-    )
-}
-
-/// ADR012 tolerant placement brackets from the placed tessellation. Its
-/// vertices lie on the surface, so its extremes bracket the solid's within the
-/// profile tolerance.
-fn tolerant_brackets(
+fn tolerant_model_brackets(
     definition: &Definition,
     request: &Request,
     cancel: &AtomicBool,
-) -> Result<[[f64; 3]; 4], GeometryError> {
-    let model = definition.prepare(TolerantPolicy::default(), cancel)?;
-    if model.failed_faces > 0 {
+) -> Result<([[f64; 3]; 4], BedPoseBasis), GeometryError> {
+    let policy = spiling_geometry::tolerant::TolerantPolicy::default();
+    let model = definition.prepare(policy, cancel)?;
+    if model.failed_faces != 0 {
         return Err(error(
             GeometryErrorCode::UnsupportedGeometry,
-            format!(
-                "{} source faces could not be tessellated",
-                model.failed_faces
-            ),
+            "bed model omitted source faces",
         ));
     }
     let (minimum, maximum) = model.placed(&request.pose).bounds();
     check_cancel(cancel)?;
-    Ok([minimum, minimum, maximum, maximum])
+    Ok((
+        [minimum, minimum, maximum, maximum],
+        BedPoseBasis::TolerantModel {
+            join_mm: policy.join_mm,
+            profile_mm: policy.profile_mm,
+        },
+    ))
 }

@@ -198,6 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DefinitionDisplay::decl(&config),
         DefinitionRecord::decl(&config),
         OccurrenceRecord::decl(&config),
+        BedPoseBasis::decl(&config),
         BedPosePreparation::decl(&config),
         LayoutObjective::decl(&config),
         LayoutStyle::decl(&config),
@@ -662,6 +663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, value) in [
         ("IMPORT_PROFILE", IMPORT_PROFILE),
         ("MESH_PROFILE", MESH_PROFILE),
+        ("MESH_PREVIEW_PROFILE", MESH_PREVIEW_PROFILE),
         ("SURFACE_IMAGE_MEDIA_TYPE", SURFACE_IMAGE_MEDIA_TYPE),
     ] {
         output.push_str(&format!("export const {name} = {value:?} as const;\n"));

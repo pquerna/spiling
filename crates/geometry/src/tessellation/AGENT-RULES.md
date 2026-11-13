@@ -6,6 +6,14 @@ Licensed under the Open Software License version 3.0
 
 # SolidCore display conversion rules
 
+Ordinary source display selects `MeshTolerantMm005V1`: caller-monitored native
+edge/face meshing, complete source-face ownership, sampled deviation reporting,
+closed oriented incidence and checked packing. It is disposable approximation,
+not coefficient certification or material authority. The proof obligations below
+apply to the separately requested `MeshTrimmedMm005V2` route; never label a
+tolerant preview as satisfying them. Both preserve cancellation and fail rather
+than publish omitted faces or malformed buffers.
+
 Borrow the definition's single immutable BREP. Use the pinned `solidcore-mesh` edge/face candidate APIs and the deterministic query-local kernel context. Publish through `MeshChunkBuilder` in `Definition::face_ids()` order; the matching source STEP table and checked inverse ordinal mapping must remain complete. No native face may disappear, including an empty, failed or unresolved face. Do not replace a failed mesh with an empty artifact.
 
 Candidate chord tolerances, normal estimates, convergence diagnostics and sampled deviation are not certificates. A returned candidate's convergence flag does not preempt the complete independent audits; only their certified shape-error exceedance requests refinement. Audit every published triangle against the actual stored native coefficient law in its natural UV chart with `parametric::DisplayTriangleProof`; include fresh physical vertex residuals. Analytics in `FaceInfo` are descriptions, not evaluator or parameter-correspondence authority. In particular, a candidate using an analytic position correction must still satisfy the same coefficient-based bound.

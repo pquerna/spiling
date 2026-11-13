@@ -500,11 +500,18 @@ impl Workbench {
                         "Original support Z: {:.6}…{:.6} mm",
                         proposal.minimum_lower_mm[2], proposal.minimum_upper_mm[2]
                     ));
-                    ui.weak(format!(
-                        "Maximum contact gap {:.6} mm; allowed {:.6} mm",
-                        proposal.maximum_contact_gap_mm, proposal.contact_tolerance_mm
-                    ));
-                    ui.collapsing("Native support and envelope evidence", |ui| {
+                    match proposal.basis {
+                        spiling_contracts::geometry::BedPoseBasis::NativeBounded => {
+                            ui.weak(format!(
+                                "Native contact · ≤ {:.6} mm",
+                                proposal.maximum_contact_gap_mm
+                            ));
+                        }
+                        spiling_contracts::geometry::BedPoseBasis::TolerantModel { .. } => {
+                            ui.weak("Approximate placement");
+                        }
+                    }
+                    ui.collapsing("Placement details", |ui| {
                         ui.label(format!("{proposal:#?}"));
                     });
                     if !current {

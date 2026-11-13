@@ -72,6 +72,29 @@ An optional nonzero UUID `request_id` follows [AIP-155](https://google.aip.dev/1
 
 List uses bounded keyset pagination with parent-bound opaque tokens and default 20/max 50 items, following [AIP-158](https://google.aip.dev/158). A token is not a fixed historical snapshot: newly inserted operations can alter subsequent pages. Negative page sizes or wrong-parent tokens fail. Request parameters other than the token/page size must remain consistent.
 
+## Bed placement evidence
+
+`PrepareBedPose` is a read-only source/pose/revision-bound proposal; Core alone
+applies its pose. Required `BedPosePreparation.basis` distinguishes native
+bounded support from the ADR012 tolerant model. Native bounds enclose the native
+material and retain the requested no-penetration/contact uncertainty. Tolerant
+values are placed model-vertex extrema, carry the exact join/profile policy,
+and do not certify native extrema or physical contact. Their reported gap applies
+only to that model. The workbench labels this as approximate placement rather
+than presenting a native-contact receipt.
+
+Native support uses complete native exclusion and independently feasible
+boundary vertex and curve-point witnesses. Ordinary placement uses this bounded
+source traversal, not adaptive whole-trim extremum refinement. When import boxes
+are loose, a complete prepared chart cover (including native joint covers),
+carrier coefficient bounds, spatial edge bounds and native vertices tighten
+exclusion together; spatial edges alone never bound trimmed carriers. If the
+complete enclosure and feasible witnesses do not close the requested uncertainty,
+it selects the explicitly identified tolerant model; cancellation,
+stale/bad requests and resource failure propagate. Missing faces never produce a
+partial successful bed model. Saved poses remain ordinary project content and
+do not confer manufacturing, physical grip or machine-readiness qualification.
+
 ## Derived color names
 
 `Engine.NameColors` is an authenticated read-only unary query independent of project/session revision. It takes 1..64 explicitly encoded opaque sRGB8 samples and a required Exact, Nearest or Descriptive mode; unspecified/unknown modes and channels above 255 refuse. Ordered replies retain samples, uppercase hex, optional exact-match name, reference sample/name, optional single modifier, generated-label provenance and normalized OKLab distance. Exact misses return no name. The reply binds the naming algorithm version and pinned dataset digest; clients validate these plus requested mode/order/count. Distance is a numerical description, not a confidence probability or physical color qualification.

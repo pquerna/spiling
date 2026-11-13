@@ -338,11 +338,20 @@ pub enum GeometryResponse {
     },
 }
 
-/// Read-only native contact evidence; applying the pose still requires both
-/// captured revisions. Bounds enclose the original posed source, not a mesh.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BedPoseBasis {
+    NativeBounded,
+    TolerantModel { join_mm: f64, profile_mm: f64 },
+}
+
+/// Read-only placement evidence; applying the pose requires both revisions.
+/// Native brackets enclose source material; tolerant brackets describe only
+/// the sampled model identified by `basis`, not certified native extrema.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BedPosePreparation {
+    pub basis: BedPoseBasis,
     pub session_id: SessionId,
     pub scene_revision: SceneRevision,
     pub project_revision: crate::project::ProjectRevision,
@@ -362,6 +371,17 @@ pub struct BedPosePreparation {
 
 impl BedPosePreparation {
     pub fn validate(&self) -> Result<(), GeometryError> {
+        if let BedPoseBasis::TolerantModel {
+            join_mm,
+            profile_mm,
+        } = self.basis
+            && (!join_mm.is_finite()
+                || join_mm <= 0.0
+                || !profile_mm.is_finite()
+                || profile_mm <= 0.0)
+        {
+            return Err(invalid("invalid tolerant bed-placement model policy"));
+        }
         self.original_pose.validate()?;
         self.pose.validate()?;
         self.envelope_mm.validate()?;

@@ -44,15 +44,14 @@ pub use joint::{
 pub(crate) use material_source::MaterialSourceView;
 pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
-    PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
-    placed_material_bounds,
+    PlacedMaterialProjectedBounds, PlacedNativeSupport, analyze_placed_height_domain,
+    placed_bounds, placed_material_bounds, placed_native_support,
 };
 pub(crate) use placed::{analyze_placed_slab, section_placed_with_work};
 pub use planar::{
-    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm,
+    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedPlanarForbidden,
     certify_planar_capsule_clearance, certify_planar_capsule_clearance_prepared,
     certify_planar_capsule_pair_clearance, planar_bounds_clear, prepare_planar_forbidden,
-    PreparedPlanarForbidden,
 };
 pub use slab::analyze_height_domain;
 pub(crate) use slab::{HeightFunctional, analyze_slab};
@@ -61,14 +60,6 @@ pub use voids::{
     ProtectedVoidHeightScope, ProtectedVoidPolicy, capture_projected_voids,
     projected_protected_void_envelopes,
 };
-
-/// Defect fuse for one exact directional-bounds query. Precision comes from
-/// the printer's motion step; at that precision every bounds query in the
-/// realistic corpus completes within about 16 million units, except trimmed
-/// faces the interval search cannot prune, which run to hundreds of millions.
-/// The fuse sends those to the ADR012 tolerant lane rather than letting them
-/// stall a job. It is not a quality gate.
-pub const EXACT_BOUNDS_WORK_FUSE: u64 = 1 << 26;
 
 /// Cumulative numerical work across a captured geometry job. Reusing a cache or
 /// subdividing an interval never resets this counter.
@@ -99,10 +90,6 @@ impl GeometryWorkBudget {
     /// Default cumulative accounting for one complete manufacturing compile.
     pub fn compile() -> Self {
         Self::monitored()
-    }
-    /// One exact bounds query under [`EXACT_BOUNDS_WORK_FUSE`].
-    pub fn exact_bounds_fuse() -> Self {
-        Self::new(EXACT_BOUNDS_WORK_FUSE)
     }
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)

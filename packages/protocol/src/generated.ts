@@ -372,7 +372,7 @@ export type ImportFindingCode = "interpreted_units" | "degenerate_facets" | "dup
 
 export type MeshSourceFormat = "stl" | "three_mf";
 
-export type DisplayProfile = "mesh-trimmed-mm-0.05-v2";
+export type DisplayProfile = "mesh-trimmed-mm-0.05-v2" | "mesh-tolerant-mm-0.05-v1";
 
 export type FaceRef = { session_id: SessionId, scene_revision: SceneRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, face_id: FaceId, };
 
@@ -415,7 +415,9 @@ export type DefinitionRecord = { definition_id: DefinitionId, provenance: Source
 
 export type OccurrenceRecord = { occurrence_id: OccurrenceId, definition_id: DefinitionId, pose: RigidPoseMm, };
 
-export type BedPosePreparation = { session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, original_pose: RigidPoseMm, pose: RigidPoseMm, envelope_mm: AabbMm, minimum_lower_mm: [number, number, number], minimum_upper_mm: [number, number, number], maximum_lower_mm: [number, number, number], maximum_upper_mm: [number, number, number], center_xy: boolean, contact_tolerance_mm: number, maximum_contact_gap_mm: number, };
+export type BedPoseBasis = { "kind": "native_bounded" } | { "kind": "tolerant_model", join_mm: number, profile_mm: number, };
+
+export type BedPosePreparation = { basis: BedPoseBasis, session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, original_pose: RigidPoseMm, pose: RigidPoseMm, envelope_mm: AabbMm, minimum_lower_mm: [number, number, number], minimum_upper_mm: [number, number, number], maximum_lower_mm: [number, number, number], maximum_upper_mm: [number, number, number], center_xy: boolean, contact_tolerance_mm: number, maximum_contact_gap_mm: number, };
 
 export type LayoutObjective = "arrange" | "copies" | "fill";
 
@@ -1219,4 +1221,5 @@ export const POSE_NORM_TOLERANCE = 0.0000000001 as const;
 export const NORMAL_NORM_TOLERANCE = 0.0001 as const;
 export const IMPORT_PROFILE = "step-native-trimmed-v2" as const;
 export const MESH_PROFILE = "mesh-trimmed-mm-0.05-v2" as const;
+export const MESH_PREVIEW_PROFILE = "mesh-tolerant-mm-0.05-v1" as const;
 export const SURFACE_IMAGE_MEDIA_TYPE = "image/x-portable-graymap" as const;

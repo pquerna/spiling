@@ -7,6 +7,7 @@
 //! certificates, and this module never creates a manufacturing face domain.
 
 mod audit;
+mod preview;
 mod singular;
 mod sweep;
 mod trim;
@@ -232,6 +233,9 @@ pub(crate) fn tessellate_with_work(
 ) -> Result<MeshArtifact, GeometryError> {
     check_cancel(cancel)?;
     budget.validate()?;
+    if profile == DisplayProfile::MeshTolerantMm005V1 {
+        return preview::tessellate(definition, cancel, budget, work, progress);
+    }
     let faces = definition.face_ids();
     if faces.is_empty() || faces.len() > MAX_NATIVE_FACES as usize {
         return Err(invalid(

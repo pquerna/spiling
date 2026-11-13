@@ -20,6 +20,7 @@ pub const KERNEL_NAME: &str = "solidcore";
 
 pub const IMPORT_PROFILE: &str = "step-native-trimmed-v2";
 pub const MESH_PROFILE: &str = "mesh-trimmed-mm-0.05-v2";
+pub const MESH_PREVIEW_PROFILE: &str = "mesh-tolerant-mm-0.05-v1";
 /// One immutable PTAC source object, matching its chunked representation bound.
 /// This is a storage/representation limit, never a live-memory allowance.
 /// The engine independently admits source/proof growth from current headroom.
@@ -1255,6 +1256,8 @@ impl SourceProvenance {
 pub enum DisplayProfile {
     #[serde(rename = "mesh-trimmed-mm-0.05-v2")]
     MeshTrimmedMm005V2,
+    #[serde(rename = "mesh-tolerant-mm-0.05-v1")]
+    MeshTolerantMm005V1,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

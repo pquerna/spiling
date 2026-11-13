@@ -483,6 +483,126 @@ fn placed_bounds_inner(
     )
 }
 
+/// Source support from complete native enclosures and independently feasible
+/// native boundary witnesses. Optional prepared chart covers remain exclusion
+/// only. This grants no manufacturing/trim admission capability.
+#[derive(Debug)]
+pub struct PlacedNativeSupport<'d> {
+    definition: &'d Definition,
+    pose: RigidPoseMm,
+    world_direction: [f64; 3],
+    policy: BoundsPolicy,
+    bounds: ProjectedBounds,
+}
+
+impl PlacedNativeSupport<'_> {
+    pub fn bounds(&self) -> ProjectedBounds {
+        self.bounds
+    }
+    pub fn definition_id(&self) -> &spiling_contracts::geometry::DefinitionId {
+        self.definition.id()
+    }
+    pub fn placed_pose(&self) -> RigidPoseMm {
+        self.pose
+    }
+    pub fn world_direction(&self) -> [f64; 3] {
+        self.world_direction
+    }
+    pub fn policy(&self) -> BoundsPolicy {
+        self.policy
+    }
+    pub fn is_compatible_with_definition(&self, definition: &Definition) -> bool {
+        std::ptr::eq(self.definition, definition)
+    }
+}
+
+/// Return a source-bound positive only when complete native exclusion and
+/// feasible incident points close BOTH endpoints at the requested accuracy.
+/// `None` leaves the consumer an explicit search or sampled placement; a box
+/// never supplies contact.
+/// The byte allowance excludes the caller's already retained definition.
+pub fn placed_native_support<'d>(
+    definition: &'d Definition,
+    pose: RigidPoseMm,
+    world_direction: [f64; 3],
+    policy: BoundsPolicy,
+    query_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<PlacedNativeSupport<'d>>, GeometryError> {
+    work.charge(1, cancel)?;
+    // Admit the coexisting frame, receipt and fixed evaluator scratch before
+    // borrowing coefficients or preparing optional source charts.
+    let scratch_bytes = std::mem::size_of::<PlacedBoundsFrame>()
+        + std::mem::size_of::<PlacedNativeSupport<'_>>()
+        + std::mem::size_of::<ProjectedBounds>()
+        + 16 * std::mem::size_of::<Interval>()
+        + std::mem::size_of::<crate::parametric::nurbs_eval::SurfaceTensor>()
+        + crate::parametric::PreparedValidatedCurve::scratch_bytes();
+    if scratch_bytes > query_byte_limit {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "native enclosure support exhausts query scratch capacity",
+        ));
+    }
+    let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
+    let source = super::bounds::native_enclosure_support(
+        definition,
+        frame.nominal,
+        frame.source_policy,
+        work,
+        cancel,
+    )?;
+    let source = match source {
+        Some(source) => source,
+        None => {
+            let preparation_bytes =
+                query_byte_limit.checked_sub(scratch_bytes).ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native support frame exceeds coexisting storage",
+                    )
+                })?;
+            let prepared = super::prepare_solid(definition, preparation_bytes, work, cancel)?;
+            let remaining = preparation_bytes
+                .checked_sub(prepared.retained_bytes())
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native boundary support exceeds coexisting storage",
+                    )
+                })?;
+            let Some(source) = super::bounds::native_chart_enclosure_support(
+                prepared.source_view()?,
+                frame.nominal,
+                frame.source_policy,
+                remaining,
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(None);
+            };
+            source
+        }
+    };
+    let bounds = match frame.finish(source, source_extent(definition)) {
+        Ok(bounds) => bounds,
+        // A coarse enclosure may amplify coefficient residuals too far. Only
+        // the full native search can improve those; never relax output policy.
+        Err(failure) if failure.code == GeometryErrorCode::ConditioningFailure => return Ok(None),
+        Err(failure) => return Err(failure),
+    };
+    work.charge(1, cancel)?;
+    Ok(Some(PlacedNativeSupport {
+        definition,
+        pose,
+        world_direction,
+        policy,
+        bounds,
+    }))
+}
+
 /// Complete native material support for one exact definition, material policy,
 /// pose and directional query. Terminal brackets are global native extrema.
 #[derive(Debug)]
@@ -2670,6 +2790,202 @@ mod tests {
             Some(0.0)
         };
         assert!(!material.is_compatible_with_definition(&definition));
+    }
+
+    #[test]
+    fn native_enclosure_support_binds_source_pose_and_closed_endpoints() {
+        let bytes = include_bytes!("../../../../fixtures/geometry/box-mm.step");
+        let definition = crate::from_step_bytes(bytes).unwrap();
+        let other = crate::from_step_bytes(bytes).unwrap();
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: SECTION_PLANE_TOLERANCE_MM,
+        };
+        let direction = [0.0, 0.0, 1.0];
+        // The second pose is accepted as near-unit, but its actual polynomial
+        // is not an exactly orthogonal transform. Preserve its residuals too.
+        for rotation_xyzw in [[0.0, 0.0, 0.0, 1.0], [0.6, 0.0, 0.0, 0.8]] {
+            let pose = RigidPoseMm {
+                rotation_xyzw,
+                translation_mm: [2.0, -3.0, 4.0],
+            };
+            let support = placed_native_support(
+                &definition,
+                pose,
+                direction,
+                policy,
+                crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+                &mut GeometryWorkBudget::query(),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+            .expect("native box extrema have incident vertex witnesses");
+            assert!(support.is_compatible_with_definition(&definition));
+            assert!(!support.is_compatible_with_definition(&other));
+            assert_eq!(support.definition_id(), definition.id());
+            assert_eq!(support.placed_pose(), pose);
+            assert_eq!(support.world_direction(), direction);
+            assert_eq!(
+                support.policy().maximum_endpoint_uncertainty_mm,
+                policy.maximum_endpoint_uncertainty_mm
+            );
+            let bounds = support.bounds();
+            for x in [0.0, 20.0] {
+                for y in [0.0, 10.0] {
+                    for z in [0.0, 8.0] {
+                        let [qx, qy, qz, qw] = rotation_xyzw;
+                        let height = z
+                            + 2.0
+                                * (qx * qx * -z
+                                    + qx * qw * y
+                                    + qy * qz * y
+                                    + qy * qw * -x
+                                    + qx * qz * x
+                                    - qy * qy * z)
+                            + pose.translation_mm[2];
+                        assert!(bounds.minimum[0] <= height);
+                        assert!(height <= bounds.maximum[1]);
+                    }
+                }
+            }
+            assert!(bounds.minimum[0] <= 4.0 && 4.0 <= bounds.minimum[1]);
+            assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
+        }
+    }
+
+    #[test]
+    fn native_enclosure_support_retains_cancellation_work_and_byte_admission() {
+        let definition =
+            crate::from_step_bytes(include_bytes!("../../../../fixtures/geometry/box-mm.step"))
+                .unwrap();
+        for (mut work, cancel, bytes, expected) in [
+            (
+                GeometryWorkBudget::new(0),
+                AtomicBool::new(false),
+                crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+                GeometryErrorCode::ResourceLimit,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(true),
+                crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+                GeometryErrorCode::Cancelled,
+            ),
+            (
+                GeometryWorkBudget::query(),
+                AtomicBool::new(false),
+                0,
+                GeometryErrorCode::ResourceLimit,
+            ),
+        ] {
+            assert_eq!(
+                placed_native_support(
+                    &definition,
+                    RigidPoseMm::IDENTITY,
+                    [0.0, 0.0, 1.0],
+                    BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: 1e-6
+                    },
+                    bytes,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn native_enclosure_support_leaves_curved_contact_to_native_search() {
+        let definition = super::super::test_source::original_definition(
+            super::super::test_source::sphere_belt(),
+        );
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 1e-5,
+        };
+        let cancel = AtomicBool::new(false);
+        let direction = [1.0, 1.0, 0.0];
+        let mut work = GeometryWorkBudget::query();
+        assert!(
+            placed_native_support(
+                &definition,
+                RigidPoseMm::IDENTITY,
+                direction,
+                policy,
+                crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none(),
+            "coarse enclosure corners and boundary vertices cannot supply spherical interior contact"
+        );
+        let support = placed_material_bounds(
+            &definition,
+            RigidPoseMm::IDENTITY,
+            direction,
+            policy,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .bounds();
+        assert!(support.minimum[0] <= -5.0 && -5.0 <= support.minimum[1]);
+        assert!(support.maximum[0] <= 5.0 && 5.0 <= support.maximum[1]);
+    }
+
+    #[test]
+    fn native_contact_exclusion_keeps_carriers_when_spatial_edges_lie_inward() {
+        let mut definition =
+            crate::from_step_bytes(include_bytes!("../../../../fixtures/geometry/box-mm.step"))
+                .unwrap();
+        let scale = 1.0 - 1e-9;
+        let kernel = crate::make_kernel_context();
+        for vertex in definition.brep.vertex_list().to_vec() {
+            let vertex = definition.brep.vertex_mut(vertex).unwrap();
+            vertex.point = vertex.point * scale;
+        }
+        for edge in definition.brep.edge_list().to_vec() {
+            definition
+                .brep
+                .edge_mut(edge)
+                .unwrap()
+                .curve
+                .as_mut()
+                .unwrap()
+                .transform(
+                    &kernel,
+                    &solidcore::geom::axis2_placement::Axis2Placement::default(),
+                    Some(solidcore::math::Vec3::new(scale, scale, scale)),
+                )
+                .unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let prepared = super::prepare_solid(
+            &definition,
+            crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+            &mut GeometryWorkBudget::query(),
+            &cancel,
+        )
+        .unwrap();
+        prepared.source_view().unwrap();
+        assert!(
+            placed_native_support(
+                &definition,
+                RigidPoseMm::IDENTITY,
+                [1.0, 0.0, 0.0],
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1e-8
+                },
+                crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
+                &mut GeometryWorkBudget::query(),
+                &cancel,
+            )
+            .unwrap()
+            .is_none(),
+            "inward spatial edges cannot bound the unchanged native carrier"
+        );
     }
 
     #[test]

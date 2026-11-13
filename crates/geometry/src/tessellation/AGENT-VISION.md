@@ -8,6 +8,12 @@ Licensed under the Open Software License version 3.0
 
 Produce disposable, bounded, source-face-mapped display meshes from one immutable native definition. The packed result belongs to the downstream display consumer; native geometry does not invent sessions, artifact identities, original parameter bindings or manufacturing domains.
 
+Ordinary display uses the explicitly tolerant preview profile: complete native
+face meshing, measured approximation, closed oriented incidence and independently
+checked packed buffers. It does not inherit exact coefficient certification or
+grant material authority. The trimmed profile below remains a separate exact
+diagnostic consumer rather than a prerequisite for seeing an admitted part.
+
 `solidcore-mesh` supplies candidates with actual native UV coordinates, shared edge vertices and face provenance. Independent coefficient bounds and topology audits decide publication. Whole triangle carrier transport and complete original trim displacement share the unchanged 0.025 mm native budget; float32 reconstruction has its separate 0.025 mm budget. Positive UV chains, cancelled interior incidence, simple closed circuits and original-loop bijections preserve holes rather than merely placing vertices near a carrier.
 
 An original source lacking a carrier-bound seam may still have an independently auditable display candidate. Its native inversion is a proposal only. Full edge-interval transport and triangle coverage do not restore an original STEP UV expression or give manufacturing authority. Conversely, import availability does not imply display certification: unresolved singular normals, crossed/degenerate charts, missing source incidence and exhausted work or bytes remain typed display failures, leaving the immutable source admitted.

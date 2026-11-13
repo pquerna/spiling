@@ -59,6 +59,15 @@ impl TryFrom<rpc::BedPosePreparation> for BedPosePreparation {
     type Error = String;
     fn try_from(value: rpc::BedPosePreparation) -> Result<Self, String> {
         let result = Self {
+            basis: match required(value.basis, "bed_pose.basis")? {
+                rpc::bed_pose_preparation::Basis::NativeBounded(_) => BedPoseBasis::NativeBounded,
+                rpc::bed_pose_preparation::Basis::TolerantModel(model) => {
+                    BedPoseBasis::TolerantModel {
+                        join_mm: model.join_mm,
+                        profile_mm: model.profile_mm,
+                    }
+                }
+            },
             session_id: SessionId::parse(value.session_id).map_err(|e| e.to_string())?,
             scene_revision: SceneRevision(value.scene_revision),
             project_revision: ProjectRevision(value.project_revision),
@@ -85,6 +94,18 @@ impl TryFrom<BedPosePreparation> for rpc::BedPosePreparation {
     fn try_from(value: BedPosePreparation) -> Result<Self, String> {
         value.validate().map_err(|error| error.to_string())?;
         Ok(Self {
+            basis: Some(match value.basis {
+                BedPoseBasis::NativeBounded => {
+                    rpc::bed_pose_preparation::Basis::NativeBounded(rpc::NativeBedBounds {})
+                }
+                BedPoseBasis::TolerantModel {
+                    join_mm,
+                    profile_mm,
+                } => rpc::bed_pose_preparation::Basis::TolerantModel(rpc::TolerantBedBounds {
+                    join_mm,
+                    profile_mm,
+                }),
+            }),
             session_id: value.session_id.into(),
             scene_revision: value.scene_revision.get(),
             project_revision: value.project_revision.0,
@@ -110,6 +131,7 @@ mod tests {
 
     fn exact_contact() -> rpc::BedPosePreparation {
         BedPosePreparation {
+            basis: BedPoseBasis::NativeBounded,
             session_id: SessionId::new(),
             scene_revision: SceneRevision(3),
             project_revision: ProjectRevision(7),
@@ -131,6 +153,28 @@ mod tests {
         }
         .try_into()
         .unwrap()
+    }
+
+    #[test]
+    fn bed_model_basis_is_required_and_never_promoted_to_native_evidence() {
+        let mut missing = exact_contact();
+        missing.basis = None;
+        assert!(BedPosePreparation::try_from(missing).is_err());
+        let mut sampled = exact_contact();
+        sampled.basis = Some(rpc::bed_pose_preparation::Basis::TolerantModel(
+            rpc::TolerantBedBounds {
+                join_mm: 0.01,
+                profile_mm: 0.01,
+            },
+        ));
+        assert!(matches!(
+            BedPosePreparation::try_from(sampled.clone()).unwrap().basis,
+            BedPoseBasis::TolerantModel { .. }
+        ));
+        if let Some(rpc::bed_pose_preparation::Basis::TolerantModel(model)) = &mut sampled.basis {
+            model.profile_mm = f64::NAN;
+        }
+        assert!(BedPosePreparation::try_from(sampled).is_err());
     }
 
     #[test]

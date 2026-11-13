@@ -865,7 +865,7 @@ impl Capacity {
         progress: &dyn Fn(String),
     ) -> Result<MeshArtifact, GeometryError> {
         let mesh = definition.display(
-            DisplayProfile::MeshTrimmedMm005V2,
+            DisplayProfile::MeshTolerantMm005V1,
             cancel,
             self.mesh,
             work,

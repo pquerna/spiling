@@ -17,11 +17,214 @@ use crate::{
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::{cmp::Ordering, collections::BinaryHeap, sync::atomic::AtomicBool};
 
-const MAX_LIVE_CELLS: usize = 131_072;
-const MAX_CREATED_CELLS: u64 = 2_000_000;
 pub(crate) use crate::compute::MAX_DIRECTIONAL_SCRATCH_BYTES as MAX_SCRATCH_ALLOCATION_BYTES;
 const MAX_DEPTH: u16 = 96;
 const MAX_BOUNDARY_PROBES: usize = 4096;
+
+/// Positive-only source support shortcut. The sole production constructor of
+/// `Definition` imports this complete native carrier/edge enclosure together
+/// with its immutable BREP. The box supplies exclusion only; incident boundary
+/// vertices of that same BREP independently supply both feasible endpoints.
+/// No scene/display box or tessellation is accepted by this query.
+pub(super) fn native_enclosure_support(
+    definition: &Definition,
+    direction: [f64; 3],
+    policy: BoundsPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<ProjectedBounds>, GeometryError> {
+    work.charge(1, cancel)?;
+    let direction = validate_query(direction, policy)?;
+    let enclosure = definition.bounds;
+    let outer = project(
+        std::array::from_fn(|axis| Interval {
+            lo: enclosure.min[axis],
+            hi: enclosure.max[axis],
+        }),
+        direction,
+    )?;
+    let mut witnesses = None;
+    let brep = definition.brep();
+    for &face in definition.face_ids() {
+        work.charge(1, cancel)?;
+        let face = brep
+            .face(face)
+            .map_err(|cause| error(GeometryErrorCode::InvalidGeometry, &cause.to_string()))?;
+        for &wire in &face.loops {
+            work.charge(1, cancel)?;
+            let wire = brep
+                .loop_(wire)
+                .map_err(|cause| error(GeometryErrorCode::InvalidGeometry, &cause.to_string()))?;
+            for entry in &wire.edges {
+                work.charge(1, cancel)?;
+                let edge = brep.edge(entry.edge).map_err(|cause| {
+                    error(GeometryErrorCode::InvalidGeometry, &cause.to_string())
+                })?;
+                for vertex in edge.vertices {
+                    work.charge(1, cancel)?;
+                    let point = brep
+                        .vertex(vertex)
+                        .map_err(|cause| {
+                            error(GeometryErrorCode::InvalidGeometry, &cause.to_string())
+                        })?
+                        .point;
+                    include_witness(
+                        &mut witnesses,
+                        project([point.x, point.y, point.z].map(Interval::point), direction)?,
+                    );
+                }
+                if let Some(curve) = &edge.curve {
+                    for fraction in [0.25, 0.5, 0.75] {
+                        let parameter = edge.interval.evaluate(fraction);
+                        let point = parametric::CurveEvaluator::tensor(
+                            curve,
+                            [parameter, parameter],
+                            0,
+                            work,
+                            cancel,
+                        )?[0];
+                        include_witness(&mut witnesses, project(point, direction)?);
+                    }
+                }
+            }
+        }
+    }
+    let Some(witnesses) = witnesses else {
+        return Ok(None);
+    };
+    let mut bounds = ProjectedBounds {
+        minimum: [outer.lo, witnesses.minimum[1]],
+        maximum: [witnesses.maximum[0], outer.hi],
+        achieved_uncertainty_mm: 0.0,
+    };
+    bounds.achieved_uncertainty_mm = uncertainty(&bounds);
+    Ok((bounds.minimum[0] <= bounds.minimum[1]
+        && bounds.maximum[0] <= bounds.maximum[1]
+        && bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm)
+        .then_some(bounds))
+}
+
+fn include_witness(aggregate: &mut Option<ProjectedBounds>, height: Interval) {
+    let point = ProjectedBounds {
+        minimum: [height.lo, height.hi],
+        maximum: [height.lo, height.hi],
+        achieved_uncertainty_mm: 0.0,
+    };
+    *aggregate = Some(match *aggregate {
+        Some(previous) => ProjectedBounds {
+            minimum: [
+                previous.minimum[0].min(height.lo),
+                previous.minimum[1].min(height.hi),
+            ],
+            maximum: [
+                previous.maximum[0].max(height.lo),
+                previous.maximum[1].max(height.hi),
+            ],
+            achieved_uncertainty_mm: 0.0,
+        },
+        None => point,
+    });
+}
+
+pub(super) fn native_chart_enclosure_support(
+    source: MaterialSourceView<'_, '_>,
+    direction: [f64; 3],
+    policy: BoundsPolicy,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<ProjectedBounds>, GeometryError> {
+    let direction = validate_query(direction, policy)?;
+    let mut outer: Option<Interval> = None;
+    let mut witnesses = None;
+    let trims = source.trim_source();
+    for ordinal in 0..source.definition().face_ids().len() {
+        work.charge(1, cancel)?;
+        let trim = trims.face_domain(ordinal).ok_or_else(|| {
+            error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "native support omitted a trim domain",
+            )
+        })?;
+        if !trim.is_native_material() || trim.coedges().is_empty() {
+            return Ok(None);
+        }
+        let PreparedTrimSurface::Native(surface) = trim.surface_operand() else {
+            return Ok(None);
+        };
+        let uv = trim.support_uv_cover(work, cancel)?;
+        let [functional] = parametric::surface_functional_enclosures(
+            surface,
+            uv,
+            &[parametric::SurfaceFunctional {
+                direction,
+                origin: [Interval::point(0.0); 3],
+                offset: Interval::point(0.0),
+            }],
+            work,
+            cancel,
+        )?;
+        let cartesian = parametric::surface_position_enclosure(surface, uv, work, cancel)?;
+        let height = intersect(functional.position, project(cartesian, direction)?)?;
+        outer = Some(outer.map_or(height, |previous| previous.hull(height)));
+        for (index, coedge) in trim.coedges().iter().enumerate() {
+            for vertex in coedge.vertices {
+                let point = trims
+                    .native_vertex_point(vertex, work, cancel)?
+                    .map(Interval::point);
+                let height = project(point, direction)?;
+                outer = Some(outer.map_or(height, |previous| previous.hull(height)));
+                include_witness(&mut witnesses, height);
+            }
+            let range = coedge.oriented_native_range();
+            let range = [range[0].min(range[1]), range[0].max(range[1])];
+            trim.with_native_spatial_curve(
+                index,
+                remaining_bytes,
+                work,
+                cancel,
+                |curve, work, cancel| {
+                    let height = match parametric::native_curve_functional_control_bounds(
+                        curve,
+                        range,
+                        direction,
+                        Interval::point(0.0),
+                        work,
+                        cancel,
+                    )? {
+                        Some(height) => height,
+                        None => project(curve.tensor(range, 0, work, cancel)?[0], direction)?,
+                    };
+                    outer = Some(outer.map_or(height, |previous| previous.hull(height)));
+                    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                        let parameter = range[0] + (range[1] - range[0]) * fraction;
+                        let point = curve.tensor([parameter, parameter], 0, work, cancel)?[0];
+                        include_witness(&mut witnesses, project(point, direction)?);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    let (Some(outer), Some(witnesses)) = (outer, witnesses) else {
+        return Ok(None);
+    };
+    let mut bounds = ProjectedBounds {
+        minimum: [outer.lo, witnesses.minimum[1]],
+        maximum: [witnesses.maximum[0], outer.hi],
+        achieved_uncertainty_mm: 0.0,
+    };
+    bounds.achieved_uncertainty_mm = uncertainty(&bounds);
+    Ok((bounds.minimum[0] <= bounds.minimum[1]
+        && bounds.maximum[0] <= bounds.maximum[1]
+        && bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm)
+        .then_some(bounds))
+}
+
+fn include_exclusion(aggregate: &mut ProjectedBounds, height: Interval) {
+    aggregate.minimum[0] = aggregate.minimum[0].min(height.lo);
+    aggregate.maximum[1] = aggregate.maximum[1].max(height.hi);
+}
 
 /// Enclose the minimum and maximum of mathematically normalized `direction`
 /// on the native, literally trimmed authoring faces. This is not material proof.
@@ -222,6 +425,32 @@ fn native_projected_bounds(
     };
     let definition = source.definition();
     let mut aggregate: Option<ProjectedBounds> = None;
+    // Collect the complete cheap feasible set before refining any face/edge.
+    // Contact witnesses on late faces must prune earlier noncontact carriers.
+    for ordinal in 0..definition.face_ids().len() {
+        work.charge(1, cancel)?;
+        let trim = source.face_domain(ordinal).ok_or_else(|| {
+            error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "native directional source omitted a face trim domain",
+            )
+        })?;
+        if trim.is_native_material() {
+            for coedge in trim.coedges() {
+                for vertex in coedge.vertices {
+                    include_witness(
+                        &mut aggregate,
+                        project(
+                            source
+                                .native_vertex_point(vertex, work, cancel)?
+                                .map(Interval::point),
+                            direction,
+                        )?,
+                    );
+                }
+            }
+        }
+    }
     for ordinal in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
         let trim = source.face_domain(ordinal).ok_or_else(|| {
@@ -233,35 +462,6 @@ fn native_projected_bounds(
         if trim.is_native_material() {
             for (index, coedge) in trim.coedges().iter().enumerate() {
                 work.charge(1, cancel)?;
-                // Native topology owns its spatial boundary and vertices.
-                // They are feasible material points, not original-STEP witnesses.
-                for vertex in coedge.vertices {
-                    let height = project(
-                        source
-                            .native_vertex_point(vertex, work, cancel)?
-                            .map(Interval::point),
-                        direction,
-                    )?;
-                    let point = ProjectedBounds {
-                        minimum: [height.lo, height.hi],
-                        maximum: [height.lo, height.hi],
-                        achieved_uncertainty_mm: height.hi - height.lo,
-                    };
-                    aggregate = Some(match aggregate {
-                        Some(previous) => ProjectedBounds {
-                            minimum: [
-                                previous.minimum[0].min(point.minimum[0]),
-                                previous.minimum[1].min(point.minimum[1]),
-                            ],
-                            maximum: [
-                                previous.maximum[0].max(point.maximum[0]),
-                                previous.maximum[1].max(point.maximum[1]),
-                            ],
-                            achieved_uncertainty_mm: 0.0,
-                        },
-                        None => point,
-                    });
-                }
                 let range = coedge.oriented_native_range();
                 let range = [range[0].min(range[1]), range[0].max(range[1])];
                 // The borrowed native adapter allocates no heap. Its evaluator
@@ -272,16 +472,26 @@ fn native_projected_bounds(
                         let control_support = parametric::native_curve_functional_control_bounds(
                             curve, range, direction, Interval::point(0.0), work, cancel,
                         )?;
-                        search_domains(
+                        if let (Some(height), Some(mut seed)) = (control_support, aggregate)
+                            && resolved_by_feasible_extrema(height, seed.minimum[1], seed.maximum[0], tolerance)
+                        {
+                            include_exclusion(&mut seed, height);
+                            return Ok(seed);
+                        }
+                        search_domains_with_feasible_extrema(
                             std::iter::once([range, [0.0, 0.0]]),
                             1, tolerance, aggregate, &mut scratch, work, cancel,
-                            |cell, work, cancel| {
-                                let jet = curve.tensor(cell[0], 1, work, cancel)?;
-                                let height = project(jet[0], direction)?;
-                                let height = match control_support {
-                                    Some(control) => intersect(height, control)?,
-                                    None => height,
+                            |cell, work, cancel, feasible| {
+                                let coarse = project(curve.tensor(cell[0], 0, work, cancel)?[0], direction)?;
+                                let coarse = match control_support {
+                                    Some(control) => intersect(coarse, control)?,
+                                    None => coarse,
                                 };
+                                if resolved_by_feasible_extrema(coarse, feasible[0], feasible[1], tolerance) {
+                                    return Ok(Some(Evaluation { height: coarse, witness: None, split_axis: 0 }));
+                                }
+                                let jet = curve.tensor(cell[0], 1, work, cancel)?;
+                                let height = intersect(project(jet[0], direction)?, coarse)?;
                                 let middle = cell[0][0] * 0.5 + cell[0][1] * 0.5;
                                 let witness = project(curve.tensor([middle, middle], 0, work, cancel)?[0], direction)?;
                                 let delta = Interval {
@@ -312,6 +522,28 @@ fn native_projected_bounds(
         };
         let before = work.consumed();
         let uv = trim.support_uv_cover(work, cancel)?;
+        // Order-zero complete carrier bounds can exclude a noncontact face
+        // before tensor derivatives, boundary searches or trim classification.
+        // Conditioning at this coarse scale still falls through to refinement.
+        if let Some(mut seed) = aggregate {
+            match parametric::surface_position_enclosure(surface, uv, work, cancel) {
+                Ok(position) => {
+                    let height = project(position, direction)?;
+                    if resolved_by_feasible_extrema(
+                        height,
+                        seed.minimum[1],
+                        seed.maximum[0],
+                        tolerance,
+                    ) {
+                        include_exclusion(&mut seed, height);
+                        aggregate = Some(seed);
+                        continue;
+                    }
+                }
+                Err(failure) if failure.code == GeometryErrorCode::ConditioningFailure => {}
+                Err(failure) => return Err(failure),
+            }
+        }
         if trim.is_native_material()
             && trim.carrier_is_c1()
             && !trim.loops().is_empty()
@@ -470,9 +702,18 @@ fn native_projected_bounds(
         // extrema of every noncontact face. Each new face still has its complete
         // coefficient/trim cover searched; the seed never clips its enclosures
         // or supplies a feasible point on that particular face.
-        let support = search_domains(
+        let support = search_domains_with_feasible_extrema(
             boxes, 2, tolerance, aggregate, &mut scratch, work, cancel,
-            |cell, work, cancel| {
+            |cell, work, cancel, feasible| {
+                let position = parametric::surface_position_enclosure(surface, cell, work, cancel)?;
+                let coarse = project(position, direction)?;
+                if resolved_by_feasible_extrema(coarse, feasible[0], feasible[1], tolerance) {
+                    return Ok(Some(Evaluation {
+                        height: coarse,
+                        witness: None,
+                        split_axis: 0,
+                    }));
+                }
                 // Enclose the complete coefficient sheet before asking whether
                 // its trimmed subset can furnish contact. Prior source points
                 // may already exclude the whole sheet from global extrema.
@@ -486,12 +727,8 @@ fn native_projected_bounds(
                     }],
                     work, cancel,
                 )?;
-                let height = enclosure.position;
-                if aggregate.is_some_and(|seed| {
-                    resolved_by_feasible_extrema(
-                        height, seed.minimum[1], seed.maximum[0], tolerance,
-                    )
-                }) {
+                let height = intersect(enclosure.position, coarse)?;
+                if resolved_by_feasible_extrema(height, feasible[0], feasible[1], tolerance) {
                     return Ok(Some(Evaluation {
                         height,
                         witness: None,
@@ -529,11 +766,7 @@ fn native_projected_bounds(
                 let height = intersect(height, centered)?;
                 let split_axis = usize::from(du.abs_upper() * width(cell[0])
                     < dv.abs_upper() * width(cell[1]));
-                if aggregate.is_some_and(|seed| {
-                    resolved_by_feasible_extrema(
-                        height, seed.minimum[1], seed.maximum[0], tolerance,
-                    )
-                }) {
+                if resolved_by_feasible_extrema(height, feasible[0], feasible[1], tolerance) {
                     return Ok(Some(Evaluation {
                         height,
                         witness: None,
@@ -674,7 +907,6 @@ impl Ord for Cell {
 
 struct Scratch {
     cells: BinaryHeap<Cell>,
-    created: u64,
     allocated_bytes: usize,
     byte_limit: usize,
 }
@@ -682,7 +914,6 @@ impl Default for Scratch {
     fn default() -> Self {
         Self {
             cells: BinaryHeap::new(),
-            created: 0,
             allocated_bytes: 0,
             byte_limit: MAX_SCRATCH_ALLOCATION_BYTES,
         }
@@ -696,18 +927,16 @@ impl Scratch {
         cancel: &AtomicBool,
     ) -> Result<(), GeometryError> {
         work.charge(1, cancel)?;
-        if self.created >= MAX_CREATED_CELLS || self.cells.len() >= MAX_LIVE_CELLS {
-            return Err(error(
-                GeometryErrorCode::ResourceLimit,
-                "directional subdivision cell cap exhausted",
-            ));
-        }
         if self.cells.len() == self.cells.capacity() {
-            let additional = self
-                .cells
-                .capacity()
-                .max(16)
-                .min(MAX_LIVE_CELLS - self.cells.len());
+            let available_cells =
+                self.byte_limit.saturating_sub(self.allocated_bytes) / std::mem::size_of::<Cell>();
+            if available_cells == 0 {
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "directional scratch allocation cap exhausted",
+                ));
+            }
+            let additional = self.cells.capacity().max(16).min(available_cells);
             let bytes = additional
                 .checked_mul(std::mem::size_of::<Cell>())
                 .and_then(|bytes| self.allocated_bytes.checked_add(bytes))
@@ -738,7 +967,6 @@ impl Scratch {
                 ));
             }
         }
-        self.created += 1;
         self.cells.push(cell);
         Ok(())
     }
@@ -765,7 +993,7 @@ fn search_domains(
         &AtomicBool,
     ) -> Result<Option<Evaluation>, GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
-    search_domains_with_query_scratch(
+    search_domains_with_feasible_extrema(
         domains,
         dimensions,
         tolerance,
@@ -779,9 +1007,9 @@ fn search_domains(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "The evaluator receives its independently admitted scratch while the search retains its own domains, seed and convergence policy"
+    reason = "The evaluator receives current feasible extrema while the search retains its domains, seed and convergence policy"
 )]
-fn search_domains_with_query_scratch(
+fn search_domains_with_feasible_extrema(
     domains: impl Iterator<Item = [[f64; 2]; 2]>,
     dimensions: usize,
     tolerance: f64,
@@ -793,7 +1021,7 @@ fn search_domains_with_query_scratch(
         [[f64; 2]; 2],
         &mut GeometryWorkBudget,
         &AtomicBool,
-        usize,
+        [f64; 2],
     ) -> Result<Option<Evaluation>, GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
     scratch.cells.clear();
@@ -819,13 +1047,15 @@ fn search_domains_with_query_scratch(
     let mut outer_max = seed.map_or(f64::NEG_INFINITY, |value| value.maximum[1]);
     while let Some(cell) = scratch.cells.pop() {
         work.charge(1, cancel)?;
+        // A parent enclosure is still complete for this child. Newly found
+        // feasible points can now exclude queued cells without reevaluation.
+        if resolved_by_feasible_extrema(cell.ancestor, feasible_min, feasible_max, tolerance) {
+            outer_min = outer_min.min(cell.ancestor.lo);
+            outer_max = outer_max.max(cell.ancestor.hi);
+            continue;
+        }
         let mut conditioning = false;
-        let evaluation = match evaluate(
-            cell.uv,
-            work,
-            cancel,
-            scratch.byte_limit - scratch.allocated_bytes,
-        ) {
+        let evaluation = match evaluate(cell.uv, work, cancel, [feasible_min, feasible_max]) {
             Ok(None) => continue,
             Ok(Some(mut value)) => {
                 value.height = intersect(value.height, cell.ancestor)?;
@@ -1069,6 +1299,36 @@ mod tests {
         let bounds = receipt.bounds();
         assert!(bounds.minimum[0] <= -5.0 && -5.0 <= bounds.minimum[1]);
         assert!(bounds.maximum[0] <= 5.0 && 5.0 <= bounds.maximum[1]);
+    }
+
+    #[test]
+    fn native_support_is_independent_of_contact_face_order() {
+        let mut definition =
+            crate::from_step_bytes(include_bytes!("../../../../fixtures/geometry/box-mm.step"))
+                .unwrap();
+        let cancel = AtomicBool::new(false);
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 1e-5,
+        };
+        // The opposite cap's incident vertices occur later in either order.
+        // Both endpoint witnesses must be available before local refinement.
+        for _ in 0..2 {
+            let bounds = material_projected_bounds(
+                &definition,
+                [0.0, 0.0, 1.0],
+                policy,
+                &mut GeometryWorkBudget::query(),
+                &cancel,
+            )
+            .unwrap()
+            .bounds();
+            assert!(bounds.minimum[0] <= 0.0 && 0.0 <= bounds.minimum[1]);
+            assert!(bounds.maximum[0] <= 8.0 && 8.0 <= bounds.maximum[1]);
+            definition.face_ids.reverse();
+            definition.face_step_ids.reverse();
+            definition.face_surface_maps.reverse();
+            definition.faces.reverse();
+        }
     }
 
     #[test]
@@ -1419,6 +1679,43 @@ mod tests {
         assert!(result.minimum[0] <= 0.75 && result.minimum[1] >= 0.75);
         assert!(result.minimum[0] > 0.74);
         assert!(result.maximum[0] <= 1.0 && result.maximum[1] >= 1.0);
+    }
+
+    #[test]
+    fn trimmed_hole_excludes_the_carriers_interior_maximum() {
+        // h=2-u²-v² on a square with its central radius-1/2 disk removed.
+        // The carrier peaks at 2, but actual trimmed material peaks at 7/4.
+        let bounds = search(
+            [[-1.0, 1.0]; 2],
+            2,
+            0.001,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::query(),
+            &AtomicBool::new(false),
+            |cell, _, _| {
+                let [u, v] = cell.map(|span| Interval {
+                    lo: span[0],
+                    hi: span[1],
+                });
+                let radius_squared = u.square().add(v.square());
+                if radius_squared.hi < 0.25 {
+                    return Ok(None);
+                }
+                let point_radius = Interval::point(u.mid())
+                    .square()
+                    .add(Interval::point(v.mid()).square());
+                Ok(Some(Evaluation {
+                    height: Interval::point(2.0).sub(radius_squared),
+                    witness: (point_radius.lo >= 0.25)
+                        .then_some(Interval::point(2.0).sub(point_radius)),
+                    split_axis: usize::from(u.width() < v.width()),
+                }))
+            },
+        )
+        .unwrap();
+        assert!(bounds.minimum[0] <= 0.0 && 0.0 <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= 1.75 && 1.75 <= bounds.maximum[1]);
+        assert!(bounds.achieved_uncertainty_mm <= 0.001);
     }
 
     #[test]

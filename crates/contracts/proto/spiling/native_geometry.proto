@@ -50,6 +50,8 @@ message PrepareBedPoseRequest {
   bool center_xy = 9;
   double contact_tolerance_mm = 10;
 }
+message NativeBedBounds {}
+message TolerantBedBounds { double join_mm = 1; double profile_mm = 2; }
 message BedPosePreparation {
   string session_id = 1;
   uint32 scene_revision = 2;
@@ -66,6 +68,7 @@ message BedPosePreparation {
   bool center_xy = 13;
   double contact_tolerance_mm = 14;
   double maximum_contact_gap_mm = 15;
+  oneof basis { NativeBedBounds native_bounded = 16; TolerantBedBounds tolerant_model = 17; }
 }
 message GeometryRequest {
   oneof command {
@@ -120,7 +123,7 @@ message ArtifactPage {
   repeated Artifact resources = 5;
 }
 enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; MICROMETRE = 4; CENTIMETRE = 5; FOOT = 6; }
-enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; }
+enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; MESH_TOLERANT_MM_005_V1 = 3; }
 message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; }
 message NormalizedSource { string hash = 1; MeshSourceFormat format = 2; string selector = 3; repeated ImportFinding findings = 4; string object_name = 5; }
 enum MeshSourceFormat { MESH_SOURCE_FORMAT_UNSPECIFIED = 0; STL = 1; THREE_MF = 2; }
