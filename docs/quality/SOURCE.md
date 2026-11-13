@@ -24,3 +24,8 @@ The repository must remain inexpensively and conveniently accessible while that 
 The desktop displays the complete license offline and requires explicit assent before entering the workbench. The acknowledgement is local and versioned; it is not telemetry or a copyright assignment. CLI diagnostics are developer tools; a public CLI distribution must be accompanied by a documented recipient-assent procedure suited to its distribution channel. No B0 development smoke establishes legal compliance for every deployment.
 
 Before release, confirm source availability, notices, dependency licensing, the recipient-assent mechanism, platform signing/install behavior and the hardware support matrix. Record a prominent modification attribution when distributing a derivative of an existing Original Work. Seek qualified review where obligations or compatibility are uncertain.
+
+The target LLVM build-helper adaptation is an attributed snapshot under
+`vendor/tracel-llvm-bundler`, with original MIT/Apache notices and exact archive
+provenance in `UPSTREAM.toml`. Apple SDKs and privately provisioned macOS toolchains
+are development prerequisites and are not included in this repository or source archives.

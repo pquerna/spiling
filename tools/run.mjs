@@ -20,12 +20,16 @@ import { dirname, join, resolve, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { collectCatalogProvenance } from "./material-catalogs.mjs";
+import { macosCommand, macosApp, writeMacosMetadata, auditMachO } from "./macos.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binSuffix = process.platform === "win32" ? ".exe" : "";
 const cargoTarget = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 const environment = {
   ...process.env,
+  ...(process.platform === "darwin"
+    ? { MACOSX_DEPLOYMENT_TARGET: macosApp.minimumSystemVersion }
+    : {}),
   PATH: `${join(homedir(), ".cargo", "bin")}${delimiter}${process.env.PATH}`,
   CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "1",
   RUST_TEST_THREADS: process.env.RUST_TEST_THREADS ?? "1",
@@ -294,6 +298,12 @@ async function provenance() {
     join(root, "vendor", "cpp_map", "UPSTREAM.toml"),
     join(cppMapNotices, "UPSTREAM.toml"),
   );
+  const llvmNotices = join(directory, "third-party", "source", "tracel-llvm-bundler");
+  await copyNotices(join(root, "vendor", "tracel-llvm-bundler"), llvmNotices);
+  await copyFile(
+    join(root, "vendor", "tracel-llvm-bundler", "UPSTREAM.toml"),
+    join(llvmNotices, "UPSTREAM.toml"),
+  );
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;
   const lockHashes = {};
@@ -363,6 +373,10 @@ async function bootstrap() {
 }
 
 async function packageNative() {
+  if (process.platform === "darwin" && process.arch !== "arm64")
+    throw new Error(
+      "macOS packaging requires Apple Silicon; Intel and universal output are not supported",
+    );
   // A package always has an exactly recoverable source tree. Never silently
   // attribute dirty binaries to HEAD or archive private/untracked workspace data.
   if (await run("git", ["status", "--porcelain"], { capture: true }))
@@ -399,14 +413,9 @@ async function packageNative() {
     "HEAD",
   ]);
   if (process.platform === "darwin") {
-    await writeFile(
-      join(app, "Info.plist"),
-      `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleExecutable</key><string>spiling-workbench</string><key>CFBundleIdentifier</key><string>org.spiling.workbench</string><key>CFBundleName</key><string>Spiling</string><key>CFBundleVersion</key><string>0.1.0</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIconFile</key><string>icon.icns</string><key>NSHighResolutionCapable</key><true/></dict></plist>
-`,
-    );
-    await copyFile(join(resources, "icons", "icon.icns"), join(resources, "icon.icns"));
+    for (const bin of ["spiling-workbench", "spiling-engine", "spiling-cli"])
+      await auditMachO(join(binaries, bin));
+    await writeMacosMetadata(app, "0.1.0");
   }
   await run("tar", ["-czf", join(output, `${name}.tar.gz`), "-C", output, name]);
   if (process.platform === "linux") {
@@ -732,6 +741,9 @@ async function main() {
     case "build":
       await contracts(true);
       await nativeBuild();
+      break;
+    case "macos":
+      await macosCommand(process.argv.slice(3), { run, root, cargoTarget });
       break;
     case "package":
       await packageNative();

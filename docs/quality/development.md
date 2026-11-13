@@ -857,12 +857,23 @@ macOS input/assistive stacks require separate evidence. Default fonts do not cov
 all CJK glyphs. AccessKit support is enabled, but full IME, mixed-direction text,
 screen-reader and mixed-DPI behavior remain unqualified.
 
+## macOS development and Linux cross-builds
+
+[`tools/macos/README.md`](../../tools/macos/README.md) owns ARM64 native Mac and
+Linux development cross-build setup. `pnpm macos doctor|check-core|build|bundle`
+keeps normal host Cargo behavior and builds the adjacent workbench/engine/CLI in
+the dev profile. Linux needs a privately provisioned Apple SDK, OSXCross and
+matching target LLVM link metadata; SDK-independent core checks are a narrower
+surface. Development `.app` bundles are audited, unsigned local test artifacts.
+A Mac must exercise the produced layout; signing/notarization and release DMGs
+remain a separate Mac-builder qualification.
+
 ## Packaging, CI and recording results
 
 `pnpm package` refuses a dirty worktree, checks contract drift, builds release
 engine/workbench/CLI once with default features (inspection off), and collects
 notices. `CARGO_TARGET_DIR/release/bundle/` contains a target-named portable
-`.tar.gz`; Linux additionally gets a `.deb`. macOS uses a `.app` inside the archive;
+`.tar.gz`; Linux additionally gets a `.deb`. ARM64 macOS uses the shared audited `.app` metadata inside the archive;
 Windows gets adjacent `.exe` files. Windows/macOS builds, signing, notarization,
 installers, associations and upgrade behavior are not qualified by Linux evidence.
 

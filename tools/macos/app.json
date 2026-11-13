@@ -1,0 +1,10 @@
+{
+  "name": "Spiling",
+  "identifier": "org.spiling.workbench",
+  "executable": "spiling-workbench",
+  "binaries": ["spiling-workbench", "spiling-engine", "spiling-cli"],
+  "minimumSystemVersion": "13.0",
+  "target": "aarch64-apple-darwin",
+  "llvmVersion": "23.1.0",
+  "llvmBundleVersion": "23.1.0-4"
+}

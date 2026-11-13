@@ -7545,8 +7545,6 @@ dependencies = [
 [[package]]
 name = "tracel-llvm-bundler"
 version = "23.1.0-4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da7f3434b87c37611d7298bbf08e0dd47da5a43f3aadf36163b02d77eb01c157"
 dependencies = [
  "anyhow",
  "bytes",

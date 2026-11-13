@@ -1,0 +1,8 @@
+name = "tracel-llvm-bundler"
+version = "23.1.0-4"
+repository = "https://github.com/tracel-ai/tracel-llvm"
+revision = "7835ab2b080e1a13c40506f2f6b9d44de398c600"
+registry_archive_sha256 = "da7f3434b87c37611d7298bbf08e0dd47da5a43f3aadf36163b02d77eb01c157"
+license = "MIT OR Apache-2.0"
+adapter_license = "OSL-3.0"
+changes = "Explicit Darwin cross-build target LLVM prefix and captured link queries; native bundle provisioning retained."

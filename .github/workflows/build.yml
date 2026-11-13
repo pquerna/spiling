@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.platform == 'all' && '["ubuntu-24.04","macos-14","windows-2022"]' || inputs.platform == 'macos' && '["macos-14"]' || inputs.platform == 'windows' && '["windows-2022"]' || '["ubuntu-24.04"]') }}
+        os: ${{ fromJSON(inputs.platform == 'all' && '["ubuntu-24.04","macos-15","windows-2022"]' || inputs.platform == 'macos' && '["macos-15"]' || inputs.platform == 'windows' && '["windows-2022"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -50,6 +50,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Check contract drift before packaging
         run: pnpm contracts --check
+      - name: Require Apple Silicon for macOS packaging
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
       - name: Build release once and bundle selected platform
         run: pnpm package
       - name: Upload development package and provenance

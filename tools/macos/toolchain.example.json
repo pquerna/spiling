@@ -1,0 +1,13 @@
+{
+  "target": "aarch64-apple-darwin",
+  "osxcrossRevision": "00bbf6b090a1f5fd8710adfe5d7da56da8282f96",
+  "sdkArchiveSha256": "REPLACE_WITH_VERIFIED_PRIVATE_SDK_ARCHIVE_SHA256",
+  "sdkVersion": "REPLACE_WITH_SDK_SETTINGS_VERSION",
+  "sdk": "/private/macos/osxcross/target/SDK/MacOSXVERSION.sdk",
+  "cc": "/private/macos/osxcross/target/bin/arm64-apple-darwinVERSION-clang",
+  "cxx": "/private/macos/osxcross/target/bin/arm64-apple-darwinVERSION-clang++",
+  "ar": "/private/macos/osxcross/target/bin/arm64-apple-darwinVERSION-ar",
+  "ranlib": "/private/macos/osxcross/target/bin/arm64-apple-darwinVERSION-ranlib",
+  "llvmPrefix": "/private/macos/tracel-llvm-23.1.0-4",
+  "llvmConfig": "/private/macos/mac-llvm-queries"
+}

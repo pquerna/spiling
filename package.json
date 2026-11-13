@@ -16,6 +16,7 @@
     "bench:slice": "node tools/run.mjs bench:slice",
     "bench:open": "node tools/run.mjs bench:open",
     "package": "node tools/run.mjs package",
+    "macos": "node tools/run.mjs macos",
     "contracts": "node tools/run.mjs contracts",
     "build": "node tools/run.mjs build",
     "smoke:cli": "node tools/run.mjs smoke:cli",

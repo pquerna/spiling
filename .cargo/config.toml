@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+
+# Explicit dev builds; ordinary Cargo commands retain the native host target.
+# On Linux use `pnpm macos build` to apply the private cross toolchain environment.
+[alias]
+mac-arm = "build --locked --target aarch64-apple-darwin -p spiling-workbench -p spiling-engine -p spiling-cli"
