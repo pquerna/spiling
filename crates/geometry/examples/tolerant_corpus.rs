@@ -89,8 +89,11 @@ fn report(
         z += 0.2;
     }
     println!(
-        "{name:44} layers ok {ok:4} refused {refused:3} loops {loops:6} joined gaps {gaps:4} max gap {max_gap:.5} mm failed faces {} | mesh {:.2}s total {:.2}s {}",
+        "{name:44} layers ok {ok:4} refused {refused:3} loops {loops:6} joined gaps {gaps:4} max gap {max_gap:.5} mm failed faces {} conformed {} ({:.1e} mm) open edges {} | mesh {:.2}s total {:.2}s {}",
         model.failed_faces,
+        model.conformed.vertices,
+        model.conformed.max_offset_mm,
+        model.open_edges().len(),
         built.as_secs_f64(),
         started.elapsed().as_secs_f64(),
         first_refusal

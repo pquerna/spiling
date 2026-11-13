@@ -20,8 +20,10 @@
 //! validated, oriented and nested on the result; nothing here is a proof, and
 //! the measured gaps and dropped slivers are reported.
 
+mod conform;
 mod exact;
 mod support;
+pub use conform::Conformed;
 pub use exact::SectionCircle;
 pub use support::{TolerantSupportPiece, TolerantSupportProjection, TolerantVoidProjection};
 
@@ -98,6 +100,37 @@ pub struct TolerantModel {
     support_enclosure_mm: f64,
     /// Source faces the mesher could not tessellate; their area is missing.
     pub failed_faces: usize,
+    /// Open mesh edges split to share a neighbouring face's crossing vertex.
+    pub conformed: Conformed,
+}
+
+/// Exact coordinate welding restores shared mesh-edge identity without
+/// moving geometry or applying an unrecorded repair tolerance. Reuses the
+/// position allocation in place.
+fn weld(positions: &mut Vec<[f64; 3]>, triangles: &mut [[u32; 3]]) {
+    let mut vertices = HashMap::new();
+    let mut remap = Vec::with_capacity(positions.len());
+    let mut unique = 0;
+    for index in 0..positions.len() {
+        let point = positions[index];
+        let key = point.map(|v| {
+            if v == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                v.to_bits()
+            }
+        });
+        let id = *vertices.entry(key).or_insert_with(|| {
+            positions[unique] = point;
+            unique += 1;
+            (unique - 1) as u32
+        });
+        remap.push(id);
+    }
+    positions.truncate(unique);
+    for triangle in triangles.iter_mut() {
+        *triangle = triangle.map(|v| remap[v as usize]);
+    }
 }
 
 fn unavailable(message: impl Into<String>) -> GeometryError {
@@ -168,7 +201,7 @@ impl TolerantModel {
                 "tolerant tessellation cancelled",
             ));
         }
-        let positions: Vec<[f64; 3]> = mesh.positions.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let mut positions: Vec<[f64; 3]> = mesh.positions.iter().map(|p| [p.x, p.y, p.z]).collect();
         let mut faces = Vec::with_capacity(mesh.triangle_faces.len());
         for face in &mesh.triangle_faces {
             let ordinal = definition
@@ -189,15 +222,26 @@ impl TolerantModel {
                     .and_then(exact::Implicit::from_analytic)
             })
             .collect();
-        Ok(Self::indexed(
+        let mut triangles = mesh.triangles;
+        weld(&mut positions, &mut triangles);
+        let conformed = conform::conform(
+            &positions,
+            &mut triangles,
+            &mut faces,
+            policy.join_mm,
+            cancel,
+        )?;
+        let mut model = Self::indexed(
             positions,
-            mesh.triangles,
+            triangles,
             faces,
             surfaces,
             policy,
             reach,
             failed_faces,
-        ))
+        );
+        model.conformed = conformed;
+        Ok(model)
     }
 
     /// Shared preparation from an admitted analytic/faceted source complex.
@@ -215,9 +259,12 @@ impl TolerantModel {
                 "source interpretation exceeds section profile tolerance",
             ));
         }
+        let mut positions = source.positions.clone();
+        let mut triangles = source.triangles.clone();
+        weld(&mut positions, &mut triangles);
         Ok(Self::indexed(
-            source.positions.clone(),
-            source.triangles.clone(),
+            positions,
+            triangles,
             source.regions.clone(),
             source
                 .faces
@@ -265,45 +312,23 @@ impl TolerantModel {
             self.reach,
             self.failed_faces,
         )
+        .with_conformed(self.conformed)
+    }
+
+    fn with_conformed(mut self, conformed: Conformed) -> Self {
+        self.conformed = conformed;
+        self
     }
 
     fn indexed(
-        mut positions: Vec<[f64; 3]>,
-        mut triangles: Vec<[u32; 3]>,
+        positions: Vec<[f64; 3]>,
+        triangles: Vec<[u32; 3]>,
         faces: Vec<u32>,
         surfaces: Vec<Option<exact::Implicit>>,
         policy: TolerantPolicy,
         reach: f64,
         failed_faces: usize,
     ) -> Self {
-        // Exact coordinate welding restores shared mesh-edge identity without
-        // moving geometry or applying an unrecorded repair tolerance. Reuse the
-        // position allocation in place; support topology is checked on demand.
-        let mut vertices = HashMap::new();
-        let mut remap = Vec::with_capacity(positions.len());
-        let mut unique = 0;
-        for index in 0..positions.len() {
-            let point = positions[index];
-            let key = point.map(|v| {
-                if v == 0.0 {
-                    0.0_f64.to_bits()
-                } else {
-                    v.to_bits()
-                }
-            });
-            let id = *vertices.entry(key).or_insert_with(|| {
-                positions[unique] = point;
-                unique += 1;
-                (unique - 1) as u32
-            });
-            remap.push(id);
-        }
-        positions.truncate(unique);
-        for triangle in &mut triangles {
-            *triangle = triangle.map(|v| remap[v as usize]);
-        }
-        drop(vertices);
-        drop(remap);
         let z_min = positions.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
         let z_max = positions
             .iter()
@@ -339,7 +364,42 @@ impl TolerantModel {
             reach,
             support_enclosure_mm,
             failed_faces,
+            conformed: Conformed::default(),
         }
+    }
+
+    /// Mesh edges not used by exactly two triangles after exact welding: the
+    /// edge's two positions and the source face ordinals of its triangles.
+    pub fn open_edges(&self) -> Vec<([[f64; 3]; 2], Vec<u32>)> {
+        let mut edges = HashMap::<(u32, u32), Vec<u32>>::new();
+        for (triangle, face) in self.triangles.iter().zip(&self.faces) {
+            for [a, b] in [
+                [triangle[0], triangle[1]],
+                [triangle[1], triangle[2]],
+                [triangle[2], triangle[0]],
+            ] {
+                edges
+                    .entry(if a < b { (a, b) } else { (b, a) })
+                    .or_default()
+                    .push(*face);
+            }
+        }
+        let mut open: Vec<_> = edges
+            .into_iter()
+            .filter(|(_, faces)| faces.len() != 2)
+            .map(|((a, b), faces)| {
+                (
+                    [self.positions[a as usize], self.positions[b as usize]],
+                    faces,
+                )
+            })
+            .collect();
+        open.sort_by(|a, b| {
+            a.0[0]
+                .partial_cmp(&b.0[0])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        open
     }
 
     /// Axis-aligned bounds of the tessellation.

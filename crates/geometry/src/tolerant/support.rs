@@ -384,6 +384,76 @@ impl TolerantModel {
         Ok(pieces)
     }
 
+    /// Heights of the vertices where a horizontal section can change
+    /// topology: extrema, saddles, vertices with a neighbour at the same
+    /// height and vertices whose link is not one cycle; plus the bounds.
+    fn critical_heights(&self, cancel: &AtomicBool) -> Result<Vec<f64>, GeometryError> {
+        let count = self.positions.len();
+        let mut start = vec![0usize; count + 1];
+        for triangle in &self.triangles {
+            for v in triangle {
+                start[*v as usize + 1] += 1;
+            }
+        }
+        for v in 0..count {
+            start[v + 1] += start[v];
+        }
+        let mut fill = start.clone();
+        // Each corner's opposite edge in the triangle's winding.
+        let mut link = vec![[0u32; 2]; start[count]];
+        for t in &self.triangles {
+            for k in 0..3 {
+                let v = t[k] as usize;
+                link[fill[v]] = [t[(k + 1) % 3], t[(k + 2) % 3]];
+                fill[v] += 1;
+            }
+        }
+        drop(fill);
+        let mut heights = Vec::new();
+        for v in 0..count {
+            if v % 4096 == 0 {
+                cancelled(cancel)?;
+            }
+            let corners = &link[start[v]..start[v + 1]];
+            if corners.is_empty() {
+                continue;
+            }
+            let z = self.positions[v][2];
+            let mut flat = false;
+            let mut mixed = 0;
+            for [p, q] in corners {
+                let (zp, zq) = (
+                    self.positions[*p as usize][2],
+                    self.positions[*q as usize][2],
+                );
+                flat |= zp == z || zq == z;
+                mixed += usize::from((zp < z) != (zq < z));
+            }
+            let mut single = false;
+            if !flat && mixed == 2 {
+                // Follow the link from the first corner around one cycle.
+                let mut current = corners[0][1];
+                let mut steps = 1;
+                while current != corners[0][0] && steps <= corners.len() {
+                    match corners.iter().find(|c| c[0] == current) {
+                        Some(c) => current = c[1],
+                        None => break,
+                    }
+                    steps += 1;
+                }
+                single = current == corners[0][0] && steps == corners.len();
+            }
+            if !single {
+                heights.push(z);
+            }
+        }
+        let (min, max) = self.bounds();
+        heights.extend([min[2], max[2]]);
+        heights.sort_by(f64::total_cmp);
+        heights.dedup();
+        Ok(heights)
+    }
+
     /// Exhaust every mesh topology interval. Raw traces retain triangle IDs,
     /// so complete swept hole boundaries are grouped independently of print
     /// layer sampling, analytic face labels or the presence of a sample hole.
@@ -412,10 +482,20 @@ impl TolerantModel {
                     .or_default() += 1;
             }
         }
-        if edges.values().any(|n| *n != 2) {
-            return Err(unavailable(
-                "support projection requires a closed source facet boundary; sampled chain joins do not establish complete protected holes",
-            ));
+        let open = edges.values().filter(|n| **n != 2).count();
+        if open > 0 {
+            let mut faces: Vec<u32> = self
+                .open_edges()
+                .into_iter()
+                .flat_map(|(_, faces)| faces)
+                .collect();
+            faces.sort_unstable();
+            faces.dedup();
+            let more = faces.len().saturating_sub(16);
+            faces.truncate(16);
+            return Err(unavailable(format!(
+                "support projection requires a closed source facet boundary; sampled chain joins do not establish complete protected holes ({open} open mesh edges on source face ordinals {faces:?} and {more} more)",
+            )));
         }
         drop(edges);
         struct Record {
@@ -427,46 +507,192 @@ impl TolerantModel {
         let mut events: Vec<f64> = self.positions.iter().map(|p| p[2]).collect();
         events.sort_by(f64::total_cmp);
         events.dedup();
+        // Vertex slabs with a representable midpoint are the ones a section
+        // can sample; `sampled[k]` counts them among the first `k` slabs.
+        let mut sampled = Vec::with_capacity(events.len());
+        sampled.push(0usize);
+        for pair in events.windows(2) {
+            let mid = pair[0] + (pair[1] - pair[0]) * 0.5;
+            let last = *sampled.last().expect("seeded");
+            sampled.push(last + usize::from(pair[0] < mid && mid < pair[1]));
+        }
+        // Whether some sampled slab lies within the closed height range.
+        let crosses_sampled = |low: f64, high: f64| {
+            let first = events.partition_point(|e| *e < low);
+            let last = events.partition_point(|e| *e <= high);
+            last > first + 1 && sampled[last - 1] > sampled[first]
+        };
+        // The level sets of a closed mesh change topology only at critical
+        // vertices. Between consecutive critical heights each connected band
+        // of crossed triangles sweeps exactly one section loop, so one section
+        // classifies every band, and the union of a band's per-slab clips is
+        // its clip over the whole interval. Threads and other helical faces
+        // put almost every vertex at its own height but few are critical.
+        let critical = self.critical_heights(cancel)?;
+        let heights: Vec<[f64; 2]> = self
+            .triangles
+            .iter()
+            .map(|t| {
+                let zs = t.map(|v| self.positions[v as usize][2]);
+                [
+                    zs.iter().copied().fold(f64::INFINITY, f64::min),
+                    zs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ]
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..self.triangles.len()).collect();
+        order.sort_by(|a, b| heights[*a][0].total_cmp(&heights[*b][0]));
+        let mut next = 0;
+        let mut active: Vec<usize> = Vec::new();
         let mut parents: Vec<usize> = (0..self.triangles.len()).collect();
         let mut selected = vec![false; self.triangles.len()];
+        let mut local = vec![usize::MAX; self.triangles.len()];
         let mut records = Vec::new();
-        for pair in events.windows(2) {
+        for pair in critical.windows(2) {
             cancelled(cancel)?;
-            let mid = pair[0] + (pair[1] - pair[0]) * 0.5;
-            if !(pair[0] < mid && mid < pair[1]) {
-                continue;
+            let [lo, hi] = [pair[0], pair[1]];
+            while next < order.len() && heights[order[next]][0] < hi {
+                active.push(order[next]);
+                next += 1;
             }
-            for l in self
+            active.retain(|t| heights[*t][1] > lo);
+            // The first and last sampled vertex slabs bound what the
+            // per-slab sections would have seen.
+            let first = events.partition_point(|e| *e < lo);
+            let last = events.partition_point(|e| *e <= hi);
+            let Some(low) = (first..last.saturating_sub(1)).find(|k| sampled[k + 1] > sampled[*k])
+            else {
+                continue;
+            };
+            let high = (first..last - 1)
+                .rev()
+                .find(|k| sampled[k + 1] > sampled[*k])
+                .expect("a first sampled slab is also a last");
+            let mid = events[low] + (events[low + 1] - events[low]) * 0.5;
+            let [lo, hi] = [events[low], events[high + 1]];
+            let holes: Vec<_> = self
                 .section_with(mid, false)?
                 .loops
                 .into_iter()
                 .filter(|l| l.area < 0.0)
-            {
-                let first = l.faces[0] as usize;
-                let mut points = l.points;
-                let mut bottom = Vec::new();
-                for index in l.faces {
-                    let index = index as usize;
-                    selected[index] = true;
-                    join(&mut parents, first, index);
-                    let vertices = self.triangles[index].map(|i| self.positions[i as usize]);
-                    points.extend(
-                        clip(vertices, [pair[0], pair[1]])
-                            .into_iter()
-                            .map(|p| [p[0], p[1]]),
-                    );
-                    bottom.extend(
-                        clip(vertices, [pair[0], pair[0]])
-                            .into_iter()
-                            .map(|p| [p[0], p[1]]),
-                    );
+                .collect();
+            if holes.is_empty() {
+                continue;
+            }
+            if low == high {
+                // One sampled slab: its section is the whole record. Keep only
+                // the faces the section crossed; a slab a few ulps thick
+                // (rounding noise on a flat face) must not enrol every
+                // nearly flat triangle it touches.
+                for l in holes {
+                    let first = l.faces[0] as usize;
+                    let mut points = l.points;
+                    let mut bottom = Vec::new();
+                    for index in l.faces {
+                        let index = index as usize;
+                        selected[index] = true;
+                        join(&mut parents, first, index);
+                        let vertices = self.triangles[index].map(|i| self.positions[i as usize]);
+                        points.extend(clip(vertices, [lo, hi]).into_iter().map(|p| [p[0], p[1]]));
+                        bottom.extend(clip(vertices, [lo, lo]).into_iter().map(|p| [p[0], p[1]]));
+                    }
+                    records.push(Record {
+                        triangle: first,
+                        points: hull(points),
+                        bottom: hull(bottom),
+                        height: [lo, hi],
+                    });
                 }
-                records.push(Record {
-                    triangle: first,
-                    points: hull(points),
-                    bottom: hull(bottom),
-                    height: [pair[0], pair[1]],
-                });
+                continue;
+            }
+            // Bands: triangles crossed in a sampled slab, joined by edges
+            // crossed there.
+            let members: Vec<usize> = active
+                .iter()
+                .copied()
+                .filter(|t| crosses_sampled(heights[*t][0].max(lo), heights[*t][1].min(hi)))
+                .collect();
+            for (i, &t) in members.iter().enumerate() {
+                local[t] = i;
+            }
+            let member = |face: u32| {
+                let i = local[face as usize];
+                if members.get(i) == Some(&(face as usize)) {
+                    Ok(i)
+                } else {
+                    Err(unavailable(
+                        "support void section crossed a triangle outside its interval",
+                    ))
+                }
+            };
+            let mut bands: Vec<usize> = (0..members.len()).collect();
+            let mut crossed = HashMap::<(u32, u32), usize>::new();
+            for (i, &t) in members.iter().enumerate() {
+                cancelled(cancel)?;
+                let triangle = self.triangles[t];
+                for [a, b] in [
+                    [triangle[0], triangle[1]],
+                    [triangle[1], triangle[2]],
+                    [triangle[2], triangle[0]],
+                ] {
+                    let (za, zb) = (self.positions[a as usize][2], self.positions[b as usize][2]);
+                    if za.min(zb) < hi
+                        && za.max(zb) > lo
+                        && crosses_sampled(za.min(zb).max(lo), za.max(zb).min(hi))
+                    {
+                        match crossed.entry(if a < b { (a, b) } else { (b, a) }) {
+                            std::collections::hash_map::Entry::Occupied(o) => {
+                                join(&mut bands, i, *o.get());
+                            }
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                v.insert(i);
+                            }
+                        }
+                    }
+                }
+            }
+            drop(crossed);
+            let mut band_records = HashMap::<usize, Record>::new();
+            for l in &holes {
+                let first = member(l.faces[0])?;
+                for &face in &l.faces {
+                    join(&mut bands, first, member(face)?);
+                }
+            }
+            for l in holes {
+                let band = root(&mut bands, member(l.faces[0])?);
+                band_records
+                    .entry(band)
+                    .or_insert_with(|| Record {
+                        triangle: l.faces[0] as usize,
+                        points: Vec::new(),
+                        bottom: Vec::new(),
+                        height: [lo, hi],
+                    })
+                    .points
+                    .extend(l.points);
+            }
+            for (i, &t) in members.iter().enumerate() {
+                let band = root(&mut bands, i);
+                let Some(record) = band_records.get_mut(&band) else {
+                    continue;
+                };
+                selected[t] = true;
+                join(&mut parents, record.triangle, t);
+                let vertices = self.triangles[t].map(|v| self.positions[v as usize]);
+                record
+                    .points
+                    .extend(clip(vertices, [lo, hi]).into_iter().map(|p| [p[0], p[1]]));
+                record
+                    .bottom
+                    .extend(clip(vertices, [lo, lo]).into_iter().map(|p| [p[0], p[1]]));
+            }
+            let mut band_records: Vec<_> = band_records.into_values().collect();
+            band_records.sort_by_key(|record| record.triangle);
+            for mut record in band_records {
+                record.points = hull(std::mem::take(&mut record.points));
+                record.bottom = hull(std::mem::take(&mut record.bottom));
+                records.push(record);
             }
         }
         let mut vertices = HashMap::new();
@@ -534,6 +760,129 @@ mod tests {
     use super::super::{TolerantPolicy, contains};
     use super::*;
 
+    #[cfg(test)]
+    impl TolerantModel {
+        /// The per-vertex-slab algorithm `support_voids` replaced: one section
+        /// between every pair of consecutive vertex heights. Test oracle.
+        fn reference_support_voids(
+            &self,
+            cancel: &AtomicBool,
+        ) -> Result<Vec<TolerantVoidProjection>, GeometryError> {
+            struct Record {
+                triangle: usize,
+                points: Vec<[f64; 2]>,
+                bottom: Vec<[f64; 2]>,
+                height: [f64; 2],
+            }
+            let mut events: Vec<f64> = self.positions.iter().map(|p| p[2]).collect();
+            events.sort_by(f64::total_cmp);
+            events.dedup();
+            let mut parents: Vec<usize> = (0..self.triangles.len()).collect();
+            let mut selected = vec![false; self.triangles.len()];
+            let mut records = Vec::new();
+            for pair in events.windows(2) {
+                cancelled(cancel)?;
+                let mid = pair[0] + (pair[1] - pair[0]) * 0.5;
+                if !(pair[0] < mid && mid < pair[1]) {
+                    continue;
+                }
+                for l in self
+                    .section_with(mid, false)?
+                    .loops
+                    .into_iter()
+                    .filter(|l| l.area < 0.0)
+                {
+                    let first = l.faces[0] as usize;
+                    let mut points = l.points;
+                    let mut bottom = Vec::new();
+                    for index in l.faces {
+                        let index = index as usize;
+                        selected[index] = true;
+                        join(&mut parents, first, index);
+                        let vertices = self.triangles[index].map(|i| self.positions[i as usize]);
+                        points.extend(
+                            clip(vertices, [pair[0], pair[1]])
+                                .into_iter()
+                                .map(|p| [p[0], p[1]]),
+                        );
+                        bottom.extend(
+                            clip(vertices, [pair[0], pair[0]])
+                                .into_iter()
+                                .map(|p| [p[0], p[1]]),
+                        );
+                    }
+                    records.push(Record {
+                        triangle: first,
+                        points: hull(points),
+                        bottom: hull(bottom),
+                        height: [pair[0], pair[1]],
+                    });
+                }
+            }
+            if std::env::var("VOID_DEBUG").is_ok() {
+                let list: Vec<usize> = (0..selected.len()).filter(|i| selected[*i]).collect();
+                eprintln!("SELECTED {} {:?}", list.len(), list);
+            }
+            let mut vertices = HashMap::new();
+            for (i, triangle) in self
+                .triangles
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| selected[*i])
+            {
+                cancelled(cancel)?;
+                for vertex in triangle {
+                    if let Some(previous) = vertices.insert(*vertex, i) {
+                        join(&mut parents, previous, i);
+                    }
+                }
+            }
+            let margin = self.support_margin();
+            let mut groups: HashMap<usize, TolerantVoidProjection> = HashMap::new();
+            for record in records {
+                cancelled(cancel)?;
+                let group = groups
+                    .entry(root(&mut parents, record.triangle))
+                    .or_insert_with(|| TolerantVoidProjection {
+                        polygon: Vec::new(),
+                        height_mm: record.height,
+                        bottom: Vec::new(),
+                        floor: Vec::new(),
+                    });
+                if record.height[0] < group.height_mm[0] {
+                    group.height_mm[0] = record.height[0];
+                    group.bottom.clear();
+                }
+                if record.height[0] == group.height_mm[0] {
+                    group.bottom.extend(record.bottom);
+                }
+                group.height_mm[1] = group.height_mm[1].max(record.height[1]);
+                group.polygon.extend(record.points);
+                group.polygon = hull(std::mem::take(&mut group.polygon));
+            }
+            let mut result: Vec<_> = groups.into_iter().collect();
+            result.sort_by_key(|(index, _)| *index);
+            let mut result: Vec<_> = result.into_iter().map(|(_, value)| value).collect();
+            for group in &mut result {
+                cancelled(cancel)?;
+                group.bottom = hull(std::mem::take(&mut group.bottom));
+                for triangle in &self.triangles {
+                    cancelled(cancel)?;
+                    let vertices = triangle.map(|i| self.positions[i as usize]);
+                    if vertices.iter().all(|p| p[2] == group.height_mm[0]) {
+                        group.floor.push(vertices.map(|p| [p[0], p[1]]));
+                    }
+                }
+                group.polygon = padded(std::mem::take(&mut group.polygon), margin);
+                group.height_mm = [
+                    (group.height_mm[0] - margin).next_down(),
+                    (group.height_mm[1] + margin).next_up(),
+                ];
+            }
+            Ok(result)
+        }
+    }
+
     fn boxes(bounds: &[[[f64; 3]; 2]]) -> TolerantModel {
         let mut positions = Vec::new();
         let mut triangles = Vec::new();
@@ -566,6 +915,211 @@ mod tests {
             0.01,
             0,
         )
+    }
+
+    /// A tube whose every vertex sits at its own height, like a modelled
+    /// thread: each ring rises by a fraction of a layer around its turn.
+    fn stepped_tube(segments: usize, layers: usize) -> TolerantModel {
+        let ring =
+            |k: usize, side: usize, j: usize| ((k * 2 + side) * segments + j % segments) as u32;
+        let mut positions = Vec::new();
+        for k in 0..=layers {
+            for (side, radius) in [(0, 10.0), (1, 4.0)] {
+                for j in 0..segments {
+                    let angle =
+                        std::f64::consts::TAU * j as f64 / segments as f64 + 0.05 * k as f64;
+                    let z = k as f64 + 0.37 * j as f64 / segments as f64 + 0.011 * side as f64;
+                    positions.push([radius * angle.cos(), radius * angle.sin(), z]);
+                }
+            }
+        }
+        let mut triangles = Vec::new();
+        for j in 0..segments {
+            for k in 0..layers {
+                let (a, b, c, d) = (
+                    ring(k, 0, j),
+                    ring(k, 0, j + 1),
+                    ring(k + 1, 0, j + 1),
+                    ring(k + 1, 0, j),
+                );
+                triangles.extend([[a, b, c], [a, c, d]]);
+                let (a, b, c, d) = (
+                    ring(k, 1, j),
+                    ring(k, 1, j + 1),
+                    ring(k + 1, 1, j + 1),
+                    ring(k + 1, 1, j),
+                );
+                triangles.extend([[a, c, b], [a, d, c]]);
+            }
+            let top = [
+                ring(layers, 0, j),
+                ring(layers, 0, j + 1),
+                ring(layers, 1, j + 1),
+                ring(layers, 1, j),
+            ];
+            triangles.extend([[top[0], top[1], top[2]], [top[0], top[2], top[3]]]);
+            let bottom = [
+                ring(0, 0, j),
+                ring(0, 0, j + 1),
+                ring(0, 1, j + 1),
+                ring(0, 1, j),
+            ];
+            triangles.extend([
+                [bottom[0], bottom[2], bottom[1]],
+                [bottom[0], bottom[3], bottom[2]],
+            ]);
+        }
+        let faces = vec![0; triangles.len()];
+        TolerantModel::indexed(
+            positions,
+            triangles,
+            faces,
+            vec![None],
+            TolerantPolicy::default(),
+            0.01,
+            0,
+        )
+    }
+
+    fn area(points: &[[f64; 2]]) -> f64 {
+        (0..points.len())
+            .map(|i| {
+                let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5
+    }
+
+    /// Few vertices of a helical surface are critical, so the voids need a
+    /// section per critical interval, not per vertex height; the result is
+    /// the per-vertex-slab one.
+    #[test]
+    fn helical_voids_sample_critical_intervals_and_match_every_vertex_slab() {
+        let model = stepped_tube(24, 12);
+        let cancel = AtomicBool::new(false);
+        let critical = model.critical_heights(&cancel).unwrap();
+        let mut heights: Vec<f64> = model.positions.iter().map(|p| p[2]).collect();
+        heights.sort_by(f64::total_cmp);
+        heights.dedup();
+        assert!(
+            critical.len() * 4 < heights.len(),
+            "{} critical of {} heights",
+            critical.len(),
+            heights.len()
+        );
+        let voids = model.support_voids(&cancel).unwrap();
+        let reference = model.reference_support_voids(&cancel).unwrap();
+        assert_eq!(voids.len(), 1);
+        assert_eq!(reference.len(), 1);
+        let (v, r) = (&voids[0], &reference[0]);
+        assert_eq!(v.height_mm, r.height_mm);
+        assert!((area(&v.polygon) - area(&r.polygon)).abs() < 1e-9);
+        assert!((area(&v.bottom) - area(&r.bottom)).abs() < 1e-9);
+        assert_eq!(v.floor, r.floor);
+        // The hole is the inner radius-4 bore, not the radius-10 outside.
+        let hole = area(&v.polygon);
+        assert!(hole > 45.0 && hole < 100.0, "{hole}");
+    }
+
+    /// Rounding noise on a flat face makes slabs an ulp thick that no
+    /// section can sample. The nearly flat triangles there must not join a
+    /// pocket's void, nor separate pockets into one.
+    #[test]
+    fn ulp_slabs_on_a_flat_face_keep_separate_pockets() {
+        // Two square pockets opening on the top face, the top face split
+        // between them by a vertex one ulp low.
+        let mut positions = Vec::new();
+        let mut triangles = Vec::new();
+        let ring = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [0.0, 4.0]];
+        let pockets = [
+            [[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]],
+            [[7.0, 1.0], [9.0, 1.0], [9.0, 3.0], [7.0, 3.0]],
+        ];
+        let top = 2.0;
+        let low = 2.0f64.next_down();
+        // 0..4 outer top corners, 4..8 outer bottom corners.
+        for p in ring {
+            positions.push([p[0], p[1], top]);
+        }
+        for p in ring {
+            positions.push([p[0], p[1], 0.0]);
+        }
+        let mut pocket_base = Vec::new();
+        for (index, pocket) in pockets.iter().enumerate() {
+            pocket_base.push(positions.len() as u32);
+            // The first pocket's first rim corner sits one ulp low: it stays
+            // a regular vertex between its wall and the top face.
+            for (corner, p) in pocket.iter().enumerate() {
+                let z = if index == 0 && corner == 0 { low } else { top };
+                positions.push([p[0], p[1], z]);
+            }
+            for p in pocket {
+                positions.push([p[0], p[1], 1.0]);
+            }
+        }
+        let middle = positions.len() as u32;
+        positions.push([5.0, 2.0, top]);
+        // Outer walls and bottom.
+        for i in 0..4u32 {
+            let j = (i + 1) % 4;
+            triangles.extend([[i, i + 4, j + 4], [i, j + 4, j]]);
+        }
+        triangles.extend([[4, 6, 5], [4, 7, 6]]);
+        // Pocket walls and floors.
+        for &base in &pocket_base {
+            for i in 0..4u32 {
+                let j = (i + 1) % 4;
+                triangles.extend([
+                    [base + i, base + j, base + j + 4],
+                    [base + i, base + j + 4, base + i + 4],
+                ]);
+            }
+            triangles.extend([
+                [base + 4, base + 5, base + 6],
+                [base + 4, base + 6, base + 7],
+            ]);
+        }
+        // Top face: fan from the outer ring and pocket rims to the middle
+        // vertex and the corners, covering the ring minus both pockets.
+        let [a, b] = [pocket_base[0], pocket_base[1]];
+        triangles.extend([
+            [0, 1, b],
+            [0, b, a],
+            [1, 2, b + 1],
+            [b, 1, b + 1],
+            [2, b + 2, b + 1],
+            [2, 3, a + 3],
+            [2, a + 3, b + 2],
+            [3, 0, a],
+            [3, a, a + 3],
+            [a, b, middle],
+            [b, b + 3, middle],
+            [b + 3, b + 2, middle],
+            [b + 2, a + 2, middle],
+            [a + 2, a + 1, middle],
+            [a + 1, a, middle],
+            [a + 2, b + 2, a + 3],
+        ]);
+        let faces = vec![0; triangles.len()];
+        let model = TolerantModel::indexed(
+            positions,
+            triangles,
+            faces,
+            vec![None],
+            TolerantPolicy::default(),
+            0.01,
+            0,
+        );
+        let cancel = AtomicBool::new(false);
+        let voids = model.support_voids(&cancel).unwrap();
+        let reference = model.reference_support_voids(&cancel).unwrap();
+        assert_eq!(voids.len(), 2);
+        assert_eq!(reference.len(), 2);
+        for v in &voids {
+            let a = area(&v.polygon);
+            assert!(a < 9.0, "a pocket void spans {a} mm2");
+        }
     }
 
     #[test]
