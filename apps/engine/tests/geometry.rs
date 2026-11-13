@@ -190,7 +190,7 @@ fn mesh_artifact(definition: &DefinitionRecord) -> ArtifactId {
     match &definition.display {
         DefinitionDisplay::Mesh { artifact_id } => *artifact_id,
         DefinitionDisplay::Unavailable { error } => {
-            panic!("expected certified native display: {error:?}")
+            panic!("expected source-mapped native display: {error:?}")
         }
     }
 }
@@ -1193,23 +1193,11 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
         RigidPoseMm::IDENTITY,
     )
     .await;
-    let mut saw_audit = false;
-    let summary = loop {
-        let job = client.native_operation(&operation).await.unwrap();
-        saw_audit |= job.stage.starts_with("display_auditing_faces_");
-        if job.status.is_terminal() {
-            assert_eq!(job.status, JobStatus::Completed, "{job:?}");
-            let Some(JobResult::Scene { summary }) = job.result else {
-                panic!("expected plate import scene result");
-            };
-            break summary;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let job = wait_job(&mut client, operation).await;
+    assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+    let Some(JobResult::Scene { summary }) = job.result else {
+        panic!("expected plate import scene result");
     };
-    assert!(
-        saw_audit,
-        "real display audit phases must reach Operations while native work runs"
-    );
     let definition = definitions(&mut client, &summary).await.remove(0);
     let hashes = mesh(&mut client, &definition).await;
     assert!(summary.unique_mesh_bytes > 0);
@@ -1249,7 +1237,7 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
 }
 
 #[tokio::test]
-async fn cancelling_plate_display_audit_reports_progress_and_preserves_existing_scene() {
+async fn cancelling_plate_display_work_reports_progress_and_preserves_existing_scene() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     let before = import(&mut client, "box-mm.step", RigidPoseMm::IDENTITY).await;
     let revision = project_revision(&client).await;
@@ -1259,17 +1247,28 @@ async fn cancelling_plate_display_audit_reports_progress_and_preserves_existing_
         RigidPoseMm::IDENTITY,
     )
     .await;
-    loop {
-        let job = client.native_operation(&operation).await.unwrap();
-        assert!(
-            !job.status.is_terminal(),
-            "display audit must be observable before publication: {job:?}"
-        );
-        if job.stage.starts_with("display_auditing_faces_") {
-            break;
+    let mut progress = client
+        .rpc()
+        .watch_native_operation(operation.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(70), async {
+        loop {
+            let job = progress.next().await.unwrap();
+            assert!(
+                !job.status.is_terminal(),
+                "display work must report progress before publication: {job:?}"
+            );
+            if job.stage.starts_with("display_preparing_edges_faces_")
+                || job.stage.starts_with("display_tessellating_faces_")
+            {
+                break;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .unwrap();
+    drop(progress);
     client.rpc().cancel_operation(&operation).await.unwrap();
     let started = Instant::now();
     let cancelled = wait_job_with_timeout(&mut client, operation, Duration::from_secs(5)).await;

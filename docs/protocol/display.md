@@ -19,13 +19,21 @@ Decoders validate with byte reads before constructing borrowing typed views. The
 ## SPLM mesh, version 1
 
 The ordinary native scene uses `mesh-tolerant-mm-0.05-v1`: complete source-face
-meshing at the ADR012 half-profile chord target, measured native face/edge
+meshing at one quarter of the shared display-carrier allowance, measured native face/edge
 deviation within the display budget, closed oriented triangle incidence after
 exact coordinate welding, and independently checked packed reconstruction.
 Its carrier/trim deviation fields report the native mesher's sampled surface
-and edge estimates, not interval certificates or material authority. Failed or
+and edge estimates, not interval certificates or material authority. Every
+selected triangle sample must evaluate to a finite surface-distance seed;
+failed evaluations cannot silently contribute zero deviation. Failed or
 missing faces, invalid topology, excessive measured deviation, cancellation and
 resource refusal never publish a partial successful mesh.
+
+Faces are generated, checked and packed one at a time. Only the shared edge set,
+complete oriented-incidence inventory and bounded packed output remain live
+between faces; native face candidates and adapter buffers are released before
+the next face query. Display precision is separate from manufacturing's finer
+source-section policy and grants no material authority.
 
 The explicitly requested `mesh-trimmed-mm-0.05-v2` route retains independent
 coefficient carrier/trim certification. Both profiles use the same checked

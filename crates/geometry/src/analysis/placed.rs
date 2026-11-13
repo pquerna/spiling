@@ -2944,7 +2944,7 @@ mod tests {
         let kernel = crate::make_kernel_context();
         for vertex in definition.brep.vertex_list().to_vec() {
             let vertex = definition.brep.vertex_mut(vertex).unwrap();
-            vertex.point = vertex.point * scale;
+            vertex.point *= scale;
         }
         for edge in definition.brep.edge_list().to_vec() {
             definition
@@ -2962,7 +2962,7 @@ mod tests {
                 .unwrap();
         }
         let cancel = AtomicBool::new(false);
-        let prepared = super::prepare_solid(
+        let prepared = crate::prepare_solid(
             &definition,
             crate::MAX_DIRECTIONAL_SCRATCH_BYTES,
             &mut GeometryWorkBudget::query(),
