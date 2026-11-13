@@ -567,7 +567,19 @@ pub(super) struct SupportWork {
     /// Their unanchored strokes print as authored and are reported, the
     /// build-plate-only outcome, instead of requesting refinement again.
     pub(super) exhausted: std::collections::BTreeSet<u64>,
+    /// Physical intervals already split for an uncertified corridor, with
+    /// the unanchored span that requested each split, in request order. Each
+    /// record added a layer, so the schedule's layer budget bounds them.
+    pub(super) anchor_refinements: Vec<AnchorRefinement>,
     pub(super) replay: SupportReplay,
+}
+
+/// One actual-anchor split: the `[lower_z, z]` extent of the refined pair
+/// before the split and the unanchored span that requested it.
+#[derive(Clone, Copy)]
+pub(super) struct AnchorRefinement {
+    pub(super) interval_mm: [f64; 2],
+    pub(super) span_mm: f64,
 }
 
 impl SupportWork {
@@ -624,6 +636,10 @@ pub(super) enum SupportAdmission {
     RefineUnreachableLayer {
         index: usize,
         failure: ManufacturingError,
+        /// Unanchored span of the stroke whose corridor could not be
+        /// certified; `None` when refinement is needed for another reason
+        /// (a missing contact layer, a disabled-support startup pair).
+        span_mm: Option<f64>,
     },
 }
 
@@ -1178,7 +1194,11 @@ pub(super) fn realize(
                     if tentative && index > 0 && !exhausted {
                         let failure =
                             admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
-                        return Ok(SupportAdmission::RefineUnreachableLayer { index, failure });
+                        return Ok(SupportAdmission::RefineUnreachableLayer {
+                            index,
+                            failure,
+                            span_mm: None,
+                        });
                     }
                     // Supports are off, or no finer schedule can anchor or
                     // support this layer: print the overhang as PrusaSlicer
@@ -1327,6 +1347,7 @@ pub(super) fn realize(
                     return Ok(SupportAdmission::RefineUnreachableLayer {
                         index: demand.target,
                         failure: unreachable_layer_error(layers, demand, z_gap_mm)?,
+                        span_mm: None,
                     });
                 }
             }
@@ -1893,6 +1914,7 @@ pub(super) fn realize(
                     return Ok(SupportAdmission::RefineUnreachableLayer {
                         index: demand.target,
                         failure: unresolved,
+                        span_mm: Some(failure.span),
                     });
                 }
                 // The part blocks every column from the bed (an overhang over
@@ -4237,9 +4259,8 @@ fn stage_touching_sheet(
         + super::native::XYZ6_SCREEN_SLACK_MM)
         .next_up();
     let lower = layer.lower_z_mm;
-    let touches = |height: Option<[f64; 2]>| {
-        height.is_some_and(|[from, to]| from <= upper && to >= lower)
-    };
+    let touches =
+        |height: Option<[f64; 2]>| height.is_some_and(|[from, to]| from <= upper && to >= lower);
     let scanned = std::cell::Cell::new(0usize);
     let mut failure = None;
     section.visit_occupied_screened(
@@ -4310,8 +4331,14 @@ fn stage_object_beads(
         // beyond the round bead.
         let half = (edge.half + super::OFFSET_TOLERANCE_MM).next_up();
         let bounds = [
-            [(p[0].min(q[0]) - half).next_down(), (p[1].min(q[1]) - half).next_down()],
-            [(p[0].max(q[0]) + half).next_up(), (p[1].max(q[1]) + half).next_up()],
+            [
+                (p[0].min(q[0]) - half).next_down(),
+                (p[1].min(q[1]) - half).next_down(),
+            ],
+            [
+                (p[0].max(q[0]) + half).next_up(),
+                (p[1].max(q[1]) + half).next_up(),
+            ],
         ];
         if screen.rejects(bounds) {
             continue;

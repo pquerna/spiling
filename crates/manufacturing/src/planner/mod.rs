@@ -270,8 +270,19 @@ fn plan_with(
         );
         match outcome? {
             ScheduleAdmission::PrefixAdmitted(capture) => break Some(capture),
-            ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
-                exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
+            ScheduleAdmission::RefineUnreachableLayer {
+                index,
+                failure,
+                span_mm,
+            } => {
+                exhaust_or_refine(
+                    &mut schedule,
+                    index,
+                    input,
+                    failure,
+                    span_mm,
+                    &mut support_work,
+                )?;
             }
             ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
                 unreachable!("tentative prefix cannot publish a plan")
@@ -320,8 +331,19 @@ fn plan_with(
                 &mut survival_memo,
             );
             match outcome {
-                Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure, .. }) => {
-                    exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
+                Ok(ScheduleAdmission::RefineUnreachableLayer {
+                    index,
+                    failure,
+                    span_mm,
+                }) => {
+                    exhaust_or_refine(
+                        &mut schedule,
+                        index,
+                        input,
+                        failure,
+                        span_mm,
+                        &mut support_work,
+                    )?;
                     refined = Some(index);
                     continue;
                 }
@@ -347,8 +369,19 @@ fn plan_with(
         );
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
-            ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
-                exhaust_or_refine(&mut schedule, index, input, failure, &mut support_work)?;
+            ScheduleAdmission::RefineUnreachableLayer {
+                index,
+                failure,
+                span_mm,
+            } => {
+                exhaust_or_refine(
+                    &mut schedule,
+                    index,
+                    input,
+                    failure,
+                    span_mm,
+                    &mut support_work,
+                )?;
                 refined = truncate_retries.then_some(index);
             }
             ScheduleAdmission::PrefixAdmitted(_) | ScheduleAdmission::RetryUndecided => {
@@ -391,6 +424,7 @@ enum ScheduleAdmission {
     RefineUnreachableLayer {
         index: usize,
         failure: ManufacturingError,
+        span_mm: Option<f64>,
     },
     Complete(NormalizedPrintPlan),
     /// A truncated retry found no refinement the complete pass would make.
@@ -2253,8 +2287,16 @@ fn admit_schedule<'model>(
             support::SupportAdmission::Undecided => {
                 unreachable!("only truncated retries leave support undecided")
             }
-            support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
-                return Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure });
+            support::SupportAdmission::RefineUnreachableLayer {
+                index,
+                failure,
+                span_mm,
+            } => {
+                return Ok(ScheduleAdmission::RefineUnreachableLayer {
+                    index,
+                    failure,
+                    span_mm,
+                });
             }
             support::SupportAdmission::Complete if probe.is_some() => {
                 let startup_key = first_wall_key
@@ -2838,9 +2880,6 @@ fn deposition_probe(
     }))
 }
 
-/// Refine the schedule at an unreachable layer. When it can be refined no
-/// further and supports are enabled, mark the layer exhausted so the retry
-/// prints its overhang as authored; a second request for it still refuses.
 /// Alternating-axis key of `schedule[index]`. A layer outside refinement
 /// uses its course. Within a maximal run of layers whose courses were split,
 /// the key counts down from the run's top layer, which keeps its course axis:
@@ -2868,15 +2907,67 @@ fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
     schedule[top].course + (top - index) as u32
 }
 
+/// Refine the schedule at an unreachable layer. When it can be refined no
+/// further and supports are enabled, mark the layer exhausted so the retry
+/// prints its overhang as authored; a second request for it still refuses.
+///
+/// A split can anchor a stroke only by moving the section below it closer in
+/// Z, which shortens the stagger it bridges. When an uncertified corridor
+/// returns inside an interval already split for one and its unanchored span
+/// is no shorter by more than the profile tolerance, the split moved nothing
+/// the stroke needed: the first layer above a flat ceiling, or a stroke
+/// across a sparse gap below, stays unanchored however thin the layers get.
+/// Such a layer is exhausted at once rather than halved toward the minimum
+/// bead height.
 fn exhaust_or_refine(
     schedule: &mut Vec<LayerElevation>,
     index: usize,
     input: &CompilerInput<'_>,
     failure: ManufacturingError,
+    span_mm: Option<f64>,
     support_work: &mut support::SupportWork,
 ) -> Result<(), ManufacturingError> {
     let z = schedule.get(index).map(|layer| layer.z.to_bits());
-    match refine_deposition_pair(schedule, index, input, failure) {
+    let futile = span_mm.is_some_and(|span| {
+        schedule.get(index).is_some_and(|layer| {
+            support_work
+                .anchor_refinements
+                .iter()
+                .rev()
+                .find(|split| split.interval_mm[0] < layer.z && layer.z <= split.interval_mm[1])
+                .is_some_and(|split| span > split.span_mm - ANCHOR_REFINEMENT_PROGRESS_MM)
+        })
+    });
+    let interval = index
+        .checked_sub(1)
+        .filter(|_| index < schedule.len())
+        .map(|below| [schedule[below].lower_z, schedule[index].z]);
+    let refined = if futile {
+        Err(failure)
+    } else {
+        refine_deposition_pair(schedule, index, input, failure)
+    };
+    match refined {
+        Ok(()) => {
+            if let (Some(span_mm), Some(interval_mm)) = (span_mm, interval) {
+                support_work
+                    .anchor_refinements
+                    .try_reserve(1)
+                    .map_err(|_| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "actual-anchor refinement record allocation refused",
+                        )
+                    })?;
+                support_work
+                    .anchor_refinements
+                    .push(support::AnchorRefinement {
+                        interval_mm,
+                        span_mm,
+                    });
+            }
+            Ok(())
+        }
         Err(failure)
             if failure.code != ManufacturingErrorCode::ResourceLimit
                 && failure.code != ManufacturingErrorCode::Cancelled
@@ -2887,9 +2978,13 @@ fn exhaust_or_refine(
                 _ => Err(failure),
             }
         }
-        other => other,
+        Err(failure) => Err(failure),
     }
 }
+
+/// Section changes below the ADR012 profile tolerance are not geometric
+/// progress for an actual-anchor split.
+const ANCHOR_REFINEMENT_PROGRESS_MM: f64 = 0.01;
 
 fn refine_deposition_pair(
     schedule: &mut Vec<LayerElevation>,
