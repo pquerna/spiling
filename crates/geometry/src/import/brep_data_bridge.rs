@@ -1258,15 +1258,18 @@ fn build_plane(
     Ok((Surface::from(pl), dom, false))
 }
 
-/// The canonical IGES constructor limits the *representation's* weights, not
-/// rational geometry. Admit only a common, exactly reversible binary gauge;
-/// retain every Euclidean control point and every relative weight. Never clamp
-/// individual weights or round a homogeneous coefficient into the envelope.
-fn canonical_surface_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a, [f64]>> {
+/// The canonical IGES constructors limit the *representation's* weights, not
+/// rational geometry: a rational curve or surface is unchanged when every
+/// weight is multiplied by one positive constant. CAD exporters write such
+/// homogeneous gauges freely (for example all weights near 2.5e4). Admit only a
+/// common, exactly reversible binary gauge; retain every Euclidean control
+/// point and every relative weight. Never clamp individual weights or round a
+/// homogeneous coefficient into the envelope.
+fn canonical_rational_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a, [f64]>> {
     use solidcore::nurbs::srf_basic::{WEIGHT_MAX, WEIGHT_MIN};
 
     if weights.len() != cps.len() || weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
-        return Err(BridgeError::Invalid("invalid rational surface weights"));
+        return Err(BridgeError::Invalid("invalid rational spline weights"));
     }
     if weights
         .iter()
@@ -1290,9 +1293,7 @@ fn canonical_surface_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a
             for (point, &weight) in cps.iter().zip(weights) {
                 let scaled = weight * scale;
                 if !(WEIGHT_MIN..=WEIGHT_MAX).contains(&scaled) || scaled / scale != weight {
-                    return Err(BridgeError::Invalid(
-                        "inexact rational surface weight gauge",
-                    ));
+                    return Err(BridgeError::Invalid("inexact rational spline weight gauge"));
                 }
                 for coordinate in [point.x, point.y, point.z] {
                     let original = coordinate * weight;
@@ -1303,7 +1304,7 @@ fn canonical_surface_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a
                         || mapped / scale != original
                     {
                         return Err(BridgeError::Invalid(
-                            "inexact rational surface coefficient gauge",
+                            "inexact rational spline coefficient gauge",
                         ));
                     }
                 }
@@ -1317,7 +1318,7 @@ fn canonical_surface_weights<'a>(cps: &[Point3], weights: &'a [f64]) -> R<Cow<'a
         }
     }
     Err(BridgeError::Invalid(
-        "rational surface has no exact common binary gauge in the native weight envelope",
+        "rational spline has no exact common binary gauge in the native weight envelope",
     ))
 }
 
@@ -1330,7 +1331,7 @@ fn build_bspline_surface(
     weights: Option<&[f64]>,
 ) -> R<BSplineSurface> {
     let weights = weights
-        .map(|weights| canonical_surface_weights(cps, weights))
+        .map(|weights| canonical_rational_weights(cps, weights))
         .transpose()?;
     let weights = weights.as_deref();
     let u_order = u_knots_flat
@@ -1603,6 +1604,7 @@ fn build_trim_curve(c: &b::Curve2, forward: bool, shift: f64) -> R<Curve> {
         .map(|&(p, _)| Point3::new(p[0], p[1], 0.0))
         .collect();
     let weights: Vec<f64> = pts.iter().map(|&(_, w)| w).collect();
+    let weights = canonical_rational_weights(&cps, &weights)?;
     let (uk, mults) = unique_knots_and_multiplicities(&k_flat);
     let bsc = BSplineCurve::create_canonical(&CanonicalData {
         dim: 2,
@@ -1612,7 +1614,7 @@ fn build_trim_curve(c: &b::Curve2, forward: bool, shift: f64) -> R<Curve> {
         knot_multiplicities: &mults,
         knots: &uk,
         knot_type: KnotType::Unspecified,
-        weights: Some(&weights),
+        weights: Some(&weights[..]),
         trim: None,
     })?;
     Ok(Curve::from(bsc))
@@ -1711,6 +1713,7 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
                 .map(|h| Point3::new(h[0] / h[3], h[1] / h[3], h[2] / h[3]))
                 .collect();
             let weights: Vec<f64> = homogeneous.iter().map(|h| h[3]).collect();
+            let weights = canonical_rational_weights(&cps, &weights)?;
             let (uk, mults) = unique_knots_and_multiplicities(knots);
             let bsc = BSplineCurve::create_canonical(&CanonicalData {
                 dim: 3,
@@ -1720,7 +1723,7 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
                 knot_multiplicities: &mults,
                 knots: &uk,
                 knot_type: KnotType::Unspecified,
-                weights: Some(&weights),
+                weights: Some(&weights[..]),
                 trim: None,
             })?;
             Ok((
@@ -2418,11 +2421,11 @@ mod tests {
         let points = [p3([1.0, 2.0, 3.0]); 2];
         let ordinary = [1.0, 2.0];
         assert!(matches!(
-            canonical_surface_weights(&points, &ordinary).unwrap(),
+            canonical_rational_weights(&points, &ordinary).unwrap(),
             Cow::Borrowed(_)
         ));
         let tiny = [1.0 / 4096.0, 2.0 / 4096.0];
-        let scaled = canonical_surface_weights(&points, &tiny).unwrap();
+        let scaled = canonical_rational_weights(&points, &tiny).unwrap();
         assert_eq!(&*scaled, &[1.0 / 512.0, 1.0 / 256.0]);
         for weights in [
             [0.0, 256.0],
@@ -2434,13 +2437,13 @@ mod tests {
             // does. Preserve the refusal rather than round the control net.
             [0.0015, 120.0],
         ] {
-            assert!(canonical_surface_weights(&points, &weights).is_err());
+            assert!(canonical_rational_weights(&points, &weights).is_err());
         }
-        assert!(canonical_surface_weights(&points, &[256.0]).is_err());
+        assert!(canonical_rational_weights(&points, &[256.0]).is_err());
         let lossy = [p3([f64::from_bits(1), 0.0, 0.0]), points[1]];
-        assert!(canonical_surface_weights(&lossy, &[1.0, 256.0]).is_err());
+        assert!(canonical_rational_weights(&lossy, &[1.0, 256.0]).is_err());
         let overflow = [p3([f64::MAX, 0.0, 0.0]); 2];
-        assert!(canonical_surface_weights(&overflow, &[256.0; 2]).is_err());
+        assert!(canonical_rational_weights(&overflow, &[256.0; 2]).is_err());
     }
 
     #[test]
@@ -2489,6 +2492,75 @@ mod tests {
             assert!(coordinate.hi - coordinate.lo < 1e-12);
         }
         assert_eq!(weights, [1.0, 2.0, 4.0, 256.0]);
+    }
+
+    /// CAD exporters may write a rational curve in any homogeneous gauge (an
+    /// observed exporter wrote all weights of a conic edge near 2.5e4). The
+    /// curve is unchanged by that common factor, so both 3D edge curves and
+    /// pcurves admit through the exact binary gauge and evaluate exactly as
+    /// their in-envelope representation does.
+    #[test]
+    fn rational_curve_common_binary_gauge_matches_in_envelope_representation() {
+        use crate::parametric::CurveEvaluator as _;
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let gauge = 16_384.0;
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let quarter = |scale: f64| {
+            [[1.0, 0.0, 1.0], [half, half, half], [0.0, 1.0, 1.0]]
+                .map(|[x, y, w]| [x * scale, y * scale, 0.0, w * scale])
+        };
+        let curve = |scale: f64| b::Curve::RationalSpline {
+            knots: knots.clone(),
+            homogeneous: quarter(scale).to_vec(),
+        };
+        let pcurve = |scale: f64| b::Curve2::RationalSpline {
+            knots: knots.clone(),
+            homogeneous: quarter(scale).map(|h| [h[0], h[1], h[3]]).to_vec(),
+        };
+        let kernel = Kernel::default();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut work = crate::GeometryWorkBudget::new(100_000);
+        // Position enclosures at sampled parameters; the outward rounding of
+        // the interval evaluator is not itself gauge invariant.
+        let mut evaluate = |curve: &Curve| {
+            [0.0, 0.25, 0.5, 1.0].map(|t| {
+                let jet = curve.tensor([t, t], 0, &mut work, &cancel).unwrap();
+                let position = jet[0];
+                let mid = position.map(|c| 0.5 * (c.lo + c.hi));
+                assert!(position.iter().all(|c| c.hi - c.lo < 1e-12));
+                let radius = (mid[0] * mid[0] + mid[1] * mid[1]).sqrt();
+                assert!((radius - 1.0).abs() < 1e-12, "the edge stays on the circle");
+                mid
+            })
+        };
+        let same = |a: [[f64; 3]; 4], b: [[f64; 3]; 4]| {
+            for (a, b) in a.iter().flatten().zip(b.iter().flatten()) {
+                assert!((a - b).abs() < 1e-12, "{a} != {b}");
+            }
+        };
+        let (reference, reference_range) =
+            build_curve_3d(&kernel, &curve(1.0), [0.0, 1.0]).unwrap();
+        let (gauged, gauged_range) = build_curve_3d(&kernel, &curve(gauge), [0.0, 1.0])
+            .expect("a common weight factor must not refuse a rational edge curve");
+        assert_eq!(reference_range, gauged_range);
+        let (reference, gauged) = (evaluate(&reference), evaluate(&gauged));
+        same(reference, gauged);
+        let reference = build_trim_curve(&pcurve(1.0), true, 0.0).unwrap();
+        let gauged = build_trim_curve(&pcurve(gauge), true, 0.0)
+            .expect("a common weight factor must not refuse a rational pcurve");
+        let positions = (evaluate(&reference), evaluate(&gauged));
+        same(positions.0, positions.1);
+        let native = crate::parametric::native_curve_nurbs(&gauged)
+            .unwrap()
+            .unwrap();
+        assert!(native.is_rational(), "relative weights are retained");
+
+        // Relative weights the envelope cannot hold still refuse explicitly.
+        let mut spread = curve(1.0);
+        if let b::Curve::RationalSpline { homogeneous, .. } = &mut spread {
+            homogeneous[1] = homogeneous[1].map(|c| c * 1e6);
+        }
+        assert!(build_curve_3d(&kernel, &spread, [0.0, 1.0]).is_err());
     }
     use solidcore_mesh::{TessellateOptions, tessellate};
 
