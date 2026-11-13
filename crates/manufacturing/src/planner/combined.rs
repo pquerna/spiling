@@ -111,6 +111,7 @@ pub(super) fn combine(
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
     native_live_bytes: usize,
     native_sources: &[spiling_geometry::NativeUnionSourceCapture],
+    tolerant: Option<&super::TolerantModels>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let SparseInfillPolicy::CombineEligible { max_height_mm } = intent.recipe.sparse_infill else {
@@ -159,9 +160,15 @@ pub(super) fn combine(
         let span = super::span_at(sections, first as u32);
         let section = &sections[span];
         let neighborhood = first - 1..=last + 1;
-        let reason = if (!section.invariant && section.inner_material.is_none())
-            || (first..=last).any(|i| super::span_at(sections, i as u32) != span)
-        {
+        // Tolerant spans are one layer each; a band may cross them while they
+        // print one source prism, and then queries its full-height inner material.
+        let reason = if (!section.invariant
+            && section.inner_material.is_none()
+            && tolerant.is_none())
+            || (first..=last).any(|i| {
+                let other = super::span_at(sections, i as u32);
+                other != span && !super::same_prism(section, &sections[other])
+            }) {
             Some(SparseBandVeto::ChangingDomain)
         } else if has_support
             || neighborhood.clone().any(|i| {
@@ -376,6 +383,7 @@ pub(super) fn combine(
                     width,
                     intent,
                     native_sources,
+                    tolerant,
                     native_live_bytes,
                     geometry_work,
                     cancel,
@@ -515,6 +523,7 @@ pub(super) fn combine(
                             width,
                             intent,
                             native_sources,
+                            tolerant,
                             native_live_bytes
                                 .saturating_add(super::bonds::path_bytes(&coarse))
                                 .saturating_add(region::cloned_polygons_bytes(&domain.0)?),
@@ -1067,18 +1076,15 @@ pub(super) fn inner_material_admits(
     width_mm: f64,
     intent: &ManufacturingIntent,
     sources: &[spiling_geometry::NativeUnionSourceCapture],
+    tolerant: Option<&super::TolerantModels>,
     live_bytes: usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
     use spiling_contracts::manufacturing::program_coordinates::project_xyz6_bead_height_mm;
-    let Some(captures) = &section.inner_material else {
-        return Ok(false);
-    };
     if coverage.contributions.is_empty() {
         return Ok(false);
     }
-    let outer_z = project_xyz6_bead_height_mm(physical_z[1], physical_z[1] - physical_z[0])?;
     let max_coordinate = intent
         .printer
         .build_envelope
@@ -1093,6 +1099,21 @@ pub(super) fn inner_material_admits(
     let projection_radius =
         (((0.5e-6_f64).next_up() + 4.0 * ulp).next_up() * 2.0_f64.sqrt().next_up()).next_up();
     let radius = (width_mm * 0.5 + projection_radius).next_up();
+    let Some(captures) = &section.inner_material else {
+        let Some(models) = tolerant else {
+            return Ok(false);
+        };
+        return super::tolerant::inner_material_admits(
+            models,
+            coverage.contributions.iter().map(|c| c.occurrence_id),
+            eligible,
+            physical_z,
+            radius,
+            intent.printer.motion_resolution.z_mm,
+            cancel,
+        );
+    };
+    let outer_z = project_xyz6_bead_height_mm(physical_z[1], physical_z[1] - physical_z[0])?;
     for contribution in &coverage.contributions {
         let Some(capture) = captures.iter().find(|capture| {
             capture.source().occurrence_id() == contribution.occurrence_id

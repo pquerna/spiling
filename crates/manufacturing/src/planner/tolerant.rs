@@ -86,7 +86,15 @@ fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, Manufa
     // of the profile tolerance, the sag analytic curves were densified to, so
     // walls see the section's shape rather than its triangle fans. Kept
     // vertices stay on the BREP.
+    // Simplification keeps each ring's first point, so start every ring at
+    // its lexicographically least vertex, a corner of its hull, not at
+    // whichever mesh crossing the chain began on: a prism's straight edges
+    // then lose every crossing and its layers share one bit-identical section.
     let epsilon = model.policy().profile_mm * 0.25;
+    for polygon in &mut result.0 {
+        polygon.exterior_mut(start_at_least);
+        polygon.interiors_mut(|rings| rings.iter_mut().for_each(start_at_least));
+    }
     result = geo::Simplify::simplify(&result, epsilon);
     result
         .0
@@ -94,20 +102,85 @@ fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, Manufa
     Ok(result)
 }
 
-/// One layer as a native-shaped span: material at the layer sample, and an
-/// occupied enclosure streamed from the source over the complete interval when
-/// supports are enabled; sampled occupancy remains for ordinary classification.
+fn start_at_least(ring: &mut LineString<f64>) {
+    if ring.0.len() < 4 {
+        return;
+    }
+    ring.0.pop();
+    let start = (0..ring.0.len())
+        .min_by(|&a, &b| {
+            ring.0[a]
+                .x
+                .total_cmp(&ring.0[b].x)
+                .then(ring.0[a].y.total_cmp(&ring.0[b].y))
+        })
+        .unwrap_or(0);
+    ring.0.rotate_left(start);
+    ring.0.push(ring.0[0]);
+}
+
+/// Sections of one layer for every occurrence, computed while deciding a
+/// span's extent; the next span starts from them.
+pub(super) type Prefetched = Option<(u32, u64, Vec<MultiPolygon<f64>>)>;
+
+fn sections_at(
+    occurrences: &[&OccurrenceRecord],
+    models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
+    z: f64,
+    cancel: &AtomicBool,
+) -> Result<Vec<MultiPolygon<f64>>, ManufacturingError> {
+    let mut sections = Vec::with_capacity(occurrences.len());
+    for occurrence in occurrences {
+        check_cancel(cancel)?;
+        let mut placed = section_at(&models[&occurrence.occurrence_id], z)?;
+        region::canonicalize(&mut placed);
+        sections.push(placed);
+    }
+    Ok(sections)
+}
+
+/// A span of layers as a native-shaped span: material at its first layer's
+/// sample, and an occupied enclosure streamed from the source over the
+/// complete interval when supports are enabled; sampled occupancy remains for
+/// ordinary classification. The first section is held over each following
+/// layer of `layers` whose own sections agree with it within the profile
+/// tolerance, compared against the held section so error never accumulates;
+/// the span ends at the first layer that does not. A source prism thus
+/// slices as one span, as its vertical faces do: walls, permanent plate
+/// extents, combined bands and material constructions see one section.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_span(
     occurrences: &[&OccurrenceRecord],
     models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
     admission: &super::preflight::Admission,
-    layer: &LayerElevation,
+    layers: &[LayerElevation],
     index: u32,
+    prefetched: &mut Prefetched,
     supports: bool,
     cancel: &AtomicBool,
 ) -> Result<native::NativeSpan, ManufacturingError> {
-    let (lower, upper, sample) = (layer.lower_z, layer.z, layer.sample);
-    let inset = (0.25 * (upper - lower)).min(0.01);
+    let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+    let sections = match prefetched.take() {
+        Some((at, sample, sections)) if at == index && sample == layers[0].sample.to_bits() => {
+            sections
+        }
+        _ => sections_at(occurrences, models, layers[0].sample, cancel)?,
+    };
+    let mut held = 1;
+    while held < layers.len() {
+        let next = sections_at(occurrences, models, layers[held].sample, cancel)?;
+        if !sections
+            .iter()
+            .zip(&next)
+            .all(|(held, other)| held.0 == other.0 || super::same_within(held, other, profile))
+        {
+            *prefetched = Some((index + held as u32, layers[held].sample.to_bits(), next));
+            break;
+        }
+        held += 1;
+    }
+    let layers = &layers[..held];
+    let (lower, upper) = (layers[0].lower_z, layers[held - 1].z);
     let mut material = MultiPolygon(Vec::new());
     let mut contributions = Vec::with_capacity(occurrences.len());
     let mut contribution_bytes = 0usize;
@@ -115,11 +188,9 @@ pub(super) fn collect_span(
     let mut finished_bytes = 0usize;
     let mut finished_area_mm2 = 0.0;
     let mut occupied = ContinuousOccupied::default();
-    for occurrence in occurrences {
+    for (occurrence, mut placed) in occurrences.iter().zip(sections) {
         check_cancel(cancel)?;
         let model = &models[&occurrence.occurrence_id];
-        let mut placed = section_at(model, sample)?;
-        region::canonicalize(&mut placed);
         let bounds = admission.native_bounds[&occurrence.occurrence_id];
         let height = [lower.max(bounds.min[2]), upper.min(bounds.max[2])];
         if supports {
@@ -128,9 +199,12 @@ pub(super) fn collect_span(
                 interval: [lower, upper],
             });
         } else if height[0] <= height[1] {
-            for z in [lower + inset, sample, upper - inset] {
-                for polygon in section_at(model, z)?.0 {
-                    occupied.push(polygon, height, Some(occurrence.occurrence_id))?;
+            for layer in layers {
+                let inset = (0.25 * (layer.z - layer.lower_z)).min(0.01);
+                for z in [layer.lower_z + inset, layer.sample, layer.z - inset] {
+                    for polygon in section_at(model, z)?.0 {
+                        occupied.push(polygon, height, Some(occurrence.occurrence_id))?;
+                    }
                 }
             }
         }
@@ -181,7 +255,7 @@ pub(super) fn collect_span(
         .map(|(_, placed)| region::point_count(placed))
         .fold(region::point_count(&material), usize::saturating_add);
     Ok(native::NativeSpan::tolerant(
-        index + 1,
+        index + held as u32,
         Arc::new(material),
         contributions,
         contribution_bytes,
@@ -192,6 +266,66 @@ pub(super) fn collect_span(
         point_count,
         material_bytes,
     ))
+}
+
+/// ADR012 full-height inner material: `eligible` grown by `radius` lies
+/// inside the union of `occurrences`' material over the whole slab
+/// `interval`, within the profile tolerance. An occurrence's material over
+/// the slab is its section there minus the projection of every facet that
+/// crosses the slab (`TolerantModel::slab_crossings`); flat faces within the
+/// printer's Z step of either end bound the slab rather than cross it, as
+/// they bound its layers. This is the guarantee a permanent plate or a
+/// combined sparse band needs: no wall, overhang or roof inside its height.
+pub(super) fn inner_material_admits(
+    models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
+    occurrences: impl IntoIterator<Item = OccurrenceId>,
+    eligible: &MultiPolygon<f64>,
+    interval: [f64; 2],
+    radius: f64,
+    height_mm: f64,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    use geo::BoundingRect;
+    let admit = |_: usize, _: usize, _: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>| Ok(());
+    let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+    let slab = [interval[0] + height_mm, interval[1] - height_mm];
+    if eligible.0.is_empty() || slab[0] >= slab[1] || !radius.is_finite() {
+        return Ok(false);
+    }
+    let required = region::offset_admitted(eligible, (radius - profile).max(0.0), admit, cancel)?;
+    let Some(bounds) = required.bounding_rect() else {
+        return Ok(false);
+    };
+    let within = [
+        [bounds.min().x, bounds.min().y],
+        [bounds.max().x, bounds.max().y],
+    ];
+    let mut inner = MultiPolygon(Vec::new());
+    for occurrence_id in occurrences {
+        check_cancel(cancel)?;
+        let Some(model) = models.get(&occurrence_id) else {
+            return Ok(false);
+        };
+        let section = section_at(model, 0.5 * (slab[0] + slab[1]))?;
+        let crossings: Vec<Polygon<f64>> = model
+            .slab_crossings(slab, within, cancel)
+            .map_err(|e| super::native_error(e, "tolerant full-height inner material"))?
+            .into_iter()
+            .map(polygon)
+            .collect();
+        check_cancel(cancel)?;
+        let material = section.difference(&geo::unary_union(&crossings));
+        inner = if inner.0.is_empty() {
+            material
+        } else {
+            inner.union(&material)
+        };
+    }
+    Ok(required
+        .difference(&inner)
+        .0
+        .iter()
+        .all(|residue| geo::Area::unsigned_area(residue) <= profile * profile))
 }
 
 pub(super) fn polygon(points: Vec<[f64; 2]>) -> Polygon<f64> {

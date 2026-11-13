@@ -198,7 +198,9 @@ fn geometry_refusal(error: &ManufacturingError) -> bool {
 
 /// Features that still consume native captures refuse in tolerant mode
 /// rather than being silently dropped. Surface finishes are realized on the
-/// finished occurrence's tolerant section (`tolerant::collect_span`).
+/// finished occurrence's tolerant section (`tolerant::collect_span`);
+/// permanent plates and combined bands query full-height inner material from
+/// the tolerant model (`tolerant::inner_material_admits`).
 fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingError> {
     let refuse = |what: &str| {
         Err(error(
@@ -211,18 +213,6 @@ fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingErro
         JobWorkflow::FixedDualMarlin { .. }
     ) {
         return refuse("fixed-dual routing");
-    }
-    // Permanent diaphragms and separators prove full-height inner material
-    // from native captures; tolerant spans do not carry it yet.
-    if input
-        .process_document
-        .layers
-        .iter()
-        .filter(|layer| layer.enabled)
-        .flat_map(|layer| &layer.operations)
-        .any(|operation| operation.interface.is_some())
-    {
-        return refuse("a permanent process interface");
     }
     Ok(())
 }
@@ -733,6 +723,7 @@ fn admit_schedule<'model>(
     let mut native_finished_bytes = 0usize;
     let mut native_source_area_mm2 = 0.0;
     let mut native_points = 0usize;
+    let mut prefetched = None;
     while index < count {
         check_cancel(cancel)?;
         let mut sample = schedule[index as usize].sample;
@@ -772,12 +763,24 @@ fn admit_schedule<'model>(
                         &cause,
                     )?;
                 }
+                // Mapped image layers keep their per-layer vertical-error check.
+                let hold_end = if admission
+                    .surface_fields
+                    .values()
+                    .flatten()
+                    .any(|field| field.is_image())
+                {
+                    index as usize + 1
+                } else {
+                    count as usize
+                };
                 tolerant::collect_span(
                     &occurrences,
                     models,
                     admission,
-                    &schedule[index as usize],
+                    &schedule[index as usize..hold_end],
                     index,
+                    &mut prefetched,
                     !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
                     cancel,
                 )?
@@ -1774,6 +1777,7 @@ fn admit_schedule<'model>(
                         recipe.bead_width_mm,
                         input.intent,
                         native_coverage.source_captures(),
+                        admission.tolerant.as_ref(),
                         retained_support_native_bytes.saturating_add(native::output_bytes(
                             &sections,
                             &Vec::new(),
@@ -1784,7 +1788,7 @@ fn admit_schedule<'model>(
                     )? {
                         return Err(error(
                             ManufacturingErrorCode::UnsupportedGeometry,
-                            "UnsupportedInterface: complete permanent plate lacks native full-height inner material authority",
+                            "UnsupportedInterface: complete permanent plate lacks full-height inner material",
                         ));
                     }
                 }
@@ -2995,6 +2999,7 @@ fn admit_schedule<'model>(
                 retained_section_bytes,
             )),
             native_coverage.material_proof.sources(),
+            admission.tolerant.as_ref(),
             cancel,
         )?;
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
@@ -4466,6 +4471,64 @@ fn material_twins(
     }
     Ok(twins)
 }
+
+/// Same polygons and rings, every vertex of each within `tolerance` of the
+/// corresponding ring of the other. Canonical rings start at their least
+/// vertex and run the same way, so one cursor walks the other ring forward:
+/// linear work, and a ring that does not follow fails rather than searching.
+fn same_within(a: &MultiPolygon<f64>, b: &MultiPolygon<f64>, tolerance: f64) -> bool {
+    a.0.len() == b.0.len()
+        && a.0.iter().zip(&b.0).all(|(p, q)| {
+            p.interiors().len() == q.interiors().len()
+                && std::iter::once(p.exterior())
+                    .chain(p.interiors())
+                    .zip(std::iter::once(q.exterior()).chain(q.interiors()))
+                    .all(|(r, s)| follows(r, s, tolerance) && follows(s, r, tolerance))
+        })
+}
+
+fn follows(ring: &geo::LineString<f64>, other: &geo::LineString<f64>, tolerance: f64) -> bool {
+    use geo::{Distance, Euclidean};
+    let segments = other.0.len().saturating_sub(1);
+    if segments == 0 || ring.0.len() < 2 {
+        return false;
+    }
+    let near = |c: geo::Coord<f64>, j: usize| {
+        Euclidean.distance(&Point(c), &geo::Line::new(other.0[j], other.0[j + 1])) <= tolerance
+    };
+    let Some(mut cursor) = (0..segments).find(|&j| near(ring.0[0], j)) else {
+        return false;
+    };
+    let mut advanced = 0usize;
+    for &c in &ring.0[1..] {
+        while !near(c, cursor) {
+            cursor = (cursor + 1) % segments;
+            advanced += 1;
+            if advanced > 2 * segments {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Spans that print as one source prism: the same material and process
+/// domains.
+fn same_prism(a: &SectionSpan, b: &SectionSpan) -> bool {
+    let same =
+        |x: &Arc<MultiPolygon<f64>>, y: &Arc<MultiPolygon<f64>>| Arc::ptr_eq(x, y) || x.0 == y.0;
+    same(&a.material, &b.material)
+        && a.process_domains.len() == b.process_domains.len()
+        && a.process_domains
+            .iter()
+            .zip(&b.process_domains)
+            .all(|(x, y)| x.coverage == y.coverage && same(&x.material, &y.material))
+}
+
+type TolerantModels = BTreeMap<
+    spiling_contracts::geometry::OccurrenceId,
+    Arc<spiling_geometry::tolerant::TolerantModel>,
+>;
 
 fn span_at(sections: &[SectionSpan], index: u32) -> usize {
     let position = sections.partition_point(|s| s.end <= index);
