@@ -4012,7 +4012,7 @@ fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
         )
         .unwrap()
         {
-            ScheduleAdmission::RefineUnreachableLayer { index, failure } => {
+            ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
                 refine_deposition_pair(&mut schedule, index, &input, failure).unwrap();
             }
             ScheduleAdmission::PrefixAdmitted(capture) => {
@@ -4851,4 +4851,60 @@ fn tolerant_structured_interiors_keep_automatic_external_supports() {
             "{policy:?}"
         );
     }
+}
+
+#[test]
+fn anchor_refinement_exhausts_a_split_that_shortened_nothing() {
+    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
+    ))
+    .unwrap();
+    assert!(matches!(
+        intent.recipe.supports,
+        SupportPolicy::Breakaway { .. }
+    ));
+    let scene = NativeScene::new(
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[RigidPoseMm {
+            translation_mm: [98.0, 100.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }],
+    );
+    let input = scene.input(&intent);
+    let mut schedule = (0..5)
+        .map(|i| LayerElevation {
+            lower_z: i as f64 * 0.2,
+            z: (i + 1) as f64 * 0.2,
+            sample: (i as f64 + 0.5) * 0.2,
+            height: 0.2,
+            course: i,
+        })
+        .collect::<Vec<_>>();
+    let failure = || {
+        error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "uncertified corridor",
+        )
+    };
+    let mut work = support::SupportWork::default();
+    // The first request splits the pair below layer 2 and records it.
+    exhaust_or_refine(&mut schedule, 2, &input, failure(), Some(0.8), &mut work).unwrap();
+    assert_eq!(schedule.len(), 6);
+    assert!(work.exhausted.is_empty());
+    // The same span returns inside the split interval: exhausted, not halved.
+    let z = schedule[2].z.to_bits();
+    exhaust_or_refine(&mut schedule, 2, &input, failure(), Some(0.805), &mut work).unwrap();
+    assert_eq!(schedule.len(), 6);
+    assert!(work.exhausted.contains(&z));
+    // A shorter span is progress, and a missing contact layer is always
+    // refined: both still split.
+    exhaust_or_refine(&mut schedule, 3, &input, failure(), Some(0.5), &mut work).unwrap();
+    assert_eq!(schedule.len(), 7);
+    exhaust_or_refine(&mut schedule, 4, &input, failure(), None, &mut work).unwrap();
+    assert_eq!(schedule.len(), 8);
+    // Outside every split interval a span is a fresh request.
+    exhaust_or_refine(&mut schedule, 7, &input, failure(), Some(0.9), &mut work).unwrap();
+    assert_eq!(schedule.len(), 9);
 }
