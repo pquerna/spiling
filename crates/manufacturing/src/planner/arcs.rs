@@ -18,6 +18,10 @@ use std::sync::atomic::AtomicBool;
 /// validate against their own first point. Walls of sampled sections sit
 /// within a few tenths of a micrometre of their circle.
 const RUN_BAND_MM: f64 = MAX_ARC_POINT_DEVIATION_MM * 0.9;
+/// Chord sagitta allowed when forming a run. The contract recomputes the
+/// radius from the stored run, which can sit anywhere in its radial band, so
+/// keep a margin below the contract's limit.
+const SAGITTA_LIMIT_MM: f64 = MAX_ARC_SAGITTA_MM * 0.9;
 /// Largest offset of a wall from the section circle it follows.
 const WALL_BAND_MM: f64 = 5.0;
 /// Largest turn of one edge in a run; a sharper turn is a corner.
@@ -178,7 +182,7 @@ fn runs_about(
                 || (direction != 0.0 && step.signum() != direction)
                 || band[1].max(distances[j + 1]) - band[0].min(distances[j + 1]) > RUN_BAND_MM
                 || b[2] != points[i][2]
-                || sagitta > MAX_ARC_SAGITTA_MM
+                || sagitta > SAGITTA_LIMIT_MM
                 || sweep + step.abs() > MAX_ARC_SWEEP_RADIANS
                 || width(j) != width(i)
             {

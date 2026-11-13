@@ -1884,9 +1884,11 @@ impl DepositionPath {
                     || deviation > MAX_ARC_POINT_DEVIATION_MM
                     || sagitta > MAX_ARC_SAGITTA_MM
                 {
-                    return Err(invalid(
-                        "arc run points must stay on one horizontal circle, turning one way",
-                    ));
+                    return Err(invalid(&format!(
+                        "arc run points must stay on one horizontal circle, turning one way: run {first}..{last} of {} points, edge {i}, step {step}, deviation {deviation}, sagitta {sagitta}, z {} vs {z}",
+                        self.points_mm.len(),
+                        b[2]
+                    )));
                 }
                 if let WidthProfile::PerEdge { widths_mm } = &self.width
                     && widths_mm[i] != widths_mm[first]
@@ -4817,7 +4819,15 @@ pub fn input_fingerprint(
     let mut ids = BTreeSet::new();
     for def in &defs {
         def.provenance.validate().map_err(|e| invalid(&e.message))?;
-        if def.provenance.definition_id() != def.definition_id || !ids.insert(&def.definition_id) {
+        let mut digest = [0u8; 32];
+        for (i, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&def.provenance.source_hash.as_str()[i * 2..i * 2 + 2], 16)
+                .map_err(|_| invalid("invalid source hash"))?;
+        }
+        if DefinitionId::for_source(&digest, def.provenance.source_solid.as_ref())
+            != def.definition_id
+            || !ids.insert(&def.definition_id)
+        {
             return Err(invalid("duplicate or source-inconsistent definition"));
         }
     }
