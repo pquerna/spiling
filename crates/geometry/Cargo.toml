@@ -12,8 +12,6 @@ publish = false
 
 [dependencies]
 spiling-contracts.workspace = true
-spiling-model-import.workspace = true
-serde_json.workspace = true
 solidcore.workspace = true
 solidcore-mesh.workspace = true
 solidcraft-geom.workspace = true
@@ -24,3 +22,4 @@ serde.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+serde_json.workspace = true

@@ -201,40 +201,6 @@ impl TolerantModel {
         ))
     }
 
-    /// Shared preparation from an admitted analytic/faceted source complex.
-    pub fn from_complex(
-        source: &crate::source::SurfaceComplex,
-        policy: TolerantPolicy,
-    ) -> Result<Self, GeometryError> {
-        source.validate()?;
-        if !policy.join_mm.is_finite()
-            || !policy.profile_mm.is_finite()
-            || policy.join_mm <= 0.
-            || policy.profile_mm < source.error_mm
-        {
-            return Err(unavailable(
-                "source interpretation exceeds section profile tolerance",
-            ));
-        }
-        Ok(Self::indexed(
-            source.positions.clone(),
-            source.triangles.clone(),
-            source.regions.clone(),
-            source
-                .faces
-                .iter()
-                .map(|f| {
-                    f.geometry
-                        .analytic
-                        .as_ref()
-                        .and_then(exact::Implicit::from_analytic)
-                })
-                .collect(),
-            policy,
-            policy.profile_mm,
-            0,
-        ))
-    }
     pub fn policy(&self) -> TolerantPolicy {
         self.policy
     }
@@ -723,13 +689,8 @@ pub struct CircleSource {
 }
 impl CircleSource {
     pub fn new(definition: &Definition, pose: &spiling_contracts::geometry::RigidPoseMm) -> Self {
-        Self::from_faces(definition.faces(), pose)
-    }
-    pub fn from_faces(
-        faces: &[spiling_contracts::geometry::FaceInfo],
-        pose: &spiling_contracts::geometry::RigidPoseMm,
-    ) -> Self {
-        let surfaces = faces
+        let surfaces = definition
+            .faces()
             .iter()
             .enumerate()
             .filter_map(|(ordinal, face)| {

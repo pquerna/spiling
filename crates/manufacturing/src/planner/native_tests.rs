@@ -30,7 +30,7 @@ fn with_program(result: &ManufacturingResult, program: &str) -> ManufacturingRes
 
 struct NativeScene {
     project: ProjectId,
-    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
+    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
@@ -40,9 +40,9 @@ struct NativeScene {
 }
 impl NativeScene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
-        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
+        let native = Arc::new(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        ));
+        );
         let id = native.id().clone();
         Self {
             project: ProjectId::default(),
@@ -66,9 +66,9 @@ impl NativeScene {
         }
     }
     fn add(&mut self, bytes: &[u8], poses: &[RigidPoseMm]) {
-        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
+        let native = Arc::new(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        ));
+        );
         let id = native.id().clone();
         if !self.definitions.contains_key(&id) {
             self.stored.push(StoredDefinition {
@@ -189,7 +189,7 @@ fn original_section_polygons(scene: &NativeScene, z: f64) -> MultiPolygon<f64> {
     assert_eq!(scene.occurrences[0].pose, RigidPoseMm::IDENTITY);
     let cancel = AtomicBool::new(false);
     let section = spiling_geometry::section(
-        scene.definitions.values().next().unwrap().native().unwrap(),
+        scene.definitions.values().next().unwrap(),
         PlaneMm {
             origin_mm: [0.0, 0.0, z],
             normal: [0.0, 0.0, 1.0],
@@ -286,8 +286,33 @@ fn actual_fixture_contact_gap(bundle: &ManufacturingBundle, source_floor: f64) -
     object_bottom - support_top
 }
 
+/// The single ordinary lane (ADR012) binds every scheduled layer to tolerant
+/// source evidence and records no exact-lane height analyses, slab captures or
+/// native feature classifications.
+fn assert_single_lane_coverage(bundle: &ManufacturingBundle) {
+    let coverage = &bundle.plan.native_geometry;
+    assert_eq!(coverage.evidence, PreflightEvidence::Tolerant);
+    assert_eq!(
+        coverage.certified_layer_count,
+        bundle.plan.layers.len() as u32
+    );
+    assert_eq!(coverage.height_analysis_count, 0);
+    assert_eq!(coverage.slab_count, 0);
+    let features = &coverage.source_feature_coverage;
+    assert_eq!(features.disjoint_source_layer_count, 0);
+    assert_eq!(features.invariant_source_union_layer_count, 0);
+    assert_eq!(features.native_interface_complex_layer_count, 0);
+    assert_eq!(features.owned_critical_slab_count, 0);
+    assert_eq!(
+        coverage.achieved_shape_error_mm,
+        spiling_geometry::tolerant::TolerantPolicy::default()
+            .profile_mm
+            .min(coverage.requested_shape_error_mm)
+    );
+}
+
 #[test]
-fn original_box_reuses_certified_slabs_without_fabricating_layer_captures() {
+fn original_box_binds_every_layer_to_single_lane_evidence_without_native_captures() {
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(BOX, &[translated(100.0, 105.0, 0.0)]);
     let mut intent = intent(true);
@@ -300,19 +325,17 @@ fn original_box_reuses_certified_slabs_without_fabricating_layer_captures() {
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     let coverage = &bundle.plan.native_geometry;
     assert_eq!(coverage.requested_shape_error_mm, 0.1);
-    assert_eq!(coverage.height_analysis_count, 1);
-    assert_eq!(
-        coverage.certified_layer_count,
-        bundle.plan.layers.len() as u32
-    );
-    assert!(
-        coverage.slab_count > 0 && coverage.slab_count < coverage.certified_layer_count,
-        "invariant source slabs are real accepted captures, not one synthetic capture per reused layer: {coverage:?}"
-    );
-    assert!(coverage.achieved_shape_error_mm.is_finite());
+    assert_single_lane_coverage(&bundle);
     assert!((0.0..=0.1).contains(&coverage.achieved_shape_error_mm));
-    assert!(coverage.geometry_work > 0);
-    assert_eq!(coverage.evidence, PreflightEvidence::Certified);
+    let layers = &bundle.plan.layers;
+    assert_eq!(layers[0].lower_z_mm, 0.0);
+    assert!((layers.last().unwrap().z_mm - 8.0).abs() < 1e-6);
+    for (index, layer) in layers.iter().enumerate() {
+        assert!(0.0 < layer.height_mm && layer.height_mm <= 0.2 + 1e-9);
+        if index > 0 {
+            assert_eq!(layer.lower_z_mm, layers[index - 1].z_mm);
+        }
+    }
     assert_eq!(bundle.summary().native_geometry, *coverage);
     assert_eq!(bundle.provenance.occurrences, scene.occurrences);
     assert!(
@@ -322,14 +345,6 @@ fn original_box_reuses_certified_slabs_without_fabricating_layer_captures() {
             .iter()
             .all(|layer| { (layer.region_coverage.source_section_area_mm2 - 200.0).abs() < 1e-6 })
     );
-    let features = &coverage.source_feature_coverage;
-    assert_eq!(
-        features.disjoint_source_layer_count
-            + features.invariant_source_union_layer_count
-            + features.native_interface_complex_layer_count,
-        coverage.certified_layer_count
-    );
-    assert!(features.owned_critical_slab_count <= coverage.slab_count);
     let reopened = reload(&encode(&bundle), &bundle.program);
     assert_eq!(reopened.plan.native_geometry, *coverage);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
@@ -356,28 +371,23 @@ fn disjoint_mixed_height_sources_bind_actual_birth_and_terminal_contributors() {
             (layer.region_coverage.source_section_area_mm2 - box_area - cylinder_area).abs() < 0.2
         );
     }
-    let coverage = &bundle.plan.native_geometry;
-    assert_eq!(coverage.height_analysis_count, 2);
-    assert!(coverage.slab_count >= coverage.height_analysis_count);
-    assert!(coverage.slab_count <= coverage.height_analysis_count * coverage.certified_layer_count);
-    assert_eq!(
-        coverage.slab_count % coverage.height_analysis_count,
-        0,
-        "every accepted span captures both original sources, even while one is inactive"
-    );
-    let features = &coverage.source_feature_coverage;
-    assert_eq!(
-        features.disjoint_source_layer_count
-            + features.invariant_source_union_layer_count
-            + features.native_interface_complex_layer_count,
-        coverage.certified_layer_count
-    );
-    assert_eq!(features.invariant_source_union_layer_count, 0);
+    // The cylinder's birth and the box's terminal face are actual layer
+    // boundaries of the one schedule.
     assert!(
-        features.native_interface_complex_layer_count > 0,
-        "inactive source caps own real adjacent material through native interface evidence"
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| (layer.lower_z_mm - 4.0).abs() < 1e-6)
     );
-    assert!(coverage.source_feature_coverage.owned_critical_slab_count >= 2);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| (layer.z_mm - 8.0).abs() < 1e-6)
+    );
+    assert_single_lane_coverage(&bundle);
     let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
 }
@@ -463,25 +473,13 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
     );
     let policy = TolerantPolicy::default();
     let baseline_model = TolerantModel::build(
-        baseline
-            .definitions
-            .values()
-            .next()
-            .unwrap()
-            .native()
-            .unwrap(),
+        baseline.definitions.values().next().unwrap(),
         policy,
         &cancel,
     )
     .unwrap();
     let changed_model = TolerantModel::build(
-        changed
-            .definitions
-            .values()
-            .next()
-            .unwrap()
-            .native()
-            .unwrap(),
+        changed.definitions.values().next().unwrap(),
         policy,
         &cancel,
     )
@@ -572,13 +570,7 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
         };
         assert_eq!(product_section(&changed_model, outside).0.len(), 1);
         let failure = spiling_geometry::section(
-            changed
-                .definitions
-                .values()
-                .next()
-                .unwrap()
-                .native()
-                .unwrap(),
+            changed.definitions.values().next().unwrap(),
             PlaneMm {
                 origin_mm: [0.0, 0.0, event],
                 normal: [0.0, 0.0, 1.0],
@@ -1328,9 +1320,7 @@ fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
 fn rib_layer(scene: &NativeScene, id: u32) -> spiling_contracts::surface::SurfaceLayer {
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let occurrence = &scene.occurrences[0];
-    let native = scene.definitions[&occurrence.definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&occurrence.definition_id];
     let face = native
         .faces()
         .iter()
@@ -1522,9 +1512,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
         original.provenance.definitions
     );
     assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
-    let native = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
     let mut admission_work_1 = spiling_geometry::GeometryWorkBudget::compile();
     let (admitted, _) =
@@ -1876,9 +1864,7 @@ fn finished_native_cantilever_keeps_ribs_through_actual_anchor_support_realizati
     let enabled = intent(true);
     let bundle = compile(scene.input(&enabled), &cancel).unwrap();
     assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
-    let native = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
     let mut admission_work_2 = spiling_geometry::GeometryWorkBudget::compile();
     let (admitted, _) =
@@ -1960,9 +1946,7 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
         edge_margin_mm: 1.2,
         phase_mm: 0.37,
     };
-    let native = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = scene.definitions[&scene.occurrences[0].definition_id].clone();
     let second_face = native
         .faces()
         .iter()
@@ -2046,9 +2030,7 @@ const FULL_CYLINDER: &[u8] =
 fn cylinder_layer(scene: &NativeScene, phase: f64) -> spiling_contracts::surface::SurfaceLayer {
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let occurrence = &scene.occurrences[0];
-    let native = scene.definitions[&occurrence.definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&occurrence.definition_id];
     let face = native
         .faces()
         .iter()
@@ -2078,9 +2060,7 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             if cylindrical { FULL_CYLINDER } else { BOX },
             &[RigidPoseMm::IDENTITY, translated(50.0, 0.0, 0.0)],
         );
-        let native = scene.definitions[&scene.occurrences[0].definition_id]
-            .native()
-            .unwrap();
+        let native = &scene.definitions[&scene.occurrences[0].definition_id];
         let mut admission_work_4 = spiling_geometry::GeometryWorkBudget::compile();
         let bounds = preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_4)
             .unwrap()
@@ -2169,9 +2149,14 @@ fn independent_cylindrical_ribs_change_ordinary_walls_accounting_and_actual_repl
     );
     for (plain, textured) in original.plan.layers.iter().zip(&finished.plan.layers) {
         let coverage = &textured.region_coverage;
+        // The finish leaves the source section unchanged. Until finishes run on
+        // the single lane, the finished job's exact section and the plain job's
+        // sliced one agree within the profile tolerance along the circle.
+        let area = plain.region_coverage.section_area_mm2;
+        let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
         assert!(
-            (coverage.source_section_area_mm2 - plain.region_coverage.section_area_mm2).abs()
-                < 1e-8
+            (coverage.source_section_area_mm2 - area).abs()
+                <= profile * 2.0 * (std::f64::consts::PI * area).sqrt()
         );
         assert!(coverage.surface_added_area_mm2 > 0.0);
         assert!(
@@ -2256,9 +2241,7 @@ fn cylindrical_source_phase_pose_and_flipped_z_preserve_native_closed_material()
                 .surface_overlays
                 .layers
                 .push(cylinder_layer(&scene, phase));
-            let native = scene.definitions[&scene.occurrences[0].definition_id]
-                .native()
-                .unwrap();
+            let native = &scene.definitions[&scene.occurrences[0].definition_id];
             let mut admission_work_5 = spiling_geometry::GeometryWorkBudget::compile();
             let (admitted, _) =
                 preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_5).unwrap();
@@ -2318,9 +2301,7 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
         include_bytes!("../../../../fixtures/geometry/cylinder.step"),
         &[RigidPoseMm::IDENTITY],
     );
-    let native = partial.definitions[&partial.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = &partial.definitions[&partial.occurrences[0].definition_id];
     let face = native
         .faces()
         .iter()
@@ -2593,9 +2574,7 @@ fn blank_image_interval_returns_exact_native_material_and_no_invented_added_area
         preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_6).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     let occurrence = &scene.occurrences[0];
-    let native = scene.definitions[&occurrence.definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&occurrence.definition_id];
     let source = region::from_native(
         &spiling_geometry::section_with_byte_limit(
             native,
@@ -2776,8 +2755,6 @@ fn asymmetric_image_phase_moves_actual_first_wall_lobe_despite_identical_extrema
     let pixels = [255, 0, 0, 0, 255, 0, 0, 0];
     install_image(&mut scene, false, 4, 2, &pixels, parameters.clone());
     let cert = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap()
         .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
         .unwrap();
     let intent = intent(false);
@@ -2818,8 +2795,6 @@ fn ordinary_erosion_lost_image_feature_is_attributed_advisory_not_fake_wall_surv
     let intent = intent(false);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     let cert = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap()
         .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
         .unwrap();
     let peak = wall_peak_in_u_band(&bundle.plan.layers[0], &cert, 1.2, 0.45, 0.55)
@@ -2900,9 +2875,7 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
         let (admitted, _) =
             preflight::admit(&scene.input(&enabled), &cancel, &mut admission_work_7).unwrap();
         let occurrence = &scene.occurrences[0];
-        let native = scene.definitions[&occurrence.definition_id]
-            .native()
-            .unwrap();
+        let native = &scene.definitions[&occurrence.definition_id];
         let cert = native
             .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
             .unwrap();
@@ -3150,13 +3123,7 @@ fn equivalent_analytic_and_rational_sources_preserve_sections_material_and_fresh
         assert_eq!(bundles[1].provenance.definitions, b.stored);
         let mut volumes = [0.0; 2];
         for (index, bundle) in bundles.iter().enumerate() {
-            let coverage = &bundle.plan.native_geometry;
-            assert_eq!(coverage.evidence, PreflightEvidence::Certified);
-            assert_eq!(
-                coverage.certified_layer_count,
-                bundle.plan.layers.len() as u32
-            );
-            assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+            assert_single_lane_coverage(bundle);
             assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() < 1e-6);
             for layer in &bundle.plan.layers {
                 let expected = match name {
@@ -3255,9 +3222,7 @@ fn assert_native_family_compile_and_replay(
     let cancel = AtomicBool::new(false);
     let source = native_test_source(name);
     let scene = NativeScene::new(&source, &[translated(0.0, 0.0, bed_translation)]);
-    let native = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
     assert!(
         native
             .faces()
@@ -3291,18 +3256,11 @@ fn assert_native_family_compile_and_replay(
         "{name}"
     );
     let coverage = &bundle.plan.native_geometry;
-    if supports {
-        assert_eq!(coverage.evidence, PreflightEvidence::Certified, "{name}");
-    } else {
+    if !supports {
         assert_eq!(intent.recipe.supports, SupportPolicy::Disabled);
         assert_eq!(bundle.verification.support_deposition_segments, 0, "{name}");
     }
-    assert_eq!(
-        coverage.certified_layer_count,
-        bundle.plan.layers.len() as u32
-    );
-    assert!(coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm);
-    assert!(coverage.geometry_work > 0);
+    assert_single_lane_coverage(&bundle);
     assert_eq!(
         coverage.skin_coverage,
         SkinCoverageScope::ScheduledMaterialDistance
@@ -3311,61 +3269,8 @@ fn assert_native_family_compile_and_replay(
         coverage.support_clearance,
         SupportClearanceScope::ContinuousTargetOuterOccupancy
     );
-    let features = &coverage.source_feature_coverage;
-    assert_eq!(features.invariant_source_union_layer_count, 0, "{name}");
-    match coverage.evidence {
-        PreflightEvidence::Certified => {
-            assert_eq!(
-                coverage.height_analysis_count,
-                scene.occurrences.len() as u32
-            );
-            assert!(coverage.slab_count > 0);
-            assert_eq!(
-                features.disjoint_source_layer_count
-                    + features.invariant_source_union_layer_count
-                    + features.native_interface_complex_layer_count,
-                coverage.certified_layer_count,
-                "{name}"
-            );
-            if matches!(
-                family,
-                SurfaceFamily::Cone | SurfaceFamily::Sphere | SurfaceFamily::Torus
-            ) {
-                assert!(
-                    features.native_interface_complex_layer_count > 0,
-                    "{name}: non-product critical cofaces require real native interface evidence"
-                );
-            }
-        }
-        PreflightEvidence::Tolerant => {
-            assert!(
-                !supports,
-                "{name}: tolerant mode cannot supply generated support"
-            );
-            assert_eq!(coverage.height_analysis_count, 0);
-            assert_eq!(coverage.slab_count, 0);
-            assert_eq!(features.disjoint_source_layer_count, 0);
-            assert_eq!(features.native_interface_complex_layer_count, 0);
-            assert_eq!(features.owned_critical_slab_count, 0);
-            assert_eq!(
-                coverage.achieved_shape_error_mm,
-                spiling_geometry::tolerant::TolerantPolicy::default()
-                    .profile_mm
-                    .min(intent.recipe.native_shape_error_mm)
-            );
-        }
-        evidence => panic!("{name}: unexpected material evidence: {evidence:?}"),
-    }
     if family == SurfaceFamily::Sphere {
-        let surface_error = match coverage.evidence {
-            PreflightEvidence::Certified => {
-                coverage.achieved_shape_error_mm + bundle.plan.sampling_tolerance_mm
-            }
-            PreflightEvidence::Tolerant => {
-                spiling_geometry::tolerant::TolerantPolicy::default().profile_mm
-            }
-            evidence => panic!("{name}: unexpected material evidence: {evidence:?}"),
-        };
+        let surface_error = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
         let area_bound = std::f64::consts::PI * (10.0 * surface_error + surface_error.powi(2));
         for layer in &bundle.plan.layers {
             let local_z = layer.section_z_mm - bed_translation;
@@ -3476,16 +3381,15 @@ fn cone_first_and_last_layers_preserve_closed_material_and_fresh_replay() {
             assert_eq!(layer.lower_z_mm, layers[index - 1].z_mm);
         }
         // Independent analytic area of this frozen 5-to-3 mm, 8 mm cone.
-        // Check every realized layer, including the two terminal layers. A
-        // certified span may reuse a nearby native sample, so its full closed-
-        // layer shape bound owns this comparison, not the section chord error.
+        // Check every realized layer, including the two terminal layers,
+        // against the recorded tolerant profile bound.
         let radius = 5.0 - layer.section_z_mm / 4.0;
         let expected = std::f64::consts::PI * radius * radius;
         let error = bundle.plan.native_geometry.achieved_shape_error_mm;
         let area_error = std::f64::consts::PI * (2.0 * radius * error + error * error);
         assert!(
             (layer.region_coverage.source_section_area_mm2 - expected).abs() <= area_error,
-            "layer {index}: realized cone area must preserve the original radial law within its certified bound"
+            "layer {index}: realized cone area must preserve the original radial law within its recorded bound"
         );
     }
 }
@@ -3496,9 +3400,7 @@ fn sphere_source_does_not_broaden_finish_certificates_and_smooth_keeps_precedenc
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let source = native_test_source("sphere-belt");
     let mut scene = NativeScene::new(&source, &[translated(0.0, 0.0, 3.0)]);
-    let native = scene.definitions[&scene.occurrences[0].definition_id]
-        .native()
-        .unwrap();
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let face = native
         .faces()
         .iter()
@@ -3595,10 +3497,8 @@ fn spline_extrusion_bore_keeps_native_holes_through_ordinary_paths_and_reopen_re
     }
     let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
-    assert_eq!(
-        reopened.plan.native_geometry.evidence,
-        PreflightEvidence::Certified
-    );
+    assert_eq!(reopened.plan.native_geometry, bundle.plan.native_geometry);
+    assert_single_lane_coverage(&reopened);
 }
 
 #[test]
@@ -3713,22 +3613,7 @@ fn blind_native_pocket_floor_remains_owned_while_ordinary_material_becomes_a_rin
                 > 28.0,
             "{name}"
         );
-        let coverage = &bundle.plan.native_geometry;
-        assert!(
-            coverage
-                .source_feature_coverage
-                .native_interface_complex_layer_count
-                > 0,
-            "{name}"
-        );
-        assert!(
-            coverage.source_feature_coverage.owned_critical_slab_count > 0,
-            "{name}"
-        );
-        assert!(
-            coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm,
-            "{name}"
-        );
+        assert_single_lane_coverage(&bundle);
         assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
         let reopened = reload(&encode(&bundle), &bundle.program);
         assert!(
@@ -3795,13 +3680,7 @@ fn non_grid_overlapping_native_material_binds_actual_overlay_and_replays() {
         coverage.achieved_shape_error_mm > 0.0,
         "Actual common-frame overlay conversion cannot be reported as an exact zero-error source model"
     );
-    assert!(coverage.achieved_shape_error_mm <= coverage.requested_shape_error_mm);
-    assert_eq!(
-        coverage
-            .source_feature_coverage
-            .invariant_source_union_layer_count,
-        coverage.certified_layer_count
-    );
+    assert_single_lane_coverage(&bundle);
     assert_eq!(bundle.provenance.occurrences, scene.occurrences);
     let reopened = reload(&encode(&bundle), &bundle.program);
     assert!(crate::verify_bundle(&reopened, &cancel).unwrap().verified);
@@ -3847,27 +3726,12 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
         let bundle = compile(scene.input(&intent), &cancel).unwrap();
         assert_eq!(bundle.provenance.occurrences, scene.occurrences);
         assert_definition_provenance(&bundle.provenance.definitions, &scene.stored);
-        let coverage = &bundle.plan.native_geometry;
-        assert_eq!(coverage.height_analysis_count, 3);
-        let features = &coverage.source_feature_coverage;
-        assert_eq!(
-            features.disjoint_source_layer_count
-                + features.invariant_source_union_layer_count
-                + features.native_interface_complex_layer_count,
-            coverage.certified_layer_count
-        );
-        assert_eq!(
-            features.native_interface_complex_layer_count, coverage.certified_layer_count,
-            "an invariant overlapping subgroup cannot label the varying whole layer invariant or disjoint"
-        );
-        assert_eq!(features.invariant_source_union_layer_count, 0);
-        assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+        assert_single_lane_coverage(&bundle);
         assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() < 0.000001);
         let mut cone_source_volume = 0.0;
         let mut volume_error = 0.0;
         for layer in &bundle.plan.layers {
-            // Analytic fixture oracle at accepted samples, not an all-Z proof:
-            // interval/leaf/joint native evidence remains the Compile authority.
+            // Analytic fixture oracle at the scheduled section heights.
             let radius = 5.0 - layer.section_z_mm * 0.25;
             let expected = std::f64::consts::PI * radius * radius;
             let xy_error = intent.recipe.native_shape_error_mm * 1.25;
@@ -4412,9 +4276,7 @@ fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_addi
         )
     };
     let actual_section = |occurrence: &OccurrenceRecord, z: f64| {
-        let native = scene.definitions[&occurrence.definition_id]
-            .native()
-            .unwrap();
+        let native = &scene.definitions[&occurrence.definition_id];
         let section = spiling_geometry::section_with_byte_limit(
             native,
             PlaneMm {
@@ -4844,7 +4706,7 @@ fn rounded_housing_disabled_supports_refines_startup_and_replays() {
     );
     let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
     assert_eq!(bundle.verification.support_deposition_segments, 0);
-    assert!(bundle.plan.native_geometry.geometry_work > 0);
+    assert_single_lane_coverage(&bundle);
     assert!(
         bundle
             .plan

@@ -62,7 +62,6 @@ async fn import(client: &mut EngineClient, path: &Path) -> spiling_contracts::Na
         session_id: summary.session_id.clone(),
         base_revision: summary.revision,
         source: NativePath::from_os_str(path.as_os_str()).unwrap(),
-        options: spiling_contracts::geometry::ModelImportOptions::default(),
         initial_pose: RigidPoseMm::IDENTITY,
     };
     let operation = match client.geometry(command).await.unwrap() {
@@ -140,7 +139,6 @@ async fn native_watch_drop_reconnect_and_terminal_receipts_preserve_work() {
             session_id: before.session_id,
             base_revision: before.revision,
             source: NativePath::from_os_str(fixture("box-mm.step").as_os_str()).unwrap(),
-            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         })
         .await
@@ -405,7 +403,6 @@ async fn preflight_rejections_leave_transport_unwritten_and_live() {
         source: NativePath::UnixBytes {
             hex: "61".repeat(MAX_NATIVE_PATH_UNITS as usize + 1),
         },
-        options: spiling_contracts::geometry::ModelImportOptions::default(),
         initial_pose: RigidPoseMm::IDENTITY,
     };
     assert!(matches!(
@@ -595,7 +592,6 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
             session_id: readonly.session_id.clone(),
             base_revision: readonly.revision,
             source: NativePath::from_os_str(fixture("cylinder.step").as_os_str()).unwrap(),
-            options: spiling_contracts::geometry::ModelImportOptions::default(),
             initial_pose: RigidPoseMm::IDENTITY,
         },
     ] {

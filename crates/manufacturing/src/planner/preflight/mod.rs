@@ -311,16 +311,7 @@ pub(super) fn admit<'a, 'work>(
     cancel: &AtomicBool,
     geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<(Admission<'work>, super::PreparedSources<'a>), ManufacturingError> {
-    let prepared = input.definitions.values().any(|d| {
-        matches!(
-            d.as_ref(),
-            spiling_geometry::source::SourceDefinition::Hybrid(_)
-        )
-    });
-    if prepared {
-        super::tolerant_supported(input)?;
-    }
-    admit_with(input, cancel, geometry_work, prepared)
+    admit_with(input, cancel, geometry_work, false)
 }
 
 /// Preflight in exact or ADR012 tolerant mode. Tolerant mode takes bounds and
@@ -610,7 +601,7 @@ pub(super) fn admit_with<'a, 'work>(
         }
         let mut placed = if let Some(models) = result.tolerant.as_mut() {
             if !tolerant_models.contains_key(&occurrence.definition_id) {
-                match definition.prepare(TolerantPolicy::default(), cancel) {
+                match TolerantModel::build(definition, TolerantPolicy::default(), cancel) {
                     Ok(model) if model.failed_faces == 0 => {
                         tolerant_models.insert(occurrence.definition_id.clone(), model);
                     }
@@ -657,9 +648,6 @@ pub(super) fn admit_with<'a, 'work>(
             models.insert(occurrence.occurrence_id, std::sync::Arc::new(model));
             placed
         } else {
-            let definition = definition
-                .native()
-                .map_err(|e| super::native_error(e, "native capability"))?;
             if !geometry_sources.contains_key(&occurrence.definition_id) {
                 let source = match spiling_geometry::prepare_solid(
                     definition,

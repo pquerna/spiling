@@ -105,7 +105,7 @@ fn intent() -> ManufacturingIntent {
 }
 struct Scene {
     id: ProjectId,
-    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
+    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
@@ -115,9 +115,9 @@ struct Scene {
 }
 impl Scene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
-        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
+        let native = Arc::new(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        ));
+        );
         let id = native.id().clone();
         let mut provenance = native.provenance().clone();
         provenance.source_name = "operator captured source.step".into();
@@ -252,7 +252,7 @@ fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
         "../../../fixtures/manufacturing/fixed-dual.intent.json"
     ))
     .unwrap();
-    let native = scene.definitions.values().next().unwrap().native().unwrap();
+    let native = scene.definitions.values().next().unwrap();
     let occurrence = &scene.occurrences[0];
     let face = native
         .faces()
@@ -330,7 +330,7 @@ fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
 }
 
 fn sparse_functional_intent(scene: &Scene) -> ManufacturingIntent {
-    let native = scene.definitions.values().next().unwrap().native().unwrap();
+    let native = scene.definitions.values().next().unwrap();
     let face_id = native
         .faces()
         .iter()
@@ -498,7 +498,7 @@ fn functional_sparse_parent_density_and_face_directions() {
         (1, 1.0, 1.0),
     ] {
         let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
-        let native = scene.definitions.values().next().unwrap().native().unwrap();
+        let native = scene.definitions.values().next().unwrap();
         let face_id = native
             .faces()
             .iter()
@@ -683,7 +683,7 @@ fn functional_localized_patches_preserve_complete_stock_and_replay() {
     ] {
         let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
         let mut requested = functional_material_intent(&scene);
-        let native = scene.definitions.values().next().unwrap().native().unwrap();
+        let native = scene.definitions.values().next().unwrap();
         let face = native
             .faces()
             .iter()
@@ -1208,7 +1208,7 @@ fn regional_surface_cycles_resolve_opposite_phases_at_common_z_with_shared_white
 fn adjoining_equal_surface_bands_union_once_and_conflicting_depths_refuse() {
     for source in [BOX, HOLE] {
         let scene = Scene::new(source, &[pose(20.0, 20.0, 0.0)]);
-        let native = scene.definitions.values().next().unwrap().native().unwrap();
+        let native = scene.definitions.values().next().unwrap();
         let side = native
             .faces()
             .iter()
@@ -1422,8 +1422,14 @@ fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore()
             fraction,
         );
     }
-    let unchanged = placements.map(|translation| {
-        actual_object_geometry(&motion, translation, |kind, a, b| {
+    // Perimeters and physical cap skins of each copy must be exactly what the
+    // same scene prints without local fractions: only sparse interiors move.
+    let plain = {
+        let scene = Scene::new(HOLE, &placements.map(|p| pose(p[0], p[1], p[2])));
+        actual_motion(&scene.compile(&intent).unwrap())
+    };
+    let walls_and_caps = |motion: &[(u8, u32, [f64; 3])], translation: [f64; 3]| {
+        actual_object_geometry(motion, translation, |kind, a, b| {
             let in_source = |p: [f64; 3]| {
                 (-0.001..=20.001).contains(&p[0]) && (-0.001..=20.001).contains(&p[1])
             };
@@ -1431,14 +1437,18 @@ fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore()
                 && in_source(b)
                 && (kind == 1 || kind == 3 && b[2] <= 0.6 || kind == 4 && b[2] >= 7.6)
         })
-    });
-    for role in [1, 3, 4] {
-        assert!(unchanged[0].iter().any(|segment| segment.0 == role));
+    };
+    for translation in placements {
+        let with_fractions = walls_and_caps(&motion, translation);
+        for role in [1, 3, 4] {
+            assert!(with_fractions.iter().any(|segment| segment.0 == role));
+        }
+        assert_eq!(
+            with_fractions,
+            walls_and_caps(&plain, translation),
+            "local sparse fractions must not move actual perimeters or physical cap skins",
+        );
     }
-    assert_eq!(
-        unchanged[0], unchanged[1],
-        "local sparse fractions must not move actual perimeters or physical cap skins",
-    );
     for translation in placements {
         let mut pocket_segments = 0;
         for pair in motion.windows(2) {
@@ -2592,20 +2602,23 @@ fn build_direction_and_prime_endpoint_resolve_actual_seam_ties() {
     let mut diagnostic = intent();
     diagnostic.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, -0.0] };
     let without_prior = scene.compile(&diagnostic).unwrap();
+    // The seam is the wall vertex furthest along the preferred direction,
+    // ties broken toward -Y: walls need not have a vertex at their bounding
+    // box corner.
+    let extreme = |wall: &DepositionPath, tie_y: f64| {
+        wall.points_mm
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                a[0].total_cmp(&b[0])
+                    .then((tie_y * a[1]).total_cmp(&(tie_y * b[1])))
+            })
+            .unwrap()
+    };
     let first = &without_prior.plan.layers[0].paths[0];
-    let max_x = first
-        .points_mm
-        .iter()
-        .map(|point| point[0])
-        .fold(f64::NEG_INFINITY, f64::max);
-    let min_y = first
-        .points_mm
-        .iter()
-        .map(|point| point[1])
-        .fold(f64::INFINITY, f64::min);
     assert_eq!(
         actual_motion(&without_prior)[0].2,
-        project_xyz6_point_mm([max_x, min_y, first.points_mm[0][2]]).unwrap()
+        project_xyz6_point_mm(extreme(first, -1.0)).unwrap()
     );
 
     let mut complete = decode_intent(include_bytes!(
@@ -2623,21 +2636,11 @@ fn build_direction_and_prime_endpoint_resolve_actual_seam_ties() {
     let preferred = scene.compile(&complete).unwrap();
     for bundle in [&nearest, &preferred] {
         let wall = &bundle.plan.layers[0].paths[0];
-        let max_x = wall
-            .points_mm
-            .iter()
-            .map(|point| point[0])
-            .fold(f64::NEG_INFINITY, f64::max);
-        let max_y = wall
-            .points_mm
-            .iter()
-            .map(|point| point[1])
-            .fold(f64::NEG_INFINITY, f64::max);
         let motion = actual_motion(bundle);
         let body_entry = motion.windows(2).find(|pair| pair[1].0 == 1).unwrap()[0].2;
         assert_eq!(
             body_entry,
-            project_xyz6_point_mm([max_x, max_y, wall.points_mm[0][2]]).unwrap()
+            project_xyz6_point_mm(extreme(wall, 1.0)).unwrap()
         );
     }
     let rotated = Scene::new(
@@ -2885,21 +2888,29 @@ fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates(
     let overlap = Scene::new(BOX, &[RigidPoseMm::IDENTITY, pose(10.0, 0.0, 0.0)])
         .compile(&data)
         .unwrap();
+    // The overlap is one 30 x 10 mm union on every layer, not two summed boxes.
+    let coverage = &overlap.plan.native_geometry;
+    assert_eq!(coverage.evidence, PreflightEvidence::Tolerant);
     assert_eq!(
-        overlap
-            .plan
-            .native_geometry
-            .source_feature_coverage
-            .disjoint_source_layer_count,
+        coverage.certified_layer_count,
+        overlap.plan.layers.len() as u32
+    );
+    assert_eq!(
+        coverage.source_feature_coverage.disjoint_source_layer_count,
         0
     );
     assert_eq!(
-        overlap
-            .plan
-            .native_geometry
+        coverage
             .source_feature_coverage
             .invariant_source_union_layer_count,
-        overlap.plan.native_geometry.certified_layer_count,
+        0
+    );
+    assert!(
+        overlap
+            .plan
+            .layers
+            .iter()
+            .all(|layer| { (layer.region_coverage.source_section_area_mm2 - 300.0).abs() < 1e-6 })
     );
     assert!(overlap.verification.deposited_volume_mm3 > one.verification.deposited_volume_mm3);
     assert!(
@@ -3035,9 +3046,9 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
     use spiling_contracts::geometry::PlaneMm;
 
     let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
-    let upper = Arc::new(spiling_geometry::source::SourceDefinition::from(
+    let upper = Arc::new(
         spiling_geometry::from_step_bytes_with_cancel(CYLINDER, &AtomicBool::new(false)).unwrap(),
-    ));
+    );
     let upper_id = upper.id().clone();
     scene.stored.push(StoredDefinition {
         definition_id: upper_id.clone(),
@@ -3060,7 +3071,7 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
     for index in [20, 39] {
         let layer = &bundle.plan.layers[index];
         let native = spiling_geometry::section_with_byte_limit(
-            upper.native().unwrap(),
+            &upper,
             PlaneMm {
                 origin_mm: [0.0, 0.0, layer.section_z_mm - 8.0],
                 normal: [0.0, 0.0, 1.0],
@@ -3109,13 +3120,6 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     // endpoint has an intentionally visible serialization-rounding deviation.
     bundle.plan.layers.truncate(1);
     bundle.plan.native_geometry.certified_layer_count = 1;
-    bundle.plan.native_geometry.slab_count = 1;
-    bundle.plan.native_geometry.source_feature_coverage = NativeFeatureCoverageSummary {
-        disjoint_source_layer_count: 1,
-        invariant_source_union_layer_count: 0,
-        native_interface_complex_layer_count: 0,
-        owned_critical_slab_count: 0,
-    };
     bundle.plan.layers[0].z_mm = 0.4;
     bundle.plan.layers[0].paths = vec![
         DepositionPath {

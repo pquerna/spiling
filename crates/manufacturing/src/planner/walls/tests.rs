@@ -729,7 +729,7 @@ fn wall_census() {
             match result {
                 Ok(plan) => {
                     part_passed += 1;
-                    use std::hash::{Hash, Hasher};
+                    use std::hash::Hash;
                     for path in &plan.paths {
                         for p in &path.points_mm {
                             p.map(f64::to_bits).hash(&mut digest);

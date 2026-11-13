@@ -362,12 +362,6 @@ impl<'de> Deserialize<'de> for SessionId {
 #[ts(type = "string")]
 pub struct FaceId(String);
 impl FaceId {
-    pub fn from_mesh_region(region: u32) -> Result<Self, GeometryError> {
-        if region == 0 {
-            return Err(invalid("mesh region must be positive"));
-        }
-        Ok(Self(format!("mesh:{region}")))
-    }
     pub fn from_step_entity(entity: u64) -> Result<Self, GeometryError> {
         if entity == 0 {
             return Err(invalid("STEP face entity must be nonzero"));
@@ -382,7 +376,6 @@ impl FaceId {
         let value = value.into();
         let digits = value
             .strip_prefix("step:")
-            .or_else(|| value.strip_prefix("mesh:"))
             .ok_or_else(|| invalid("invalid source face ID"))?;
         let entity = digits
             .parse::<u64>()
@@ -477,9 +470,6 @@ impl TryFrom<&StepEntityId> for FaceId {
 impl TryFrom<&FaceId> for StepEntityId {
     type Error = GeometryError;
     fn try_from(face_id: &FaceId) -> Result<Self, Self::Error> {
-        if !face_id.as_str().starts_with("step:") {
-            return Err(invalid("mesh region has no STEP entity"));
-        }
         let entity = face_id.step_entity();
         if entity == 0 {
             return Err(invalid("STEP face entity must be nonzero"));
@@ -1001,12 +991,6 @@ impl PlaneFrameMm {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub enum SourceUnit {
-    #[serde(rename = "micrometre")]
-    Micrometre,
-    #[serde(rename = "centimetre")]
-    Centimetre,
-    #[serde(rename = "foot")]
-    Foot,
     #[serde(rename = "millimetre")]
     Millimetre,
     #[serde(rename = "metre")]
@@ -1017,9 +1001,6 @@ pub enum SourceUnit {
 impl SourceUnit {
     pub fn scale_to_mm(self) -> f64 {
         match self {
-            Self::Micrometre => 0.001,
-            Self::Centimetre => 10.0,
-            Self::Foot => 304.8,
             Self::Millimetre => 1.0,
             Self::Metre => 1000.0,
             Self::Inch => 25.4,
@@ -1029,8 +1010,6 @@ impl SourceUnit {
 #[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceProvenance {
-    /// Retained interpreted geometry; absent only for native STEP sources.
-    pub normalized: Option<NormalizedSource>,
     pub source_hash: SourceHash,
     pub source_name: String,
     pub source_unit: SourceUnit,
@@ -1045,8 +1024,6 @@ pub struct SourceProvenance {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProvenance {
-    #[serde(deserialize_with = "required_normalized")]
-    normalized: Option<NormalizedSource>,
     source_hash: SourceHash,
     source_name: String,
     source_unit: SourceUnit,
@@ -1058,7 +1035,6 @@ impl TryFrom<RawProvenance> for SourceProvenance {
     type Error = GeometryError;
     fn try_from(raw: RawProvenance) -> Result<Self, Self::Error> {
         let value = Self {
-            normalized: raw.normalized,
             source_hash: raw.source_hash,
             source_name: raw.source_name,
             source_unit: raw.source_unit,
@@ -1074,59 +1050,9 @@ impl<'de> Deserialize<'de> for SourceProvenance {
         deserialize_checked::<D, RawProvenance, Self>(deserializer)
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct NormalizedSource {
-    pub hash: SourceHash,
-    pub format: MeshSourceFormat,
-    /// Package-part/object and affine interpretation, or STL unit selection.
-    pub selector: String,
-    pub notes: Vec<String>,
-}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MeshSourceFormat {
-    Stl,
-    ThreeMf,
-}
-fn required_normalized<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<NormalizedSource>, D::Error> {
-    Option::<NormalizedSource>::deserialize(d)
-}
 impl SourceProvenance {
-    pub fn definition_id(&self) -> DefinitionId {
-        let digest = |hash: &SourceHash| -> [u8; 32] {
-            std::array::from_fn(|i| {
-                u8::from_str_radix(&hash.as_str()[i * 2..i * 2 + 2], 16).expect("validated hash")
-            })
-        };
-        if let Some(normalized) = &self.normalized {
-            let mut hash = Sha256::new();
-            hash.update(b"spiling-normalized-source-1\0");
-            hash.update(digest(&self.source_hash));
-            hash.update(digest(&normalized.hash));
-            hash.update(normalized.selector.as_bytes());
-            hash.update([match normalized.format {
-                MeshSourceFormat::Stl => 0,
-                MeshSourceFormat::ThreeMf => 1,
-            }]);
-            DefinitionId::from_source_sha256(&hash.finalize().into())
-        } else {
-            DefinitionId::for_source(&digest(&self.source_hash), self.source_solid.as_ref())
-        }
-    }
-
     pub fn validate(&self) -> Result<(), GeometryError> {
-        if self.normalized.as_ref().is_some_and(|n| {
-            n.selector.is_empty()
-                || n.selector.len() > MAX_NATIVE_PATH_UNITS as usize
-                || n.notes.len() > 32
-                || n.notes
-                    .iter()
-                    .any(|s| s.len() > MAX_DISPLAY_LABEL_BYTES as usize)
-                || self.source_solid.is_some()
-        }) || self.source_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
+        if self.source_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
             || self
                 .uncertainty_mm
                 .is_some_and(|v| !v.is_finite() || v < 0.0)
@@ -1192,7 +1118,6 @@ pub enum SurfaceFamily {
     LinearExtrusion,
     Revolution,
     TSpline,
-    Faceted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]

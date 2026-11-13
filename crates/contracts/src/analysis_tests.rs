@@ -252,7 +252,6 @@ fn analysis_document_binds_revision_source_hash_and_layout_membership() {
     let definitions = vec![StoredDefinition {
         definition_id: value.definition_id.clone(),
         provenance: SourceProvenance {
-            normalized: None,
             source_hash: value.source_hash.clone(),
             source_name: "part.step".into(),
             source_unit: SourceUnit::Millimetre,

@@ -18,16 +18,6 @@ original-STEP material reconstruction. See [manufacturing](manufacturing-evidenc
 for compiler/replay obligations and [development](development.md) for build
 prerequisites. No geometry result establishes physical printability or machine readiness.
 
-## STL and 3MF source interpretation
-
-[ADR013](../adr/013-hybrid-imported-material.md) extends admission with retained analytic/faceted sources. `crates/model-import` decodes STL and practical 3MF package/component syntax; `geometry::source` normalizes units/affines, preserves shared topology and adopts bounded analytic patches. `SourceDefinition` supplies shared prepared sections and explicit native-only capability requests. Core stores original and normalized objects independently with exact closure and shared ownership; reopening does not repeat fitting.
-
-Binary/ASCII STL use retained unit interpretation (millimetres by default). 3MF admits core meshes, production-extension external model parts, component graphs, repeated instances, affine normalization, printable flags and recognized Prusa/Bambu/Orca part roles. One source plate is imported into Current. The native Project → Model import options menu exposes STL units and 3MF source plate selection for the next import. CLI `--source-plate N` before `--import` selects another. CLI `--import-units mm|m|inch` before STL import retains an explicit override. Settings/painting/support controls do not become positive model material or replace Current setup. Exact cooriented duplicate facets can be removed with a retained report; opposed duplicates remain ambiguous. Cura workspace role metadata currently requires geometry-only export. Negative volumes, unsupported required extensions, unresolved role references and open/nonmanifold meshes refuse explicitly. Automatic hole filling and general surface reconstruction are unqualified.
-
-Planar patches and eligible upright cylinders drive the common section/arc consumers; unresolved fillets remain faceted. Retained patch deviation is rechecked over complete original facets. Native-only finishes, fixed-dual constructions and detailed mechanical operations retain their separate capability gates. Successful source display is not manufacturing qualification.
-
-Reproduce the original box, bore, supported cantilever and external-part/mirrored/repeated assembly journeys with `python3 tools/model-import/check.py target/debug NEW_WORK_DIR`. It requires built engine/CLI binaries and retains exact inputs, logs, fresh source-absent replay/export and a structured result. `cargo test -p spiling-model-import`, geometry `source::tests`, contracts and Core storage tests separately exercise package semantics, useful recovery, identity and corruption. Actual native window/picker qualification remains separate from the checked workbench integration.
-
 ## Entry points and immutable source identity
 
 - Start at [`crates/geometry/src/lib.rs`](../../crates/geometry/src/lib.rs):

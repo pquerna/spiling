@@ -13,13 +13,6 @@ pub struct KernelIdentity {
     pub revision: String,
 }
 
-/// Explicit source interpretation choices. Defaults apply to new imports only.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ModelImportOptions {
-    pub stl_unit: Option<SourceUnit>,
-    pub source_plate: Option<u32>,
-}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryCommand {
@@ -27,7 +20,6 @@ pub enum GeometryCommand {
         session_id: SessionId,
         base_revision: SceneRevision,
         source: NativePath,
-        options: ModelImportOptions,
         initial_pose: RigidPoseMm,
     },
     AddInstance {

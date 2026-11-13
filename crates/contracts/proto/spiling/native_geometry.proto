@@ -30,7 +30,6 @@ message ImportPartRequest {
   uint32 base_revision = 3;
   NativePath source = 4;
   RigidPoseMm initial_pose = 5;
-  ModelImportOptions options = 6;
 }
 message StartSectionRequest {
   string parent = 1;
@@ -119,11 +118,9 @@ message ArtifactPage {
   optional uint32 next_offset = 4;
   repeated Artifact resources = 5;
 }
-enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; MICROMETRE = 4; CENTIMETRE = 5; FOOT = 6; }
+enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; }
 enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; }
-message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; }
-message NormalizedSource { string hash = 1; MeshSourceFormat format = 2; string selector = 3; repeated string notes = 4; }
-enum MeshSourceFormat { MESH_SOURCE_FORMAT_UNSPECIFIED = 0; STL = 1; THREE_MF = 2; }
+message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; }
 message DefinitionDisplay {
   oneof kind { uint32 mesh_artifact_id = 1; DomainError unavailable = 2; }
 }
@@ -138,7 +135,7 @@ message FaceRef { string session_id = 1; uint32 scene_revision = 2; uint32 occur
 enum SurfaceFamily {
   SURFACE_FAMILY_UNSPECIFIED = 0;
   PLANE = 1; CYLINDER = 2; CONE = 3; SPHERE = 4; TORUS = 5;
-  B_SPLINE = 6; NURBS = 7; LINEAR_EXTRUSION = 8; REVOLUTION = 9; T_SPLINE = 10; FACETED = 11;
+  B_SPLINE = 6; NURBS = 7; LINEAR_EXTRUSION = 8; REVOLUTION = 9; T_SPLINE = 10;
 }
 enum TorusKind { TORUS_KIND_UNSPECIFIED = 0; REGULAR_RING = 1; HORN = 2; SPINDLE = 3; }
 message AnalyticSurfaceDescription {
@@ -199,5 +196,3 @@ message LayoutRequest { LayoutObjective objective = 1; optional uint32 template 
 message LayoutPlacement { uint32 source = 1; bool copy = 2; RigidPoseMm pose = 3; }
 message PrepareLayoutRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; uint32 project_revision = 4; LayoutRequest request = 5; }
 message ApplyLayoutRequest { string session_id = 1; uint32 base_revision = 2; uint32 project_revision = 3; string proposal_id = 4; }
-
-message ModelImportOptions { optional SourceUnit stl_unit = 1; optional uint32 source_plate = 2; }

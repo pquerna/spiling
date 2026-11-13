@@ -116,7 +116,6 @@ mod tests {
         let definition = DefinitionRecord {
             definition_id: DefinitionId::from_source_sha256(&[1; 32]),
             provenance: SourceProvenance {
-                normalized: None,
                 source_hash: SourceHash::from_bytes(b"overview"),
                 source_name: "Part.step".into(),
                 source_unit: SourceUnit::Millimetre,
@@ -181,7 +180,6 @@ mod tests {
             .map(|n| DefinitionRecord {
                 definition_id: DefinitionId::from_source_sha256(&[n; 32]),
                 provenance: SourceProvenance {
-                    normalized: None,
                     source_hash: SourceHash::parse(format!("{n:02x}").repeat(32)).unwrap(),
                     source_name: "x".repeat(MAX_DISPLAY_LABEL_BYTES as usize),
                     source_unit: SourceUnit::Millimetre,

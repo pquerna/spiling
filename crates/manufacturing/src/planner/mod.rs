@@ -99,7 +99,9 @@ pub(crate) fn plan(
             input
                 .definitions
                 .get(&occurrence.definition_id)
-                .map(|definition| definition.circles(&occurrence.pose))
+                .map(|definition| {
+                    spiling_geometry::tolerant::CircleSource::new(definition, &occurrence.pose)
+                })
         })
         .collect();
     arcs::attach(&mut plan, &sources, cancel)?;
@@ -111,12 +113,9 @@ fn plan_lane(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    if input.definitions.values().any(|d| {
-        matches!(
-            d.as_ref(),
-            spiling_geometry::source::SourceDefinition::Hybrid(_)
-        )
-    }) {
+    // One pipeline: every job the tolerance policy covers slices through it.
+    // Only features not yet ported keep the exact lane.
+    if tolerant_supported(input).is_ok() {
         return plan_with(input, cancel, geometry_work, true);
     }
     match plan_with(input, cancel, geometry_work, false) {
@@ -199,12 +198,31 @@ fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingErro
             format!("{what} is not yet available for parts sliced within tolerance (ADR012)"),
         ))
     };
-    if input
-        .surface_overlays
-        .layers
-        .iter()
-        .any(|layer| layer.enabled)
-    {
+    // Only an effective displacing finish needs the native finish lane; a
+    // Smooth layer (or one overridden to Smooth) changes nothing.
+    let finished = input.occurrences.iter().any(|occurrence| {
+        input
+            .definitions
+            .get(&occurrence.definition_id)
+            .is_some_and(|definition| {
+                definition.faces().iter().any(|face| {
+                    input
+                        .surface_overlays
+                        .effective_layer(
+                            &occurrence.definition_id,
+                            occurrence.occurrence_id,
+                            &face.face_id,
+                        )
+                        .is_some_and(|layer| {
+                            !matches!(
+                                layer.finish,
+                                spiling_contracts::surface::SurfaceFinish::Smooth
+                            )
+                        })
+                })
+            })
+    });
+    if finished {
         return refuse("a surface finish");
     }
     if matches!(
@@ -212,6 +230,18 @@ fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingErro
         JobWorkflow::FixedDualMarlin { .. }
     ) {
         return refuse("fixed-dual routing");
+    }
+    // Permanent diaphragms and separators prove full-height inner material
+    // from native captures; tolerant spans do not carry it yet.
+    if input
+        .process_document
+        .layers
+        .iter()
+        .filter(|layer| layer.enabled)
+        .flat_map(|layer| &layer.operations)
+        .any(|operation| operation.interface.is_some())
+    {
+        return refuse("a permanent process interface");
     }
     Ok(())
 }
@@ -1204,7 +1234,7 @@ fn admit_schedule<'model>(
         if input.occurrences.len() != 1
             || sections
                 .iter()
-                .any(|span| span.material.as_ref() != first.material.as_ref())
+                .any(|span| !same_section(&first.material, &span.material))
         {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
@@ -3116,9 +3146,10 @@ impl SectionSpan {
         use geo::BoundingRect;
         use std::ops::ControlFlow;
         let rect = |polygon: &geo::Polygon<f64>| {
-            polygon.bounding_rect().map_or([[f64::NAN; 2]; 2], |b| {
-                [[b.min().x, b.min().y], [b.max().x, b.max().y]]
-            })
+            polygon.bounding_rect().map_or(
+                [[f64::NAN; 2]; 2],
+                |b| [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+            )
         };
         if let Some(outer) = &self.occupied {
             for piece in &outer.pieces {
@@ -3140,11 +3171,12 @@ impl SectionSpan {
                             Ok(keep) => ControlFlow::Continue(keep),
                             Err(error) => ControlFlow::Break(Err(error)),
                         },
-                        |piece| match visit(&tolerant::polygon(piece.points), Some(piece.height_mm))
-                        {
-                            Ok(true) => ControlFlow::Continue(()),
-                            Ok(false) => ControlFlow::Break(Ok(())),
-                            Err(error) => ControlFlow::Break(Err(error)),
+                        |piece| {
+                            match visit(&tolerant::polygon(piece.points), Some(piece.height_mm)) {
+                                Ok(true) => ControlFlow::Continue(()),
+                                Ok(false) => ControlFlow::Break(Ok(())),
+                                Err(error) => ControlFlow::Break(Err(error)),
+                            }
                         },
                     )
                     .map_err(|e| native_error(e, "tolerant continuous support enclosure"))?;
@@ -4255,6 +4287,23 @@ fn prefill_walls(
         }
     }
     check_cancel(cancel)
+}
+
+/// Two sections are the same shape when they differ by less than the
+/// recorded profile tolerance along their boundary: sliced sections of one
+/// prism can differ in ring start and redundant collinear vertices.
+fn same_section(a: &MultiPolygon<f64>, b: &MultiPolygon<f64>) -> bool {
+    use geo::{Area, BooleanOps, Euclidean, Length};
+    if a == b {
+        return true;
+    }
+    let perimeter: f64 =
+        a.0.iter()
+            .flat_map(|p| std::iter::once(p.exterior()).chain(p.interiors()))
+            .map(|ring| Euclidean.length(ring))
+            .sum();
+    let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+    a.0.len() == b.0.len() && a.xor(b).unsigned_area() <= profile * perimeter
 }
 
 fn material_hash(material: &MultiPolygon<f64>) -> u64 {

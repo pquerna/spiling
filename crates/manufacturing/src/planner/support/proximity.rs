@@ -182,8 +182,7 @@ impl ColumnProximity {
 }
 
 fn crosses(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
-    (a[1] > p[1]) != (b[1] > p[1])
-        && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+    (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
 }
 
 fn polygon_contains(polygon: &Polygon<f64>, p: [f64; 2]) -> bool {
@@ -218,7 +217,12 @@ fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
 }
 
 fn segment_distance_squared(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
-    let (o1, o2, o3, o4) = (orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b));
+    let (o1, o2, o3, o4) = (
+        orient(a, b, c),
+        orient(a, b, d),
+        orient(c, d, a),
+        orient(c, d, b),
+    );
     if ((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
         && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))
     {

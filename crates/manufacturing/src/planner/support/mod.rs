@@ -3564,8 +3564,8 @@ impl PieceBatch {
         interfaces: &[Rc<OwnedMaterial>],
         temporary: &[&OwnedMaterial],
     ) -> Result<(), ManufacturingError> {
-        let points = piece.exterior().0.len()
-            + piece.interiors().iter().map(|r| r.0.len()).sum::<usize>();
+        let points =
+            piece.exterior().0.len() + piece.interiors().iter().map(|r| r.0.len()).sum::<usize>();
         let bytes = std::mem::size_of::<Polygon<f64>>()
             + std::mem::size_of_val(piece.interiors())
             + points * std::mem::size_of::<geo::Coord<f64>>();
@@ -3700,7 +3700,9 @@ fn subtract_batch(
         // Packed overlay input and output each hold at most twice the staged
         // coordinates before the merged pieces replace the staged copy.
         super::remaining_geometry_units(
-            retained.saturating_add(units).saturating_add(3 * staged.points),
+            retained
+                .saturating_add(units)
+                .saturating_add(3 * staged.points),
             owned_bytes
                 .saturating_add(bytes)
                 .saturating_add(3 * staged.owned_bytes()),
