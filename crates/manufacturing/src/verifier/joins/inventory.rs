@@ -100,12 +100,12 @@ fn admit(bytes: usize) -> Result<(), ManufacturingError> {
     Ok(())
 }
 
-fn along(policy: RectilinearAxisPolicy, index: u32) -> usize {
+fn along(policy: RectilinearAxisPolicy, course: u32) -> usize {
     match policy {
         RectilinearAxisPolicy::X => 0,
         RectilinearAxisPolicy::Y => 1,
-        RectilinearAxisPolicy::AlternatingXY => usize::from(!index.is_multiple_of(2)),
-        RectilinearAxisPolicy::AlternatingYX => usize::from(index.is_multiple_of(2)),
+        RectilinearAxisPolicy::AlternatingXY => usize::from(!course.is_multiple_of(2)),
+        RectilinearAxisPolicy::AlternatingYX => usize::from(course.is_multiple_of(2)),
     }
 }
 
@@ -269,6 +269,7 @@ pub(super) fn verify(
     let retained = retained_bytes(plan)?;
     let mut residuals: Vec<Option<Residual<'_>>> =
         (0..plan.material_domains.len()).map(|_| None).collect();
+    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (layer_index, layer) in plan.layers.iter().enumerate() {
         cancelled(cancel)?;
         let mut demands = Vec::new();
@@ -414,7 +415,7 @@ pub(super) fn verify(
                         } else {
                             recipe.rectilinear_axis
                         },
-                        layer.index,
+                        alternation[layer_index],
                     ),
                     domain: fill,
                 });
@@ -452,7 +453,7 @@ pub(super) fn verify(
                             },
                             kind: DepositionKind::SparseFill,
                             fraction,
-                            along: along(recipe.rectilinear_axis, layer.index),
+                            along: along(recipe.rectilinear_axis, alternation[layer_index]),
                             domain: fill,
                         });
                         region_index += 1;
@@ -504,7 +505,7 @@ pub(super) fn verify(
                         DepositionKind::SparseFill
                     },
                     fraction,
-                    along: along(recipe.rectilinear_axis, layer.index),
+                    along: along(recipe.rectilinear_axis, alternation[layer_index]),
                     domain: piece,
                 });
                 region_index += 1;

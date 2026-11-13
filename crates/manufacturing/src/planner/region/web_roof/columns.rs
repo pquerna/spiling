@@ -287,6 +287,7 @@ mod tests {
         });
         PrintLayer {
             index,
+            hatch_course: index,
             lower_z_mm: f64::from(index) * 0.2,
             z_mm: f64::from(index + 1) * 0.2,
             height_mm: 0.2,

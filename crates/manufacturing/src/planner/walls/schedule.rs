@@ -171,6 +171,7 @@ mod tests {
                 z,
                 height: z - lower_z,
                 sample: lower_z + (z - lower_z) * 0.5,
+                course: 0,
             }
         });
         assert_eq!(

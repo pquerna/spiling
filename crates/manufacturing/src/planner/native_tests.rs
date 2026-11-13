@@ -4545,6 +4545,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
                 z: interval[1],
                 sample: 9.991_666_713_601_173,
                 height: interval[1] - interval[0],
+                course: schedule.len() as u32,
             });
             terminal_appended = true;
         }

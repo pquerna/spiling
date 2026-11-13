@@ -240,6 +240,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             PrintLayer {
                 skin_command_fits: Vec::new(),
                 index: 0,
+                hatch_course: 0,
                 z_mm: 1.0,
                 lower_z_mm: 0.0,
                 height_mm: 1.0,
@@ -275,6 +276,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             PrintLayer {
                 skin_command_fits: Vec::new(),
                 index: 1,
+                hatch_course: 1,
                 z_mm: 2.0,
                 lower_z_mm: 1.0,
                 height_mm: 1.0,
@@ -375,6 +377,7 @@ fn replay_rejects_omitted_intermediate_and_final_fixed_height_layers() {
             PrintLayer {
                 skin_command_fits: Vec::new(),
                 index: empty_index as u32,
+                hatch_course: empty_index as u32,
                 z_mm: (empty_index + 1) as f64,
                 lower_z_mm: empty_index as f64,
                 height_mm: 1.0,
@@ -385,6 +388,7 @@ fn replay_rejects_omitted_intermediate_and_final_fixed_height_layers() {
         );
         for (index, layer) in omitted.layers.iter_mut().enumerate() {
             layer.index = index as u32;
+            layer.hatch_course = index as u32;
             layer.z_mm = (index + 1) as f64;
             layer.lower_z_mm = index as f64;
             layer.section_z_mm = index as f64 + 0.5;
@@ -1862,6 +1866,7 @@ fn distributed_square_fixture(layer_count: usize) -> (ManufacturingIntent, Norma
         .map(|index| {
             let mut layer = template.clone();
             layer.index = index as u32;
+            layer.hatch_course = index as u32;
             layer.lower_z_mm = index as f64;
             layer.z_mm = index as f64 + 1.0;
             layer.section_z_mm = index as f64 + 0.5;
@@ -2179,6 +2184,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     let mut gap = PrintLayer {
         skin_command_fits: Vec::new(),
         index: 1,
+        hatch_course: 1,
         z_mm: 1.25,
         lower_z_mm: 1.0,
         height_mm: 0.25,
@@ -2190,6 +2196,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     gap.region_coverage.source_section_area_mm2 = 0.0;
     gap.region_coverage.wall_area_mm2 = 0.0;
     plan.layers[1].index = 2;
+    plan.layers[1].hatch_course = 2;
     plan.layers[1].height_mm = 0.25;
     plan.layers[1].lower_z_mm = 1.25;
     for path in &mut plan.layers[1].paths {
@@ -2331,6 +2338,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     for index in 1..=2 {
         let mut layer = plan.layers[0].clone();
         layer.index = index;
+        layer.hatch_course = index;
         layer.lower_z_mm = if index == 1 { 0.1 } else { 0.2 };
         layer.z_mm = if index == 1 { 0.2 } else { 0.3 };
         layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
@@ -2555,6 +2563,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         .map(|index| {
             let mut layer = template.clone();
             layer.index = index;
+            layer.hatch_course = index;
             layer.lower_z_mm = f64::from(index) * 0.1;
             layer.z_mm = f64::from(index + 1) * 0.1;
             layer.height_mm = 0.1;
@@ -2684,6 +2693,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
     tiny_end.layers.insert(1, tiny);
     for (index, layer) in tiny_end.layers.iter_mut().enumerate() {
         layer.index = index as u32;
+        layer.hatch_course = index as u32;
     }
     tiny_end.sparse_bands[0].last_layer = 4;
     let interval = [tiny_end.layers[1].lower_z_mm, tiny_end.layers[1].z_mm];
@@ -3094,6 +3104,7 @@ fn fitted_skin_bridge_still_requires_genuine_direct_lower_anchors_and_bounded_sp
     let (intent, mut plan) = minimum_skin_fixture();
     let mut upper = plan.layers[0].clone();
     upper.index = 1;
+    upper.hatch_course = 1;
     upper.lower_z_mm = 1.0;
     upper.z_mm = 2.0;
     upper.section_z_mm = 1.5;
@@ -3151,6 +3162,7 @@ fn ordinary_fitted_skin_uses_actual_lower_strokes_not_source_material_as_support
     let (intent, mut plan) = minimum_skin_fixture();
     let mut upper = plan.layers[0].clone();
     upper.index = 1;
+    upper.hatch_course = 1;
     upper.lower_z_mm = 1.0;
     upper.z_mm = 2.0;
     upper.section_z_mm = 1.5;
@@ -3526,6 +3538,7 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
         .map(|index| {
             let mut layer = template.clone();
             layer.index = index;
+            layer.hatch_course = index;
             layer.lower_z_mm = f64::from(index);
             layer.z_mm = f64::from(index) + 1.0;
             layer.section_z_mm = f64::from(index) + 0.5;

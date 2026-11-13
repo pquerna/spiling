@@ -3252,12 +3252,14 @@ fn split_resolved_layer(
         z: layer.z,
         sample: upper_sample,
         height: upper_height,
+        course: layer.course,
     };
     let lower = LayerElevation {
         lower_z: layer.lower_z,
         z: midpoint,
         sample: lower_sample,
         height: lower_height,
+        course: layer.course,
     };
     schedule[index as usize] = lower;
     schedule.insert(index as usize + 1, upper);
@@ -4495,7 +4497,7 @@ mod actual_deposition_tests {
                 let volume =
                     (0.5 - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
                 let index = layers.len() as u32;
-                layers.push(PrintLayer { skin_command_fits: Vec::new(), index,
+                layers.push(PrintLayer { skin_command_fits: Vec::new(), index, hatch_course: index,
                 z_mm: z,
                 lower_z_mm: lower,
                 height_mm: height,
@@ -4542,6 +4544,7 @@ mod actual_deposition_tests {
                     lower_z: lower,
                     sample: lower + height * 0.5,
                     height,
+                    course: schedule.len() as u32,
                 });
                 lower = z;
             };
@@ -4626,6 +4629,7 @@ mod refinement_tests {
             z,
             sample: lower_z + height * 0.5,
             height,
+            course: 0,
         }
     }
 
@@ -4922,6 +4926,7 @@ mod capture_proposal_tests {
                     z: lower_z + 0.5,
                     sample: lower_z + 0.25,
                     height: 0.5,
+                    course: index,
                 }
             })
             .collect()
