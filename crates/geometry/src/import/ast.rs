@@ -104,6 +104,7 @@ impl<'a> Entities<'a> {
                         | "CONICAL_SURFACE"
                         | "SPHERICAL_SURFACE"
                         | "TOROIDAL_SURFACE"
+                        | "DEGENERATE_TOROIDAL_SURFACE"
                         | "B_SPLINE_SURFACE"
                         | "B_SPLINE_SURFACE_WITH_KNOTS"
                         | "BEZIER_SURFACE"

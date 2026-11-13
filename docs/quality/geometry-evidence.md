@@ -867,8 +867,13 @@ import one definition per solid at its source placement and are placed on the
 bed as one rigid group (`--center-all-on-bed`). Remaining refusals: no solid
 in the file (`00`), a part longer than the bed (`01`), modelled threads whose
 helical faces the importer or mesher cannot represent (`26`, `27`, `28`),
-import-time kernel refusals (`16` B-spline canonicalization, `17` horn torus),
-void-shell solids (`27`) and a strip thinner than the narrowest bead (`25`).
+an import-time kernel refusal (`16` B-spline canonicalization), void-shell
+solids (`27`) and a strip thinner than the narrowest bead (`25`). Horn and
+spindle tori import as OCCT's `Geom_ToroidalSurface` does: a face uses the
+outer sheet, and an apex on the axis is a pole like a cone's (`17`, whose
+1 mm corner blends end there). A face on a spindle's inner (lemon) sheet is
+refused by name, because STEP's out-of-tube normal and the kernels' parametric
+normal point opposite ways there.
 
 `SPILING_CORPUS_INFILL=cathedral` runs the same parts with Cathedral infill and
 `SPILING_CORPUS_FRACTION` sets the infill fraction (default 0.15). The same 12

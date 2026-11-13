@@ -367,6 +367,8 @@ impl Implicit {
                 let (t, c) = at(center, [0.0, 0.0, axis[2].signum()]);
                 let half = (minor * minor - t * t).sqrt();
                 push(c, major + half);
+                // A horn or spindle torus's outer sheet has no inner circle
+                // past the axis; admitted faces never use the inner sheet.
                 push(c, major - half);
             }
             _ => {}
@@ -427,6 +429,38 @@ mod tests {
         assert_eq!(circles.len(), 2);
         assert!((circles[0].radius - (10.0 + half)).abs() < 1e-12);
         assert!((circles[1].radius - (10.0 - half)).abs() < 1e-12);
+        // A spindle torus's outer sheet: one circle where its inner one
+        // would cross the axis, two once it no longer does.
+        let spindle = Implicit::Torus {
+            center: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            major: 1.0,
+            minor: 2.0,
+        };
+        let q = spindle.project([3.1, 0.0], 0.0, 0.5).unwrap();
+        assert!((q[0] - 3.0).abs() < 1e-12, "{q:?}");
+        circles.clear();
+        spindle.circles(1.0, 7, &mut circles);
+        assert_eq!(circles.len(), 1);
+        assert!((circles[0].radius - (1.0 + 3.0_f64.sqrt())).abs() < 1e-12);
+        circles.clear();
+        spindle.circles(1.9, 7, &mut circles);
+        let half = (4.0_f64 - 1.9 * 1.9).sqrt();
+        assert_eq!(circles.len(), 2);
+        assert!((circles[1].radius - (1.0 - half)).abs() < 1e-12);
+        // A horn torus closes at its apex: one circle above and below, none at it.
+        let horn = Implicit::Torus {
+            center: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            major: 1.0,
+            minor: 1.0,
+        };
+        let q = horn.project([0.45, 0.0], 0.6, 0.5).unwrap();
+        assert!((q[0] - 0.2).abs() < 1e-12, "{q:?}");
+        circles.clear();
+        horn.circles(0.0, 7, &mut circles);
+        assert_eq!(circles.len(), 1);
+        assert!((circles[0].radius - 2.0).abs() < 1e-12);
         // A far move is refused rather than snapping to another sheet.
         assert!(cylinder.project([1.0 + 2.0, 2.0], 5.0, 0.2).is_none());
         // A crossing on an unconverged mesh comes back with a matching reach.

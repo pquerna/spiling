@@ -50,3 +50,7 @@ reason = "A torus face's loop going all the way around the torus that starts on 
 [[changes]]
 paths = ["crates/geom/src/brep/pcurve.rs", "crates/step/src/topology_tests.rs"]
 reason = "After each loop is closed into the base period, move every loop of a face by whole periods to sit over the face's widest loop: a hole beside an outer loop whose seam is not at the surface's zero landed a period away, outside its face's domain."
+
+[[changes]]
+paths = ["crates/geom/src/brep.rs", "crates/geom/src/brep/eval.rs", "crates/geom/src/brep/tests.rs", "crates/step/src/topology/swept.rs", "crates/step/src/topology_tests.rs"]
+reason = "Admit horn and spindle tori, and DEGENERATE_TOROIDAL_SURFACE's outer sheet, as OCCT's Geom_ToroidalSurface does; a torus offset past its axis keeps its parameters. Refuse by name a face whose boundary lies on a spindle's inner (lemon) sheet, where STEP's out-of-tube normal and the parametric normal disagree. Projection at a horn or spindle apex on the axis keeps the nearby angle, as on the axis itself, instead of the angle of rounding noise."

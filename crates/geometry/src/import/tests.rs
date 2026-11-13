@@ -1756,3 +1756,299 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
         );
     }
 }
+
+/// An authored torus cusp. Four quadrant faces of one torus about Z run from a
+/// rim circle (v = pi/2, radius `major`, at z = `minor`) down to where the
+/// outer sheet meets the axis: a horn torus closes there at its apex and a
+/// spindle at its upper cusp, as CAD corner blends do. Without `pit` a planar
+/// disk caps the rim and the material is the cusp itself; with `pit` the cusp
+/// is a funnel sunk into a cylinder of twice the rim radius whose floor lies
+/// 2 mm below it. `degenerate` writes `DEGENERATE_TOROIDAL_SURFACE` with that
+/// `select_outer`.
+fn torus_cusp_step(major: f64, minor: f64, degenerate: Option<bool>, pit: bool) -> String {
+    fn real(x: f64) -> String {
+        let s = format!("{x:?}");
+        assert!(s.contains('.') && !s.contains('e'), "{s}");
+        s
+    }
+    fn add(data: &mut Vec<String>, text: String) -> String {
+        data.push(text);
+        format!("#{}", 99 + data.len())
+    }
+    fn point(d: &mut Vec<String>, p: [f64; 3]) -> String {
+        let [x, y, z] = p.map(real);
+        add(d, format!("CARTESIAN_POINT('',({x},{y},{z}))"))
+    }
+    fn vertex(d: &mut Vec<String>, p: [f64; 3]) -> String {
+        let p = point(d, p);
+        add(d, format!("VERTEX_POINT('',{p})"))
+    }
+    fn placement(d: &mut Vec<String>, o: [f64; 3], z: [f64; 3], x: [f64; 3]) -> String {
+        let o = point(d, o);
+        let [z, x] = [z, x].map(|v| {
+            let [a, b, c] = v.map(real);
+            add(d, format!("DIRECTION('',({a},{b},{c}))"))
+        });
+        add(d, format!("AXIS2_PLACEMENT_3D('',{o},{z},{x})"))
+    }
+    fn sense(forward: bool) -> &'static str {
+        if forward { ".T." } else { ".F." }
+    }
+    /// A face of `loops` (the first outer), each a list of oriented edges.
+    fn face(
+        d: &mut Vec<String>,
+        loops: &[&[(&String, bool)]],
+        surface: &str,
+        same: bool,
+    ) -> String {
+        let bounds: Vec<String> = loops
+            .iter()
+            .enumerate()
+            .map(|(k, uses)| {
+                let uses: Vec<String> = uses
+                    .iter()
+                    .map(|(e, f)| add(d, format!("ORIENTED_EDGE('',*,*,{e},{})", sense(*f))))
+                    .collect();
+                let edge_loop = add(d, format!("EDGE_LOOP('',({}))", uses.join(",")));
+                let kind = if k == 0 {
+                    "FACE_OUTER_BOUND"
+                } else {
+                    "FACE_BOUND"
+                };
+                add(d, format!("{kind}('',{edge_loop},.T.)"))
+            })
+            .collect();
+        add(
+            d,
+            format!(
+                "ADVANCED_FACE('',({}),{surface},{})",
+                bounds.join(","),
+                sense(same)
+            ),
+        )
+    }
+    /// Four quarter arcs of `circle` through `at`, counter-clockwise about +Z.
+    fn arcs(d: &mut Vec<String>, at: &[String], circle: &str) -> Vec<String> {
+        (0..4)
+            .map(|i| {
+                add(
+                    d,
+                    format!("EDGE_CURVE('',{},{},{circle},.T.)", at[i], at[(i + 1) % 4]),
+                )
+            })
+            .collect()
+    }
+    const QUADRANTS: [[f64; 2]; 4] = [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]];
+    let up = [0.0, 0.0, 1.0];
+    let east = [1.0, 0.0, 0.0];
+    let cusp_z = (minor * minor - major * major).sqrt();
+    let mut d = Vec::new();
+    let origin = placement(&mut d, [0.0; 3], up, east);
+    let torus = match degenerate {
+        None => format!(
+            "TOROIDAL_SURFACE('',{origin},{},{})",
+            real(major),
+            real(minor)
+        ),
+        Some(outer) => format!(
+            "DEGENERATE_TOROIDAL_SURFACE('',{origin},{},{},{})",
+            real(major),
+            real(minor),
+            sense(outer)
+        ),
+    };
+    let torus = add(&mut d, torus);
+    let top = placement(&mut d, [0.0, 0.0, minor], up, east);
+    let top_plane = add(&mut d, format!("PLANE('',{top})"));
+    let rim_circle = add(&mut d, format!("CIRCLE('',{top},{})", real(major)));
+    let cusp = vertex(&mut d, [0.0, 0.0, cusp_z]);
+    let rim: Vec<String> = QUADRANTS
+        .iter()
+        .map(|[c, s]| vertex(&mut d, [major * c, major * s, minor]))
+        .collect();
+    let rim_arcs = arcs(&mut d, &rim, &rim_circle);
+    // Each meridian runs from its rim vertex (angle pi/2) to the cusp.
+    let meridians: Vec<String> = QUADRANTS
+        .iter()
+        .zip(&rim)
+        .map(|(&[c, s], rim)| {
+            let frame = placement(
+                &mut d,
+                [major * c, major * s, 0.0],
+                [s, -c, 0.0],
+                [c, s, 0.0],
+            );
+            let circle = add(&mut d, format!("CIRCLE('',{frame},{})", real(minor)));
+            add(&mut d, format!("EDGE_CURVE('',{rim},{cusp},{circle},.T.)"))
+        })
+        .collect();
+    let mut faces = Vec::new();
+    if !pit {
+        let rim_loop: Vec<_> = rim_arcs.iter().map(|e| (e, true)).collect();
+        faces.push(face(&mut d, &[&rim_loop], &top_plane, true));
+        // The material lies outside the tube: against the out-of-tube normal.
+        for i in 0..4 {
+            let uses = [
+                (&rim_arcs[i], false),
+                (&meridians[i], true),
+                (&meridians[(i + 1) % 4], false),
+            ];
+            faces.push(face(&mut d, &[&uses], &torus, false));
+        }
+    } else {
+        let (outer, floor) = (2.0 * major, cusp_z - 2.0);
+        let wall_circle = add(&mut d, format!("CIRCLE('',{top},{})", real(outer)));
+        let bottom = placement(&mut d, [0.0, 0.0, floor], up, east);
+        let bottom_plane = add(&mut d, format!("PLANE('',{bottom})"));
+        let floor_circle = add(&mut d, format!("CIRCLE('',{bottom},{})", real(outer)));
+        let cylinder = add(
+            &mut d,
+            format!("CYLINDRICAL_SURFACE('',{origin},{})", real(outer)),
+        );
+        let upper: Vec<String> = QUADRANTS
+            .iter()
+            .map(|[c, s]| vertex(&mut d, [outer * c, outer * s, minor]))
+            .collect();
+        let lower: Vec<String> = QUADRANTS
+            .iter()
+            .map(|[c, s]| vertex(&mut d, [outer * c, outer * s, floor]))
+            .collect();
+        let upper_arcs = arcs(&mut d, &upper, &wall_circle);
+        let lower_arcs = arcs(&mut d, &lower, &floor_circle);
+        let down = add(&mut d, "DIRECTION('',(0.0,0.0,-1.0))".into());
+        let rulings: Vec<String> = (0..4)
+            .map(|i| {
+                let vector = add(&mut d, format!("VECTOR('',{down},1.0)"));
+                let [c, s] = QUADRANTS[i];
+                let start = point(&mut d, [outer * c, outer * s, minor]);
+                let line = add(&mut d, format!("LINE('',{start},{vector})"));
+                add(
+                    &mut d,
+                    format!("EDGE_CURVE('',{},{},{line},.T.)", upper[i], lower[i]),
+                )
+            })
+            .collect();
+        let outer_loop: Vec<_> = upper_arcs.iter().map(|e| (e, true)).collect();
+        let hole: Vec<_> = rim_arcs.iter().rev().map(|e| (e, false)).collect();
+        faces.push(face(&mut d, &[&outer_loop, &hole], &top_plane, true));
+        // The material lies on the tube's side: along the out-of-tube normal.
+        for i in 0..4 {
+            let uses = [
+                (&rim_arcs[i], true),
+                (&meridians[(i + 1) % 4], true),
+                (&meridians[i], false),
+            ];
+            faces.push(face(&mut d, &[&uses], &torus, true));
+        }
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            let uses = [
+                (&upper_arcs[i], false),
+                (&rulings[i], true),
+                (&lower_arcs[i], true),
+                (&rulings[j], false),
+            ];
+            faces.push(face(&mut d, &[&uses], &cylinder, true));
+        }
+        let floor_loop: Vec<_> = lower_arcs.iter().rev().map(|e| (e, false)).collect();
+        faces.push(face(&mut d, &[&floor_loop], &bottom_plane, false));
+    }
+    let shell = add(&mut d, format!("CLOSED_SHELL('',({}))", faces.join(",")));
+    let solid = add(&mut d, format!("MANIFOLD_SOLID_BREP('',{shell})"));
+    let mut text = String::from(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('torus cusp'),'2;1');\n\
+         FILE_NAME('torus-cusp.step','2026-01-01T00:00:00',('Spiling contributors'),('Spiling'),'','','');\n\
+         FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n\
+         #1=APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#2);\n\
+         #2=APPLICATION_CONTEXT('core data for automotive mechanical design processes');\n\
+         #3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);\n#4=PRODUCT_DEFINITION_SHAPE('','',#5);\n\
+         #5=PRODUCT_DEFINITION('design','',#6,#9);\n#6=PRODUCT_DEFINITION_FORMATION('','',#7);\n\
+         #7=PRODUCT('','','',(#8));\n#8=PRODUCT_CONTEXT('',#2,'mechanical');\n\
+         #9=PRODUCT_DEFINITION_CONTEXT('part definition',#2,'design');\n",
+    );
+    text += &format!("#10=SHAPE_REPRESENTATION('',({solid}),#11);\n");
+    text += "#11=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#15))\
+             GLOBAL_UNIT_ASSIGNED_CONTEXT((#12,#13,#14))REPRESENTATION_CONTEXT('',''));\n\
+             #12=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\n\
+             #13=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\n\
+             #14=(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());\n\
+             #15=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-6),#12,'distance_accuracy_value','');\n";
+    for (i, entity) in d.iter().enumerate() {
+        text += &format!("#{}={entity};\n", 100 + i);
+    }
+    text + "ENDSEC;\nEND-ISO-10303-21;\n"
+}
+
+#[test]
+fn horn_and_spindle_torus_cusps_import_and_section_on_their_outer_sheet() {
+    use crate::tolerant::{TolerantModel, TolerantPolicy};
+    use spiling_contracts::geometry::{AnalyticSurfaceDescription, TorusKind};
+    let cancel = cancelled();
+    let policy = TolerantPolicy::default();
+    // (major, minor, kind, degenerate record, section height). The cusp's
+    // section radius on the outer sheet is major - sqrt(minor^2 - z^2).
+    for (major, minor, kind, degenerate, z) in [
+        (5.0, 5.0, TorusKind::Horn, None, 3.0),
+        (5.0, 10.0, TorusKind::Spindle, None, 9.5),
+        (5.0, 10.0, TorusKind::Spindle, Some(true), 9.5),
+    ] {
+        for pit in [false, true] {
+            let label = format!("{major}/{minor} {degenerate:?} pit {pit}");
+            let source = torus_cusp_step(major, minor, degenerate, pit);
+            let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel)
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let tori = definition
+                .faces()
+                .iter()
+                .filter(|face| {
+                    matches!(
+                        face.geometry.analytic,
+                        Some(AnalyticSurfaceDescription::Torus { torus_kind, .. }) if torus_kind == kind
+                    )
+                })
+                .count();
+            assert_eq!(tori, 4, "{label}");
+            let cusp_z = (minor * minor - major * major).sqrt();
+            let bounds = definition.bounds_mm();
+            // Import boxes are conservative enclosures, not extrema.
+            assert!(
+                bounds.min[2] <= cusp_z && bounds.max[2] >= minor,
+                "{label}: {bounds:?}"
+            );
+            let model = TolerantModel::build(&definition, policy, &cancel).unwrap();
+            assert_eq!(model.failed_faces, 0, "{label}");
+            let section = model.section(z).unwrap();
+            let radius = major - (minor * minor - z * z).sqrt();
+            // The pit's section is the cylinder's circle with the cusp's as a hole.
+            let mut rings = vec![(radius, if pit { -1.0 } else { 1.0 })];
+            if pit {
+                rings.insert(0, (2.0 * major, 1.0));
+            }
+            let mut loops = section.loops.clone();
+            loops.sort_by(|a, b| b.area.total_cmp(&a.area));
+            assert_eq!(loops.len(), rings.len(), "{label}");
+            for (ring, (r, side)) in loops.iter().zip(rings) {
+                let area = side * std::f64::consts::PI * r * r;
+                let perimeter = std::f64::consts::TAU * r;
+                assert!(
+                    (ring.area - area).abs() <= policy.profile_mm * perimeter,
+                    "{label}: area {} expected {area}",
+                    ring.area
+                );
+                for p in &ring.points {
+                    assert!(
+                        (p[0].hypot(p[1]) - r).abs() <= policy.profile_mm,
+                        "{label}: {p:?} off radius {r}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_spindle_torus_inner_sheet_is_refused_by_name() {
+    let source = torus_cusp_step(5.0, 10.0, Some(false), false);
+    let error = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
+    assert!(error.message.contains("lemon"), "{error:?}");
+}

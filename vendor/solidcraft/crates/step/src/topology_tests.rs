@@ -797,12 +797,12 @@ fn hostile_topology_is_an_error_never_a_panic() {
             }),
         ),
         (
-            "a degenerate torus",
+            "a degenerate torus's inner sheet",
             Box::new(|t: &str| {
                 let (head, rest) = t.split_once("PLANE('',#").unwrap();
                 let a: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                 let (_, rest) = rest.split_once(')').unwrap();
-                format!("{head}DEGENERATE_TOROIDAL_SURFACE('',#{a},1.,2.,.T.){rest}")
+                format!("{head}DEGENERATE_TOROIDAL_SURFACE('',#{a},1.,2.,.F.){rest}")
             }),
         ),
         (
@@ -981,6 +981,10 @@ fn swept_and_offset_surfaces_are_the_files_own() {
         ("CONICAL_SURFACE('',#4,5.,-0.3)", -1.0),
         ("SPHERICAL_SURFACE('',#4,5.)", 1.0),
         ("TOROIDAL_SURFACE('',#4,10.,2.)", 1.0),
+        // Past the axis: a ring torus offset into a spindle, a horn torus, a spindle.
+        ("TOROIDAL_SURFACE('',#4,10.,2.)", 9.0),
+        ("TOROIDAL_SURFACE('',#4,3.,3.)", 1.0),
+        ("TOROIDAL_SURFACE('',#4,2.,3.)", 1.0),
     ] {
         let one = format!("#11={basis};#10=OFFSET_SURFACE('',#11,{},.F.);", real(d));
         same_surface(&one, (0.1, 2.0), (0.1, 1.2));
@@ -991,7 +995,7 @@ fn swept_and_offset_surfaces_are_the_files_own() {
     let ext = swept::Extent { points: vec![Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 1.0)], seam: Vec::new() };
     for (data, why) in [
         ("#11=CYLINDRICAL_SURFACE('',#4,5.);#10=OFFSET_SURFACE('',#11,-5.,.F.);", "collapses"),
-        ("#11=TOROIDAL_SURFACE('',#4,10.,2.);#10=OFFSET_SURFACE('',#11,9.,.F.);", "meets its axis"),
+        ("#11=TOROIDAL_SURFACE('',#4,10.,2.);#10=OFFSET_SURFACE('',#11,-2.,.F.);", "collapses"),
         ("#11=CYLINDRICAL_SURFACE('',#4,5.);#12=OFFSET_SURFACE('',#11,-6.,.F.);#10=OFFSET_SURFACE('',#12,6.,.F.);", "collapses"),
         ("#7=ELLIPSE('',#4,9.,4.);#8=VECTOR('',#3,1.);#10=SURFACE_OF_LINEAR_EXTRUSION('',#7,#8);", "profile's plane"),
         (

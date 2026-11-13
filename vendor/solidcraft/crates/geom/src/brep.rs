@@ -465,8 +465,7 @@ fn surface(s: &Surface, depth: usize, budget: &mut Budget) -> Result<()> {
         Surface::Torus { frame: f, major_radius, minor_radius } => {
             frame(f, budget)?;
             radius(*major_radius)?;
-            radius(*minor_radius)?;
-            require(major_radius > minor_radius, "ring torus radii")
+            radius(*minor_radius)
         }
         Surface::Spline { u_knots, v_knots, points: p } => grid(u_knots, v_knots, p, budget),
         Surface::RationalSpline { u_knots, v_knots, homogeneous: p } => {

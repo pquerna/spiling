@@ -134,6 +134,7 @@ fn source_geometry(
                 | "CONICAL_SURFACE"
                 | "SPHERICAL_SURFACE"
                 | "TOROIDAL_SURFACE"
+                | "DEGENERATE_TOROIDAL_SURFACE"
         )
     });
     let (kind, family, analytic) = if let Some(surface) = analytic_record {
@@ -157,20 +158,33 @@ fn source_geometry(
                 frame,
                 radius_mm: number(at(surface, 2)?)? * scale,
             },
-            "TOROIDAL_SURFACE" => {
+            "TOROIDAL_SURFACE" | "DEGENERATE_TOROIDAL_SURFACE" => {
                 let major = number(at(surface, 2)?)? * scale;
                 let minor = number(at(surface, 3)?)? * scale;
-                if major <= minor {
-                    return Err(error(
-                        GeometryErrorCode::SingularGeometry,
-                        "horn/spindle torus is outside the regular bounded import envelope",
+                // OCCT's Geom_ToroidalSurface admits any positive radii; horn
+                // (major == minor) and spindle (major < minor) tori are
+                // ordinary CAD fillet carriers whose trimmed patch is what matters.
+                // The STEP reader refuses faces on a spindle's inner (lemon)
+                // sheet, whose side STEP and kernel normals disagree on.
+                if surface.name == "DEGENERATE_TOROIDAL_SURFACE"
+                    && !source::source_bool(at(surface, 4)?)?
+                {
+                    return Err(unsupported(
+                        "degenerate torus inner (lemon) sheet has no admitted face side",
                     ));
                 }
+                let torus_kind = if major > minor {
+                    TorusKind::RegularRing
+                } else if major == minor {
+                    TorusKind::Horn
+                } else {
+                    TorusKind::Spindle
+                };
                 AnalyticSurfaceDescription::Torus {
                     frame,
                     major_radius_mm: major,
                     minor_radius_mm: minor,
-                    torus_kind: TorusKind::RegularRing,
+                    torus_kind,
                 }
             }
             _ => unreachable!(),

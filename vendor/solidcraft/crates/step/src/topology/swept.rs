@@ -471,8 +471,9 @@ fn offset(s: BSurface, d: f64) -> R<BSurface> {
         }
         BSurface::Torus { frame, major_radius, minor_radius } => {
             let r = minor_radius + d;
-            if !(r > 1e-9 && r < major_radius) {
-                return bad("torus that collapses or meets its axis");
+            // Past the axis the offset is the same parameters on a horn or spindle torus.
+            if !(r > 1e-9) {
+                return bad("torus that collapses");
             }
             BSurface::Torus { frame, major_radius, minor_radius: r }
         }
@@ -488,7 +489,31 @@ fn offset(s: BSurface, d: f64) -> R<BSurface> {
 pub(super) fn map_surface(s: &Surface, ext: &Extent, tol: f64) -> R<(BSurface, bool)> {
     let mut reversed = false;
     let s = map_surface_in(s, ext, tol, 0, &mut reversed)?;
+    lemon_sheet(&s, ext, tol)?;
     Ok((s, reversed))
+}
+
+/// Refuse a face on a spindle torus's inner (lemon) sheet: a boundary point there within `tol`
+/// and off the outer (apple) sheet. STEP gives the torus normal as pointing out of the tube,
+/// while the parametric normal other kernels orient by turns inward on that sheet, so its
+/// faces' sides are not decided here. Points at the cusps lie on both sheets.
+fn lemon_sheet(s: &BSurface, ext: &Extent, tol: f64) -> R<()> {
+    let BSurface::Torus { frame: f, major_radius, minor_radius } = s else { return Ok(()) };
+    if !(major_radius < minor_radius) {
+        return Ok(());
+    }
+    let (o, k) = (Vec3::from(f.origin), Vec3::from(f.x_axis).cross(Vec3::from(f.y_axis)));
+    for p in &ext.points {
+        let d = *p - o;
+        let h = d.dot(k);
+        let rho = (d - k * h).len();
+        let inner = ((rho + major_radius).hypot(h) - minor_radius).abs();
+        let outer = ((rho - major_radius).hypot(h) - minor_radius).abs();
+        if inner <= tol && outer > tol {
+            return Err(unsupported("a face on the inner (lemon) sheet of a spindle torus"));
+        }
+    }
+    Ok(())
 }
 
 /// An extruded circle along its axis is a cylinder; a circle in a plane through the axis,
@@ -561,12 +586,18 @@ fn map_surface_in(s: &Surface, ext: &Extent, tol: f64, depth: usize, reversed: &
         }
         Surface::Sphere { position, radius } => BSurface::Sphere { frame: frame(position), radius: *radius },
         Surface::Torus { position, major_radius, minor_radius } => {
-            if !(major_radius > minor_radius) {
-                return Err(unsupported("a spindle or horn torus"));
+            // Horn and spindle tori are admitted like OCCT's Geom_ToroidalSurface: the face's
+            // trim selects the sheet it uses.
+            if !(*major_radius > 0.0) {
+                return Err(unsupported("a torus with no major radius"));
             }
             BSurface::Torus { frame: frame(position), major_radius: *major_radius, minor_radius: *minor_radius }
         }
-        Surface::DegenerateTorus { .. } => return Err(unsupported("DEGENERATE_TOROIDAL_SURFACE")),
+        // The outer (apple) sheet is the torus's; the inner (lemon) sheet is refused as above.
+        Surface::DegenerateTorus { position, major_radius, minor_radius, select_outer: true } if *major_radius > 0.0 => {
+            BSurface::Torus { frame: frame(position), major_radius: *major_radius, minor_radius: *minor_radius }
+        }
+        Surface::DegenerateTorus { .. } => return Err(unsupported("a DEGENERATE_TOROIDAL_SURFACE inner (lemon) sheet")),
         Surface::BSpline(b) => super::map_bspline_surface(b)?,
         Surface::RectangularTrimmed { basis, .. } => map_surface_in(basis, ext, tol, depth + 1, reversed)?,
         Surface::Revolution { profile, axis } => revolution(profile, axis, ext)?,

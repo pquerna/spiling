@@ -767,5 +767,8 @@ fn analytic_records_are_unbounded_with_independent_frames() {
     assert!(frame(&bad, &mut Budget(0)).is_err());
     assert!(interval(&[2., 1.], UNBOUNDED).is_err());
     assert!(radius(f64::NAN).is_err());
-    assert!(surface(&Surface::Torus { frame: a_frame(), major_radius: 1., minor_radius: 2. }, 0, &mut Budget(0)).is_err());
+    // Horn and spindle tori are surfaces too; a missing radius is not.
+    surface(&Surface::Torus { frame: a_frame(), major_radius: 2., minor_radius: 2. }, 0, &mut Budget(0)).unwrap();
+    surface(&Surface::Torus { frame: a_frame(), major_radius: 1., minor_radius: 2. }, 0, &mut Budget(0)).unwrap();
+    assert!(surface(&Surface::Torus { frame: a_frame(), major_radius: 0., minor_radius: 2. }, 0, &mut Budget(0)).is_err());
 }

@@ -229,7 +229,13 @@ impl SurfaceEval {
             SurfaceEval::Torus { axes, major, .. } => {
                 let [a, b, h] = axes.local(p);
                 let v = h.atan2(a.hypot(b) - major);
-                [angle(a, b, near.map(|n| n[0])), if v < 0.0 { v + TAU } else { v }]
+                let q = [angle(a, b, near.map(|n| n[0])), if v < 0.0 { v + TAU } else { v }];
+                // At a horn or spindle torus's apex on the axis the angle about it is rounding
+                // noise; as on the axis itself, keep `near`'s.
+                match near {
+                    Some(n) if self.pole(q)[0] => [n[0], q[1]],
+                    _ => q,
+                }
             }
         };
         (q[0].is_finite() && q[1].is_finite() && self.point(q).is_some_and(|s| s.dist(p) <= accept)).then_some(q)
