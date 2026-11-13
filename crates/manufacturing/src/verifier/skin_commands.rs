@@ -561,8 +561,12 @@ pub(super) fn verify(
                         return Err(failed("skin fit has duplicate actual constructions"));
                     }
                 }
-                let (path_index, path, ends) = construction
-                    .ok_or_else(|| failed("skin fit has no complete actual final construction"))?;
+                let (path_index, path, ends) = construction.ok_or_else(|| {
+                    failed(format!(
+                        "skin fit has no complete actual final construction: layer {index}, fitted {:?}",
+                        fit.fitted_mm
+                    ))
+                })?;
                 if claimed[path_index] {
                     return Err(failed(
                         "skin fit repeats an already claimed actual construction",

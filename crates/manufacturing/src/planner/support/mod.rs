@@ -2935,6 +2935,37 @@ fn replace_skin_bridge_domains(
     Ok(())
 }
 
+/// A fitted short skin row absorbed into a coalesced row is no longer its
+/// own command. Its fit witness stays only while the coalesced row is still a
+/// mandatory-skin Bridge of the same skin, the construction the verifier binds
+/// a fit to. A row whose owners disagree is an ordinary Bridge: it carries
+/// that skin material and its own command length, so the witness is released
+/// rather than left naming a command that no longer exists.
+fn release_absorbed_fit(
+    domains: &mut Vec<SkinCommandFitDomain>,
+    piece: &DepositionPath,
+    row: &DepositionPath,
+) {
+    if piece.points_mm.len() != 2 {
+        return;
+    }
+    let Some(DepositionOwner::MandatorySkin { skin }) = piece.owner else {
+        return;
+    };
+    if row.kind == DepositionKind::Bridge
+        && row.owner == Some(DepositionOwner::MandatorySkin { skin })
+    {
+        return;
+    }
+    let ends = [piece.points_mm[0], piece.points_mm[1]];
+    for domain in domains.iter_mut().filter(|domain| domain.skin == skin) {
+        domain
+            .fits
+            .retain(|fit| fit.fitted_mm != ends && fit.fitted_mm != [ends[1], ends[0]]);
+    }
+    domains.retain(|domain| !domain.fits.is_empty());
+}
+
 fn replace_skin_command_fits(
     current: &mut Vec<SkinCommandFitDomain>,
     domains: Vec<SkinCommandFitDomain>,
@@ -3475,6 +3506,11 @@ where
             for &(_, start, stop, index) in &pieces[group_begin..cursor] {
                 if ownership[index] == Ownership::Required && start >= lo && stop <= hi {
                     ownership[index] = Ownership::Removed;
+                    release_absorbed_fit(
+                        &mut candidate.skin_command_fits,
+                        &candidate.paths[index],
+                        &row,
+                    );
                 }
             }
             // Reuse an existing two-point owner instead of retaining both all
@@ -4766,6 +4802,77 @@ mod tests {
                 assert_eq!(candidate.paths[0].kind, Bridge);
                 assert_eq!(candidate.paths[0].owner, expected);
             }
+        }
+    }
+
+    /// A fitted short skin row absorbed into a mixed-owner Bridge is no
+    /// longer its own command: its fit witness is released, never left
+    /// naming a construction the verifier cannot find. An all-skin Bridge
+    /// keeps the witness the verifier binds to it.
+    #[test]
+    fn absorbed_skin_fit_is_released_only_from_a_mixed_owner_bridge() {
+        use DepositionKind::{BottomSkin, Bridge, SolidFill};
+        let previous = [
+            row(SolidFill, 0.0, 3.0, 0.4),
+            row(SolidFill, 7.0, 10.0, 0.4),
+        ];
+        let recipe = crate::planner::tests::recipe(1.0);
+        for (kinds, keeps) in [
+            ([SolidFill, BottomSkin, SolidFill], false),
+            ([BottomSkin, BottomSkin, BottomSkin], true),
+        ] {
+            let paths = vec![
+                row(kinds[0], 1.0, 3.0, 0.8),
+                row(kinds[1], 3.0, 7.0, 0.8),
+                row(kinds[2], 7.0, 9.0, 0.8),
+            ];
+            let fitted = [paths[1].points_mm[0], paths[1].points_mm[1]];
+            let domain = SkinCommandFitDomain {
+                region_index: 0,
+                region: ProcessRegionCoverage {
+                    functional_solid_zone: None,
+                    material_domain: None,
+                    area_mm2: 1.0,
+                    fraction: 1.0,
+                    contributions: Vec::new(),
+                },
+                skin: ProcessSkinKind::BottomSkin,
+                regional: Vec::new(),
+                mandatory: Vec::new(),
+                source_owner: Vec::new(),
+                fits: vec![SkinCommandFit {
+                    required_mm: fitted,
+                    fitted_mm: fitted,
+                }],
+            };
+            let mut candidate = RasterCandidate {
+                skin_command_fits: vec![domain],
+                skin_bridge_domains: Vec::new(),
+                paths,
+                whole_rows: vec![row(Bridge, 1.0, 9.0, 0.8)],
+                process_interfaces: Vec::new(),
+            };
+            assert!(
+                coalesce_bridge_rows(
+                    &mut candidate,
+                    BridgeRowContext {
+                        axis: region::HatchAxis::X,
+                        demanded_reorientation: false,
+                        retained_points: 0,
+                        owned_bytes: 0,
+                        recipe: &recipe,
+                    },
+                    previous.iter(),
+                    std::iter::empty(),
+                    &mut AnchorWorkspace::default(),
+                    &mut 0,
+                    &AtomicBool::new(false),
+                )
+                .unwrap()
+            );
+            assert_eq!(candidate.paths.len(), 1);
+            assert_eq!(candidate.paths[0].kind, Bridge);
+            assert_eq!(candidate.skin_command_fits.len(), usize::from(keeps));
         }
     }
 
