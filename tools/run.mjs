@@ -288,6 +288,12 @@ async function provenance() {
     join(root, "vendor", "solidcraft", "UPSTREAM.toml"),
     join(vendorNotices, "UPSTREAM.toml"),
   );
+  const cppMapNotices = join(directory, "third-party", "source", "cpp_map-0.2.0");
+  await copyNotices(join(root, "vendor", "cpp_map"), cppMapNotices);
+  await copyFile(
+    join(root, "vendor", "cpp_map", "UPSTREAM.toml"),
+    join(cppMapNotices, "UPSTREAM.toml"),
+  );
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;
   const lockHashes = {};

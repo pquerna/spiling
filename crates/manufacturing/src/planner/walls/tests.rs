@@ -787,3 +787,93 @@ fn wall_census() {
         }
     }
 }
+
+#[test]
+fn classic_walls_repeat_bit_identically_on_near_degenerate_circles() {
+    // With OS-seeded skip-list levels in boostvoronoi's beach line about a
+    // third of these constructions produced a different medial graph.
+    let section = near_degenerate_circles();
+    let mut recipe = crate::planner::tests::recipe(0.25);
+    recipe.bead_width_mm = 0.45;
+    recipe.layer_height_mm = 0.2;
+    recipe.perimeter_count = 2;
+    let limits = DepositionLimits {
+        min_bead_width_mm: 0.30,
+        max_bead_width_mm: 0.75,
+        min_bead_height_mm: 0.0025,
+        max_bead_height_mm: 0.30,
+    };
+    let required = region::RequiredMaterial::from_section(&section);
+    let plan = || {
+        let plan = plan_section_walls(
+            WallRequest {
+                material: &section,
+                required: &required,
+                recipe: &recipe,
+                limits: &limits,
+                nozzle_diameter_mm: 0.4,
+                owned_bytes: 0,
+                lower_z: 1.9,
+                upper_z: 2.1,
+                retained_points: region::point_count(&section),
+                classic: true,
+            },
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        format!("{:?} {:?}", plan.paths, plan.fill)
+    };
+    let first = plan();
+    for run in 1..24 {
+        assert!(plan() == first, "wall plan {run} differs from the first");
+    }
+}
+
+/// Two r = 3 mm tessellated holes' material as a sliced STEP part presents
+/// them: 128 vertices each, quadrant vertices displaced by about 1e-7 mm.
+/// The near-cocircular sites make segment-Voronoi beach-line searches
+/// sensitive to the skip list's tower heights.
+fn near_degenerate_circles() -> MultiPolygon<f64> {
+    const OCTANT: [[f64; 2]; 17] = [
+        [-2.999999999999986, -1.1559272650174535e-07],
+        [-2.99696464576094, -0.13491816800912204],
+        [-2.987864714907573, -0.26956343485394996],
+        [-2.9721035123586717, -0.40816750461692664],
+        [-2.9499160833894535, -0.5458892753665339],
+        [-2.920404180252845, -0.6864688077120462],
+        [-2.8841968438245402, -0.8254747519291215],
+        [-2.8402041324484344, -0.9660437288357002],
+        [-2.789364867412772, -1.1042842190501858],
+        [-2.7305374596595016, -1.242644430799146],
+        [-2.6648519848607037, -1.377883848074248],
+        [-2.591277047003004, -1.511715338837078],
+        [-2.5109864409061657, -1.6416294020226587],
+        [-2.423230222686769, -1.7686026370718082],
+        [-2.32905947244015, -1.8908944904030704],
+        [-2.228170621289408, -2.008794584426866],
+        [-2.1213203435596313, -2.1213203435596313],
+    ];
+    let mut quarter: Vec<[f64; 2]> = OCTANT.to_vec();
+    quarter.extend(OCTANT[1..16].iter().rev().map(|p| [p[1], p[0]]));
+    let ring = |c: [f64; 2]| {
+        let mut points = Vec::new();
+        for turn in 0..4 {
+            for p in &quarter {
+                let r = match turn {
+                    0 => *p,
+                    1 => [-p[1], p[0]],
+                    2 => [-p[0], -p[1]],
+                    _ => [p[1], -p[0]],
+                };
+                points.push(Coord {
+                    x: c[0] + r[0],
+                    y: c[1] + r[1],
+                });
+            }
+        }
+        points.push(points[0]);
+        Polygon::new(geo::LineString(points), Vec::new())
+    };
+    MultiPolygon(vec![ring([92.9765, 110.353]), ring([127.7295, 110.353])])
+}

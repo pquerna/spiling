@@ -447,6 +447,12 @@ The retained placed-revolution failure is documented in
 [geometry limits](geometry-evidence.md#refusals-and-support-boundary); do not
 hide it by skipping the test or weaken its PCurve assertion.
 
+`vendor/cpp_map/` replaces `boostvoronoi`'s `cpp_map` dependency through
+`[patch.crates-io]` so segment-Voronoi construction does not depend on an
+OS-seeded skip-list RNG; planner output must be bit-identical for identical
+input. Keep that patch when updating `boostvoronoi`, and test the copy with
+`cargo test --offline --manifest-path vendor/cpp_map/Cargo.toml`.
+
 ## SolidCore fork freshness
 
 The integration owner refreshes upstream at the start of each active UTC workday
