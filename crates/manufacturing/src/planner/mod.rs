@@ -3182,6 +3182,11 @@ fn scheduled_layers(
         row_events.clear();
         for &event in &events {
             check_cancel(cancel)?;
+            // Material that only ends facing up (a top face, the part's top)
+            // carries nothing above it that support could hold.
+            if admission.upward_only_events.binary_search_by(|z| z.total_cmp(&event)).is_ok() {
+                continue;
+            }
             let scale = event
                 .abs()
                 .max(input.intent.select_layer_height()?.height_mm)

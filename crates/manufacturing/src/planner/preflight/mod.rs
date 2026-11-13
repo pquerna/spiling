@@ -14,6 +14,9 @@ use std::sync::atomic::AtomicBool;
 pub(super) struct Admission<'work> {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
+    /// Events where material only ends facing up (no downward face or body
+    /// bottom within the merge distance): nothing above needs support there.
+    pub upward_only_events: Vec<f64>,
     pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
@@ -124,6 +127,7 @@ pub(super) fn admit<'work>(
     let mut result = Admission {
         bounds: None,
         horizontal_events: Vec::new(),
+        upward_only_events: Vec::new(),
         native_bounds: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
         geometry_work,
@@ -666,11 +670,15 @@ pub(super) fn resolve_native_events(
     // height, e.g. assembled bodies meant to sit flush.
     let merge_mm = input.intent.printer.motion_resolution.z_mm;
     let mut heights = Vec::new();
+    let (mut up, mut down) = (Vec::new(), Vec::new());
     let mut combined: Option<AabbMm> = None;
     for occurrence in input.occurrences {
         check_cancel(cancel)?;
         let model = &admission.models[&occurrence.occurrence_id];
         heights.extend(model.feature_heights(merge_mm));
+        let (u, d) = model.facing_heights(merge_mm);
+        up.extend(u);
+        down.extend(d);
         let bounds = admission.native_bounds[&occurrence.occurrence_id];
         let placed = admission
             .surface_fields
@@ -701,6 +709,18 @@ pub(super) fn resolve_native_events(
             admission.horizontal_events.push(z);
         }
     }
+    down.sort_by(f64::total_cmp);
+    admission.upward_only_events = admission
+        .horizontal_events
+        .iter()
+        .copied()
+        .filter(|z| {
+            up.iter().any(|u| (u - z).abs() <= merge_mm) && {
+                let i = down.partition_point(|d| *d < z - merge_mm);
+                down.get(i).is_none_or(|d| *d > z + merge_mm)
+            }
+        })
+        .collect();
     admission.bounds = combined;
     *proposal_work = proposal_work.saturating_add(admission.horizontal_events.len());
     Ok(())

@@ -386,6 +386,42 @@ impl TolerantModel {
         merged
     }
 
+    /// Heights where material ends facing up and where it begins facing
+    /// down: flat faces (every triangle within `tolerance_mm`) classified by
+    /// their outward normal, plus the model's top (up) and bottom (down).
+    /// Only a downward height can carry material that needs support below.
+    pub fn facing_heights(&self, tolerance_mm: f64) -> (Vec<f64>, Vec<f64>) {
+        // Per face: z extent, flatness and signed projected area (+ up).
+        let mut faces: HashMap<u32, (f64, f64, bool, f64)> = HashMap::new();
+        for (triangle, face) in self.triangles.iter().zip(&self.faces) {
+            let [a, b, c] = triangle.map(|v| self.positions[v as usize]);
+            let lo = a[2].min(b[2]).min(c[2]);
+            let hi = a[2].max(b[2]).max(c[2]);
+            let normal_z = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            let entry = faces.entry(*face).or_insert((lo, hi, true, 0.0));
+            entry.0 = entry.0.min(lo);
+            entry.1 = entry.1.max(hi);
+            entry.2 &= hi - lo <= tolerance_mm;
+            entry.3 += normal_z;
+        }
+        let (min, max) = self.bounds();
+        let (mut up, mut down) = (vec![max[2]], vec![min[2]]);
+        for (lo, hi, flat, area) in faces.values() {
+            if !*flat || hi - lo > tolerance_mm {
+                continue;
+            }
+            let z = 0.5 * (lo + hi);
+            if *area > 0.0 {
+                up.push(z);
+            } else if *area < 0.0 {
+                down.push(z);
+            }
+        }
+        up.sort_by(f64::total_cmp);
+        down.sort_by(f64::total_cmp);
+        (up, down)
+    }
+
     /// Heap held by the prepared tessellation.
     pub fn retained_bytes(&self) -> usize {
         self.positions.capacity() * 24

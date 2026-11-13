@@ -325,6 +325,25 @@ fn assert_single_lane_coverage(bundle: &ManufacturingBundle) {
 }
 
 #[test]
+fn supported_box_schedules_no_support_stops_under_its_top() {
+    // A box's top face ends material facing up: nothing above it needs
+    // support, so supports-on scheduling adds no stop beneath it and the
+    // layers stay on the requested 0.2 mm grid.
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[translated(100.0, 105.0, 0.0)]);
+    let mut intent = intent(true);
+    intent.printer.build_envelope = AabbMm::new([0.0, 0.0, 0.0], [220.0, 220.0, 100.0]).unwrap();
+    intent.recipe.layer_height_mm = 0.2;
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let layers = &bundle.plan.layers;
+    assert_eq!(layers.len(), 40);
+    for layer in layers {
+        assert!((layer.height_mm - 0.2).abs() < 1e-6, "{} at {}", layer.height_mm, layer.z_mm);
+    }
+    assert_eq!(bundle.verification.support_deposition_segments, 0);
+}
+
+#[test]
 fn original_box_binds_every_layer_to_single_lane_evidence_without_native_captures() {
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(BOX, &[translated(100.0, 105.0, 0.0)]);
