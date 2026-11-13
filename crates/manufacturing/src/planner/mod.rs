@@ -112,8 +112,16 @@ fn plan_lane(
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
     // One pipeline: every job the tolerance policy covers slices through it.
-    // Only features not yet ported keep the exact lane.
-    if tolerant_supported(input).is_ok() {
+    // Only features not yet ported keep the exact lane. Hybrid (mesh) sources
+    // have no exact native lane at all, so they always take the tolerant one,
+    // which names any unported feature it refuses.
+    let hybrid = input.definitions.values().any(|d| {
+        matches!(
+            d.as_ref(),
+            spiling_geometry::source::SourceDefinition::Hybrid(_)
+        )
+    });
+    if hybrid || tolerant_supported(input).is_ok() {
         return plan_with(input, cancel, geometry_work, true);
     }
     match plan_with(input, cancel, geometry_work, false) {
