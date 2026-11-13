@@ -95,6 +95,8 @@ pub struct Snapshot {
     pub library: Arc<library::State>,
     pub diagnostic: Option<Arc<spiling_contracts::OperationView>>,
     pub diagnostic_triangle: bool,
+    pub import_failure: Option<Arc<crate::import_failure::Failure>>,
+    pub import_preview_loading: bool,
     pub generation: u64,
     pub serial: u64,
     pub phase: Phase,
@@ -137,6 +139,8 @@ impl Default for Snapshot {
             library: Arc::default(),
             diagnostic: None,
             diagnostic_triangle: false,
+            import_failure: None,
+            import_preview_loading: false,
             generation: 0,
             serial: 0,
             phase: Phase::Starting,
@@ -325,6 +329,8 @@ enum Request {
     Library(Box<LibraryAction>),
     Geometry(Box<GeometryCommand>),
     StartupOpen(crate::launch::Open),
+    InspectImportFailure,
+    DismissImportFailure,
     Manufacturing(Box<ManufacturingCommand>),
     Project(Box<ProjectCommand>),
     Command(Command),
@@ -401,6 +407,8 @@ impl Host {
             alternative_task: None,
             preserve_current_for_option_edit: false,
             export_task: None,
+            import_preview_task: None,
+            import_preview_cancel: Arc::new(AtomicBool::new(false)),
             display_task: None,
             display_cancel: Arc::new(AtomicBool::new(false)),
         };
@@ -421,6 +429,12 @@ impl Host {
         self.sender
             .try_send(request)
             .map_err(|e| format!("Native host admission: {e}"))
+    }
+    pub fn inspect_import_failure(&self) -> Result<(), String> {
+        self.send(Request::InspectImportFailure)
+    }
+    pub fn dismiss_import_failure(&self) -> Result<(), String> {
+        self.send(Request::DismissImportFailure)
     }
     pub fn open_from_launch(&self, open: crate::launch::Open) -> Result<(), String> {
         self.send(Request::StartupOpen(open))
@@ -676,6 +690,7 @@ struct GuardedAction {
     revision: ProjectRevision,
     action: Action,
 }
+type ImportPreviewTask = JoinHandle<Result<(String, Arc<Scene>), ClientError>>;
 struct Actor {
     config: Config,
     compute_settings: spiling_contracts::compute::ComputeSettings,
@@ -705,16 +720,31 @@ struct Actor {
     export_task: Option<JoinHandle<Result<manufacture::StagedExport, String>>>,
     section_task: Option<JoinHandle<Result<Arc<Section>, ClientError>>>,
     section_cancel: Arc<AtomicBool>,
+    import_preview_task: Option<ImportPreviewTask>,
+    import_preview_cancel: Arc<AtomicBool>,
     display_task: Option<JoinHandle<Result<Arc<Scene>, ClientError>>>,
     display_cancel: Arc<AtomicBool>,
 }
 impl Actor {
     fn publish(&mut self) {
+        if self.state.import_failure.as_ref().is_some_and(|f| {
+            self.state.scene.as_ref().is_none_or(|s| {
+                s.session_id != f.summary.session_id || s.revision != f.summary.revision
+            })
+        }) {
+            self.import_preview_cancel.store(true, Ordering::Release);
+            if let Some(task) = self.import_preview_task.take() {
+                task.abort();
+            }
+            self.state.import_failure = None;
+        }
+
         self.state.optical_loading = self.optical_task.is_some();
         self.state.stock.loading = self.stock_task.is_some();
         self.state.image_loading = self.image_task.is_some();
         self.state.section_loading = self.section_task.is_some();
         self.state.display_loading = self.display_task.is_some();
+        self.state.import_preview_loading = self.import_preview_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).loading = self.review_task.is_some();
         Arc::make_mut(&mut self.state.manufacturing).alternative_loading =
             self.alternative_task.is_some();
@@ -804,6 +834,18 @@ impl Actor {
                     }
                 } => {
                     self.complete_mechanics(result).await;
+                },
+                result=async{match &mut self.import_preview_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                    self.import_preview_task=None;
+                    match result {
+                        Ok(Ok((operation,preview))) if self.state.import_failure.as_ref().is_some_and(|f| f.operation==operation)
+                            && self.state.scene.as_ref().is_some_and(|s|s.session_id==preview.summary.session_id && s.revision==preview.summary.revision)=>{
+                            if let Some(failure)=&mut self.state.import_failure { Arc::make_mut(failure).preview=Some(preview); }
+                        },
+                        Ok(Ok(_))=>{},
+                        Ok(Err(error))=>{if let Some(failure)=&mut self.state.import_failure {Arc::make_mut(failure).preview_error=Some(error.to_string());}},
+                        Err(error)=>self.problem(error.to_string()),
+                    }
                 },
                 result=async{match &mut self.optical_task{Some(task)=>task.await,None=>std::future::pending().await}}=>{
                     self.optical_task=None;
@@ -1062,6 +1104,13 @@ impl Actor {
         }
     }
     async fn cleanup(&mut self) {
+        self.import_preview_cancel.store(true, Ordering::Release);
+        if let Some(task) = self.import_preview_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.import_failure = None;
+
         self.mechanics_restore_key = None;
         if let Some(task) = self.mechanics_task.take() {
             task.abort();
@@ -1458,14 +1507,54 @@ impl Actor {
     }
     async fn request(&mut self, request: Request) {
         match request {
+            Request::InspectImportFailure => {
+                if self.pending.is_none()
+                    && self.import_preview_task.is_none()
+                    && let (Some(client), Some(failure)) =
+                        (&self.client, &self.state.import_failure)
+                    && failure.preview.is_none()
+                {
+                    self.import_preview_cancel = Arc::new(AtomicBool::new(false));
+                    self.import_preview_task = Some(tokio::spawn(crate::import_failure::load(
+                        client.rpc(),
+                        failure.clone(),
+                        self.import_preview_cancel.clone(),
+                        self.state.display.as_ref().map_or(0, |s| s.raw_bytes),
+                    )));
+                }
+            }
+            Request::DismissImportFailure => {
+                self.import_preview_cancel.store(true, Ordering::Release);
+                if let Some(task) = self.import_preview_task.take() {
+                    task.abort();
+                }
+                if let Some(failure) = self.state.import_failure.take()
+                    && let Some(id) = failure
+                        .error
+                        .import_diagnostic
+                        .as_ref()
+                        .and_then(|d| d.preview)
+                    && let Some(client) = &self.client
+                {
+                    let _ = client
+                        .geometry(GeometryCommand::ReleaseArtifact {
+                            session_id: failure.summary.session_id.clone(),
+                            artifact_id: id,
+                        })
+                        .await;
+                }
+            }
             Request::ComputeSettings(settings) => self.compute_settings = settings,
             Request::StartupOpen(open) => {
-                self.admit(Action::Open {
-                    path: open.path,
-                    read_only: open.read_only,
-                    recover_previous: false,
-                })
-                .await
+                let action = match open {
+                    crate::launch::Open::Project { path, read_only } => Action::Open {
+                        path,
+                        read_only,
+                        recover_previous: false,
+                    },
+                    crate::launch::Open::Import { path } => Action::Import(path),
+                };
+                self.admit(action).await
             }
             Request::Manufacturing(command) => self.manufacturing(*command).await,
             Request::Library(action) => self.library_action(*action).await,
@@ -1858,6 +1947,7 @@ impl Actor {
                 base_revision,
             },
             Action::Import(source) => {
+                crate::performance::mark("import_requested");
                 let result = client
                     .geometry(GeometryCommand::ImportPart {
                         session_id,
@@ -2010,7 +2100,37 @@ impl Actor {
         }
         let pending = self.pending.take().expect("terminal pending operation");
         let completed = operation.status == JobStatus::Completed;
+        if matches!(pending.receipt, Receipt::Import) {
+            self.import_preview_cancel.store(true, Ordering::Release);
+            if let Some(task) = self.import_preview_task.take() {
+                task.abort();
+            }
+            self.state.import_failure = None;
+            if operation.status == JobStatus::Failed {
+                crate::performance::mark("import_failed");
+            }
+            if operation.status == JobStatus::Failed
+                && let Some(JobError::Geometry { error }) = &operation.error
+                && error.import_diagnostic.is_some()
+                && let (Some(summary), Some(project)) = (&self.state.scene, &self.state.project)
+                && summary.session_id == operation.session_id
+            {
+                self.state.import_failure = Some(Arc::new(crate::import_failure::Failure {
+                    operation: operation.name.clone(),
+                    summary: summary.clone(),
+                    project: project.project_id.clone(),
+                    project_revision: project.revision,
+                    error: error.clone(),
+                    preview: None,
+                    preview_error: None,
+                }));
+            }
+        }
+
         match (&pending.receipt, &operation.result) {
+            (Receipt::Import, Some(JobResult::Scene { .. })) if completed => {
+                crate::performance::mark("import_published");
+            }
             (Receipt::Open(route), Some(JobResult::Scene { summary })) if completed => {
                 self.state.analysis_model = None;
                 self.state.analysis_faces.clear();

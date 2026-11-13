@@ -8,6 +8,7 @@ pub mod assets;
 pub mod commands;
 pub mod diagnostics;
 pub mod host;
+pub mod import_failure;
 pub mod inspection;
 pub mod launch;
 pub mod layers;

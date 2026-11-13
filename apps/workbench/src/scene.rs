@@ -16,6 +16,36 @@ pub use focus::FocusTarget;
 pub struct Chunk {
     pub metadata: MeshChunkMetadata,
     pub bytes: Arc<[u8]>,
+    checked: spiling_contracts::display::CheckedMeshChunk,
+}
+impl Chunk {
+    pub(crate) fn from_checked(checked: spiling_contracts::display::CheckedMeshChunk) -> Self {
+        Self {
+            metadata: checked.metadata().clone(),
+            bytes: checked.bytes().clone(),
+            checked,
+        }
+    }
+    pub(crate) fn view(
+        &self,
+        session: &SessionId,
+        definition: &DefinitionId,
+    ) -> Result<spiling_contracts::display::ValidatedMeshChunk<'_>, GeometryError> {
+        if &self.metadata != self.checked.metadata()
+            || !Arc::ptr_eq(&self.bytes, self.checked.bytes())
+            || &self.metadata.session_id != session
+            || &self.metadata.definition_id != definition
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::UnknownHandle,
+                "checked mesh binding changed",
+            ));
+        }
+        Ok(self.checked.view())
+    }
+    pub(crate) fn radius_mm(&self) -> f64 {
+        self.checked.radius_mm()
+    }
 }
 #[derive(Debug)]
 pub struct Definition {
@@ -23,8 +53,14 @@ pub struct Definition {
     pub faces: Vec<FaceIndexRow>,
     pub chunks: Vec<Chunk>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneKind {
+    Source,
+    UnresolvedImport,
+}
 #[derive(Debug)]
 pub struct Scene {
+    pub kind: SceneKind,
     pub summary: SceneSummary,
     pub definitions: Vec<Arc<Definition>>,
     pub occurrences: Vec<OccurrenceRecord>,
@@ -41,6 +77,9 @@ impl Scene {
             .find(|d| &d.record.definition_id == id)
     }
     pub fn reference(&self, occurrence: &OccurrenceRecord, ordinal: usize) -> Option<FaceRef> {
+        if self.kind == SceneKind::UnresolvedImport {
+            return None;
+        }
         let definition = self.definition(&occurrence.definition_id)?;
         Some(FaceRef {
             session_id: self.summary.session_id.clone(),
@@ -266,14 +305,11 @@ pub async fn load(
                         context_error = Some("Additional plate previews exceed the shared display budget. Focus a plate to inspect it.".into());
                         break 'definitions;
                     }
-                    let bytes = rpc
-                        .read_geometry_chunk(&resource, &metadata, &artifact)
+                    let checked = rpc
+                        .read_checked_mesh_chunk(&resource, &metadata, &artifact)
                         .await?;
                     newly_retained = next;
-                    chunks.push(Chunk {
-                        metadata: mesh.clone(),
-                        bytes: bytes.into(),
-                    });
+                    chunks.push(Chunk::from_checked(checked));
                 }
                 if chunks.len() > MAX_SCENE_MESH_BYTES as usize / 64 {
                     return Err(invalid("Too many display chunks"));
@@ -362,14 +398,7 @@ pub async fn load(
             return Err(invalid("Unreferenced live definition"));
         }
         for chunk in &definition.chunks {
-            let view = spiling_contracts::display::validate_mesh_chunk(
-                &chunk.bytes,
-                &chunk.metadata,
-                &summary.session_id,
-                chunk.metadata.artifact_id,
-                &definition.record.definition_id,
-                chunk.metadata.chunk_index,
-            )?;
+            let view = chunk.view(&summary.session_id, &definition.record.definition_id)?;
             for occurrence in occurrences
                 .iter()
                 .filter(|o| o.definition_id == definition.record.definition_id)
@@ -380,13 +409,17 @@ pub async fn load(
                     - center;
                 let translated = translation.as_vec3().as_dvec3();
                 let rounded_q = q.as_quat().as_dquat();
-                for position in view.positions.iter() {
-                    let p = glam::DVec3::from_array(position.map(f64::from));
-                    if ((rounded_q * p + translated) - (q * p + translation)).length() > 0.001 {
-                        return Err(invalid(
-                            "Source display projection exceeds 0.001 mm; previous display retained",
-                        ));
-                    }
+                let radius = chunk.radius_mm();
+                let rotation_error = [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z]
+                    .iter()
+                    .map(|v| ((rounded_q * *v) - (q * *v)).length_squared())
+                    .sum::<f64>()
+                    .sqrt()
+                    * radius;
+                if rotation_error + (translated - translation).length() > 0.001 {
+                    return Err(invalid(
+                        "Source display projection exceeds 0.001 mm; previous display retained",
+                    ));
                 }
             }
         }
@@ -401,6 +434,7 @@ pub async fn load(
     }
     check(&cancel)?;
     Ok(Arc::new(Scene {
+        kind: SceneKind::Source,
         summary,
         definitions: loaded,
         occurrences,

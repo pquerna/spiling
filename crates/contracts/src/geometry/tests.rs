@@ -524,6 +524,7 @@ fn geometry_only_scene_retains_bounded_definition_and_native_face_identity() {
         error: GeometryError {
             code: GeometryErrorCode::UnsupportedOperation,
             message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1),
+            import_diagnostic: None,
         },
     };
     assert!(invalid.validate().is_err());

@@ -54,9 +54,16 @@ impl Drop for Span {
 #[derive(Default)]
 pub(crate) struct Frames {
     first: bool,
+    confirmation: Option<u64>,
     scene: Option<std::sync::Weak<crate::scene::Scene>>,
 }
 impl Frames {
+    pub(crate) fn confirmation(&mut self, ctx: &egui::Context, id: u64) {
+        if clock().is_some() && self.confirmation != Some(id) {
+            self.confirmation = Some(id);
+            ctx.request_screenshot(|_| mark("discard_confirmation_frame"));
+        }
+    }
     pub(crate) fn observe(
         &mut self,
         ctx: &egui::Context,
@@ -82,5 +89,53 @@ impl Frames {
             mark("source_ui");
             ctx.request_screenshot(|_| mark("source_frame_readback"));
         }
+    }
+}
+
+/// Opt-in native acceptance reports the visible control's location after pixels
+/// are rendered. Automation uses normal pointer input; this never dispatches an action.
+pub(crate) fn control(ctx: &egui::Context, stage: &'static str, response: &egui::Response) {
+    if clock().is_none() || std::env::var_os("SPILING_IMPORT_INTERACTION_TRACE").is_none() {
+        return;
+    }
+    let id = egui::Id::unique(stage);
+    let (ready, settling) = ctx.data_mut(|data| {
+        let (previous, count, sent) = data
+            .get_temp::<(egui::Rect, usize, Option<egui::Rect>)>(id)
+            .unwrap_or((response.rect, 0, None));
+        let count = if previous == response.rect {
+            count.saturating_add(1)
+        } else {
+            1
+        };
+        let ready = count >= 2 && sent != Some(response.rect);
+        data.insert_temp(
+            id,
+            (
+                response.rect,
+                count,
+                if ready { Some(response.rect) } else { sent },
+            ),
+        );
+        (ready, count < 2)
+    });
+    if !ready {
+        if settling {
+            ctx.request_repaint();
+        }
+        return;
+    }
+    let point = response.rect.center() * ctx.pixels_per_point();
+    ctx.request_screenshot(move |_| {
+        if let Some(origin)=clock() {
+            let record=serde_json::json!({"schema":1,"process":"workbench","pid":std::process::id(),"stage":stage,"at_us":origin.elapsed().as_micros(),"elapsed_us":0,"x":point.x,"y":point.y});
+            let line=format!("SPILING_OPEN_TRACE {record}\n");
+            let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());
+        }
+    });
+}
+pub(crate) fn after_frame(ctx: &egui::Context, stage: &'static str) {
+    if clock().is_some() {
+        ctx.request_screenshot(move |_| mark(stage));
     }
 }

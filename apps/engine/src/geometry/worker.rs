@@ -62,6 +62,10 @@ impl LiveSnapshot {
 }
 pub type Live = Arc<Mutex<LiveSnapshot>>;
 
+struct ImportReports<'a> {
+    progress: &'a dyn Fn(String),
+    rejected: &'a mut dyn FnMut(spiling_contracts::display::EncodedMesh),
+}
 pub struct ImportRequest {
     pub options: ModelImportOptions,
     pub source: NativePath,
@@ -284,6 +288,7 @@ pub struct Worker {
     pub result: Receiver<Event>,
     pub live: Live,
     pub progress: Arc<Mutex<Option<(JobId, String)>>>,
+    pub rejected_import: Arc<Mutex<Option<(JobId, spiling_contracts::display::EncodedMesh)>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
@@ -294,9 +299,17 @@ impl Worker {
         let snapshot = live.clone();
         let progress = Arc::new(Mutex::new(None));
         let worker_progress = progress.clone();
+        let rejected_import = Arc::new(Mutex::new(None));
+        let worker_rejection = rejected_import.clone();
         let thread = std::thread::spawn(move || {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(commands, results, snapshot, worker_progress)
+                run(
+                    commands,
+                    results,
+                    snapshot,
+                    worker_progress,
+                    worker_rejection,
+                )
             }))
             .is_err()
             {
@@ -313,6 +326,7 @@ impl Worker {
             result,
             live,
             progress,
+            rejected_import,
             thread: Some(thread),
         }
     }
@@ -346,6 +360,7 @@ fn run(
     results: SyncSender<Event>,
     live: Live,
     progress: Arc<Mutex<Option<(JobId, String)>>>,
+    rejected_import: Arc<Mutex<Option<(JobId, spiling_contracts::display::EncodedMesh)>>>,
 ) {
     let mut definitions = BTreeMap::<DefinitionId, Resident>::new();
     let mut analysis_operator: Option<spiling_analysis::run::CachedOperator> = None;
@@ -493,14 +508,23 @@ fn run(
                 .map(|()| Product::SurfaceImage(asset))
                 .map_err(JobError::from),
             Work::Import(request) => {
-                import(request, &definitions, &cancel, &mut display_work, &report).map(
-                    |(parts, residents)| {
-                        for resident in residents {
-                            pending.insert(resident.definition.id().clone(), resident);
-                        }
-                        Product::Import(parts)
+                rejected_import.lock().take();
+                import(
+                    request,
+                    &definitions,
+                    &cancel,
+                    &mut display_work,
+                    &report,
+                    &mut |mesh| {
+                        *rejected_import.lock() = Some((job, mesh));
                     },
                 )
+                .map(|(parts, residents)| {
+                    for resident in residents {
+                        pending.insert(resident.definition.id().clone(), resident);
+                    }
+                    Product::Import(parts)
+                })
             }
             Work::Open(request) => open(request, &definitions, &cancel, &mut display_work, &report)
                 .map(
@@ -963,6 +987,7 @@ fn import(
     cancel: &AtomicBool,
     work: &mut GeometryWorkBudget,
     progress: &dyn Fn(String),
+    rejected: &mut dyn FnMut(spiling_contracts::display::EncodedMesh),
 ) -> Result<ImportedParts, JobError> {
     let ImportRequest {
         source,
@@ -975,7 +1000,10 @@ fn import(
     let growth =
         crate::resources::source_growth(source_retention(retained_source_bytes, definitions)?)?;
     let mut capacity = Capacity::new(definitions, budget, growth);
-    let captured = source::capture(source, capacity.source_bytes, cancel)?;
+    let captured = {
+        let _span = crate::performance::span("import_capture");
+        source::capture(source, capacity.source_bytes, cancel)?
+    };
     let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
     // A source that places one solid keeps its whole-source identity; each
     // solid of a multi-solid source is its own definition of the same bytes.
@@ -987,7 +1015,7 @@ fn import(
             (definitions, &reuse),
             cancel,
             work,
-            progress,
+            ImportReports { progress, rejected },
         );
     }
     if options != ModelImportOptions::default() {
@@ -1056,11 +1084,13 @@ fn import_mesh(
     reuse: (&BTreeMap<DefinitionId, Resident>, &BTreeSet<DefinitionId>),
     cancel: &AtomicBool,
     work: &mut GeometryWorkBudget,
-    progress: &dyn Fn(String),
+    reports: ImportReports<'_>,
 ) -> Result<ImportedParts, JobError> {
+    let ImportReports { progress, rejected } = reports;
     use spiling_geometry::source::{HybridDefinition, SourceDefinition};
     progress("preparing_source_geometry".into());
-    let decoded = spiling_geometry::source::decode_container(
+    let decode_span = crate::performance::span("import_decode_normalize");
+    let decoded = spiling_geometry::source::decode_container_report(
         &captured.bytes,
         &captured.label,
         captured
@@ -1069,7 +1099,20 @@ fn import_mesh(
         capacity.source_bytes,
         options,
         cancel,
-    )?;
+    )
+    .map_err(|failure| {
+        let diagnostic = super::import_diagnostic::encode(
+            failure.mesh.as_deref(),
+            &captured.bytes,
+            capacity.mesh,
+            cancel,
+        );
+        if let Some(mesh) = diagnostic {
+            rejected(mesh);
+        }
+        failure.error
+    })?;
+    drop(decode_span);
     let bytes = Arc::new(captured.bytes);
     capacity.charge_source(&bytes)?;
     let source_hash = SourceHash::from_digest(&Sha256::digest(bytes.as_slice()).into());
@@ -1077,7 +1120,9 @@ fn import_mesh(
     let mut residents = Vec::new();
     for decoded in decoded {
         check_cancel(cancel)?;
+        let encode_span = crate::performance::span("import_pack");
         let normalized = Arc::new(decoded.complex.encode()?);
+        drop(encode_span);
         capacity.charge_source(&normalized)?;
         let provenance = SourceProvenance {
             source_hash: source_hash.clone(),
@@ -1131,7 +1176,10 @@ fn import_mesh(
             bytes.clone(),
             Some(normalized),
         )?);
-        let display = capacity.display(&definition, cancel, work, progress)?;
+        let display = {
+            let _span = crate::performance::span("import_display");
+            capacity.display(&definition, cancel, work, progress)?
+        };
         let resident = resident(definition, &source, &display);
         parts.push((
             imported(&resident.definition, source, display),
@@ -1803,6 +1851,7 @@ mod geometry_only_tests {
             &cancel,
             &mut GeometryWorkBudget::query(),
             &|_| {},
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!((parts.len(), residents.len()), (1, 1));

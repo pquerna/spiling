@@ -1,0 +1,5 @@
+# Boolmesh 0.2.2 MPL-2.0 source, with a local cooperative cancellation patch.
+repository = "https://github.com/komietty/boolmesh"
+version = "0.2.2"
+crates_io_checksum = "176de4d7890892cbe9fd5458627f817bc2b609777ccafacb77eef883b0e0e986"
+changes = "Scoped cooperative cancellation; loop checkpoints. No geometric predicate changes."

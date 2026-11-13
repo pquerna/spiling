@@ -100,6 +100,7 @@ impl Workbench {
         summary.bounds_mm = Some(bounds);
         summary.occurrence_count = occurrences.len() as u32;
         let preview = Arc::new(crate::scene::Scene {
+            kind: crate::scene::SceneKind::Source,
             summary,
             definitions: source.definitions.clone(),
             occurrences,

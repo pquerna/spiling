@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod owned;
+pub use owned::CheckedMeshChunk;
+
 use super::*;
 use crate::geometry::*;
 use std::collections::HashMap;

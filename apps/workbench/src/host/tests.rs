@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
-use spiling_contracts::geometry::{SessionId, SourceHash};
+use spiling_contracts::geometry::{ArtifactPageKind, ImportFailureKind, SessionId, SourceHash};
 use std::time::Instant;
 fn layout_id(host: &Host) -> spiling_contracts::project::PrintLayoutId {
     host.snapshot()
@@ -346,6 +346,8 @@ fn test_actor(root: &std::path::Path) -> Actor {
         export_task: None,
         section_task: None,
         section_cancel: Arc::new(AtomicBool::new(false)),
+        import_preview_task: None,
+        import_preview_cancel: Arc::new(AtomicBool::new(false)),
         display_task: None,
         display_cancel: Arc::new(AtomicBool::new(false)),
     }
@@ -565,11 +567,25 @@ fn cancellation_observes_terminal_outcome_before_another_mutation() {
     )
     .unwrap();
     wait(&host, |s| s.phase == Phase::Running);
-    host.send(Request::Action(Action::Import(native(&fixture()))))
+    let large_source = std::env::var_os("SPILING_TEST_IMPORT_SOURCE").map(PathBuf::from);
+    let source = large_source.clone().unwrap_or_else(fixture);
+    host.send(Request::Action(Action::Import(native(&source))))
         .unwrap();
     let active = wait(&host, |s| {
-        s.active_operation || s.jobs.back().is_some_and(|j| j.status.is_terminal())
+        (s.active_operation
+            && (large_source.is_none()
+                || s.jobs
+                    .back()
+                    .is_some_and(|j| j.stage == "preparing_source_geometry")))
+            || s.jobs.back().is_some_and(|j| j.status.is_terminal())
     });
+    if large_source.is_some() {
+        assert!(
+            active.active_operation,
+            "large source finished before cancellation witness"
+        );
+    }
+    let cancelled_at = Instant::now();
     if active.active_operation {
         host.command(Command::Cancel).unwrap();
     }
@@ -577,6 +593,13 @@ fn cancellation_observes_terminal_outcome_before_another_mutation() {
         !s.busy && s.jobs.back().is_some_and(|j| j.status.is_terminal())
     });
     let status = outcome.jobs.back().unwrap().status;
+    if large_source.is_some() {
+        assert_eq!(status, JobStatus::Cancelled);
+        eprintln!(
+            "large import cancel-to-terminal seconds={:.6}",
+            cancelled_at.elapsed().as_secs_f64()
+        );
+    }
     assert!(
         matches!(status, JobStatus::Completed | JobStatus::Cancelled),
         "{:?}",
@@ -585,7 +608,11 @@ fn cancellation_observes_terminal_outcome_before_another_mutation() {
     if status == JobStatus::Cancelled {
         assert_eq!(outcome.scene.as_ref().unwrap().occurrence_count, 0);
     }
-    if outcome.project.as_ref().unwrap().dirty {
+    if status == JobStatus::Cancelled {
+        let next = imported(&host);
+        assert_eq!(next.scene.as_ref().unwrap().occurrence_count, 1);
+    }
+    if host.snapshot().project.as_ref().unwrap().dirty {
         let requested = send(&host, Action::Close);
         host.confirm(requested.confirmation.unwrap().id, true)
             .unwrap();
@@ -4954,4 +4981,65 @@ fn interior_policy_suggestion_is_detached_cancelable_and_exactly_adopted() {
     );
     retain_project(&host, root.path(), "interior-suggestion");
     assert_eq!(send(&host, Action::Close).phase, Phase::Closed);
+}
+
+#[test]
+#[ignore = "requires SPILING_TEST_ENGINE; actual engine import/preview/revision journey"]
+fn failed_import_preview_preserves_project_and_expires_on_dismissal() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: temp.path().join("jobs.sqlite"),
+        },
+        || {},
+    )
+    .unwrap();
+    wait(&host, |s| s.phase == Phase::Running && !s.busy);
+    let before = imported(&host);
+    let project = before.project.unwrap();
+    let summary = before.scene.unwrap();
+    let source = temp.path().join("open.stl");
+    std::fs::write(&source,b"solid open\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 10 0\nendloop\nendfacet\nendsolid open\n").unwrap();
+    send(&host, Action::Import(native(&source)));
+    let failed = wait(&host, |s| s.import_failure.is_some() && !s.busy);
+    assert_eq!(failed.project.as_ref().unwrap().as_ref(), project.as_ref());
+    assert_eq!(failed.scene.as_ref().unwrap(), &summary);
+    let failure = failed.import_failure.unwrap();
+    let diagnostic = failure.error.import_diagnostic.as_ref().unwrap();
+    assert_eq!(diagnostic.kind, ImportFailureKind::OpenBoundary);
+    let artifact = diagnostic.preview.expect("checked raw preview");
+    host.inspect_import_failure().unwrap();
+    let loaded = wait(&host, |s| {
+        s.import_failure
+            .as_ref()
+            .is_some_and(|f| f.preview.is_some() || f.preview_error.is_some())
+            && !s.import_preview_loading
+    });
+    let rejected = loaded.import_failure.as_ref().unwrap();
+    let preview = rejected
+        .preview
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", rejected.preview_error));
+    assert!(preview.definitions[0].faces.is_empty());
+    assert_eq!(loaded.scene.as_ref().unwrap(), &summary);
+    host.dismiss_import_failure().unwrap();
+    wait(&host, |s| s.import_failure.is_none());
+    let serial = host.snapshot().serial;
+    // Go through the same host geometry action; an expired lease cannot become a part.
+    host.geometry(GeometryCommand::GetArtifactPage {
+        session_id: summary.session_id,
+        artifact_id: artifact,
+        kind: ArtifactPageKind::Chunks,
+        offset: 0,
+    })
+    .unwrap();
+    let expired = idle_after(&host, serial);
+    assert!(
+        expired.problems.iter().any(|p| p.contains("UnknownHandle")),
+        "{:?}",
+        expired.problems
+    );
+    let after = send(&host, Action::Undo);
+    assert_eq!(after.scene.as_ref().unwrap().occurrence_count, 0);
 }

@@ -32,9 +32,17 @@ pub(super) fn build(
     transform: spiling_model_import::Affine,
     cancel: &AtomicBool,
 ) -> Result<(SurfaceComplex, Vec<ImportFinding>), GeometryError> {
+    build_report(mesh, scale, transform, cancel).map_err(|rejected| rejected.error)
+}
+pub(super) fn build_report(
+    mesh: spiling_model_import::Mesh,
+    scale: f64,
+    transform: spiling_model_import::Affine,
+    cancel: &AtomicBool,
+) -> Result<(SurfaceComplex, Vec<ImportFinding>), RejectedSource> {
     mesh.validate().map_err(|e| invalid(e.to_string()))?;
     if !scale.is_finite() || scale <= 0. {
-        return Err(invalid("invalid interpreted mesh units"));
+        return Err(invalid("invalid interpreted mesh units").into());
     }
     transform.validate().map_err(|e| invalid(e.to_string()))?;
     let mut referenced = vec![false; mesh.vertices.len()];
@@ -54,7 +62,7 @@ pub(super) fn build(
         }
         let p = transform.apply(p.map(|v| v * scale));
         if p.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("normalized mesh is not finite"));
+            return Err(invalid("normalized mesh is not finite").into());
         }
         let key = p.map(|v| if v == 0. { 0 } else { v.to_bits() });
         let id = match weld.get(&key) {
@@ -81,13 +89,25 @@ pub(super) fn build(
             t
         })
         .collect();
-    let (mesh, adjacency, findings) = super::topology::prepare(
-        spiling_model_import::Mesh {
-            vertices: positions,
-            triangles,
-        },
-        cancel,
-    )?;
+    let mut mesh = spiling_model_import::Mesh {
+        vertices: positions,
+        triangles,
+    };
+    let (adjacency, findings) = match super::topology::prepare(&mut mesh, cancel) {
+        Ok(value) => value,
+        Err(error) => return Err(RejectedSource::material(mesh, error, cancel)),
+    };
+    if mesh
+        .triangles
+        .iter()
+        .any(|&t| normal(&mesh.vertices, t).is_none())
+    {
+        return Err(RejectedSource::material(
+            mesh,
+            invalid("boundary joins or composition left a zero-area material facet"),
+            cancel,
+        ));
+    }
     let positions = mesh.vertices;
     let triangles = mesh.triangles;
     let normals: Vec<_> = triangles

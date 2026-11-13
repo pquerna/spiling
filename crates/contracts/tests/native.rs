@@ -941,3 +941,30 @@ fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
     op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
     assert!(native_operation_view(&op).is_err());
 }
+
+#[test]
+fn import_failure_status_preserves_location_without_adopting_material() {
+    use spiling_contracts::geometry::*;
+    let hash = SourceHash::from_bytes(b"original rejected source");
+    let mut error = GeometryError::new(
+        GeometryErrorCode::UnsupportedGeometry,
+        "open source boundary",
+    );
+    error.import_diagnostic = Some(Box::new(ImportDiagnostic {
+        kind: ImportFailureKind::OpenBoundary,
+        source_name: "part.stl".into(),
+        object_name: String::new(),
+        source_hash: Some(hash),
+        bounds_mm: Some(AabbMm::new([0.; 3], [10., 10., 0.]).unwrap()),
+        preview: None,
+        preview_definition: None,
+    }));
+    let job = JobError::from(error.clone());
+    let status = spiling_contracts::domain_status(&job);
+    assert_eq!(spiling_contracts::domain_error(&status).unwrap(), job);
+    let mut json = serde_json::to_value(&error).unwrap();
+    json["import_diagnostic"]["kind"] = "invented_failure".into();
+    assert!(serde_json::from_value::<GeometryError>(json).is_err());
+    error.code = GeometryErrorCode::Cancelled;
+    assert!(error.validate().is_err());
+}

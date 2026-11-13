@@ -159,6 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OpticalStudyInfo::decl(&config),
         GeometryErrorCode::decl(&config),
         GeometryError::decl(&config),
+        ImportFailureKind::decl(&config),
+        ImportDiagnostic::decl(&config),
         SessionId::decl(&config),
         DefinitionId::decl(&config),
         SourceHash::decl(&config),

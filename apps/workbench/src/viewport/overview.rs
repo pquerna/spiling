@@ -363,20 +363,10 @@ fn stage(
             continue;
         }
         for chunk in &definition.chunks {
-            let mesh = validate_mesh_chunk(
-                &chunk.bytes,
-                &chunk.metadata,
-                &scene.summary.session_id,
-                chunk.metadata.artifact_id,
-                &definition.record.definition_id,
-                chunk.metadata.chunk_index,
-            )
-            .map_err(|e| e.to_string())?;
-            let radius = mesh
-                .positions
-                .iter()
-                .map(|p| DVec3::from_array(p.map(f64::from)).length())
-                .fold(0.0, f64::max);
+            let mesh = chunk
+                .view(&scene.summary.session_id, &definition.record.definition_id)
+                .map_err(|e| e.to_string())?;
+            let radius = chunk.radius_mm();
             let mut instances = vec![];
             for part in &parts {
                 let q = DQuat::from_array(part.pose.rotation_xyzw);

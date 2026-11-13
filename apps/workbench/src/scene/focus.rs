@@ -56,15 +56,9 @@ impl Scene {
                 .position(|item| item.face_id == face.face_id)
                 .ok_or("The selected face is not in the current display")?;
             for chunk in &definition.chunks {
-                let view = spiling_contracts::display::validate_mesh_chunk(
-                    &chunk.bytes,
-                    &chunk.metadata,
-                    &self.summary.session_id,
-                    chunk.metadata.artifact_id,
-                    &definition.record.definition_id,
-                    chunk.metadata.chunk_index,
-                )
-                .map_err(|_| "The selected face display could not be checked")?;
+                let view = chunk
+                    .view(&self.summary.session_id, &definition.record.definition_id)
+                    .map_err(|_| "The selected face display could not be checked")?;
                 for triangle in 0..view.face_ordinals.len() {
                     if view.face_ordinals.get(triangle) != Some(ordinal as u32) {
                         continue;

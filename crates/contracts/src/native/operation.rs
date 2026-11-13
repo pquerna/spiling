@@ -287,6 +287,22 @@ pub fn native_operation_view(
         }
         None => (None, None),
     };
+    if let Some(error) = &error {
+        let diagnostic_preview = matches!(error,JobError::Geometry{error} if error.import_diagnostic.as_ref().is_some_and(|d|d.preview.is_some()));
+        if diagnostic_preview {
+            if status != JobStatus::Failed
+                || meta.outputs.is_empty()
+                || meta
+                    .outputs
+                    .iter()
+                    .any(|a| a.media_type != "application/x-spiling-mesh")
+            {
+                return Err("invalid rejected-source display outputs".into());
+            }
+        } else if !meta.outputs.is_empty() {
+            return Err("outputs on an unrelated native failure".into());
+        }
+    }
     if let Some(result) = &result {
         if matches!(result, JobResult::ProjectSaveUncertain { .. }) && status != JobStatus::Failed {
             return Err("uncertain save receipt requires Failed state".into());

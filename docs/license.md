@@ -177,9 +177,12 @@ Before publishing or externally deploying:
 
 This is an engineering application guide, not legal advice or a guarantee of compliance. Resolve uncertain ownership, derivative-work boundaries, license compatibility, and distribution/assent questions through qualified legal review rather than inventing exceptions.
 
-Import material composition uses the exact-pinned `boolmesh` crate under MPL-2.0,
-with its separate upstream copyright and license. Spiling's adapter is original
-OSL-3.0 code; no upstream implementation is copied into it. Preserve boolmesh and
+Import material composition uses exact-pinned `boolmesh` 0.2.2 under MPL-2.0.
+The source in `vendor/boolmesh` retains its upstream copyright/license and the
+registry checksum in `UPSTREAM.toml`. Its local cancellation extension adds scoped
+cooperative checkpoints without changing geometric predicates. `scoped-tls` 1.0.1
+retains its MIT/Apache-2.0 terms. Spiling's adapter remains original OSL-3.0 code;
+MPL-2.0 applies independently to the vendored implementation and its changes. Preserve boolmesh and
 its locked dependencies' notices through the existing release collector. The
 library proposes a composed boundary; Spiling checks closure, source tolerance
 and consumer-visible material/void behavior before adopting that boundary.

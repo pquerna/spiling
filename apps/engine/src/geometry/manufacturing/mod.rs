@@ -137,7 +137,7 @@ impl Runtime {
         Reply::Manufacturing(ManufacturingResponse::Status {
             interior_opportunity,
             info: self.project.info(),
-            context_hash: match spiling_core::context_hash(&snapshot) {
+            context_hash: match self.status_context_hash(&snapshot) {
                 Ok(hash) => hash,
                 Err(error) => {
                     return Reply::Manufacturing(ManufacturingResponse::Error {

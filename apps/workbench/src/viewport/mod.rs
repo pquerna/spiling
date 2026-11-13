@@ -17,7 +17,7 @@ mod section;
 use crate::scene::{Scene, Section};
 use egui_wgpu::wgpu::{self, util::DeviceExt};
 use glam::{DMat4, DQuat, DVec3};
-use spiling_contracts::{display::validate_mesh_chunk, geometry::*};
+use spiling_contracts::geometry::*;
 use std::{collections::HashMap, sync::Arc};
 
 #[repr(C)]
@@ -89,6 +89,7 @@ struct Resources {
     uniform: wgpu::Buffer,
     scene: Option<Arc<Scene>>,
     draws: Vec<Draw>,
+    source_traced: std::sync::atomic::AtomicBool,
     failure: Option<String>,
     line_pipeline: wgpu::RenderPipeline,
     line_group: wgpu::BindGroup,
@@ -524,6 +525,7 @@ impl Viewport {
             uniform,
             scene: None,
             draws: Vec::new(),
+            source_traced: std::sync::atomic::AtomicBool::new(false),
             failure: None,
             line_pipeline,
             line_group,
@@ -1494,6 +1496,8 @@ impl egui_wgpu::CallbackTrait for Callback {
             _ => true,
         };
         if changed {
+            r.source_traced
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let _opening = crate::performance::span("source_gpu_stage");
             match r.stage(device, self.scene.clone()) {
                 Ok(draws) => {
@@ -1700,6 +1704,15 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(r) = resources.get::<Resources>() else {
             return;
         };
+        if self.view.source
+            && self.uniform.cut[1] == 0.0
+            && r.draws.iter().any(|d| d.indices > 0 && d.instances > 0)
+            && !r
+                .source_traced
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::performance::mark("source_drawn");
+        }
         r.plate.paint(pass, &r.line_group, self.show_height);
         pass.set_pipeline(&r.pipeline);
         for draw in r
@@ -2065,20 +2078,10 @@ impl Resources {
         let mut instance_bytes = 0usize;
         for definition in &scene.definitions {
             for chunk in &definition.chunks {
-                let view = validate_mesh_chunk(
-                    &chunk.bytes,
-                    &chunk.metadata,
-                    &scene.summary.session_id,
-                    chunk.metadata.artifact_id,
-                    &definition.record.definition_id,
-                    chunk.metadata.chunk_index,
-                )
-                .map_err(|e| e.to_string())?;
-                let radius = view
-                    .positions
-                    .iter()
-                    .map(|p| DVec3::from_array(p.map(f64::from)).length())
-                    .fold(0.0, f64::max);
+                let view = chunk
+                    .view(&scene.summary.session_id, &definition.record.definition_id)
+                    .map_err(|e| e.to_string())?;
+                let radius = chunk.radius_mm();
                 let mut instances = Vec::new();
                 for (index, occurrence) in scene
                     .occurrences
@@ -2203,14 +2206,8 @@ fn pick_clipped_hit(
         let source_origin = inverse * (origin - DVec3::from_array(occurrence.pose.translation_mm));
         let source_direction = inverse * direction;
         for chunk in &definition.chunks {
-            let Ok(view) = validate_mesh_chunk(
-                &chunk.bytes,
-                &chunk.metadata,
-                &scene.summary.session_id,
-                chunk.metadata.artifact_id,
-                &definition.record.definition_id,
-                chunk.metadata.chunk_index,
-            ) else {
+            let Ok(view) = chunk.view(&scene.summary.session_id, &definition.record.definition_id)
+            else {
                 continue;
             };
             let ray = source_origin - DVec3::from_array(view.local_origin_mm);

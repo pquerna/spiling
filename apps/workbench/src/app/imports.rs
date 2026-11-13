@@ -13,6 +13,152 @@ pub(super) struct ImportSelection {
     area: Option<Arc<Area>>,
 }
 impl Workbench {
+    pub(super) fn import_failure_dialog(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(failure) = self.state.import_failure.clone() else {
+            return;
+        };
+        if self.rejected_operation.as_ref() != Some(&failure.operation) {
+            self.rejected_operation = Some(failure.operation.clone());
+            self.rejected_viewport = Default::default();
+            self.rejected_selected = false;
+        }
+        let Some(info) = failure.error.import_diagnostic.as_ref() else {
+            return;
+        };
+        let modal = egui::Modal::new(egui::Id::unique("failed_import")).show(ctx, |ui| {
+            ui.set_max_width(800.);
+            ui.heading("Import needs attention");
+            ui.strong(&info.source_name);
+            if !info.object_name.is_empty() {
+                ui.label(&info.object_name);
+            }
+            ui.label(&failure.error.message);
+            let kind = match info.kind {
+                ImportFailureKind::OpenBoundary => "Open boundary",
+                ImportFailureKind::NonManifold => "Nonmanifold junction",
+                ImportFailureKind::CollapsedFacet => "Collapsed facet",
+                ImportFailureKind::Composition => "Material composition",
+                ImportFailureKind::UnresolvedMaterial => "Unresolved material",
+            };
+            let row = ui.selectable_label(self.rejected_selected, kind);
+            crate::performance::control(ctx, "import_failure_issue", &row);
+            if row.clicked() {
+                self.rejected_selected = !self.rejected_selected;
+                crate::performance::after_frame(ctx, "import_failure_selected");
+            }
+            let area = failure
+                .preview
+                .as_ref()
+                .and_then(|scene| {
+                    info.bounds_mm.and_then(|b| {
+                        Area::import_location(b, RigidPoseMm::IDENTITY, scene.summary.bounds_mm)
+                            .ok()
+                    })
+                })
+                .map(Arc::new);
+            ui.horizontal(|ui| {
+                if failure.preview.is_none() && info.preview.is_some() {
+                    let inspect = ui.add_enabled(
+                        !self.state.import_preview_loading,
+                        egui::Button::new("Inspect source"),
+                    );
+                    if !self.state.import_preview_loading {
+                        crate::performance::control(ctx, "import_failure_inspect", &inspect);
+                    }
+                    if inspect.clicked()
+                        && let Some(host) = &self.host
+                        && let Err(error) = host.inspect_import_failure()
+                    {
+                        self.local_problem = Some(error);
+                    }
+                }
+                if self.state.import_preview_loading {
+                    ui.spinner();
+                    ui.label("Loading source preview");
+                }
+                if let Some(scene) = &failure.preview {
+                    let label = if info.bounds_mm.is_some() {
+                        "Locate issue"
+                    } else {
+                        "Locate source object"
+                    };
+                    let locate = ui.button(label);
+                    crate::performance::control(ctx, "import_failure_locate", &locate);
+                    if locate.clicked() {
+                        crate::performance::after_frame(ctx, "import_failure_located");
+                        let target = area
+                            .as_ref()
+                            .map(|a| a.target)
+                            .or_else(|| scene.focus_target(None, None).ok());
+                        if let Some(target) = target {
+                            self.rejected_viewport.focus_area(
+                                scene,
+                                target,
+                                &[OccurrenceId::new(1).unwrap()],
+                            );
+                        }
+                    }
+                }
+            });
+            if let Some(error) = &failure.preview_error {
+                ui.weak(error);
+            }
+            if let Some(scene) = &failure.preview {
+                ui.weak("Unresolved source · display only · not part of the project");
+                ui.weak(
+                    "Preview shows the normalization attempt; zero-area facets cannot be drawn.",
+                );
+                ui.allocate_ui(egui::vec2(740., 400.), |ui| {
+                    let mut analysis = crate::analysis::SectionView::default();
+                    let view = crate::replay::View {
+                        source: true,
+                        ..Default::default()
+                    };
+                    self.rejected_viewport.show(
+                        ui,
+                        crate::viewport::Input {
+                            force: None,
+                            fastener: None,
+                            mechanics: None,
+                            inspection: if self.rejected_selected { area } else { None },
+                            project_id: None,
+                            plate: None,
+                            layout_preview: false,
+                            scene: Some(scene.clone()),
+                            section: None,
+                            review: None,
+                            view,
+                            selected: None,
+                            interactive: false,
+                            analysis: &mut analysis,
+                            plane: PlaneMm {
+                                origin_mm: [0.; 3],
+                                normal: [0., 0., 1.],
+                            },
+                            scope: None,
+                        },
+                        frame,
+                    );
+                });
+            } else if info.preview.is_none() {
+                ui.weak("Source preview unavailable.");
+            }
+            ui.separator();
+            ui.weak("Current project preserved. Correct the source and import it again.");
+            if ui.button("Close").clicked()
+                && let Some(host) = &self.host
+                && let Err(error) = host.dismiss_import_failure()
+            {
+                self.local_problem = Some(error);
+            }
+        });
+        if modal.should_close()
+            && let Some(host) = &self.host
+            && let Err(error) = host.dismiss_import_failure()
+        {
+            self.local_problem = Some(error);
+        }
+    }
     pub(super) fn import_overlay(&mut self) -> Option<Arc<Area>> {
         let selection = self.import_selection.as_ref()?;
         if self.display_current()

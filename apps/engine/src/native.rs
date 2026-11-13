@@ -373,8 +373,16 @@ fn publish_terminal(
         return Ok(false);
     }
     if let Some(error) = job.error {
+        // Failed-source display uses the same checked immutable ByteStream
+        // artifacts as source display. It remains an error, with no Core edit.
+        let mut outputs = Vec::new();
+        if let geometry::JobError::Geometry { error } = &error
+            && let Some(preview) = error.import_diagnostic.as_ref().and_then(|d| d.preview)
+        {
+            publish_geometry(runtime, jobs, preview, resources, &mut outputs)?;
+        }
         let status = terminal_error(error, job.result)?;
-        jobs.native_finish(name, Err(status), vec![])?;
+        jobs.native_finish(name, Err(status), outputs)?;
         return Ok(true);
     }
     let private = job

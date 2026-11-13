@@ -55,6 +55,9 @@ impl Default for Preferences {
 pub struct Workbench {
     startup_open: Option<crate::launch::Open>,
     opening_frames: crate::performance::Frames,
+    rejected_viewport: crate::viewport::Viewport,
+    rejected_selected: bool,
+    rejected_operation: Option<String>,
     prefs: Preferences,
     host: Option<Host>,
     state: Snapshot,
@@ -138,6 +141,9 @@ impl Workbench {
         Self {
             startup_open: open,
             opening_frames: Default::default(),
+            rejected_viewport: Default::default(),
+            rejected_selected: false,
+            rejected_operation: None,
             start_requested: prefs.accepted_osl3,
             prefs,
             host: None,
@@ -518,7 +524,11 @@ impl Workbench {
             self.command_query.clear();
             ctx.request_repaint();
         }
-        if ctx.text_edit_focused() || self.show_commands || self.state.confirmation.is_some() {
+        if ctx.text_edit_focused()
+            || self.show_commands
+            || self.state.confirmation.is_some()
+            || self.state.import_failure.is_some()
+        {
             return;
         }
         for (key, shift, action) in [
@@ -1118,6 +1128,17 @@ impl eframe::App for Workbench {
                             size,
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
+                                if self
+                                    .state
+                                    .import_failure
+                                    .as_ref()
+                                    .is_some_and(|f| f.preview.is_some())
+                                {
+                                    ui.centered_and_justified(|ui| {
+                                        ui.weak("Inspecting unresolved source")
+                                    });
+                                    return;
+                                }
                                 picked = self.viewport.show(
                                     ui,
                                     crate::viewport::Input {
@@ -1288,11 +1309,13 @@ impl eframe::App for Workbench {
                 ctx.memory_mut(|m| m.request_focus(id));
             }
         }
+        self.import_failure_dialog(&ctx, frame);
         self.navigation_dialog(&ctx);
         self.compute_dialog(&ctx);
         self.plate_dialog(&ctx);
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
+            self.opening_frames.confirmation(&ctx, id);
             let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {
                 ui.set_max_width(420.0);
                 ui.heading("Discard unsaved changes?");
@@ -1300,7 +1323,9 @@ impl eframe::App for Workbench {
                 if self.state.project.as_ref().is_some_and(|p| p.save_uncertain) { ui.colored_label(self.prefs.theme.tokens().warning,"The last save may already have reached disk. Inspect it before relying on its outcome."); }
                 ui.horizontal(|ui| {
                     if ui::primary(ui, "Keep editing", None) { self.confirmation = Some((id,false)); }
-                    if ui.button(RichText::new("Discard changes").color(self.prefs.theme.tokens().warning)).clicked() { self.confirmation = Some((id,true)); }
+                    if ui.button(RichText::new("Discard changes").color(self.prefs.theme.tokens().warning)).on_hover_text("Alt+D").clicked()
+                        || ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::D))
+                    { self.confirmation = Some((id,true)); }
                 });
             });
             if modal.should_close() {

@@ -28,9 +28,11 @@ pub const MAX_STEP_ENTITIES: u32 = 100_000;
 pub const MAX_NATIVE_FACES: u32 = 50_000;
 pub const MAX_DEFINITIONS: u32 = 32;
 pub const MAX_OCCURRENCES: u32 = 256;
-pub const MAX_DISPLAY_VERTICES: u32 = 1_000_000;
-pub const MAX_DISPLAY_TRIANGLES: u32 = 1_000_000;
 pub const MAX_SCENE_MESH_BYTES: u32 = 64 * 1024 * 1024;
+// Counts cannot exceed the checked packed-byte envelope (24 bytes per vertex,
+// 16 per indexed triangle). Do not impose a second arbitrary topology ceiling.
+pub const MAX_DISPLAY_VERTICES: u32 = MAX_SCENE_MESH_BYTES / 24;
+pub const MAX_DISPLAY_TRIANGLES: u32 = MAX_SCENE_MESH_BYTES / 16;
 pub const MAX_SECTION_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_ENGINE_ARTIFACT_BYTES: u32 = 128 * 1024 * 1024;
 /// Disk-backed operation artifact store; one operation's outputs fit within it.
@@ -89,18 +91,63 @@ pub enum GeometryErrorCode {
     ShapeErrorExceeded,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq, thiserror::Error)]
 #[error("{code:?}: {message}")]
 #[serde(deny_unknown_fields)]
 pub struct GeometryError {
     pub code: GeometryErrorCode,
     pub message: String,
+    pub import_diagnostic: Option<Box<ImportDiagnostic>>,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportFailureKind {
+    OpenBoundary,
+    NonManifold,
+    CollapsedFacet,
+    Composition,
+    UnresolvedMaterial,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImportDiagnostic {
+    pub kind: ImportFailureKind,
+    pub source_name: String,
+    pub object_name: String,
+    pub source_hash: Option<SourceHash>,
+    pub bounds_mm: Option<AabbMm>,
+    /// Session-local display handle; never a retained material definition.
+    pub preview: Option<ArtifactId>,
+    pub preview_definition: Option<DefinitionId>,
+}
+impl ImportDiagnostic {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        if self.source_name.is_empty()
+            || self.source_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
+            || self.object_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
+            || self.preview.is_some() != self.preview_definition.is_some()
+            || self.preview.is_some() && self.source_hash.is_none()
+        {
+            return Err(invalid("invalid import diagnostic identity"));
+        }
+        if let Some(bounds) = self.bounds_mm {
+            bounds.validate()?;
+        }
+        Ok(())
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGeometryError {
     code: GeometryErrorCode,
     message: String,
+    #[serde(deserialize_with = "required_import_diagnostic")]
+    import_diagnostic: Option<Box<ImportDiagnostic>>,
+}
+fn required_import_diagnostic<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Box<ImportDiagnostic>>, D::Error> {
+    Deserialize::deserialize(d)
 }
 impl TryFrom<RawGeometryError> for GeometryError {
     type Error = &'static str;
@@ -108,10 +155,13 @@ impl TryFrom<RawGeometryError> for GeometryError {
         if raw.message.len() > MAX_ERROR_MESSAGE_BYTES as usize {
             return Err("geometry error message too long");
         }
-        Ok(Self {
+        let error = Self {
             code: raw.code,
             message: raw.message,
-        })
+            import_diagnostic: raw.import_diagnostic,
+        };
+        error.validate().map_err(|_| "invalid import diagnostic")?;
+        Ok(error)
     }
 }
 impl<'de> Deserialize<'de> for GeometryError {
@@ -121,6 +171,15 @@ impl<'de> Deserialize<'de> for GeometryError {
 }
 impl GeometryError {
     pub fn validate(&self) -> Result<(), GeometryError> {
+        if let Some(diagnostic) = &self.import_diagnostic {
+            if !matches!(
+                self.code,
+                GeometryErrorCode::UnsupportedGeometry | GeometryErrorCode::InvalidGeometry
+            ) {
+                return Err(invalid("import diagnostic on a non-material error"));
+            }
+            diagnostic.validate()?;
+        }
         if self.message.len() > MAX_ERROR_MESSAGE_BYTES as usize {
             return Err(invalid("geometry error message exceeds limit"));
         }
@@ -130,6 +189,7 @@ impl GeometryError {
         Self {
             code,
             message: bounded_text(message.as_ref(), MAX_ERROR_MESSAGE_BYTES as usize),
+            import_diagnostic: None,
         }
     }
 }

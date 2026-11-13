@@ -830,7 +830,7 @@ impl EngineRpc {
         }
     }
     /// Immutable ByteStream retrieval followed by checked packed-layout validation.
-    pub async fn read_geometry_chunk(
+    async fn geometry_chunk_bytes(
         &self,
         descriptor: &ArtifactView,
         expected: &ArtifactChunkMetadata,
@@ -900,6 +900,36 @@ impl EngineRpc {
                 &descriptor.sha256,
                 u64::from(MAX_GEOMETRY_CHUNK_BYTES),
             )
+            .await?;
+        Ok(bytes)
+    }
+    pub async fn read_checked_mesh_chunk(
+        &self,
+        descriptor: &ArtifactView,
+        expected: &ArtifactChunkMetadata,
+        summary: &ArtifactSummary,
+    ) -> Result<spiling_contracts::display::CheckedMeshChunk, ClientError> {
+        let ArtifactChunkMetadata::Mesh { metadata } = expected else {
+            return Err(ClientError::Protocol(
+                "checked mesh requested for a section".into(),
+            ));
+        };
+        let bytes = self
+            .geometry_chunk_bytes(descriptor, expected, summary)
+            .await?;
+        Ok(spiling_contracts::display::CheckedMeshChunk::new(
+            bytes.into(),
+            metadata.clone(),
+        )?)
+    }
+    pub async fn read_geometry_chunk(
+        &self,
+        descriptor: &ArtifactView,
+        expected: &ArtifactChunkMetadata,
+        summary: &ArtifactSummary,
+    ) -> Result<Vec<u8>, ClientError> {
+        let bytes = self
+            .geometry_chunk_bytes(descriptor, expected, summary)
             .await?;
         match (expected, summary) {
             (

@@ -2010,7 +2010,8 @@ mod tests {
             rpc::DefinitionDisplay::try_from(DefinitionDisplay::Unavailable {
                 error: GeometryError {
                     code: GeometryErrorCode::UnsupportedOperation,
-                    message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1)
+                    message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1),
+                    import_diagnostic: None,
                 },
             })
             .is_err()

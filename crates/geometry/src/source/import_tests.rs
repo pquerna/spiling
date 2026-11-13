@@ -193,3 +193,22 @@ fn boundary_join_that_collapses_a_face_reports_unresolved_material() {
         SurfaceComplex::normalize(mesh, 1., Affine::IDENTITY, &AtomicBool::new(false)).unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
 }
+
+#[test]
+fn rejected_mesh_reports_actual_open_edges_and_never_adopts_a_source() {
+    let cancel = AtomicBool::new(false);
+    let mut mesh = tests::cube(0., 10.);
+    mesh.triangles.drain(..2);
+    let failure = normalize::build_report(mesh, 1., Affine::IDENTITY, &cancel).unwrap_err();
+    let diagnostic = failure.error.import_diagnostic.as_ref().unwrap();
+    assert_eq!(diagnostic.kind, ImportFailureKind::OpenBoundary);
+    let bounds = diagnostic.bounds_mm.unwrap();
+    assert!(bounds.max.iter().zip(bounds.min).any(|(hi, lo)| *hi == lo)); // A local boundary plane, not a whole-part box.
+    failure.mesh.as_ref().unwrap().validate().unwrap();
+    failure.error.validate().unwrap();
+    let mut invalid = tests::cube(0., 10.);
+    invalid.vertices[0][0] = f64::NAN;
+    let failure = normalize::build_report(invalid, 1., Affine::IDENTITY, &cancel).unwrap_err();
+    assert!(failure.mesh.is_none());
+    assert!(failure.error.import_diagnostic.is_none());
+}

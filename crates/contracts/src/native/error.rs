@@ -10,6 +10,7 @@ impl TryFrom<rpc::DomainError> for GeometryError {
         let error = Self {
             code: geometry_parse(&value.code)?,
             message: value.message,
+            import_diagnostic: None,
         };
         error.validate().map_err(|error| error.to_string())?;
         Ok(error)
@@ -19,6 +20,9 @@ impl TryFrom<GeometryError> for rpc::DomainError {
     type Error = String;
     fn try_from(value: GeometryError) -> Result<Self, String> {
         value.validate().map_err(|error| error.to_string())?;
+        if value.import_diagnostic.is_some() {
+            return Err("import diagnostics require DomainErrorDetail".into());
+        }
         Ok(Self {
             code: geometry_code(value.code).into(),
             message: value.message,
@@ -274,6 +278,12 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
             type_url: DOMAIN_ERROR_TYPE.into(),
             value: rpc::DomainErrorDetail {
                 error: Some(detail),
+                import_diagnostic: match error {
+                    JobError::Geometry { error } => {
+                        error.import_diagnostic.as_deref().map(Into::into)
+                    }
+                    _ => None,
+                },
             }
             .encode_to_vec(),
         }],
@@ -310,6 +320,9 @@ pub(super) fn status_error_and_receipt(
     let any = domain.ok_or("missing domain error detail")?;
     let detail = rpc::DomainErrorDetail::decode(any.value.as_slice()).map_err(|e| e.to_string())?;
     use rpc::domain_error_detail::Error as E;
+    if detail.import_diagnostic.is_some() && !matches!(detail.error, Some(E::Geometry(_))) {
+        return Err("import diagnostic on another error domain".into());
+    }
     let error = match detail.error.ok_or("missing domain error")? {
         E::Geometry(e) => {
             if e.message.len() > MAX_ERROR_MESSAGE_BYTES as usize || e.message != status.message {
@@ -319,6 +332,12 @@ pub(super) fn status_error_and_receipt(
                 error: GeometryError {
                     code: geometry_parse(&e.code)?,
                     message: e.message,
+                    import_diagnostic: detail
+                        .import_diagnostic
+                        .clone()
+                        .map(TryInto::try_into)
+                        .transpose()?
+                        .map(Box::new),
                 },
             }
         }
@@ -492,6 +511,80 @@ pub fn manufacturing_request_status(message: &str) -> google::rpc::Status {
     domain_status(&JobError::Manufacturing {
         error: ManufacturingError::new(code, text),
     })
+}
+
+impl From<&ImportDiagnostic> for rpc::ImportDiagnostic {
+    fn from(value: &ImportDiagnostic) -> Self {
+        Self {
+            kind: match value.kind {
+                ImportFailureKind::OpenBoundary => 1,
+                ImportFailureKind::NonManifold => 2,
+                ImportFailureKind::CollapsedFacet => 3,
+                ImportFailureKind::Composition => 4,
+                ImportFailureKind::UnresolvedMaterial => 5,
+            },
+            source_name: value.source_name.clone(),
+            object_name: value.object_name.clone(),
+            source_hash: value
+                .source_hash
+                .as_ref()
+                .map(|hash| hash.as_str().to_owned())
+                .unwrap_or_default(),
+            bounds_mm: value.bounds_mm.map(|b| rpc::AabbMm {
+                min: Some(rpc::Vec3 {
+                    x: b.min[0],
+                    y: b.min[1],
+                    z: b.min[2],
+                }),
+                max: Some(rpc::Vec3 {
+                    x: b.max[0],
+                    y: b.max[1],
+                    z: b.max[2],
+                }),
+            }),
+            preview: value.preview.map(|id| id.get()).unwrap_or_default(),
+            preview_definition: value
+                .preview_definition
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_default(),
+        }
+    }
+}
+impl TryFrom<rpc::ImportDiagnostic> for ImportDiagnostic {
+    type Error = String;
+    fn try_from(value: rpc::ImportDiagnostic) -> Result<Self, String> {
+        let result = Self {
+            kind: match value.kind {
+                1 => ImportFailureKind::OpenBoundary,
+                2 => ImportFailureKind::NonManifold,
+                3 => ImportFailureKind::CollapsedFacet,
+                4 => ImportFailureKind::Composition,
+                5 => ImportFailureKind::UnresolvedMaterial,
+                _ => return Err("unknown import diagnostic kind".into()),
+            },
+            source_name: value.source_name,
+            object_name: value.object_name,
+            source_hash: if value.source_hash.is_empty() {
+                None
+            } else {
+                Some(SourceHash::parse(value.source_hash).map_err(|e| e.to_string())?)
+            },
+            bounds_mm: value.bounds_mm.map(TryInto::try_into).transpose()?,
+            preview: if value.preview == 0 {
+                None
+            } else {
+                Some(ArtifactId::new(value.preview).map_err(|e| e.to_string())?)
+            },
+            preview_definition: if value.preview_definition.is_empty() {
+                None
+            } else {
+                Some(DefinitionId::parse(value.preview_definition).map_err(|e| e.to_string())?)
+            },
+        };
+        result.validate().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

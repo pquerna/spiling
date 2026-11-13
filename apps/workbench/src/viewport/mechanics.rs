@@ -383,15 +383,9 @@ pub(super) fn patch_edges(
     let translation = DVec3::from_array(occurrence.pose.translation_mm);
     let mut edges = std::collections::BTreeMap::<[[u64; 3]; 2], ([DVec3; 2], usize)>::new();
     for chunk in &definition.chunks {
-        let view = validate_mesh_chunk(
-            &chunk.bytes,
-            &chunk.metadata,
-            &scene.summary.session_id,
-            chunk.metadata.artifact_id,
-            &definition.record.definition_id,
-            chunk.metadata.chunk_index,
-        )
-        .map_err(|error| error.to_string())?;
+        let view = chunk
+            .view(&scene.summary.session_id, &definition.record.definition_id)
+            .map_err(|error| error.to_string())?;
         for triangle in 0..view.face_ordinals.len() {
             if view.face_ordinals.get(triangle) != Some(ordinal) {
                 continue;

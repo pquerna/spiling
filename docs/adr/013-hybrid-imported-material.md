@@ -38,3 +38,11 @@ are typed provenance, not generic log strings. Foreign process controls remain
 excluded from material, with specific located `not_applied` findings; foreign
 profiles/scripts never replace the current setup. Unused namespace declarations
 are harmless; unsupported actual workspace semantics remain explicit failures.
+
+Failed import inspection does not add a material authority. Checked facets from a
+rejected normalization attempt may be displayed through a temporary diagnostic
+lease with source identity and known affected bounds. They are not a project
+part, selectable manufacturing face or repair. Persistent import findings apply
+to adopted sources; failed-attempt diagnostics remain separate Operations
+inspection/audit data. See [control](../protocol/control.md) and
+[display](../protocol/display.md).

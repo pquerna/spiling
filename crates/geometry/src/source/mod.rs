@@ -223,6 +223,89 @@ pub struct DecodedSource {
 }
 /// Decode syntax and adopt geometry once; rigid translation stays occurrence
 /// data. Repeated package instances with the same linear map share a source.
+/// A rejected normalization attempt may retain checked facets for diagnostic
+/// display only. It never becomes a SourceDefinition or material-query operand.
+pub use spiling_model_import::Mesh as RejectedMesh;
+#[derive(Debug)]
+pub struct RejectedSource {
+    pub error: GeometryError,
+    pub mesh: Option<Box<spiling_model_import::Mesh>>,
+}
+impl From<GeometryError> for RejectedSource {
+    fn from(error: GeometryError) -> Self {
+        Self { error, mesh: None }
+    }
+}
+impl RejectedSource {
+    pub(super) fn object(mut self, name: String) -> Self {
+        if let Some(info) = &mut self.error.import_diagnostic {
+            info.object_name = bounded_text(&name, MAX_DISPLAY_LABEL_BYTES as usize);
+        }
+        self
+    }
+    fn material(
+        mesh: spiling_model_import::Mesh,
+        mut error: GeometryError,
+        cancel: &AtomicBool,
+    ) -> Self {
+        if !matches!(
+            error.code,
+            GeometryErrorCode::UnsupportedGeometry | GeometryErrorCode::InvalidGeometry
+        ) {
+            return error.into();
+        }
+        let mut edges = std::collections::BTreeMap::<(u32, u32), usize>::new();
+        for (i, t) in mesh.triangles.iter().enumerate() {
+            if i % 1024 == 0 && crate::check_cancel(cancel).is_err() {
+                return GeometryError::new(
+                    GeometryErrorCode::Cancelled,
+                    "import diagnostic cancelled",
+                )
+                .into();
+            }
+            for a in 0..3 {
+                let (v, w) = (t[a], t[(a + 1) % 3]);
+                *edges.entry((v.min(w), v.max(w))).or_default() += 1;
+            }
+        }
+        let mut points = Vec::new();
+        let mut kind = ImportFailureKind::UnresolvedMaterial;
+        for ((a, b), uses) in edges {
+            if uses != 2 {
+                if uses > 2 {
+                    kind = ImportFailureKind::NonManifold;
+                } else if kind != ImportFailureKind::NonManifold {
+                    kind = ImportFailureKind::OpenBoundary;
+                }
+                points.extend([mesh.vertices[a as usize], mesh.vertices[b as usize]]);
+            }
+        }
+        for &t in &mesh.triangles {
+            if normalize::normal(&mesh.vertices, t).is_none() {
+                kind = ImportFailureKind::CollapsedFacet;
+                points.extend(t.map(|v| mesh.vertices[v as usize]));
+            }
+        }
+        error.import_diagnostic = Some(Box::new(ImportDiagnostic {
+            kind,
+            source_name: "Source".into(),
+            object_name: String::new(),
+            source_hash: None,
+            bounds_mm: if points.is_empty() {
+                None
+            } else {
+                topology::point_bounds(&points).ok()
+            },
+            preview: None,
+            preview_definition: None,
+        }));
+        Self {
+            error,
+            mesh: Some(Box::new(mesh)),
+        }
+    }
+}
+
 pub fn decode_container(
     bytes: &[u8],
     label: &str,
@@ -231,6 +314,35 @@ pub fn decode_container(
     options: &ModelImportOptions,
     cancel: &AtomicBool,
 ) -> Result<Vec<DecodedSource>, GeometryError> {
+    decode_container_report(bytes, label, format, live_bytes, options, cancel)
+        .map_err(|rejected| rejected.error)
+}
+pub fn decode_container_report(
+    bytes: &[u8],
+    label: &str,
+    format: MeshSourceFormat,
+    live_bytes: usize,
+    options: &ModelImportOptions,
+    cancel: &AtomicBool,
+) -> Result<Vec<DecodedSource>, RejectedSource> {
+    decode_container_inner(bytes, label, format, live_bytes, options, cancel).map_err(
+        |mut rejected| {
+            if let Some(info) = &mut rejected.error.import_diagnostic {
+                info.source_name = bounded_text(label, MAX_DISPLAY_LABEL_BYTES as usize);
+                info.source_hash = Some(SourceHash::from_bytes(bytes));
+            }
+            rejected
+        },
+    )
+}
+fn decode_container_inner(
+    bytes: &[u8],
+    label: &str,
+    format: MeshSourceFormat,
+    live_bytes: usize,
+    options: &ModelImportOptions,
+    cancel: &AtomicBool,
+) -> Result<Vec<DecodedSource>, RejectedSource> {
     use spiling_model_import::{
         Affine,
         threemf::{Package, Role},
@@ -244,10 +356,10 @@ pub fn decode_container(
     };
     if format == MeshSourceFormat::Stl {
         if options.source_plate.is_some() {
-            return Err(invalid("STL has no source-plate selection"));
+            return Err(invalid("STL has no source-plate selection").into());
         }
         let mesh = spiling_model_import::stl::decode(bytes, cancel).map_err(decode_error)?;
-        let (complex, mut findings) = normalize::build(
+        let (complex, mut findings) = normalize::build_report(
             mesh,
             options
                 .stl_unit
@@ -279,9 +391,9 @@ pub fn decode_container(
         }]);
     }
     if options.stl_unit.is_some() {
-        return Err(invalid(
-            "unit override applies only to unitless STL; 3MF declares its units",
-        ));
+        return Err(
+            invalid("unit override applies only to unitless STL; 3MF declares its units").into(),
+        );
     }
     let mut package = Package::decode(bytes, live_bytes, cancel).map_err(decode_error)?;
     let selected_plate = package
@@ -312,7 +424,26 @@ pub fn decode_container(
     }
     let leaves = package.leaves(cancel).map_err(decode_error)?;
     if leaves.iter().any(|l| l.role == Role::Negative) {
-        return composition::negative_objects(&package, leaves, &findings, selected_plate, cancel);
+        return composition::negative_objects(&package, leaves, &findings, selected_plate, cancel)
+            .map_err(|mut failure| {
+                if failure.error.import_diagnostic.is_none()
+                    && matches!(
+                        failure.error.code,
+                        GeometryErrorCode::UnsupportedGeometry | GeometryErrorCode::InvalidGeometry
+                    )
+                {
+                    failure.error.import_diagnostic = Some(Box::new(ImportDiagnostic {
+                        kind: ImportFailureKind::Composition,
+                        source_name: "Source".into(),
+                        object_name: format!("{} · source plate {}", package.root, selected_plate),
+                        source_hash: None,
+                        bounds_mm: None,
+                        preview: None,
+                        preview_definition: None,
+                    }));
+                }
+                failure
+            });
     }
     let controls: Vec<_> = leaves
         .iter()
@@ -353,7 +484,14 @@ pub fn decode_container(
             leaf.volume_index
         );
         let (complex, mut local_findings) =
-            normalize::build((*leaf.mesh).clone(), 1., linear, cancel)?;
+            normalize::build_report((*leaf.mesh).clone(), 1., linear, cancel).map_err(
+                |failure| {
+                    failure.object(format!(
+                        "{}:{} · {}",
+                        leaf.object.part, leaf.object.id, leaf.name
+                    ))
+                },
+            )?;
         local_findings.extend(findings.clone());
         for control in controls
             .iter()
@@ -374,7 +512,7 @@ pub fn decode_container(
         });
     }
     if results.is_empty() {
-        return Err(invalid("3MF contains no printable editable model geometry"));
+        return Err(invalid("3MF contains no printable editable model geometry").into());
     }
     Ok(results)
 }
@@ -406,23 +544,38 @@ impl SourceDefinition {
                 for (r, triangles) in by_region.into_iter().enumerate() {
                     crate::check_cancel(cancel)?;
                     let mut positions = Vec::new();
-                    let mut normals = Vec::new();
+                    let mut normals: Vec<[f64; 3]> = Vec::new();
                     let mut ts = Vec::new();
-                    for t in triangles {
+                    let mut indices = std::collections::HashMap::<u32, u32>::new();
+                    for (index, t) in triangles.into_iter().enumerate() {
+                        if index % 1024 == 0 {
+                            crate::check_cancel(cancel)?;
+                        }
                         let p = t.map(|i| c.positions[i as usize]);
-                        let a = std::array::from_fn::<_, 3, _>(|i| p[1][i] - p[0][i]);
-                        let b = std::array::from_fn::<_, 3, _>(|i| p[2][i] - p[0][i]);
-                        let n = [
-                            a[1] * b[2] - a[2] * b[1],
-                            a[2] * b[0] - a[0] * b[2],
-                            a[0] * b[1] - a[1] * b[0],
-                        ];
-                        let length = n.iter().map(|v| v * v).sum::<f64>().sqrt();
-                        let n = n.map(|v| v / length);
-                        let i = positions.len() as u32;
-                        positions.extend_from_slice(&p);
-                        normals.extend_from_slice(&[n; 3]);
-                        ts.push([i, i + 1, i + 2]);
+                        let n = normalize::normal(&c.positions, t)
+                            .ok_or_else(|| invalid("source display has a degenerate facet"))?;
+                        let local = std::array::from_fn(|slot| {
+                            *indices.entry(t[slot]).or_insert_with(|| {
+                                let next = positions.len() as u32;
+                                positions.push(p[slot]);
+                                normals.push([0.; 3]);
+                                next
+                            })
+                        });
+                        for &vertex in &local {
+                            for a in 0..3 {
+                                normals[vertex as usize][a] += n[a];
+                            }
+                        }
+                        ts.push(local);
+                    }
+                    for n in &mut normals {
+                        let length = normalize::dot(*n, *n).sqrt();
+                        *n = if length > 0. {
+                            n.map(|v| v / length)
+                        } else {
+                            [0., 0., 1.]
+                        };
                     }
                     builder.push_face(r as u32, &positions, &normals, &ts, c.error_mm, 0.)?;
                 }

@@ -12,8 +12,8 @@ import zlib
 
 def main():
     action, process, *arguments = sys.argv[1:]
-    if action not in ("close", "capture") or len(arguments) != (action == "capture"):
-        raise ValueError("usage: native-window.py close PID | capture PID NEW.png")
+    if action not in ("close", "capture", "discard", "click") or len(arguments) != (2 if action == "click" else int(action == "capture")):
+        raise ValueError("usage: native-window.py close PID | capture PID NEW.png | discard PID")
     pid = int(process)
     x = c.CDLL("libX11.so.6")
     window = c.c_ulong
@@ -54,7 +54,40 @@ def main():
         w = find(x.XDefaultRootWindow(d))
         if not w:
             raise RuntimeError(f"No X11 window owned by process {pid}")
-        if action == "close":
+        if action == "click":
+            left, top = map(lambda value: int(round(float(value))), arguments)
+            root=x.XDefaultRootWindow(d)
+            geometry_root, win_x,win_y,width,height,border,depth=window(),c.c_int(),c.c_int(),c.c_uint(),c.c_uint(),c.c_uint(),c.c_uint()
+            x.XGetGeometry.argtypes=[display,window,c.POINTER(window),c.POINTER(c.c_int),c.POINTER(c.c_int),c.POINTER(c.c_uint),c.POINTER(c.c_uint),c.POINTER(c.c_uint),c.POINTER(c.c_uint)]
+            if not x.XGetGeometry(d,w,c.byref(geometry_root),c.byref(win_x),c.byref(win_y),c.byref(width),c.byref(height),c.byref(border),c.byref(depth)) or not (0<=left<width.value and 0<=top<height.value):
+                raise ValueError("Control point is outside the owned window")
+            out_x,out_y,child=c.c_int(),c.c_int(),window()
+            x.XTranslateCoordinates.argtypes=[display,window,window,c.c_int,c.c_int,c.POINTER(c.c_int),c.POINTER(c.c_int),c.POINTER(window)]
+            if not x.XTranslateCoordinates(d,w,root,left,top,c.byref(out_x),c.byref(out_y),c.byref(child)):
+                raise RuntimeError("Native control coordinate translation failed")
+            x.XSetInputFocus.argtypes=[display,window,c.c_int,c.c_ulong]
+            x.XSetInputFocus(d,w,2,0)
+            xt=c.CDLL("libXtst.so.6")
+            xt.XTestFakeMotionEvent.argtypes=[display,c.c_int,c.c_int,c.c_int,c.c_ulong]
+            xt.XTestFakeButtonEvent.argtypes=[display,c.c_uint,c.c_int,c.c_ulong]
+            if not xt.XTestFakeMotionEvent(d,-1,out_x.value,out_y.value,0): raise RuntimeError("Native pointer motion failed")
+            if not xt.XTestFakeButtonEvent(d,1,1,0): raise RuntimeError("Native pointer press failed")
+            if not xt.XTestFakeButtonEvent(d,1,0,0): raise RuntimeError("Native pointer release failed")
+            x.XFlush(d)
+        elif action == "discard":
+            # Ordinary modal accelerator, addressed only to the supplied window.
+            x.XSetInputFocus.argtypes = [display, window, c.c_int, c.c_ulong]
+            x.XSetInputFocus(d, w, 2, 0)
+            x.XStringToKeysym.argtypes, x.XStringToKeysym.restype = [c.c_char_p], c.c_ulong
+            x.XKeysymToKeycode.argtypes, x.XKeysymToKeycode.restype = [display, c.c_ulong], c.c_uint
+            xt = c.CDLL("libXtst.so.6")
+            xt.XTestFakeKeyEvent.argtypes = [display, c.c_uint, c.c_int, c.c_ulong]
+            alt, key = [x.XKeysymToKeycode(d, x.XStringToKeysym(v)) for v in (b"Alt_L", b"d")]
+            for code, down in ((alt, 1), (key, 1), (key, 0), (alt, 0)):
+                if not xt.XTestFakeKeyEvent(d, code, down, 0):
+                    raise RuntimeError("Native key event failed")
+            x.XFlush(d)
+        elif action == "close":
             class Data(c.Union):
                 _fields_ = [("bytes", c.c_char * 20), ("shorts", c.c_short * 10), ("longs", c.c_long * 5)]
             class ClientMessage(c.Structure):

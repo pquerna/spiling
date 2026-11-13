@@ -6,6 +6,7 @@ mod analysis;
 mod appearance;
 mod bed_pose;
 mod execution;
+mod import_diagnostic;
 mod layout;
 mod manufacturing;
 mod optical;
@@ -224,6 +225,11 @@ struct Active {
     failure: Option<JobError>,
 }
 
+struct StatusContext {
+    snapshot: std::sync::Weak<spiling_core::Snapshot>,
+    hash: SourceHash,
+}
+
 /// The dedicated native dispatcher owns bounded metadata and immutable encoded buffers.
 /// Native values exist exclusively on Worker; publication is a two-phase ACK boundary.
 pub struct Runtime {
@@ -237,7 +243,9 @@ pub struct Runtime {
     definitions: BTreeMap<DefinitionId, DefinitionState>,
     project: Project,
     uncertain_copy: Option<Arc<Storage>>,
+    status_context: std::cell::RefCell<Option<StatusContext>>,
     artifacts: BTreeMap<ArtifactId, Artifact>,
+    rejected_import_artifact: Option<(ArtifactId, SceneRevision, ProjectRevision)>,
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
     // into the terminal ledger transaction after ACK and released immediately.
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
@@ -280,7 +288,9 @@ impl Runtime {
             definitions: BTreeMap::new(),
             project: Project::new(),
             uncertain_copy: None,
+            status_context: Default::default(),
             artifacts: BTreeMap::new(),
+            rejected_import_artifact: None,
             replay_publication: None,
             alternative_publication: None,
             released: VecDeque::new(),
@@ -446,6 +456,18 @@ impl Runtime {
                 }
                 // Comparing produces evidence only, never a Core transaction. A
                 // cancelled traversal must still deliver its incomplete report.
+                let mut result = result;
+                let rejected = self.worker.rejected_import.lock().take();
+                if active.base == self.revision
+                    && active.project_base == self.project.info().revision
+                    && !active.cancel.load(Ordering::Acquire)
+                    && let Err(JobError::Geometry { error }) = &mut result
+                    && error.import_diagnostic.is_some()
+                    && let Some((owner, mesh)) = rejected
+                    && owner == job
+                {
+                    self.attach_import_preview(error, mesh)?;
+                }
                 let report_only = matches!(
                     active.purpose,
                     Purpose::CompareAppearance | Purpose::CompareOptical | Purpose::MatchStock
@@ -1325,7 +1347,34 @@ impl Runtime {
         }
         Ok(())
     }
+    // Core replaces or copy-on-writes immutable snapshots on every semantic edit.
+    // A Weak identity cache cannot retain a part or authorize another snapshot;
+    // arbitrary/changed snapshots still pass Core's complete context validation.
+    fn status_context_hash(
+        &self,
+        snapshot: &Arc<spiling_core::Snapshot>,
+    ) -> Result<SourceHash, ProjectError> {
+        if let Some(cached) = self.status_context.borrow().as_ref()
+            && std::sync::Weak::ptr_eq(&cached.snapshot, &Arc::downgrade(snapshot))
+        {
+            return Ok(cached.hash.clone());
+        }
+        let hash = spiling_core::context_hash(snapshot)?;
+        *self.status_context.borrow_mut() = Some(StatusContext {
+            snapshot: Arc::downgrade(snapshot),
+            hash: hash.clone(),
+        });
+        Ok(hash)
+    }
     fn synchronize_native_pins(&mut self) {
+        if self
+            .rejected_import_artifact
+            .is_some_and(|(_, scene, project)| {
+                scene != self.revision || project != self.project.info().revision
+            })
+        {
+            self.clear_import_preview();
+        }
         let sources = self.project.retained_sources();
         let ids: std::collections::BTreeSet<_> = sources
             .iter()
@@ -1438,6 +1487,7 @@ impl Runtime {
                         return Ok(Reply::Geometry(GeometryResponse::ProjectError { error }));
                     }
                 };
+                self.clear_import_preview();
                 self.start(
                     Purpose::Import { pose: initial_pose },
                     MAX_SCENE_MESH_BYTES,
@@ -1836,6 +1886,12 @@ impl Runtime {
             } => {
                 self.session(&session_id)?;
                 if let Some(artifact) = self.artifacts.get_mut(&artifact_id) {
+                    if self
+                        .rejected_import_artifact
+                        .is_some_and(|(id, _, _)| id == artifact_id)
+                    {
+                        self.rejected_import_artifact = None;
+                    }
                     artifact.leased = false;
                     self.collect_artifact(artifact_id);
                 } else if !self.released.contains(&artifact_id) {
@@ -2899,4 +2955,39 @@ fn same_geometry(left: &spiling_core::Snapshot, right: &spiling_core::Snapshot) 
             .all(|((left_id, left), (right_id, right))| {
                 left_id == right_id && left.record == right.record
             })
+}
+
+#[cfg(test)]
+mod status_context_tests {
+    use super::*;
+    #[test]
+    fn status_cache_never_admits_a_changed_or_invalid_snapshot() {
+        let runtime = Runtime::new(None);
+        let mut snapshot = runtime.project.snapshot();
+        let hash = runtime.status_context_hash(&snapshot).unwrap();
+        assert_eq!(runtime.status_context_hash(&snapshot).unwrap(), hash);
+        let changed = Arc::make_mut(&mut snapshot);
+        let layout = PrintLayoutId::new();
+        changed.focused_layout = layout.clone();
+        changed.layouts[0].layout_id = layout;
+        let changed_hash = runtime.status_context_hash(&snapshot).unwrap();
+        assert_ne!(changed_hash, hash);
+        // A new source-less occurrence is corrupt. A successful context cached
+        // for the previous immutable snapshot cannot mask it.
+        Arc::make_mut(&mut snapshot).occurrences.insert(
+            OccurrenceId::new(1).unwrap(),
+            OccurrenceRecord {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                definition_id: DefinitionId::from_source_sha256(&[7; 32]),
+                pose: RigidPoseMm::IDENTITY,
+            },
+        );
+        assert!(runtime.status_context_hash(&snapshot).is_err());
+        assert_eq!(
+            runtime
+                .status_context_hash(&runtime.project.snapshot())
+                .unwrap(),
+            hash
+        );
+    }
 }

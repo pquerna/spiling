@@ -17,7 +17,7 @@ pub(super) fn negative_objects(
     global_findings: &[ImportFinding],
     selected_plate: u32,
     cancel: &AtomicBool,
-) -> Result<Vec<DecodedSource>, GeometryError> {
+) -> Result<Vec<DecodedSource>, RejectedSource> {
     let mut groups = BTreeMap::<usize, Vec<Leaf>>::new();
     for leaf in leaves {
         groups.entry(leaf.build_index).or_default().push(leaf);
@@ -61,7 +61,15 @@ pub(super) fn negative_objects(
                 findings.push(control_finding(leaf, transform)?);
                 continue;
             }
-            let (complex, local) = normalize::build((*leaf.mesh).clone(), 1., transform, cancel)?;
+            let (complex, local) =
+                normalize::build_report((*leaf.mesh).clone(), 1., transform, cancel).map_err(
+                    |failure| {
+                        failure.object(format!(
+                            "{}:{} · {}",
+                            leaf.object.part, leaf.object.id, leaf.name
+                        ))
+                    },
+                )?;
             findings.extend(local);
             let mesh = Mesh {
                 vertices: complex.positions,
@@ -90,7 +98,7 @@ pub(super) fn negative_objects(
         for cut in negative {
             material = csg::compose(material, cut, true, cancel)?;
         }
-        let (complex, local) = normalize::build(material, 1., Affine::IDENTITY, cancel)?;
+        let (complex, local) = normalize::build_report(material, 1., Affine::IDENTITY, cancel)?;
         findings.extend(local);
         let result = DecodedSource {
             complex,

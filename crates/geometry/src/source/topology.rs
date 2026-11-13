@@ -11,9 +11,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 type EdgeUses = BTreeMap<(u32, u32), Vec<(usize, bool)>>;
 pub(super) type Adjacency = Vec<Vec<(usize, bool)>>;
 
-fn edges(triangles: &[[u32; 3]]) -> EdgeUses {
+fn edges(triangles: &[[u32; 3]], cancel: &AtomicBool) -> Result<EdgeUses, GeometryError> {
     let mut edges = EdgeUses::new();
     for (i, t) in triangles.iter().enumerate() {
+        if i % 1024 == 0 {
+            crate::check_cancel(cancel)?;
+        }
         for a in 0..3 {
             let (v, w) = (t[a], t[(a + 1) % 3]);
             edges
@@ -22,11 +25,15 @@ fn edges(triangles: &[[u32; 3]]) -> EdgeUses {
                 .push((i, v < w));
         }
     }
-    edges
+    Ok(edges)
 }
-fn adjacency(triangles: &[[u32; 3]], partition: bool) -> Result<Adjacency, GeometryError> {
+fn adjacency(
+    triangles: &[[u32; 3]],
+    partition: bool,
+    cancel: &AtomicBool,
+) -> Result<Adjacency, GeometryError> {
     let mut result = vec![Vec::new(); triangles.len()];
-    for uses in edges(triangles).values() {
+    for uses in edges(triangles, cancel)?.values() {
         let pairs: Vec<_> = if uses.len() == 2 {
             vec![(uses[0], uses[1])]
         } else if partition && uses.len().is_multiple_of(2) {
@@ -76,7 +83,7 @@ fn weld_boundary(
     findings: &mut Vec<ImportFinding>,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    let boundary: BTreeSet<_> = edges(&mesh.triangles)
+    let boundary: BTreeSet<_> = edges(&mesh.triangles, cancel)?
         .into_iter()
         .filter(|(_, uses)| uses.len() == 1)
         .flat_map(|((a, b), _)| [a, b])
@@ -150,9 +157,9 @@ fn weld_boundary(
     Ok(())
 }
 pub(super) fn prepare(
-    mut mesh: Mesh,
+    mesh: &mut Mesh,
     cancel: &AtomicBool,
-) -> Result<(Mesh, Adjacency, Vec<ImportFinding>), GeometryError> {
+) -> Result<(Adjacency, Vec<ImportFinding>), GeometryError> {
     let mut findings = Vec::new();
     let mut removed = Vec::new();
     mesh.triangles.retain(|&t| {
@@ -179,11 +186,8 @@ pub(super) fn prepare(
     }
     // An odd multiplicity cannot partition into closed sheets. Deduplicate only
     // this case; even coincident sheets must retain component identity first.
-    if edges(&mesh.triangles)
-        .values()
-        .any(|u| !u.len().is_multiple_of(2))
-    {
-        let incidence = edges(&mesh.triangles);
+    let incidence = edges(&mesh.triangles, cancel)?;
+    if incidence.values().any(|u| !u.len().is_multiple_of(2)) {
         let mut unique = BTreeMap::<[u32; 3], usize>::new();
         let mut removed = Vec::new();
         mesh.triangles.retain(|t| {
@@ -219,8 +223,9 @@ pub(super) fn prepare(
             ));
         }
     }
-    weld_boundary(&mut mesh, &mut findings, cancel)?;
-    let graph = adjacency(&mesh.triangles, true)?;
+    drop(incidence);
+    weld_boundary(mesh, &mut findings, cancel)?;
+    let graph = adjacency(&mesh.triangles, true, cancel)?;
     let mut flips = vec![None; mesh.triangles.len()];
     let mut groups = Vec::new();
     for first in 0..mesh.triangles.len() {
@@ -246,7 +251,7 @@ pub(super) fn prepare(
             }
         }
         let shell = subset(&mesh.vertices, &mesh.triangles, &group);
-        adjacency(&shell.triangles, false)?; // a pairing proposal alone never admits a shell
+        adjacency(&shell.triangles, false, cancel)?; // a pairing proposal alone never admits a shell
         groups.push(group);
     }
     let mut changed = Vec::new();
@@ -368,7 +373,7 @@ pub(super) fn prepare(
             let next = subset(&mesh.vertices, &mesh.triangles, &groups[i]);
             material = super::csg::compose(material, next, depths[i] % 2 == 1, cancel)?;
         }
-        mesh = material;
+        *mesh = material;
         findings.push(finding(
             ImportFindingKind::Information,
             ImportFindingCode::ComponentUnion,
@@ -381,9 +386,9 @@ pub(super) fn prepare(
     }
     // Remove unused positions (including removed debris) from retained bounds.
     let all: Vec<_> = (0..mesh.triangles.len()).collect();
-    mesh = subset(&mesh.vertices, &mesh.triangles, &all);
-    let graph = adjacency(&mesh.triangles, false)?;
-    Ok((mesh, graph, findings))
+    *mesh = subset(&mesh.vertices, &mesh.triangles, &all);
+    let graph = adjacency(&mesh.triangles, false, cancel)?;
+    Ok((graph, findings))
 }
 pub(super) fn point_bounds(points: &[[f64; 3]]) -> Result<AabbMm, GeometryError> {
     let mut min = [f64::INFINITY; 3];

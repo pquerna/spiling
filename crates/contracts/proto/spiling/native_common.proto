@@ -20,7 +20,18 @@ message GeometryLimits {
   uint32 outstanding_chunks = 16;
 }
 message DomainError { string code = 1; string message = 2; }
+message ImportDiagnostic {
+  enum Kind { UNSPECIFIED = 0; OPEN_BOUNDARY = 1; NON_MANIFOLD = 2; COLLAPSED_FACET = 3; COMPOSITION = 4; UNRESOLVED_MATERIAL = 5; }
+  Kind kind = 1;
+  string source_name = 2;
+  string object_name = 3;
+  AabbMm bounds_mm = 4;
+  uint32 preview = 5;
+  string preview_definition = 6;
+  string source_hash = 7;
+}
 message DomainErrorDetail {
+  ImportDiagnostic import_diagnostic = 5;
   oneof error { DomainError geometry = 1; DomainError project = 2; DomainError manufacturing = 3; DomainError library = 4; }
 }
 message Artifact {

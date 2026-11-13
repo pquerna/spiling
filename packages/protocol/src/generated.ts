@@ -305,7 +305,15 @@ export type OpticalStudyInfo = { request: OpticalRequest, report: OpticalReportR
 
 export type GeometryErrorCode = "invalid_geometry" | "unsupported_geometry" | "unsupported_units" | "source_io" | "source_changed" | "invalid_pose" | "stale_revision" | "unknown_handle" | "busy" | "resource_limit" | "cancelled" | "degenerate_section" | "kernel_failure" | "conditioning_failure" | "analysis_indeterminate" | "singular_geometry" | "unsupported_conversion" | "unsupported_operation" | "native_intersection_failure" | "parameter_correspondence_unavailable" | "shape_error_exceeded";
 
-export type GeometryError = { code: GeometryErrorCode, message: string, };
+export type GeometryError = { code: GeometryErrorCode, message: string, import_diagnostic: ImportDiagnostic | null, };
+
+export type ImportFailureKind = "open_boundary" | "non_manifold" | "collapsed_facet" | "composition" | "unresolved_material";
+
+export type ImportDiagnostic = { kind: ImportFailureKind, source_name: string, object_name: string, source_hash: SourceHash | null, bounds_mm: AabbMm | null,
+/**
+ * Session-local display handle; never a retained material definition.
+ */
+preview: ArtifactId | null, preview_definition: DefinitionId | null, };
 
 export type SessionId = string;
 
@@ -1131,8 +1139,8 @@ export const MAX_STEP_ENTITIES = 100000 as const;
 export const MAX_NATIVE_FACES = 50000 as const;
 export const MAX_DEFINITIONS = 32 as const;
 export const MAX_OCCURRENCES = 256 as const;
-export const MAX_DISPLAY_VERTICES = 1000000 as const;
-export const MAX_DISPLAY_TRIANGLES = 1000000 as const;
+export const MAX_DISPLAY_VERTICES = 2796202 as const;
+export const MAX_DISPLAY_TRIANGLES = 4194304 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
 export const MAX_SECTION_BYTES = 16777216 as const;
 export const MAX_REPLAY_DISPLAY_BYTES = 964000416 as const;
