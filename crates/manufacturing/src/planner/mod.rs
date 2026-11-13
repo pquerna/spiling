@@ -82,9 +82,10 @@ fn remaining_geometry_units(
 // envelope. Actual physical Z remains on each materialized layer and skin key.
 type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 
-/// Plan with exact native certification, falling back to ADR012 tolerant
-/// sections when the exact path refuses on geometry grounds. Cancellation,
-/// resource limits and invalid specifications are never retried.
+/// Plan through ADR012 tolerant sections. Jobs using a feature only the exact
+/// native path serves try it first and fall back within tolerance when it
+/// refuses on geometry grounds. Cancellation, resource limits and invalid
+/// specifications are never retried.
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
@@ -196,7 +197,8 @@ fn geometry_refusal(error: &ManufacturingError) -> bool {
 }
 
 /// Features that still consume native captures refuse in tolerant mode
-/// rather than being silently dropped.
+/// rather than being silently dropped. Surface finishes are realized on the
+/// finished occurrence's tolerant section (`tolerant::collect_span`).
 fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingError> {
     let refuse = |what: &str| {
         Err(error(
@@ -204,33 +206,6 @@ fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingErro
             format!("{what} is not yet available for parts sliced within tolerance (ADR012)"),
         ))
     };
-    // Only an effective displacing finish needs the native finish lane; a
-    // Smooth layer (or one overridden to Smooth) changes nothing.
-    let finished = input.occurrences.iter().any(|occurrence| {
-        input
-            .definitions
-            .get(&occurrence.definition_id)
-            .is_some_and(|definition| {
-                definition.faces().iter().any(|face| {
-                    input
-                        .surface_overlays
-                        .effective_layer(
-                            &occurrence.definition_id,
-                            occurrence.occurrence_id,
-                            &face.face_id,
-                        )
-                        .is_some_and(|layer| {
-                            !matches!(
-                                layer.finish,
-                                spiling_contracts::surface::SurfaceFinish::Smooth
-                            )
-                        })
-                })
-            })
-    });
-    if finished {
-        return refuse("a surface finish");
-    }
     if matches!(
         &input.intent.printer.workflow,
         JobWorkflow::FixedDualMarlin { .. }
@@ -782,10 +757,25 @@ fn admit_schedule<'model>(
                         &spiling_contracts::geometry::OccurrenceRecord,
                     >()));
             let captured = if let Some(models) = &admission.tolerant {
+                // A later split can move a layer's sample; mapped fields still
+                // hold their vertical-error bound on every sliced layer.
+                while let Some(cause) = native::surface_vertical_error(admission, schedule, index)?
+                {
+                    check_cancel(cancel)?;
+                    native::refine_surface_layer(
+                        schedule,
+                        index,
+                        input
+                            .intent
+                            .effective_deposition_limits()
+                            .min_bead_height_mm,
+                        &cause,
+                    )?;
+                }
                 tolerant::collect_span(
                     &occurrences,
                     models,
-                    &admission.native_bounds,
+                    admission,
                     &schedule[index as usize],
                     index,
                     !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
