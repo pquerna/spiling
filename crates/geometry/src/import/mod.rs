@@ -7,12 +7,14 @@ mod source;
 mod ast;
 pub(crate) mod brep_data_bridge;
 mod closed_spline_decode;
+mod prepared;
 pub mod structure;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod topology_tests;
 mod units;
+pub use prepared::PreparedStepSource;
 
 use crate::{check_cancel, kernel::Definition};
 use ast::*;
@@ -341,32 +343,40 @@ pub(crate) fn import_step(
     query_proof_byte_limit: usize,
 ) -> Result<Definition, GeometryError> {
     check_cancel(cancel)?;
+    validate_face_limit(face_limit)?;
+    PreparedStepSource::new(bytes, cancel)?.read_solid(
+        selected,
+        cancel,
+        face_limit,
+        query_proof_byte_limit,
+    )
+}
+
+fn validate_face_limit(face_limit: u32) -> Result<(), GeometryError> {
     if face_limit == 0 || face_limit > MAX_NATIVE_FACES {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
             "remaining native-face capacity exhausted or exceeds support cap",
         ));
     }
-    if bytes.len() > MAX_SOURCE_BYTES as usize {
-        return Err(error(
-            GeometryErrorCode::ResourceLimit,
-            "STEP source cap exceeded",
-        ));
-    }
-    lexical_bound(bytes, cancel)?;
+    Ok(())
+}
+
+fn import_prepared(
+    prepared: &PreparedStepSource<'_>,
+    selected: Option<&SourceSolidId>,
+    cancel: &AtomicBool,
+    face_limit: u32,
+    query_proof_byte_limit: usize,
+) -> Result<Definition, GeometryError> {
+    check_cancel(cancel)?;
+    validate_face_limit(face_limit)?;
+    let bytes = prepared.bytes;
     let text = std::str::from_utf8(bytes).map_err(|_| invalid("STEP source is not UTF-8"))?;
-    check_cancel(cancel)?;
-    let exchange =
-        step_p21::parser::parse(text).map_err(|_| invalid("invalid ISO-10303-21 exchange"))?;
-    check_cancel(cancel)?;
-    if exchange.data.len() != 1 || !exchange.reference.is_empty() || !exchange.anchor.is_empty() {
-        return Err(unsupported("one local DATA section is required"));
-    }
-    units::validate_schema(&exchange.header)?;
-    let entities = Entities::new(&exchange.data[0], cancel)?;
+    let entities = Entities::new(&prepared.data, cancel)?;
     // Product structure must be coherent even when one solid is imported; its
     // placements belong to the caller's occurrences, not to this definition.
-    let bodies = structure::bodies(&entities, cancel)?;
+    let bodies = &prepared.bodies;
     let solid_id = match selected {
         None if bodies.len() == 1 => bodies[0].solid.step_entity(),
         None if bodies.is_empty() => {

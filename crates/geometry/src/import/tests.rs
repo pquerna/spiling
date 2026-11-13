@@ -1712,6 +1712,11 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
         "#9500=MANIFOLD_SOLID_BREP('second',#17);",
     );
     let bodies = structure::source_bodies(source.as_bytes(), &cancelled()).unwrap();
+    let prepared = PreparedStepSource::new(source.as_bytes(), &cancelled()).unwrap();
+    assert_eq!(prepared.bodies(), bodies);
+    assert!(prepared.matches_bytes(source.as_bytes()));
+    assert!(!prepared.matches_bytes(&fixture("box-mm.step")));
+    assert!(prepared.retained_bytes() > size_of::<PreparedStepSource<'_>>());
     assert_eq!(
         bodies
             .iter()
@@ -1727,10 +1732,34 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
     );
     let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
     let mut ids = BTreeSet::new();
-    for body in &bodies {
+    for body in bodies.iter().rev() {
         let definition =
             crate::from_step_solid_with_cancel(source.as_bytes(), &body.solid, &cancelled())
                 .unwrap();
+        let shared = prepared
+            .read_solid(
+                Some(&body.solid),
+                &cancelled(),
+                MAX_NATIVE_FACES,
+                MAX_QUERY_PROOF_BYTES,
+            )
+            .unwrap();
+        assert_eq!(shared.id(), definition.id());
+        assert_eq!(shared.provenance(), definition.provenance());
+        assert_eq!(shared.faces(), definition.faces());
+        assert_eq!(shared.bounds_mm(), definition.bounds_mm());
+        let plane = spiling_contracts::geometry::PlaneMm {
+            origin_mm: [0.0, 0.0, 4.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let shared_section = crate::section(&shared, plane, &cancelled()).unwrap();
+        let direct_section = crate::section(&definition, plane, &cancelled()).unwrap();
+        assert_eq!(shared_section.loops().len(), direct_section.loops().len());
+        for (shared_loop, direct_loop) in shared_section.loops().iter().zip(direct_section.loops())
+        {
+            assert_eq!(shared_loop.is_hole, direct_loop.is_hole);
+            assert_eq!(shared_loop.points_mm, direct_loop.points_mm);
+        }
         assert_eq!(
             definition.provenance().source_solid.as_ref(),
             Some(&body.solid)
@@ -1743,6 +1772,30 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
         ids.insert(definition.id().clone());
     }
     assert_eq!(ids.len(), 2);
+    assert_eq!(
+        prepared
+            .read_solid(
+                Some(&bodies[0].solid),
+                &cancelled(),
+                5,
+                MAX_QUERY_PROOF_BYTES
+            )
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::ResourceLimit,
+    );
+    assert_eq!(
+        prepared
+            .read_solid(
+                Some(&bodies[0].solid),
+                &AtomicBool::new(true),
+                MAX_NATIVE_FACES,
+                MAX_QUERY_PROOF_BYTES
+            )
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::Cancelled,
+    );
     for wrong in ["step:17", "step:999999"] {
         assert_eq!(
             crate::from_step_solid_with_cancel(

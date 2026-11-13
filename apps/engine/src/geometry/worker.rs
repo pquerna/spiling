@@ -803,7 +803,7 @@ impl Capacity {
     }
     fn admit(
         &mut self,
-        bytes: &[u8],
+        source: &spiling_geometry::PreparedStepSource<'_>,
         solid: Option<&SourceSolidId>,
         cancel: &AtomicBool,
     ) -> Result<Definition, GeometryError> {
@@ -814,13 +814,16 @@ impl Capacity {
                 "resident/staged native definition cap exceeded",
             ));
         }
-        let definition = spiling_geometry::from_step_solid_with_limits(
-            bytes,
-            solid,
-            cancel,
-            self.faces,
-            self.source_bytes,
-        )?;
+        let query_bytes = self
+            .source_bytes
+            .checked_sub(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "prepared STEP source exceeds coexisting admission",
+                )
+            })?;
+        let definition = source.read_solid(solid, cancel, self.faces, query_bytes)?;
         self.retain_definition(definition.into(), cancel)
     }
     fn retain_definition(
@@ -1025,7 +1028,10 @@ fn import(
         )
         .into());
     }
-    let bodies = spiling_geometry::source_bodies(&captured.bytes, cancel)?;
+    let bytes = Arc::new(captured.bytes);
+    capacity.charge_source(&bytes)?;
+    let prepared = spiling_geometry::PreparedStepSource::new(&bytes, cancel)?;
+    let bodies = prepared.bodies();
     if bodies.is_empty() {
         return Err(error(
             GeometryErrorCode::UnsupportedGeometry,
@@ -1034,13 +1040,11 @@ fn import(
         .into());
     }
     let selects = bodies.len() > 1;
-    let bytes = Arc::new(captured.bytes);
-    capacity.charge_source(&bytes)?;
     let mut parts = Vec::with_capacity(bodies.len());
     let mut residents = Vec::new();
     for body in bodies {
         check_cancel(cancel)?;
-        let solid = selects.then_some(body.solid);
+        let solid = selects.then(|| body.solid.clone());
         let id = DefinitionId::for_source(&digest, solid.as_ref());
         if reuse.contains(&id)
             && let Some(resident) = definitions.get(&id)
@@ -1051,12 +1055,12 @@ fn import(
             validate_provenance(&resident.definition, &source)?;
             parts.push((
                 imported(&resident.definition, source, ImportedDisplay::Reused),
-                body.placements,
+                body.placements.clone(),
             ));
             continue;
         }
         progress("preparing_native_geometry".into());
-        let definition = capacity.admit(&bytes, solid.as_ref(), cancel)?;
+        let definition = capacity.admit(&prepared, solid.as_ref(), cancel)?;
         let mut provenance = definition.provenance().clone();
         provenance.source_name = captured.label.clone();
         let source = Arc::new(SourceAsset::shared(
@@ -1070,7 +1074,7 @@ fn import(
         let resident = resident(definition, &source, &display);
         parts.push((
             imported(&resident.definition, source, display),
-            body.placements,
+            body.placements.clone(),
         ));
         residents.push(resident);
     }
@@ -1296,8 +1300,15 @@ fn open(
     }
     let mut pending = BTreeMap::new();
     let mut imports = Vec::with_capacity(loaded.sources.len());
+    let mut prepared_step: Option<spiling_geometry::PreparedStepSource<'_>> = None;
     for (id, source) in &loaded.sources {
         check_cancel(cancel)?;
+        if prepared_step
+            .as_ref()
+            .is_some_and(|prepared| !prepared.matches_bytes(&source.bytes))
+        {
+            drop(prepared_step.take());
+        }
         if allowed_reuse.contains(id)
             && let Some(resident) = definitions.get(id)
         {
@@ -1317,11 +1328,23 @@ fn open(
                     Definition::restore(source.record.provenance.clone(), bytes, cancel)?,
                     cancel,
                 )?,
-                None => capacity.admit(
-                    source.bytes.as_slice(),
-                    source.record.provenance.source_solid.as_ref(),
-                    cancel,
-                )?,
+                None => {
+                    if prepared_step
+                        .as_ref()
+                        .is_none_or(|prepared| !prepared.matches_bytes(&source.bytes))
+                    {
+                        drop(prepared_step.take());
+                        prepared_step = Some(spiling_geometry::PreparedStepSource::new(
+                            &source.bytes,
+                            cancel,
+                        )?);
+                    }
+                    capacity.admit(
+                        prepared_step.as_ref().expect("source prepared above"),
+                        source.record.provenance.source_solid.as_ref(),
+                        cancel,
+                    )?
+                }
             };
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
@@ -1335,6 +1358,7 @@ fn open(
             pending.insert(id.clone(), resident);
         }
     }
+    drop(prepared_step);
     check_cancel(cancel)?;
     for asset in loaded
         .layouts

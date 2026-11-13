@@ -325,6 +325,9 @@ impl DefinitionId {
 #[ts(type = "string")]
 pub struct SourceSolidId(String);
 impl SourceSolidId {
+    pub fn allocated_bytes(&self) -> usize {
+        self.0.capacity()
+    }
     pub fn from_step_entity(entity: u64) -> Result<Self, GeometryError> {
         if entity == 0 {
             return Err(invalid("STEP solid entity must be nonzero"));
