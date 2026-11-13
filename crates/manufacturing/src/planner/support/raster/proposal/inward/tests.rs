@@ -105,7 +105,8 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
         &cancel,
     )
     .unwrap();
-    assert_eq!(
+    // Unmodified walls fit only by omitting part of the concave corner.
+    assert!(
         commands::fit(
             &centers,
             &mut paths,
@@ -116,9 +117,8 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
             0,
             &cancel,
         )
-        .unwrap_err()
-        .code,
-        ManufacturingErrorCode::UnsupportedGeometry,
+        .unwrap()
+            > 0.0
     );
     let proposal = construct(&centers, None, 0, 0, &mut 0, 0, &cancel)
         .unwrap()
@@ -143,17 +143,21 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
         &cancel,
     )
     .unwrap();
-    commands::fit(
-        &centers,
-        &mut paths,
-        &mut segments,
-        0,
-        0,
-        &mut 0,
-        0,
-        &cancel,
-    )
-    .unwrap();
+    // The inward proposal keeps the complete wall.
+    assert_eq!(
+        commands::fit(
+            &centers,
+            &mut paths,
+            &mut segments,
+            0,
+            0,
+            &mut 0,
+            0,
+            &cancel,
+        )
+        .unwrap(),
+        0.0
+    );
     assert_eq!(centers, original);
     let recipe = crate::planner::tests::recipe(1.0);
     let domains = Domains {
@@ -198,7 +202,8 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
                 0,
                 &cancel,
             )
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(&actual[1..], expected);
     }
 }
@@ -295,7 +300,8 @@ fn inward_chain_preserves_hole_topology_and_original_interface_roles() {
                 0,
                 &cancel,
             )
-            .unwrap();
+            .unwrap()
+            .0;
         for kind in [DepositionKind::Support, DepositionKind::SupportInterface] {
             assert!(paths.iter().any(|path| path.kind == kind));
         }

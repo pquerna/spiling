@@ -1562,6 +1562,8 @@ pub(crate) fn verify_actual(
     };
     let mut unsupported_layers = 0usize;
     let mut largest_recorded_span = 0.0_f64;
+    let mut omitted_wall_layers = 0usize;
+    let mut omitted_wall_mm = 0.0_f64;
     for layer in &plan.layers {
         cancelled(cancel)?;
         let span = layer.region_coverage.unsupported_overhang_mm;
@@ -1569,9 +1571,17 @@ pub(crate) fn verify_actual(
             unsupported_layers += 1;
             largest_recorded_span = largest_recorded_span.max(span);
         }
+        let omitted = layer.region_coverage.support_omitted_wall_mm;
+        if omitted > 0.0 {
+            omitted_wall_layers += 1;
+            omitted_wall_mm += omitted;
+        }
+    }
+    if omitted_wall_layers > 0 {
+        report.limitations.insert(0, format!("Support wall omitted on {omitted_wall_layers} layers where no minimum-length command fits the support domain; {omitted_wall_mm:.4} mm in total."));
     }
     if unsupported_layers > 0 {
-        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers with supports disabled; largest recorded first-offending span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
+        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no support reached from the build plate; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
     }
     report.validate()?;
     if let Some(selection) = &plan.interior_selection {

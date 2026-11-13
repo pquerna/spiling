@@ -1945,22 +1945,28 @@ pub(super) fn realize(
             let preferred =
                 region::HatchAxis::for_policy(RectilinearAxisPolicy::AlternatingXY, layer.index);
             let mut paths = Vec::new();
+            let mut omitted_wall_mm = 0.0;
+            // Worst unanchored span of the preferred raster, kept only when
+            // the orthogonal one must be compared against it.
+            let mut preferred_span = None;
+            let mut unanchored_mm = 0.0;
             for axis in [preferred, preferred.orthogonal()] {
+                let hatch = region::HatchLayer {
+                    roof: None,
+                    width_mm: recipe.bead_width_mm,
+                    z: layer.z_mm,
+                    lower_z: layer.lower_z_mm,
+                    height: layer.z_mm - layer.lower_z_mm,
+                    axis,
+                    top_axis: axis,
+                    recipe,
+                };
                 anchors.set_budget(0);
                 domains.set_anchor_owned_bytes(anchors.retained_bytes());
-                paths = domains.paths(
+                (paths, omitted_wall_mm) = domains.paths(
                     interface,
                     density,
-                    &region::HatchLayer {
-                        roof: None,
-                        width_mm: recipe.bead_width_mm,
-                        z: layer.z_mm,
-                        lower_z: layer.lower_z_mm,
-                        height: layer.z_mm - layer.lower_z_mm,
-                        axis,
-                        top_axis: axis,
-                        recipe,
-                    },
+                    &hatch,
                     *segments,
                     &mut work,
                     foreign_work,
@@ -1976,40 +1982,75 @@ pub(super) fn realize(
                 if i == 0 {
                     break;
                 }
-                anchors.set_budget(domains.anchor_budget(&paths)?);
-                let failure = raster::failure(
-                    &paths,
+                let lower = || {
                     prior[i - 1]
                         .paths
                         .iter()
-                        .filter(|path| support_role(path.kind)),
+                        .filter(|path| support_role(path.kind))
+                };
+                anchors.set_budget(domains.anchor_budget(&paths)?);
+                if raster::failure(
+                    &paths,
+                    lower(),
                     recipe,
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
-                )?;
-                let Some(failure) = failure else {
+                )?
+                .is_none()
+                {
                     break;
-                };
-                if axis != preferred {
-                    let path = &paths[failure.path];
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        format!(
-                            "layer {i}: neither orthogonal support/interface raster has bounded deposited anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; increase support density or revise support corridor",
-                            path.kind,
-                            path.points_mm[failure.first],
-                            path.points_mm[failure.last],
-                            failure.start,
-                            failure.end,
-                            failure.span,
-                        ),
-                    ));
                 }
-                // Release failed paths and anchor records before staging the other
-                // axis. Neither attempt changes object or support ownership.
-                paths = Vec::new();
+                // Neither raster may anchor every stroke on the support below:
+                // the upper footprint can end between lower rows, or every
+                // orthogonal row run parallel to them. Build plate only: print
+                // the less unanchored raster as authored and report its span.
+                let span = raster::worst_failure(
+                    &paths,
+                    lower(),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?
+                .expect("a failing raster has a worst failure")
+                .span;
+                let Some(preferred_span) = preferred_span else {
+                    preferred_span = Some(span);
+                    // Release failed paths and anchor records before staging the
+                    // other axis. Neither attempt changes object or support ownership.
+                    paths = Vec::new();
+                    continue;
+                };
+                if span < preferred_span {
+                    unanchored_mm = span;
+                } else {
+                    // Rebuild the preferred raster rather than retain both
+                    // candidates: construction is deterministic.
+                    drop(std::mem::take(&mut paths));
+                    anchors.set_budget(0);
+                    domains.set_anchor_owned_bytes(anchors.retained_bytes());
+                    (paths, omitted_wall_mm) = domains.paths(
+                        interface,
+                        density,
+                        &region::HatchLayer {
+                            axis: preferred,
+                            top_axis: preferred,
+                            ..hatch
+                        },
+                        *segments,
+                        &mut work,
+                        foreign_work,
+                        cancel,
+                    )?;
+                    unanchored_mm = preferred_span;
+                }
             }
+            layer.region_coverage.unsupported_overhang_mm = layer
+                .region_coverage
+                .unsupported_overhang_mm
+                .max(unanchored_mm);
+            layer.region_coverage.support_omitted_wall_mm = omitted_wall_mm;
             *segments += path_segments(&paths);
             anchors.set_budget(0);
             domains.set_anchor_owned_bytes(anchors.retained_bytes());
