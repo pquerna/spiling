@@ -11,10 +11,8 @@ mod beading;
 mod contours;
 mod fitting;
 mod qualification;
-mod schedule;
 mod separation;
 mod skeleton;
-pub(super) use schedule::source_command_height_limit;
 use skeleton::{BoundarySupport, MedialEdge};
 #[cfg(test)]
 mod tests;
@@ -155,8 +153,6 @@ pub(super) struct WallRequest<'a> {
     /// TOTAL already-live caller allocations in the planner byte budget.
     /// Semantic retained points are not implicitly converted to bytes.
     pub(super) owned_bytes: usize,
-    /// ADR012 tolerant layer: classic constant-width perimeters.
-    pub(super) classic: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -272,15 +268,14 @@ pub(super) fn plan_section_walls(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<WallPlan, ManufacturingError> {
-    if request.classic {
-        return arachne::plan(request, work, cancel);
-    }
-    plan_section_walls_against(request, false, work, cancel)
+    arachne::plan(request, work, cancel)
 }
 
-fn plan_section_walls_against<'a>(
+/// The skeleton/beading generator with an additional actual-edge width fit at
+/// material boundaries, for material-domain constructions. Neither source
+/// domains nor the existing coverage allowance change.
+pub(super) fn plan_material_domain_walls<'a>(
     request: WallRequest<'a>,
-    strict_material: bool,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<WallPlan, ManufacturingError> {
@@ -399,17 +394,9 @@ fn plan_section_walls_against<'a>(
                             + 3 * std::mem::size_of::<f64>()
                             + 256);
                     let assembly_request = staged_request(&candidate_request, assembly_bytes)?;
-                    let (mut paths, correspondence) = assemble(
-                        &edge_output,
-                        &junctions,
-                        &assembly_request,
-                        strict_material,
-                        work,
-                        cancel,
-                    )?;
-                    if strict_material {
-                        fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
-                    }
+                    let (mut paths, correspondence) =
+                        assemble(&edge_output, &junctions, &assembly_request, work, cancel)?;
+                    fit_material_boundaries(&mut paths, &candidate_request, work, cancel)?;
                     candidate_request.owned_bytes = candidate_request
                         .owned_bytes
                         .checked_add(path_bytes(&paths))
@@ -530,17 +517,6 @@ fn plan_section_walls_against<'a>(
         wall_area_mm2,
         protected_hole_area_mm2,
     })
-}
-
-/// Use the same source wall construction and qualification with an additional
-/// actual-edge width fit at material boundaries. Neither source domains nor the
-/// existing coverage allowance change.
-pub(super) fn plan_material_domain_walls(
-    request: WallRequest<'_>,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<WallPlan, ManufacturingError> {
-    plan_section_walls_against(request, true, work, cancel)
 }
 
 fn fit_material_boundaries(
@@ -910,7 +886,6 @@ fn assemble(
     edges: &[BoundaryEdge],
     permissions: &[Junction],
     request: &WallRequest<'_>,
-    omit_inner_subcommand_loops: bool,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(Vec<DepositionPath>, Vec<BoundaryCorrespondence>), ManufacturingError> {
@@ -989,8 +964,7 @@ fn assemble(
             // propose omission only for the complete tiny inner loop, then run
             // unchanged original-component coverage, extent, source/void, dose
             // and junction-connection qualification over the complete candidate.
-            if omit_inner_subcommand_loops
-                && points_mm.first() == points_mm.last()
+            if points_mm.first() == points_mm.last()
                 && correspondence[correspondence_base..]
                     .iter()
                     .all(|c| c.ordinal > 0)

@@ -73,7 +73,10 @@ fn contains(ring: &[[f64; 2]], p: [f64; 2]) -> bool {
     inside
 }
 
-fn section_at(model: &TolerantModel, z: f64) -> Result<MultiPolygon<f64>, ManufacturingError> {
+pub(super) fn section_at(
+    model: &TolerantModel,
+    z: f64,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     let section = model.section(z).map_err(|e| {
         error(
             ManufacturingErrorCode::UnsupportedGeometry,
@@ -183,7 +186,6 @@ pub(super) fn collect_span(
     let (lower, upper) = (layers[0].lower_z, layers[held - 1].z);
     let mut material = MultiPolygon(Vec::new());
     let mut contributions = Vec::with_capacity(occurrences.len());
-    let mut contribution_bytes = 0usize;
     let mut finished = Vec::new();
     let mut finished_bytes = 0usize;
     let mut finished_area_mm2 = 0.0;
@@ -203,7 +205,7 @@ pub(super) fn collect_span(
                 let inset = (0.25 * (layer.z - layer.lower_z)).min(0.01);
                 for z in [layer.lower_z + inset, layer.sample, layer.z - inset] {
                     for polygon in section_at(model, z)?.0 {
-                        occupied.push(polygon, height, Some(occurrence.occurrence_id))?;
+                        occupied.push(polygon, height)?;
                     }
                 }
             }
@@ -231,7 +233,6 @@ pub(super) fn collect_span(
             material.union(&placed)
         };
         let bytes = native::material_bytes(&mut placed);
-        contribution_bytes = contribution_bytes.saturating_add(bytes);
         contributions.push((occurrence.occurrence_id, Arc::new(placed), bytes));
     }
     if contributions.len() > 1 {
@@ -258,7 +259,6 @@ pub(super) fn collect_span(
         index + held as u32,
         Arc::new(material),
         contributions,
-        contribution_bytes,
         finished,
         finished_bytes,
         Arc::new(occupied),

@@ -32,9 +32,7 @@ mod native_tests;
 mod tests;
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Area, Intersects, MultiPolygon, Point};
-use spiling_contracts::geometry::{
-    DefinitionId, GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
-};
+use spiling_contracts::geometry::{GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM};
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
 };
@@ -82,17 +80,16 @@ fn remaining_geometry_units(
 // envelope. Actual physical Z remains on each materialized layer and skin key.
 type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 
-/// Plan through ADR012 tolerant sections. Jobs using a feature only the exact
-/// native path serves try it first and fall back within tolerance when it
-/// refuses on geometry grounds. Cancellation, resource limits and invalid
-/// specifications are never retried.
+/// Plan through ADR012 tolerant sections: the one slicing pipeline. Every
+/// source, STEP or hybrid, is sectioned from its tessellation within the
+/// recorded tolerance policy; no exact native lane remains.
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    let mut plan = plan_lane(input, cancel, geometry_work)?;
-    // Walls of either lane follow the same BREP circles.
+    let mut plan = plan_with(input, cancel, geometry_work)?;
+    // Walls follow the BREP's own circles.
     let sources: Vec<_> = input
         .occurrences
         .iter()
@@ -105,45 +102,6 @@ pub(crate) fn plan(
         .collect();
     arcs::attach(&mut plan, &sources, cancel)?;
     Ok(plan)
-}
-
-fn plan_lane(
-    input: &CompilerInput<'_>,
-    cancel: &AtomicBool,
-    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    // One pipeline: every job the tolerance policy covers slices through it.
-    // Only features not yet ported keep the exact lane. Hybrid (mesh) sources
-    // have no exact native lane at all, so they always take the tolerant one,
-    // which names any unported feature it refuses.
-    let hybrid = input.definitions.values().any(|d| {
-        matches!(
-            d.as_ref(),
-            spiling_geometry::source::SourceDefinition::Hybrid(_)
-        )
-    });
-    if hybrid || tolerant_supported(input).is_ok() {
-        return plan_with(input, cancel, geometry_work, true);
-    }
-    match plan_with(input, cancel, geometry_work, false) {
-        // A job whose features tolerant mode cannot take keeps the exact
-        // refusal, which says more than "not available within tolerance".
-        Err(exact) if geometry_refusal(&exact) && tolerant_supported(input).is_ok() => {
-            plan_with(input, cancel, geometry_work, true).map_err(|tolerant| {
-                if tolerant.code == ManufacturingErrorCode::Cancelled {
-                    return tolerant;
-                }
-                error(
-                    tolerant.code,
-                    format!(
-                        "{} (exact native path also refused: {})",
-                        tolerant.message, exact.message
-                    ),
-                )
-            })
-        }
-        other => other,
-    }
 }
 
 /// A fill, skin or bridge row whose emitted XYZ6 chord is shorter than the
@@ -182,41 +140,12 @@ fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingE
     Ok(())
 }
 
-fn geometry_refusal(error: &ManufacturingError) -> bool {
-    matches!(
-        error.code,
-        ManufacturingErrorCode::UnsupportedGeometry
-            | ManufacturingErrorCode::NativeAnalysisIndeterminate
-            | ManufacturingErrorCode::NativeConditioningFailure
-            | ManufacturingErrorCode::NativeShapeErrorExceeded
-            | ManufacturingErrorCode::NativeSingularGeometry
-            | ManufacturingErrorCode::NativeKernelFailure
-            // Exact proofs can exhaust their work before any output exists.
-            | ManufacturingErrorCode::ResourceLimit
-    )
-}
-
-/// Features that still consume native captures refuse in tolerant mode
-/// rather than being silently dropped. Surface finishes are realized on the
-/// finished occurrence's tolerant section (`tolerant::collect_span`);
-/// permanent plates and combined bands query full-height inner material from
-/// the tolerant model (`tolerant::inner_material_admits`).
-fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingError> {
-    let _ = input;
-    Ok(())
-}
-
 fn plan_with(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-    tolerant: bool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    if tolerant {
-        tolerant_supported(input)?;
-    }
-    let (mut admission, geometry_sources) =
-        preflight::admit_with(input, cancel, geometry_work, tolerant)?;
+    let mut admission = preflight::admit(input, cancel, geometry_work)?;
 
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
@@ -268,13 +197,7 @@ fn plan_with(
     }
     let mut surface_work = 0usize;
 
-    preflight::resolve_native_events(
-        input,
-        &mut admission,
-        &geometry_sources,
-        &mut surface_work,
-        cancel,
-    )?;
+    preflight::resolve_native_events(input, &mut admission, &mut surface_work, cancel)?;
     let mut process_captures = Vec::new();
     process_captures
         .try_reserve_exact(input.occurrences.len())
@@ -293,32 +216,14 @@ fn plan_with(
             cancel,
         )?);
     }
-    admit_source_captures(
-        &geometry_sources,
-        admission.native_capture_proposal_bytes(),
-        admission.geometry_work,
-        cancel,
-    )?;
-    let prepared_sources = geometry_sources;
-
-    // This is a proposal, not authorization. The streamed source stage below
-    // commits each actual interval only after native metric/incidence and joint
-    // source-union certificates, refining this same field/support schedule.
+    // A proposal: support and mapped-field refinement split it further.
     let mut schedule = scheduled_layers(input, &mut admission, &process_captures, cancel)?;
     let mut support_work = support::SupportWork::default();
-    let mut span_sizing = native::NativeSpanSizing::default();
-    let mut slab_pool = native::NativeSlabPool::default();
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
     let mut survival_memo = neighborhood::SurvivalMemo::default();
     let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
-    let outside = native_retry_outside_bytes(
-        &prepared_sources,
-        &admission,
-        &schedule,
-        &process_captures,
-        &span_sizing,
-    )?;
+    let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?;
     remaining_geometry_units(0, geometry_bytes(&[outside, schedule_bytes])?)?;
     schedule
         .try_reserve_exact(MAX_PRINT_LAYERS as usize - schedule.len())
@@ -340,7 +245,6 @@ fn plan_with(
         let Some(scope) = probe_scope else { break None };
         let Some(probe) = deposition_probe(
             input,
-            &admission,
             &process_captures,
             &schedule,
             scope,
@@ -350,64 +254,20 @@ fn plan_with(
         else {
             break None;
         };
-        let mut outcome = admit_schedule(
+        let outcome = admit_schedule(
             input,
             cancel,
             &mut admission,
-            &prepared_sources,
             &mut process_captures,
             &mut schedule,
             &mut surface_work,
             &mut support_work,
             Some(probe),
             None,
-            &mut span_sizing,
-            &mut slab_pool,
             &mut wall_memo,
             &mut void_memo,
             &mut survival_memo,
         );
-        if let Ok(ScheduleAdmission::RefineUnreachableLayer { recycled, .. }) = &mut outcome {
-            let outside = native_retry_outside_bytes(
-                &prepared_sources,
-                &admission,
-                &schedule,
-                &process_captures,
-                &span_sizing,
-            )?;
-            slab_pool.recycle(
-                std::mem::take(recycled),
-                outside,
-                admission.geometry_work,
-                cancel,
-            )?;
-        }
-        if let Ok(ScheduleAdmission::PrefixAdmitted(capture)) = &mut outcome {
-            // Idle proposals have no role after the last actual-anchor retry.
-            slab_pool.clear();
-            let live = geometry_bytes(&[
-                native_retry_outside_bytes(
-                    &prepared_sources,
-                    &admission,
-                    &schedule,
-                    &process_captures,
-                    &span_sizing,
-                )?,
-                native::output_bytes(
-                    &capture.sections,
-                    &capture.native_surfaces,
-                    capture.retained_section_bytes,
-                ),
-                capture.stage.retained_proof_bytes(),
-            ])?;
-            capture.stage.materialize_pending_voids_with_startup_wall(
-                input,
-                live,
-                admission.geometry_work,
-                cancel,
-                &mut capture.startup_wall,
-            )?;
-        }
         match outcome? {
             ScheduleAdmission::PrefixAdmitted(capture) => break Some(capture),
             ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
@@ -424,21 +284,18 @@ fn plan_with(
     // neighborhood: its layers, demands and columns there equal the complete
     // pass's, so a refinement it finds is the complete pass's first one.
     // Anything else falls through to the complete pass, which decides.
-    let truncate_retries = admission.tolerant.is_some()
-        && matches!(
-            input.intent.recipe.supports,
-            SupportPolicy::Breakaway { .. }
-        )
-        && !matches!(
-            input.intent.recipe.sparse_infill,
-            SparseInfillPolicy::WebRoof { .. }
-        );
+    let truncate_retries = matches!(
+        input.intent.recipe.supports,
+        SupportPolicy::Breakaway { .. }
+    ) && !matches!(
+        input.intent.recipe.sparse_infill,
+        SparseInfillPolicy::WebRoof { .. }
+    );
     let mut refined = None;
     loop {
         if let Some(index) = refined.take()
             && let Some(probe) = deposition_probe(
                 input,
-                &admission,
                 &process_captures,
                 &schedule,
                 AnchorProbeScope::RefinedLayer {
@@ -452,15 +309,12 @@ fn plan_with(
                 input,
                 cancel,
                 &mut admission,
-                &prepared_sources,
                 &mut process_captures,
                 &mut schedule,
                 &mut surface_work,
                 &mut support_work,
                 Some(probe),
                 None,
-                &mut span_sizing,
-                &mut slab_pool,
                 &mut wall_memo,
                 &mut void_memo,
                 &mut survival_memo,
@@ -481,15 +335,12 @@ fn plan_with(
             input,
             cancel,
             &mut admission,
-            &prepared_sources,
             &mut process_captures,
             &mut schedule,
             &mut surface_work,
             &mut support_work,
             None,
             prefix.take(),
-            &mut span_sizing,
-            &mut slab_pool,
             &mut wall_memo,
             &mut void_memo,
             &mut survival_memo,
@@ -511,15 +362,14 @@ fn plan_with(
 /// may move the next demand up by one layer.
 const RETRY_WINDOW_LAYERS: usize = 3;
 
-fn native_retry_outside_bytes(
-    sources: &PreparedSources<'_>,
+/// Bytes held outside one schedule admission across retries.
+fn retry_outside_bytes(
     admission: &preflight::Admission,
     schedule: &Vec<LayerElevation>,
     process: &Vec<zones::Capture>,
-    sizing: &native::NativeSpanSizing,
 ) -> Result<usize, ManufacturingError> {
-    let fixed = geometry_bytes(&[
-        admission.native_capture_proposal_bytes(),
+    geometry_bytes(&[
+        admission.model_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
         process.capacity() * std::mem::size_of::<zones::Capture>(),
         process
@@ -529,19 +379,18 @@ fn native_retry_outside_bytes(
                     * std::mem::size_of::<spiling_contracts::process::ProcessProvenance>()
             })
             .sum(),
-        sizing.retained_bytes(),
-    ])?;
-    sources.values().try_fold(fixed, |bytes, source| {
-        geometry_bytes(&[bytes, source.retained_bytes()])
-    })
+    ])
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "One admission result moves per schedule attempt; the prefix capture is not replicated"
+)]
 enum ScheduleAdmission {
     PrefixAdmitted(NativeScheduleCapture),
     RefineUnreachableLayer {
         index: usize,
         failure: ManufacturingError,
-        recycled: native::RecyclableSlabs,
     },
     Complete(NormalizedPrintPlan),
     /// A truncated retry found no refinement the complete pass would make.
@@ -556,73 +405,13 @@ struct OrdinaryTemplate {
     fits: Vec<SkinCommandFitDomain>,
 }
 
-// Successful tentative native/D owners move into final admission unchanged.
-// The ledger still expects the full source interval and is finalized only once.
+// Successful tentative sections/D owners move into final admission unchanged.
 struct NativeScheduleCapture {
     sections: Vec<SectionSpan>,
     native_surfaces: Vec<NativeSurfaceSpan>,
     retained_section_bytes: usize,
     retained_points: usize,
-    stage: native::NativeStageState,
     startup_wall: Option<StartupWall>,
-}
-
-#[expect(
-    clippy::large_enum_variant,
-    reason = "One schedule switches native proof authority in place; the tentative owner is not replicated"
-)]
-enum ScheduleNativeAuthority {
-    Tentative { stage: native::NativeStageState },
-    Complete(native::CompletedCoverage),
-}
-
-impl ScheduleNativeAuthority {
-    fn retained_bytes(&self) -> usize {
-        match self {
-            Self::Tentative { stage, .. } => stage.retained_proof_bytes(),
-            Self::Complete(coverage) => coverage
-                .material_proof
-                .retained_bytes()
-                .saturating_add(native::void_capture_bytes(&coverage.protected_voids)),
-        }
-    }
-
-    fn source_captures(&self) -> &[spiling_geometry::NativeUnionSourceCapture] {
-        match self {
-            Self::Tentative { stage, .. } => stage.source_captures(),
-            Self::Complete(coverage) => coverage.material_proof.sources(),
-        }
-    }
-
-    fn protected_voids_mut(
-        &mut self,
-    ) -> Result<&mut Vec<native::CapturedProtectedVoid>, ManufacturingError> {
-        match self {
-            Self::Tentative { stage, .. } => stage.protected_voids_mut(),
-            Self::Complete(coverage) => Ok(&mut coverage.protected_voids),
-        }
-    }
-
-    fn refresh_void_bytes(&mut self) {
-        if let Self::Tentative { stage, .. } = self {
-            stage.refresh_void_bytes();
-        }
-    }
-
-    fn materialize_pending_voids(
-        &mut self,
-        input: &CompilerInput<'_>,
-        live_bytes: usize,
-        work: &mut spiling_geometry::GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<(), ManufacturingError> {
-        match self {
-            Self::Tentative { stage, .. } => {
-                stage.materialize_pending_voids(input, live_bytes, work, cancel)
-            }
-            Self::Complete(_) => Ok(()),
-        }
-    }
 }
 
 // Tentative and final admission use the same native/D/wall/skin/anchor pipeline.
@@ -636,21 +425,17 @@ fn admit_schedule<'model>(
     input: &CompilerInput<'model>,
     cancel: &AtomicBool,
     admission: &mut preflight::Admission,
-    prepared_sources: &PreparedSources<'model>,
     process_captures: &mut [zones::Capture],
     schedule: &mut Vec<LayerElevation>,
     surface_work: &mut usize,
     support_work: &mut support::SupportWork,
     probe: Option<DepositionProbe>,
     native_prefix: Option<NativeScheduleCapture>,
-    span_sizing: &mut native::NativeSpanSizing,
-    pool: &mut native::NativeSlabPool,
     wall_memo: &mut WallMemo,
     void_memo: &mut tolerant::VoidMemo,
     survival_memo: &mut neighborhood::SurvivalMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let recipe = &input.intent.recipe;
-    let continuing = native_prefix.is_some();
     let truncated =
         probe.is_some_and(|probe| matches!(probe.scope, AnchorProbeScope::RefinedLayer { .. }));
     for capture in process_captures.iter_mut() {
@@ -670,7 +455,6 @@ fn admit_schedule<'model>(
         mut native_surfaces,
         mut retained_section_bytes,
         mut retained_points,
-        stage: mut native_stage,
         mut startup_wall,
     } = match native_prefix {
         Some(capture) => capture,
@@ -679,10 +463,6 @@ fn admit_schedule<'model>(
             native_surfaces: Vec::new(),
             retained_section_bytes: 0,
             retained_points: 0,
-            stage: native::NativeStageState::new([
-                input.intent.printer.build_envelope.min[2],
-                schedule.last().expect("nonempty schedule").z,
-            ])?,
             startup_wall: None,
         },
     };
@@ -693,16 +473,9 @@ fn admit_schedule<'model>(
     {
         startup_wall = None;
     }
-    if !continuing {
-        native_stage.replace_span_sizing(std::mem::take(span_sizing));
-    }
-    native_stage.set_capture_terminal(terminal_z);
-    native_stage.defer_void_capture(probe.is_some());
     let mut index = sections.last().map_or(0, |section| section.end);
     let mut native_slab_end = index;
     let mut native_slab_start = 0u32;
-    let mut native_invariant = false;
-    let mut native_inner_material = None;
     let mut native_material = None;
     let mut native_material_bytes = 0usize;
     let mut native_contributions = Vec::new();
@@ -722,83 +495,48 @@ fn admit_schedule<'model>(
             // remain owned and charged by sections/native_surfaces.
             drop(native_material.take());
             native_contributions.clear();
-            drop(native_inner_material.take());
             drop(std::mem::take(&mut native_finished));
             native_required.clear();
             drop(native_occupied_shared.take());
-            let retained_output_bytes =
-                native::output_bytes(&sections, &native_surfaces, retained_section_bytes)
-                    .saturating_add(
-                        schedule
-                            .capacity()
-                            .saturating_mul(std::mem::size_of::<LayerElevation>()),
-                    )
-                    .saturating_add(occurrences.capacity().saturating_mul(std::mem::size_of::<
-                        &spiling_contracts::geometry::OccurrenceRecord,
-                    >()));
-            let captured = if let Some(models) = &admission.tolerant {
-                // A later split can move a layer's sample; mapped fields still
-                // hold their vertical-error bound on every sliced layer.
-                while let Some(cause) = native::surface_vertical_error(admission, schedule, index)?
-                {
-                    check_cancel(cancel)?;
-                    native::refine_surface_layer(
-                        schedule,
-                        index,
-                        input
-                            .intent
-                            .effective_deposition_limits()
-                            .min_bead_height_mm,
-                        &cause,
-                    )?;
-                }
-                // Mapped image layers keep their per-layer vertical-error check.
-                let hold_end = if admission
-                    .surface_fields
-                    .values()
-                    .flatten()
-                    .any(|field| field.is_image())
-                {
-                    index as usize + 1
-                } else {
-                    count as usize
-                };
-                tolerant::collect_span(
-                    &occurrences,
-                    models,
-                    admission,
-                    &schedule[index as usize..hold_end],
-                    index,
-                    &mut prefetched,
-                    !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
-                    cancel,
-                )?
-            } else {
-                native::collect_span(
-                    &native::NativeSourceInputs {
-                        input,
-                        occurrences: &occurrences,
-                        sources: prepared_sources,
-                    },
-                    admission,
+            // A later split can move a layer's sample; mapped fields still
+            // hold their vertical-error bound on every sliced layer.
+            while let Some(cause) = native::surface_vertical_error(admission, schedule, index)? {
+                check_cancel(cancel)?;
+                native::refine_surface_layer(
                     schedule,
-                    &native::NativeSpanRequest {
-                        index,
-                        retained_points,
-                        retained_output_bytes,
-                    },
-                    &mut native_stage,
-                    surface_work,
-                    pool,
-                    cancel,
-                )?
+                    index,
+                    input
+                        .intent
+                        .effective_deposition_limits()
+                        .min_bead_height_mm,
+                    &cause,
+                )?;
+            }
+            // Mapped image layers keep their per-layer vertical-error check.
+            let hold_end = if admission
+                .surface_fields
+                .values()
+                .flatten()
+                .any(|field| field.is_image())
+            {
+                index as usize + 1
+            } else {
+                count as usize
             };
+            let captured = tolerant::collect_span(
+                &occurrences,
+                &admission.models,
+                admission,
+                &schedule[index as usize..hold_end],
+                index,
+                &mut prefetched,
+                !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
+                cancel,
+            )?;
             count = schedule.partition_point(|layer| layer.z <= terminal_z) as u32;
             sample = schedule[index as usize].sample;
             native_slab_start = index;
             native_slab_end = captured.end;
-            native_invariant = captured.invariant;
-            native_inner_material = captured.inner_material;
             native_material = Some(captured.material);
             native_material_bytes = captured.material_bytes;
             native_contributions = captured.contributions;
@@ -808,15 +546,7 @@ fn admit_schedule<'model>(
             native_points = captured.point_count;
             native_source_area_mm2 = captured.source_area_mm2;
             native_occupied_shared = Some(captured.occupied);
-            let live_retained = retained_points
-                .checked_add(native_stage.retained_point_count())
-                .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "native lookahead plus captured scene point budget exceeded",
-                    )
-                })?;
+            let live_retained = retained_points;
             for (occurrence_id, native) in &native_finished {
                 let fields = &admission.surface_fields[occurrence_id];
                 if !fields.iter().any(|field| field.is_image()) {
@@ -866,16 +596,7 @@ fn admit_schedule<'model>(
                 native_required.insert(*occurrence_id, required);
             }
         }
-        let lookahead_points = native_stage.retained_point_count();
-        let live_retained = retained_points
-            .checked_add(lookahead_points)
-            .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "native lookahead plus realized scene point budget exceeded",
-                )
-            })?;
+        let live_retained = retained_points;
         let slab_start = schedule[index as usize].lower_z;
         let mut end = index + 1;
         while end < native_slab_end {
@@ -1020,7 +741,6 @@ fn admit_schedule<'model>(
             )
             .filter(|n| {
                 n.checked_add(native_points)
-                    .and_then(|n| n.checked_add(lookahead_points))
                     .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
             })
             .ok_or_else(|| {
@@ -1039,8 +759,6 @@ fn admit_schedule<'model>(
         sections.push(SectionSpan {
             start: index,
             end,
-            invariant: native_invariant,
-            inner_material: native_inner_material.clone(),
             material: next,
             process_domains,
             occupied,
@@ -1107,11 +825,7 @@ fn admit_schedule<'model>(
                             })
                     })
                     .and_then(|points| retained_points.checked_add(points))
-                    .filter(|points| {
-                        points
-                            .checked_add(lookahead_points)
-                            .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
-                    })
+                    .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -1132,48 +846,7 @@ fn admit_schedule<'model>(
         index = end;
     }
     let native_retained_points = retained_points;
-    let mut native_coverage = if probe.is_some() {
-        ScheduleNativeAuthority::Tentative {
-            stage: native_stage,
-        }
-    } else if admission.tolerant.is_some() {
-        let bottom = admission.bounds.map_or(0.0, |b| b.min[2]);
-        let top = schedule.last().map_or(bottom, |layer| layer.z);
-        ScheduleNativeAuthority::Complete(native_stage.finalize_tolerant([bottom, top]))
-    } else {
-        ScheduleNativeAuthority::Complete(native_stage.finalize(admission.geometry_work, cancel)?)
-    };
-    let authority_bytes_before_support = native_coverage.retained_bytes();
-
-    // Deferred void projection borrows these immutable domains and recipes.
-    // Keep source owners in the native byte pool, not the deposition-point pool.
-    let mut retained_support_native_bytes = prepared_sources
-        .values()
-        .try_fold(
-            native_coverage
-                .retained_bytes()
-                .saturating_add(pool.retained_bytes())
-                .saturating_add(void_memo.retained_bytes()),
-            |bytes, source| bytes.checked_add(source.retained_bytes()),
-        )
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "deferred native source retention capacity overflow",
-            )
-        })?;
-    let proof_units = native_coverage
-        .retained_bytes()
-        .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
-    retained_points = retained_points
-        .checked_add(proof_units)
-        .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "accepted native material proof retention exceeds planner admission",
-            )
-        })?;
+    let retained_support_native_bytes = void_memo.retained_bytes();
     drop(native_finished);
     drop(native_required);
     drop(native_material);
@@ -1189,7 +862,6 @@ fn admit_schedule<'model>(
     let construction_owned_bytes = geometry_bytes(&[
         native::output_bytes(&sections, &native_surfaces, retained_section_bytes),
         retained_support_native_bytes,
-        native_coverage.retained_bytes(),
         schedule.capacity() * std::mem::size_of::<LayerElevation>(),
         startup_wall.as_ref().map_or(0, StartupWall::layout_bytes),
     ])?;
@@ -1335,23 +1007,21 @@ fn admit_schedule<'model>(
         SkinNeighborhoods::with_courses(&sections, &span_courses, skin_inset, *surface_work)?;
     drop(span_courses);
     // Tolerant sections are a function of their schedule entries alone.
-    if admission.tolerant.is_some() {
-        neighborhoods.attach_memo(
-            survival_memo,
-            schedule
-                .iter()
-                .map(|layer| {
-                    [
-                        layer.z.to_bits(),
-                        layer.lower_z.to_bits(),
-                        layer.sample.to_bits(),
-                        layer.height.to_bits(),
-                    ]
-                })
-                .collect(),
-            probe.is_none(),
-        );
-    }
+    neighborhoods.attach_memo(
+        survival_memo,
+        schedule
+            .iter()
+            .map(|layer| {
+                [
+                    layer.z.to_bits(),
+                    layer.lower_z.to_bits(),
+                    layer.sample.to_bits(),
+                    layer.height.to_bits(),
+                ]
+            })
+            .collect(),
+        probe.is_none(),
+    );
     let outcome = (|| {
         let mut key = None;
         let mut classified = None;
@@ -1369,7 +1039,6 @@ fn admit_schedule<'model>(
             &construction,
             &material_twin,
             retained_points,
-            admission.tolerant.is_some(),
             wall_memo,
             neighborhoods.work_mut(),
             cancel,
@@ -1596,7 +1265,6 @@ fn admit_schedule<'model>(
                             upper_z: z,
                             retained_points: retained_wall_points,
                             owned_bytes: wall_owned_bytes,
-                            classic: admission.tolerant.is_some(),
                         },
                         neighborhoods.work_mut(),
                         cancel,
@@ -1757,22 +1425,13 @@ fn admit_schedule<'model>(
                         .as_ref()
                         .expect("classified process regions")
                         .interiors[usize::from(plate.region_index)];
-                    let section = &sections[current];
                     if !combined::inner_material_admits(
-                        section,
                         &owned.domain,
                         &owned.coverage,
                         plate.physical_z_mm,
                         recipe.bead_width_mm,
                         input.intent,
-                        native_coverage.source_captures(),
-                        admission.tolerant.as_ref(),
-                        retained_support_native_bytes.saturating_add(native::output_bytes(
-                            &sections,
-                            &Vec::new(),
-                            retained_section_bytes,
-                        )),
-                        admission.geometry_work,
+                        &admission.models,
                         cancel,
                     )? {
                         return Err(error(
@@ -2190,7 +1849,6 @@ fn admit_schedule<'model>(
         // rebuild within it, but cannot silently increase retained support staging.
         neighborhoods.freeze_retained_capacity();
         let support_native_points = skin_retained_points(retained_points, &neighborhoods, &[])?;
-        let support_authority_bytes = std::cell::Cell::new(authority_bytes_before_support);
         // Surface-only captures/templates/classification are gone. Support owns the
         // changing layer buffers, so its callback reports those separately.
         let support_static_bytes = geometry_bytes(&[
@@ -2234,15 +1892,12 @@ fn admit_schedule<'model>(
                 native_points: support_native_points,
                 native_owned_bytes: support_native_owned_bytes,
                 recipe,
-                source_z_allowance_mm: admission.tolerant.as_ref().map_or(0.0, |models| {
-                    models
-                        .values()
-                        .map(|model| model.support_margin())
-                        .fold(0.0, f64::max)
-                }),
-                replay: admission.tolerant.is_some()
-                    && web_roof.is_none()
-                    && construction.domains.is_empty(),
+                source_z_allowance_mm: admission
+                    .models
+                    .values()
+                    .map(|model| model.support_margin())
+                    .fold(0.0, f64::max),
+                replay: web_roof.is_none() && construction.domains.is_empty(),
                 phases: &phase_by_layer,
             },
             &mut segments,
@@ -2262,15 +1917,7 @@ fn admit_schedule<'model>(
                 *neighborhoods.work_mut() = *planar_work;
                 let outcome = (|| {
                     let live_retained_points = retained_points
-                        .checked_sub(proof_units)
-                        .and_then(|n| {
-                            n.checked_add(
-                                support_authority_bytes
-                                    .get()
-                                    .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
-                            )
-                        })
-                        .and_then(|n| n.checked_add(retained_support_points))
+                        .checked_add(retained_support_points)
                         .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
                         .ok_or_else(|| {
                             error(
@@ -2278,17 +1925,8 @@ fn admit_schedule<'model>(
                                 "support raster retained point limit exceeded",
                             )
                         })?;
-                    let refreshed_outside = support_outside_bytes
-                        .checked_sub(authority_bytes_before_support)
-                        .and_then(|n| n.checked_add(support_authority_bytes.get()))
-                        .ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "support raster native-owner accounting mismatch",
-                            )
-                        })?;
                     let outside_owned_bytes =
-                        geometry_bytes(&[refreshed_outside, retained_support_bytes])?;
+                        geometry_bytes(&[support_outside_bytes, retained_support_bytes])?;
                     let mut live_owned_bytes =
                         geometry_bytes(&[outside_owned_bytes, anchor_owned_bytes])?;
                     let anchor_capacity = std::cell::Cell::new(anchor_owned_bytes);
@@ -2557,151 +2195,23 @@ fn admit_schedule<'model>(
             |demand_bounds,
              retained_units,
              live_bytes,
-             native_points,
-             native_owned_bytes,
-             support_work,
-             native_work| {
-                if let Some(models) = &admission.tolerant {
-                    return tolerant::project_protected_voids(
-                        models,
-                        void_memo,
-                        demand_bounds,
-                        truncated,
-                        retained_units,
-                        live_bytes,
-                        cancel,
-                    );
-                }
-                // Carry the complete support receipt into conversion; raw M and
-                // every other live owner coexist with its bounded output/scratch.
-                let before = native_coverage.retained_bytes();
-                let unit_bytes = std::mem::size_of::<geo::Coord<f64>>();
-                let outside_native_bytes =
-                    native_owned_bytes.checked_sub(before).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void outside-owner accounting mismatch",
-                        )
-                    })?;
-                let outside_native_units = native_points
-                    .checked_sub(before.div_ceil(unit_bytes))
-                    .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "native void outside-proof accounting mismatch",
-                    )
-                })?;
-                let support_bytes =
-                    live_bytes.checked_sub(*native_owned_bytes).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void support-owner accounting mismatch",
-                        )
-                    })?;
-                let support_units =
-                    retained_units.checked_sub(*native_points).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void support-proof accounting mismatch",
-                        )
-                    })?;
-                native_coverage.materialize_pending_voids(
-                    input,
+             _native_points,
+             _native_owned_bytes,
+             _support_work,
+             _native_work| {
+                tolerant::project_protected_voids(
+                    &admission.models,
+                    void_memo,
+                    demand_bounds,
+                    truncated,
+                    retained_units,
                     live_bytes,
-                    native_work,
                     cancel,
-                )?;
-                let after = native_coverage.retained_bytes();
-                *native_owned_bytes = outside_native_bytes.checked_add(after).ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "native void owner refresh overflow",
-                    )
-                })?;
-                *native_points = outside_native_units
-                    .checked_add(after.div_ceil(unit_bytes))
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void proof refresh overflow",
-                        )
-                    })?;
-                support_authority_bytes.set(after);
-                let live = support_bytes
-                    .checked_add(*native_owned_bytes)
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void live-owner refresh overflow",
-                        )
-                    })?;
-                let retained = support_units.checked_add(*native_points).ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "native void live-proof refresh overflow",
-                    )
-                })?;
-                let point_limit = remaining_geometry_units(retained, live)?;
-                let captures = native_coverage.protected_voids_mut()?;
-                let native_owner_bytes = live
-                    .checked_sub(native::void_capture_bytes(captures))
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "native void capture-owner accounting mismatch",
-                        )
-                    })?;
-                let projected = native::project_protected_voids(
-                    input,
-                    prepared_sources,
-                    captures,
-                    &native::ProtectedVoidDemand {
-                        native_bounds: &admission.native_bounds,
-                        demand_bounds,
-                        point_limit,
-                        retained_native_owner_bytes: native_owner_bytes,
-                    },
-                    probe.is_some(),
-                    support_work,
-                    native_work,
-                    cancel,
-                );
-                native_coverage.refresh_void_bytes();
-                let after = native_coverage.retained_bytes();
-                *native_owned_bytes = outside_native_bytes.checked_add(after).ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "projected native owner refresh overflow",
-                    )
-                })?;
-                *native_points = outside_native_units
-                    .checked_add(after.div_ceil(unit_bytes))
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "projected native proof refresh overflow",
-                        )
-                    })?;
-                support_authority_bytes.set(after);
-                projected
+                )
             },
             |index, candidate, segments, work, outside_owned_bytes| {
                 let current = span_at(&sections, index as u32);
                 let base = support_native_points
-                    .checked_sub(proof_units)
-                    .and_then(|n| {
-                        n.checked_add(
-                            support_authority_bytes
-                                .get()
-                                .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
-                        )
-                    })
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "support interface native-proof accounting mismatch",
-                        )
-                    })?
                     + bonds::skin_bridge_points(&candidate.skin_bridge_domains)
                     + bonds::skin_command_fit_points(&candidate.skin_command_fits)
                     + candidate
@@ -2734,68 +2244,19 @@ fn admit_schedule<'model>(
         );
         *neighborhoods.work_mut() = support_work.planar;
         let support_admission = support_admission?;
-        let authority_bytes_after_support = native_coverage.retained_bytes();
-        retained_support_native_bytes = retained_support_native_bytes
-            .checked_sub(authority_bytes_before_support)
-            .and_then(|n| n.checked_add(authority_bytes_after_support))
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "completed support native-owner accounting mismatch",
-                )
-            })?;
-        retained_points = retained_points
-            .checked_sub(proof_units)
-            .and_then(|n| {
-                n.checked_add(
-                    authority_bytes_after_support.div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
-                )
-            })
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "completed support native-proof accounting mismatch",
-                )
-            })?;
-        let support_outside_bytes = support_outside_bytes
-            .checked_sub(authority_bytes_before_support)
-            .and_then(|n| n.checked_add(authority_bytes_after_support))
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "completed support outside-owner accounting mismatch",
-                )
-            })?;
         match support_admission {
             support::SupportAdmission::Complete | support::SupportAdmission::Undecided
                 if truncated =>
             {
-                if let ScheduleNativeAuthority::Tentative { mut stage, .. } = native_coverage {
-                    *span_sizing = stage.take_span_sizing();
-                }
                 return Ok(ScheduleAdmission::RetryUndecided);
             }
             support::SupportAdmission::Undecided => {
                 unreachable!("only truncated retries leave support undecided")
             }
             support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
-                let recycled = match native_coverage {
-                    ScheduleNativeAuthority::Tentative { mut stage, .. } => {
-                        *span_sizing = stage.take_span_sizing();
-                        stage.take_recyclable_slabs()
-                    }
-                    ScheduleNativeAuthority::Complete(_) => native::RecyclableSlabs::default(),
-                };
-                return Ok(ScheduleAdmission::RefineUnreachableLayer {
-                    index,
-                    failure,
-                    recycled,
-                });
+                return Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure });
             }
             support::SupportAdmission::Complete if probe.is_some() => {
-                let ScheduleNativeAuthority::Tentative { stage, .. } = native_coverage else {
-                    unreachable!("tentative admission retains its unfinished ledger")
-                };
                 let startup_key = first_wall_key
                     .filter(|_| StartupWall::permits(input))
                     .filter(|_| {
@@ -2819,15 +2280,11 @@ fn admit_schedule<'model>(
                     native_surfaces: Vec::new(),
                     retained_section_bytes,
                     retained_points: native_retained_points,
-                    stage,
                     startup_wall,
                 }));
             }
             support::SupportAdmission::Complete => {}
         }
-        let ScheduleNativeAuthority::Complete(native_coverage) = native_coverage else {
-            unreachable!("complete admission finalizes its full native ledger")
-        };
 
         let coordinate_scratch = skin_retained_points(retained_points, &neighborhoods, &[])?;
         let coordinate_owned_bytes = skin_retained_bytes(
@@ -2847,9 +2304,6 @@ fn admit_schedule<'model>(
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
         }
-        // No-support/no-demand paths never project or retain unused negative-space
-        // captures beyond support admission.
-        drop(native_coverage.protected_voids);
         if process_captures
             .iter()
             .map(|capture| capture.operations.len())
@@ -2910,43 +2364,26 @@ fn admit_schedule<'model>(
                         })
                 })
                 .collect(),
-            native_geometry: if admission.tolerant.is_some() {
-                NativeGeometryCoverageSummary {
-                    requested_shape_error_mm: recipe.native_shape_error_mm,
-                    achieved_shape_error_mm: spiling_geometry::tolerant::TolerantPolicy::default()
-                        .profile_mm
-                        .min(recipe.native_shape_error_mm),
-                    height_analysis_count: 0,
-                    slab_count: 0,
-                    certified_layer_count: count,
-                    event_count: admission.horizontal_events.len() as u32,
-                    geometry_work: admission.geometry_work.consumed(),
-                    height_merge_mm: input.intent.printer.motion_resolution.z_mm,
-                    evidence: PreflightEvidence::Tolerant,
-                    skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
-                    support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
-                    source_feature_coverage: NativeFeatureCoverageSummary {
-                        disjoint_source_layer_count: 0,
-                        invariant_source_union_layer_count: 0,
-                        native_interface_complex_layer_count: 0,
-                        owned_critical_slab_count: 0,
-                    },
-                }
-            } else {
-                NativeGeometryCoverageSummary {
-                    requested_shape_error_mm: recipe.native_shape_error_mm,
-                    achieved_shape_error_mm: native_coverage.achieved_shape_error_mm,
-                    height_analysis_count: input.occurrences.len() as u32,
-                    slab_count: native_coverage.slab_count,
-                    certified_layer_count: count,
-                    event_count: admission.native_event_bands.len() as u32,
-                    geometry_work: admission.geometry_work.consumed(),
-                    height_merge_mm: input.intent.printer.motion_resolution.z_mm,
-                    evidence: PreflightEvidence::Certified,
-                    skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
-                    support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
-                    source_feature_coverage: native_coverage.source_features,
-                }
+            native_geometry: NativeGeometryCoverageSummary {
+                requested_shape_error_mm: recipe.native_shape_error_mm,
+                achieved_shape_error_mm: spiling_geometry::tolerant::TolerantPolicy::default()
+                    .profile_mm
+                    .min(recipe.native_shape_error_mm),
+                height_analysis_count: 0,
+                slab_count: 0,
+                certified_layer_count: count,
+                event_count: admission.horizontal_events.len() as u32,
+                geometry_work: admission.geometry_work.consumed(),
+                height_merge_mm: input.intent.printer.motion_resolution.z_mm,
+                evidence: PreflightEvidence::Tolerant,
+                skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                source_feature_coverage: NativeFeatureCoverageSummary {
+                    disjoint_source_layer_count: 0,
+                    invariant_source_union_layer_count: 0,
+                    native_interface_complex_layer_count: 0,
+                    owned_critical_slab_count: 0,
+                },
             },
             layers,
             surface_resolution,
@@ -2981,19 +2418,11 @@ fn admit_schedule<'model>(
             &mut neighborhoods,
             retained_points,
             support_outside_bytes,
-            admission.geometry_work,
-            retained_support_native_bytes.saturating_add(native::output_bytes(
-                &sections,
-                &Vec::new(),
-                retained_section_bytes,
-            )),
-            native_coverage.material_proof.sources(),
-            admission.tolerant.as_ref(),
+            &admission.models,
             cancel,
         )?;
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
         result.validate(input.intent)?;
-        drop(native_coverage.material_proof);
 
         Ok(ScheduleAdmission::Complete(result))
     })();
@@ -3014,8 +2443,6 @@ fn admit_schedule<'model>(
 struct SectionSpan {
     start: u32,
     end: u32,
-    invariant: bool,
-    inner_material: Option<Arc<Vec<spiling_geometry::NativeInnerMaterialPrism>>>,
     material: Arc<MultiPolygon<f64>>,
     process_domains: Vec<ProcessDomain>,
     // None borrows exact all-Z invariant D. Otherwise this separately owned
@@ -3239,9 +2666,6 @@ struct TolerantOccupied {
 struct OccupiedPiece {
     polygon: geo::Polygon<f64>,
     height_mm: [f64; 2],
-    // Only raw native-M operands may consume a source-only collar projection.
-    // Independently constructed finish/additive envelopes retain None.
-    raw_native_occurrence: Option<spiling_contracts::geometry::OccurrenceId>,
 }
 
 impl ContinuousOccupied {
@@ -3249,7 +2673,6 @@ impl ContinuousOccupied {
         &mut self,
         mut polygon: geo::Polygon<f64>,
         height_mm: [f64; 2],
-        raw_native_occurrence: Option<spiling_contracts::geometry::OccurrenceId>,
     ) -> Result<(), ManufacturingError> {
         let points = polygon.exterior().0.len()
             + polygon
@@ -3276,11 +2699,7 @@ impl ContinuousOccupied {
         self.payload_bytes = self
             .payload_bytes
             .saturating_add(native::polygon_bytes(&mut polygon));
-        self.pieces.push(OccupiedPiece {
-            polygon,
-            height_mm,
-            raw_native_occurrence,
-        });
+        self.pieces.push(OccupiedPiece { polygon, height_mm });
         Ok(())
     }
 }
@@ -3303,56 +2722,6 @@ fn native_error(
     };
     // Keep the native diagnostic category in the bounded downstream message.
     error(code, format!("{context}: {e}"))
-}
-
-type PreparedSources<'a> = BTreeMap<DefinitionId, spiling_geometry::PreparedSolid<'a>>;
-
-fn geometry_query_limit(sources: &PreparedSources<'_>) -> Result<usize, ManufacturingError> {
-    sources.values().try_fold(
-        spiling_geometry::MAX_PREPARED_SECTION_BYTES,
-        |remaining, source| {
-            remaining
-                .checked_sub(source.retained_bytes())
-                .filter(|bytes| *bytes > 0)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "original material geometry exhausts shared query capacity",
-                    )
-                })
-        },
-    )
-}
-
-fn admit_source_captures(
-    sources: &PreparedSources<'_>,
-    coexisting_bytes: usize,
-    work: &mut spiling_geometry::GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    // Preflight and capture borrow the same prepared owners. There is no
-    // promotion/reconstruction phase; proposals must still coexist with them.
-    let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
-        .checked_sub(coexisting_bytes)
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposals exhaust source preparation capacity",
-            )
-        })?;
-    sources.values().try_fold(available, |remaining, source| {
-        work.charge(1, cancel)
-            .map_err(|failure| native_error(failure, "native source capture admission"))?;
-        remaining
-            .checked_sub(source.retained_bytes())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "aggregate prepared native material capacity exceeded",
-                )
-            })
-    })?;
-    Ok(())
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
@@ -3434,7 +2803,6 @@ struct DepositionProbe {
 
 fn deposition_probe(
     input: &CompilerInput<'_>,
-    admission: &preflight::Admission,
     process: &[zones::Capture],
     schedule: &[LayerElevation],
     scope: AnchorProbeScope,
@@ -3463,21 +2831,6 @@ fn deposition_probe(
             after =
                 after.max(schedule.partition_point(|layer| layer.lower_z < plate.physical_z_mm[1]));
         }
-    }
-    // Never terminate a tentative native stream through a mandatory critical
-    // band. Extend through its genuine scheduled successor, without clipping
-    // the positive material boundary or moving any native/process event.
-    while after < schedule.len() {
-        let top = schedule[after - 1].z;
-        let mut critical = false;
-        for band in &admission.native_event_bands {
-            preflight::charge_capture_proposal_work(work, 1, cancel)?;
-            critical |= band[0] <= top && top <= band[1];
-        }
-        if !critical {
-            break;
-        }
-        after += 1;
     }
     Ok(Some(DepositionProbe {
         native_top_mm: schedule[after - 1].z,
@@ -4270,7 +3623,6 @@ fn prefill_walls(
     construction: &color::Construction,
     material_twin: &[usize],
     retained_points: usize,
-    classic: bool,
     wall_memo: &mut WallMemo,
     work: &mut usize,
     cancel: &AtomicBool,
@@ -4334,7 +3686,6 @@ fn prefill_walls(
                                 upper_z: elevation.z,
                                 retained_points,
                                 owned_bytes: 0,
-                                classic,
                             },
                             &mut work,
                             cancel,

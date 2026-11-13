@@ -478,7 +478,6 @@ mod tests {
             upper_z: 0.2,
             retained_points: region::point_count(&material),
             owned_bytes: 0,
-            classic: false,
         };
         run(request);
     }

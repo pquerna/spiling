@@ -16,7 +16,7 @@ fn plan(section: &MultiPolygon<f64>) -> WallPlan {
         max_bead_height_mm: 0.30,
     };
     let required = region::RequiredMaterial::from_section(section);
-    plan_section_walls(
+    plan_material_domain_walls(
         WallRequest {
             material: section,
             required: &required,
@@ -27,7 +27,6 @@ fn plan(section: &MultiPolygon<f64>) -> WallPlan {
             lower_z: 0.0,
             upper_z: 0.2,
             retained_points: region::point_count(section),
-            classic: false,
         },
         &mut 0,
         &AtomicBool::new(false),
@@ -165,89 +164,6 @@ fn ordinary_rectangle_is_closed_and_retains_actual_residual() {
         width_envelope(&tighter, 0.1).unwrap(),
         "a consumed width limit changes wall reuse identity"
     );
-}
-
-#[test]
-fn wide_outer_corner_continues_to_preferred_straights_without_losing_material_or_holes() {
-    for hole in [false, true] {
-        let outer = polygon![
-            (x: 0.0, y: 0.0), (x: 20.0, y: 0.0),
-            (x: 20.0, y: 10.0), (x: 0.0, y: 10.0),
-        ];
-        let holes = if hole {
-            vec![geo::LineString::from(vec![
-                (8.0, 3.0),
-                (8.0, 7.0),
-                (12.0, 7.0),
-                (12.0, 3.0),
-                (8.0, 3.0),
-            ])]
-        } else {
-            Vec::new()
-        };
-        let section = MultiPolygon(vec![Polygon::new(outer.exterior().clone(), holes)]);
-        let recipe = crate::planner::tests::recipe(0.25);
-        let required = region::RequiredMaterial::from_section(&section);
-        // Same .6/.4 intent and full native required material as the skin and
-        // native-section consumers; planning exercises all physical gates.
-        let plan = crate::planner::tests::wall_plan(
-            &section,
-            &required,
-            &recipe,
-            region::point_count(&section),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let widths = assert_command_resolution(&plan);
-        assert!(widths[0] >= recipe.layer_height_mm && widths[0] < 0.5);
-        assert_eq!(widths[1], recipe.bead_width_mm);
-        assert_section_coverage(
-            cross_section(&plan, 0, 10.0)
-                .1
-                .into_iter()
-                .filter(|interval| interval[1] < 1.0)
-                .collect(),
-            [0.0, 0.6],
-        );
-        for corner in [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]] {
-            let missing_extent = plan
-                .paths
-                .iter()
-                .flat_map(|path| path.checked_edges().unwrap())
-                .map(|edge| {
-                    let line = Line::new(
-                        [edge.points_mm[0][0], edge.points_mm[0][1]],
-                        [edge.points_mm[1][0], edge.points_mm[1][1]],
-                    );
-                    Euclidean.distance(&geo::Point::from(corner), &line) - edge.width_mm * 0.5
-                        + program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
-                })
-                .fold(f64::INFINITY, f64::min);
-            assert!(
-                missing_extent < 0.1 - super::super::OFFSET_TOLERANCE_MM * 0.5,
-                "guaranteed-inner actual corner occupancy exceeds the unchanged extent: {missing_extent}"
-            );
-        }
-        for ring in section.0[0].interiors() {
-            for boundary in ring.lines() {
-                for edge in plan
-                    .paths
-                    .iter()
-                    .flat_map(|path| path.checked_edges().unwrap())
-                {
-                    let line = Line::new(
-                        [edge.points_mm[0][0], edge.points_mm[0][1]],
-                        [edge.points_mm[1][0], edge.points_mm[1][1]],
-                    );
-                    assert!(
-                        Euclidean.distance(&line, &boundary) + super::super::OFFSET_TOLERANCE_MM
-                            >= edge.width_mm * 0.5
-                                + program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -423,101 +339,6 @@ fn assert_connected_inner_material(plan: &WallPlan) {
 }
 
 #[test]
-fn useful_taper_has_consumed_edge_widths_and_finite_continuing_gradient() {
-    let section = MultiPolygon(vec![polygon![
-        (x: 0.0, y: -0.275), (x: 22.0, y: -0.6),
-        (x: 22.0, y: 0.6), (x: 0.0, y: 0.275),
-    ]]);
-    let plan = plan(&section);
-    let width_range = assert_command_resolution(&plan);
-    assert!(
-        width_range[1] - width_range[0] >= 0.1,
-        "actual admitted commands must use a useful width variation"
-    );
-    let mut counts = [0; 2];
-    for (index, x) in [0.8, 20.0].into_iter().enumerate() {
-        let target_width = 0.55 + x * 0.65 / 22.0;
-        let target = [-target_width * 0.5, target_width * 0.5];
-        let (count, intervals) = cross_section(&plan, 0, x);
-        counts[index] = count;
-        assert_section_coverage(intervals, target);
-    }
-    assert!(
-        counts[0] > 0 && counts[1] > counts[0],
-        "the wider physical cross-section needs a genuine additional bead, not extra Vec paths: {counts:?}"
-    );
-}
-
-#[test]
-fn short_arm_chooses_geometry_admitted_field_instead_of_unfit_objective_birth() {
-    // Equal preferred-width departure for counts 3 and 4 occurs at T=10.8/7.
-    // The nearly square original section has a ~.2-mm medial arm crossing that
-    // objective, too short for the ~.7-mm 3->4 ramp. The admitted whole-arm
-    // count/width field and any finite source-joint completion must still cover
-    // the original section: preferred-width departure alone cannot choose it.
-    let middle = 10.8 / 7.0;
-    let section = MultiPolygon(vec![polygon![
-        (x: 0.0, y: 0.0), (x: 1.74, y: 0.0),
-        (x: 1.74, y: middle + 0.01), (x: 0.0, y: middle - 0.01),
-    ]]);
-    let plan = plan(&section);
-    assert_command_resolution(&plan);
-    let mut prior_count = None;
-    for x in [0.84, 0.90] {
-        let thickness = middle - 0.01 + x * 0.02 / 1.74;
-        let (count, intervals) = cross_section(&plan, 0, x);
-        assert!(
-            (3..=4).contains(&count),
-            "an admitted physical count, not a count jump: {count}"
-        );
-        if let Some(prior) = prior_count {
-            assert_eq!(count, prior);
-        }
-        prior_count = Some(count);
-        for edge in plan
-            .paths
-            .iter()
-            .flat_map(|path| path.checked_edges().unwrap())
-        {
-            let [a, b] = [edge.points_mm[0][0], edge.points_mm[1][0]];
-            if (a <= x && x < b) || (b <= x && x < a) {
-                assert!(
-                    (edge.width_mm - thickness / count as f64).abs() <= 2.0 * FIT_ERROR_MM,
-                    "actual consumed T/n width, not a fixed-width substitute: {}",
-                    edge.width_mm
-                );
-            }
-        }
-        assert_section_coverage(intervals, [0.0, thickness]);
-    }
-}
-
-#[test]
-fn junction_neighborhood_count_transition_preserves_incoming_field_and_actual_lane_gradient() {
-    let section = MultiPolygon(vec![polygon![
-        (x: 0.0, y: 0.0), (x: 20.0, y: 0.0), (x: 20.0, y: 0.6),
-        (x: 10.305, y: 0.6), (x: 10.275, y: 10.6),
-        (x: 9.725, y: 10.6), (x: 9.695, y: 0.6), (x: 0.0, y: 0.6),
-    ]]);
-    let plan = plan(&section);
-    assert_command_resolution(&plan);
-    let near = cross_section(&plan, 1, 2.0).0;
-    let far = cross_section(&plan, 1, 8.0).0;
-    assert!(
-        near > far && far > 0,
-        "actual junction-adjacent count change must remain useful: {near}/{far}"
-    );
-    for y in [0.72, 2.0, 8.0] {
-        let width = 0.61 - (y - 0.6) * 0.006;
-        assert_section_coverage(
-            cross_section(&plan, 1, y).1,
-            [10.0 - width * 0.5, 10.0 + width * 0.5],
-        );
-    }
-    assert_connected_inner_material(&plan);
-}
-
-#[test]
 fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps() {
     // The non-grid two-box union has short convex/reentrant steps. Collapsing a
     // curved source arm to its narrowest constant bead loses the requested band;
@@ -562,7 +383,7 @@ fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps(
             min_bead_height_mm: 0.000001,
             max_bead_height_mm: 0.6,
         };
-        let plan = plan_section_walls(
+        let plan = plan_material_domain_walls(
             WallRequest {
                 material: &section,
                 required: &required,
@@ -573,7 +394,6 @@ fn shallow_source_steps_keep_boundary_lanes_and_physically_admitted_corner_caps(
                 upper_z: height,
                 retained_points: region::point_count(&section),
                 owned_bytes: 0,
-                classic: false,
             },
             &mut 0,
             &AtomicBool::new(false),
@@ -709,7 +529,12 @@ fn wall_census() {
             part_total += 1;
             let required = region::RequiredMaterial::from_section(&material);
             let planning = std::time::Instant::now();
-            let result = plan_section_walls(
+            let generate = if std::env::var("SPILING_WALL_GENERATOR").as_deref() == Ok("arachne") {
+                plan_section_walls
+            } else {
+                plan_material_domain_walls
+            };
+            let result = generate(
                 WallRequest {
                     material: &material,
                     required: &required,
@@ -720,7 +545,6 @@ fn wall_census() {
                     lower_z: z - 0.1,
                     upper_z: z + 0.1,
                     retained_points: region::point_count(&material),
-                    classic: std::env::var("SPILING_WALL_GENERATOR").as_deref() == Ok("arachne"),
                 },
                 &mut 0,
                 &cancel,
@@ -816,7 +640,6 @@ fn classic_walls_repeat_bit_identically_on_near_degenerate_circles() {
                 lower_z: 1.9,
                 upper_z: 2.1,
                 retained_points: region::point_count(&section),
-                classic: true,
             },
             &mut 0,
             &AtomicBool::new(false),

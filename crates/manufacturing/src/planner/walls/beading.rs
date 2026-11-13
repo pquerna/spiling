@@ -3587,17 +3587,9 @@ mod corner_width_tests {
             upper_z: 0.2,
             retained_points: region::point_count(&material),
             owned_bytes: 0,
-            classic: false,
         };
-        let (paths, associations) = assemble(
-            &sources,
-            &[],
-            &request,
-            false,
-            &mut 0,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+        let (paths, associations) =
+            assemble(&sources, &[], &request, &mut 0, &AtomicBool::new(false)).unwrap();
         assert_eq!(paths.len(), 2, "both original continuing lanes survive");
         let packed_minimum = caps[0].min(caps[1]);
         for path in &paths {
@@ -3668,7 +3660,6 @@ mod corner_width_tests {
                 upper_z: 0.2,
                 retained_points: region::point_count(&material),
                 owned_bytes: 0,
-                classic: false,
             };
             let mut permissions = Vec::new();
             let source = construct(
@@ -3774,7 +3765,6 @@ mod corner_width_tests {
                 upper_z: height,
                 retained_points: region::point_count(&material),
                 owned_bytes: 0,
-                classic: false,
             };
             let minimum = admitted_width_range(&request).unwrap()[0];
             let resolved = source_width_mm(&request).unwrap();
@@ -3921,9 +3911,13 @@ mod corner_width_tests {
             upper_z: 0.2,
             retained_points: region::point_count(&material),
             owned_bytes: 0,
-            classic: false,
         };
-        let plan = plan_section_walls(request, &mut 0, &AtomicBool::new(false)).unwrap();
+        let plan = crate::planner::walls::plan_material_domain_walls(
+            request,
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(plan.protected_hole_area_mm2, 16.0);
         assert!(plan.correspondence.iter().any(|owner| owner.ordinal == 0));
         assert!(plan.correspondence.iter().any(|owner| owner.ordinal == 1));

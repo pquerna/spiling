@@ -4,13 +4,10 @@
 
 #[cfg(test)]
 use super::boolean_budget;
-use super::{MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
+use super::{MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM};
 use crate::{check_cancel, error};
 use geo::kernels::{Kernel, Orientation, RobustKernel};
-use geo::{
-    Area, BooleanOps, BoundingRect, Contains, Coord, LineString, MultiPolygon, Point, Polygon,
-};
-use spiling_contracts::geometry::RigidPoseMm;
+use geo::{Area, BooleanOps, BoundingRect, Coord, LineString, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -36,92 +33,6 @@ impl BooleanOps for RequiredMaterial<'_> {
             .iter()
             .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
     }
-}
-
-pub(super) fn from_native(
-    native: &spiling_geometry::NativeSection,
-    pose: &RigidPoseMm,
-    sample: f64,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let mut outer = Vec::<Polygon<f64>>::new();
-    let mut holes = Vec::new();
-    let mut points = 0usize;
-    for boundary in native.loops() {
-        check_cancel(cancel)?;
-        points += boundary.points_mm.len();
-        if points > MAX_RETAINED_GEOMETRY_UNITS {
-            return Err(resource("native section point limit exceeded"));
-        }
-        let ring = native_ring(boundary, pose, sample, cancel)?;
-        if boundary.is_hole {
-            holes.push(ring);
-        } else {
-            outer.push(Polygon::new(ring, Vec::new()));
-        }
-    }
-    for hole in holes {
-        let point = Point(hole.0[0]);
-        let owner = outer
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.contains(&point))
-            .min_by(|(_, a), (_, b)| a.unsigned_area().total_cmp(&b.unsigned_area()))
-            .map(|(i, _)| i)
-            .ok_or_else(|| unsupported("native hole has no containing island"))?;
-        outer[owner].interiors_push(hole);
-    }
-    let mut result = MultiPolygon(outer);
-    check_size(&result)?;
-    canonicalize(&mut result);
-    Ok(result)
-}
-
-fn native_ring(
-    boundary: &spiling_geometry::SectionLoopMm,
-    pose: &RigidPoseMm,
-    sample: f64,
-    cancel: &AtomicBool,
-) -> Result<LineString<f64>, ManufacturingError> {
-    if boundary.points_mm.len() > MAX_RETAINED_GEOMETRY_UNITS {
-        return Err(resource("native loop point limit exceeded"));
-    }
-    let mut coordinates = Vec::with_capacity(boundary.points_mm.len());
-    for &p in &boundary.points_mm {
-        check_cancel(cancel)?;
-        let world = forward(pose, p);
-        if world.iter().any(|v| !v.is_finite())
-            || (world[2] - sample).abs() > spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
-        {
-            return Err(unsupported(
-                "native placed loop does not lie in declared horizontal sample plane",
-            ));
-        }
-        coordinates.push(Coord {
-            x: zero(world[0]),
-            y: zero(world[1]),
-        });
-    }
-    if coordinates.len() < 4 || coordinates.first() != coordinates.last() {
-        return Err(unsupported("native section loop is not closed"));
-    }
-    Ok(LineString(coordinates))
-}
-
-/// A geometry-certified WORLD-XY outer mask, never authoritative material.
-pub(super) fn from_world_outer(
-    boundary: &spiling_geometry::SectionLoopMm,
-    cancel: &AtomicBool,
-) -> Result<Polygon<f64>, ManufacturingError> {
-    if boundary.is_hole {
-        return Err(unsupported("native outer envelope was marked as a hole"));
-    }
-    let result = Polygon::new(
-        native_ring(boundary, &RigidPoseMm::IDENTITY, 0.0, cancel)?,
-        Vec::new(),
-    );
-    check_polygons(std::slice::from_ref(&result))?;
-    Ok(result)
 }
 
 pub(super) fn point_count(region: &MultiPolygon<f64>) -> usize {

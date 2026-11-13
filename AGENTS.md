@@ -9,7 +9,7 @@ This file is the critical information an agent needs to work here correctly, plu
 ## 1. Non-negotiables
 
 - **One authority per source.** STEP retains its imported SolidCore BREP; STL/3MF retain one adopted analytic/faceted surface complex ([ADR013](docs/adr/013-hybrid-imported-material.md)). Display buffers are disposable approximations. No second material interpretation or planner.
-- **Tolerance, not proof.** [ADR012](docs/adr/012-tolerant-brep-curves-and-feature-heights.md) governs acceptance: one recorded tolerance policy (join, profile 0.01 mm, height 0.001 mm) and checks on the result. Exact native certification is an optional mark, never a gate. Do not add per-site micro-tolerances or proof preconditions that refuse printable parts.
+- **Tolerance, not proof.** [ADR012](docs/adr/012-tolerant-brep-curves-and-feature-heights.md) governs acceptance: one recorded tolerance policy (join, profile 0.01 mm, height 0.001 mm) and checks on the result. There is one slicing pipeline, within tolerance; no exact native lane or certification gate. Do not add per-site micro-tolerances or proof preconditions that refuse printable parts.
 - **Independent verification is mandatory.** The verifier decodes the emitted program on its own and checks it against the plan. Never share assumptions that would hide a planner error. Replay success is not physical printability.
 - **No invented success.** Unsupported geometry, requirements or machine behaviour produce explicit diagnostics. No silent fallback, healing, hole filling or dropped feature. A decision to print something imperfect (an overhang, an unprintable sliver) must be reported in the plan.
 - **No compatibility shims before 0.1.0.** See [pre-release format evolution](#pre-release-format-evolution) below.
