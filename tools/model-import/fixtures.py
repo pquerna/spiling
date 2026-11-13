@@ -111,9 +111,25 @@ def scale(root,segments=262144,instances=200):
  with zipfile.ZipFile(root/'instances-200.3mf','w',zipfile.ZIP_DEFLATED) as z:
   for name,data in entries.items():z.writestr(name,data)
 
+def torus(root,rings=1024,sides=512):
+ """Curved, through-hole holdout: 1,048,576 facets without cap fans."""
+ root.mkdir(parents=True,exist_ok=True)
+ p=[((20+5*math.cos(math.tau*j/sides))*math.cos(math.tau*i/rings),
+     (20+5*math.cos(math.tau*j/sides))*math.sin(math.tau*i/rings),
+     5+5*math.sin(math.tau*j/sides)) for i in range(rings) for j in range(sides)]
+ with (root/'large-torus.stl').open('wb') as stream:
+  stream.write(b'solid original curved import scale'.ljust(80,b'\0')+struct.pack('<I',2*rings*sides))
+  for i in range(rings):
+   for j in range(sides):
+    a=i*sides+j;b=((i+1)%rings)*sides+j
+    c=((i+1)%rings)*sides+(j+1)%sides;d=i*sides+(j+1)%sides
+    for t in [(a,b,c),(a,c,d)]:
+     stream.write(struct.pack('<12fH',0,0,0,*(v for k in t for v in p[k]),0))
+
 if __name__=='__main__':
  import argparse
- parser=argparse.ArgumentParser();parser.add_argument('destination',type=Path);parser.add_argument('--scale',action='store_true')
+ parser=argparse.ArgumentParser();parser.add_argument('destination',type=Path);parser.add_argument('--scale',action='store_true');parser.add_argument('--torus',action='store_true')
  options=parser.parse_args()
- if options.scale:scale(options.destination)
+ if options.torus:torus(options.destination)
+ elif options.scale:scale(options.destination)
  else:generate(options.destination)

@@ -56,3 +56,29 @@ in addition to `SPILING_TEST_ENGINE`. It observes normalization entry, cancels,
 waits for the worker-authoritative terminal outcome and imports another part in
 the same session. It reports latency without a machine-specific assertion. The
 Boolean dependency's cancellation tests synchronize inside actual Boolean work.
+
+`inspect_model_import` observes normalization, packed retained return and a
+mid-height section through the geometry facade. It prints separate phase times
+and the complete packed-source SHA-256. `--display` additionally generates the
+production display chunks and reports their hashes, bounds and separate time.
+Generate the frozen cylinder with `fixtures.py NEW_DIR --scale`; the separate
+`--torus` workload generates a million-facet curved through-hole holdout.
+`total_seconds` ends after sectioning; observer hashing and optional display are
+outside that number. These phase timings are not native import-to-paint latency.
+
+For algorithm experiments, freeze an observer executable before the edit, rebuild
+with the same profile/features, and alternate both against the same source set:
+
+```sh
+python3 -B tools/model-import/bench.py --baseline BEFORE_INSPECTOR \
+  --candidate AFTER_INSPECTOR --display --output NEW_DIRECTORY --repeats 3 \
+  generated/large-cylinder.stl generated/crack.stl generated/nested.stl
+```
+
+The comparator warms each executable once, alternates measured execution order,
+retains every run and source/binary hash, and requires identical complete retained
+bytes, findings, midpoint section and optional display chunks. Do not relax this
+judge to hide nondeterministic inputs: Boolean composition can reorder a retained
+complex even in repeated baseline runs. Use stable fixtures for this byte-exact
+performance comparison and keep Boolean material/void acceptance in `check.py`.
+Always finish with the complete actual-window benchmark and real import journeys.

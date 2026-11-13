@@ -140,6 +140,16 @@ pub struct SourceAsset {
     pub normalized: Option<Arc<Vec<u8>>>,
     pub record: StoredDefinition,
     pub bytes: Arc<Vec<u8>>,
+    validation: Option<Arc<SourceValidation>>,
+}
+/// A receipt for this exact record and the still-live immutable allocations.
+/// Weak ownership prevents retaining replaced bytes; it also blocks in-place
+/// mutation through Arc::get_mut. Arc::make_mut dissociates the weak identity.
+#[derive(Debug)]
+struct SourceValidation {
+    record: StoredDefinition,
+    bytes: Weak<Vec<u8>>,
+    normalized: Option<Weak<Vec<u8>>>,
 }
 impl SourceAsset {
     pub fn new(record: StoredDefinition, bytes: Vec<u8>) -> Result<Self, ProjectError> {
@@ -154,15 +164,37 @@ impl SourceAsset {
         bytes: Arc<Vec<u8>>,
         normalized: Option<Arc<Vec<u8>>>,
     ) -> Result<Self, ProjectError> {
-        let asset = Self {
+        let mut asset = Self {
             record,
             bytes,
             normalized,
+            validation: None,
         };
         asset.validate()?;
+        asset.validation = Some(Arc::new(SourceValidation {
+            record: asset.record.clone(),
+            bytes: Arc::downgrade(&asset.bytes),
+            normalized: asset.normalized.as_ref().map(Arc::downgrade),
+        }));
         Ok(asset)
     }
     pub(crate) fn validate(&self) -> Result<(), ProjectError> {
+        if self.validation.as_ref().is_some_and(|checked| {
+            checked.record == self.record
+                && checked
+                    .bytes
+                    .upgrade()
+                    .is_some_and(|old| Arc::ptr_eq(&old, &self.bytes))
+                && match (&checked.normalized, &self.normalized) {
+                    (None, None) => true,
+                    (Some(old), Some(bytes)) => {
+                        old.upgrade().is_some_and(|old| Arc::ptr_eq(&old, bytes))
+                    }
+                    _ => false,
+                }
+        }) {
+            return Ok(());
+        }
         if self.bytes.is_empty() || self.bytes.len() > MAX_SOURCE_BYTES as usize {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,

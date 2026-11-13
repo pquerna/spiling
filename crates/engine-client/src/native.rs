@@ -893,13 +893,11 @@ impl EngineRpc {
                 .into());
             }
         }
+        // Both callers immediately run the packed mesh/section validator,
+        // which checks this metadata's SHA-256 as well as every scalar/index.
+        // Keep transfer sizing here; do not hash the same immutable bytes twice.
         let bytes = self
-            .read_bounded_artifact(
-                &descriptor.name,
-                size,
-                &descriptor.sha256,
-                u64::from(MAX_GEOMETRY_CHUNK_BYTES),
-            )
+            .read_sized_artifact(&descriptor.name, size, u64::from(MAX_GEOMETRY_CHUNK_BYTES))
             .await?;
         Ok(bytes)
     }

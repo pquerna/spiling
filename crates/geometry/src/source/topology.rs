@@ -7,38 +7,93 @@ use super::{
     *,
 };
 use spiling_model_import::Mesh;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-type EdgeUses = BTreeMap<(u32, u32), Vec<(usize, bool)>>;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+// Contiguous incidence keeps edge and use order deterministic without one tree
+// node and heap allocation per edge. Sort by triangle as well as endpoints so
+// coincident-sheet pairing retains the original input order.
+#[derive(Clone, Copy)]
+struct EdgeUse {
+    edge: (u32, u32),
+    triangle: usize,
+    forward: bool,
+}
+struct EdgeUses(Vec<EdgeUse>);
+impl EdgeUses {
+    fn groups(&self) -> impl Iterator<Item = &[EdgeUse]> {
+        self.0.chunk_by(|a, b| a.edge == b.edge)
+    }
+    fn count(&self, edge: (u32, u32)) -> usize {
+        let first = self.0.partition_point(|u| u.edge < edge);
+        let end = self.0.partition_point(|u| u.edge <= edge);
+        end - first
+    }
+}
 pub(super) type Adjacency = Vec<Vec<(usize, bool)>>;
 
 fn edges(triangles: &[[u32; 3]], cancel: &AtomicBool) -> Result<EdgeUses, GeometryError> {
-    let mut edges = EdgeUses::new();
+    let mut uses = Vec::new();
+    uses.try_reserve_exact(triangles.len().checked_mul(3).ok_or_else(|| {
+        GeometryError::new(
+            GeometryErrorCode::ResourceLimit,
+            "source edge count overflow",
+        )
+    })?)
+    .map_err(|_| {
+        GeometryError::new(
+            GeometryErrorCode::ResourceLimit,
+            "source edge allocation failed",
+        )
+    })?;
     for (i, t) in triangles.iter().enumerate() {
         if i % 1024 == 0 {
             crate::check_cancel(cancel)?;
         }
         for a in 0..3 {
             let (v, w) = (t[a], t[(a + 1) % 3]);
-            edges
-                .entry((v.min(w), v.max(w)))
-                .or_default()
-                .push((i, v < w));
+            uses.push(EdgeUse {
+                edge: (v.min(w), v.max(w)),
+                triangle: i,
+                forward: v < w,
+            });
         }
     }
-    Ok(edges)
+    uses.sort_unstable_by_key(|u| (u.edge, u.triangle));
+    crate::check_cancel(cancel)?;
+    Ok(EdgeUses(uses))
 }
 fn adjacency(
     triangles: &[[u32; 3]],
     partition: bool,
     cancel: &AtomicBool,
 ) -> Result<Adjacency, GeometryError> {
-    let mut result = vec![Vec::new(); triangles.len()];
-    for uses in edges(triangles, cancel)?.values() {
-        let pairs: Vec<_> = if uses.len() == 2 {
-            vec![(uses[0], uses[1])]
+    edge_adjacency(
+        triangles.len(),
+        &edges(triangles, cancel)?,
+        partition,
+        cancel,
+    )
+}
+fn edge_adjacency(
+    triangle_count: usize,
+    incidence: &EdgeUses,
+    partition: bool,
+    cancel: &AtomicBool,
+) -> Result<Adjacency, GeometryError> {
+    let mut result = vec![Vec::new(); triangle_count];
+    for (index, uses) in incidence.groups().enumerate() {
+        if index % 1024 == 0 {
+            crate::check_cancel(cancel)?;
+        }
+        let mut connect = |a: &EdgeUse, b: &EdgeUse| {
+            let opposite = a.forward == b.forward;
+            result[a.triangle].push((b.triangle, opposite));
+            result[b.triangle].push((a.triangle, opposite));
+        };
+        if uses.len() == 2 {
+            connect(&uses[0], &uses[1]);
         } else if partition && uses.len().is_multiple_of(2) {
-            let a: Vec<_> = uses.iter().copied().filter(|u| u.1).collect();
-            let b: Vec<_> = uses.iter().copied().filter(|u| !u.1).collect();
+            let a: Vec<_> = uses.iter().filter(|u| u.forward).collect();
+            let b: Vec<_> = uses.iter().filter(|u| !u.forward).collect();
             if a.len() != b.len() {
                 return Err(invalid(
                     "nonmanifold source has unresolved edge orientation",
@@ -46,15 +101,13 @@ fn adjacency(
             }
             // Stable candidate pairing preserves exported component order. Each
             // proposed shell is checked independently below before composition.
-            a.into_iter().zip(b).collect()
+            for (a, b) in a.into_iter().zip(b) {
+                connect(a, b);
+            }
         } else {
             return Err(invalid(
                 "mesh has open or nonmanifold edges; material closure is unresolved",
             ));
-        };
-        for ((a, fa), (b, fb)) in pairs {
-            result[a].push((b, fa == fb));
-            result[b].push((a, fa == fb));
         }
     }
     for neighbours in &mut result {
@@ -63,7 +116,9 @@ fn adjacency(
     Ok(result)
 }
 fn subset(positions: &[[f64; 3]], triangles: &[[u32; 3]], group: &[usize]) -> Mesh {
-    let mut map = BTreeMap::new();
+    // IDs are assigned on first triangle use, never map iteration. Hash lookup
+    // preserves that order while avoiding a tree search for every corner.
+    let mut map = HashMap::with_capacity(group.len().min(positions.len()));
     let mut mesh = Mesh::default();
     for &i in group {
         mesh.triangles.push(triangles[i].map(|id| {
@@ -80,16 +135,17 @@ fn subset(positions: &[[f64; 3]], triangles: &[[u32; 3]], group: &[usize]) -> Me
 /// boundary, with mutually unique partner vertices and full closure afterward.
 fn weld_boundary(
     mesh: &mut Mesh,
+    incidence: &EdgeUses,
     findings: &mut Vec<ImportFinding>,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    let boundary: BTreeSet<_> = edges(&mesh.triangles, cancel)?
-        .into_iter()
-        .filter(|(_, uses)| uses.len() == 1)
-        .flat_map(|((a, b), _)| [a, b])
+) -> Result<bool, GeometryError> {
+    let boundary: BTreeSet<_> = incidence
+        .groups()
+        .filter(|uses| uses.len() == 1)
+        .flat_map(|uses| [uses[0].edge.0, uses[0].edge.1])
         .collect();
     if boundary.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let tolerance = TolerantPolicy::default().join_mm;
     let mut bins = BTreeMap::<[i64; 3], Vec<u32>>::new();
@@ -154,7 +210,7 @@ fn weld_boundary(
         findings.push(finding(ImportFindingKind::Changed, ImportFindingCode::BoundaryWeld,
             (changed.len()/2) as u32, "Boundary joins", "Paired open-boundary vertices joined within the source join tolerance; resulting material closure checked.", Some(point_bounds(&changed)?), Some(maximum)));
     }
-    Ok(())
+    Ok(!changed.is_empty())
 }
 pub(super) fn prepare(
     mesh: &mut Mesh,
@@ -186,8 +242,8 @@ pub(super) fn prepare(
     }
     // An odd multiplicity cannot partition into closed sheets. Deduplicate only
     // this case; even coincident sheets must retain component identity first.
-    let incidence = edges(&mesh.triangles, cancel)?;
-    if incidence.values().any(|u| !u.len().is_multiple_of(2)) {
+    let mut incidence = edges(&mesh.triangles, cancel)?;
+    if incidence.groups().any(|u| !u.len().is_multiple_of(2)) {
         let mut unique = BTreeMap::<[u32; 3], usize>::new();
         let mut removed = Vec::new();
         mesh.triangles.retain(|t| {
@@ -197,7 +253,7 @@ pub(super) fn prepare(
                 .map(|a| {
                     let v = t[a];
                     let w = t[(a + 1) % 3];
-                    incidence[&(v.min(w), v.max(w))].len() / 2
+                    incidence.count((v.min(w), v.max(w))) / 2
                 })
                 .min()
                 .unwrap()
@@ -212,6 +268,7 @@ pub(super) fn prepare(
             }
         });
         if !removed.is_empty() {
+            incidence = edges(&mesh.triangles, cancel)?;
             findings.push(finding(
                 ImportFindingKind::Changed,
                 ImportFindingCode::DuplicateFacets,
@@ -223,9 +280,11 @@ pub(super) fn prepare(
             ));
         }
     }
+    if weld_boundary(mesh, &incidence, &mut findings, cancel)? {
+        incidence = edges(&mesh.triangles, cancel)?;
+    }
+    let graph = edge_adjacency(mesh.triangles.len(), &incidence, true, cancel)?;
     drop(incidence);
-    weld_boundary(mesh, &mut findings, cancel)?;
-    let graph = adjacency(&mesh.triangles, true, cancel)?;
     let mut flips = vec![None; mesh.triangles.len()];
     let mut groups = Vec::new();
     for first in 0..mesh.triangles.len() {
@@ -251,7 +310,16 @@ pub(super) fn prepare(
             }
         }
         let shell = subset(&mesh.vertices, &mesh.triangles, &group);
-        adjacency(&shell.triangles, false, cancel)?; // a pairing proposal alone never admits a shell
+        // A pairing proposal alone never admits a shell. Check every local
+        // edge's two-use incidence; constructing a discarded graph adds no check.
+        if edges(&shell.triangles, cancel)?
+            .groups()
+            .any(|uses| uses.len() != 2)
+        {
+            return Err(invalid(
+                "mesh has open or nonmanifold edges; material closure is unresolved",
+            ));
+        }
         groups.push(group);
     }
     let mut changed = Vec::new();

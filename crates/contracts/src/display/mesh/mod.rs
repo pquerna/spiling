@@ -7,7 +7,6 @@ pub use owned::CheckedMeshChunk;
 
 use super::*;
 use crate::geometry::*;
-use std::collections::HashMap;
 
 /// Identity-free producer description. The engine attaches its own session/artifact
 /// handles after native work succeeds; attachment changes no packed mesh bytes.
@@ -107,7 +106,8 @@ pub struct MeshChunkBuilder {
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
     faces: Vec<u32>,
-    remap: HashMap<u32, u32>,
+    remap: Vec<u32>,
+    remapped: Vec<u32>,
     origin: [f64; 3],
     bounds: Option<AabbMm>,
     carrier: f64,
@@ -182,7 +182,8 @@ impl MeshChunkBuilder {
             normals: Vec::new(),
             indices: Vec::new(),
             faces: Vec::new(),
-            remap: HashMap::new(),
+            remap: Vec::new(),
+            remapped: Vec::new(),
             origin: [0.0; 3],
             bounds: None,
             carrier: 0.0,
@@ -201,8 +202,8 @@ impl MeshChunkBuilder {
         }
     }
     /// Owned heap capacities, excluding borrowed inputs and allocator bookkeeping.
-    /// The standard HashMap does not expose its bucket allocation; reserve a
-    /// conservative two-slot-per-capacity bound plus control/alignment overhead.
+    /// Remapping uses checked input vertex ordinals, with touched slots reset
+    /// at each chunk boundary rather than clearing the entire face per chunk.
     pub fn retained_bytes(&self) -> usize {
         let vector_bytes = self
             .chunks
@@ -229,15 +230,11 @@ impl MeshChunkBuilder {
                     .saturating_mul(std::mem::size_of::<u32>()),
             )
             .saturating_add(self.definition.allocated_bytes());
-        let map_capacity = self.remap.capacity();
-        let map_bytes = if map_capacity == 0 {
-            0
-        } else {
-            map_capacity
-                .saturating_mul(2)
-                .saturating_mul(std::mem::size_of::<(u32, u32)>() + 1)
-                .saturating_add(64)
-        };
+        let map_bytes = self
+            .remap
+            .capacity()
+            .saturating_add(self.remapped.capacity())
+            .saturating_mul(std::mem::size_of::<u32>());
         self.chunks
             .iter()
             .fold(vector_bytes.saturating_add(map_bytes), |bytes, chunk| {
@@ -325,11 +322,12 @@ impl MeshChunkBuilder {
         if self.carrier.max(carrier) + self.trim.max(trim) > MESH_CARRIER_TOLERANCE_MM {
             self.flush()?;
         }
-        self.remap.clear();
+        self.clear_remap();
+        self.remap.resize(positions.len(), u32::MAX);
         for triangle in triangles {
             let mut missing = 0;
             for (slot, &index) in triangle.iter().enumerate() {
-                if !self.remap.contains_key(&index) && !triangle[..slot].contains(&index) {
+                if self.remap[index as usize] == u32::MAX && !triangle[..slot].contains(&index) {
                     missing += 1;
                 }
             }
@@ -344,8 +342,8 @@ impl MeshChunkBuilder {
             }
             let mut mapped = [0; 3];
             for (slot, &index) in triangle.iter().enumerate() {
-                mapped[slot] = if let Some(&mapped) = self.remap.get(&index) {
-                    mapped
+                mapped[slot] = if self.remap[index as usize] != u32::MAX {
+                    self.remap[index as usize]
                 } else {
                     if self.vertex_count == self.budget.vertices {
                         return Err(resource("unique mesh vertex budget exceeded"));
@@ -377,7 +375,8 @@ impl MeshChunkBuilder {
                     let mapped = self.positions.len() as u32;
                     self.positions.push(local);
                     self.normals.push(normal);
-                    self.remap.insert(index, mapped);
+                    self.remap[index as usize] = mapped;
+                    self.remapped.push(index);
                     if let Some(bounds) = &mut self.bounds {
                         bounds.include(point)?;
                     } else {
@@ -408,6 +407,11 @@ impl MeshChunkBuilder {
         }
         self.next_face += 1;
         Ok(())
+    }
+    fn clear_remap(&mut self) {
+        for index in self.remapped.drain(..) {
+            self.remap[index as usize] = u32::MAX;
+        }
     }
     fn flush(&mut self) -> Result<(), GeometryError> {
         if self.faces.is_empty() {
@@ -462,7 +466,7 @@ impl MeshChunkBuilder {
         self.normals.clear();
         self.indices.clear();
         self.faces.clear();
-        self.remap.clear();
+        self.clear_remap();
         self.carrier = 0.0;
         self.trim = 0.0;
         self.quantization = 0.0;

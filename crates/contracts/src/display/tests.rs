@@ -139,6 +139,59 @@ fn mesh_encodes_all_faces_and_chunks_with_local_remapping_and_borrowed_views() {
 }
 
 #[test]
+fn mesh_remapping_preserves_sparse_reuse_across_faces_and_chunks() {
+    let (session, artifact, definition) = ids();
+    let mut builder =
+        MeshChunkBuilder::with_chunk_limit(definition, 3, DisplayProfile::MeshTrimmedMm005V2, 200)
+            .unwrap();
+    let mut expected = Vec::new();
+    for (face, count, triangles) in [
+        (0, 10, vec![[9, 2, 7], [2, 8, 7], [9, 7, 8]]),
+        (1, 3, vec![[0, 1, 2]]),
+        (2, 10, vec![[7, 2, 9], [7, 8, 2]]),
+    ] {
+        let positions: Vec<_> = (0..count)
+            .map(|i| [f64::from(i), f64::from(i * i), f64::from(face)])
+            .collect();
+        for triangle in &triangles {
+            expected.push((face, triangle.map(|i| positions[i as usize])));
+        }
+        builder
+            .push_face(
+                face,
+                &positions,
+                &vec![[0., 0., 1.]; count as usize],
+                &triangles,
+                0.,
+                0.,
+            )
+            .unwrap();
+    }
+    let encoded = builder.finish().unwrap();
+    let mut actual = Vec::new();
+    for chunk in encoded.chunks {
+        let metadata = chunk.descriptor.into_metadata(session.clone(), artifact);
+        let view = validate_mesh(&chunk.bytes, &metadata).unwrap();
+        for (triangle, face) in view
+            .indices
+            .iter()
+            .collect::<Vec<_>>()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(view.face_ordinals.iter())
+        {
+            let positions = std::array::from_fn(|slot| {
+                let local = view.positions.get(triangle[slot] as usize).unwrap();
+                std::array::from_fn(|axis| view.local_origin_mm[axis] + f64::from(local[axis]))
+            });
+            actual.push((face, positions));
+        }
+    }
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn mesh_rejects_every_truncation_identity_hash_and_scalar_corruption() {
     let encoded = mesh(152);
     let chunk = &encoded.chunks[0];

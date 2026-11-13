@@ -364,6 +364,64 @@ fn source_digest_and_definition_identity_are_checked() {
 }
 
 #[test]
+fn source_validation_receipt_never_authorizes_replaced_or_mutated_bytes() {
+    let source = asset(vec![1, 2, 3], "part.step");
+    let mut replaced = (*source).clone();
+    replaced.bytes = Arc::new(vec![1, 2, 4]);
+    assert_eq!(
+        replaced.validate().unwrap_err().code,
+        ProjectErrorCode::CorruptAsset
+    );
+    let mut edited = (*source).clone();
+    Arc::make_mut(&mut edited.bytes)[0] = 9;
+    assert_eq!(
+        edited.validate().unwrap_err().code,
+        ProjectErrorCode::CorruptAsset
+    );
+    // A sole strong owner with only the receipt's Weak must also lose identity
+    // when make_mut dissociates its allocation, even without copying the Vec.
+    let mut sole = SourceAsset::new(source.record.clone(), vec![1, 2, 3]).unwrap();
+    assert_eq!(Arc::strong_count(&sole.bytes), 1);
+    assert!(Arc::get_mut(&mut sole.bytes).is_none());
+    Arc::make_mut(&mut sole.bytes)[0] = 9;
+    assert_eq!(
+        sole.validate().unwrap_err().code,
+        ProjectErrorCode::CorruptAsset
+    );
+    let mut record = (*source).clone();
+    record.record.definition_id = asset(vec![4], "other.step").record.definition_id.clone();
+    assert_eq!(
+        record.validate().unwrap_err().code,
+        ProjectErrorCode::CorruptAsset
+    );
+    let normalized = Arc::new(b"retained interpretation".to_vec());
+    let mut provenance = source.record.provenance.clone();
+    provenance.normalized = Some(NormalizedSource {
+        hash: SourceHash::from_bytes(&normalized),
+        format: MeshSourceFormat::Stl,
+        selector: "stl:mm:surface1".into(),
+        object_name: "Imported part".into(),
+        findings: vec![],
+    });
+    let mut hybrid = SourceAsset::with_normalized(
+        StoredDefinition {
+            definition_id: provenance.definition_id(),
+            provenance,
+        },
+        source.bytes.clone(),
+        Some(normalized),
+    )
+    .unwrap();
+    hybrid.validate().unwrap();
+    Arc::make_mut(hybrid.normalized.as_mut().unwrap())[0] = b'!';
+    assert_eq!(
+        hybrid.validate().unwrap_err().code,
+        ProjectErrorCode::CorruptAsset
+    );
+    source.validate().unwrap();
+}
+
+#[test]
 fn source_retention_measures_history_without_a_fixed_small_memory_quota() {
     let mut project = Project::new();
     let mut expected = 0;
