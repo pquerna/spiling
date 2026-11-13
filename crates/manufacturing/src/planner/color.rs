@@ -170,7 +170,7 @@ pub(super) fn capture(
             band_bytes += native::material_bytes(shell) + native::material_bytes(backed);
         }
     }
-    for section in sections {
+    for (section, end) in super::material_runs(sections) {
         check_cancel(cancel)?;
         if section.material.0.is_empty() {
             continue;
@@ -261,7 +261,7 @@ pub(super) fn capture(
         let core = section.material.difference(&all_backed);
         let physical_z_mm = [
             schedule[section.start as usize].lower_z,
-            schedule[section.end as usize - 1].z,
+            schedule[end as usize - 1].z,
         ];
         shells.extend([
             (

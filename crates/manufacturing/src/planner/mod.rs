@@ -202,18 +202,7 @@ fn geometry_refusal(error: &ManufacturingError) -> bool {
 /// permanent plates and combined bands query full-height inner material from
 /// the tolerant model (`tolerant::inner_material_admits`).
 fn tolerant_supported(input: &CompilerInput<'_>) -> Result<(), ManufacturingError> {
-    let refuse = |what: &str| {
-        Err(error(
-            ManufacturingErrorCode::UnsupportedCapability,
-            format!("{what} is not yet available for parts sliced within tolerance (ADR012)"),
-        ))
-    };
-    if matches!(
-        &input.intent.printer.workflow,
-        JobWorkflow::FixedDualMarlin { .. }
-    ) {
-        return refuse("fixed-dual routing");
-    }
+    let _ = input;
     Ok(())
 }
 
@@ -4470,6 +4459,31 @@ fn material_twins(
         twins.push(twin);
     }
     Ok(twins)
+}
+
+/// Consecutive spans whose material agrees within the ADR012 profile
+/// tolerance, as one source prism: the first span of each run and the end
+/// layer of its last. Tolerant spans are one layer each; a material
+/// construction binds one domain per prism, not per layer, as the source's
+/// own vertical faces do. Straight edges give bit-identical sections; curved
+/// walls are densified on their true curve from per-layer mesh crossings, so
+/// their rings agree only within the tolerance.
+fn material_runs(sections: &[SectionSpan]) -> impl Iterator<Item = (&SectionSpan, u32)> {
+    let tolerance = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
+    let mut index = 0;
+    std::iter::from_fn(move || {
+        let first = sections.get(index)?;
+        index += 1;
+        while sections.get(index).is_some_and(|next| {
+            next.start == sections[index - 1].end
+                && (Arc::ptr_eq(&next.material, &first.material)
+                    || next.material.0 == first.material.0
+                    || same_within(&first.material, &next.material, tolerance))
+        }) {
+            index += 1;
+        }
+        Some((first, sections[index - 1].end))
+    })
 }
 
 /// Same polygons and rings, every vertex of each within `tolerance` of the

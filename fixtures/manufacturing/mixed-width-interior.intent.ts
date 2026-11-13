@@ -48,7 +48,10 @@ export default {
         interior_goal: {
           minimum_modeled_saving_seconds: 1,
           max_extra_model_fraction: 0.05,
-          max_extra_waste_mm3: 0,
+          // Verified waste sums E8-quantized absolute extrusion, so the same
+          // purge strips can measure a tick apart per command between
+          // candidates; allow that rounding, not extra waste.
+          max_extra_waste_mm3: 1e-6,
         },
         tools: [job.tools[0], tool],
         assignments: [

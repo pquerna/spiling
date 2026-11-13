@@ -298,7 +298,7 @@ pub(super) fn capture_or_color(
         retained_points + staging_points,
         owned_bytes + staging_bytes,
     )?;
-    for section in sections {
+    for (section, end) in super::material_runs(sections) {
         check_cancel(cancel)?;
         if section.material.0.len() != 1 || !section.material.0[0].interiors().is_empty() {
             return Err(unsupported(
@@ -407,7 +407,7 @@ pub(super) fn capture_or_color(
             return Err(unsupported("native stock boundary inventory is incomplete"));
         }
         let lower = schedule[section.start as usize].lower_z;
-        let upper = schedule[section.end as usize - 1].z;
+        let upper = schedule[end as usize - 1].z;
         let boundaries = [
             lower,
             region_z[0].clamp(lower, upper),
