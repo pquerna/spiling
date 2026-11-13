@@ -91,7 +91,7 @@ fn same_walls(
 }
 
 fn admit(bytes: usize) -> Result<(), ManufacturingError> {
-    if bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+    if bytes as u64 > crate::working_set::bytes_u64() {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::ResourceLimit,
             "functional reconstructed fill exceeds retained-byte limit",
@@ -164,7 +164,7 @@ pub(super) fn retained_bytes(plan: &NormalizedPrintPlan) -> Result<usize, Manufa
     let mut add = |value: usize| -> Result<(), ManufacturingError> {
         total = total
             .checked_add(value)
-            .filter(|value| *value as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+            .filter(|value| *value as u64 <= crate::working_set::bytes_u64())
             .ok_or_else(|| {
                 ManufacturingError::new(
                     ManufacturingErrorCode::ResourceLimit,
@@ -360,7 +360,7 @@ pub(super) fn verify(
                 residuals[domain_index] = Some(cached);
             }
             staged += bytes(&fill) + wall_paths.capacity() * size_of::<&DepositionPath>();
-            if staged as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+            if staged as u64 > crate::working_set::bytes_u64() {
                 return Err(ManufacturingError::new(
                     ManufacturingErrorCode::ResourceLimit,
                     "functional reconstructed fill exceeds retained-byte limit",

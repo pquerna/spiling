@@ -48,8 +48,10 @@ pub fn preflight(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreflightReport, ManufacturingError> {
-    let mut work = spiling_geometry::GeometryWorkBudget::compile();
-    Ok(admit(input, cancel, &mut work)?.report)
+    crate::working_set::scope(input.working_set, || {
+        let mut work = spiling_geometry::GeometryWorkBudget::compile();
+        Ok(admit(input, cancel, &mut work)?.report)
+    })
 }
 
 /// Native/finish bounds for packing heuristics. Complete candidate compilation and

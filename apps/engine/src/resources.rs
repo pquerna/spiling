@@ -7,17 +7,26 @@ use spiling_contracts::geometry::{GeometryError, GeometryErrorCode};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 pub const SOURCE_MEMORY_ENV: &str = "SPILING_SOURCE_MEMORY_BYTES";
+pub const MANUFACTURING_MEMORY_ENV: &str = "SPILING_MANUFACTURING_MEMORY_BYTES";
 
 pub fn source_memory_limit(value: Option<std::ffi::OsString>) -> Result<Option<usize>, String> {
+    memory_limit(SOURCE_MEMORY_ENV, value)
+}
+
+pub fn manufacturing_memory_limit(
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<usize>, String> {
+    memory_limit(MANUFACTURING_MEMORY_ENV, value)
+}
+
+fn memory_limit(name: &str, value: Option<std::ffi::OsString>) -> Result<Option<usize>, String> {
     value
         .map(|value| {
             value
                 .to_str()
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    format!("{SOURCE_MEMORY_ENV} must be a positive integer byte allowance")
-                })
+                .ok_or_else(|| format!("{name} must be a positive integer byte allowance"))
         })
         .transpose()
 }
@@ -108,6 +117,30 @@ pub fn source_growth(retained: usize) -> Result<usize, GeometryError> {
     Ok(growth)
 }
 
+/// Live working set one manufacturing operation (compile, alternative,
+/// preflight, inspection) may admit, observed fresh when the job starts.
+/// Inputs, sources and previous artifacts are already resident in the OS
+/// observation; the planner and verifier count only their own growth.
+pub fn manufacturing_working_set()
+-> Result<spiling_manufacturing::WorkingSet, spiling_contracts::manufacturing::ManufacturingError> {
+    use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
+    let refuse =
+        |message: String| ManufacturingError::new(ManufacturingErrorCode::ResourceLimit, message);
+    let selected =
+        manufacturing_memory_limit(std::env::var_os(MANUFACTURING_MEMORY_ENV)).map_err(refuse)?;
+    let headroom = Headroom::current().map_err(|error| refuse(error.message))?;
+    let growth = headroom.growth(0, selected);
+    crate::diagnostic(
+        "info",
+        "manufacturing_memory_admission",
+        &format!(
+            "working_set_bytes={growth} available_bytes={} container_headroom={:?} address_headroom={:?} selected_bytes={selected:?}",
+            headroom.available, headroom.container, headroom.address_space,
+        ),
+    );
+    spiling_manufacturing::WorkingSet::new(growth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,7 +202,12 @@ mod tests {
             "999999999999999999999999999999",
         ] {
             assert!(source_memory_limit(Some(value.into())).is_err());
+            assert!(manufacturing_memory_limit(Some(value.into())).is_err());
         }
+        assert_eq!(
+            manufacturing_memory_limit(Some("128000000".into())).unwrap(),
+            Some(128000000)
+        );
     }
 
     #[test]

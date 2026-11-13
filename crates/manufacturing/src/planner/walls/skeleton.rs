@@ -7,7 +7,6 @@
 //! Independently authored adapter to the BSL-1.0 boostvoronoi 0.12.1 API.
 
 use super::super::{boolean, native};
-use crate::planner::MAX_RETAINED_GEOMETRY_UNITS;
 use crate::{check_cancel, error};
 use boostvoronoi::{
     builder::Builder,
@@ -17,9 +16,7 @@ use geo::{
     Coord, MultiPolygon,
     kernels::{Kernel, Orientation, RobustKernel},
 };
-use spiling_contracts::manufacturing::{
-    MAX_MANUFACTURING_RETAINED_BYTES, ManufacturingError, ManufacturingErrorCode,
-};
+use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use std::{mem::size_of, sync::atomic::AtomicBool};
 
 // A power-of-two scale makes conversion multiplication exact. Half a grid
@@ -1021,7 +1018,7 @@ fn reserve_retained_edge(
         .checked_mul(size_of::<MedialEdge>())
         .ok_or_else(storage)?;
     if edges.len() == edges.capacity() {
-        let remaining = (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+        let remaining = (crate::working_set::bytes())
             .checked_sub(retained.external_owned_bytes)
             .and_then(|b| b.checked_sub(staging))
             .and_then(|b| b.checked_sub(vertex_bytes))
@@ -1062,18 +1059,18 @@ fn admit_points(retained: Admission, points: usize) -> Result<(), ManufacturingE
     if retained
         .retained_points
         .checked_add(points)
-        .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+        .is_none_or(|n| n > crate::working_set::units())
     {
         return Err(storage());
     }
     Ok(())
 }
 fn admit_bytes(retained: Admission, bytes: usize) -> Result<(), ManufacturingError> {
-    if retained.retained_points > MAX_RETAINED_GEOMETRY_UNITS
+    if retained.retained_points > crate::working_set::units()
         || retained
             .external_owned_bytes
             .checked_add(bytes)
-            .is_none_or(|b| b as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+            .is_none_or(|b| b as u64 > crate::working_set::bytes_u64())
     {
         return Err(storage());
     }
@@ -1489,7 +1486,7 @@ mod tests {
         assert_eq!(
             construct(
                 &ordinary,
-                MAX_RETAINED_GEOMETRY_UNITS,
+                crate::working_set::units(),
                 0,
                 &mut 0,
                 &AtomicBool::new(false)
@@ -1518,7 +1515,7 @@ mod tests {
             construct(
                 &ordinary,
                 0,
-                MAX_MANUFACTURING_RETAINED_BYTES as usize,
+                crate::working_set::bytes(),
                 &mut 0,
                 &AtomicBool::new(false)
             )
@@ -1546,13 +1543,12 @@ mod capacity_tests {
         let material = MultiPolygon(vec![Polygon::new(LineString::from(points), vec![])]);
         let graph = construct(&material, 0, 0, &mut 0, &AtomicBool::new(false))
             .expect("sampled round material has an admitted compact interior graph");
-        let retained = MAX_RETAINED_GEOMETRY_UNITS - graph.retained_points;
+        let retained = crate::working_set::units() - graph.retained_points;
         let edge_bytes = graph.edges.capacity() * size_of::<MedialEdge>();
         let graph_peak =
             edge_bytes + edge_bytes / 2 + graph.junctions.capacity() * size_of::<MedialJunction>();
-        let external = MAX_MANUFACTURING_RETAINED_BYTES as usize
-            - constructor_staging(628, 1).unwrap()
-            - graph_peak;
+        let external =
+            crate::working_set::bytes() - constructor_staging(628, 1).unwrap() - graph_peak;
         let pressured = construct(
             &material,
             retained,

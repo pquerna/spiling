@@ -40,7 +40,7 @@ fn reserve(entries: &mut Vec<Interval>, retained_bytes: usize) -> Result<(), Man
     if entries.len() >= MAX_DEPOSITION_SEGMENTS as usize
         || retained_bytes
             .checked_add(target * size_of::<Interval>())
-            .is_none_or(|bytes| bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+            .is_none_or(|bytes| bytes as u64 > crate::working_set::bytes_u64())
     {
         return Err(resource());
     }
@@ -172,7 +172,7 @@ fn append_expected(
             || retained_bytes
                 .checked_add(entries.capacity() * size_of::<Interval>())
                 .and_then(|bytes| bytes.checked_add(edges.max(hits.capacity()) * size_of::<f64>()))
-                .is_none_or(|bytes| bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+                .is_none_or(|bytes| bytes as u64 > crate::working_set::bytes_u64())
         {
             return Err(resource());
         }

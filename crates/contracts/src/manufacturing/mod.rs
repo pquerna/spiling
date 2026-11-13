@@ -63,8 +63,8 @@ pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 768 * 1024 * 1024;
 /// Program bytes are independently bounded; a larger bundle is not permission
 /// to emit more machine commands. Programs are held as compressed frames.
 pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 512 * 1024 * 1024;
-/// Live/history/staging allowance, counted in held compressed frames for
-/// bundles and programs and in raw coordinates for planner retention.
+/// Core's live/history/staging allowance for held compressed bundle and
+/// program frames. Planner/verifier working sets are host-admitted instead.
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
 /// Job-wide deposition total, a checked count rather than an allocation.

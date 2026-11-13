@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 
 //! Job-local physical-horizon intersections of immutable final-D material.
-use super::{MAX_RETAINED_GEOMETRY_UNITS, SectionSpan, classification, region};
+use super::{SectionSpan, classification, region};
 use crate::{check_cancel, error};
 use geo::{Coord, MultiPolygon};
 use spiling_contracts::manufacturing::{
-    MAX_MANUFACTURING_RETAINED_BYTES, MAX_PRINT_LAYERS, ManufacturingError, ManufacturingErrorCode,
+    MAX_PRINT_LAYERS, ManufacturingError, ManufacturingErrorCode,
 };
 use std::{
     cmp::Ordering,
@@ -261,7 +261,7 @@ impl<'a> SkinNeighborhoods<'a> {
             .ok_or_else(|| resource("skin neighborhood node count overflow"))?;
         count
             .checked_mul(std::mem::size_of::<Cached>())
-            .filter(|bytes| *bytes <= MAX_MANUFACTURING_RETAINED_BYTES as usize)
+            .filter(|bytes| *bytes <= crate::working_set::bytes())
             .ok_or_else(|| resource("skin neighborhood index byte limit exceeded"))?;
         let mut work = initial_work;
         charge(&mut work, count)?;
@@ -272,7 +272,7 @@ impl<'a> SkinNeighborhoods<'a> {
         if nodes
             .capacity()
             .checked_mul(std::mem::size_of::<Cached>())
-            .is_none_or(|bytes| bytes > MAX_MANUFACTURING_RETAINED_BYTES as usize)
+            .is_none_or(|bytes| bytes > crate::working_set::bytes())
         {
             return Err(resource(
                 "skin neighborhood index allocation byte limit exceeded",
@@ -289,9 +289,9 @@ impl<'a> SkinNeighborhoods<'a> {
             base,
             leaf_identities_ready: false,
             retained: 0,
-            retained_capacity: MAX_RETAINED_GEOMETRY_UNITS,
+            retained_capacity: crate::working_set::units(),
             retained_owned_bytes: 0,
-            retained_owned_byte_capacity: MAX_MANUFACTURING_RETAINED_BYTES as usize,
+            retained_owned_byte_capacity: crate::working_set::bytes(),
             work,
         })
     }
@@ -676,9 +676,7 @@ impl<'a> SkinNeighborhoods<'a> {
     ) -> Result<Option<usize>, ManufacturingError> {
         check_cancel(cancel)?;
         let live = external.add(temporary)?;
-        if live.points > MAX_RETAINED_GEOMETRY_UNITS
-            || live.bytes > MAX_MANUFACTURING_RETAINED_BYTES as usize
-        {
+        if live.points > crate::working_set::units() || live.bytes > crate::working_set::bytes() {
             return Ok(None);
         }
         loop {
@@ -690,9 +688,7 @@ impl<'a> SkinNeighborhoods<'a> {
                 .bytes
                 .checked_add(self.retained_bytes())
                 .ok_or_else(|| resource("skin neighborhood retained byte overflow"))?;
-            if total <= MAX_RETAINED_GEOMETRY_UNITS
-                && bytes <= MAX_MANUFACTURING_RETAINED_BYTES as usize
-            {
+            if total <= crate::working_set::units() && bytes <= crate::working_set::bytes() {
                 return Ok(Some(total));
             }
             if !self.evict_oldest(cancel)? {
@@ -1226,7 +1222,7 @@ fn checked_points(
             charge(work, 1)?;
             points = points
                 .checked_add(ring.0.len())
-                .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| resource("skin neighborhood geometry point limit exceeded"))?;
             for point in &ring.0 {
                 check_cancel(cancel)?;

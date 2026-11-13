@@ -137,7 +137,7 @@ pub(super) fn plan(
                 if request
                     .retained_points
                     .checked_add(scratch)
-                    .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+                    .is_none_or(|n| n > crate::working_set::units())
                 {
                     return Err(resource("wall offset staging exceeded"));
                 }
@@ -277,7 +277,7 @@ pub(super) fn plan(
         paths.iter().map(|p| p.points_mm.len()).sum::<usize>() + region::point_count(&fill);
     if retained_points
         .checked_add(request.retained_points)
-        .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+        .is_none_or(|n| n > crate::working_set::units())
     {
         return Err(resource("retained wall construction limit exceeded"));
     }

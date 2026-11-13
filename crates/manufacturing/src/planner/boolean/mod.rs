@@ -4,12 +4,9 @@
 //! Carrier-independent conservative overlay work admission. Coarse safe inputs
 //! allocate nothing; sampled boundary neighborhoods use an explicitly charged
 //! edge sweep, not whole-capsule Cartesian products. No material is changed.
-use super::MAX_RETAINED_GEOMETRY_UNITS;
 use crate::{check_cancel, error};
 use geo::{MultiPolygon, Polygon};
-use spiling_contracts::manufacturing::{
-    MAX_MANUFACTURING_RETAINED_BYTES, ManufacturingError, ManufacturingErrorCode,
-};
+use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use std::sync::atomic::AtomicBool;
 
 mod prepared;
@@ -368,7 +365,7 @@ fn polygon_budget<'a>(
         charge(work, pairs)?;
         return Ok(()); // Every unordered candidate is covered by this coarse bound.
     }
-    if count > MAX_RETAINED_GEOMETRY_UNITS {
+    if count > crate::working_set::units() {
         return Err(resource("Boolean broad-phase staging point limit exceeded"));
     }
     // Two bounded scratch arrays only: edge bounds and active indices. Their
@@ -377,7 +374,7 @@ fn polygon_budget<'a>(
     // charged operations per level plus extraction, with generous linear slack.
     count
         .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
-        .filter(|bytes| *bytes <= MAX_MANUFACTURING_RETAINED_BYTES as usize)
+        .filter(|bytes| *bytes <= crate::working_set::bytes())
         .ok_or_else(|| resource("Boolean broad-phase scratch byte limit exceeded"))?;
     let sort_bound = sort_work(count)?;
     if work.checked_add(sort_bound).is_none() {

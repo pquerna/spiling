@@ -416,7 +416,7 @@ mod tests {
             synthesize(
                 &layers,
                 &recipe,
-                MAX_MANUFACTURING_RETAINED_BYTES as usize,
+                crate::working_set::bytes(),
                 &AtomicBool::new(false)
             )
             .unwrap_err()

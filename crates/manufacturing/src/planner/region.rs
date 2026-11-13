@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+use super::OFFSET_TOLERANCE_MM;
 #[cfg(test)]
 use super::boolean_budget;
-use super::{MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM};
 use crate::{check_cancel, error};
 use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::{Area, BooleanOps, BoundingRect, Coord, LineString, MultiPolygon, Polygon};
@@ -53,7 +53,7 @@ fn check_polygons(polygons: &[Polygon<f64>]) -> Result<(), ManufacturingError> {
             p.exterior().0.len() + p.interiors().iter().map(|hole| hole.0.len()).sum::<usize>()
         })
         .sum();
-    if points > MAX_RETAINED_GEOMETRY_UNITS {
+    if points > crate::working_set::units() {
         return Err(resource("planar region point limit exceeded"));
     }
     if polygons.iter().any(|p| {
@@ -246,7 +246,9 @@ fn offset_disk_sides(radius: f64) -> Result<usize, ManufacturingError> {
 /// conservative capsules around actual stroke centerlines.
 pub(super) fn circumscribed_disk(radius: f64) -> Result<Vec<Coord<f64>>, ManufacturingError> {
     if !radius.is_finite() || radius <= 0.0 {
-        return Err(unsupported("circumscribed disk radius is not finite and positive"));
+        return Err(unsupported(
+            "circumscribed disk radius is not finite and positive",
+        ));
     }
     offset_disk(radius)
 }
@@ -764,7 +766,7 @@ impl HatchRows {
         self.count
             .checked_add(1)
             .and_then(|count| self.edges.checked_mul(count))
-            .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+            .filter(|points| *points <= crate::working_set::units())
             .ok_or_else(|| resource("component hatch point bound exceeds retained budget"))
     }
 }

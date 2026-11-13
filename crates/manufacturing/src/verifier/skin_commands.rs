@@ -24,7 +24,7 @@ fn charge(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
 fn add_bytes(total: &mut usize, bytes: usize) -> Result<(), ManufacturingError> {
     *total = total
         .checked_add(bytes)
-        .filter(|n| *n as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+        .filter(|n| *n as u64 <= crate::working_set::bytes_u64())
         .ok_or_else(resource)?;
     Ok(())
 }

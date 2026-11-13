@@ -15,7 +15,9 @@ mod realization;
 mod routing;
 mod surface_inspection;
 pub mod verifier;
+pub mod working_set;
 pub use planner::preflight;
+pub use working_set::WorkingSet;
 
 use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
@@ -45,6 +47,8 @@ pub struct CompilerInput<'a> {
         spiling_contracts::geometry::SourceHash,
         Arc<spiling_surface_fields::HeightImage>,
     >,
+    /// Host-selected live working-set admission for this operation.
+    pub working_set: WorkingSet,
 }
 
 pub use spiling_chunks::ChunkSource;
@@ -115,6 +119,13 @@ pub fn program_descriptor(program: &ChunkSource) -> ProgramDescriptor {
 }
 
 pub fn compile(
+    input: CompilerInput<'_>,
+    cancel: &AtomicBool,
+) -> Result<ManufacturingResult, ManufacturingError> {
+    working_set::scope(input.working_set, || compile_scoped(input, cancel))
+}
+
+fn compile_scoped(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<ManufacturingResult, ManufacturingError> {
@@ -191,6 +202,7 @@ fn compile_exact(
 }
 
 /// Recompute replay; the persisted report is descriptive, never trusted authority.
+/// Runs under the caller's [`working_set::scope`].
 pub fn verify_bundle(
     result: &ManufacturingResult,
     cancel: &AtomicBool,
@@ -211,6 +223,7 @@ pub struct ManufacturingInspection {
 }
 
 /// Fresh independent replay; display output is opt-in and bound to the caller's immutable bundle hash.
+/// Runs under the caller's [`working_set::scope`].
 pub fn inspect_bundle(
     result: &ManufacturingResult,
     bundle_hash: &spiling_contracts::geometry::SourceHash,

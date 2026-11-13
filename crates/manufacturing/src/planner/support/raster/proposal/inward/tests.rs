@@ -377,7 +377,7 @@ fn inward_workspace_and_queries_preserve_resource_and_cancellation_refusals() {
     let domain = concave();
     for (retained, mut work, cancel, expected) in [
         (
-            super::super::super::super::super::MAX_RETAINED_GEOMETRY_UNITS,
+            crate::working_set::units(),
             0,
             false,
             ManufacturingErrorCode::ResourceLimit,

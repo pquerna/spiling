@@ -184,6 +184,7 @@ impl Scene {
             surface_overlays: &self.surface_overlays,
             process_document: &self.process_document,
             surface_images: &self.surface_images,
+            working_set: crate::WorkingSet::UNMEASURED,
         }
     }
 }

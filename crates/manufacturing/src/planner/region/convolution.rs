@@ -111,7 +111,7 @@ pub(super) fn offset(
                 .ok_or_else(|| resource("offset convolution cycle point overflow"))?;
             cycle_points = cycle_points
                 .checked_add(capacity)
-                .filter(|count| *count <= MAX_RETAINED_GEOMETRY_UNITS)
+                .filter(|count| *count <= crate::working_set::units())
                 .ok_or_else(|| resource("offset convolution point limit exceeded"))?;
             cycle_bytes = offset_bytes(&[cycle_bytes, coordinate_bytes(capacity)?])?;
             offset_admit(

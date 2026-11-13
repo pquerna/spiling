@@ -121,6 +121,19 @@ remaining growth into native proof construction without a hidden standalone
 256MiB clamp. Other scratch, mesh, inventory and packed-output limits remain
 separate capacity work.
 
+The engine also owns manufacturing working-set admission. When a compile,
+alternative, layout trial, preflight or inspection job starts on the worker, it
+observes the same headroom fresh and passes half of the smallest observation to
+manufacturing as a `WorkingSet`. Inputs, sources and held artifacts are already
+resident in that observation, so the planner and verifier count only their own
+simultaneously live geometry, caches and staging against it; there is no fixed
+256MiB planner ceiling. Optional `SPILING_MANUFACTURING_MEMORY_BYTES` selects a
+positive explicit allowance; invalid configuration refuses startup. Concurrent
+planning tasks share the allowance rather than each admitting all of it. Format
+and protocol representation limits (bundle, program, layer and segment counts)
+remain separate constants, and Core's held compressed-artifact allowance
+remains separate capacity debt.
+
 Core owns semantic source identity and persistence, measures distinct actual
 source Vec capacities across Current/history/prepared snapshots and accepts a
 caller-selected extra allocation budget. Equal hashes with different allocations

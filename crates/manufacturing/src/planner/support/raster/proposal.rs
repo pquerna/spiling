@@ -54,7 +54,7 @@ fn short_role_piece(
         [origin, target],
         interface,
         cuts,
-        super::super::super::MAX_RETAINED_GEOMETRY_UNITS.saturating_sub(retained),
+        crate::working_set::units().saturating_sub(retained),
         owned_bytes,
         work,
         foreign_work,
@@ -854,7 +854,7 @@ mod tests {
     fn optional_proposal_preserves_resource_and_cancellation_refusals() {
         for (retained, mut work, cancel, expected) in [
             (
-                super::super::super::super::MAX_RETAINED_GEOMETRY_UNITS,
+                crate::working_set::units(),
                 0,
                 false,
                 ManufacturingErrorCode::ResourceLimit,

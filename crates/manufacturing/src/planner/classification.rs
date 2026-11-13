@@ -3737,10 +3737,10 @@ pub(super) fn fixed_owned_budget(
     move |units, bytes| {
         if retained_units
             .checked_add(units)
-            .is_none_or(|n| n > super::MAX_RETAINED_GEOMETRY_UNITS)
+            .is_none_or(|n| n > crate::working_set::units())
             || owned_bytes
                 .checked_add(bytes)
-                .is_none_or(|n| n as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+                .is_none_or(|n| n as u64 > crate::working_set::bytes_u64())
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -3755,7 +3755,7 @@ fn scratch_points(regions: &[&MultiPolygon<f64>]) -> Result<usize, Manufacturing
     regions.iter().try_fold(0usize, |points, domain| {
         points
             .checked_add(region::point_count(domain))
-            .filter(|total| *total <= super::MAX_RETAINED_GEOMETRY_UNITS)
+            .filter(|total| *total <= crate::working_set::units())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -4037,7 +4037,7 @@ fn whole_row_bound(fill: &MultiPolygon<f64>, rows: usize) -> Result<usize, Manuf
     region::point_count(fill)
         .checked_mul(rows + 2)
         .and_then(|points| points.checked_add(rows.checked_mul(8)?))
-        .filter(|points| *points <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|points| *points <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -4054,7 +4054,7 @@ fn reserve_recovery_record<T>(
     admit: &mut impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
     if records.len() == records.capacity() {
-        let remaining = super::MAX_RETAINED_GEOMETRY_UNITS
+        let remaining = crate::working_set::units()
             .checked_sub(other)
             .ok_or_else(|| {
                 error(
@@ -4094,7 +4094,7 @@ struct BridgeBand {
 
 fn point_sum(a: usize, b: usize) -> Result<usize, ManufacturingError> {
     a.checked_add(b)
-        .filter(|total| *total <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|total| *total <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -4313,8 +4313,8 @@ mod ownership_tests {
             section_area_mm2: fill.unsigned_area(),
             wall_area_mm2: 0.,
             protected_hole_area_mm2: 0.,
-                thin_widened_mm: 0.,
-                thin_omitted_area_mm2: 0.,
+            thin_widened_mm: 0.,
+            thin_omitted_area_mm2: 0.,
             retained_points: 0,
             retained_bytes: 0,
         });
@@ -4425,8 +4425,8 @@ mod ownership_tests {
     fn fixed_owned_admission_separates_units_from_bytes() {
         let mut admit = fixed_owned_budget(0, 0);
         admit(MAX_DEPOSITION_SEGMENTS as usize + 1, 0).unwrap();
-        assert!(admit(0, MAX_MANUFACTURING_RETAINED_BYTES as usize + 1).is_err());
-        assert!(admit(super::super::MAX_RETAINED_GEOMETRY_UNITS + 1, 0).is_err());
+        assert!(admit(0, crate::working_set::bytes() + 1).is_err());
+        assert!(admit(crate::working_set::units() + 1, 0).is_err());
     }
 }
 
@@ -4747,8 +4747,8 @@ mod split_skin_tests {
                         section_area_mm2: material.unsigned_area(),
                         wall_area_mm2: 0.,
                         protected_hole_area_mm2: 0.,
-                thin_widened_mm: 0.,
-                thin_omitted_area_mm2: 0.,
+                        thin_widened_mm: 0.,
+                        thin_omitted_area_mm2: 0.,
                     }),
                     bottom: MultiPolygon(Vec::new()),
                     top: material,

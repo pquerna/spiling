@@ -96,6 +96,7 @@ impl NativeScene {
             surface_overlays: &self.surface_overlays,
             process_document: &self.process_document,
             surface_images: &self.surface_images,
+            working_set: crate::WorkingSet::UNMEASURED,
         }
     }
 }
@@ -338,7 +339,12 @@ fn supported_box_schedules_no_support_stops_under_its_top() {
     let layers = &bundle.plan.layers;
     assert_eq!(layers.len(), 40);
     for layer in layers {
-        assert!((layer.height_mm - 0.2).abs() < 1e-6, "{} at {}", layer.height_mm, layer.z_mm);
+        assert!(
+            (layer.height_mm - 0.2).abs() < 1e-6,
+            "{} at {}",
+            layer.height_mm,
+            layer.z_mm
+        );
     }
     assert_eq!(bundle.verification.support_deposition_segments, 0);
 }

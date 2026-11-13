@@ -213,7 +213,7 @@ pub(super) fn qualify(
                 if request
                     .retained_points
                     .checked_add(scratch)
-                    .is_none_or(|units| units > super::super::MAX_RETAINED_GEOMETRY_UNITS)
+                    .is_none_or(|units| units > crate::working_set::units())
                 {
                     return Err(resource(
                         "wall underfill reach geometry reservation exceeded",
@@ -944,7 +944,7 @@ fn overlay(
 }
 
 fn available_stage(request: &WallRequest<'_>) -> Result<usize, ManufacturingError> {
-    (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+    (crate::working_set::bytes())
         .checked_sub(request.owned_bytes)
         .ok_or_else(|| resource("wall prepared metadata byte budget exceeded"))
 }

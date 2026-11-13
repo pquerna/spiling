@@ -302,9 +302,7 @@ pub(super) fn capture(
             }
             result.points += region::point_count(&material);
             result.bytes += native::material_bytes(&mut material) * 2;
-            if result.bytes > MAX_MANUFACTURING_RETAINED_BYTES as usize / 4
-                || result.points > 65_536
-            {
+            if result.bytes > crate::working_set::bytes() / 4 || result.points > 65_536 {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
                     "surface construction retained domain budget exceeded",

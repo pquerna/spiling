@@ -211,7 +211,7 @@ fn sliding_512_vertex_annuli_keep_expected_minimum_radius_and_protected_hole() {
         assert!(material.contains(&Point::new((outer + hole) * 0.5, 0.0)));
         assert!(
             source_points(&spans) + index.retained_points() + material.temporary_points()
-                <= MAX_RETAINED_GEOMETRY_UNITS
+                <= crate::working_set::units()
         );
     }
     assert!(index.retained_points() > 0);
@@ -388,7 +388,7 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
             &cancel,
         )
         .unwrap();
-    let external = MAX_RETAINED_GEOMETRY_UNITS - 15 + lower.temporary_points();
+    let external = crate::working_set::units() - 15 + lower.temporary_points();
     let failure = index
         .survival(
             1,
@@ -411,7 +411,7 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
             .survival(
                 0,
                 Some(1),
-                MAX_RETAINED_GEOMETRY_UNITS - 4,
+                crate::working_set::units() - 4,
                 source_bytes(&spans) + lower.temporary_bytes(),
                 &cancel
             )
@@ -424,7 +424,7 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
         .survival(
             0,
             Some(1),
-            MAX_RETAINED_GEOMETRY_UNITS - 5,
+            crate::working_set::units() - 5,
             source_bytes(&spans) + lower.temporary_bytes(),
             &cancel,
         )
@@ -435,7 +435,7 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
     let byte_failure = index
         .admit_retained(
             0,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize
+            crate::working_set::bytes()
                 - index.nodes.capacity() * std::mem::size_of::<Cached>()
                 - 1,
             &cancel,
@@ -562,7 +562,7 @@ fn charged_lru_eviction_skips_pins_and_recomputed_ranges_keep_exact_geometry() {
         .survival(
             0,
             None,
-            MAX_RETAINED_GEOMETRY_UNITS - 10,
+            crate::working_set::units() - 10,
             source_bytes(&spans),
             &cancel,
         )
@@ -585,7 +585,7 @@ fn charged_lru_eviction_skips_pins_and_recomputed_ranges_keep_exact_geometry() {
             .survival(
                 0,
                 None,
-                MAX_RETAINED_GEOMETRY_UNITS - 4,
+                crate::working_set::units() - 4,
                 source_bytes(&spans),
                 &cancel
             )
@@ -658,7 +658,7 @@ fn frozen_pool_uses_owned_operands_when_pinned_and_reclaims_after_release() {
             .survival(
                 0,
                 Some(3),
-                MAX_RETAINED_GEOMETRY_UNITS - 14,
+                crate::working_set::units() - 14,
                 source_bytes(&spans),
                 &cancel
             )
@@ -707,7 +707,7 @@ fn zero_frozen_pool_counts_both_recursive_temporary_operands_and_output() {
             .survival(
                 0,
                 Some(3),
-                MAX_RETAINED_GEOMETRY_UNITS - 14,
+                crate::working_set::units() - 14,
                 source_bytes(&spans),
                 &cancel
             )
@@ -720,7 +720,7 @@ fn zero_frozen_pool_counts_both_recursive_temporary_operands_and_output() {
         .survival(
             0,
             Some(3),
-            MAX_RETAINED_GEOMETRY_UNITS - 15,
+            crate::working_set::units() - 15,
             source_bytes(&spans),
             &cancel,
         )
@@ -878,7 +878,7 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
         .survival(
             0,
             Some(0),
-            MAX_RETAINED_GEOMETRY_UNITS - result.temporary_points(),
+            crate::working_set::units() - result.temporary_points(),
             source_bytes(&spans) + result.temporary_bytes(),
             &cancel,
         )
@@ -1079,7 +1079,7 @@ fn cleared_pins_keep_geometry_and_shared_byte_admission_after_reclamation() {
         )
         .unwrap();
     let expected = region::offset(&spans[1].material, -0.6, &cancel).unwrap();
-    let outside_points = MAX_RETAINED_GEOMETRY_UNITS - lower.points;
+    let outside_points = crate::working_set::units() - lower.points;
     index
         .admit_retained(
             outside_points,
@@ -1090,7 +1090,7 @@ fn cleared_pins_keep_geometry_and_shared_byte_admission_after_reclamation() {
     let failure = index
         .admit_retained(
             0,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize - index.retained_bytes() + 1,
+            crate::working_set::bytes() - index.retained_bytes() + 1,
             &cancel,
         )
         .unwrap_err();
@@ -1235,7 +1235,7 @@ fn canonical_raw_ranges_remain_reclaimable_and_recompute_inside_frozen_pool() {
     let pool = index.freeze_retained_capacity();
     index
         .admit_retained(
-            MAX_RETAINED_GEOMETRY_UNITS - pinned.points,
+            crate::working_set::units() - pinned.points,
             source_bytes(&spans),
             &cancel,
         )
@@ -1254,7 +1254,7 @@ fn canonical_raw_ranges_remain_reclaimable_and_recompute_inside_frozen_pool() {
     let expected_area = pinned.unsigned_area();
     assert_eq!(
         index
-            .admit_retained(MAX_RETAINED_GEOMETRY_UNITS, source_bytes(&spans), &cancel)
+            .admit_retained(crate::working_set::units(), source_bytes(&spans), &cancel)
             .err()
             .unwrap()
             .code,
@@ -1263,7 +1263,7 @@ fn canonical_raw_ranges_remain_reclaimable_and_recompute_inside_frozen_pool() {
     drop(pinned);
     drop(again);
     index
-        .admit_retained(MAX_RETAINED_GEOMETRY_UNITS, source_bytes(&spans), &cancel)
+        .admit_retained(crate::working_set::units(), source_bytes(&spans), &cancel)
         .unwrap();
     assert_eq!(index.retained_points(), 0);
     let rebuilt = index

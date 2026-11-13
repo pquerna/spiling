@@ -279,7 +279,7 @@ pub(super) fn verify(
         || count
             .checked_mul(size_of::<Stroke>())
             .and_then(|bytes| bytes.checked_add(retained))
-            .is_none_or(|bytes| bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+            .is_none_or(|bytes| bytes as u64 > crate::working_set::bytes_u64())
     {
         return Err(resource());
     }

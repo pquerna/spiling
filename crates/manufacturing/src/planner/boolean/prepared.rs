@@ -22,7 +22,7 @@ impl<'a> Prepared<'a> {
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, ManufacturingError> {
         let inventory = inspect(source.0.iter(), work, cancel)?;
-        if inventory.count > MAX_RETAINED_GEOMETRY_UNITS {
+        if inventory.count > crate::working_set::units() {
             return Err(resource("Boolean broad-phase staging point limit exceeded"));
         }
         let bytes = inventory
@@ -184,7 +184,7 @@ fn admit_query(
     let min = [a.min[0].min(b.min[0]), a.min[1].min(b.min[1])];
     let max = [a.max[0].max(b.max[0]), a.max[1].max(b.max[1])];
     let padding = overlay_padding(min, max)?;
-    if count > MAX_RETAINED_GEOMETRY_UNITS {
+    if count > crate::working_set::units() {
         return Err(resource("Boolean broad-phase staging point limit exceeded"));
     }
     // Explicit repeated kernel construction/NlogN obligation, including

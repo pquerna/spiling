@@ -1600,9 +1600,11 @@ fn inspect_asset(
     let bundle = asset.decode().map_err(JobError::from)?;
     let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())
         .map_err(JobError::from)?;
-    let mut inspection =
+    let working_set = crate::resources::manufacturing_working_set()?;
+    let mut inspection = spiling_manufacturing::working_set::scope(working_set, || {
         spiling_manufacturing::inspect_bundle(&result, &asset.record.hash, output, cancel)
-            .map_err(JobError::from)?;
+    })
+    .map_err(JobError::from)?;
     let bundle = result.bundle;
     if let JobWorkflow::FixedDualMarlin { job } = &inspection.provenance.workflow {
         for face in &mut inspection.provenance.surface_color {
@@ -1685,6 +1687,7 @@ fn preflight(
             surface_overlays: &request.surface_overlays,
             process_document: &request.process_document,
             surface_images: &request.surface_images,
+            working_set: crate::resources::manufacturing_working_set()?,
         },
         cancel,
     )?)
@@ -1733,6 +1736,7 @@ fn compile(
                 surface_overlays: &surface_overlays,
                 process_document: &process_document,
                 surface_images: &surface_images,
+                working_set: crate::resources::manufacturing_working_set()?,
             },
             cancel,
         )?;

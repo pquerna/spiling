@@ -1752,7 +1752,7 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
     );
     let neighbor = region::offset(&section, -inset, &cancel).unwrap();
     let retained = 0;
-    let outside_bytes = MAX_MANUFACTURING_RETAINED_BYTES as usize - 16 * 1024;
+    let outside_bytes = crate::working_set::bytes() - 16 * 1024;
     let failure = ClassifiedRegions::new(
         Arc::clone(&layout),
         &neighbor,
@@ -1913,7 +1913,10 @@ fn refinement_splits_keep_their_course_and_every_axis_above() {
     native::split_layer(&mut schedule, 4, "course regression").unwrap();
     let run = axes(&schedule);
     assert_eq!(
-        schedule.iter().map(|layer| layer.course).collect::<Vec<_>>(),
+        schedule
+            .iter()
+            .map(|layer| layer.course)
+            .collect::<Vec<_>>(),
         [0, 1, 1, 1, 2, 2, 3, 4]
     );
     assert_eq!(run[5].1, before[2].1);

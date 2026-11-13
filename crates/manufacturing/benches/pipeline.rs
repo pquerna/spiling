@@ -267,6 +267,7 @@ impl Scene {
             surface_overlays: &self.surfaces,
             process_document: &self.process,
             surface_images: &self.images,
+            working_set: spiling_manufacturing::WorkingSet::UNMEASURED,
         }
     }
 }

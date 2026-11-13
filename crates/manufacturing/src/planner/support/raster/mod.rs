@@ -121,7 +121,7 @@ impl Domains {
             .try_fold(self.retained, |total, domain| {
                 total
                     .checked_add(region::point_count(domain))
-                    .filter(|n| *n <= super::super::MAX_RETAINED_GEOMETRY_UNITS)
+                    .filter(|n| *n <= crate::working_set::units())
                     .ok_or_else(|| {
                         resource("combined support centerline ownership budget exceeded")
                     })
@@ -172,7 +172,7 @@ impl Domains {
         let retained = self
             .admit()?
             .checked_add(region::point_count(ordinary).max(region::point_count(interface_centers)))
-            .filter(|n| *n <= super::super::MAX_RETAINED_GEOMETRY_UNITS)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| resource("combined support hatch scratch budget exceeded"))?;
         // Every path has at most twice as many points as segments. Reserve the
         // live geometry allowance before wall/hatch allocation, independently
@@ -191,8 +191,8 @@ impl Domains {
         let output_stride =
             3 * std::mem::size_of::<DepositionPath>() + 6 * std::mem::size_of::<[f64; 3]>();
         let allowance = (MAX_DEPOSITION_SEGMENTS as usize - existing_segments)
-            .min((super::super::MAX_RETAINED_GEOMETRY_UNITS - retained) / 2)
-            .min((MAX_MANUFACTURING_RETAINED_BYTES as usize - live_bytes) / output_stride);
+            .min((crate::working_set::units() - retained) / 2)
+            .min((crate::working_set::bytes() - live_bytes) / output_stride);
         let mut segments = MAX_DEPOSITION_SEGMENTS as usize - allowance;
         let mut paths = Vec::new();
         let wall_centers = self.wall_centers.as_ref().unwrap_or(&self.centers);
@@ -448,7 +448,7 @@ fn walls(
                     [a, b],
                     interface,
                     &mut cuts,
-                    super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - path_points,
+                    crate::working_set::units() - retained - path_points,
                     owned_bytes.saturating_add(super::super::bonds::path_bytes(paths)),
                     work,
                     foreign_work,
@@ -478,7 +478,7 @@ fn walls(
                             paths,
                             segments,
                             &mut path_points,
-                            super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - cuts.len(),
+                            crate::working_set::units() - retained - cuts.len(),
                             owned_bytes.saturating_add(super::vec_bytes(&cuts)),
                         )?;
                         owned_start = start;
@@ -495,7 +495,7 @@ fn walls(
                     paths,
                     segments,
                     &mut path_points,
-                    super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - cuts.len(),
+                    crate::working_set::units() - retained - cuts.len(),
                     owned_bytes.saturating_add(super::vec_bytes(&cuts)),
                 )?;
             }
@@ -685,7 +685,7 @@ mod tests {
                 false,
                 0.6,
                 0,
-                MAX_MANUFACTURING_RETAINED_BYTES as usize,
+                crate::working_set::bytes(),
                 0,
                 &mut 0,
                 0,

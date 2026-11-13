@@ -18,6 +18,7 @@ fn capture<'a>(input: &'a CompilerInput<'_>, intent: &'a ManufacturingIntent) ->
         surface_overlays: input.surface_overlays,
         process_document: input.process_document,
         surface_images: input.surface_images,
+        working_set: input.working_set,
     }
 }
 

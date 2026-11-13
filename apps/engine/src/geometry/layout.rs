@@ -56,6 +56,7 @@ impl Rect {
 fn input<'a>(
     capture: &'a CompileRequest,
     definitions: &'a BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
+    working_set: spiling_manufacturing::WorkingSet,
 ) -> spiling_manufacturing::CompilerInput<'a> {
     spiling_manufacturing::CompilerInput {
         project_id: &capture.project_id,
@@ -67,6 +68,7 @@ fn input<'a>(
         surface_overlays: &capture.surface_overlays,
         process_document: &capture.process_document,
         surface_images: &capture.surface_images,
+        working_set,
     }
 }
 fn candidate(
@@ -169,8 +171,14 @@ fn prepare_single(
         return Err(fail("Layout contains an unknown template or pinned part"));
     }
     progress("layout_preparing_native_footprints".into());
-    let bounds =
-        spiling_manufacturing::planner::layout_footprints(&input(&r.capture, definitions), cancel)?;
+    let bounds = spiling_manufacturing::planner::layout_footprints(
+        &input(
+            &r.capture,
+            definitions,
+            crate::resources::manufacturing_working_set()?,
+        ),
+        cancel,
+    )?;
     let mut bounds: BTreeMap<_, _> = bounds.into_iter().collect();
     let intent = &r.capture.intent;
     let mut bed_bounds = intent.printer.build_envelope;
@@ -444,7 +452,11 @@ fn prepare_single(
             r.capture.surface_overlays = Arc::new(surface);
             r.capture.process_document = Arc::new(process);
             Ok(spiling_manufacturing::compile(
-                input(&r.capture, definitions),
+                input(
+                    &r.capture,
+                    definitions,
+                    crate::resources::manufacturing_working_set()?,
+                ),
                 cancel,
             )?)
         })();

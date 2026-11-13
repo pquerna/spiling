@@ -44,11 +44,6 @@ use std::{
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
-// Geometry retention uses coordinate-equivalent reservation units (including
-// opaque proof bytes), NOT the independent 100k published-command ceiling.
-// This coarse arithmetic bound never replaces actual allocated-byte admission.
-const MAX_RETAINED_GEOMETRY_UNITS: usize =
-    MAX_MANUFACTURING_RETAINED_BYTES as usize / std::mem::size_of::<geo::Coord<f64>>();
 
 pub(crate) fn retained_coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
     bonds::coverage_bytes(coverage)
@@ -58,7 +53,7 @@ fn remaining_geometry_units(
     retained: usize,
     owned_bytes: usize,
 ) -> Result<usize, ManufacturingError> {
-    let units = MAX_RETAINED_GEOMETRY_UNITS
+    let units = crate::working_set::units()
         .checked_sub(retained)
         .ok_or_else(|| {
             error(
@@ -66,7 +61,7 @@ fn remaining_geometry_units(
                 "retained geometry coordinate-unit budget exceeded",
             )
         })?;
-    let bytes = (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+    let bytes = (crate::working_set::bytes())
         .checked_sub(owned_bytes)
         .ok_or_else(|| {
             error(
@@ -591,7 +586,7 @@ fn admit_schedule<'model>(
                         .checked_add(native_points)
                         .filter(|n| {
                             n.checked_add(region::point_count(native))
-                                .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
+                                .is_some_and(|total| total <= crate::working_set::units())
                         })
                         .ok_or_else(|| {
                             error(
@@ -612,7 +607,7 @@ fn admit_schedule<'model>(
                         .filter(|n| {
                             live_retained
                                 .checked_add(*n)
-                                .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
+                                .is_some_and(|total| total <= crate::working_set::units())
                         })
                         .ok_or_else(|| {
                             error(
@@ -683,7 +678,7 @@ fn admit_schedule<'model>(
                 .checked_add(native_points)
                 .and_then(|n| n.checked_add(region::point_count(&next)))
                 .and_then(|n| n.checked_add(region::point_count(placed)))
-                .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -775,7 +770,7 @@ fn admit_schedule<'model>(
             )
             .filter(|n| {
                 n.checked_add(native_points)
-                    .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
+                    .is_some_and(|total| total <= crate::working_set::units())
             })
             .ok_or_else(|| {
                 error(
@@ -859,7 +854,7 @@ fn admit_schedule<'model>(
                             })
                     })
                     .and_then(|points| retained_points.checked_add(points))
-                    .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+                    .filter(|points| *points <= crate::working_set::units())
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -905,7 +900,7 @@ fn admit_schedule<'model>(
                 .as_ref()
                 .map_or(0, |wall| wall.layout.point_count()),
         )
-        .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|points| *points <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -1328,7 +1323,7 @@ fn admit_schedule<'model>(
                         if wall_owned_bytes
                             .checked_add(new_wall_bytes)
                             .and_then(|b| b.checked_add(wall_index_entry_bytes))
-                            .is_none_or(|b| b as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+                            .is_none_or(|b| b as u64 > crate::working_set::bytes_u64())
                         {
                             return Err(error(
                                 ManufacturingErrorCode::ResourceLimit,
@@ -1952,7 +1947,7 @@ fn admit_schedule<'model>(
                 let outcome = (|| {
                     let live_retained_points = retained_points
                         .checked_add(retained_support_points)
-                        .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
+                        .filter(|total| *total <= crate::working_set::units())
                         .ok_or_else(|| {
                             error(
                                 ManufacturingErrorCode::ResourceLimit,
@@ -3184,7 +3179,11 @@ fn scheduled_layers(
             check_cancel(cancel)?;
             // Material that only ends facing up (a top face, the part's top)
             // carries nothing above it that support could hold.
-            if admission.upward_only_events.binary_search_by(|z| z.total_cmp(&event)).is_ok() {
+            if admission
+                .upward_only_events
+                .binary_search_by(|z| z.total_cmp(&event))
+                .is_ok()
+            {
                 continue;
             }
             let scale = event
@@ -3766,34 +3765,47 @@ fn prefill_walls(
         }
         wanted.push((index, current, native_index, key));
     }
+    // Rayon workers do not inherit the operation's working-set scope, and
+    // concurrent tasks are live together: each admits an equal share of the
+    // growth beyond the already-retained geometry. A task refused for its share
+    // only misses this memo; the serial layer pass retries with the whole set.
+    let working_set = {
+        let unit = std::mem::size_of::<geo::Coord<f64>>();
+        let retained_bytes = retained_points.saturating_mul(unit);
+        let growth = crate::working_set::bytes().saturating_sub(retained_bytes)
+            / rayon::current_num_threads().max(1);
+        crate::working_set::WorkingSet::new(retained_bytes.saturating_add(growth).max(1))?
+    };
     let planned: Vec<_> = wanted
         .par_iter()
         .map(|&(index, current, native_index, key)| {
-            let elevation = &schedule[index as usize];
-            let native_span = native_surfaces
-                .get(native_index)
-                .filter(|span| span.start <= index);
-            let mut work = 0usize;
-            let plan =
-                required_material(&sections[current].material, native_span, &mut work, cancel)
-                    .and_then(|required| {
-                        construction.walls(
-                            walls::WallRequest {
-                                material: &sections[current].material,
-                                required: &required,
-                                recipe: &input.intent.recipe,
-                                limits: &limits,
-                                nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
-                                lower_z: elevation.lower_z,
-                                upper_z: elevation.z,
-                                retained_points,
-                                owned_bytes: 0,
-                            },
-                            &mut work,
-                            cancel,
-                        )
-                    });
-            (current, key, plan.ok(), work)
+            crate::working_set::scope(working_set, || {
+                let elevation = &schedule[index as usize];
+                let native_span = native_surfaces
+                    .get(native_index)
+                    .filter(|span| span.start <= index);
+                let mut work = 0usize;
+                let plan =
+                    required_material(&sections[current].material, native_span, &mut work, cancel)
+                        .and_then(|required| {
+                            construction.walls(
+                                walls::WallRequest {
+                                    material: &sections[current].material,
+                                    required: &required,
+                                    recipe: &input.intent.recipe,
+                                    limits: &limits,
+                                    nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
+                                    lower_z: elevation.lower_z,
+                                    upper_z: elevation.z,
+                                    retained_points,
+                                    owned_bytes: 0,
+                                },
+                                &mut work,
+                                cancel,
+                            )
+                        });
+                (current, key, plan.ok(), work)
+            })
         })
         .collect();
     for (current, key, plan, spent) in planned {
@@ -4014,7 +4026,7 @@ fn skin_query_retained_points(
         .try_fold(retained_points, |points, material| {
             points
                 .checked_add(material.temporary_points())
-                .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+                .filter(|points| *points <= crate::working_set::units())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -4031,7 +4043,7 @@ fn skin_retained_points(
 ) -> Result<usize, ManufacturingError> {
     let retained = retained_points
         .checked_add(neighborhoods.retained_points())
-        .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|points| *points <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -4050,7 +4062,7 @@ fn skin_query_retained_bytes(
     materials.iter().try_fold(owned_bytes, |bytes, material| {
         bytes
             .checked_add(material.temporary_bytes())
-            .filter(|bytes| *bytes as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+            .filter(|bytes| *bytes as u64 <= crate::working_set::bytes_u64())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -4124,7 +4136,7 @@ fn skin_external_owned_bytes(
                 )
             })?;
     }
-    if bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+    if bytes as u64 > crate::working_set::bytes_u64() {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
             "skin outside retained-byte budget exceeded",
@@ -4137,7 +4149,7 @@ fn geometry_bytes(parts: &[usize]) -> Result<usize, ManufacturingError> {
     let bytes = parts
         .iter()
         .try_fold(0usize, |total, part| total.checked_add(*part))
-        .filter(|bytes| *bytes as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+        .filter(|bytes| *bytes as u64 <= crate::working_set::bytes_u64())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -4314,7 +4326,7 @@ fn admit_skin_scratch(
 ) -> Result<(), ManufacturingError> {
     let external = skin_query_retained_points(retained, queries)?
         .checked_add(scratch)
-        .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|total| *total <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,

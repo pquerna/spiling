@@ -992,6 +992,7 @@ fn parse_compute_settings(
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     resources::source_memory_limit(std::env::var_os(resources::SOURCE_MEMORY_ENV))?;
+    resources::manufacturing_memory_limit(std::env::var_os(resources::MANUFACTURING_MEMORY_ENV))?;
     let mut args = std::env::args_os().skip(1);
     let mut store = None;
     let mut library_path = None;

@@ -495,7 +495,7 @@ mod tests {
         };
         let mut paths = Vec::new();
         let mut segments = 0;
-        let mut memory = HatchMemory::new(&paths, MAX_MANUFACTURING_RETAINED_BYTES as usize - 1);
+        let mut memory = HatchMemory::new(&paths, crate::working_set::bytes() - 1);
         let failure = memory
             .append(&[0.0, 10.0], 0.0, &layer, false, &mut paths, &mut segments)
             .unwrap_err();

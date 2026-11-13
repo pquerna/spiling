@@ -639,7 +639,7 @@ mod tests {
         for (retained, mut work, cancel, expected) in [
             (0, usize::MAX, false, ManufacturingErrorCode::ResourceLimit),
             (
-                super::super::super::super::MAX_RETAINED_GEOMETRY_UNITS,
+                crate::working_set::units(),
                 0,
                 false,
                 ManufacturingErrorCode::ResourceLimit,

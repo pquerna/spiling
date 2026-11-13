@@ -33,7 +33,7 @@ impl Budget<'_> {
         self.allocated = self
             .allocated
             .checked_add(bytes)
-            .filter(|total| *total as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+            .filter(|total| *total as u64 <= crate::working_set::bytes_u64())
             .ok_or_else(resource)?;
         Ok(())
     }
@@ -74,7 +74,7 @@ impl Budget<'_> {
             left,
             right,
             self.work,
-            (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+            (crate::working_set::bytes())
                 .checked_sub(self.allocated)
                 .ok_or_else(resource)?,
             self.cancel,
@@ -1445,7 +1445,7 @@ mod tests {
             &[&wall],
             &recipe(),
             0.4,
-            MAX_MANUFACTURING_RETAINED_BYTES as usize - 1,
+            crate::working_set::bytes() - 1,
             &mut 0,
             &AtomicBool::new(false),
         )

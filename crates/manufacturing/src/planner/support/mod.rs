@@ -243,7 +243,7 @@ pub(super) fn component_admission<'a>(
             .chain(&candidate.whole_rows)
             .map(|path| path.points_mm.capacity())
             .sum::<usize>();
-        let retained = (super::MAX_RETAINED_GEOMETRY_UNITS)
+        let retained = (crate::working_set::units())
             .checked_sub(budget)
             .and_then(|total| total.checked_sub(owned))
             .ok_or_else(|| {
@@ -394,7 +394,7 @@ fn workspace_budget(units: usize, bytes: usize) -> Result<usize, ManufacturingEr
         f64,
         usize,
     )>());
-    Ok(remaining.min((MAX_MANUFACTURING_RETAINED_BYTES as usize - bytes) / stride))
+    Ok(remaining.min((crate::working_set::bytes() - bytes) / stride))
 }
 
 fn reserve_component_record<T>(
@@ -771,7 +771,7 @@ pub(super) fn realize(
         })?;
         let mut retained = native_points
             .checked_add(constructed_points)
-            .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -874,7 +874,7 @@ pub(super) fn realize(
                             "replayed support constructed accounting underflow",
                         )
                     })?;
-                if retained > super::MAX_RETAINED_GEOMETRY_UNITS {
+                if retained > crate::working_set::units() {
                     return Err(error(
                         ManufacturingErrorCode::ResourceLimit,
                         "replayed support retained point limit exceeded",
@@ -1579,7 +1579,7 @@ pub(super) fn realize(
         let base_retained = retained;
         let retained = retained
             .checked_add(nominal.capacity())
-            .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -2914,7 +2914,7 @@ fn replace_skin_bridge_domains(
     let revised = retained
         .checked_sub(old)
         .and_then(|n| n.checked_add(new))
-        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|n| *n <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -2946,7 +2946,7 @@ fn replace_skin_command_fits(
     let revised = retained
         .checked_sub(old)
         .and_then(|n| n.checked_add(new))
-        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .filter(|n| *n <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -4518,14 +4518,8 @@ mod tests {
         assert_eq!(bytes, a.bytes + a.header_bytes + b.bytes + b.header_bytes);
         assert!(remaining_geometry_budget(0, 0, &support, &interfaces, &[]).is_ok());
         assert!(
-            remaining_geometry_budget(
-                0,
-                MAX_MANUFACTURING_RETAINED_BYTES as usize,
-                &support,
-                &interfaces,
-                &[]
-            )
-            .is_err()
+            remaining_geometry_budget(0, crate::working_set::bytes(), &support, &interfaces, &[])
+                .is_err()
         );
     }
 

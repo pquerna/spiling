@@ -4,7 +4,7 @@
 
 //! Process-limited segment-cell wall construction. Native material remains the
 //! authority: a diagram proposes deposition, never source topology or coverage.
-use super::{MAX_RETAINED_GEOMETRY_UNITS, boolean, region};
+use super::{boolean, region};
 use crate::{check_cancel, error};
 mod arachne;
 mod beading;
@@ -300,7 +300,7 @@ pub(super) fn plan_material_domain_walls<'a>(
             if request
                 .retained_points
                 .checked_add(scratch)
-                .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+                .is_none_or(|n| n > crate::working_set::units())
             {
                 return Err(resource("wall target construction staging exceeded"));
             }
@@ -482,7 +482,7 @@ pub(super) fn plan_material_domain_walls<'a>(
         paths.iter().map(|p| p.points_mm.len()).sum::<usize>() + region::point_count(&fill);
     if retained_points
         .checked_add(request.retained_points)
-        .is_none_or(|n| n > MAX_RETAINED_GEOMETRY_UNITS)
+        .is_none_or(|n| n > crate::working_set::units())
     {
         return Err(resource("retained wall construction limit exceeded"));
     }
@@ -670,11 +670,11 @@ fn permission_bytes(permissions: &Vec<Junction>) -> usize {
             .sum::<usize>()
 }
 fn admit_stage(request: &WallRequest<'_>, bytes: usize) -> Result<(), ManufacturingError> {
-    if request.retained_points > MAX_RETAINED_GEOMETRY_UNITS
+    if request.retained_points > crate::working_set::units()
         || request
             .owned_bytes
             .checked_add(bytes)
-            .is_none_or(|total| total as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+            .is_none_or(|total| total as u64 > crate::working_set::bytes_u64())
     {
         return Err(resource("wall owned/staging byte budget exceeded"));
     }

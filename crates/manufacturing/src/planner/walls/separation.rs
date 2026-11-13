@@ -86,7 +86,7 @@ fn certificate_admitted(
     if request
         .owned_bytes
         .checked_add(bytes)
-        .is_none_or(|n| n > MAX_MANUFACTURING_RETAINED_BYTES as usize)
+        .is_none_or(|n| n > crate::working_set::bytes())
     {
         return Ok(false);
     }
@@ -664,7 +664,7 @@ mod tests {
             work -= paths.len();
             assert!(!all_certified(&paths, &[], &request, &mut work, &cancel).unwrap());
             assert_eq!(work, usize::MAX);
-            request.owned_bytes = MAX_MANUFACTURING_RETAINED_BYTES as usize;
+            request.owned_bytes = crate::working_set::bytes();
             work = 0;
             assert!(!all_certified(&paths, &[], &request, &mut work, &cancel).unwrap());
             for paths in [&paths[..], &paths[..1], &paths[..0]] {

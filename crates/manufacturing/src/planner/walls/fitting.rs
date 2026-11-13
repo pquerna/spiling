@@ -699,7 +699,7 @@ fn remember(
                 .and_then(|b| b.checked_add(owned_bytes))
                 .and_then(|b| b.checked_add(FIT_STACK_BYTES))
                 .ok_or_else(|| resource("wall fit summary ownership overflow"))?;
-            if peak as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+            if peak as u64 > crate::working_set::bytes_u64() {
                 return Err(resource("wall fit summary staging byte limit exceeded"));
             }
             boolean::charge(work, runs.len())?;
@@ -713,7 +713,7 @@ fn remember(
                         .and_then(|n| b.checked_add(n))
                 })
                 .ok_or_else(|| resource("wall fit summary retained overflow"))?;
-            if retained as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+            if retained as u64 > crate::working_set::bytes_u64() {
                 return Err(resource("wall fit summary retained byte limit exceeded"));
             }
         }
