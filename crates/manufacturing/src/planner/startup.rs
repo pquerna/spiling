@@ -85,6 +85,7 @@ mod tests {
             z: 0.2,
             sample: 0.1,
             height: 0.2,
+            course: 0,
         }
     }
 
@@ -115,6 +116,7 @@ mod tests {
                 z: 0.4,
                 sample: 0.3,
                 height: 0.2,
+                course: 1,
             },
         ];
         let mut sections = vec![SectionSpan {

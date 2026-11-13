@@ -414,9 +414,15 @@ pub(super) fn combine(
                 z,
                 lower_z,
                 height,
-                axis: region::HatchAxis::for_policy(recipe.rectilinear_axis, last as u32),
+                axis: region::HatchAxis::for_policy(
+                    recipe.rectilinear_axis,
+                    spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers)[last],
+                ),
                 recipe,
-                top_axis: region::HatchAxis::for_policy(recipe.top_skin_axis, last as u32),
+                top_axis: region::HatchAxis::for_policy(
+                    recipe.top_skin_axis,
+                    spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers)[last],
+                ),
             };
             let budget = CoarseBudget {
                 segment_base,

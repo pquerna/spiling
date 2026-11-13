@@ -109,6 +109,7 @@ pub(super) fn verify(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let mut hits = Vec::new();
+    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (index, layer) in plan.layers.iter().enumerate() {
         for path in &layer.paths {
             let Some(DepositionOwner::RegionalSkinBridge {
@@ -133,8 +134,12 @@ pub(super) fn verify(
             let fixed = match recipe.rectilinear_axis {
                 RectilinearAxisPolicy::X => 1,
                 RectilinearAxisPolicy::Y => 0,
-                RectilinearAxisPolicy::AlternatingXY => usize::from(layer.index.is_multiple_of(2)),
-                RectilinearAxisPolicy::AlternatingYX => usize::from(!layer.index.is_multiple_of(2)),
+                RectilinearAxisPolicy::AlternatingXY => {
+                    usize::from(alternation[index].is_multiple_of(2))
+                }
+                RectilinearAxisPolicy::AlternatingYX => {
+                    usize::from(!alternation[index].is_multiple_of(2))
+                }
             };
             let along = 1 - fixed;
             let raw_a = path.points_mm[0];

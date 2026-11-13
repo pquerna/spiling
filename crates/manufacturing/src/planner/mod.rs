@@ -1333,18 +1333,32 @@ fn admit_schedule<'model>(
         layers.capacity() * std::mem::size_of::<PrintLayer>() + construction.bytes;
     let mut segments = 0usize;
     let skin_inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
-    let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset, *surface_work)?;
+    // Neighborhood leaves are courses: a refinement split changes only its
+    // own course's leaf, never another range's aligned decomposition.
+    let span_courses = sections
+        .iter()
+        .map(|span| schedule[span.start as usize].course)
+        .collect::<Vec<_>>();
+    let mut neighborhoods =
+        SkinNeighborhoods::with_courses(&sections, &span_courses, skin_inset, *surface_work)?;
+    drop(span_courses);
     // Tolerant sections are a function of their schedule entries alone.
     if admission.tolerant.is_some() {
-        neighborhoods.attach_memo(survival_memo, schedule.len(), &|index| {
-            let layer = &schedule[index as usize];
-            [
-                layer.z.to_bits(),
-                layer.lower_z.to_bits(),
-                layer.sample.to_bits(),
-                layer.height.to_bits(),
-            ]
-        });
+        neighborhoods.attach_memo(
+            survival_memo,
+            schedule
+                .iter()
+                .map(|layer| {
+                    [
+                        layer.z.to_bits(),
+                        layer.lower_z.to_bits(),
+                        layer.sample.to_bits(),
+                        layer.height.to_bits(),
+                    ]
+                })
+                .collect(),
+            probe.is_none(),
+        );
     }
     let outcome = (|| {
         let mut key = None;
@@ -1459,7 +1473,10 @@ fn admit_schedule<'model>(
             let z = elevation.z;
             let sample = elevation.sample;
             let height = elevation.height;
-            let top_axis = region::HatchAxis::for_policy(recipe.top_skin_axis, index);
+            let top_axis = region::HatchAxis::for_policy(
+                recipe.top_skin_axis,
+                hatch_key(schedule, index as usize),
+            );
             let current = span_at(&sections, index);
             let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
                 .map(|i| span_at(&sections, i));
@@ -1469,6 +1486,7 @@ fn admit_schedule<'model>(
                 layers.push(PrintLayer {
                     skin_command_fits: Vec::new(),
                     index,
+                    hatch_course: elevation.course,
                     z_mm: z,
                     lower_z_mm: elevation.lower_z,
                     height_mm: height,
@@ -1874,7 +1892,10 @@ fn admit_schedule<'model>(
                 }
             }
             wall_layouts[index as usize] = wall_layout.as_ref().map(Arc::clone);
-            let axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, index);
+            let axis = region::HatchAxis::for_policy(
+                recipe.rectilinear_axis,
+                hatch_key(schedule, index as usize),
+            );
             let axis_slot = usize::from(axis == region::HatchAxis::Y);
             for template in &mut templates {
                 if template
@@ -2138,6 +2159,7 @@ fn admit_schedule<'model>(
             layers.push(PrintLayer {
                 skin_command_fits,
                 index,
+                hatch_course: elevation.course,
                 z_mm: z,
                 lower_z_mm: elevation.lower_z,
                 height_mm: height,
@@ -2228,6 +2250,7 @@ fn admit_schedule<'model>(
                 replay: admission.tolerant.is_some()
                     && web_roof.is_none()
                     && construction.domains.is_empty(),
+                phases: &phase_by_layer,
             },
             &mut segments,
             cancel,
@@ -2390,7 +2413,10 @@ fn admit_schedule<'model>(
                         lower_z: elevation.lower_z,
                         height: elevation.z - elevation.lower_z,
                         axis,
-                        top_axis: region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
+                        top_axis: region::HatchAxis::for_policy(
+                            recipe.top_skin_axis,
+                            hatch_key(schedule, index),
+                        ),
                         recipe,
                     };
                     let recovering_components = recovery.is_some();
@@ -2448,7 +2474,10 @@ fn admit_schedule<'model>(
                             elevation.z,
                             elevation.lower_z,
                             axis,
-                            region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
+                            region::HatchAxis::for_policy(
+                                recipe.top_skin_axis,
+                                hatch_key(schedule, index),
+                            ),
                             recipe,
                             web_roof.as_ref().map(|field| field.roof(index)),
                             phase_by_layer[index],
@@ -3338,6 +3367,11 @@ struct LayerElevation {
     lower_z: f64,
     sample: f64,
     height: f64,
+    /// Nominal layer this interval belongs to. The base schedule numbers its
+    /// layers bottom-up; a later split divides one course into thinner
+    /// layers that keep it, so alternating hatch axes are a function of
+    /// physical position, never of a shifting output index.
+    course: u32,
 }
 
 // No actual scheduled support top can fit beneath these object floors. This
@@ -3369,10 +3403,14 @@ fn unreachable_support_end(
 #[derive(Clone, Copy)]
 enum AnchorProbeScope {
     UnreachableSupport,
-    StartupPair { top_mm: f64 },
+    StartupPair {
+        top_mm: f64,
+    },
     /// Output layers below `end` after a complete-pass refinement. Support
     /// keeps complete-pass semantics; only a refinement it finds is a decision.
-    RefinedLayer { end: usize },
+    RefinedLayer {
+        end: usize,
+    },
 }
 
 impl AnchorProbeScope {
@@ -3456,6 +3494,33 @@ fn deposition_probe(
 /// Refine the schedule at an unreachable layer. When it can be refined no
 /// further and supports are enabled, mark the layer exhausted so the retry
 /// prints its overhang as authored; a second request for it still refuses.
+/// Alternating-axis key of `schedule[index]`. A layer outside refinement
+/// uses its course. Within a maximal run of layers whose courses were split,
+/// the key counts down from the run's top layer, which keeps its course axis:
+/// every layer inside the run crosses its neighbors, the course above still
+/// crosses the run's top, and a split changes no layer above its run. Plan
+/// validation and replay derive the same key independently from the
+/// published courses.
+fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
+    let refined = |layer: usize| {
+        let course = schedule[layer].course;
+        layer
+            .checked_sub(1)
+            .is_some_and(|below| schedule[below].course == course)
+            || schedule
+                .get(layer + 1)
+                .is_some_and(|above| above.course == course)
+    };
+    if !refined(index) {
+        return schedule[index].course;
+    }
+    let mut top = index;
+    while top + 1 < schedule.len() && refined(top + 1) {
+        top += 1;
+    }
+    schedule[top].course + (top - index) as u32
+}
+
 fn exhaust_or_refine(
     schedule: &mut Vec<LayerElevation>,
     index: usize,
@@ -4033,11 +4098,13 @@ fn layer_schedule_with_bounds(
                     ),
                 ));
             }
+            let course = schedule.len() as u32;
             schedule.push(LayerElevation {
                 z,
                 lower_z: previous,
                 sample: previous + interval_height * 0.5,
                 height,
+                course,
             });
             previous = z;
         }
@@ -4069,7 +4136,12 @@ fn refine_surface_schedule(
             }
         }
         if !split {
-            refined.push(layer);
+            // Finish-driven refinement belongs to the base schedule: each
+            // resolved interval is its own course.
+            refined.push(LayerElevation {
+                course: refined.len() as u32,
+                ..layer
+            });
             continue;
         }
         let midpoint = layer.sample;
@@ -4098,12 +4170,14 @@ fn refine_surface_schedule(
             lower_z: midpoint,
             sample: midpoint + upper_height * 0.5,
             height: upper_height,
+            course: layer.course,
         });
         pending.push(LayerElevation {
             z: midpoint,
             lower_z: start,
             sample: start + lower_height * 0.5,
             height: lower_height,
+            course: layer.course,
         });
     }
     Ok(refined)

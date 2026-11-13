@@ -8,7 +8,7 @@ use geo::{Area, BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::{
     rc::{Rc, Weak},
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
 };
 mod anchors;
 pub(super) use anchors::inward_bond_endpoint;
@@ -32,10 +32,17 @@ struct Demand {
 
 /// One layer's actual-stroke admission from an earlier pass of the same
 /// lane: the layer handed to support, its admitted result and the records
-/// the iteration appended. Valid only while its inputs are bit-identical.
+/// the iteration appended, with every input it read. Valid only while all of
+/// them are bit-identical; output indices may differ.
 struct ReplayEntry {
+    identity: [u64; 4],
+    /// Skin horizon schedule identities and the admission context below.
+    horizon: Horizon,
+    lower: Option<Arc<PrintLayer>>,
     before: PrintLayer,
-    after: PrintLayer,
+    after: Arc<PrintLayer>,
+    phase: region::OrdinaryHatchPhase,
+    axis_key: u32,
     exhausted: bool,
     demand: Option<Demand>,
     bridge_roles: Vec<(usize, DepositionKind)>,
@@ -46,43 +53,87 @@ struct ReplayEntry {
 }
 
 impl ReplayEntry {
+    /// The lower layer is the previous entry's shared `after`.
     fn bytes(&self) -> usize {
-        layer_payload_bytes([&self.before, &self.after].into_iter())
-            .saturating_add(std::mem::size_of::<Self>())
+        layer_payload_bytes([&self.before, &*self.after].into_iter())
+            .saturating_add(std::mem::size_of::<Self>() + std::mem::size_of::<PrintLayer>())
             .saturating_add(vec_bytes(&self.bridge_roles))
+            .saturating_add(vec_bytes(&self.horizon.layers))
     }
 }
 
+/// Schedule identities a layer's raster regeneration reads: its whole skin
+/// horizon plus the layer bounding it below, its position there and whether
+/// each neighbor exists (a missing one depends on where the schedule ends).
+#[derive(PartialEq)]
+struct Horizon {
+    layers: Vec<[u64; 4]>,
+    offset: usize,
+    neighbors: [bool; 2],
+}
+
+impl Horizon {
+    fn of(schedule: &[super::LayerElevation], index: usize, recipe: &PlanarPrintRecipe) -> Self {
+        let below = super::physical_neighbor(
+            schedule,
+            index as u32,
+            recipe.bottom_skin_thickness_mm,
+            false,
+        );
+        let above =
+            super::physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true);
+        // Without a lower neighbor the horizon reaches the bed, which stays
+        // in the slice so both positions are absolute.
+        let first = below.map_or(0, |below| (below as usize).saturating_sub(1));
+        let last = above.map_or(schedule.len() - 1, |above| above as usize);
+        Self {
+            layers: schedule[first..=last].iter().map(elevation_bits).collect(),
+            offset: index - first,
+            neighbors: [below.is_some(), above.is_some()],
+        }
+    }
+}
+
+/// Every field but the output index.
+fn same_layer(a: &PrintLayer, b: &PrintLayer) -> bool {
+    let PrintLayer {
+        index: _,
+        hatch_course,
+        z_mm,
+        lower_z_mm,
+        height_mm,
+        section_z_mm,
+        paths,
+        region_coverage,
+        skin_command_fits,
+    } = a;
+    *hatch_course == b.hatch_course
+        && z_mm.to_bits() == b.z_mm.to_bits()
+        && lower_z_mm.to_bits() == b.lower_z_mm.to_bits()
+        && height_mm.to_bits() == b.height_mm.to_bits()
+        && section_z_mm.to_bits() == b.section_z_mm.to_bits()
+        && *paths == b.paths
+        && *region_coverage == b.region_coverage
+        && *skin_command_fits == b.skin_command_fits
+}
+
 /// Per-layer support admission kept across schedule retries. A refinement
-/// changes the schedule from one index upward; layers whose complete skin
-/// horizon lies below it see bit-identical layers, neighbors and raster
-/// context, so their admission is replayed instead of recomputed.
+/// splits one layer and shifts every output index above it, but hatch axes
+/// follow courses and neighborhoods follow physical ranges, so a layer keeps
+/// its inputs wherever it moves. Entries are found by schedule identity and
+/// replayed while the layer handed to support, its phase and axis, the
+/// admitted layer below and its whole skin horizon are bit-identical.
 #[derive(Default)]
 pub(super) struct SupportReplay {
+    /// The last pass's schedule; clipped columns are valid below its first change.
     schedule: Vec<[u64; 4]>,
+    /// Ascending schedule identity. A truncated pass keeps earlier entries
+    /// above its last layer.
     entries: Vec<ReplayEntry>,
     /// Demand corridor after occupied-section clipping, by target layer:
     /// demanded path, contact top and the clipped column.
     columns: std::collections::BTreeMap<usize, (usize, usize, MultiPolygon<f64>)>,
     bytes: usize,
-}
-
-impl SupportReplay {
-    /// Layers below the returned index may replay: their schedule entries
-    /// and every top-skin neighbor are unchanged since the recorded pass.
-    fn valid_prefix(&self, schedule: &[super::LayerElevation], top_skin_mm: f64) -> usize {
-        let changed = schedule
-            .iter()
-            .zip(&self.schedule)
-            .position(|(layer, recorded)| elevation_bits(layer) != *recorded)
-            .unwrap_or(schedule.len().min(self.schedule.len()));
-        (0..self.entries.len().min(changed))
-            .find(|index| {
-                super::physical_neighbor(schedule, *index as u32, top_skin_mm, true)
-                    .is_none_or(|above| above as usize >= changed)
-            })
-            .unwrap_or(self.entries.len().min(changed))
-    }
 }
 
 fn elevation_bits(layer: &super::LayerElevation) -> [u64; 4] {
@@ -104,7 +155,7 @@ pub(super) struct RasterCandidate {
 
 fn authored_component_axis(
     candidate: &RasterCandidate,
-    index: u32,
+    course: u32,
     recipe: &PlanarPrintRecipe,
 ) -> region::HatchAxis {
     let top = !candidate.paths.is_empty()
@@ -120,7 +171,7 @@ fn authored_component_axis(
         } else {
             recipe.rectilinear_axis
         },
-        index,
+        course,
     )
 }
 
@@ -500,6 +551,8 @@ pub(super) struct SupportInput<'a> {
     /// Sections are a function of the schedule entry alone and each layer of
     /// its skin horizon, so per-layer admission may replay across retries.
     pub(super) replay: bool,
+    /// Ordinary hatch phase by output layer, a raster regeneration input.
+    pub(super) phases: &'a [region::OrdinaryHatchPhase],
 }
 
 #[derive(Default)]
@@ -621,7 +674,7 @@ pub(super) fn realize(
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
     let replaying = input.replay && !tentative;
-    let replay_old = if replaying {
+    let mut replay_old = if replaying {
         std::mem::take(&mut work_bank.replay)
     } else {
         SupportReplay::default()
@@ -639,15 +692,48 @@ pub(super) fn realize(
             recipe,
             source_z_allowance_mm,
             replay: _,
+            phases,
         } = *input;
+        // Clipped columns cross every lower layer: valid only below the first
+        // schedule change since the last pass and below every live layer.
         let mut replay_limit = if replaying {
-            replay_old.valid_prefix(schedule, recipe.top_skin_thickness_mm)
+            schedule
+                .iter()
+                .zip(&replay_old.schedule)
+                .position(|(layer, recorded)| elevation_bits(layer) != *recorded)
+                .unwrap_or(schedule.len().min(replay_old.schedule.len()))
         } else {
             0
         };
         native_owned_bytes = native_owned_bytes.saturating_add(replay_old.bytes);
-        let mut replay_entries = replay_old.entries.into_iter();
-        let column_replay = replay_old.columns;
+        let mut replay_entries = std::mem::take(&mut replay_old.entries)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let column_replay = std::mem::take(&mut replay_old.columns);
+        // Earlier entry with each output layer's schedule identity.
+        let mut cursor = 0usize;
+        let mut entry_at = |identity: [u64; 4], entries: &[Option<ReplayEntry>]| {
+            let z = f64::from_bits(identity[0]);
+            while entries.get(cursor).is_some_and(|entry| {
+                entry
+                    .as_ref()
+                    .is_none_or(|entry| f64::from_bits(entry.identity[0]) < z)
+            }) {
+                cursor += 1;
+            }
+            entries
+                .get(cursor)
+                .and_then(Option::as_ref)
+                .is_some_and(|entry| entry.identity == identity)
+                .then_some(cursor)
+        };
+        let phase_at = |index: usize| {
+            phases
+                .get(index)
+                .copied()
+                .unwrap_or(region::OrdinaryHatchPhase::Centered)
+        };
         let mut recorded: Vec<ReplayEntry> = Vec::new();
         let mut recorded_bytes = 0usize;
         let mut recording = replaying;
@@ -700,17 +786,15 @@ pub(super) fn realize(
         {
             return Err(super::bonds::unresolved(first));
         }
-        // Every replay above builds on this layer's admitted result.
-        if replay_entries
-            .next()
-            .is_none_or(|entry| Some(&entry.after) != layers.first())
-        {
-            replay_limit = 0;
-        }
         if let (Some(before), Some(after)) = (first_before, layers.first()) {
             recorded.push(ReplayEntry {
+                identity: elevation_bits(&schedule[0]),
+                horizon: Horizon::of(schedule, 0, recipe),
+                lower: None,
                 before,
-                after: after.clone(),
+                after: Arc::new(after.clone()),
+                phase: phase_at(0),
+                axis_key: super::hatch_key(schedule, 0),
                 exhausted: false,
                 demand: None,
                 bridge_roles: Vec::new(),
@@ -723,12 +807,26 @@ pub(super) fn realize(
         for index in 1..layers.len() {
             check_cancel(cancel)?;
             let exhausted_here = exhausted_layers.contains(&layers[index].z_mm.to_bits());
-            let old_entry = replay_entries.next();
-            if index < replay_limit
-                && let Some(entry) = old_entry
-                && entry.exhausted == exhausted_here
-                && entry.before == layers[index]
-            {
+            let identity = elevation_bits(&schedule[index]);
+            let old_index = if replaying {
+                entry_at(identity, &replay_entries)
+            } else {
+                None
+            };
+            let entry = old_index
+                .and_then(|old| replay_entries[old].take())
+                .filter(|entry| {
+                    entry.exhausted == exhausted_here
+                        && entry.phase == phase_at(index)
+                        && entry.axis_key == super::hatch_key(schedule, index)
+                        && entry
+                            .lower
+                            .as_deref()
+                            .is_some_and(|lower| same_layer(lower, &layers[index - 1]))
+                        && same_layer(&entry.before, &layers[index])
+                        && entry.horizon == Horizon::of(schedule, index, recipe)
+                });
+            if let Some(mut entry) = entry {
                 // Bit-identical inputs: apply the recorded admission.
                 let live = native_owned_bytes
                     + layer_payload_bytes(layers.iter())
@@ -765,7 +863,14 @@ pub(super) fn realize(
                         "replayed support retained point limit exceeded",
                     ));
                 }
-                layers[index] = entry.after.clone();
+                layers[index] = (*entry.after).clone();
+                layers[index].index = index as u32;
+                entry.before.index = index as u32;
+                if let Some(demand) = &mut entry.demand {
+                    demand.target = index;
+                }
+                // Re-link to this pass's lower entry: the record stays a chain.
+                entry.lower = recorded.last().map(|lower| Arc::clone(&lower.after));
                 joined_layers[index] = entry.joined;
                 if let Some(demand) = &entry.demand {
                     reserve_owned(&mut demands, 1, live)?;
@@ -775,7 +880,9 @@ pub(super) fn realize(
                 for &(path, kind) in &entry.bridge_roles {
                     original_bridge_roles.push((index, path, kind));
                 }
-                recorded.push(entry);
+                if recording {
+                    recorded.push(entry);
+                }
                 continue;
             }
             replay_limit = replay_limit.min(index);
@@ -817,7 +924,10 @@ pub(super) fn realize(
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
             anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-            let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
+            let authored_axis = region::HatchAxis::for_policy(
+                recipe.rectilinear_axis,
+                super::hatch_key(schedule, index),
+            );
             let previous = prior[index - 1].paths.iter();
             anchors.set_budget(workspace_budget(
                 retained,
@@ -851,13 +961,14 @@ pub(super) fn realize(
                         + vec_bytes(&admission.bridges);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
+                    let course = super::hatch_key(schedule, index);
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,
                          scratch: usize,
                          scratch_owned_bytes: usize| {
                             let contact_bridge =
-                                axis != authored_component_axis(candidate, index as u32, recipe);
+                                axis != authored_component_axis(candidate, course, recipe);
                             let budget = component_budget(
                                 retained,
                                 owned_bytes,
@@ -1122,8 +1233,13 @@ pub(super) fn realize(
             )) = replay_before
             {
                 let entry = ReplayEntry {
+                    identity,
+                    horizon: Horizon::of(schedule, index, recipe),
+                    lower: recorded.last().map(|lower| Arc::clone(&lower.after)),
                     before,
-                    after: layer.clone(),
+                    after: Arc::new(layer.clone()),
+                    phase: phase_at(index),
+                    axis_key: super::hatch_key(schedule, index),
                     exhausted: exhausted_here,
                     demand: demands.get(demand_at).cloned(),
                     bridge_roles: original_bridge_roles[roles_at..]
@@ -1151,11 +1267,21 @@ pub(super) fn realize(
                 }
             }
         }
-        drop(replay_entries);
         // Layers below this index equal the recorded pass's after admission.
         let column_valid = replay_limit.min(layers.len());
         let mut recording_columns = recording;
         if recording {
+            // A truncated pass saw only a prefix; earlier entries above it
+            // remain exact records of their own inputs.
+            let top = recorded
+                .last()
+                .map(|entry| f64::from_bits(entry.identity[0]));
+            recorded.extend(
+                replay_entries
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| top.is_some_and(|top| f64::from_bits(entry.identity[0]) > top)),
+            );
             let bytes = recorded
                 .iter()
                 .map(ReplayEntry::bytes)
@@ -1942,8 +2068,10 @@ pub(super) fn realize(
                 foreign_work,
                 cancel,
             )?;
-            let preferred =
-                region::HatchAxis::for_policy(RectilinearAxisPolicy::AlternatingXY, layer.index);
+            let preferred = region::HatchAxis::for_policy(
+                RectilinearAxisPolicy::AlternatingXY,
+                super::hatch_key(schedule, i),
+            );
             let mut paths = Vec::new();
             let mut omitted_wall_mm = 0.0;
             // Worst unanchored span of the preferred raster, kept only when
@@ -2105,7 +2233,10 @@ pub(super) fn realize(
                 + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
             owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
             anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
-            let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
+            let authored_axis = region::HatchAxis::for_policy(
+                recipe.rectilinear_axis,
+                super::hatch_key(schedule, index),
+            );
             let begin = object_start[index];
             let previous = prior[index - 1].paths.iter();
             let contact_paths = contact_tops[index]
@@ -2126,13 +2257,14 @@ pub(super) fn realize(
                 ) + support_metadata_bytes
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 let staged_anchor_bytes = anchors.retained_bytes();
+                let course = super::hatch_key(schedule, index);
                 let mut check_component =
                     |candidate: &mut RasterCandidate,
                      axis,
                      scratch: usize,
                      scratch_owned_bytes: usize| {
                         let contact_bridge =
-                            axis != authored_component_axis(candidate, index as u32, recipe);
+                            axis != authored_component_axis(candidate, course, recipe);
                         let budget = component_budget(
                             retained_regions,
                             native_owned_bytes + extra_owned_bytes,
@@ -2265,13 +2397,14 @@ pub(super) fn realize(
                         + vec_bytes(&admission.bridges);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
+                    let course = super::hatch_key(schedule, index);
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,
                          scratch: usize,
                          scratch_owned_bytes: usize| {
                             let contact_bridge =
-                                axis != authored_component_axis(candidate, index as u32, recipe);
+                                axis != authored_component_axis(candidate, course, recipe);
                             let budget = component_budget(
                                 retained_regions,
                                 owned_bytes,
