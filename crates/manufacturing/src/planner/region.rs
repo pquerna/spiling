@@ -331,6 +331,15 @@ fn offset_disk_sides(radius: f64) -> Result<usize, ManufacturingError> {
     Ok(sides)
 }
 
+/// The same circumscribed disk the offsets use, for constructing outward
+/// conservative capsules around actual stroke centerlines.
+pub(super) fn circumscribed_disk(radius: f64) -> Result<Vec<Coord<f64>>, ManufacturingError> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(unsupported("circumscribed disk radius is not finite and positive"));
+    }
+    offset_disk(radius)
+}
+
 /// Counterclockwise circumscribed disk vertices at `(k + 1/2)·2π/sides`.
 fn offset_disk(radius: f64) -> Result<Vec<Coord<f64>>, ManufacturingError> {
     let sides = offset_disk_sides(radius)?;

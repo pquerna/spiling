@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 mod anchors;
+mod beads;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::strict_capsule_point;
 pub(crate) use anchors::{
@@ -1494,10 +1495,10 @@ pub(super) fn realize(
                 .saturating_add(
                     sections
                         .len()
-                        .saturating_mul(std::mem::size_of::<(usize, f64)>()),
+                        .saturating_mul(std::mem::size_of::<NominalScope>()),
                 ),
         )?;
-        let mut nominal: Vec<(usize, f64)> = Vec::new();
+        let mut nominal: Vec<NominalScope> = Vec::new();
         nominal.try_reserve_exact(sections.len()).map_err(|_| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -1511,6 +1512,7 @@ pub(super) fn realize(
                 continue;
             }
             let mut floor: Option<f64> = None;
+            let mut beads: Option<[[f64; 2]; 2]> = None;
             // A truncated retry's spans may extend past its output layers.
             let objects = layers
                 .get(section.start as usize..(section.end as usize).min(layers.len()))
@@ -1526,10 +1528,20 @@ pub(super) fn realize(
                         path.physical_z_mm[1] - path.physical_z_mm[0],
                     )?[0];
                     floor = Some(floor.map_or(lower, |value| value.min(lower)));
+                    // Outward XY bounds of the actual nominal bead footprint,
+                    // which can extend outside D; screens only.
+                    let Some(bounds) = bead_bounds(path, &mut work, cancel)? else {
+                        continue;
+                    };
+                    beads = Some(union_frame(beads, bounds));
                 }
             }
             if let Some(floor) = floor {
-                nominal.push((index, floor));
+                nominal.push(NominalScope {
+                    index,
+                    floor,
+                    beads,
+                });
             }
         }
         super::boolean::charge(
@@ -1541,7 +1553,7 @@ pub(super) fn realize(
                 )
             })?,
         )?;
-        nominal.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        nominal.sort_unstable_by(|a, b| a.floor.total_cmp(&b.floor).then(a.index.cmp(&b.index)));
         check_cancel(cancel)?;
         let base_retained = retained;
         let retained = retained
@@ -1560,6 +1572,12 @@ pub(super) fn realize(
             &interfaces,
             &[&protected],
         )?;
+        // Object bead edges reaching outside each section's D, found once per
+        // section on first need and shared by every later demand.
+        let mut outside_beads: Vec<Option<Vec<beads::BeadEdge>>> = Vec::new();
+        reserve_owned(&mut outside_beads, nominal.len(), owned_bytes)?;
+        outside_beads.resize_with(nominal.len(), || None);
+        owned_bytes = owned_bytes.saturating_add(vec_bytes(&outside_beads));
         for demand in &demands {
             check_cancel(cancel)?;
             let demanded_path = &layers[demand.target].paths[demand.failure.path];
@@ -1925,7 +1943,12 @@ pub(super) fn realize(
                 )?[1];
                 // Higher portions are subsets of the already bed-anchored lower
                 // column. Do not lower/remap its original eligible contact top.
-                while let Some(&(index, floor)) = nominal.get(next_nominal) {
+                while let Some(&NominalScope {
+                    index,
+                    floor,
+                    beads,
+                }) = nominal.get(next_nominal)
+                {
                     super::native::charge_support_clearance(&mut work, cancel)?;
                     if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
                         break;
@@ -1995,7 +2018,142 @@ pub(super) fn realize(
                             &[&protected, &column],
                         )?;
                     }
+                    // Actual object beads can extend outside D (variable-width
+                    // walls, Bridge construction). Exclude their nominal
+                    // capsules at the same clearance so final actual support
+                    // capsules meet the unchanged pair proof by construction.
+                    if let Some(beads) = beads
+                        && !column.0.is_empty()
+                        && !ColumnScreen::new(&column, xy_clearance_mm)?
+                            .is_some_and(|screen| screen.rejects(beads))
+                    {
+                        if outside_beads[next_nominal].is_none() {
+                            let section = &sections[index];
+                            let objects = layers
+                                .get(
+                                    section.start as usize
+                                        ..(section.end as usize).min(layers.len()),
+                                )
+                                .unwrap_or(&[]);
+                            let edges = beads::outside_material(
+                                &section.material,
+                                objects.iter().flat_map(|layer| &layer.paths),
+                                BEAD_OUTSIDE_ALLOWANCE_MM,
+                                &mut work,
+                                cancel,
+                            )?;
+                            owned_bytes = owned_bytes.saturating_add(vec_bytes(&edges));
+                            remaining_geometry_budget(
+                                retained,
+                                owned_bytes,
+                                &support_regions,
+                                &interfaces,
+                                &[&protected, &column],
+                            )?;
+                            outside_beads[next_nominal] = Some(edges);
+                        }
+                        let edges = outside_beads[next_nominal]
+                            .as_deref()
+                            .expect("cached outside bead edges");
+                        let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
+                        let mut batch = stage_object_beads(
+                            edges,
+                            &column,
+                            &proximity,
+                            xy_clearance_mm,
+                            &BeadStaging {
+                                retained,
+                                owned_bytes,
+                                support: &support_regions,
+                                interfaces: &interfaces,
+                                protected: &protected,
+                            },
+                            &mut work,
+                            cancel,
+                        )?;
+                        if !batch.pieces.0.is_empty() {
+                            let next = subtract_staged(
+                                &mut batch,
+                                &column,
+                                xy_clearance_mm,
+                                retained,
+                                owned_bytes,
+                                &support_regions,
+                                &interfaces,
+                                &protected,
+                                &mut work,
+                                foreign_work,
+                                cancel,
+                            )
+                            .map_err(|mut e| {
+                                e.message = format!(
+                                    "support layer {i}, actual object beads of owner {index}: {}",
+                                    e.message,
+                                );
+                                e
+                            })?;
+                            if let Some(next) = next {
+                                column = next.into_shared();
+                                shared_union = None;
+                                proximity = index_column(
+                                    &column,
+                                    retained,
+                                    owned_bytes,
+                                    &support_regions,
+                                    &interfaces,
+                                    &[&protected, &column],
+                                )?;
+                            }
+                        }
+                    }
                     next_nominal += 1;
+                }
+                // The top bead's actual upper height touches the next section's
+                // closed occupancy sheet; final proof keeps such equal sheets.
+                // Clip only this top layer, never the lower corridor.
+                if i == top && !column.0.is_empty() {
+                    let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
+                    let mut batch = stage_touching_sheet(
+                        layers,
+                        sections,
+                        top,
+                        &column,
+                        &proximity,
+                        xy_clearance_mm,
+                        &BeadStaging {
+                            retained,
+                            owned_bytes,
+                            support: &support_regions,
+                            interfaces: &interfaces,
+                            protected: &protected,
+                        },
+                        &mut work,
+                        cancel,
+                    )?;
+                    if let Some(next) = subtract_staged(
+                        &mut batch,
+                        &column,
+                        xy_clearance_mm,
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &protected,
+                        &mut work,
+                        foreign_work,
+                        cancel,
+                    )? {
+                        column = next.into_shared();
+                        shared_union = None;
+                        proximity = index_column(
+                            &column,
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &column],
+                        )?;
+                    }
                 }
                 if column.0.is_empty() {
                     break;
@@ -2042,6 +2200,8 @@ pub(super) fn realize(
             return Ok(SupportAdmission::Undecided);
         }
         drop(nominal);
+        // Recomputed for the raster stage below, which no longer charges these.
+        drop(outside_beads);
         let mut retained = base_retained;
         // Support centers stay half a bead inside the clipped support region. This
         // gives the nominal bead, not only its centerline, the declared XY clearance.
@@ -3857,16 +4017,63 @@ fn subtract_batch(
     foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let owned = owned_bytes.saturating_add(proximity.bytes());
+    let Some(next) = subtract_staged(
+        batch,
+        column,
+        xy_clearance_mm,
+        retained,
+        owned,
+        support,
+        interfaces,
+        protected,
+        work,
+        foreign_work,
+        cancel,
+    )?
+    else {
+        return Ok(());
+    };
+    *column = next;
+    *proximity = index_column(
+        column,
+        retained,
+        owned,
+        support,
+        interfaces,
+        &[protected, column],
+    )?;
+    Ok(())
+}
+
+/// The column minus the clearance offset of the staged pieces' positive union;
+/// `None` when nothing was staged. `owned_bytes` includes live column indexes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Batch subtraction inventories shared support, interfaces and temporary material"
+)]
+fn subtract_staged(
+    batch: &mut PieceBatch,
+    column: &OwnedMaterial,
+    xy_clearance_mm: f64,
+    retained: usize,
+    owned_bytes: usize,
+    support: &[Rc<OwnedMaterial>],
+    interfaces: &[Rc<OwnedMaterial>],
+    protected: &OwnedMaterial,
+    work: &mut usize,
+    foreign_work: usize,
+    cancel: &AtomicBool,
+) -> Result<Option<OwnedMaterial>, ManufacturingError> {
     let staged = std::mem::take(batch);
     let (Some(frame), Some(b)) = (staged.frame, column.bounding_rect()) else {
-        return Ok(());
+        return Ok(None);
     };
     let distance = clearance_distance_in_frame(
         frame,
         [[b.min().x, b.min().y], [b.max().x, b.max().y]],
         xy_clearance_mm,
     )?;
-    let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
     // Union the raw pieces first: (A ∪ B) ⊕ D = (A ⊕ D) ∪ (B ⊕ D), and stacked
     // facet hulls then cross only their few own edges, not offset cycles.
     let merged = if staged.pieces.0.len() > 1 {
@@ -3916,18 +4123,218 @@ fn subtract_batch(
         interfaces,
         &[protected, column, &clearance, &next],
     )?;
-    *column = next;
-    region::check_size(column)?;
-    drop(clearance);
-    *proximity = index_column(
-        column,
-        retained,
-        owned_bytes,
-        support,
-        interfaces,
-        &[protected, column],
+    region::check_size(&next)?;
+    Ok(Some(next))
+}
+
+/// Object beads reaching at most this far outside D stay covered by the D
+/// exclusion, whose clearance distance already adds the offset tolerance.
+const BEAD_OUTSIDE_ALLOWANCE_MM: f64 = super::OFFSET_TOLERANCE_MM * 0.4;
+
+/// Admission context for staging actual object bead capsules.
+struct BeadStaging<'a> {
+    retained: usize,
+    owned_bytes: usize,
+    support: &'a [Rc<OwnedMaterial>],
+    interfaces: &'a [Rc<OwnedMaterial>],
+    protected: &'a OwnedMaterial,
+}
+
+/// One section's admitted object floor and the outward XY bounds of its
+/// actual nominal bead footprints.
+#[derive(Clone, Copy)]
+struct NominalScope {
+    index: usize,
+    floor: f64,
+    beads: Option<[[f64; 2]; 2]>,
+}
+
+/// Outward XY bounds of a path's nominal bead capsules; `None` for paths that
+/// deposit no edge. Malformed paths are left to ordinary validation.
+fn bead_bounds(
+    path: &DepositionPath,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<[[f64; 2]; 2]>, ManufacturingError> {
+    if path.points_mm.len() < 2 || support_role(path.kind) {
+        return Ok(None);
+    }
+    let width = match &path.width {
+        spiling_contracts::manufacturing::WidthProfile::Constant { width_mm } => *width_mm,
+        spiling_contracts::manufacturing::WidthProfile::PerEdge { widths_mm } => {
+            widths_mm.iter().copied().fold(0.0, f64::max)
+        }
+    };
+    let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+    for point in &path.points_mm {
+        super::native::charge_support_clearance(work, cancel)?;
+        bounds = [
+            [bounds[0][0].min(point[0]), bounds[0][1].min(point[1])],
+            [bounds[1][0].max(point[0]), bounds[1][1].max(point[1])],
+        ];
+    }
+    let half = (width * 0.5).next_up();
+    let bounds = [
+        bounds[0].map(|v| (v - half).next_down()),
+        bounds[1].map(|v| (v + half).next_up()),
+    ];
+    Ok(bounds
+        .iter()
+        .flatten()
+        .all(|v| v.is_finite())
+        .then_some(bounds))
+}
+
+/// Circumscribed polygon of one nominal bead capsule: the convex hull of the
+/// offset disk placed at both centerline endpoints contains the round capsule.
+fn bead_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Result<Polygon<f64>, ManufacturingError> {
+    use geo::ConvexHull;
+    let disk = region::circumscribed_disk(radius)?;
+    let points: Vec<geo::Coord<f64>> = [a, b]
+        .into_iter()
+        .flat_map(|center| {
+            disk.iter().map(move |offset| geo::Coord {
+                x: center[0] + offset.x,
+                y: center[1] + offset.y,
+            })
+        })
+        .collect();
+    Ok(geo::MultiPoint::from(points).convex_hull())
+}
+
+/// Stage the next section's continuous occupancy pieces whose closed height
+/// scope reaches the top support bead's actual upper height. Unscoped invariant
+/// D spans its whole height and stays with the height-aware nominal exclusion.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Sheet staging screens against the live column and its index under shared admission"
+)]
+fn stage_touching_sheet(
+    layers: &[PrintLayer],
+    sections: &[super::SectionSpan],
+    top: usize,
+    column: &MultiPolygon<f64>,
+    proximity: &proximity::ColumnProximity,
+    xy_clearance_mm: f64,
+    admission: &BeadStaging<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<PieceBatch, ManufacturingError> {
+    let mut batch = PieceBatch::default();
+    let next = span_at(sections, top as u32) + 1;
+    let Some(section) = sections.get(next) else {
+        return Ok(batch);
+    };
+    let Some(screen) = ColumnScreen::new(column, xy_clearance_mm)? else {
+        return Ok(batch);
+    };
+    let layer = &layers[top];
+    let upper = (program_coordinates::project_xyz6_segment_bead_height_mm(
+        layer.z_mm,
+        layer.z_mm,
+        layer.z_mm - layer.lower_z_mm,
+    )?[1]
+        + super::native::XYZ6_SCREEN_SLACK_MM)
+        .next_up();
+    let lower = layer.lower_z_mm;
+    let touches = |height: Option<[f64; 2]>| {
+        height.is_some_and(|[from, to]| from <= upper && to >= lower)
+    };
+    let scanned = std::cell::Cell::new(0usize);
+    let mut failure = None;
+    section.visit_occupied_screened(
+        cancel,
+        |bounds, height| {
+            check_cancel(cancel)?;
+            scanned.set(scanned.get().saturating_add(1));
+            Ok(touches(height) && !screen.rejects(bounds))
+        },
+        |piece, height| {
+            if !touches(height) {
+                return Ok(true);
+            }
+            super::boolean::budget_polygon_accumulated(piece, work, cancel)?;
+            let Some(distance) = candidate_clearance_distance(piece, column, xy_clearance_mm)?
+            else {
+                return Ok(true);
+            };
+            if proximity.separated(piece, separation_reach(distance)) {
+                return Ok(true);
+            }
+            if let Err(error) = batch.stage(
+                piece,
+                admission.retained,
+                admission.owned_bytes,
+                admission.support,
+                admission.interfaces,
+                &[admission.protected],
+            ) {
+                failure = Some(error);
+                return Ok(false);
+            }
+            Ok(true)
+        },
     )?;
-    Ok(())
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    *work = work.checked_add(scanned.get()).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "cumulative touching occupancy scope work counter overflow",
+        )
+    })?;
+    Ok(batch)
+}
+
+/// Stage the circumscribed capsules of the given actual object bead edges that
+/// the column clearance can reach. Screens decide only what to skip: a skipped
+/// capsule's clearance offset provably cannot meet the column.
+fn stage_object_beads(
+    edges: &[beads::BeadEdge],
+    column: &MultiPolygon<f64>,
+    proximity: &proximity::ColumnProximity,
+    xy_clearance_mm: f64,
+    admission: &BeadStaging<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<PieceBatch, ManufacturingError> {
+    let mut batch = PieceBatch::default();
+    let Some(screen) = ColumnScreen::new(column, xy_clearance_mm)? else {
+        return Ok(batch);
+    };
+    for edge in edges {
+        super::native::charge_support_clearance(work, cancel)?;
+        let (p, q) = (edge.a, edge.b);
+        // The circumscribed capsule reaches at most half the offset tolerance
+        // beyond the round bead.
+        let half = (edge.half + super::OFFSET_TOLERANCE_MM).next_up();
+        let bounds = [
+            [(p[0].min(q[0]) - half).next_down(), (p[1].min(q[1]) - half).next_down()],
+            [(p[0].max(q[0]) + half).next_up(), (p[1].max(q[1]) + half).next_up()],
+        ];
+        if screen.rejects(bounds) {
+            continue;
+        }
+        let capsule = bead_capsule(p, q, edge.half)?;
+        super::boolean::budget_polygon_accumulated(&capsule, work, cancel)?;
+        let Some(distance) = candidate_clearance_distance(&capsule, column, xy_clearance_mm)?
+        else {
+            continue;
+        };
+        if proximity.separated(&capsule, separation_reach(distance)) {
+            continue;
+        }
+        batch.stage(
+            &capsule,
+            admission.retained,
+            admission.owned_bytes,
+            admission.support,
+            admission.interfaces,
+            &[admission.protected],
+        )?;
+    }
+    Ok(batch)
 }
 
 /// A clearance offset reaches at most its circumscribed disk plus overlay
