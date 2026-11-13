@@ -164,6 +164,7 @@ fn finite_bounds_pose_and_provenance_are_checked_at_json_boundary() {
     pose.translation_mm[0] = f64::INFINITY;
     assert!(pose.validate().is_err());
     let mut provenance = SourceProvenance {
+        normalized: None,
         source_hash: SourceHash::from_bytes(b"part"),
         source_name: "part.step".into(),
         source_unit: SourceUnit::Inch,
@@ -247,6 +248,7 @@ fn face_refs_reject_every_stale_or_cross_identity() {
     let record = DefinitionRecord {
         definition_id: definition.clone(),
         provenance: SourceProvenance {
+            normalized: None,
             source_hash: SourceHash::from_bytes(b"part"),
             source_name: "part".into(),
             source_unit: SourceUnit::Millimetre,
@@ -466,6 +468,7 @@ fn geometry_only_scene_retains_bounded_definition_and_native_face_identity() {
     let definition = DefinitionRecord {
         definition_id: DefinitionId::from_source_sha256(&[1; 32]),
         provenance: SourceProvenance {
+            normalized: None,
             source_hash: SourceHash::from_bytes(b"part"),
             source_name: "part.step".into(),
             source_unit: SourceUnit::Millimetre,
@@ -608,4 +611,34 @@ fn step_entity_and_section_ir_types_work() {
     let json = serde_json::to_string(&span).unwrap();
     let deserialized: SectionSpan2d = serde_json::from_str(&json).unwrap();
     assert_eq!(span, deserialized);
+}
+
+#[test]
+fn mesh_regions_and_interpretations_have_distinct_checked_identity() {
+    let face = FaceId::from_mesh_region(4).unwrap();
+    assert_eq!(FaceId::parse(face.as_str()).unwrap(), face);
+    assert!(StepEntityId::try_from(&face).is_err());
+    let mut source = SourceProvenance {
+        source_hash: SourceHash::from_bytes(b"unitless source"),
+        source_name: "part.stl".into(),
+        source_unit: SourceUnit::Millimetre,
+        uncertainty_mm: None,
+        source_solid: None,
+        normalized: Some(NormalizedSource {
+            hash: SourceHash::from_bytes(b"mm geometry"),
+            format: MeshSourceFormat::Stl,
+            selector: "stl:mm:surface1".into(),
+            notes: vec![],
+        }),
+    };
+    let mm = source.definition_id();
+    source.source_unit = SourceUnit::Inch;
+    source.normalized.as_mut().unwrap().hash = SourceHash::from_bytes(b"inch geometry");
+    source.normalized.as_mut().unwrap().selector = "stl:inch:surface1".into();
+    assert_ne!(source.definition_id(), mm);
+    let wire = crate::rpc::SourceProvenance::try_from(source.clone()).unwrap();
+    assert_eq!(SourceProvenance::try_from(wire).unwrap(), source);
+    let mut json = serde_json::to_value(&source).unwrap();
+    json.as_object_mut().unwrap().remove("normalized");
+    assert!(serde_json::from_value::<SourceProvenance>(json).is_err());
 }

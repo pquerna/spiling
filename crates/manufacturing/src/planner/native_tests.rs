@@ -30,7 +30,7 @@ fn with_program(result: &ManufacturingResult, program: &str) -> ManufacturingRes
 
 struct NativeScene {
     project: ProjectId,
-    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
@@ -40,9 +40,9 @@ struct NativeScene {
 }
 impl NativeScene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
-        let native = Arc::new(
+        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        );
+        ));
         let id = native.id().clone();
         Self {
             project: ProjectId::default(),
@@ -66,9 +66,9 @@ impl NativeScene {
         }
     }
     fn add(&mut self, bytes: &[u8], poses: &[RigidPoseMm]) {
-        let native = Arc::new(
+        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        );
+        ));
         let id = native.id().clone();
         if !self.definitions.contains_key(&id) {
             self.stored.push(StoredDefinition {
@@ -189,7 +189,7 @@ fn original_section_polygons(scene: &NativeScene, z: f64) -> MultiPolygon<f64> {
     assert_eq!(scene.occurrences[0].pose, RigidPoseMm::IDENTITY);
     let cancel = AtomicBool::new(false);
     let section = spiling_geometry::section(
-        scene.definitions.values().next().unwrap(),
+        scene.definitions.values().next().unwrap().native().unwrap(),
         PlaneMm {
             origin_mm: [0.0, 0.0, z],
             normal: [0.0, 0.0, 1.0],
@@ -473,13 +473,25 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
     );
     let policy = TolerantPolicy::default();
     let baseline_model = TolerantModel::build(
-        baseline.definitions.values().next().unwrap(),
+        baseline
+            .definitions
+            .values()
+            .next()
+            .unwrap()
+            .native()
+            .unwrap(),
         policy,
         &cancel,
     )
     .unwrap();
     let changed_model = TolerantModel::build(
-        changed.definitions.values().next().unwrap(),
+        changed
+            .definitions
+            .values()
+            .next()
+            .unwrap()
+            .native()
+            .unwrap(),
         policy,
         &cancel,
     )
@@ -570,7 +582,13 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
         };
         assert_eq!(product_section(&changed_model, outside).0.len(), 1);
         let failure = spiling_geometry::section(
-            changed.definitions.values().next().unwrap(),
+            changed
+                .definitions
+                .values()
+                .next()
+                .unwrap()
+                .native()
+                .unwrap(),
             PlaneMm {
                 origin_mm: [0.0, 0.0, event],
                 normal: [0.0, 0.0, 1.0],
@@ -1320,7 +1338,9 @@ fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
 fn rib_layer(scene: &NativeScene, id: u32) -> spiling_contracts::surface::SurfaceLayer {
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let occurrence = &scene.occurrences[0];
-    let native = &scene.definitions[&occurrence.definition_id];
+    let native = scene.definitions[&occurrence.definition_id]
+        .native()
+        .unwrap();
     let face = native
         .faces()
         .iter()
@@ -1512,7 +1532,9 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
         original.provenance.definitions
     );
     assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
-    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let native = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     let cert = native.vertical_wall_face(&face_id).unwrap();
     let mut admission_work_1 = spiling_geometry::GeometryWorkBudget::compile();
     let (admitted, _) =
@@ -1864,7 +1886,9 @@ fn finished_native_cantilever_keeps_ribs_through_actual_anchor_support_realizati
     let enabled = intent(true);
     let bundle = compile(scene.input(&enabled), &cancel).unwrap();
     assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
-    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let native = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     let cert = native.vertical_wall_face(&face_id).unwrap();
     let mut admission_work_2 = spiling_geometry::GeometryWorkBudget::compile();
     let (admitted, _) =
@@ -1946,7 +1970,9 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
         edge_margin_mm: 1.2,
         phase_mm: 0.37,
     };
-    let native = scene.definitions[&scene.occurrences[0].definition_id].clone();
+    let native = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     let second_face = native
         .faces()
         .iter()
@@ -2030,7 +2056,9 @@ const FULL_CYLINDER: &[u8] =
 fn cylinder_layer(scene: &NativeScene, phase: f64) -> spiling_contracts::surface::SurfaceLayer {
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let occurrence = &scene.occurrences[0];
-    let native = &scene.definitions[&occurrence.definition_id];
+    let native = scene.definitions[&occurrence.definition_id]
+        .native()
+        .unwrap();
     let face = native
         .faces()
         .iter()
@@ -2060,7 +2088,9 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             if cylindrical { FULL_CYLINDER } else { BOX },
             &[RigidPoseMm::IDENTITY, translated(50.0, 0.0, 0.0)],
         );
-        let native = &scene.definitions[&scene.occurrences[0].definition_id];
+        let native = scene.definitions[&scene.occurrences[0].definition_id]
+            .native()
+            .unwrap();
         let mut admission_work_4 = spiling_geometry::GeometryWorkBudget::compile();
         let bounds = preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_4)
             .unwrap()
@@ -2241,7 +2271,9 @@ fn cylindrical_source_phase_pose_and_flipped_z_preserve_native_closed_material()
                 .surface_overlays
                 .layers
                 .push(cylinder_layer(&scene, phase));
-            let native = &scene.definitions[&scene.occurrences[0].definition_id];
+            let native = scene.definitions[&scene.occurrences[0].definition_id]
+                .native()
+                .unwrap();
             let mut admission_work_5 = spiling_geometry::GeometryWorkBudget::compile();
             let (admitted, _) =
                 preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_5).unwrap();
@@ -2301,7 +2333,9 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
         include_bytes!("../../../../fixtures/geometry/cylinder.step"),
         &[RigidPoseMm::IDENTITY],
     );
-    let native = &partial.definitions[&partial.occurrences[0].definition_id];
+    let native = partial.definitions[&partial.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     let face = native
         .faces()
         .iter()
@@ -2574,7 +2608,9 @@ fn blank_image_interval_returns_exact_native_material_and_no_invented_added_area
         preflight::admit(&scene.input(&intent), &cancel, &mut admission_work_6).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     let occurrence = &scene.occurrences[0];
-    let native = &scene.definitions[&occurrence.definition_id];
+    let native = scene.definitions[&occurrence.definition_id]
+        .native()
+        .unwrap();
     let source = region::from_native(
         &spiling_geometry::section_with_byte_limit(
             native,
@@ -2755,6 +2791,8 @@ fn asymmetric_image_phase_moves_actual_first_wall_lobe_despite_identical_extrema
     let pixels = [255, 0, 0, 0, 255, 0, 0, 0];
     install_image(&mut scene, false, 4, 2, &pixels, parameters.clone());
     let cert = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap()
         .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
         .unwrap();
     let intent = intent(false);
@@ -2795,6 +2833,8 @@ fn ordinary_erosion_lost_image_feature_is_attributed_advisory_not_fake_wall_surv
     let intent = intent(false);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     let cert = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap()
         .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
         .unwrap();
     let peak = wall_peak_in_u_band(&bundle.plan.layers[0], &cert, 1.2, 0.45, 0.55)
@@ -2875,7 +2915,9 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
         let (admitted, _) =
             preflight::admit(&scene.input(&enabled), &cancel, &mut admission_work_7).unwrap();
         let occurrence = &scene.occurrences[0];
-        let native = &scene.definitions[&occurrence.definition_id];
+        let native = scene.definitions[&occurrence.definition_id]
+            .native()
+            .unwrap();
         let cert = native
             .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
             .unwrap();
@@ -3222,7 +3264,9 @@ fn assert_native_family_compile_and_replay(
     let cancel = AtomicBool::new(false);
     let source = native_test_source(name);
     let scene = NativeScene::new(&source, &[translated(0.0, 0.0, bed_translation)]);
-    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let native = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     assert!(
         native
             .faces()
@@ -3400,7 +3444,9 @@ fn sphere_source_does_not_broaden_finish_certificates_and_smooth_keeps_precedenc
     use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
     let source = native_test_source("sphere-belt");
     let mut scene = NativeScene::new(&source, &[translated(0.0, 0.0, 3.0)]);
-    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let native = scene.definitions[&scene.occurrences[0].definition_id]
+        .native()
+        .unwrap();
     let face = native
         .faces()
         .iter()
@@ -4276,7 +4322,9 @@ fn housing_c0_occupied_projection_preserves_other_poses_and_semantic_finish_addi
         )
     };
     let actual_section = |occurrence: &OccurrenceRecord, z: f64| {
-        let native = &scene.definitions[&occurrence.definition_id];
+        let native = scene.definitions[&occurrence.definition_id]
+            .native()
+            .unwrap();
         let section = spiling_geometry::section_with_byte_limit(
             native,
             PlaneMm {

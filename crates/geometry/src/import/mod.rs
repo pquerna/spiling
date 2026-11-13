@@ -457,6 +457,7 @@ pub(crate) fn import_step(
     let definition = Definition {
         id: DefinitionId::for_source(&digest, selected),
         provenance: SourceProvenance {
+            normalized: None,
             source_hash: SourceHash::from_digest(&digest),
             source_name: String::new(),
             source_unit,

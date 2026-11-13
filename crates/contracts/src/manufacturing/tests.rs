@@ -1170,6 +1170,7 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
         vec![StoredDefinition {
             definition_id: id.clone(),
             provenance: SourceProvenance {
+                normalized: None,
                 source_hash: hash,
                 source_name: "part.step".into(),
                 source_unit: SourceUnit::Millimetre,

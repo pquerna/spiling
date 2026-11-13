@@ -105,7 +105,7 @@ fn intent() -> ManufacturingIntent {
 }
 struct Scene {
     id: ProjectId,
-    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
@@ -115,9 +115,9 @@ struct Scene {
 }
 impl Scene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
-        let native = Arc::new(
+        let native = Arc::new(spiling_geometry::source::SourceDefinition::from(
             spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
-        );
+        ));
         let id = native.id().clone();
         let mut provenance = native.provenance().clone();
         provenance.source_name = "operator captured source.step".into();
@@ -252,7 +252,7 @@ fn surface_color_intent(scene: &Scene) -> ManufacturingIntent {
         "../../../fixtures/manufacturing/fixed-dual.intent.json"
     ))
     .unwrap();
-    let native = scene.definitions.values().next().unwrap();
+    let native = scene.definitions.values().next().unwrap().native().unwrap();
     let occurrence = &scene.occurrences[0];
     let face = native
         .faces()
@@ -330,7 +330,7 @@ fn functional_material_intent(scene: &Scene) -> ManufacturingIntent {
 }
 
 fn sparse_functional_intent(scene: &Scene) -> ManufacturingIntent {
-    let native = scene.definitions.values().next().unwrap();
+    let native = scene.definitions.values().next().unwrap().native().unwrap();
     let face_id = native
         .faces()
         .iter()
@@ -498,7 +498,7 @@ fn functional_sparse_parent_density_and_face_directions() {
         (1, 1.0, 1.0),
     ] {
         let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
-        let native = scene.definitions.values().next().unwrap();
+        let native = scene.definitions.values().next().unwrap().native().unwrap();
         let face_id = native
             .faces()
             .iter()
@@ -683,7 +683,7 @@ fn functional_localized_patches_preserve_complete_stock_and_replay() {
     ] {
         let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
         let mut requested = functional_material_intent(&scene);
-        let native = scene.definitions.values().next().unwrap();
+        let native = scene.definitions.values().next().unwrap().native().unwrap();
         let face = native
             .faces()
             .iter()
@@ -1208,7 +1208,7 @@ fn regional_surface_cycles_resolve_opposite_phases_at_common_z_with_shared_white
 fn adjoining_equal_surface_bands_union_once_and_conflicting_depths_refuse() {
     for source in [BOX, HOLE] {
         let scene = Scene::new(source, &[pose(20.0, 20.0, 0.0)]);
-        let native = scene.definitions.values().next().unwrap();
+        let native = scene.definitions.values().next().unwrap().native().unwrap();
         let side = native
             .faces()
             .iter()
@@ -3046,9 +3046,9 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
     use spiling_contracts::geometry::PlaneMm;
 
     let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
-    let upper = Arc::new(
+    let upper = Arc::new(spiling_geometry::source::SourceDefinition::from(
         spiling_geometry::from_step_bytes_with_cancel(CYLINDER, &AtomicBool::new(false)).unwrap(),
-    );
+    ));
     let upper_id = upper.id().clone();
     scene.stored.push(StoredDefinition {
         definition_id: upper_id.clone(),
@@ -3071,7 +3071,7 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
     for index in [20, 39] {
         let layer = &bundle.plan.layers[index];
         let native = spiling_geometry::section_with_byte_limit(
-            &upper,
+            upper.native().unwrap(),
             PlaneMm {
                 origin_mm: [0.0, 0.0, layer.section_z_mm - 8.0],
                 normal: [0.0, 0.0, 1.0],

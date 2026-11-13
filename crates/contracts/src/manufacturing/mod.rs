@@ -4819,15 +4819,7 @@ pub fn input_fingerprint(
     let mut ids = BTreeSet::new();
     for def in &defs {
         def.provenance.validate().map_err(|e| invalid(&e.message))?;
-        let mut digest = [0u8; 32];
-        for (i, byte) in digest.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&def.provenance.source_hash.as_str()[i * 2..i * 2 + 2], 16)
-                .map_err(|_| invalid("invalid source hash"))?;
-        }
-        if DefinitionId::for_source(&digest, def.provenance.source_solid.as_ref())
-            != def.definition_id
-            || !ids.insert(&def.definition_id)
-        {
+        if def.provenance.definition_id() != def.definition_id || !ids.insert(&def.definition_id) {
             return Err(invalid("duplicate or source-inconsistent definition"));
         }
     }

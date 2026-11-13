@@ -109,6 +109,23 @@ impl TryFrom<rpc::SourceProvenance> for SourceProvenance {
     type Error = String;
     fn try_from(value: rpc::SourceProvenance) -> Result<Self, String> {
         let value = Self {
+            normalized: value
+                .normalized
+                .map(|n| -> Result<NormalizedSource, String> {
+                    Ok(NormalizedSource {
+                        hash: checked(SourceHash::parse(n.hash))?,
+                        selector: n.selector,
+                        notes: n.notes,
+                        format: match rpc::MeshSourceFormat::try_from(n.format)
+                            .map_err(|_| "invalid mesh format")?
+                        {
+                            rpc::MeshSourceFormat::Stl => MeshSourceFormat::Stl,
+                            rpc::MeshSourceFormat::ThreeMf => MeshSourceFormat::ThreeMf,
+                            _ => return Err("unspecified mesh format".into()),
+                        },
+                    })
+                })
+                .transpose()?,
             source_hash: checked(SourceHash::parse(value.source_hash))?,
             source_name: value.source_name,
             source_unit: value.source_unit.try_into()?,
@@ -129,6 +146,15 @@ impl TryFrom<SourceProvenance> for rpc::SourceProvenance {
     fn try_from(value: SourceProvenance) -> Result<Self, String> {
         checked(value.validate())?;
         let value = Self {
+            normalized: value.normalized.map(|n| rpc::NormalizedSource {
+                hash: n.hash.into(),
+                selector: n.selector,
+                notes: n.notes,
+                format: match n.format {
+                    MeshSourceFormat::Stl => rpc::MeshSourceFormat::Stl,
+                    MeshSourceFormat::ThreeMf => rpc::MeshSourceFormat::ThreeMf,
+                } as i32,
+            }),
             source_hash: value.source_hash.into(),
             source_name: value.source_name,
             source_unit: rpc::SourceUnit::try_from(value.source_unit)? as i32,
@@ -570,6 +596,9 @@ impl TryFrom<i32> for SourceUnit {
             rpc::SourceUnit::Millimetre => Ok(Self::Millimetre),
             rpc::SourceUnit::Metre => Ok(Self::Metre),
             rpc::SourceUnit::Inch => Ok(Self::Inch),
+            rpc::SourceUnit::Micrometre => Ok(Self::Micrometre),
+            rpc::SourceUnit::Centimetre => Ok(Self::Centimetre),
+            rpc::SourceUnit::Foot => Ok(Self::Foot),
             _ => Err("unspecified SourceUnit".into()),
         }
     }
@@ -581,6 +610,9 @@ impl TryFrom<SourceUnit> for rpc::SourceUnit {
             SourceUnit::Millimetre => Self::Millimetre,
             SourceUnit::Metre => Self::Metre,
             SourceUnit::Inch => Self::Inch,
+            SourceUnit::Micrometre => Self::Micrometre,
+            SourceUnit::Centimetre => Self::Centimetre,
+            SourceUnit::Foot => Self::Foot,
         })
     }
 }
@@ -759,6 +791,7 @@ impl TryFrom<rpc::FaceGeometryInfo> for FaceGeometryInfo {
             rpc::SurfaceFamily::LinearExtrusion => SurfaceFamily::LinearExtrusion,
             rpc::SurfaceFamily::Revolution => SurfaceFamily::Revolution,
             rpc::SurfaceFamily::TSpline => SurfaceFamily::TSpline,
+            rpc::SurfaceFamily::Faceted => SurfaceFamily::Faceted,
             rpc::SurfaceFamily::Unspecified => return Err("unspecified surface family".into()),
         };
         checked(Self::new(
@@ -783,6 +816,7 @@ impl TryFrom<FaceGeometryInfo> for rpc::FaceGeometryInfo {
             SurfaceFamily::LinearExtrusion => rpc::SurfaceFamily::LinearExtrusion,
             SurfaceFamily::Revolution => rpc::SurfaceFamily::Revolution,
             SurfaceFamily::TSpline => rpc::SurfaceFamily::TSpline,
+            SurfaceFamily::Faceted => rpc::SurfaceFamily::Faceted,
         };
         Ok(Self {
             family: family as i32,
@@ -1105,6 +1139,13 @@ impl TryFrom<rpc::ImportPartRequest> for GeometryCommand {
         Ok(Self::ImportPart {
             session_id: session_parent(&value.parent)?,
             base_revision: SceneRevision(value.base_revision),
+            options: {
+                let options = required(value.options, "options")?;
+                ModelImportOptions {
+                    stl_unit: options.stl_unit.map(|v| v.try_into()).transpose()?,
+                    source_plate: options.source_plate,
+                }
+            },
             source: required(value.source, "source")?.try_into()?,
             initial_pose: required(value.initial_pose, "initial_pose")?.try_into()?,
         })
@@ -1128,12 +1169,20 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             session_id,
             base_revision,
             source,
+            options,
             initial_pose,
         } => {
             return Ok(GeometryCall::ImportPart(rpc::ImportPartRequest {
                 parent: format!("sessions/{session_id}", session_id = session_id.as_str()),
                 request_id: id.into(),
                 base_revision: base_revision.get(),
+                options: Some(rpc::ModelImportOptions {
+                    stl_unit: options
+                        .stl_unit
+                        .map(|u| rpc::SourceUnit::try_from(u).map(|u| u as i32))
+                        .transpose()?,
+                    source_plate: options.source_plate,
+                }),
                 source: Some(source.try_into()?),
                 initial_pose: Some(initial_pose.try_into()?),
             }));
@@ -1732,6 +1781,7 @@ mod tests {
                 session_id: session.clone(),
                 base_revision: revision,
                 source: NativePath::UnixBytes { hex: "2fff".into() },
+                options: ModelImportOptions::default(),
                 initial_pose: RigidPoseMm::IDENTITY,
             },
             GeometryCommand::AddInstance {
@@ -1884,6 +1934,7 @@ mod tests {
             DefinitionRecord::try_from(rpc::DefinitionRecord {
                 definition_id: "a".repeat(64),
                 provenance: Some(rpc::SourceProvenance {
+                    normalized: None,
                     source_hash: "b".repeat(64),
                     source_name: "part".into(),
                     source_unit: rpc::SourceUnit::Millimetre as i32,

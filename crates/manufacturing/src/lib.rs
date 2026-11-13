@@ -35,7 +35,7 @@ pub const VERIFIER_VERSION: &str = "41";
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
     pub revision: ProjectRevision,
-    pub definitions: &'a BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
+    pub definitions: &'a BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     pub stored_definitions: &'a [StoredDefinition],
     pub occurrences: &'a [OccurrenceRecord],
     pub intent: &'a ManufacturingIntent,

@@ -3378,7 +3378,11 @@ pub(super) fn project_protected_voids(
                     )
                 })?;
             if projected.definition_id() != captured.capture.definition_id()
-                || !projected.is_compatible_with_definition(definition)
+                || !projected.is_compatible_with_definition(
+                    definition
+                        .native()
+                        .map_err(|e| super::native_error(e, "native void source"))?,
+                )
                 || projected.placed_pose() != captured.capture.placed_pose()
                 || projected.world_height_interval_mm()
                     != captured.capture.world_height_interval_mm()

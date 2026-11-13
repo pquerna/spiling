@@ -99,9 +99,7 @@ pub(crate) fn plan(
             input
                 .definitions
                 .get(&occurrence.definition_id)
-                .map(|definition| {
-                    spiling_geometry::tolerant::CircleSource::new(definition, &occurrence.pose)
-                })
+                .map(|definition| definition.circles(&occurrence.pose))
         })
         .collect();
     arcs::attach(&mut plan, &sources, cancel)?;
@@ -3146,10 +3144,9 @@ impl SectionSpan {
         use geo::BoundingRect;
         use std::ops::ControlFlow;
         let rect = |polygon: &geo::Polygon<f64>| {
-            polygon.bounding_rect().map_or(
-                [[f64::NAN; 2]; 2],
-                |b| [[b.min().x, b.min().y], [b.max().x, b.max().y]],
-            )
+            polygon.bounding_rect().map_or([[f64::NAN; 2]; 2], |b| {
+                [[b.min().x, b.min().y], [b.max().x, b.max().y]]
+            })
         };
         if let Some(outer) = &self.occupied {
             for piece in &outer.pieces {
@@ -3171,12 +3168,11 @@ impl SectionSpan {
                             Ok(keep) => ControlFlow::Continue(keep),
                             Err(error) => ControlFlow::Break(Err(error)),
                         },
-                        |piece| {
-                            match visit(&tolerant::polygon(piece.points), Some(piece.height_mm)) {
-                                Ok(true) => ControlFlow::Continue(()),
-                                Ok(false) => ControlFlow::Break(Ok(())),
-                                Err(error) => ControlFlow::Break(Err(error)),
-                            }
+                        |piece| match visit(&tolerant::polygon(piece.points), Some(piece.height_mm))
+                        {
+                            Ok(true) => ControlFlow::Continue(()),
+                            Ok(false) => ControlFlow::Break(Ok(())),
+                            Err(error) => ControlFlow::Break(Err(error)),
                         },
                     )
                     .map_err(|e| native_error(e, "tolerant continuous support enclosure"))?;

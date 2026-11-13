@@ -232,14 +232,7 @@ impl ProjectManifest {
                 .provenance
                 .validate()
                 .map_err(|error| invalid(&error.message))?;
-            let hash = definition.provenance.source_hash.as_str();
-            let mut bytes = [0u8; 32];
-            for (index, byte) in bytes.iter_mut().enumerate() {
-                *byte = u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16)
-                    .map_err(|_| invalid("invalid source hash"))?;
-            }
-            if DefinitionId::for_source(&bytes, definition.provenance.source_solid.as_ref())
-                != definition.definition_id
+            if definition.provenance.definition_id() != definition.definition_id
                 || !definitions.insert(&definition.definition_id)
             {
                 return Err(invalid(
