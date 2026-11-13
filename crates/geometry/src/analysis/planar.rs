@@ -709,9 +709,9 @@ mod tests {
                         && Interval::point(lower).sub(reserve).lo >= 0.15;
                     let result =
                         certify_planar_capsule_pair_clearance(capsules, 0.15, &mut work, &cancel);
-                    if result.is_ok() {
+                    if let Ok(result) = result {
                         // The bounds gap is itself a lower bound of the distance.
-                        let gap = result.unwrap().minimum_gap_mm().unwrap();
+                        let gap = result.minimum_gap_mm().unwrap();
                         assert!(gap >= 0.15 && gap <= Interval::point(lower).sub(reserve).hi + 1e-9);
                         if !reference {
                             panic!("bounds path accepted beyond the distance proof: {other:?}");

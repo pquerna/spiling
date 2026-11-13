@@ -43,6 +43,65 @@ pub struct Area {
     pub(crate) target: FocusTarget,
 }
 impl Area {
+    /// An import finding marks bounds, not a recovered face or proof region.
+    pub fn import_location(
+        bounds: AabbMm,
+        pose: spiling_contracts::geometry::RigidPoseMm,
+        scene_bounds: Option<AabbMm>,
+    ) -> Result<Self, String> {
+        bounds.validate().map_err(|e| e.to_string())?;
+        pose.validate().map_err(|e| e.to_string())?;
+        let scene = scene_bounds.ok_or("No scene frame for import location")?;
+        let origin = DVec3::from_array(scene.min) * 0.5 + DVec3::from_array(scene.max) * 0.5;
+        let rotation = glam::DQuat::from_array(pose.rotation_xyzw);
+        let translation = DVec3::from_array(pose.translation_mm);
+        let corners: Vec<_> = (0..8)
+            .map(|i| {
+                let p = DVec3::from_array(std::array::from_fn(|a| {
+                    let lo = bounds.min[a];
+                    let hi = bounds.max[a];
+                    // Give point/line findings a visible marker, without changing
+                    // the retained issue bounds or any material geometry.
+                    let pad = if hi == lo { 0.25 } else { 0. };
+                    if i & (1 << a) == 0 {
+                        lo - pad
+                    } else {
+                        hi + pad
+                    }
+                }));
+                rotation * p + translation
+            })
+            .collect();
+        let mut vertices = Vec::with_capacity(24);
+        let mut min = DVec3::splat(f64::INFINITY);
+        let mut max = DVec3::splat(f64::NEG_INFINITY);
+        for i in 0..8 {
+            for a in 0..3 {
+                if i & (1 << a) != 0 {
+                    continue;
+                }
+                for p in [corners[i], corners[i | (1 << a)]] {
+                    let relative = p - origin;
+                    if !relative.is_finite()
+                        || (relative.as_vec3().as_dvec3() - relative).length() > 0.001
+                    {
+                        return Err("Import location exceeds display coordinate precision".into());
+                    }
+                    min = min.min(p);
+                    max = max.max(p);
+                    vertices.push(Vertex {
+                        position: relative.as_vec3().to_array(),
+                        color: [1., 0.65, 0.12],
+                    });
+                }
+            }
+        }
+        let target = FocusTarget {
+            bounds_mm: AabbMm::new(min.to_array(), max.to_array()).map_err(|e| e.to_string())?,
+            normal: None,
+        };
+        Ok(Self { vertices, target })
+    }
     /// Display-only subsets of XYZ6 strokes bound by the caller to fresh actual
     /// replay. Clipping does not construct material or a new machine command.
     pub fn functional_commands(
@@ -856,5 +915,36 @@ mod tests {
                 .any(|vertex| vertex.position == [3.0, 3.0, 2.0])
         );
         assert_eq!(area.target.normal, Some(DVec3::Z));
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use spiling_contracts::geometry::RigidPoseMm;
+    #[test]
+    fn import_marker_uses_current_occurrence_transform_and_rebased_scene_frame() {
+        let bounds = AabbMm::new([0., 0., 0.], [2., 4., 6.]).unwrap();
+        let pose = RigidPoseMm {
+            rotation_xyzw: [
+                0.,
+                0.,
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+            translation_mm: [1000000000., 20., 30.],
+        };
+        let scene = AabbMm::new([999999990., 10., 20.], [1000000010., 40., 50.]).unwrap();
+        let marker = Area::import_location(bounds, pose, Some(scene)).unwrap();
+        assert_eq!(marker.vertices.len(), 24);
+        assert!((marker.target.bounds_mm.min[0] - (1000000000. - 4.)).abs() < 0.001);
+        assert!((marker.target.bounds_mm.max[1] - 22.).abs() < 0.001);
+        assert!(Area::import_location(bounds, pose, None).is_err());
+        assert!(
+            marker
+                .vertices
+                .iter()
+                .all(|v| v.position.iter().all(|x| x.is_finite() && x.abs() < 100.))
+        );
     }
 }

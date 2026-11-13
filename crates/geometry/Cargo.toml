@@ -14,6 +14,7 @@ publish = false
 spiling-contracts.workspace = true
 spiling-model-import.workspace = true
 serde_json.workspace = true
+boolmesh.workspace = true
 solidcore.workspace = true
 solidcore-mesh.workspace = true
 solidcraft-geom.workspace = true

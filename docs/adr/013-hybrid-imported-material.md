@@ -20,3 +20,21 @@ Exact-coordinate welding changes no material. Winding correction preserves neste
 A mesh-only slicer would duplicate planning and verification. Turning every triangle into a synthetic BREP would multiply topology and obscure source identity. Requiring complete analytic reconstruction would exclude ordinary printable meshes. A mixed surface complex supports incremental recovery while retaining one material interpretation.
 
 Native certificates remain capability-specific. Import, rendering, nominal replay and geometric recovery do not establish calibrated strength, physical supports, swept-nozzle clearance or machine readiness. Acceptance records must name actual complete journeys and remaining refusals.
+
+## Import normalization and findings
+
+Exact-coordinate topology retains coincident component sheets until closed,
+orientable components have been established. Import material composition unions
+those components while preserving strictly nested cavities and islands. 3MF
+negative volumes subtract only from their logical build object, after units and
+affines, before analytic recovery. The composed boundary is retained once and is
+shared by display, sections, supports, planning and saved return.
+
+Zero-area debris, cooriented repeats and mutually paired boundary joins within
+the shared join policy are recorded, with affected definition-local bounds and
+measured displacement where applicable. Surviving closure is checked; unresolved
+open/nonmanifold inputs fail rather than receive guessed faces. Import findings
+are typed provenance, not generic log strings. Foreign process controls remain
+excluded from material, with specific located `not_applied` findings; foreign
+profiles/scripts never replace the current setup. Unused namespace declarations
+are harmless; unsupported actual workspace semantics remain explicit failures.

@@ -72,7 +72,7 @@ impl EdgeGrid {
                         if !(radius.is_finite() && radius > 0.0 && radius <= INDEXED_MAGNITUDE_MM)
                             || c.iter()
                                 .chain(&d)
-                                .any(|x| !(x.abs() <= INDEXED_MAGNITUDE_MM))
+                                .any(|x| !x.is_finite() || x.abs() > INDEXED_MAGNITUDE_MM)
                             || (c[0] == d[0] && c[1] == d[1])
                         {
                             indexed = false;

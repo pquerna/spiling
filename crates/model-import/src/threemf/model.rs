@@ -94,6 +94,12 @@ pub(super) fn decode(bytes: &[u8], part: &str, cancel: &AtomicBool) -> Result<Mo
         let (namespace, event) = reader
             .read_resolved_event()
             .map_err(|e| invalid(format!("3MF XML: {e}")))?;
+        let cura_content = matches!(&namespace, ResolveResult::Bound(uri) if String::from_utf8_lossy(uri.as_ref()).contains("/cura/"));
+        if cura_content {
+            return Err(invalid(
+                "Cura workspace elements require explicit manufacturing-role interpretation",
+            ));
+        }
         let core = match namespace {
             ResolveResult::Unbound => true,
             ResolveResult::Bound(uri) => matches!(
@@ -165,15 +171,24 @@ pub(super) fn decode(bytes: &[u8], part: &str, cancel: &AtomicBool) -> Result<Mo
                 _ => {}
             }
         }
+        if name == b"metadata"
+            && a.get("name").is_some_and(|key| {
+                matches!(
+                    key.as_str(),
+                    "cura:mesh_type"
+                        | "cura:infill_mesh"
+                        | "cura:cutting_mesh"
+                        | "cura:support_mesh"
+                        | "cura:anti_overhang_mesh"
+                )
+            })
+        {
+            return Err(invalid(
+                "Cura workspace mesh-role metadata is not applied; export model geometry or remove this control",
+            ));
+        }
         match name {
             b"model" => {
-                if a.iter()
-                    .any(|(key, uri)| key.starts_with("xmlns:") && uri.contains("/cura/"))
-                {
-                    return Err(invalid(
-                        "Cura workspace object roles are not interpreted; export geometry-only 3MF or STL",
-                    ));
-                }
                 if root || !stack.is_empty() {
                     return Err(invalid("invalid 3MF model root"));
                 }
@@ -222,11 +237,13 @@ pub(super) fn decode(bytes: &[u8], part: &str, cancel: &AtomicBool) -> Result<Mo
                     Object {
                         name: a
                             .get("name")
+                            .filter(|name| !name.trim().is_empty())
                             .cloned()
                             .unwrap_or_else(|| format!("Object {oid}")),
                         mesh: None,
                         components: Vec::new(),
                         role,
+                        volumes: Vec::new(),
                     },
                 ));
             }

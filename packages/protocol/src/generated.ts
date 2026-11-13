@@ -354,7 +354,13 @@ export type NormalizedSource = { hash: SourceHash, format: MeshSourceFormat,
 /**
  * Package-part/object and affine interpretation, or STL unit selection.
  */
-selector: string, notes: Array<string>, };
+selector: string, object_name: string, findings: Array<ImportFinding>, };
+
+export type ImportFinding = { kind: ImportFindingKind, code: ImportFindingCode, count: number, label: string, detail: string, bounds_mm: AabbMm | null, displacement_mm: number | null, };
+
+export type ImportFindingKind = "information" | "changed" | "not_applied";
+
+export type ImportFindingCode = "interpreted_units" | "degenerate_facets" | "duplicate_facets" | "boundary_weld" | "corrected_winding" | "component_union" | "negative_volumes" | "foreign_settings" | "process_control" | "source_plate" | "analytic_recovery" | "appearance" | "non_printable";
 
 export type MeshSourceFormat = "stl" | "three_mf";
 

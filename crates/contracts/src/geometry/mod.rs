@@ -1081,7 +1081,63 @@ pub struct NormalizedSource {
     pub format: MeshSourceFormat,
     /// Package-part/object and affine interpretation, or STL unit selection.
     pub selector: String,
-    pub notes: Vec<String>,
+    pub object_name: String,
+    pub findings: Vec<ImportFinding>,
+}
+/// Retained import decisions. Locations are definition-local millimetres, never
+/// display triangle IDs or manufacturing authority.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImportFinding {
+    pub kind: ImportFindingKind,
+    pub code: ImportFindingCode,
+    pub count: u32,
+    pub label: String,
+    pub detail: String,
+    pub bounds_mm: Option<AabbMm>,
+    pub displacement_mm: Option<f64>,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportFindingKind {
+    Information,
+    Changed,
+    NotApplied,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportFindingCode {
+    InterpretedUnits,
+    DegenerateFacets,
+    DuplicateFacets,
+    BoundaryWeld,
+    CorrectedWinding,
+    ComponentUnion,
+    NegativeVolumes,
+    ForeignSettings,
+    ProcessControl,
+    SourcePlate,
+    AnalyticRecovery,
+    Appearance,
+    NonPrintable,
+}
+impl ImportFinding {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        if self.count == 0
+            || self.label.is_empty()
+            || self.label.len() > MAX_DISPLAY_LABEL_BYTES as usize
+            || self.detail.len() > MAX_DISPLAY_LABEL_BYTES as usize
+            || self
+                .displacement_mm
+                .is_some_and(|v| !v.is_finite() || v < 0.)
+        {
+            return Err(invalid("invalid import finding"));
+        }
+        if let Some(bounds) = self.bounds_mm {
+            bounds.validate()?;
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1120,11 +1176,10 @@ impl SourceProvenance {
     pub fn validate(&self) -> Result<(), GeometryError> {
         if self.normalized.as_ref().is_some_and(|n| {
             n.selector.is_empty()
+                || n.object_name.is_empty()
+                || n.object_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
                 || n.selector.len() > MAX_NATIVE_PATH_UNITS as usize
-                || n.notes.len() > 32
-                || n.notes
-                    .iter()
-                    .any(|s| s.len() > MAX_DISPLAY_LABEL_BYTES as usize)
+                || n.findings.iter().any(|finding| finding.validate().is_err())
                 || self.source_solid.is_some()
         }) || self.source_name.len() > MAX_DISPLAY_LABEL_BYTES as usize
             || self

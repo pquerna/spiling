@@ -28,6 +28,27 @@ pub struct Mesh {
     pub triangles: Vec<[u32; 3]>,
 }
 impl Mesh {
+    /// Compact a semantic triangle range without copying unrelated vertices.
+    pub fn triangle_range(&self, range: std::ops::Range<usize>) -> Self {
+        let mut remap = std::collections::HashMap::new();
+        let mut result = Self::default();
+        for t in &self.triangles[range] {
+            result.triangles.push(t.map(|v| {
+                *remap.entry(v).or_insert_with(|| {
+                    let id = result.vertices.len() as u32;
+                    result.vertices.push(self.vertices[v as usize]);
+                    id
+                })
+            }));
+        }
+        result
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.vertices
+            .capacity()
+            .saturating_mul(24)
+            .saturating_add(self.triangles.capacity().saturating_mul(12))
+    }
     pub fn validate(&self) -> Result<()> {
         if self.triangles.is_empty() || self.vertices.iter().flatten().any(|v| !v.is_finite()) {
             return Err(invalid("mesh is empty or has nonfinite coordinates"));

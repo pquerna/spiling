@@ -37,7 +37,7 @@ pub(super) fn resolve(base: &str, target: &str) -> Result<String> {
     }
     Ok(format!("/{}", parts.join("/")))
 }
-pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) -> Result<Package> {
+pub(super) fn decode(bytes: &[u8], live_bytes: usize, cancel: &AtomicBool) -> Result<Package> {
     let mut zip =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| invalid(format!("3MF ZIP: {e}")))?;
     let mut names = BTreeMap::new();
@@ -58,7 +58,7 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
             return Err(invalid("ambiguous or duplicate 3MF ZIP member"));
         }
     }
-    let mut read = |name: &str| -> Result<Vec<u8>> {
+    let mut read = |name: &str, retained: usize| -> Result<Vec<u8>> {
         check(cancel)?;
         let (_, index) = names
             .get(&name.to_ascii_lowercase())
@@ -67,7 +67,10 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
             .by_index(*index)
             .map_err(|e| invalid(format!("3MF ZIP member: {e}")))?;
         let size = usize::try_from(file.size()).map_err(|_| invalid("3MF member size overflow"))?;
-        if size > remaining {
+        if size
+            .checked_add(retained)
+            .is_none_or(|total| total > live_bytes)
+        {
             return Err(invalid(
                 "3MF decompression exceeds current live-memory admission",
             ));
@@ -92,10 +95,9 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
         if data.len() != size {
             return Err(invalid("truncated 3MF ZIP member"));
         }
-        remaining -= size;
         Ok(data)
     };
-    let rels = read("/_rels/.rels")?;
+    let rels = read("/_rels/.rels", 0)?;
     let mut reader = Reader::from_reader(rels.as_slice());
     let mut root = None;
     loop {
@@ -122,6 +124,8 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
             _ => {}
         }
     }
+    drop(reader);
+    drop(rels);
     let root = root.ok_or_else(|| invalid("3MF has no editable root model"))?;
     let mut pending = vec![root.clone()];
     let mut models = BTreeMap::new();
@@ -129,7 +133,8 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
         if models.contains_key(&part) {
             continue;
         }
-        let data = read(&part)?;
+        let retained = model_bytes(&models);
+        let data = read(&part, retained)?;
         let model = model::decode(&data, &part, cancel)?;
         for instance in model
             .build
@@ -153,16 +158,25 @@ pub(super) fn decode(bytes: &[u8], mut remaining: usize, cancel: &AtomicBool) ->
         models,
         omitted,
         plates: BTreeMap::new(),
+        roles: BTreeMap::new(),
     };
     // Bambu/Orca model_settings records are material roles, not presets.
     if names.contains_key("/metadata/model_settings.config") {
-        let data = read("/Metadata/model_settings.config")?;
+        let data = read(
+            "/Metadata/model_settings.config",
+            model_bytes(&package.models),
+        )?;
         roles(&data, &mut package)?;
         plates(&data, &mut package)?;
+        package.omitted.remove("/Metadata/model_settings.config");
     }
     if names.contains_key("/metadata/slic3r_pe_model.config") {
-        let data = read("/Metadata/Slic3r_PE_model.config")?;
+        let data = read(
+            "/Metadata/Slic3r_PE_model.config",
+            model_bytes(&package.models),
+        )?;
         prusa_roles(&data, &mut package)?;
+        package.omitted.remove("/Metadata/Slic3r_PE_model.config");
     }
     Ok(package)
 }
@@ -194,6 +208,7 @@ fn roles(data: &[u8], package: &mut Package) -> Result<()> {
                             .ok_or_else(|| invalid("3MF role metadata lacks value"))?;
                         set_role(package, object, part, kind)?;
                     }
+                    b"metadata" => record_setting(package, &a, object, part),
                     _ => {}
                 }
             }
@@ -237,7 +252,7 @@ fn set_role(
             .map(|i| i.object.clone())
             .collect()
     };
-    let mut pending = starts;
+    let mut pending = starts.clone();
     let mut seen = BTreeSet::new();
     let mut candidates = BTreeSet::new();
     while let Some(key) = pending.pop() {
@@ -262,14 +277,15 @@ fn set_role(
         ));
     }
     let key = candidates.pop_first().unwrap();
-    let target = package
-        .models
-        .get_mut(&key.part)
-        .unwrap()
-        .objects
-        .get_mut(&key.id)
-        .unwrap();
-    target.role = role;
+    for owner in starts {
+        if package
+            .roles
+            .insert((owner, key.clone()), role)
+            .is_some_and(|old| old != role)
+        {
+            return Err(invalid("conflicting 3MF part roles"));
+        }
+    }
     Ok(())
 }
 
@@ -279,7 +295,7 @@ fn prusa_roles(data: &[u8], package: &mut Package) -> Result<()> {
     let mut reader = Reader::from_reader(data);
     let mut object = None;
     let mut volume: Option<(usize, usize, Role)> = None;
-    let mut excluded = BTreeMap::<u32, Vec<(usize, usize)>>::new();
+    let mut ranges = BTreeMap::<u32, Vec<(usize, usize, Role)>>::new();
     loop {
         match reader
             .read_event()
@@ -320,6 +336,7 @@ fn prusa_roles(data: &[u8], package: &mut Package) -> Result<()> {
                             .ok_or_else(|| invalid("Prusa volume role outside volume"))?
                             .2 = role;
                     }
+                    b"metadata" => record_setting(package, &a, object, None),
                     _ => {}
                 }
             }
@@ -332,17 +349,10 @@ fn prusa_roles(data: &[u8], package: &mut Package) -> Result<()> {
                     if first > last {
                         return Err(invalid("reversed Prusa volume range"));
                     }
-                    if role == Role::Negative {
-                        return Err(invalid(
-                            "Prusa 3MF contains a negative volume; subtractive composition is required",
-                        ));
-                    }
-                    if role != Role::Model {
-                        excluded
-                            .entry(object.ok_or_else(|| invalid("Prusa volume outside object"))?)
-                            .or_default()
-                            .push((first, last));
-                    }
+                    ranges
+                        .entry(object.ok_or_else(|| invalid("Prusa volume outside object"))?)
+                        .or_default()
+                        .push((first, last, role));
                 }
                 _ => {}
             },
@@ -352,38 +362,40 @@ fn prusa_roles(data: &[u8], package: &mut Package) -> Result<()> {
         }
     }
     let model = package.models.get_mut(&package.root).unwrap();
-    for (id, ranges) in excluded {
+    for (id, mut ranges) in ranges {
         let object = model
             .objects
             .get_mut(&id)
             .ok_or_else(|| invalid("Prusa volume refers to missing object"))?;
         let original = object
             .mesh
-            .as_ref()
+            .take()
             .ok_or_else(|| invalid("Prusa volume refers to missing mesh"))?;
+        ranges.sort_by_key(|r| r.0);
         if ranges
             .iter()
-            .any(|&(_, last)| last >= original.triangles.len())
+            .any(|&(first, last, _)| first > last || last >= original.triangles.len())
+            || ranges.windows(2).any(|r| r[0].1 >= r[1].0)
         {
-            return Err(invalid("Prusa volume range exceeds mesh"));
+            return Err(invalid("Prusa volume ranges overlap or exceed mesh"));
         }
-        let mut mesh = (**original).clone();
-        mesh.triangles = mesh
-            .triangles
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                !ranges
-                    .iter()
-                    .any(|&(first, last)| *i >= first && *i <= last)
-            })
-            .map(|(_, t)| t)
-            .collect();
-        if mesh.triangles.is_empty() {
-            object.role = Role::Modifier;
-        } else {
-            mesh.validate()?;
-            object.mesh = Some(Arc::new(mesh));
+        let mut next = 0;
+        for (first, last, role) in ranges {
+            if next < first {
+                object
+                    .volumes
+                    .push((Arc::new(original.triangle_range(next..first)), Role::Model));
+            }
+            object
+                .volumes
+                .push((Arc::new(original.triangle_range(first..last + 1)), role));
+            next = last + 1;
+        }
+        if next < original.triangles.len() {
+            object.volumes.push((
+                Arc::new(original.triangle_range(next..original.triangles.len())),
+                Role::Model,
+            ));
         }
     }
     Ok(())
@@ -464,4 +476,45 @@ fn plates(data: &[u8], package: &mut Package) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn model_bytes(models: &BTreeMap<String, Model>) -> usize {
+    models
+        .values()
+        .flat_map(|m| m.objects.values())
+        .fold(0usize, |sum, o| {
+            let mesh = o.mesh.as_ref().map_or(0, |m| m.retained_bytes());
+            o.volumes
+                .iter()
+                .fold(sum.saturating_add(mesh), |sum, (m, _)| {
+                    sum.saturating_add(m.retained_bytes())
+                })
+        })
+}
+
+fn record_setting(
+    package: &mut Package,
+    attrs: &BTreeMap<String, String>,
+    object: Option<u32>,
+    part: Option<u32>,
+) {
+    let Some(key) = attrs.get("key") else { return };
+    if matches!(
+        key.as_str(),
+        "name" | "volume_type" | "part_type" | "plater_id" | "object_id" | "instance_id"
+    ) {
+        return;
+    }
+    let scope = match (object, part) {
+        (Some(o), Some(p)) => format!("object {o}/part {p}"),
+        (Some(o), _) => format!("object {o}"),
+        _ => "package".into(),
+    };
+    let value = attrs
+        .get("value")
+        .filter(|v| v.len() <= 96 && !key.contains("gcode") && !key.contains("script"));
+    package.omitted.insert(format!(
+        "{scope}: {key}{}",
+        value.map_or(String::new(), |v| format!("={v}"))
+    ));
 }

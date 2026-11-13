@@ -853,6 +853,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "boolmesh"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "176de4d7890892cbe9fd5458627f817bc2b609777ccafacb77eef883b0e0e986"
+dependencies = [
+ "glam 0.32.1",
+]
+
+[[package]]
 name = "boostvoronoi"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3179,6 +3188,12 @@ dependencies = [
  "log",
  "xml-rs",
 ]
+
+[[package]]
+name = "glam"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
 name = "glam"
@@ -6906,6 +6921,7 @@ dependencies = [
 name = "spiling-geometry"
 version = "0.1.0"
 dependencies = [
+ "boolmesh",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6964,7 +6980,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-wgpu",
- "glam",
+ "glam 0.34.1",
  "libc",
  "rfd",
  "serde",

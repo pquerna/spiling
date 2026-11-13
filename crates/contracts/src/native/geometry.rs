@@ -115,7 +115,12 @@ impl TryFrom<rpc::SourceProvenance> for SourceProvenance {
                     Ok(NormalizedSource {
                         hash: checked(SourceHash::parse(n.hash))?,
                         selector: n.selector,
-                        notes: n.notes,
+                        object_name: n.object_name,
+                        findings: n
+                            .findings
+                            .into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<_, _>>()?,
                         format: match rpc::MeshSourceFormat::try_from(n.format)
                             .map_err(|_| "invalid mesh format")?
                         {
@@ -146,15 +151,25 @@ impl TryFrom<SourceProvenance> for rpc::SourceProvenance {
     fn try_from(value: SourceProvenance) -> Result<Self, String> {
         checked(value.validate())?;
         let value = Self {
-            normalized: value.normalized.map(|n| rpc::NormalizedSource {
-                hash: n.hash.into(),
-                selector: n.selector,
-                notes: n.notes,
-                format: match n.format {
-                    MeshSourceFormat::Stl => rpc::MeshSourceFormat::Stl,
-                    MeshSourceFormat::ThreeMf => rpc::MeshSourceFormat::ThreeMf,
-                } as i32,
-            }),
+            normalized: value
+                .normalized
+                .map(|n| -> Result<rpc::NormalizedSource, String> {
+                    Ok(rpc::NormalizedSource {
+                        hash: n.hash.into(),
+                        selector: n.selector,
+                        object_name: n.object_name,
+                        findings: n
+                            .findings
+                            .into_iter()
+                            .map(TryInto::try_into)
+                            .collect::<Result<_, _>>()?,
+                        format: match n.format {
+                            MeshSourceFormat::Stl => rpc::MeshSourceFormat::Stl,
+                            MeshSourceFormat::ThreeMf => rpc::MeshSourceFormat::ThreeMf,
+                        } as i32,
+                    })
+                })
+                .transpose()?,
             source_hash: value.source_hash.into(),
             source_name: value.source_name,
             source_unit: rpc::SourceUnit::try_from(value.source_unit)? as i32,
@@ -1750,6 +1765,76 @@ impl TryFrom<GeometryResponse> for rpc::GeometryReply {
         };
         Ok(Self {
             response: Some(response),
+        })
+    }
+}
+
+impl TryFrom<rpc::ImportFinding> for ImportFinding {
+    type Error = String;
+    fn try_from(v: rpc::ImportFinding) -> Result<Self, String> {
+        let result = Self {
+            kind: match rpc::ImportFindingKind::try_from(v.kind) {
+                Ok(rpc::ImportFindingKind::Information) => ImportFindingKind::Information,
+                Ok(rpc::ImportFindingKind::Changed) => ImportFindingKind::Changed,
+                Ok(rpc::ImportFindingKind::NotApplied) => ImportFindingKind::NotApplied,
+                _ => return Err("invalid import finding kind".into()),
+            },
+            code: match rpc::ImportFindingCode::try_from(v.code) {
+                Ok(rpc::ImportFindingCode::InterpretedUnits) => ImportFindingCode::InterpretedUnits,
+                Ok(rpc::ImportFindingCode::DegenerateFacets) => ImportFindingCode::DegenerateFacets,
+                Ok(rpc::ImportFindingCode::DuplicateFacets) => ImportFindingCode::DuplicateFacets,
+                Ok(rpc::ImportFindingCode::BoundaryWeld) => ImportFindingCode::BoundaryWeld,
+                Ok(rpc::ImportFindingCode::CorrectedWinding) => ImportFindingCode::CorrectedWinding,
+                Ok(rpc::ImportFindingCode::ComponentUnion) => ImportFindingCode::ComponentUnion,
+                Ok(rpc::ImportFindingCode::NegativeVolumes) => ImportFindingCode::NegativeVolumes,
+                Ok(rpc::ImportFindingCode::ForeignSettings) => ImportFindingCode::ForeignSettings,
+                Ok(rpc::ImportFindingCode::ProcessControl) => ImportFindingCode::ProcessControl,
+                Ok(rpc::ImportFindingCode::SourcePlate) => ImportFindingCode::SourcePlate,
+                Ok(rpc::ImportFindingCode::AnalyticRecovery) => ImportFindingCode::AnalyticRecovery,
+                Ok(rpc::ImportFindingCode::Appearance) => ImportFindingCode::Appearance,
+                Ok(rpc::ImportFindingCode::NonPrintable) => ImportFindingCode::NonPrintable,
+                _ => return Err("invalid import finding code".into()),
+            },
+            count: v.count,
+            label: v.label,
+            detail: v.detail,
+            bounds_mm: v.bounds_mm.map(TryInto::try_into).transpose()?,
+            displacement_mm: v.displacement_mm,
+        };
+        checked(result.validate())?;
+        Ok(result)
+    }
+}
+impl TryFrom<ImportFinding> for rpc::ImportFinding {
+    type Error = String;
+    fn try_from(v: ImportFinding) -> Result<Self, String> {
+        checked(v.validate())?;
+        Ok(Self {
+            kind: match v.kind {
+                ImportFindingKind::Information => rpc::ImportFindingKind::Information,
+                ImportFindingKind::Changed => rpc::ImportFindingKind::Changed,
+                ImportFindingKind::NotApplied => rpc::ImportFindingKind::NotApplied,
+            } as i32,
+            code: match v.code {
+                ImportFindingCode::InterpretedUnits => rpc::ImportFindingCode::InterpretedUnits,
+                ImportFindingCode::DegenerateFacets => rpc::ImportFindingCode::DegenerateFacets,
+                ImportFindingCode::DuplicateFacets => rpc::ImportFindingCode::DuplicateFacets,
+                ImportFindingCode::BoundaryWeld => rpc::ImportFindingCode::BoundaryWeld,
+                ImportFindingCode::CorrectedWinding => rpc::ImportFindingCode::CorrectedWinding,
+                ImportFindingCode::ComponentUnion => rpc::ImportFindingCode::ComponentUnion,
+                ImportFindingCode::NegativeVolumes => rpc::ImportFindingCode::NegativeVolumes,
+                ImportFindingCode::ForeignSettings => rpc::ImportFindingCode::ForeignSettings,
+                ImportFindingCode::ProcessControl => rpc::ImportFindingCode::ProcessControl,
+                ImportFindingCode::SourcePlate => rpc::ImportFindingCode::SourcePlate,
+                ImportFindingCode::AnalyticRecovery => rpc::ImportFindingCode::AnalyticRecovery,
+                ImportFindingCode::Appearance => rpc::ImportFindingCode::Appearance,
+                ImportFindingCode::NonPrintable => rpc::ImportFindingCode::NonPrintable,
+            } as i32,
+            count: v.count,
+            label: v.label,
+            detail: v.detail,
+            bounds_mm: v.bounds_mm.map(TryInto::try_into).transpose()?,
+            displacement_mm: v.displacement_mm,
         })
     }
 }

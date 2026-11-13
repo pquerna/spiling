@@ -17,6 +17,7 @@ mod chrome;
 use crate::commands::Workspace;
 use chrome::{Panel, WorkArea};
 mod alternative;
+mod imports;
 mod interfaces;
 pub(crate) use alternative::gallery as alternative_gallery;
 
@@ -79,6 +80,7 @@ pub struct Workbench {
     title: String,
     viewport: Viewport,
     interfaces: interfaces::InterfacesUi,
+    import_selection: Option<imports::ImportSelection>,
     selected: Option<FaceRef>,
     occurrence: Option<OccurrenceId>,
     pose: [f64; 6],
@@ -161,6 +163,7 @@ impl Workbench {
             title: String::new(),
             viewport: Viewport::new(cc),
             interfaces: Default::default(),
+            import_selection: None,
             selected: None,
             occurrence: None,
             pose: [0.0; 6],
@@ -1101,8 +1104,10 @@ impl eframe::App for Workbench {
                     let mechanics = self.mechanics_view();
                     let mut force_canvas = self.force_canvas();
                     let mut fastener_canvas = self.fastener_canvas();
-                    let inspection = self
-                        .interface_overlay(self.state.display.clone().as_ref(), review.as_ref());
+                    let import_overlay = self.import_overlay();
+                    let inspection = import_overlay.or_else(|| {
+                        self.interface_overlay(self.state.display.clone().as_ref(), review.as_ref())
+                    });
                     ui.horizontal_top(|ui| {
                         let rail = if review.is_some() { 84.0 } else { 0.0 };
                         let size = egui::vec2(
@@ -1184,6 +1189,7 @@ impl eframe::App for Workbench {
                         self.analysis.view.offset_mm = analysis.offset_mm;
                     }
                     if let Some(reference) = picked {
+                        self.import_selection = None;
                         self.select_fastener_face(&reference);
                         self.select_force_face(&reference);
                         self.select_face(reference);

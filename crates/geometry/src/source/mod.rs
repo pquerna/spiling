@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 
 //! One adopted material interpretation, with native or mixed surface storage.
+mod composition;
+mod csg;
 mod deviation;
 mod normalize;
 mod packed;
+mod topology;
 use crate::{
     Definition, GeometryError, GeometryErrorCode,
     tolerant::{TolerantModel, TolerantPolicy},
@@ -215,7 +218,7 @@ pub struct DecodedSource {
     pub format: MeshSourceFormat,
     pub source_unit: SourceUnit,
     pub name: String,
-    pub notes: Vec<String>,
+    pub findings: Vec<ImportFinding>,
     pub placements: Vec<RigidPoseMm>,
 }
 /// Decode syntax and adopt geometry once; rigid translation stays occurrence
@@ -244,7 +247,7 @@ pub fn decode_container(
             return Err(invalid("STL has no source-plate selection"));
         }
         let mesh = spiling_model_import::stl::decode(bytes, cancel).map_err(decode_error)?;
-        let (complex, duplicates) = normalize::build(
+        let (complex, mut findings) = normalize::build(
             mesh,
             options
                 .stl_unit
@@ -253,13 +256,15 @@ pub fn decode_container(
             Affine::IDENTITY,
             cancel,
         )?;
-        let mut notes =
-            vec!["STL is unitless; interpreted dimensions and units are retained.".into()];
-        if duplicates > 0 {
-            notes.push(format!(
-                "Removed {duplicates} duplicate facets with identical winding."
-            ));
-        }
+        findings.push(finding(
+            ImportFindingKind::Information,
+            ImportFindingCode::InterpretedUnits,
+            1,
+            "STL units",
+            "Unitless source interpreted using the selected units.",
+            None,
+            None,
+        ));
         return Ok(vec![DecodedSource {
             complex,
             selector: format!(
@@ -269,7 +274,7 @@ pub fn decode_container(
             format: MeshSourceFormat::Stl,
             source_unit: options.stl_unit.unwrap_or(SourceUnit::Millimetre),
             name: label.into(),
-            notes,
+            findings,
             placements: vec![RigidPoseMm::IDENTITY],
         }]);
     }
@@ -279,37 +284,56 @@ pub fn decode_container(
         ));
     }
     let mut package = Package::decode(bytes, live_bytes, cancel).map_err(decode_error)?;
-    package
+    let selected_plate = package
         .select_plate(options.source_plate)
         .map_err(decode_error)?;
-    let mut notes = vec!["Geometry imported; foreign printer/process settings, custom G-code and appearance metadata were not applied.".into()];
+    let mut findings = Vec::new();
+    if !package.omitted.is_empty() {
+        findings.push(finding(
+            ImportFindingKind::NotApplied,
+            ImportFindingCode::ForeignSettings,
+            package.omitted.len() as u32,
+            "Package settings",
+            &bounded_text(&format!("Not applied: {}. Current setup is retained; source scripts are never executed.",package.omitted.iter().cloned().collect::<Vec<_>>().join(", ")),MAX_DISPLAY_LABEL_BYTES as usize),
+            None,
+            None,
+        ));
+    }
     if package.plates.len() > 1 {
-        notes.push(format!(
-            "Source contains {} plates; each import selects one source plate.",
-            package.plates.len()
+        findings.push(finding(
+            ImportFindingKind::Information,
+            ImportFindingCode::SourcePlate,
+            package.plates.len() as u32,
+            &format!("Plate {selected_plate}/{}", package.plates.len()),
+            "Selected source plate imported; other source plates remain in the original package.",
+            None,
+            None,
         ));
     }
     let leaves = package.leaves(cancel).map_err(decode_error)?;
-    if leaves.iter().any(|leaf| leaf.role != Role::Model) {
-        notes.push(
-            "Process modifiers and support controls were excluded from model material.".into(),
-        );
-    }
     if leaves.iter().any(|l| l.role == Role::Negative) {
-        return Err(invalid(
-            "3MF contains negative volumes; subtractive component composition is not available for this construction",
-        ));
+        return composition::negative_objects(&package, leaves, &findings, selected_plate, cancel);
     }
+    let controls: Vec<_> = leaves
+        .iter()
+        .filter(|l| !matches!(l.role, Role::Model | Role::Negative))
+        .collect();
     let mut results: Vec<DecodedSource> = Vec::new();
     let mut keys = std::collections::BTreeMap::<_, usize>::new();
-    for leaf in leaves {
+    for leaf in &leaves {
         if leaf.role != Role::Model {
             continue;
         }
         crate::check_cancel(cancel)?;
         let (linear, pose) = split_placement(leaf.transform_mm)?;
         let key = (
-            leaf.object.clone(),
+            (
+                package.models[&package.root].build[leaf.build_index]
+                    .object
+                    .clone(),
+                leaf.object.clone(),
+                leaf.volume_index,
+            ),
             linear
                 .0
                 .map(|p| p.map(|v| if v == 0. { 0 } else { v.to_bits() })),
@@ -318,29 +342,34 @@ pub fn decode_container(
             results[index].placements.push(pose);
             continue;
         }
-        let selector = format!("3mf:{}:{}:surface1", leaf.object.part, leaf.object.id);
-        let (complex, duplicates) = normalize::build((*leaf.mesh).clone(), 1., linear, cancel)?;
-        let mut notes = notes.clone();
-        if duplicates > 0 {
-            notes.push(format!(
-                "Removed {duplicates} duplicate facets with identical winding."
-            ));
+        let owner = &package.models[&package.root].build[leaf.build_index].object;
+        let selector = format!(
+            "3mf:{}:{}:owner{}:{}:plate{}:volume{}:surface1",
+            leaf.object.part,
+            leaf.object.id,
+            owner.part,
+            owner.id,
+            selected_plate,
+            leaf.volume_index
+        );
+        let (complex, mut local_findings) =
+            normalize::build((*leaf.mesh).clone(), 1., linear, cancel)?;
+        local_findings.extend(findings.clone());
+        for control in controls
+            .iter()
+            .filter(|l| l.build_index == leaf.build_index)
+        {
+            let transform = composition::relative_transform(control.transform_mm, pose);
+            local_findings.push(composition::control_finding(control, transform)?);
         }
         keys.insert(key, results.len());
         results.push(DecodedSource {
             complex,
             selector,
             format: MeshSourceFormat::ThreeMf,
-            source_unit: match leaf.source_scale_to_mm {
-                0.001 => SourceUnit::Micrometre,
-                10. => SourceUnit::Centimetre,
-                25.4 => SourceUnit::Inch,
-                304.8 => SourceUnit::Foot,
-                1000. => SourceUnit::Metre,
-                _ => SourceUnit::Millimetre,
-            },
-            name: leaf.name,
-            notes: notes.clone(),
+            source_unit: composition::source_unit(leaf.source_scale_to_mm),
+            name: leaf.name.clone(),
+            findings: local_findings,
             placements: vec![pose],
         });
     }
@@ -427,7 +456,7 @@ impl SourceDefinition {
 mod tests {
     use super::*;
     use spiling_model_import::{Affine, Mesh};
-    fn cube(lo: f64, hi: f64) -> Mesh {
+    pub(super) fn cube(lo: f64, hi: f64) -> Mesh {
         Mesh {
             vertices: vec![
                 [lo, lo, lo],
@@ -499,7 +528,8 @@ mod tests {
                 hash: SourceHash::from_bytes(&bytes),
                 format: MeshSourceFormat::Stl,
                 selector: "box".into(),
-                notes: vec![],
+                object_name: "Imported part".into(),
+                findings: vec![],
             }),
         };
         let source = SourceDefinition::restore(provenance, &bytes, &cancel).unwrap();
@@ -526,7 +556,11 @@ mod tests {
         let mut mesh = cube(0., 10.);
         mesh.triangles.push(mesh.triangles[0]);
         let (complex, count) = normalize::build(mesh, 1., Affine::IDENTITY, &cancel).unwrap();
-        assert_eq!(count, 1);
+        assert!(
+            count
+                .iter()
+                .any(|f| f.code == ImportFindingCode::DuplicateFacets && f.count == 1)
+        );
         let section = TolerantModel::from_complex(&complex, TolerantPolicy::default())
             .unwrap()
             .section(5.)
@@ -789,3 +823,26 @@ fn split_placement(
     residual.validate().map_err(|e| invalid(e.to_string()))?;
     Ok((residual, pose))
 }
+
+fn finding(
+    kind: ImportFindingKind,
+    code: ImportFindingCode,
+    count: u32,
+    label: &str,
+    detail: &str,
+    bounds_mm: Option<AabbMm>,
+    displacement_mm: Option<f64>,
+) -> ImportFinding {
+    ImportFinding {
+        kind,
+        code,
+        count,
+        label: label.into(),
+        detail: detail.into(),
+        bounds_mm,
+        displacement_mm,
+    }
+}
+
+#[cfg(test)]
+mod import_tests;

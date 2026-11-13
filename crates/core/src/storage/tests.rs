@@ -2211,7 +2211,8 @@ fn normalized_source_closure_shares_bytes_and_detects_saved_corruption() {
         hash: SourceHash::from_bytes(&normalized),
         format: MeshSourceFormat::Stl,
         selector: "stl:mm:surface1".into(),
-        notes: vec![],
+        object_name: "Imported part".into(),
+        findings: vec![],
     });
     let source = Arc::new(
         SourceAsset::with_normalized(
@@ -2243,7 +2244,7 @@ fn normalized_source_closure_shares_bytes_and_detects_saved_corruption() {
             source_bytes: 0,
             ..LoadBudgets::MAXIMUM
         },
-        &[source.clone()],
+        std::slice::from_ref(&source),
     )
     .unwrap();
     let restored = &loaded.sources[&source.record.definition_id];

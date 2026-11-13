@@ -133,6 +133,7 @@ impl InventoryStats {
 }
 
 impl<'a> NominalAnchorPaths<'a> {
+    #[cfg(test)]
     pub(in crate::planner::support) fn new(
         previous: impl Iterator<Item = &'a DepositionPath> + Clone,
         contacts: impl Iterator<Item = &'a DepositionPath> + Clone,

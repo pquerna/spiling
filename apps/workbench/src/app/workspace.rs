@@ -7,6 +7,9 @@ use spiling_contracts::geometry::*;
 
 impl Workbench {
     pub(super) fn source_display_visible(&self) -> bool {
+        if self.import_selection.is_some() && self.display_current() {
+            return true;
+        }
         let has_review = !self.layout.open
             && (self.work_area.workspace == super::Workspace::Review || self.analysis.open)
             && self.selected_manufacturing_review().is_some();
@@ -104,25 +107,37 @@ impl Workbench {
                     let Some(definition) = scene.definition(&occurrence.definition_id) else {
                         continue;
                     };
-                    let title = format!(
+                    let normalized = definition.record.provenance.normalized.as_ref();
+                    let not_applied = normalized.map_or(0, |source| {
+                        source
+                            .findings
+                            .iter()
+                            .filter(|f| f.kind == ImportFindingKind::NotApplied)
+                            .count()
+                    });
+                    let mut title = format!(
                         "{} · {}",
-                        definition.record.provenance.source_name,
+                        normalized.map_or(
+                            definition.record.provenance.source_name.as_str(),
+                            |source| source.object_name.as_str(),
+                        ),
                         index + 1
                     );
+                    if not_applied > 0 {
+                        title.push_str(&format!(" · {not_applied} not applied"));
+                    }
+                    let title = egui::RichText::new(title);
+                    let title = if not_applied > 0 {
+                        title.color(self.prefs.theme.tokens().warning)
+                    } else {
+                        title
+                    };
                     let row = egui::CollapsingHeader::new(title)
                         .id_salt(occurrence.occurrence_id)
                         .default_open(scene.occurrences.len() == 1)
                         .show(ui, |ui| {
                             if let Some(source) = &definition.record.provenance.normalized {
-                                ui.collapsing("Import details", |ui| {
-                                    ui.label(format!(
-                                        "{:?} · {:?}",
-                                        source.format, definition.record.provenance.source_unit
-                                    ));
-                                    for note in &source.notes {
-                                        ui.weak(note);
-                                    }
-                                });
+                                self.import_details_ui(ui, &scene, occurrence, source);
                             }
                             if ui
                                 .selectable_label(

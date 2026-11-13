@@ -27,6 +27,7 @@ pub struct Object {
     pub mesh: Option<Arc<Mesh>>,
     pub components: Vec<Instance>,
     pub role: Role,
+    pub volumes: Vec<(Arc<Mesh>, Role)>,
 }
 #[derive(Debug, Clone)]
 pub struct Instance {
@@ -46,11 +47,13 @@ pub struct Package {
     pub models: BTreeMap<String, Model>,
     pub omitted: BTreeSet<String>,
     pub plates: BTreeMap<u32, Vec<(u32, u32)>>,
+    pub roles: BTreeMap<(ObjectKey, ObjectKey), Role>,
 }
 #[derive(Debug)]
 pub struct Leaf {
     pub object: ObjectKey,
     pub mesh: Arc<Mesh>,
+    pub volume_index: usize,
     pub transform_mm: Affine,
     pub source_scale_to_mm: f64,
     pub role: Role,
@@ -140,25 +143,58 @@ impl Package {
                         .objects
                         .get(&key.id)
                         .ok_or_else(|| invalid("missing referenced 3MF object"))?;
+                    let mut scoped = None;
+                    for owner in &active {
+                        if let Some(&role) = self.roles.get(&((*owner).clone(), key.clone())) {
+                            if scoped.is_some_and(|previous| previous != role) {
+                                return Err(invalid("conflicting nested 3MF material roles"));
+                            }
+                            scoped = Some(role);
+                        }
+                    }
                     let role = if inherited == Role::Model {
-                        object.role
+                        scoped.unwrap_or(object.role)
                     } else {
                         inherited
                     };
-                    if let Some(mesh) = &object.mesh {
+                    if object.mesh.is_some() || !object.volumes.is_empty() {
                         let mut scale = Affine::IDENTITY;
                         for a in 0..3 {
                             scale.0[a][a] = model.scale_to_mm;
                         }
-                        leaves.push(Leaf {
-                            source_scale_to_mm: model.scale_to_mm,
-                            object: key.clone(),
-                            mesh: Arc::clone(mesh),
-                            transform_mm: scale.then(transform).validate()?,
-                            role,
-                            name: object.name.clone(),
-                            build_index,
-                        });
+                        let volumes = if object.volumes.is_empty() {
+                            vec![(
+                                Arc::clone(object.mesh.as_ref().expect("mesh or volumes")),
+                                role,
+                            )]
+                        } else {
+                            object
+                                .volumes
+                                .iter()
+                                .map(|(mesh, volume_role)| {
+                                    (
+                                        Arc::clone(mesh),
+                                        if role == Role::Model {
+                                            *volume_role
+                                        } else {
+                                            role
+                                        },
+                                    )
+                                })
+                                .collect()
+                        };
+                        for (volume_index, (mesh, role)) in volumes.into_iter().enumerate() {
+                            leaves.push(Leaf {
+                                source_scale_to_mm: model.scale_to_mm,
+                                object: key.clone(),
+                                mesh,
+                                volume_index,
+                                transform_mm: scale.then(transform).validate()?,
+                                role,
+                                name: object.name.clone(),
+                                build_index,
+                            });
+                        }
                     }
                     stack.push(Visit::Exit(key));
                     for component in object.components.iter().rev() {
@@ -223,7 +259,7 @@ mod tests {
         for body in [
             r#"<model><resources><object id="1"><components><component objectid="1"/></components></object></resources><build><item objectid="1"/></build></model>"#,
             r#"<model requiredextensions="x" xmlns:x="unknown"><resources/><build/></model>"#,
-            r#"<model xmlns:cura="http://software.ultimaker.com/xml/cura/3mf/2015/10"><resources/><build/></model>"#,
+            r#"<model xmlns:cura="http://software.ultimaker.com/xml/cura/3mf/2015/10"><resources/><cura:setting/><build/></model>"#,
             r#"<model><resources/><build><item objectid="1" transform="bad"/></build></model>"#,
         ] {
             let bytes = package(&[("_rels/.rels", RELS), ("3D/root.model", body)]);
@@ -261,7 +297,14 @@ mod tests {
             ("3D/root.model", &body),
             ("Metadata/Slic3r_PE_model.config", prusa),
         ]);
-        assert!(Package::decode(&bytes, usize::MAX, &cancel).is_err());
+        assert_eq!(
+            Package::decode(&bytes, usize::MAX, &cancel)
+                .unwrap()
+                .leaves(&cancel)
+                .unwrap()[0]
+                .role,
+            Role::Negative
+        );
     }
 }
 
@@ -303,5 +346,57 @@ mod plate_tests {
                 .select_plate(Some(3))
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod role_scope_tests {
+    use super::*;
+    #[test]
+    fn reused_resource_roles_belong_to_their_logical_parent() {
+        let key = |id| ObjectKey {
+            part: "/root.model".into(),
+            id,
+        };
+        let instance = |id| Instance {
+            object: key(id),
+            transform: Affine::IDENTITY,
+            printable: true,
+        };
+        let part = Object {
+            name: "shared".into(),
+            mesh: Some(Arc::new(Mesh {
+                vertices: vec![[0.; 3], [1., 0., 0.], [0., 1., 0.]],
+                triangles: vec![[0, 1, 2]],
+            })),
+            components: vec![],
+            role: Role::Model,
+            volumes: vec![],
+        };
+        let group = || Object {
+            name: "assembly".into(),
+            mesh: None,
+            components: vec![instance(3)],
+            role: Role::Model,
+            volumes: vec![],
+        };
+        let package = Package {
+            root: "/root.model".into(),
+            models: BTreeMap::from([(
+                "/root.model".into(),
+                Model {
+                    scale_to_mm: 1.,
+                    objects: BTreeMap::from([(1, group()), (2, group()), (3, part)]),
+                    build: vec![instance(1), instance(2)],
+                },
+            )]),
+            omitted: BTreeSet::new(),
+            plates: BTreeMap::new(),
+            roles: BTreeMap::from([((key(1), key(3)), Role::Negative)]),
+        };
+        let leaves = package.leaves(&AtomicBool::new(false)).unwrap();
+        assert_eq!(leaves[0].role, Role::Negative);
+        assert_eq!(leaves[1].role, Role::Model);
+        assert!(Arc::ptr_eq(&leaves[0].mesh, &leaves[1].mesh));
     }
 }

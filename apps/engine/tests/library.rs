@@ -678,7 +678,11 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
             base_revision: scene_revision(&client).await,
             source: native(&source),
             options: spiling_contracts::geometry::ModelImportOptions::default(),
-            initial_pose: RigidPoseMm::IDENTITY,
+            // Include the profile enclosure inside the captured plate.
+            initial_pose: RigidPoseMm {
+                translation_mm: [40., 40., 0.],
+                ..RigidPoseMm::IDENTITY
+            },
         })
         .await
         .unwrap()

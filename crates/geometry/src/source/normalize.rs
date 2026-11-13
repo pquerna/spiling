@@ -3,13 +3,13 @@
 
 use super::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| a[i] - b[i])
 }
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(super) fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum()
 }
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(super) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -20,7 +20,7 @@ fn unit(p: [f64; 3]) -> Option<[f64; 3]> {
     let n = dot(p, p).sqrt();
     (n.is_finite() && n > 0.).then(|| p.map(|v| v / n))
 }
-fn normal(p: &[[f64; 3]], t: [u32; 3]) -> Option<[f64; 3]> {
+pub(super) fn normal(p: &[[f64; 3]], t: [u32; 3]) -> Option<[f64; 3]> {
     unit(cross(
         sub(p[t[1] as usize], p[t[0] as usize]),
         sub(p[t[2] as usize], p[t[0] as usize]),
@@ -31,7 +31,7 @@ pub(super) fn build(
     scale: f64,
     transform: spiling_model_import::Affine,
     cancel: &AtomicBool,
-) -> Result<(SurfaceComplex, usize), GeometryError> {
+) -> Result<(SurfaceComplex, Vec<ImportFinding>), GeometryError> {
     mesh.validate().map_err(|e| invalid(e.to_string()))?;
     if !scale.is_finite() || scale <= 0. {
         return Err(invalid("invalid interpreted mesh units"));
@@ -70,148 +70,34 @@ pub(super) fn build(
         remap.push(id);
     }
     drop(weld);
-    let mut triangles = Vec::with_capacity(mesh.triangles.len());
-    let mut unique = HashMap::<[u32; 3], [u32; 3]>::new();
-    let mut duplicates = 0usize;
-    for (i, t) in mesh.triangles.into_iter().enumerate() {
-        if i % 1024 == 0 {
-            crate::check_cancel(cancel)?;
-        }
-        let mut t = t.map(|v| remap[v as usize]);
-        if transform.determinant() < 0. {
-            t.swap(1, 2);
-        }
-        if normal(&positions, t).is_none() {
-            return Err(invalid(
-                "mesh contains a degenerate triangle; explicit repair is required",
-            ));
-        }
-        let mut key = t;
-        key.sort_unstable();
-        if let Some(previous) = unique.get(&key) {
-            if (0..3).any(|offset| (0..3).all(|a| t[a] == previous[(a + offset) % 3])) {
-                duplicates += 1;
-                continue;
+    let triangles = mesh
+        .triangles
+        .into_iter()
+        .map(|t| {
+            let mut t = t.map(|v| remap[v as usize]);
+            if transform.determinant() < 0. {
+                t.swap(1, 2);
             }
-            return Err(invalid(
-                "oppositely wound duplicate facets have ambiguous material; explicit repair is required",
-            ));
-        }
-        unique.insert(key, t);
-        triangles.push(t);
-    }
-    drop(remap);
-    drop(unique);
-    // Adjacency is shared by orientation, segmentation and boundary checks.
-    let mut edges = HashMap::<(u32, u32), Vec<(usize, bool)>>::new();
-    for (i, t) in triangles.iter().enumerate() {
-        for a in 0..3 {
-            let (v, w) = (t[a], t[(a + 1) % 3]);
-            edges
-                .entry((v.min(w), v.max(w)))
-                .or_default()
-                .push((i, v < w));
-        }
-    }
-    if edges.values().any(|uses| uses.len() != 2) {
-        return Err(invalid(
-            "mesh has open or nonmanifold edges; material closure is unresolved",
-        ));
-    }
-    let mut adjacency = vec![Vec::new(); triangles.len()];
-    for uses in edges.values() {
-        let [(a, forward_a), (b, forward_b)] = uses[..] else {
-            unreachable!()
-        };
-        adjacency[a].push((b, forward_a == forward_b));
-        adjacency[b].push((a, forward_a == forward_b));
-    }
-    drop(edges);
-    for neighbours in &mut adjacency {
-        neighbours.sort_unstable();
-    }
-    let mut flips = vec![None; triangles.len()];
-    let mut shells = Vec::<Vec<usize>>::new();
-    for first in 0..triangles.len() {
-        if flips[first].is_some() {
-            continue;
-        }
-        let mut shell = Vec::new();
-        let mut queue = VecDeque::from([first]);
-        flips[first] = Some(false);
-        while let Some(i) = queue.pop_front() {
-            crate::check_cancel(cancel)?;
-            shell.push(i);
-            for &(j, opposite) in &adjacency[i] {
-                let expected = flips[i].unwrap() ^ opposite;
-                match flips[j] {
-                    None => {
-                        flips[j] = Some(expected);
-                        queue.push_back(j);
-                    }
-                    Some(old) if old != expected => return Err(invalid("mesh is non-orientable")),
-                    _ => {}
-                }
-            }
-        }
-        shells.push(shell);
-    }
-    for (t, flip) in triangles.iter_mut().zip(flips) {
-        if flip.unwrap() {
-            t.swap(1, 2);
-        }
-    }
-    // Winding correction preserves nested void shells. The representative is
-    // an existing vertex, not a centroid that might lie outside a concave shell.
-    for shell in &shells {
-        let point = positions[triangles[shell[0]][0] as usize];
-        let mut depth = 0;
-        for other in &shells {
-            if std::ptr::eq(shell, other) {
-                continue;
-            }
-            let mut angle = 0.;
-            for &i in other {
-                let p = triangles[i].map(|v| sub(positions[v as usize], point));
-                let n = p.map(|v| dot(v, v).sqrt());
-                if n.contains(&0.) {
-                    return Err(invalid(
-                        "mesh shells share a vertex; material interpretation is ambiguous",
-                    ));
-                }
-                angle += 2.
-                    * dot(p[0], cross(p[1], p[2])).atan2(
-                        n[0] * n[1] * n[2]
-                            + dot(p[0], p[1]) * n[2]
-                            + dot(p[1], p[2]) * n[0]
-                            + dot(p[2], p[0]) * n[1],
-                    );
-            }
-            if angle.abs() > std::f64::consts::TAU {
-                depth += 1;
-            }
-        }
-        let origin = point;
-        let volume: f64 = shell
-            .iter()
-            .map(|&i| {
-                let p = triangles[i].map(|v| sub(positions[v as usize], origin));
-                dot(p[0], cross(p[1], p[2]))
-            })
-            .sum();
-        if !volume.is_finite() || volume == 0. {
-            return Err(invalid("mesh shell has no resolved volume"));
-        }
-        if (volume > 0.) != (depth % 2 == 0) {
-            for &i in shell {
-                triangles[i].swap(1, 2);
-            }
-        }
-    }
+            t
+        })
+        .collect();
+    let (mesh, adjacency, findings) = super::topology::prepare(
+        spiling_model_import::Mesh {
+            vertices: positions,
+            triangles,
+        },
+        cancel,
+    )?;
+    let positions = mesh.vertices;
+    let triangles = mesh.triangles;
     let normals: Vec<_> = triangles
         .iter()
-        .map(|&t| normal(&positions, t).unwrap())
-        .collect();
+        .map(|&t| {
+            normal(&positions, t).ok_or_else(|| {
+                invalid("boundary joins or composition left a zero-area material facet")
+            })
+        })
+        .collect::<Result<_, _>>()?;
     // Recover connected planes before smooth grouping: a fillet must not
     // swallow the flat plate it touches. Broad planar patches dominate their
     // adjacent smooth facets; equal-sized strips remain eligible for a shared
@@ -403,9 +289,14 @@ pub(super) fn build(
         faces,
         error_mm: 0.,
     };
-    result.error_mm = result.measured_deviation()?;
+    let repair_displacement = findings
+        .iter()
+        .filter(|f| f.code == ImportFindingCode::BoundaryWeld)
+        .filter_map(|f| f.displacement_mm)
+        .fold(0_f64, f64::max);
+    result.error_mm = result.measured_deviation()? + repair_displacement;
     result.validate()?;
-    Ok((result, duplicates))
+    Ok((result, findings))
 }
 fn cylinder(
     p: &[[f64; 3]],

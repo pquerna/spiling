@@ -2022,7 +2022,7 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
     for occurrence in &scene.occurrences {
         let source = region::from_native(
             &spiling_geometry::section_with_byte_limit(
-                &native,
+                native,
                 PlaneMm {
                     origin_mm: [0.0, 0.0, 2.0],
                     normal: [0.0, 0.0, 1.0],
@@ -2049,7 +2049,7 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
         assert_native_surface_retention(
             &source,
             &derived,
-            &native,
+            native,
             &occurrence.pose,
             2.0,
             &scene.surface_overlays.layers,

@@ -1075,11 +1075,7 @@ fn import_mesh(
     let source_hash = SourceHash::from_digest(&Sha256::digest(bytes.as_slice()).into());
     let mut parts = Vec::new();
     let mut residents = Vec::new();
-    for mut decoded in decoded {
-        decoded.notes.push(format!(
-            "Analytic recovery deviation: {} mm.",
-            decoded.complex.error_mm
-        ));
+    for decoded in decoded {
         check_cancel(cancel)?;
         let normalized = Arc::new(decoded.complex.encode()?);
         capacity.charge_source(&normalized)?;
@@ -1093,7 +1089,8 @@ fn import_mesh(
                 hash: SourceHash::from_digest(&Sha256::digest(normalized.as_slice()).into()),
                 format: decoded.format,
                 selector: decoded.selector,
-                notes: decoded.notes,
+                object_name: bounded_text(&decoded.name, MAX_DISPLAY_LABEL_BYTES as usize),
+                findings: decoded.findings,
             }),
         };
         let id = provenance.definition_id();

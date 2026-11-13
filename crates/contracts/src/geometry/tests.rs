@@ -628,7 +628,8 @@ fn mesh_regions_and_interpretations_have_distinct_checked_identity() {
             hash: SourceHash::from_bytes(b"mm geometry"),
             format: MeshSourceFormat::Stl,
             selector: "stl:mm:surface1".into(),
-            notes: vec![],
+            object_name: "Imported part".into(),
+            findings: vec![],
         }),
     };
     let mm = source.definition_id();
@@ -641,4 +642,39 @@ fn mesh_regions_and_interpretations_have_distinct_checked_identity() {
     let mut json = serde_json::to_value(&source).unwrap();
     json.as_object_mut().unwrap().remove("normalized");
     assert!(serde_json::from_value::<SourceProvenance>(json).is_err());
+}
+
+#[test]
+fn import_findings_retain_locations_and_reject_unknown_or_invalid_wire_values() {
+    let finding = ImportFinding {
+        kind: ImportFindingKind::Changed,
+        code: ImportFindingCode::BoundaryWeld,
+        count: 2,
+        label: "Boundary joins".into(),
+        detail: "Paired boundary vertices".into(),
+        bounds_mm: Some(AabbMm::new([1., 2., 3.], [4., 5., 6.]).unwrap()),
+        displacement_mm: Some(0.00001),
+    };
+    let wire = crate::rpc::ImportFinding::try_from(finding.clone()).unwrap();
+    assert_eq!(ImportFinding::try_from(wire.clone()).unwrap(), finding);
+    for bad in [
+        crate::rpc::ImportFinding {
+            kind: 999,
+            ..wire.clone()
+        },
+        crate::rpc::ImportFinding {
+            code: 0,
+            ..wire.clone()
+        },
+        crate::rpc::ImportFinding {
+            count: 0,
+            ..wire.clone()
+        },
+        crate::rpc::ImportFinding {
+            displacement_mm: Some(f64::NAN),
+            ..wire
+        },
+    ] {
+        assert!(ImportFinding::try_from(bad).is_err());
+    }
 }
