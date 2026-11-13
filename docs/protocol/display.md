@@ -22,8 +22,12 @@ The ordinary native scene uses `mesh-tolerant-mm-0.05-v1`: complete source-face
 meshing at one quarter of the shared display-carrier allowance, measured native face/edge
 deviation within the display budget, closed oriented triangle incidence after
 exact coordinate welding, and independently checked packed reconstruction.
-Its carrier/trim deviation fields report the native mesher's sampled surface
-and edge estimates, not interval certificates or material authority. Every
+Its carrier/trim deviation fields report sampled surface and edge estimates,
+not interval certificates or material authority. A finite distance to the
+surface at each selected parameter seed already bounds that sample's distance
+to its carrier. Native Newton polishing is requested only when these direct
+distances do not satisfy the unchanged carrier-plus-trim allowance; the prior
+face candidate is released before that request. Every
 selected triangle sample must evaluate to a finite surface-distance seed;
 failed evaluations cannot silently contribute zero deviation. Failed or
 missing faces, invalid topology, excessive measured deviation, cancellation and

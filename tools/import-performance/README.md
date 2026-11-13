@@ -44,3 +44,17 @@ correctness and secondary metrics; keep or reject the change. Do not adopt the
 upstream tool's automatic blanket revert/commit behavior in a shared checkout.
 Remeasure the accepted producer and complete the ordinary geometry, engine,
 manufacturing and full supports-off/on corpus checks before integration.
+
+The optional geometry-owned display probe reports per-definition direct versus
+native-polished face counts and the largest accepted sampled carrier/direct and
+trim deviations, while checking the packed buffers:
+
+```sh
+SPILING_PREVIEW_STEP=/path/to/part.step RUST_MIN_STACK=8388608 \
+  cargo test --locked --profile profiling -p spiling-geometry --lib \
+  preview_external_step_reports_measurement_paths -- --ignored --nocapture
+```
+
+Retain the source hash and producer with this diagnostic. It exercises the
+display owner, not engine publication, desktop rendering or manufacturing;
+the supervised journeys and complete corpus remain separate acceptance checks.

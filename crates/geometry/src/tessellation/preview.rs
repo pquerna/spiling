@@ -43,7 +43,7 @@ pub(super) fn tessellate(
             face_ids: true,
             edge_polylines: true,
         },
-        measure_deviation: true,
+        measure_deviation: false,
         ..TessellateOptions::default()
     };
     let mut update = DisplayProgress {
@@ -67,6 +67,8 @@ pub(super) fn tessellate(
     }
     let trim = edge_deviation(definition, &kernel, &edges, work, cancel)?;
     let mut topology = Topology::default();
+    #[cfg(test)]
+    let mut measurements = (0usize, 0usize, 0.0_f64, 0.0_f64);
     let mut builder = MeshChunkBuilder::with_budget(
         definition.id().clone(),
         faces.len() as u32,
@@ -82,44 +84,71 @@ pub(super) fn tessellate(
             .retained_bytes()
             .saturating_add(topology.retained_bytes())
             .saturating_add(builder.retained_bytes());
-        let candidate = candidate_query(outside, work, cancel, |native| {
-            solidcore_mesh::tessellate_face_with_budget(
-                &kernel,
-                definition.brep(),
-                face,
-                &edges,
-                &options,
-                native,
-            )
-        })
-        .map_err(|failure| {
-            GeometryError::new(
-                failure.code,
-                format!(
-                    "preview face {ordinal}/{}: {}",
-                    faces.len(),
-                    failure.message
-                ),
-            )
-        })?;
-        if candidate.face != face
-            || candidate.positions.is_empty()
-            || candidate.triangles.is_empty()
-        {
-            return Err(invalid(
-                "preview omitted or changed an original source face",
-            ));
-        }
-        validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
-        let carrier = candidate
-            .deviation
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .ok_or_else(|| invalid("preview face has no finite measured deviation"))?;
+        let mesh_face = |polish: bool, work: &mut GeometryWorkBudget| {
+            let mut options = options.clone();
+            options.measure_deviation = polish;
+            let candidate = candidate_query(outside, work, cancel, |native| {
+                solidcore_mesh::tessellate_face_with_budget(
+                    &kernel,
+                    definition.brep(),
+                    face,
+                    &edges,
+                    &options,
+                    native,
+                )
+            })
+            .map_err(|failure| {
+                GeometryError::new(
+                    failure.code,
+                    format!(
+                        "preview face {ordinal}/{}: {}",
+                        faces.len(),
+                        failure.message
+                    ),
+                )
+            })?;
+            if candidate.face != face
+                || candidate.positions.is_empty()
+                || candidate.triangles.is_empty()
+            {
+                return Err(invalid(
+                    "preview omitted or changed an original source face",
+                ));
+            }
+            Ok(candidate)
+        };
+        let candidate = mesh_face(false, work)?;
+        let carrier = validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
+        let (candidate, carrier) = if carrier + trim <= MESH_CARRIER_TOLERANCE_MM {
+            #[cfg(test)]
+            {
+                measurements.0 += 1;
+                measurements.3 = measurements.3.max(carrier);
+            }
+            (candidate, carrier)
+        } else {
+            #[cfg(test)]
+            {
+                measurements.1 += 1;
+            }
+            drop(candidate);
+            let candidate = mesh_face(true, work)?;
+            validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
+            let carrier = candidate
+                .deviation
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| invalid("preview face has no finite measured deviation"))?;
+            (candidate, carrier)
+        };
         if !trim.is_finite() || trim < 0.0 || carrier + trim > MESH_CARRIER_TOLERANCE_MM {
             return Err(GeometryError::new(
                 GeometryErrorCode::ShapeErrorExceeded,
                 "measured preview deviation exceeds display profile",
             ));
+        }
+        #[cfg(test)]
+        {
+            measurements.2 = measurements.2.max(carrier);
         }
         update.stage = DisplayStage::AuditingFace;
         update.consumed_work = work.consumed();
@@ -155,6 +184,16 @@ pub(super) fn tessellate(
     topology.finish(builder.retained_bytes(), work, cancel)?;
     check_cancel(cancel)?;
     let result = builder.finish()?;
+    #[cfg(test)]
+    eprintln!(
+        "preview_measurements definition={:?} direct_faces={} polished_faces={} max_carrier_mm={} max_direct_mm={} trim_mm={}",
+        definition.id(),
+        measurements.0,
+        measurements.1,
+        measurements.2,
+        measurements.3,
+        trim
+    );
     update.stage = DisplayStage::Complete;
     update.consumed_work = work.consumed();
     progress(update);
@@ -168,7 +207,7 @@ fn validate_measurement_samples(
     candidate: &FaceMesh,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<f64, GeometryError> {
     let surface = definition
         .brep()
         .face(candidate.face)
@@ -176,6 +215,7 @@ fn validate_measurement_samples(
         .surface
         .as_ref()
         .ok_or_else(|| invalid("preview face has no surface"))?;
+    let mut maximum = 0.0_f64;
     for triangle in &candidate.triangles {
         let mut points = [solidcore::math::Point3::default(); 3];
         let mut parameters = [solidcore::math::Point2::default(); 3];
@@ -214,12 +254,14 @@ fn validate_measurement_samples(
             let measured = surface
                 .evaluate_point(kernel, parameter)
                 .map_err(|cause| invalid(cause.to_string()))?;
-            if !measured.distance(point).is_finite() {
+            let distance = measured.distance(point);
+            if !distance.is_finite() {
                 return Err(invalid("preview sample has no finite surface measurement"));
             }
+            maximum = maximum.max(distance);
         }
     }
-    Ok(())
+    Ok(maximum)
 }
 
 struct AdaptedFace {
@@ -657,6 +699,43 @@ mod tests {
     use std::{collections::BTreeSet, path::Path};
 
     #[test]
+    #[ignore = "operator-selected STEP display profiling, not a frozen product fixture"]
+    fn preview_external_step_reports_measurement_paths() {
+        let path = std::env::var_os("SPILING_PREVIEW_STEP").expect("set SPILING_PREVIEW_STEP");
+        let source = std::fs::read(path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let prepared = crate::PreparedStepSource::new(&source, &cancel).unwrap();
+        for body in prepared.bodies() {
+            let selected = (prepared.bodies().len() > 1).then_some(&body.solid);
+            let definition = prepared
+                .read_solid(
+                    selected,
+                    &cancel,
+                    spiling_contracts::geometry::MAX_NATIVE_FACES,
+                    crate::MAX_QUERY_PROOF_BYTES,
+                )
+                .unwrap();
+            let artifact = tessellate(
+                &definition,
+                &cancel,
+                MeshBudget::FROZEN,
+                &mut GeometryWorkBudget::query(),
+                &mut |_| {},
+            )
+            .unwrap();
+            for chunk in artifact.chunks {
+                CheckedMeshChunk::new(
+                    chunk.bytes.into(),
+                    chunk
+                        .descriptor
+                        .into_metadata(SessionId::new(), ArtifactId::new(1).unwrap()),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn preview_refuses_unmeasurable_surface_samples_instead_of_zero_deviation() {
         let source = std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/through-hole.step"),
@@ -689,6 +768,13 @@ mod tests {
         .unwrap();
         validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap();
         candidate.deviation = Some(0.0);
+        for point in &mut candidate.positions {
+            *point += solidcore::math::Point3::new(1000.0, 1000.0, 1000.0);
+        }
+        assert!(
+            validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap()
+                > MESH_CARRIER_TOLERANCE_MM
+        );
         candidate
             .uvs
             .fill(solidcore::math::Point2::new(f64::NAN, 0.0));
