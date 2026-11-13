@@ -22,6 +22,11 @@ const RUN_BAND_MM: f64 = MAX_ARC_POINT_DEVIATION_MM * 0.9;
 /// radius from the stored run, which can sit anywhere in its radial band, so
 /// keep a margin below the contract's limit.
 const SAGITTA_LIMIT_MM: f64 = MAX_ARC_SAGITTA_MM * 0.9;
+/// Sweep allowed when forming a run. The program rounds the run's ends and
+/// center to its coordinate step, which can turn a run planned at the
+/// contract's limit a few nanoradians past it when the verifier decodes it;
+/// keep a margin below the limit.
+const SWEEP_LIMIT_RADIANS: f64 = MAX_ARC_SWEEP_RADIANS * 0.99;
 /// Largest offset of a wall from the section circle it follows.
 const WALL_BAND_MM: f64 = 5.0;
 /// Largest turn of one edge in a run; a sharper turn is a corner.
@@ -183,7 +188,7 @@ fn runs_about(
                 || band[1].max(distances[j + 1]) - band[0].min(distances[j + 1]) > RUN_BAND_MM
                 || b[2] != points[i][2]
                 || sagitta > SAGITTA_LIMIT_MM
-                || sweep + step.abs() > MAX_ARC_SWEEP_RADIANS
+                || sweep + step.abs() > SWEEP_LIMIT_RADIANS
                 || width(j) != width(i)
             {
                 break;
