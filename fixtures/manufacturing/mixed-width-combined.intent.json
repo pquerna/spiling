@@ -88,7 +88,7 @@
         "interior_goal": {
           "minimum_modeled_saving_seconds": 1,
           "max_extra_model_fraction": 0.05,
-          "max_extra_waste_mm3": 0
+          "max_extra_waste_mm3": 0.000001
         },
         "timing_model": {
           "id": "software-rest-to-rest",
