@@ -2410,9 +2410,15 @@ pub struct PlanarRegionCoverage {
     pub support_area_mm2: f64,
     pub support_nominal_deposition_volume_mm3: f64,
     /// The unanchored span of a stroke printed over nothing on this layer:
-    /// with supports disabled, or with supports on where the part itself
-    /// blocks every column from the build plate. Zero otherwise.
+    /// with supports disabled, with supports on where the part itself
+    /// blocks every column from the build plate, or a support stroke whose
+    /// own lower support rows cannot anchor it on either raster axis. Zero
+    /// otherwise.
     pub unsupported_overhang_mm: f64,
+    /// Support wall length omitted on this layer because no minimum-length
+    /// command fits inside the support center domain within the wall error
+    /// bound there; the wall is split around it. Zero otherwise.
+    pub support_omitted_wall_mm: f64,
     #[serde(deserialize_with = "process_regions")]
     pub process_regions: Vec<ProcessRegionCoverage>,
     #[serde(deserialize_with = "process_interfaces")]
@@ -2610,6 +2616,7 @@ impl PlanarRegionCoverage {
             self.support_area_mm2,
             self.support_nominal_deposition_volume_mm3,
             self.unsupported_overhang_mm,
+            self.support_omitted_wall_mm,
         ];
         let partition = self.wall_area_mm2
             + self.bottom_skin_area_mm2
@@ -2635,7 +2642,8 @@ impl PlanarRegionCoverage {
             || (self.support_area_mm2 == 0.0) != (self.support_nominal_deposition_volume_mm3 == 0.0)
             || (matches!(recipe.supports, SupportPolicy::Disabled)
                 && (self.support_area_mm2 != 0.0
-                    || self.support_nominal_deposition_volume_mm3 != 0.0))
+                    || self.support_nominal_deposition_volume_mm3 != 0.0
+                    || self.support_omitted_wall_mm != 0.0))
             || !solid.is_finite()
             || !sparse.is_finite()
             || !void.is_finite()

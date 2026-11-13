@@ -510,6 +510,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
         unsupported_overhang_mm: 0.0,
+        support_omitted_wall_mm: 0.0,
     };
     let end = match recipe.rectilinear_axis {
         RectilinearAxisPolicy::Y | RectilinearAxisPolicy::AlternatingYX => [1.0, 2.0, 0.2],

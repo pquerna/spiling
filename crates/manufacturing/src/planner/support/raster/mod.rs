@@ -155,7 +155,7 @@ impl Domains {
         work: &mut usize,
         foreign_work: usize,
         cancel: &AtomicBool,
-    ) -> Result<Vec<DepositionPath>, ManufacturingError> {
+    ) -> Result<(Vec<DepositionPath>, f64), ManufacturingError> {
         check_cancel(cancel)?;
         let empty = MultiPolygon(Vec::new());
         let ordinary = self.ordinary.as_ref().unwrap_or(if self.all_interface {
@@ -230,7 +230,7 @@ impl Domains {
                 cancel,
             )?;
         }
-        commands::fit(
+        let omitted_wall_mm = commands::fit(
             &self.centers,
             &mut paths,
             &mut segments,
@@ -256,7 +256,7 @@ impl Domains {
             )?;
         }
         candidate_budget(&paths, self.admit()?, self.owned_bytes)?;
-        Ok(paths)
+        Ok((paths, omitted_wall_mm))
     }
 
     pub(super) fn anchor_budget(
@@ -584,9 +584,36 @@ pub(super) fn failure<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
+    scan(paths, previous, recipe, anchors, work, cancel, true)
+}
+
+/// The longest unanchored demand span of any stroke, when the raster has one.
+/// A layer whose rasters all have one prints the least-unanchored of them as
+/// authored and reports this span.
+pub(super) fn worst_failure<'a>(
+    paths: &[DepositionPath],
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<strokes::Failure>, ManufacturingError> {
+    scan(paths, previous, recipe, anchors, work, cancel, false)
+}
+
+fn scan<'a>(
+    paths: &[DepositionPath],
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    first: bool,
+) -> Result<Option<strokes::Failure>, ManufacturingError> {
+    let mut worst: Option<strokes::Failure> = None;
     for (path_index, path) in paths.iter().enumerate() {
-        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
-            let a = path.points_mm[first];
+        for (first_point, last, width_mm) in StrokeRuns::for_path(path)? {
+            let a = path.points_mm[first_point];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             for gap in anchors.gaps(
@@ -605,21 +632,25 @@ pub(super) fn failure<'a>(
                 if matches!(
                     strokes::gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
                     strokes::GapKind::Demand
-                ) {
-                    return Ok(Some(strokes::Failure {
+                ) && worst.as_ref().is_none_or(|worst| span > worst.span)
+                {
+                    worst = Some(strokes::Failure {
                         path: path_index,
-                        first,
+                        first: first_point,
                         last,
                         width_mm,
                         start: gap.start,
                         end: gap.end,
                         span,
-                    }));
+                    });
+                    if first {
+                        return Ok(worst);
+                    }
                 }
             }
         }
     }
-    Ok(None)
+    Ok(worst)
 }
 
 #[cfg(test)]
@@ -737,7 +768,8 @@ mod tests {
                 0,
                 &cancel,
             )
-            .unwrap();
+            .unwrap()
+            .0;
         let current = upper
             .paths(
                 &upper_interface,
@@ -757,7 +789,8 @@ mod tests {
                 0,
                 &cancel,
             )
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(
             previous
                 .iter()
@@ -783,19 +816,49 @@ mod tests {
             .is_none()
         );
         // Process ownership is not an anchor certificate: the identical raster
-        // still refuses when no actual support was deposited underneath it.
+        // still fails when no actual support was deposited underneath it.
         anchors.set_budget(upper.anchor_budget(&current).unwrap());
+        let first = failure(
+            &current,
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        // The span a degraded layer reports is the worst of every stroke,
+        // not the first one found.
+        let worst = worst_failure(
+            &current,
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(worst.span >= first.span);
+        let longest = current
+            .iter()
+            .flat_map(|path| path.points_mm.windows(2))
+            .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]))
+            .fold(0.0_f64, f64::max);
+        assert!(worst.span >= longest - 1e-9);
+        // Fully anchored rasters have no worst failure.
         assert!(
-            failure(
+            worst_failure(
                 &current,
-                std::iter::empty(),
+                previous.iter(),
                 &recipe,
                 &mut anchors,
                 &mut work,
                 &cancel
             )
             .unwrap()
-            .is_some()
+            .is_none()
         );
     }
 

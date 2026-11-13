@@ -722,7 +722,8 @@ mod tests {
                         0,
                         &cancel,
                     )
-                    .unwrap();
+                    .unwrap()
+                    .0;
                 assert_eq!(&actual[1..], expected);
                 assert_eq!(actual[0].points_mm.len(), 7);
                 assert_eq!(actual[0].kind, kind);
@@ -792,7 +793,8 @@ mod tests {
                     0,
                     &cancel,
                 )
-                .unwrap();
+                .unwrap()
+                .0;
             for kind in [DepositionKind::Support, DepositionKind::SupportInterface] {
                 assert!(paths.iter().any(|path| path.kind == kind));
             }
@@ -880,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn irreducible_optional_ring_still_refuses_instead_of_disappearing() {
+    fn irreducible_optional_ring_is_omitted_and_reported_not_silently_dropped() {
         let centers = MultiPolygon(vec![Polygon::new(
             LineString::from(vec![(0.0, 0.0), (0.01, 0.0), (0.0, 0.01), (0.0, 0.0)]),
             vec![],
@@ -904,22 +906,21 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        assert_eq!(
-            commands::fit(
-                &centers,
-                &mut paths,
-                &mut segments,
-                0,
-                0,
-                &mut 0,
-                0,
-                &cancel
-            )
-            .unwrap_err()
-            .code,
-            ManufacturingErrorCode::UnsupportedGeometry,
-        );
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].points_mm.len(), 4);
+        // No command fits anywhere on this ring: it deposits nothing, and its
+        // whole length is returned for the layer's report.
+        let omitted = commands::fit(
+            &centers,
+            &mut paths,
+            &mut segments,
+            0,
+            0,
+            &mut 0,
+            0,
+            &cancel,
+        )
+        .unwrap();
+        assert!(paths.is_empty());
+        assert_eq!(segments, 0);
+        assert!((omitted - (0.02 + 0.01 * std::f64::consts::SQRT_2)).abs() < 1e-12);
     }
 }

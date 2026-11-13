@@ -23,7 +23,7 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
             ui.visuals().warn_fg_color,
             format!("Unsupported deposition · {count} layers"),
         );
-        ui.weak("Supports are disabled. Verification checks commands, not printability; inspect these spans before printing. Each row records the first unsupported span found on that layer, not its worst span.");
+        ui.weak("No support reached these strokes from the build plate. Verification checks commands, not printability; inspect these spans before printing. Each row records one unsupported span found on that layer, not necessarily its worst span.");
         ui.collapsing("Unsupported layers", |ui| {
             let row_height = ui.text_style_height(&egui::TextStyle::Body);
             egui::ScrollArea::vertical()
@@ -258,6 +258,15 @@ pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
             format!(
                 "Unsupported deposition · first recorded span {:.3} mm",
                 r.unsupported_overhang_mm
+            ),
+        );
+    }
+    if r.support_omitted_wall_mm > 0.0 {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Support wall omitted · {:.4} mm with no admissible command",
+                r.support_omitted_wall_mm
             ),
         );
     }

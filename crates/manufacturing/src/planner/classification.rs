@@ -334,6 +334,7 @@ impl ClassifiedRegions {
             support_area_mm2: 0.0,
             support_nominal_deposition_volume_mm3: 0.0,
             unsupported_overhang_mm: 0.0,
+            support_omitted_wall_mm: 0.0,
         };
         let mut result = Self {
             layout,
