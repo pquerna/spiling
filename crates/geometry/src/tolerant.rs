@@ -138,13 +138,12 @@ impl TolerantModel {
         };
         let mut reach = policy.profile_mm;
         let mut failed_faces = mesh.failures.len() + mesh.unconverged_faces.len();
-        // The mesher can stop refining a face with work left. On analytic
-        // faces only the mesh's topology is used; measure how far it strays
-        // and admit it if projection can bring every crossing back.
-        if mesh.failures.is_empty()
-            && !mesh.unconverged_faces.is_empty()
-            && mesh.unconverged_faces.iter().all(analytic)
-        {
+        // The mesher can stop refining a face with work left. Measure how far
+        // it strays. On analytic faces only the mesh's topology is used: admit
+        // it if projection can bring every crossing back. Any face whose mesh
+        // is measured within the profile tolerance needs no projection.
+        if mesh.failures.is_empty() && !mesh.unconverged_faces.is_empty() {
+            let all_analytic = mesh.unconverged_faces.iter().all(analytic);
             let measured = solidcore_mesh::tessellate(
                 &kernel,
                 definition.brep(),
@@ -154,10 +153,10 @@ impl TolerantModel {
                 },
             )
             .map_err(|e| unavailable(format!("tolerant tessellation failed: {e}")))?;
-            if let Some(admitted) = unconverged_reach(
-                measured.stats.face_deviation.unwrap_or(f64::INFINITY),
-                policy,
-            ) {
+            let deviation = measured.stats.face_deviation.unwrap_or(f64::INFINITY);
+            if (all_analytic || deviation <= policy.profile_mm)
+                && let Some(admitted) = unconverged_reach(deviation, policy)
+            {
                 reach = admitted;
                 failed_faces = 0;
                 mesh = measured;

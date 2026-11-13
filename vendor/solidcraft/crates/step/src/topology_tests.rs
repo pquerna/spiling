@@ -1214,3 +1214,123 @@ fn a_loop_traversed_backwards_samples_inside_each_pcurve_interval() {
     let area = super::loop_area(&uses, &pcs, [false, false]).expect("the loop closes");
     assert!((area + 0.5).abs() < 1e-12);
 }
+
+/// A cubic B-spline edge through `n + 1` points of `at` on [0, 1], from `a` to `b`.
+fn spline_edge(w: &mut W, a: u64, b: u64, n: usize, at: impl Fn(f64) -> V) -> u64 {
+    let params: Vec<f64> = (0..=n).map(|i| i as f64 / n as f64).collect();
+    let points: Vec<V> = params.iter().map(|&t| at(t)).collect();
+    let c = solidcraft_geom::bspline::CurveN::<3>::interpolate(&params, &points, 3).unwrap();
+    let ids: Vec<u64> = c.ctrl.iter().map(|p| w.pt(*p)).collect();
+    let mut knots: Vec<(f64, usize)> = Vec::new();
+    for k in &c.knots {
+        match knots.last_mut() {
+            Some(last) if last.0 == *k => last.1 += 1,
+            _ => knots.push((*k, 1)),
+        }
+    }
+    let mults: Vec<String> = knots.iter().map(|k| k.1.to_string()).collect();
+    let values: Vec<String> = knots.iter().map(|k| real(k.0)).collect();
+    let curve = w.add(format!(
+        "B_SPLINE_CURVE_WITH_KNOTS('',3,({}),.UNSPECIFIED.,.F.,.F.,({}),({}),.UNSPECIFIED.)",
+        list(&ids),
+        mults.join(","),
+        values.join(",")
+    ));
+    w.add(format!("EDGE_CURVE('',#{a},#{b},#{curve},.T.)"))
+}
+
+/// One turn of a helical band on a cylinder of radius 5 (a thread's root), between helices of
+/// pitch 2 a width 0.5 apart, written as two faces on two equal surface records split along the
+/// straight ruling from the start of the upper helix to the end of the lower one: off the band,
+/// so each face alone bounds nothing.
+#[test]
+fn a_face_split_along_an_edge_off_it_gets_the_cut_inside() {
+    let (r, pitch, width) = (5.0, 2.0, 0.5);
+    let helix = |z0: f64| move |t: f64| [r * (TAU * t).cos(), r * (TAU * t).sin(), z0 + pitch * t];
+    let mut w = W::default();
+    let corner = |z: f64| [r, 0.0, z];
+    let (a0, b0, a1, b1) = (w.vertex(corner(0.0)), w.vertex(corner(width)), w.vertex(corner(pitch)), w.vertex(corner(pitch + width)));
+    let lower = spline_edge(&mut w, a0, a1, 256, helix(0.0));
+    let upper = spline_edge(&mut w, b0, b1, 256, helix(width));
+    let start = w.line_edge((a0, corner(0.0)), (b0, corner(width)), true, 1.0);
+    let end = w.line_edge((a1, corner(pitch)), (b1, corner(pitch + width)), true, 1.0);
+    let cut = w.line_edge((b0, corner(width)), (a1, corner(pitch)), true, 1.0);
+    let cylinder = |w: &mut W| {
+        let a = w.axis([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+        w.add(format!("CYLINDRICAL_SURFACE('',#{a},{})", real(r)))
+    };
+    // The band counter-clockwise in (angle, height): the lower helix, its end, the upper helix
+    // back, its start. The cut takes each half's share.
+    let ring = |w: &mut W, uses: &[(u64, bool)]| uses.iter().map(|&(e, o)| w.oe(e, o)).collect::<Vec<_>>();
+    let upper_half = ring(&mut w, &[(upper, false), (cut, true), (end, true)]);
+    let lower_half = ring(&mut w, &[(lower, true), (cut, false), (start, false)]);
+    let mut faces = Vec::new();
+    for oes in [upper_half, lower_half] {
+        let bound = w.bound(&oes, true, true);
+        let surface = cylinder(&mut w);
+        faces.push(w.face(&[bound], surface, true));
+    }
+    let shell = w.add(format!("OPEN_SHELL('',({}))", list(&faces)));
+    let model = w.add(format!("SHELL_BASED_SURFACE_MODEL('band',(#{shell}))"));
+    let s = one_solid(&w.file(&[model]));
+    assert!(s.notes.iter().any(|n| n.contains("1 edges splitting a face")), "{:?}", s.notes);
+    assert_eq!(counts(&s.brep), [1, 1, 2, 5, 4]);
+    // The cut now runs inside the band: halfway along it, half a turn round, between the helices.
+    let used_twice: Vec<&brep::Edge> = s.brep.edges.iter().filter(|e| e.uses.len() == 2).collect();
+    let [e] = used_twice.as_slice() else { panic!("one shared edge") };
+    let c = CurveEval::new(&e.curve).unwrap();
+    let m = c.point(0.5 * (e.interval[0] + e.interval[1])).unwrap();
+    assert!((m.x.hypot(m.y) - r).abs() < 1e-6, "{m:?}");
+    assert!((m.y.atan2(m.x).abs() - PI).abs() < 1e-3, "{m:?}");
+    let (lo, hi) = (0.5 * pitch, 0.5 * pitch + width);
+    assert!(m.z > lo && m.z < hi, "{m:?}");
+    for f in &s.brep.faces {
+        assert!(f.domain[0][1] - f.domain[0][0] <= TAU + 1e-6, "{:?}", f.domain);
+    }
+}
+
+/// A sheet: the side of a cylinder of radius 5 from z = 0 to 10 whose seam (at the surface's
+/// angle π) closes one turn, with a window through it at the surface's angle π/2 ± 0.3: a
+/// turn from the seam, not in the surface's first turn.
+#[test]
+fn a_hole_lies_in_its_outer_loop_turn() {
+    let r = 5.0;
+    let mut w = W::default();
+    let p = |a: f64, z: f64| [r * a.cos(), r * a.sin(), z];
+    let (s0, s1) = (w.vertex(p(PI, 0.0)), w.vertex(p(PI, 10.0)));
+    let ring = |w: &mut W, v: u64, z: f64| {
+        let k = w.circle([0.0, 0.0, z], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], r);
+        w.add(format!("EDGE_CURVE('',#{v},#{v},#{k},.T.)"))
+    };
+    let (bottom, top) = (ring(&mut w, s0, 0.0), ring(&mut w, s1, 10.0));
+    let seam = w.line_edge((s0, p(PI, 0.0)), (s1, p(PI, 10.0)), true, 1.0);
+    let (lo, hi) = (FRAC_PI_2 - 0.3, FRAC_PI_2 + 0.3);
+    let corners = [(lo, 3.0), (hi, 3.0), (hi, 7.0), (lo, 7.0)];
+    let vs: Vec<(u64, V)> = corners.iter().map(|&(a, z)| (w.vertex(p(a, z)), p(a, z))).collect();
+    let arc = |w: &mut W, i: usize, j: usize, z: f64| {
+        let k = w.circle([0.0, 0.0, z], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], r);
+        w.add(format!("EDGE_CURVE('',#{},#{},#{k},.T.)", vs[i].0, vs[j].0))
+    };
+    let (low, high) = (arc(&mut w, 0, 1, 3.0), arc(&mut w, 3, 2, 7.0));
+    let (left, right) = (w.line_edge(vs[0], vs[3], true, 1.0), w.line_edge(vs[1], vs[2], true, 1.0));
+    let outer: Vec<u64> = [(bottom, true), (seam, true), (top, false), (seam, false)].iter().map(|&(e, o)| w.oe(e, o)).collect();
+    // The window runs clockwise in (angle, height).
+    let window: Vec<u64> = [(left, true), (high, true), (right, false), (low, false)].iter().map(|&(e, o)| w.oe(e, o)).collect();
+    let (ob, wb) = (w.bound(&outer, true, true), w.bound(&window, false, true));
+    let a = w.axis([0.0; 3], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+    let cylinder = w.add(format!("CYLINDRICAL_SURFACE('',#{a},{})", real(r)));
+    let face = w.face(&[ob, wb], cylinder, true);
+    let shell = w.add(format!("OPEN_SHELL('',(#{face}))"));
+    let model = w.add(format!("SHELL_BASED_SURFACE_MODEL('',(#{shell}))"));
+    let s = one_solid(&w.file(&[model]));
+    let f = &s.brep.faces[0];
+    assert!((f.domain[0][1] - f.domain[0][0] - TAU).abs() < 1e-6, "{:?}", f.domain);
+    let Loop::Edges { edges } = &f.loops[1] else { panic!("an edge loop") };
+    for u in edges {
+        let [t0, t1] = u.pcurve.interval().unwrap();
+        for t in [t0, t1] {
+            let uv = u.pcurve.eval(t).unwrap();
+            assert!(uv[0] > f.domain[0][0] && uv[0] < f.domain[0][1], "{uv:?} outside {:?}", f.domain);
+        }
+    }
+}

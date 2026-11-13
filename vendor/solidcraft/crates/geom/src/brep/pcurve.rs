@@ -133,6 +133,7 @@ pub fn pcurves_within(
         on.close(&mut fitted, tolerance)?;
         out.push(fitted.into_iter().map(|(c, _)| c).collect());
     }
+    on.align(&mut out);
     Ok(out)
 }
 
@@ -420,6 +421,36 @@ impl On {
             samples = dense;
         }
         Err(Error::Failed(format!("no pcurve within {tol} mm in {MAX_SPANS} spans")))
+    }
+
+    /// A face's loops in one window of each period: each closed into the base period on its own
+    /// can land a period from the others (an outer loop whose seam is not at the surface's zero,
+    /// a hole beside it), so every loop is moved by whole periods to sit over the face's widest
+    /// loop in that parameter, which holds the rest (its outer bound).
+    fn align(&self, loops: &mut [Vec<Curve2>]) {
+        for d in 0..2 {
+            let Some(period) = self.dom.period.get(d).copied().flatten().filter(|p| *p > 0.0) else { continue };
+            let extent = |l: &[Curve2]| {
+                l.iter().flat_map(points).filter_map(|q| q.get(d).copied()).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)))
+            };
+            let spans: Vec<(f64, f64)> = loops.iter().map(|l| extent(l)).collect();
+            let Some(widest) = spans.iter().enumerate().filter(|(_, (a, b))| b >= a).max_by(|x, y| (x.1.1 - x.1.0).total_cmp(&(y.1.1 - y.1.0))).map(|(i, _)| i) else {
+                continue;
+            };
+            let Some(&(lo, hi)) = spans.get(widest) else { continue };
+            let centre = 0.5 * (lo + hi);
+            for (l, (a, b)) in loops.iter_mut().zip(&spans) {
+                if !(b >= a) {
+                    continue;
+                }
+                let by = ((centre - 0.5 * (a + b)) / period).round() * period;
+                if by != 0.0 {
+                    for c in l.iter_mut() {
+                        move_by(c, d, by);
+                    }
+                }
+            }
+        }
     }
 
     /// The loop's uses moved by whole periods so each starts where the one before it ends (in

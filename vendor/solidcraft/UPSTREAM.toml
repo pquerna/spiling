@@ -34,3 +34,19 @@ reason = "Solve generated cubic PCURVE least squares in displacement coordinates
 [[changes]]
 paths = ["crates/step/src/topology.rs", "crates/step/src/topology_tests.rs"]
 reason = "Clamp loop-area sample parameters to each pcurve's interval. Traversing a use backwards computed b - (b - a), which rounds one ulp below a for some intervals; the pcurve refused it, the loop lost its area, a hole was taken as the outer loop and its face was turned over."
+
+[[changes]]
+paths = ["crates/step/src/topology.rs", "crates/step/src/topology/seams.rs", "crates/step/src/topology_tests.rs"]
+reason = "A circle or ellipse edge between distinct vertices within the tolerance is read as a full turn, as before, but keeps the arc between its vertices' angles as its other reading. A periodic face whose loops cannot bound it with the full-turn reading (an Inventor 0.001 mm arc under a 0.01 mm uncertainty made a cylinder band wind twice) takes the arc reading when its loops then close, recorded in the solid's notes; otherwise the face refuses as before."
+
+[[changes]]
+paths = ["crates/step/src/topology.rs", "crates/step/src/topology/seams.rs", "crates/step/src/topology/splits.rs", "crates/step/src/topology_tests.rs"]
+reason = "Two faces on equal surface records sharing one edge, each bounded by a loop that winds once around an open periodic surface while together they wind nowhere (an Inventor thread root band split along a straight ruling off the band), keep their loops, edges and vertices; the shared edge is laid again inside their union on the surface (along its corners' bisectors, then straight in (u, v)), checked inside the union and within half the tolerance, and recorded in the solid's notes. Any other single winding loop on an open surface still refuses."
+
+[[changes]]
+paths = ["crates/step/src/topology.rs"]
+reason = "A torus face's loop going all the way around the torus that starts on the seam at the high end of the face's turn starts instead at a use inside the turn (or, when every use starts on the seam, at its low end). The pinned SolidCore gives torus faces no UV trims, so its mesher maps such a loop by point inversion from its start, where a seam point reads as the low end, and the loop ran out of its chart. Other faces keep their loop order."
+
+[[changes]]
+paths = ["crates/geom/src/brep/pcurve.rs", "crates/step/src/topology_tests.rs"]
+reason = "After each loop is closed into the base period, move every loop of a face by whole periods to sit over the face's widest loop: a hole beside an outer loop whose seam is not at the surface's zero landed a period away, outside its face's domain."

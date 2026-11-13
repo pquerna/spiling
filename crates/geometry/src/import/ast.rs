@@ -82,7 +82,9 @@ impl<'a> Entities<'a> {
                 if !matches!(
                     record.name.as_str(),
                     "MANIFOLD_SOLID_BREP"
+                        | "BREP_WITH_VOIDS"
                         | "CLOSED_SHELL"
+                        | "ORIENTED_CLOSED_SHELL"
                         | "ORIENTED_FACE"
                         | "ADVANCED_FACE"
                         | "FACE_SURFACE"

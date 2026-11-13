@@ -395,29 +395,60 @@ pub(super) fn read_solid(
 ) -> Result<solidcraft_step::topology::Solid> {
     let root = ex
         .get(solid_id)
-        .filter(|e| e.name() == "MANIFOLD_SOLID_BREP")
+        .filter(|e| super::SOLID_ITEMS.contains(&e.name()))
         .ok_or_else(|| invalid("missing decoder solid root"))?;
-    let shell = root
+    // The outer shell, then a BREP_WITH_VOIDS's void shells.
+    let mut shells: Vec<u64> = root
         .params()
         .get(1)
         .and_then(Param::as_ref_id)
-        .and_then(|id| ex.get(id))
-        .filter(|e| e.name() == "CLOSED_SHELL")
-        .ok_or_else(|| invalid("missing decoder closed shell"))?;
-    let faces = shell
-        .params()
-        .get(1)
-        .and_then(Param::as_list)
-        .ok_or_else(|| invalid("missing decoder shell faces"))?;
-    if faces.len() > MAX_NATIVE_FACES as usize {
-        return Err(error(
-            GeometryErrorCode::ResourceLimit,
-            "native face cap exceeded",
-        ));
+        .into_iter()
+        .collect();
+    if root.name() == "BREP_WITH_VOIDS" {
+        let voids = root
+            .params()
+            .get(2)
+            .and_then(Param::as_list)
+            .ok_or_else(|| invalid("missing decoder void shells"))?;
+        for void in voids {
+            shells.push(
+                void.as_ref_id()
+                    .ok_or_else(|| invalid("decoder void shell reference"))?,
+            );
+        }
+    }
+    let mut faces = Vec::new();
+    for id in shells {
+        let mut shell = ex.get(id);
+        if let Some(oriented) = shell.filter(|e| e.name() == "ORIENTED_CLOSED_SHELL") {
+            shell = oriented
+                .params()
+                .get(2)
+                .and_then(Param::as_ref_id)
+                .and_then(|id| ex.get(id));
+        }
+        let shell = shell
+            .filter(|e| e.name() == "CLOSED_SHELL")
+            .ok_or_else(|| invalid("missing decoder closed shell"))?;
+        faces.extend(
+            shell
+                .params()
+                .get(1)
+                .and_then(Param::as_list)
+                .ok_or_else(|| invalid("missing decoder shell faces"))?
+                .iter()
+                .cloned(),
+        );
+        if faces.len() > MAX_NATIVE_FACES as usize {
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "native face cap exceeded",
+            ));
+        }
     }
     let mut bytes = 0usize;
     let mut axes = Vec::new();
-    for face in faces {
+    for face in &faces {
         check_cancel(cancel)?;
         let carrier = face_carrier(
             ex,

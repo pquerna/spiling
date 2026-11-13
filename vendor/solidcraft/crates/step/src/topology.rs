@@ -53,6 +53,7 @@ use crate::units;
 
 mod charts;
 mod seams;
+mod splits;
 mod swept;
 
 use charts::{construct_native_chart_boundaries, declared_spline_pcurve};
@@ -360,6 +361,9 @@ struct Builder<'b, 'a> {
     face_ids: HashSet<u64>,
     faces: Vec<FaceB>,
     sense_mismatches: usize,
+    /// Circle and ellipse edges between distinct vertices within the tolerance, read as a full
+    /// turn: the arc between their angles, the other reading ([`seams`] decides by the loops).
+    short_arcs: HashMap<u32, [f64; 2]>,
 }
 
 impl<'b, 'a> Builder<'b, 'a> {
@@ -376,6 +380,7 @@ impl<'b, 'a> Builder<'b, 'a> {
             face_ids: HashSet::new(),
             faces: Vec::new(),
             sense_mismatches: 0,
+            short_arcs: HashMap::new(),
         }
     }
 
@@ -440,6 +445,12 @@ impl<'b, 'a> Builder<'b, 'a> {
             self.raise_vertex(v, gap, id)?;
         }
         let i = index(self.edges.len())?;
+        // Distinct vertices this near make the edge a full turn or the short arc between them.
+        if near && !closed && let Ok(short) = map_edge(&curve, ps, pe, same_sense, false, false, self.tol) {
+            if matches!(short.curve, BCurve::Circle { .. } | BCurve::Ellipse { .. }) && short.interval != mapped.interval {
+                self.short_arcs.insert(i, short.interval);
+            }
+        }
         self.edges.push(EdgeB { source_geometry: Some(rid(p.get(3), "edge geometry")?), curve: mapped.curve, interval: mapped.interval, vertices, tolerance: self.tol });
         self.edge_ids.insert(id, (i, mapped.with_step));
         Ok((i, mapped.with_step))
@@ -667,9 +678,15 @@ impl<'b, 'a> Builder<'b, 'a> {
     /// Pcurves, outer loops, domains and the canonical order: the finished record.
     fn finish(mut self, item: u64, name: String, shells: Vec<Vec<(u32, bool)>>, kind: Kind) -> R<Solid> {
         let mut notes = Vec::new();
-        let seams = self.add_seams()?;
+        let (seams, arcs, cuts) = self.add_seams()?;
         if seams > 0 {
             notes.push(format!("{seams} seam edges added to faces that wind around their surface"));
+        }
+        if cuts > 0 {
+            notes.push(format!("{cuts} edges splitting a face from another on its surface ran off both; laid again inside the two"));
+        }
+        if arcs > 0 {
+            notes.push(format!("{arcs} arcs between distinct vertices within the tolerance read as short arcs, not full turns: their loops wind as their faces need"));
         }
         if self.sense_mismatches > 0 {
             notes.push(format!("{} edges run against their same_sense (read by their vertices)", self.sense_mismatches));
@@ -1060,10 +1077,54 @@ impl<'b, 'a> Builder<'b, 'a> {
             }
             face.forward = !face.forward;
         }
-        let pcs: Vec<Vec<Curve2>> = if flip { pcs.into_iter().map(|l| l.into_iter().rev().collect()).collect() } else { pcs };
+        let mut pcs: Vec<Vec<Curve2>> = if flip { pcs.into_iter().map(|l| l.into_iter().rev().collect()).collect() } else { pcs };
         let domain = face_domain(&surface, &pcs)?;
+        // A torus face all the way around: start each loop off its seam's high side, where a
+        // point on the seam alone reads as the low side (a consumer that maps a loop by following
+        // it from its start takes the face's side of the seam then). Other faces keep their order.
+        if matches!(surface, BSurface::Torus { .. }) {
+            for (ring, pos) in pcs.iter_mut().zip(&positions) {
+                let Some(LoopB::Edges(es)) = face.loops.get_mut(*pos) else { continue };
+                let k = off_seam_start(es, ring, &domain, periods);
+                if k > 0 && k < es.len() && k < ring.len() {
+                    es.rotate_left(k);
+                    ring.rotate_left(k);
+                }
+            }
+        }
         Ok((pcs, domain, flip, tol))
     }
+}
+
+/// The use a loop should start at: its first, unless that starts on the seam at the high end of
+/// a direction the face goes all the way around, where a point on the seam alone reads as the
+/// low end; then the use starting farthest inside the face's turn (in (u, v)), or, with every use
+/// starting on the seam, one starting at its low end.
+fn off_seam_start(es: &[(u32, bool)], ring: &[Curve2], domain: &[[f64; 2]; 2], periodic: [bool; 2]) -> usize {
+    let around: Vec<usize> = (0..2).filter(|&d| periodic[d] && domain[d][1] - domain[d][0] >= TAU * (1.0 - 1e-9)).collect();
+    if around.is_empty() {
+        return 0;
+    }
+    let pad = 1e-6 * (1.0 + TAU);
+    // How far each use starts inside the face's turn, and whether it starts at its low or high end.
+    let starts: Vec<(f64, bool, bool)> = es
+        .iter()
+        .zip(ring)
+        .map(|(&(_, forward), c)| {
+            let Some(uv) = c.interval().and_then(|[a, b]| c.eval(if forward { a } else { b })) else { return (0.0, false, false) };
+            let clear = around.iter().map(|&d| (uv[d] - domain[d][0]).min(domain[d][1] - uv[d])).fold(f64::INFINITY, f64::min);
+            let low = around.iter().all(|&d| uv[d] - domain[d][0] <= pad);
+            let high = around.iter().any(|&d| domain[d][1] - uv[d] <= pad);
+            (clear, low, high)
+        })
+        .collect();
+    if !starts.first().is_some_and(|s| s.2) {
+        return 0;
+    }
+    if let Some((k, _)) = starts.iter().enumerate().filter(|(_, s)| s.0 > pad).max_by(|a, b| a.1.0.total_cmp(&b.1.0)) {
+        return k;
+    }
+    starts.iter().position(|s| s.1).unwrap_or(0)
 }
 
 /// The loop run the other way.

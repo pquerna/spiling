@@ -77,7 +77,7 @@ pub(super) fn capture(
     for (info, &native_face) in faces.iter().zip(native_faces) {
         check_cancel(cancel)?;
         let source_face = info.face_id.step_entity();
-        let (resolved, orientation) = resolve_face(entities, source_face)?;
+        let (resolved, _) = resolve_face(entities, source_face)?;
         let face = entities
             .records(resolved)?
             .iter()
@@ -95,7 +95,8 @@ pub(super) fn capture(
             carrier_id: StepEntityId(carrier_id),
             carrier,
             same_sense: source_bool(at(face, 3)?)?,
-            face_use_forward: orientation == source_bool(at(face, 3)?)?,
+            // `info.orientation` includes a reversed shell's turn.
+            face_use_forward: info.orientation == source_bool(at(face, 3)?)?,
             wires: Vec::new(),
         };
         for bound in list(at(face, 1)?)? {

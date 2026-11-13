@@ -363,7 +363,12 @@ pub(super) fn bodies(
         }
     }
     // Placements of every representation group, from the unplaced roots down.
-    let solids = entities.named("MANIFOLD_SOLID_BREP", cancel)?;
+    let mut solids = Vec::new();
+    for item in super::SOLID_ITEMS {
+        solids.extend(entities.named(item, cancel)?);
+    }
+    solids.sort_unstable();
+    solids.dedup();
     let mut owners = BTreeMap::new();
     for &solid in &solids {
         // Exporters may list a solid in several representations of one frame.
@@ -420,7 +425,12 @@ pub(super) fn bodies(
     }
     let mut bodies = Vec::with_capacity(solids.len());
     for solid in solids {
-        let record = entities.record(solid, "MANIFOLD_SOLID_BREP")?;
+        let record = entities
+            .records(solid)?
+            .iter()
+            .copied()
+            .find(|r| super::SOLID_ITEMS.contains(&r.name.as_str()))
+            .ok_or_else(|| invalid("STEP reference has wrong entity type"))?;
         let name = match at(record, 0)? {
             Parameter::String(name) => name.clone(),
             _ => String::new(),

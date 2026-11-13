@@ -10,6 +10,8 @@ mod closed_spline_decode;
 pub mod structure;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod topology_tests;
 mod units;
 
 use crate::{check_cancel, kernel::Definition};
@@ -259,6 +261,64 @@ fn resolve_face(entities: &Entities<'_>, canonical: u64) -> Result<(u64, bool), 
         id = reference(at(oriented, 2)?)?;
     }
 }
+/// One closed shell of a solid: the CLOSED_SHELL listing its faces and
+/// whether the solid uses it reversed (ORIENTED_CLOSED_SHELL `.F.`).
+struct SolidShell {
+    faces: u64,
+    reversed: bool,
+}
+
+/// The shells bounding a solid item, outer shell first: a MANIFOLD_SOLID_BREP's
+/// one shell, or a BREP_WITH_VOIDS's outer shell and then each void shell in
+/// declared order (ISO 10303-42). Material is inside the outer shell and
+/// outside every void; each shell keeps its declared orientation.
+fn solid_shells(entities: &Entities<'_>, solid: u64) -> Result<Vec<SolidShell>, GeometryError> {
+    let shell = |id: u64| -> Result<SolidShell, GeometryError> {
+        let records = entities.records(id)?;
+        if records.iter().any(|r| r.name == "CLOSED_SHELL") {
+            return Ok(SolidShell {
+                faces: id,
+                reversed: false,
+            });
+        }
+        let oriented = entities.record(id, "ORIENTED_CLOSED_SHELL")?;
+        let faces = reference(at(oriented, 2)?)?;
+        entities
+            .record(faces, "CLOSED_SHELL")
+            .map_err(|_| unsupported("oriented shell element is not a CLOSED_SHELL"))?;
+        Ok(SolidShell {
+            faces,
+            reversed: !source::source_bool(at(oriented, 3)?)?,
+        })
+    };
+    let records = entities.records(solid)?;
+    if let Some(root) = records.iter().find(|r| r.name == "BREP_WITH_VOIDS") {
+        let mut shells = vec![shell(reference(at(root, 1)?)?)?];
+        let voids = list(at(root, 2)?)?;
+        if voids.is_empty() {
+            return Err(invalid("BREP_WITH_VOIDS declares no void shell"));
+        }
+        for void in voids {
+            let void = reference(void)?;
+            entities
+                .record(void, "ORIENTED_CLOSED_SHELL")
+                .map_err(|_| invalid("BREP_WITH_VOIDS void is not an oriented closed shell"))?;
+            shells.push(shell(void)?);
+        }
+        let mut seen = BTreeSet::new();
+        if !shells.iter().all(|s| seen.insert(s.faces)) {
+            return Err(invalid("solid uses one closed shell twice"));
+        }
+        return Ok(shells);
+    }
+    let root = entities.record(solid, "MANIFOLD_SOLID_BREP")?;
+    Ok(vec![shell(reference(at(root, 1)?)?)?])
+}
+
+/// The STEP solid items Spiling imports: MANIFOLD_SOLID_BREP and its
+/// BREP_WITH_VOIDS subtype, in entity order.
+pub(super) const SOLID_ITEMS: [&str; 2] = ["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"];
+
 pub(crate) fn import_step(
     bytes: &[u8],
     selected: Option<&SourceSolidId>,
@@ -290,19 +350,6 @@ pub(crate) fn import_step(
     }
     units::validate_schema(&exchange.header)?;
     let entities = Entities::new(&exchange.data[0], cancel)?;
-    for records in entities.0.values() {
-        for record in records {
-            check_cancel(cancel)?;
-            if matches!(
-                record.name.as_str(),
-                "BREP_WITH_VOIDS" | "ORIENTED_CLOSED_SHELL"
-            ) {
-                return Err(unsupported(
-                    "void-shell or oriented-shell STEP representation",
-                ));
-            }
-        }
-    }
     // Product structure must be coherent even when one solid is imported; its
     // placements belong to the caller's occurrences, not to this definition.
     let bodies = structure::bodies(&entities, cancel)?;
@@ -331,11 +378,14 @@ pub(crate) fn import_step(
         uncertainty_mm,
     } = units::resolve(&entities, solid_id, cancel)?;
     let scale = source_unit.scale_to_mm();
-    let root = entities.record(solid_id, "MANIFOLD_SOLID_BREP")?;
-    let shell_id = reference(at(root, 1)?)?;
-    let shell = entities.record(shell_id, "CLOSED_SHELL")?;
+    let shells = solid_shells(&entities, solid_id)?;
     entities.validate_geometry(solid_id, cancel)?;
-    let canonical = list(at(shell, 1)?)?;
+    let mut canonical = Vec::new();
+    for shell in &shells {
+        for face in list(at(entities.record(shell.faces, "CLOSED_SHELL")?, 1)?)? {
+            canonical.push((reference(face)?, shell.reversed));
+        }
+    }
     if canonical.len() > face_limit as usize {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
@@ -344,13 +394,14 @@ pub(crate) fn import_step(
     }
     let mut seen = BTreeSet::new();
     let mut faces = Vec::with_capacity(canonical.len());
-    for p in canonical {
+    for (id, reversed) in canonical {
         check_cancel(cancel)?;
-        let id = reference(p)?;
         if !seen.insert(id) {
             return Err(invalid("duplicate canonical shell face use"));
         }
         let (resolved, orientation) = resolve_face(&entities, id)?;
+        // A reversed (ORIENTED_CLOSED_SHELL .F.) shell turns every face use.
+        let orientation = orientation != reversed;
         let (source_entity_kind, source_surface_entity_kind, geometry) =
             source_geometry(&entities, resolved, scale, radians_per_angle_unit)?;
         faces.push(FaceInfo {

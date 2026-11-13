@@ -121,6 +121,25 @@ fn spline_axis(s: &BSurface, eval: &SurfaceEval) -> Option<Axis> {
     Some(Axis { origin: Vec3::new(0.0, 0.0, 0.0), z: Vec3::new(0.0, 0.0, 1.0), kind: Kind::Iso { u0, column }, poles: [pole(v0), pole(v1)], period })
 }
 
+/// A face's loops around its axis, +u and −u, or why they cannot bound it.
+type Around = Result<(Vec<usize>, Vec<usize>), String>;
+
+/// Whether loops winding as `around` bound a face: none or a pair around the axis, or one
+/// with the pole it needs on its face's side.
+fn closable(around: &Around, ax: Option<&Axis>) -> bool {
+    match (around, ax) {
+        (Err(_), _) => false,
+        (Ok((up, down)), _) if up.is_empty() && down.is_empty() => true,
+        (Ok(_), None) => false,
+        (Ok((up, down)), Some(ax)) => match (up.len(), down.len()) {
+            (1, 1) => true,
+            (1, 0) => ax.poles[1].is_some(),
+            (0, 1) => ax.poles[0].is_some(),
+            _ => false,
+        },
+    }
+}
+
 const IDENTITY: [[f64; 4]; 4] = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
 
 /// `p` turned by `angle` about the axis through `o` along unit `k` (right-handed).
@@ -153,13 +172,16 @@ fn meridian(profile: &BCurve, o: Vec3, k: Vec3, angle: f64) -> R<BCurve> {
 
 impl Builder<'_, '_> {
     /// Give every face that winds around its surface without a seam one. Returns how many
-    /// seams were added.
-    pub(super) fn add_seams(&mut self) -> R<usize> {
+    /// seams were added, how many arcs were read short and how many split faces' cuts were laid
+    /// again so that their faces' loops close.
+    pub(super) fn add_seams(&mut self) -> R<(usize, usize, usize)> {
         let mut added = 0;
+        let mut arcs = 0;
+        let mut cuts = 0;
         let mut splits = 0;
         for fi in 0..self.faces.len() {
             let Some(face) = self.faces.get(fi) else { continue };
-            let surface = face.surface.clone();
+            let (step, surface) = (face.step, face.surface.clone());
             let natural = super::natural_periods(&surface);
             let eval = SurfaceEval::new(&surface).map_err(|e| e.to_string())?;
             // Periodic as the surface is, or as a spline closed on itself is (its knot width).
@@ -167,25 +189,40 @@ impl Builder<'_, '_> {
             if periods.iter().all(Option::is_none) {
                 continue;
             }
-            let mut up = Vec::new();
-            let mut down = Vec::new();
-            for (li, l) in face.loops.iter().enumerate() {
-                let LoopB::Edges(es) = l else { continue };
-                let w = self.winding(&eval, es, periods)?;
-                if w[1] != 0 || w[0].abs() > 1 {
-                    return Err(format!("face #{}: {}", face.step, unsupported("a loop winding around a surface more than once or in v")));
-                }
-                match w[0] {
-                    1 => up.push(li),
-                    -1 => down.push(li),
-                    _ => {}
+            let ax = axis(&surface).or_else(|| spline_axis(&surface, &eval));
+            let mut around = self.around(fi, &eval, periods)?;
+            if !closable(&around, ax.as_ref()) {
+                // A full-turn arc between near vertices may be the short arc they bound: read
+                // this face's such arcs short, and keep that only if its loops then close.
+                let short = self.face_short_arcs(fi);
+                if !short.is_empty() {
+                    let full: Vec<[f64; 2]> = short.iter().map(|(e, _)| self.edges.get(*e as usize).map_or([0.0; 2], |x| x.interval)).collect();
+                    self.set_intervals(short.iter().copied())?;
+                    let shortened = self.around(fi, &eval, periods)?;
+                    if closable(&shortened, ax.as_ref()) {
+                        for (e, _) in &short {
+                            self.short_arcs.remove(e);
+                        }
+                        arcs += short.len();
+                        around = shortened;
+                    } else {
+                        self.set_intervals(short.iter().map(|(e, _)| *e).zip(full))?;
+                    }
                 }
             }
+            if !closable(&around, ax.as_ref())
+                && let Ok((up, down)) = &around
+                && let ([l], []) | ([], [l]) = (up.as_slice(), down.as_slice())
+                && self.relay_split(fi, *l, &eval, periods)?
+            {
+                cuts += 1;
+                around = self.around(fi, &eval, periods)?;
+            }
+            let (up, down) = around.map_err(|m| format!("face #{step}: {m}"))?;
             if up.is_empty() && down.is_empty() {
                 continue;
             }
-            let step = face.step;
-            let Some(ax) = axis(&surface).or_else(|| spline_axis(&surface, &eval)) else {
+            let Some(ax) = ax else {
                 return Err(format!("face #{step}: {}", unsupported("a face winding around a torus or a spline closed in v without a seam edge")));
             };
             match (up.as_slice(), down.as_slice()) {
@@ -197,7 +234,60 @@ impl Builder<'_, '_> {
             }
             added += 1;
         }
-        Ok(added)
+        Ok((added, arcs, cuts))
+    }
+
+    /// The loops of face `fi` that go once around its surface in +u and in −u; an error for a
+    /// loop winding more than once or in v.
+    fn around(&self, fi: usize, eval: &SurfaceEval, periods: [Option<f64>; 2]) -> R<Around> {
+        let Some(face) = self.faces.get(fi) else { return Err("face reference".into()) };
+        let (mut up, mut down) = (Vec::new(), Vec::new());
+        for (li, l) in face.loops.iter().enumerate() {
+            let LoopB::Edges(es) = l else { continue };
+            let w = self.winding(eval, es, periods)?;
+            if w[1] != 0 || w[0].abs() > 1 {
+                return Ok(Err(unsupported("a loop winding around a surface more than once or in v")));
+            }
+            match w[0] {
+                1 => up.push(li),
+                -1 => down.push(li),
+                _ => {}
+            }
+        }
+        Ok(Ok((up, down)))
+    }
+
+    /// The edges of face `fi` with a short-arc reading not yet decided, and that reading.
+    fn face_short_arcs(&self, fi: usize) -> Vec<(u32, [f64; 2])> {
+        let mut out: Vec<(u32, [f64; 2])> = Vec::new();
+        for l in self.faces.get(fi).map(|f| f.loops.as_slice()).unwrap_or_default() {
+            let LoopB::Edges(es) = l else { continue };
+            for (e, _) in es {
+                if let Some(short) = self.short_arcs.get(e)
+                    && !out.iter().any(|(x, _)| x == e)
+                {
+                    out.push((*e, *short));
+                }
+            }
+        }
+        out
+    }
+
+    /// Give edges these intervals, widening their vertices' tolerances to the curve's new ends.
+    fn set_intervals(&mut self, intervals: impl IntoIterator<Item = (u32, [f64; 2])>) -> R<()> {
+        for (e, interval) in intervals {
+            let edge = self.edges.get_mut(e as usize).ok_or("edge reference")?;
+            edge.interval = interval;
+            let (curve, vertices) = (edge.curve.clone(), edge.vertices);
+            let c = CurveEval::new(&curve).map_err(|m| m.to_string())?;
+            for (t, v) in interval.into_iter().zip(vertices) {
+                let gap = c.point(t).ok_or("arc point")?.dist(self.vpoint(v)?);
+                if let Some(x) = self.vertices.get_mut(v as usize) {
+                    x.tolerance = x.tolerance.max(1.5 * gap);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Turns (in u, in v) a loop makes around a periodic surface.
@@ -232,7 +322,7 @@ impl Builder<'_, '_> {
         Ok(if forward { edge.vertices[0] } else { edge.vertices[1] })
     }
 
-    fn vpoint(&self, v: u32) -> R<Vec3> {
+    pub(super) fn vpoint(&self, v: u32) -> R<Vec3> {
         self.vertices.get(v as usize).map(|v| Vec3::from(v.point)).ok_or_else(|| "vertex reference".to_string())
     }
 
