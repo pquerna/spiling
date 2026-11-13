@@ -788,6 +788,7 @@ fn native_enclosure_bounds(
 ) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
     use crate::parametric::{self, CurveEvaluator, Interval};
     let mut work = crate::GeometryWorkBudget::query();
+    let kernel = crate::kernel::make_kernel_context();
     let mut minimum = [f64::INFINITY; 3];
     let mut maximum = [f64::NEG_INFINITY; 3];
     let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {
@@ -836,20 +837,35 @@ fn native_enclosure_bounds(
             .ok_or_else(|| invalid("native face has no coefficient carrier"))?;
         let low = face.uv_domain.min();
         let high = face.uv_domain.max();
+        let mut chart = [[low.x, high.x], [low.y, high.y]];
+        // A face whose trims wind past one period of a closed direction (a
+        // thread flank's helical band) lies within one whole turn there.
+        let natural = surface
+            .natural_uv_domain_with_nurb(&kernel)
+            .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
+        let natural = [
+            [natural.u_min(), natural.u_max()],
+            [natural.v_min(), natural.v_max()],
+        ];
+        let beyond = [0, 1].map(|d| chart[d][0] < natural[d][0] || chart[d][1] > natural[d][1]);
+        if beyond.contains(&true) {
+            let periods = brep_data_bridge::surface_periods(&kernel, surface)
+                .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
+            for d in 0..2 {
+                if beyond[d] && periods[d].is_some() {
+                    chart[d] = natural[d];
+                }
+            }
+        }
         let before = work.consumed();
-        let position = parametric::surface_position_enclosure(
-            surface,
-            [[low.x, high.x], [low.y, high.y]],
-            &mut work,
-            cancel,
-        )
-        .map_err(|failure| {
-            work.annotate_error(
-                failure,
-                before,
-                format_args!("native import face enclosure; face={face_id:?}"),
-            )
-        })?;
+        let position = parametric::surface_position_enclosure(surface, chart, &mut work, cancel)
+            .map_err(|failure| {
+                work.annotate_error(
+                    failure,
+                    before,
+                    format_args!("native import face enclosure; face={face_id:?}"),
+                )
+            })?;
         include(position)?;
     }
     spiling_contracts::geometry::AabbMm::new(minimum, maximum)

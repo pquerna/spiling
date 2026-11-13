@@ -1094,15 +1094,19 @@ pub(super) fn append_hatch_row(
                 continue;
             }
         }
-        // A sparse clip that collapses on the actual XYZ6 lattice cannot
-        // deposit material or anchor another road. Omit it before support
-        // demand, rather than request a scaffold for a numerical fragment.
-        // Required skin proposals retain their separate fitting/joining path.
+        // A sparse clip that collapses on the actual XYZ6 lattice, or is a
+        // fragment of a few lattice steps whose ends merely straddle a
+        // rounding boundary, cannot deposit material or anchor another road.
+        // Omit it before support demand, rather than request a scaffold for a
+        // numerical fragment (ADR012: a fill row shorter than one minimum
+        // command is omitted). Required skin proposals retain their separate
+        // fitting/joining path.
         if kind == DepositionKind::SparseFill
             && length.is_finite()
             && length >= 0.0
-            && program_coordinates::project_xyz6_coordinate_mm(pair[0])?
-                == program_coordinates::project_xyz6_coordinate_mm(pair[1])?
+            && (length <= 0.000002
+                || program_coordinates::project_xyz6_coordinate_mm(pair[0])?
+                    == program_coordinates::project_xyz6_coordinate_mm(pair[1])?)
         {
             continue;
         }
@@ -1327,8 +1331,17 @@ fn collapsed_sparse_clip_cannot_create_support_demand_or_nominal_material() {
     };
     let mut paths = Vec::new();
     let mut segments = 0;
+    // The first clip collapses on the lattice; the second is shorter than
+    // one lattice step but its ends straddle a rounding boundary.
     append_hatch_row(
-        &[99.274999976, 99.275000012, 100.0, 101.0],
+        &[
+            99.274999976,
+            99.275000012,
+            80.624788231951,
+            80.624788501058,
+            100.0,
+            101.0,
+        ],
         4.0,
         DepositionKind::SparseFill,
         &layer,

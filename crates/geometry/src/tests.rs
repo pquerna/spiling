@@ -1078,3 +1078,160 @@ fn tolerant_sections_lie_on_analytic_faces_and_report_their_circles() {
     }
     assert!(circles >= 12, "only {circles} exact circles reported");
 }
+
+/// A cylinder whose one lateral face is closed by a helical seam edge, as
+/// thread flanks and coils are: with no PCURVEs, its boundary winds once round
+/// plus the seam's twist, past one period of the chart. The decoder and the
+/// kernel each place trims a whole period apart; chained by period, the face
+/// tessellates and slices like any cylinder.
+fn twisted_seam_cylinder(twist: f64) -> String {
+    const R: f64 = 5.0;
+    const H: f64 = 8.0;
+    const SPANS: usize = 8;
+    // Piecewise cubic Hermite helix: C1, within 1e-8 mm of the true helix.
+    let at = |t: f64| [R * (twist * t).cos(), R * (twist * t).sin(), H * t];
+    let tangent = |t: f64| {
+        [
+            -R * twist * (twist * t).sin(),
+            R * twist * (twist * t).cos(),
+            H,
+        ]
+    };
+    let mut controls = Vec::new();
+    for span in 0..SPANS {
+        let (t0, t1) = (span as f64 / SPANS as f64, (span + 1) as f64 / SPANS as f64);
+        let h = (t1 - t0) / 3.0;
+        let (p0, p1, d0, d1) = (at(t0), at(t1), tangent(t0), tangent(t1));
+        if span == 0 {
+            controls.push(p0);
+        }
+        controls.push(std::array::from_fn(|i| p0[i] + d0[i] * h));
+        controls.push(std::array::from_fn(|i| p1[i] - d1[i] * h));
+        controls.push(p1);
+    }
+    let point = |p: [f64; 3]| {
+        format!(
+            "CARTESIAN_POINT('',({:.17E},{:.17E},{:.17E}))",
+            p[0], p[1], p[2]
+        )
+    };
+    let first_control = 100;
+    let mut data = vec![
+        "#1=APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#2);".to_string(),
+        "#2=APPLICATION_CONTEXT('core data for automotive mechanical design processes');".into(),
+        "#3=SHAPE_DEFINITION_REPRESENTATION(#4,#10);".into(),
+        "#4=PRODUCT_DEFINITION_SHAPE('','',#5);".into(),
+        "#5=PRODUCT_DEFINITION('design','',#6,#9);".into(),
+        "#6=PRODUCT_DEFINITION_FORMATION('','',#7);".into(),
+        "#7=PRODUCT('','','',(#8));".into(),
+        "#8=PRODUCT_CONTEXT('',#2,'mechanical');".into(),
+        "#9=PRODUCT_DEFINITION_CONTEXT('part definition',#2,'design');".into(),
+        "#10=SHAPE_REPRESENTATION('',(#16),#11);".into(),
+        "#11=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#15)) GLOBAL_UNIT_ASSIGNED_CONTEXT((#12,#13,#14)) REPRESENTATION_CONTEXT('',''));".into(),
+        "#12=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));".into(),
+        "#13=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));".into(),
+        "#14=(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT());".into(),
+        "#15=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#12,'distance_accuracy_value','');".into(),
+        "#16=MANIFOLD_SOLID_BREP('',#17);".into(),
+        "#17=CLOSED_SHELL('',(#20,#30,#40));".into(),
+        // Bottom cap, normal -Z.
+        "#20=ADVANCED_FACE('',(#21),#24,.F.);".into(),
+        "#21=FACE_BOUND('',#22,.F.);".into(),
+        "#22=EDGE_LOOP('',(#23));".into(),
+        "#23=ORIENTED_EDGE('',*,*,#50,.T.);".into(),
+        "#24=PLANE('',#25);".into(),
+        "#25=AXIS2_PLACEMENT_3D('',#26,#27,#28);".into(),
+        "#26=CARTESIAN_POINT('',(0.,0.,0.));".into(),
+        "#27=DIRECTION('',(0.,0.,1.));".into(),
+        "#28=DIRECTION('',(1.,0.,0.));".into(),
+        // Top cap, normal +Z.
+        "#30=ADVANCED_FACE('',(#31),#34,.T.);".into(),
+        "#31=FACE_BOUND('',#32,.T.);".into(),
+        "#32=EDGE_LOOP('',(#33));".into(),
+        "#33=ORIENTED_EDGE('',*,*,#60,.T.);".into(),
+        "#34=PLANE('',#35);".into(),
+        "#35=AXIS2_PLACEMENT_3D('',#36,#27,#28);".into(),
+        format!("#36=CARTESIAN_POINT('',(0.,0.,{H:.1}));"),
+        // The lateral face: bottom circle, helix up, top circle back, helix down.
+        "#40=ADVANCED_FACE('',(#41),#47,.T.);".into(),
+        "#41=FACE_BOUND('',#42,.T.);".into(),
+        "#42=EDGE_LOOP('',(#43,#44,#45,#46));".into(),
+        "#43=ORIENTED_EDGE('',*,*,#50,.T.);".into(),
+        "#44=ORIENTED_EDGE('',*,*,#70,.T.);".into(),
+        "#45=ORIENTED_EDGE('',*,*,#60,.F.);".into(),
+        "#46=ORIENTED_EDGE('',*,*,#70,.F.);".into(),
+        format!("#47=CYLINDRICAL_SURFACE('',#48,{R:.1});"),
+        "#48=AXIS2_PLACEMENT_3D('',#26,#27,#28);".into(),
+        "#50=EDGE_CURVE('',#51,#51,#53,.T.);".into(),
+        "#51=VERTEX_POINT('',#52);".into(),
+        format!("#52={};", point(at(0.0))),
+        format!("#53=CIRCLE('',#25,{R:.1});"),
+        "#60=EDGE_CURVE('',#61,#61,#63,.T.);".into(),
+        "#61=VERTEX_POINT('',#62);".into(),
+        format!("#62={};", point(at(1.0))),
+        format!("#63=CIRCLE('',#64,{R:.1});"),
+        "#64=AXIS2_PLACEMENT_3D('',#36,#27,#65);".into(),
+        format!("#65=DIRECTION('',({:.17E},{:.17E},0.));", twist.cos(), twist.sin()),
+        "#70=EDGE_CURVE('',#51,#61,#71,.T.);".into(),
+    ];
+    let references: Vec<String> = (0..controls.len())
+        .map(|i| format!("#{}", first_control + i))
+        .collect();
+    let multiplicities: Vec<String> = std::iter::once("4".to_string())
+        .chain(std::iter::repeat_n("3".to_string(), SPANS - 1))
+        .chain(std::iter::once("4".to_string()))
+        .collect();
+    let knots: Vec<String> = (0..=SPANS).map(|k| format!("{:.1}", k as f64)).collect();
+    data.push(format!(
+        "#71=B_SPLINE_CURVE_WITH_KNOTS('',3,({}),.UNSPECIFIED.,.F.,.F.,({}),({}),.UNSPECIFIED.);",
+        references.join(","),
+        multiplicities.join(","),
+        knots.join(",")
+    ));
+    for (i, p) in controls.iter().enumerate() {
+        data.push(format!("#{}={};", first_control + i, point(*p)));
+    }
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('twisted seam cylinder'),'2;1');\nFILE_NAME('twisted-seam-cylinder.step','2026-11-13T00:00:00',('Spiling contributors'),('Spiling'),'','Spiling test','OSL-3.0');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{}\nENDSEC;\nEND-ISO-10303-21;\n",
+        data.join("\n")
+    )
+}
+
+/// A face whose boundary winds just past one period of a closed analytic
+/// chart, as a thread flank whose end edges straddle the seam does, tessellates
+/// watertight and slices to the true circle. One winding further than the
+/// mesher's one-turn chart reaches is reported as a failed face, never dropped.
+#[test]
+fn periodic_face_winding_past_one_turn_tessellates_and_slices() {
+    use crate::tolerant::{TolerantModel, TolerantPolicy};
+    let cancel = AtomicBool::new(false);
+    // Past one turn by 0.0025 mm and by 0.01 mm of the 5 mm radius.
+    for twist in [0.0005_f64, 0.002] {
+        let source = twisted_seam_cylinder(twist);
+        let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel)
+            .unwrap_or_else(|e| panic!("twist {twist}: {}", e.message));
+        let model = TolerantModel::build(&definition, TolerantPolicy::default(), &cancel).unwrap();
+        assert_eq!(model.failed_faces, 0, "twist {twist}");
+        let (minimum, maximum) = model.bounds();
+        for axis in 0..2 {
+            close(minimum[axis], -5.0, 0.01);
+            close(maximum[axis], 5.0, 0.01);
+        }
+        close(minimum[2], 0.0, 1e-9);
+        close(maximum[2], 8.0, 1e-9);
+        for z in [0.1, 2.0, 4.0, 6.0, 7.9] {
+            let section = model.section(z).unwrap();
+            assert_eq!(section.loops.len(), 1, "twist {twist} at {z}");
+            assert_eq!(section.joined_gaps, 0, "twist {twist} at {z}");
+            let boundary = &section.loops[0];
+            for p in &boundary.points {
+                close(p[0].hypot(p[1]), 5.0, 0.01);
+            }
+            close(boundary.area, std::f64::consts::PI * 25.0, 0.05);
+        }
+    }
+    let source = twisted_seam_cylinder(0.5);
+    let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel).unwrap();
+    let model = TolerantModel::build(&definition, TolerantPolicy::default(), &cancel).unwrap();
+    assert_eq!(model.failed_faces, 1);
+}

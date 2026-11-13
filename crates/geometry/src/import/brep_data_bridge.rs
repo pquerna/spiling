@@ -203,9 +203,172 @@ pub fn from_schema4_brep(
         for f in faces {
             let _ =
                 solidcore::topology::face::p3::create_uv_trim_curves(k, &mut out, f, false, None);
+            chain_periodic_trims(k, &mut out, f)?;
         }
     }
     Ok(out)
+}
+
+/// The period of each direction in which `surface` closes on its natural chart:
+/// both chart ends evaluate to one point along the whole other direction.
+pub(crate) fn surface_periods(k: &Kernel, surface: &Surface) -> R<[Option<f64>; 2]> {
+    let natural = surface.natural_uv_domain_with_nurb(k)?;
+    let closes = |along_u: bool| -> bool {
+        let (length, other) = if along_u {
+            (
+                natural.u_max() - natural.u_min(),
+                [natural.v_min(), natural.v_max()],
+            )
+        } else {
+            (
+                natural.v_max() - natural.v_min(),
+                [natural.u_min(), natural.u_max()],
+            )
+        };
+        if !(length.is_finite() && length > 0.0 && other[0].is_finite() && other[1].is_finite()) {
+            return false;
+        }
+        (0..=4).all(|i| {
+            let w = other[0] + (other[1] - other[0]) * f64::from(i) / 4.0;
+            let (a, z) = if along_u {
+                (
+                    solidcore::math::Point2::new(natural.u_min(), w),
+                    solidcore::math::Point2::new(natural.u_max(), w),
+                )
+            } else {
+                (
+                    solidcore::math::Point2::new(w, natural.v_min()),
+                    solidcore::math::Point2::new(w, natural.v_max()),
+                )
+            };
+            match (surface.evaluate_point(k, a), surface.evaluate_point(k, z)) {
+                (Ok(p), Ok(q)) => (p - q).length() <= 1e-9 * (1.0 + p.length().max(q.length())),
+                _ => false,
+            }
+        })
+    };
+    Ok([
+        closes(true).then(|| natural.u_max() - natural.u_min()),
+        closes(false).then(|| natural.v_max() - natural.v_min()),
+    ])
+}
+
+/// Fraction of a period within which two trim ends a whole number of periods
+/// apart are one point across the seam (the kernel's own seam-wrap residual).
+const SEAM_WRAP_RESIDUAL: f64 = 0.01;
+
+/// The kernel projects each trim of a closed surface's face on its own, into
+/// the face's one-turn chart. Where a boundary crosses that chart's seam
+/// without a seam edge, consecutive trims then land a whole period apart: a
+/// modelled thread's flank winds one turn, and its short end edges straddle
+/// the seam by their vertices' placement. Move each trim by whole periods to
+/// start where the one before it ends, in loop order, as OCCT's
+/// `ShapeFix_Wire::FixShifted` does after projecting missing pcurves, and
+/// widen the face's chart to the moved trims. No point moves: the surface is
+/// the same a period on. A jump across a singular side (a cone's apex, a
+/// sphere's pole) is left, as is a gap that is not whole periods; a loop that
+/// winds round the surface keeps its net period.
+fn chain_periodic_trims(k: &Kernel, b: &mut Brep, f: solidcore::FaceId) -> R<()> {
+    use solidcore::math::Point2;
+    use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+    use solidcore::topology::edgeuse::p1 as eu1;
+    let Some(surface) = b.face(f)?.surface.as_ref() else {
+        return Ok(());
+    };
+    let periods = surface_periods(k, surface)?;
+    if periods.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let tolerance = 2.0 * solidcore::topology::face::p2::tolerance(b, f)?;
+    // Whether the chart segment between two trim ends may be one point on
+    // the surface: a singular side, where the periodic parameter is free.
+    // A segment that does not evaluate keeps the kernel's own placement.
+    let singular = |a: [f64; 2], z: [f64; 2]| -> bool {
+        let at = |t: f64| {
+            surface.evaluate_point(
+                k,
+                Point2::new(a[0] + (z[0] - a[0]) * t, a[1] + (z[1] - a[1]) * t),
+            )
+        };
+        let Ok(anchor) = at(0.0) else {
+            return true;
+        };
+        [0.25, 0.5, 0.75, 1.0]
+            .into_iter()
+            .all(|t| at(t).map_or(true, |p| (p - anchor).length() <= tolerance))
+    };
+    let mut moves: Vec<(solidcore::topology::EdgeuseId, [f64; 2])> = Vec::new();
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for lu in solidcore::topology::face::p4::upward_loopuses(b, f, false, None)? {
+        let mut previous: Option<[f64; 2]> = None;
+        for eu in solidcore::topology::loopuse::edgeuses(b, lu, None, None)? {
+            let (Some(curve), Some(holder)) = eu1::uv_trim_curve(b, eu)? else {
+                previous = None;
+                continue;
+            };
+            let interval = curve.natural_interval();
+            let a = curve.evaluate_point(k, interval.min())?;
+            let z = curve.evaluate_point(k, interval.max())?;
+            let (start, end) = if eu1::orientation(b, eu)? == OrientType::Opposite {
+                ([z.x, z.y], [a.x, a.y])
+            } else {
+                ([a.x, a.y], [z.x, z.y])
+            };
+            let mut shift = [0.0; 2];
+            if let Some(previous) = previous {
+                for d in 0..2 {
+                    let Some(period) = periods[d] else { continue };
+                    let gap = previous[d] - start[d];
+                    let n = (gap / period).round();
+                    if n != 0.0 && (gap - n * period).abs() <= SEAM_WRAP_RESIDUAL * period {
+                        shift[d] = n * period;
+                    }
+                }
+                if shift != [0.0; 2] && singular(previous, start) {
+                    shift = [0.0; 2];
+                }
+            }
+            for i in 0..=8 {
+                let p = curve.evaluate_point(k, interval.evaluate(f64::from(i) / 8.0))?;
+                for (d, x) in [p.x, p.y].into_iter().enumerate() {
+                    lo[d] = lo[d].min(x + shift[d]);
+                    hi[d] = hi[d].max(x + shift[d]);
+                }
+            }
+            previous = Some([end[0] + shift[0], end[1] + shift[1]]);
+            if shift != [0.0; 2] {
+                moves.push((holder, shift));
+            }
+        }
+    }
+    if moves.is_empty() {
+        return Ok(());
+    }
+    for (holder, shift) in moves {
+        let Some(curve) = b.edgeuse_mut(holder)?.uv_trim_curve.as_mut() else {
+            return Err(BridgeError::Invalid("periodic trim holder"));
+        };
+        curve.transform(
+            k,
+            &Axis2Placement::new(
+                Point3::new(shift[0], shift[1], 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            None,
+        )?;
+        curve.convert_to_2d(k)?;
+    }
+    let face = b.face_mut(f)?;
+    let domain = face.uv_domain;
+    face.uv_domain = Extent2d::from_bounds(
+        domain.u_min().min(lo[0]),
+        domain.v_min().min(lo[1]),
+        domain.u_max().max(hi[0]),
+        domain.v_max().max(hi[1]),
+    );
+    Ok(())
 }
 
 /// Builds a [`solidcore::topology::brep_data::BrepData`] from a Schema 4 `Brep`.
