@@ -111,8 +111,21 @@ pub struct QualifiedInteriorWork {
     pub program_hash: SourceHash,
     pub model_volume_mm3: f64,
     pub waste_volume_mm3: f64,
+    /// E8 rounding the decoded waste may contain (one quantum per waste segment).
+    pub waste_rounding_mm3: f64,
     #[serde(deserialize_with = "required_option")]
     pub time: Option<JobTimeLedger>,
+}
+impl QualifiedInteriorWork {
+    /// Whether this work's waste stays within `extra` of `reference`, comparing
+    /// decoded volumes up to the E8 rounding both programs contain.
+    pub fn waste_within(&self, reference: &Self, extra: f64) -> bool {
+        self.waste_volume_mm3
+            <= reference.waste_volume_mm3
+                + extra
+                + self.waste_rounding_mm3
+                + reference.waste_rounding_mm3
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -196,7 +209,7 @@ impl InteriorSelection {
             reason = InteriorSelectionReason::ObjectiveNotMet;
             let seconds = time.modeled_seconds();
             if work.model_volume_mm3 <= model_bound
-                && work.waste_volume_mm3 <= waste_bound
+                && work.waste_within(baseline, goal.max_extra_waste_mm3)
                 && seconds < best
                 && reference_time.modeled_seconds() - seconds >= goal.minimum_modeled_saving_seconds
             {
@@ -229,10 +242,15 @@ impl InteriorSelection {
             .routing
             .as_ref()
             .map_or(0.0, |r| r.tools.iter().map(|t| t.waste_volume_mm3).sum());
+        let rounding = report
+            .routing
+            .as_ref()
+            .map_or(0.0, |r| r.waste_rounding_mm3());
         if work.program_hash != *program
             || work.time != report.job_time
             || work.model_volume_mm3 != report.deposited_volume_mm3
             || work.waste_volume_mm3 != waste
+            || work.waste_rounding_mm3 != rounding
             || work.interior_segments_per_tool[0]
                 .checked_add(work.interior_segments_per_tool[1])
                 .is_none_or(|count| count > report.deposition_segments)
@@ -270,7 +288,10 @@ impl InteriorSelection {
                 {
                     return Err(resource("interior candidate segment budget exceeded"));
                 }
-                if !work.waste_volume_mm3.is_finite() || work.waste_volume_mm3 < 0.0 {
+                if [work.waste_volume_mm3, work.waste_rounding_mm3]
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < 0.0)
+                {
                     return Err(invalid("invalid interior candidate waste quantity"));
                 }
                 if let Some(time) = &work.time {
@@ -421,7 +442,10 @@ impl InteriorPolicyAssessment {
             {
                 return Err(resource("policy work segment count exceeds bound"));
             }
-            if !work.waste_volume_mm3.is_finite() || work.waste_volume_mm3 < 0.0 {
+            if [work.waste_volume_mm3, work.waste_rounding_mm3]
+                .iter()
+                .any(|v| !v.is_finite() || *v < 0.0)
+            {
                 return Err(invalid("invalid policy assessment waste"));
             }
             if let Some(time) = &work.time {
@@ -450,7 +474,7 @@ impl InteriorPolicyAssessment {
                 || before.modeled_seconds() - after.modeled_seconds()
                     < goal.minimum_modeled_saving_seconds
                 || work.model_volume_mm3 > model_bound
-                || work.waste_volume_mm3 > waste_bound
+                || !work.waste_within(&self.primary, goal.max_extra_waste_mm3)
             {
                 return Err(invalid(
                     "policy change does not meet the captured objective",

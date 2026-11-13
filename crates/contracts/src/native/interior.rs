@@ -166,6 +166,7 @@ impl TryFrom<rpc::QualifiedInteriorWork> for QualifiedInteriorWork {
                 .map_err(|e| e.to_string())?,
             model_volume_mm3: v.model_volume_mm3,
             waste_volume_mm3: v.waste_volume_mm3,
+            waste_rounding_mm3: v.waste_rounding_mm3,
             time: v.time.map(TryInto::try_into).transpose()?,
         })
     }
@@ -178,6 +179,7 @@ impl TryFrom<QualifiedInteriorWork> for rpc::QualifiedInteriorWork {
             program_hash: v.program_hash.as_str().into(),
             model_volume_mm3: v.model_volume_mm3,
             waste_volume_mm3: v.waste_volume_mm3,
+            waste_rounding_mm3: v.waste_rounding_mm3,
             time: v.time.map(TryInto::try_into).transpose()?,
         })
     }

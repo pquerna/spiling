@@ -797,7 +797,11 @@ export type InteriorStrategy = "primary" | "synchronized" | "grouped";
 
 export type InteriorSelectionReason = "explicit_primary" | "no_timing_model" | "no_objective" | "grouping_disabled" | "no_qualified_alternative" | "incomparable_timing" | "objective_not_met" | "improved_modeled_work";
 
-export type QualifiedInteriorWork = { interior_segments_per_tool: [number, number], program_hash: SourceHash, model_volume_mm3: number, waste_volume_mm3: number, time: JobTimeLedger | null, };
+export type QualifiedInteriorWork = { interior_segments_per_tool: [number, number], program_hash: SourceHash, model_volume_mm3: number, waste_volume_mm3: number,
+/**
+ * E8 rounding the decoded waste may contain (one quantum per waste segment).
+ */
+waste_rounding_mm3: number, time: JobTimeLedger | null, };
 
 export type InteriorCandidateOutcome = { "kind": "qualified", work: QualifiedInteriorWork, } | { "kind": "refused", error: ManufacturingError, } | { "kind": "not_evaluated", reason: InteriorSelectionReason, };
 

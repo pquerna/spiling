@@ -561,4 +561,5 @@ message QualifiedInteriorWork {
   double model_volume_mm3 = 3;
   double waste_volume_mm3 = 4;
   JobTimeLedger time = 5;
+  double waste_rounding_mm3 = 6;
 }

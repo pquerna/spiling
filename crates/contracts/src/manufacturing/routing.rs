@@ -7,6 +7,9 @@ use super::*;
 pub const FIXED_DUAL_FIRMWARE_REVISION: &str = "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7";
 pub const MAX_TOOL_SELECTIONS: u32 = 50_000;
 
+/// One E8 extrusion quantum of filament length.
+pub const E_QUANTUM_MM: f64 = 1e-8;
+
 /// The reviewed, deliberately non-extensible firmware branch contract.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -894,6 +897,19 @@ pub struct FixedDualVerification {
     pub tools: [RoutedToolAccounting; 2],
 }
 impl FixedDualVerification {
+    /// Largest E8 rounding contained in the decoded waste volume: every waste
+    /// segment's emitted E may differ from its nominal dose by one quantum.
+    pub fn waste_rounding_mm3(&self) -> f64 {
+        self.tools
+            .iter()
+            .filter(|tool| tool.waste_filament_length_mm > 0.0)
+            .map(|tool| {
+                f64::from(tool.waste_deposition_segments)
+                    * E_QUANTUM_MM
+                    * (tool.waste_volume_mm3 / tool.waste_filament_length_mm)
+            })
+            .sum()
+    }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if self.selection_count == 0 || self.selection_count > MAX_TOOL_SELECTIONS {
             return Err(invalid("invalid decoded fixed-dual selection count"));

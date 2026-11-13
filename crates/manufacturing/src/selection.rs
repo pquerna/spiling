@@ -76,6 +76,12 @@ fn assessment(
                     .iter()
                     .map(|t| t.waste_volume_mm3)
                     .sum(),
+                waste_rounding_mm3: bundle
+                    .verification
+                    .routing
+                    .as_ref()
+                    .expect("qualified dual route")
+                    .waste_rounding_mm3(),
                 time: bundle.verification.job_time.clone(),
             },
         },
