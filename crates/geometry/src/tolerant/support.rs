@@ -321,6 +321,69 @@ impl TolerantModel {
         Ok(ControlFlow::Continue(()))
     }
 
+    /// Boundary facets crossing the slab between `interval`'s heights, each
+    /// projected to XY and padded by the support enclosure, limited to those
+    /// whose padded bounds meet `within`. Facets lying wholly at or beyond
+    /// either height (a flat face bounding the slab) do not cross it. A
+    /// vertical line inside a section of the slab and outside every piece
+    /// meets no boundary there, so it stays inside material over the whole
+    /// slab: the slab's full-height inner material is that section minus the
+    /// union of these pieces. Approximation is enclosed in XY.
+    pub fn slab_crossings(
+        &self,
+        interval: [f64; 2],
+        within: [[f64; 2]; 2],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<Vec<[f64; 2]>>, GeometryError> {
+        if !interval.iter().all(|z| z.is_finite()) || interval[0] >= interval[1] {
+            return Err(unavailable("invalid inner-material slab interval"));
+        }
+        cancelled(cancel)?;
+        let margin = self.support_margin();
+        let mut pieces = Vec::new();
+        if self.buckets.is_empty() {
+            return Ok(pieces);
+        }
+        let bucket = |z: f64| {
+            (((z - self.z_min) / super::BUCKET_MM).floor().max(0.0) as usize)
+                .min(self.buckets.len() - 1)
+        };
+        let first = bucket(interval[0]);
+        for index in first..=bucket(interval[1]) {
+            for &triangle in &self.buckets[index] {
+                cancelled(cancel)?;
+                let vertices = self.triangles[triangle as usize].map(|i| self.positions[i as usize]);
+                let low = vertices.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
+                let high = vertices.iter().map(|p| p[2]).fold(f64::NEG_INFINITY, f64::max);
+                // Each triangle once: in its lowest bucket within the range.
+                if bucket(low).max(first) != index || low >= interval[1] || high <= interval[0] {
+                    continue;
+                }
+                let xy: Vec<[f64; 2]> = clip(vertices, interval)
+                    .into_iter()
+                    .map(|p| [p[0], p[1]])
+                    .collect();
+                if xy.is_empty() {
+                    continue;
+                }
+                let [lo, hi] = padded_bounds(&xy, margin);
+                if lo[0] > within[1][0]
+                    || hi[0] < within[0][0]
+                    || lo[1] > within[1][1]
+                    || hi[1] < within[0][1]
+                {
+                    continue;
+                }
+                let piece = padded(xy, margin);
+                if piece.iter().flatten().any(|v| !v.is_finite()) {
+                    return Err(unavailable("inner-material crossing is not finite"));
+                }
+                pieces.push(piece);
+            }
+        }
+        Ok(pieces)
+    }
+
     /// Exhaust every mesh topology interval. Raw traces retain triangle IDs,
     /// so complete swept hole boundaries are grouped independently of print
     /// layer sampling, analytic face labels or the presence of a sample hole.
@@ -566,6 +629,36 @@ mod tests {
                 .code,
             GeometryErrorCode::Cancelled
         );
+    }
+
+    #[test]
+    fn slab_crossings_exclude_every_boundary_inside_the_slab_only() {
+        let model = boxes(&[
+            [[0.0, 0.0, 0.0], [4.0, 4.0, 1.0]],
+            [[0.0, 0.0, 1.0], [2.0, 4.0, 2.0]],
+        ]);
+        let cancel = AtomicBool::new(false);
+        let everywhere = [[-10.0, -10.0], [10.0, 10.0]];
+        let hit =
+            |pieces: &[Vec<[f64; 2]>], p: [f64; 2]| pieces.iter().any(|piece| contains(piece, p));
+        // Below the step: only the outer walls cross; the flat faces at 0
+        // and 1 bound the slab and do not.
+        let lower = model
+            .slab_crossings([0.0, 1.0], everywhere, &cancel)
+            .unwrap();
+        assert!(!hit(&lower, [3.0, 2.0]) && !hit(&lower, [1.0, 2.0]));
+        assert!(hit(&lower, [4.0, 2.0]) && hit(&lower, [0.0, 2.0]));
+        // Across the step the lower box's top at 1 lies inside the slab and
+        // excludes the region it caps; the upper box's wall at x = 2 crosses.
+        let across = model
+            .slab_crossings([0.5, 1.5], everywhere, &cancel)
+            .unwrap();
+        assert!(hit(&across, [3.0, 2.0]) && hit(&across, [2.0, 2.0]));
+        // Pieces outside the requested XY window are not built.
+        let window = model
+            .slab_crossings([0.0, 1.0], [[3.5, 1.0], [4.5, 3.0]], &cancel)
+            .unwrap();
+        assert!(!hit(&window, [0.0, 2.0]) && hit(&window, [4.0, 2.0]));
     }
 
     #[test]
