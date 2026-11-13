@@ -31,6 +31,30 @@ fn memory_limit(name: &str, value: Option<std::ffi::OsString>) -> Result<Option<
         .transpose()
 }
 
+/// Operator override for the allocator arena count, read by glibc itself.
+const MALLOC_ARENA_ENV: &str = "MALLOC_ARENA_MAX";
+/// glibc arenas shared by the engine's worker threads.
+const ENGINE_MALLOC_ARENAS: i32 = 4;
+
+/// Bound glibc's per-thread allocator arenas before worker threads start.
+///
+/// glibc gives each concurrently allocating thread its own arena (up to eight
+/// per core) and rarely returns their freed pages. Parallel per-layer planning
+/// on a wide machine then keeps several times its live working set resident,
+/// which also shrinks the headroom later admissions observe. Four shared
+/// arenas keep that parallel planning's throughput while its resident peak
+/// tracks live data. This tunes allocation reuse; it refuses no work.
+pub fn configure_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os(MALLOC_ARENA_ENV).is_none() {
+        // SAFETY: mallopt only adjusts glibc allocator tuning; it is called at
+        // startup and has no Rust-visible memory effects.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, ENGINE_MALLOC_ARENAS);
+        }
+    }
+}
+
 fn resource(message: impl AsRef<str>) -> GeometryError {
     GeometryError::new(GeometryErrorCode::ResourceLimit, message)
 }

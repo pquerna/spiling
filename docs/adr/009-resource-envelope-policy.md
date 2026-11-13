@@ -134,6 +134,11 @@ and protocol representation limits (bundle, program, layer and segment counts)
 remain separate constants, and Core's held compressed-artifact allowance
 remains separate capacity debt.
 
+Resident memory, not only counted live data, consumes that headroom. On glibc
+the engine bounds allocator arenas to four before any thread starts (an operator
+`MALLOC_ARENA_MAX` wins), so parallel per-layer planning does not keep a
+per-thread arena high-water resident beside its live working set.
+
 Core owns semantic source identity and persistence, measures distinct actual
 source Vec capacities across Current/history/prepared snapshots and accepts a
 caller-selected extra allocation budget. Equal hashes with different allocations
