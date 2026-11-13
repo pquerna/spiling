@@ -7,48 +7,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
-import { copyNotices, run, runTestSuites, workspaceTests } from "./run.mjs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-test("native Zstandard sources retain separate upstream notices", async () => {
-  const temporary = await mkdtemp(join(tmpdir(), "spiling-native-notices-"));
-  try {
-    const source = join(temporary, "zstd-sys-test");
-    const output = join(temporary, "notices");
-    await mkdir(join(source, "zstd", "lib", "common"), { recursive: true });
-    await mkdir(join(source, "zstd", "lib", "dictBuilder"), { recursive: true });
-    await writeFile(join(source, "LICENSE"), "Rust binding license\n");
-    await writeFile(join(source, "zstd", "LICENSE"), "Native license\n");
-    await writeFile(join(source, "zstd", "COPYING"), "Alternative upstream license\n");
-    const hashNotice = "/* Copyright original hash author; upstream license reference. */";
-    const sortNotice = "/* Copyright original sort author; complete upstream license. */";
-    await writeFile(join(source, "zstd", "lib", "common", "xxhash.h"), `${hashNotice}\ncode`);
-    await writeFile(
-      join(source, "zstd", "lib", "dictBuilder", "divsufsort.c"),
-      `${sortNotice}\ncode`,
-    );
-    await copyNotices(source, output);
-    assert.equal(await readFile(join(output, "LICENSE"), "utf8"), "Rust binding license\n");
-    assert.equal(await readFile(join(output, "zstd", "LICENSE"), "utf8"), "Native license\n");
-    assert.equal(
-      await readFile(join(output, "zstd", "COPYING"), "utf8"),
-      "Alternative upstream license\n",
-    );
-    assert.equal(
-      await readFile(join(output, "zstd", "xxhash.h.notice"), "utf8"),
-      `${hashNotice}\n`,
-    );
-    assert.equal(
-      await readFile(join(output, "zstd", "divsufsort.c.notice"), "utf8"),
-      `${sortNotice}\n`,
-    );
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
-});
-
+import { run, runTestSuites, toolingTests } from "./run.mjs";
 test("independent suites finish sequentially", async () => {
   const visits = [];
   await runTestSuites([
@@ -70,67 +29,19 @@ test("independent suites finish sequentially", async () => {
   assert.deepEqual(visits, ["first start", "first end", "second"]);
 });
 
-test("workspace gate prepares binaries and contracts once and retains independent consumer failures", async (context) => {
+test("optional tooling continues independent observers after authoring fails", async (context) => {
   context.mock.method(console, "error", () => {});
-  for (const failingAction of ["test", "run"]) {
-    const calls = [];
-    const suiteFailure = new Error(`${failingAction} failed`);
-    await assert.rejects(
-      workspaceTests(async (command, args) => {
-        calls.push({ command, args });
-        if (
-          command === "cargo" &&
-          args[0] === failingAction &&
-          (failingAction !== "test" || args.includes("--workspace"))
-        )
-          throw suiteFailure;
-      }),
-      (error) => {
-        assert.deepEqual(error.errors, [suiteFailure]);
-        return true;
-      },
-    );
-    const count = (command, predicate) =>
-      calls.filter((c) => c.command === command && predicate(c.args)).length;
-    assert.equal(
-      count("cargo", (args) => args[0] === "build"),
-      1,
-    );
-    assert.equal(
-      count("cargo", (args) => args.includes("generate") && args.includes("--check")),
-      1,
-    );
-    assert.equal(
-      count("node", (args) => args.includes("tools/generate-hardware-catalog.mjs")),
-      failingAction === "run" ? 0 : 1,
-    );
-    assert.equal(
-      count("node", (args) => args.includes("tools/smoke-cli.mjs")),
-      1,
-    );
-    assert.equal(
-      count("pnpm", (args) => args.includes("@spiling/protocol")),
-      1,
-    );
-    assert.equal(
-      count("node", (args) => args.includes("tools/gcode-parity/test.mjs")),
-      1,
-    );
-    for (const name of [
-      "tests::real::manufacturing_bundle_survives_save_restart_and_source_removal",
-      "manufacturing_fresh_process_replay_export_invalidation_and_undo",
-    ]) {
-      assert.equal(
-        count(
-          "cargo",
-          (args) => args.includes(name) && args.includes("--ignored") && args.includes("--exact"),
-        ),
-        1,
-      );
-    }
-    assert.equal(calls[0].command, "cargo");
-    assert.equal(calls[0].args[0], "build");
-  }
+  const visits = [];
+  await assert.rejects(
+    toolingTests(async (command, args) => {
+      visits.push({ command, args });
+      if (args.includes("tools/generate-hardware-catalog.mjs")) throw new Error("authoring drift");
+    }),
+    /authoring drift/,
+  );
+  assert.ok(visits.some(({ args }) => args.includes("tools/smoke-cli.mjs")));
+  assert.ok(visits.some(({ args }) => args.includes("@spiling/protocol")));
+  assert.ok(visits.some(({ args }) => args.includes("tools/gcode-parity/test.mjs")));
 });
 
 test("every failed suite remains fatal after later suites run", async (context) => {

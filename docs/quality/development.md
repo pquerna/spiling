@@ -8,7 +8,7 @@ Licensed under the Open Software License version 3.0
 
 ## Prerequisites
 
-- Node24.x, pnpm10.32.1, and the Rust toolchain/components in `rust-toolchain.toml`.
+- Rust toolchain/components in `rust-toolchain.toml` (stable 1.100); no Node/pnpm needed for native build, launch, checks or packaging.
 - Native C/C++ tools: MSVC on Windows, Xcode command-line tools on macOS, GCC/Clang and pkg-config on Linux.
 - Vulkan/Metal/DX12 graphics, an OS window session and native dialog services.
 
@@ -18,52 +18,62 @@ Typical Ubuntu native dependencies:
 sudo apt-get install build-essential pkg-config cmake ninja-build libssl-dev \
   libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 \
   xdg-desktop-portal xdg-desktop-portal-gtk desktop-file-utils
-pnpm bootstrap
-pnpm dev
+cargo xtask bootstrap
+cargo xtask dev
 ```
 
 Linux needs a working XDG desktop portal/file chooser backend. The workbench uses
 X11 or Wayland directly and wgpu; no browser runtime, web server or GTK widget
 build is required. A suitable Vulkan driver must be installed separately.
 
-[`tools/run.mjs`](../../tools/run.mjs) owns root commands:
+[`xtask/`](../../xtask/) owns native commands. Its dependencies are isolated from
+product crates; it honors Cargo's target directory and preserves child failures/cancellation.
 
-| Command                           | Purpose                                                                                  |
-| --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `pnpm bootstrap`                  | Locked install/fetch, contract drift check and matching native build                     |
-| `pnpm dev`, `pnpm dev:native`     | Build and launch the native workbench                                                    |
-| `pnpm build`, `pnpm build:native` | Build engine, workbench and CLI together                                                 |
-| `pnpm gallery:native`             | Production controls/themes without an engine                                             |
-| `pnpm test:native`                | Host checks and sequential actual-child operator regressions                             |
-| `pnpm test:geometry-stress`       | Explicit oversized-plate integration and native-support diagnostics                      |
-| `pnpm contracts --check`          | Reject Rust-derived TypeScript and packed-golden drift                                   |
-| `pnpm materials:sync`             | Refresh pinned external reference catalogs after complete admission                      |
-| `pnpm materials:check`            | Check catalog integrity offline; see [catalog maintenance](material-catalogs.md)         |
-| `pnpm test:material-catalogs`     | Exercise catalog refresh and failure handling                                            |
-| `pnpm check`                      | Formatting, Clippy, TypeScript and contract checks                                       |
-| `pnpm test`                       | Workspace behavior, real CLI and packed interoperability                                 |
-| `pnpm smoke:cli`                  | Actual child startup, operations, transfer and reap                                      |
-| `pnpm bench:open ...`             | Optimized actual native project-opening measurements; Linux X11 automation               |
-| `pnpm bench:smoke`                | Diagnostic process/transfer benchmark, not geometry performance                          |
-| `pnpm compare:slicers`            | Independent commanded G-code comparison; see [contract](gcode-parity.md)                 |
-| `pnpm test:parity`                | Independent observer fault/accounting tests                                              |
-| `pnpm package`                    | Clean-source release binaries, source/notices, portable archive and Linux Debian package |
-| `node tools/run.mjs provenance`   | Collect native dependency and data-tool provenance/notices                               |
+| Command                                        | Purpose                                                               |
+| ---------------------------------------------- | --------------------------------------------------------------------- |
+| `cargo xtask bootstrap`                        | Locked fetch and matching engine/workbench/CLI dev build              |
+| `cargo xtask build`                            | Build the three native executables together                           |
+| `cargo xtask dev [ARGS...]`                    | Build, then launch the native workbench                               |
+| `cargo xtask gallery`                          | Production controls/themes without an engine                          |
+| `cargo xtask contracts [--check]`              | Rust-owned generated data views and packed goldens                    |
+| `cargo xtask check`                            | Rust contract drift, workspace-owned formatting and all-target Clippy |
+| `cargo xtask test`                             | Workspace tests and the two actual-engine saved-project journeys      |
+| `cargo xtask test-native`                      | Workbench checks and sequential actual-child host regressions         |
+| `cargo xtask macos ...`                        | Apple Silicon native/cross development tooling                        |
+| `cargo xtask package [--profile dev\|release]` | Clean-source bundle, source/notices, archive and Linux Debian package |
+| `cargo xtask provenance`                       | Installed native dependency and embedded-asset notices/provenance     |
 
-`pnpm test` builds its matching engine/CLI prerequisite once, then checks generated
-contracts and runs tooling and material-catalog tests,
-every Rust workspace test target (`--no-fail-fast`), the real engine-client
-saved/source-absent replay journey, the CLI fresh-process replay/export/Undo journey,
-the CLI smoke, TypeScript protocol tests and the independent G-code observer tests sequentially. Failures
-are summarized together and keep the overall command unsuccessful; later suites
-still run. A failed prerequisite build or an operator interruption stops the run.
-Keep the complete output when handing a failing gate to its owning module.
-`pnpm test:native` separately exercises the actual-child host regressions.
-Other ignored CLI/client tests remain opt-in; building the engine does not execute
-them. The aggregate gate explicitly selects these two saved-project journeys.
-The CLI smoke reuses that executable pair; standalone `pnpm smoke:cli` prepares
-its own contracts and binaries. Generated-contract drift remains a reported
-suite failure while the independent behavioral suites continue.
+`cargo xtask test` prepares matching binaries once, runs Cargo with
+`--no-fail-fast`, and explicitly runs the saved-project client/CLI ignored journeys.
+Independent suite failures remain fatal after later suites finish; cancellation
+stops the sequence. `test-native` separately exercises native host regressions.
+Native window/device and physical-machine acceptance remain separate.
+
+### Optional authoring, observers and research
+
+Node24.x and pnpm10.32.1 are required only for this tooling:
+
+```sh
+npm install --global pnpm@10.32.1
+pnpm install --frozen-lockfile
+pnpm check:tooling
+pnpm test:tooling
+```
+
+`check:tooling` validates TypeScript authoring/hardware catalog drift, reference
+catalogs and JS/JSON/Markdown formatting. `test:tooling` prepares the native
+binaries through Cargo, then runs independent TypeScript packed decoders, the real
+CLI smoke, G-code observers and tooling tests. Run both native and optional gates
+before merging changes affecting both surfaces. Node's built-in TypeScript
+stripping executes supported authoring/observer code; no `tsx` or esbuild install
+is needed. The Rust engine remains the manufacturing authority.
+
+`pnpm contracts --check` additionally checks TypeScript-authored hardware catalog
+data; the Rust-only generator is `cargo xtask contracts --check`. Catalog
+maintenance (`materials:sync`, `materials:check`, `test:material-catalogs`),
+`test:geometry-stress`, `smoke:cli`, `test:hardware`, `test:materials`,
+`compare:slicers`, `test:parity`, `bench:open`, `bench:smoke`, `bench:slice` and
+`infill:lab` remain explicit optional tooling commands in `package.json`.
 
 Select checks by the product failure or supporting invariant they detect, an
 independent expectation and distinct coverage. Default geometry tests retain
@@ -120,7 +130,7 @@ existing supervised engine and displays admitted native sources, shared occurren
 source-face inspection/picking and sections. Prepare loads a complete inert intent,
 commits full policy and whole/boxed source-sparse edits, reviews native bed placement and
 runs engine Preflight/Compile. Review performs fresh independent verification,
-retrieves checked actual SPLR6 motion and exclusively exports four files. `pnpm dev`
+retrieves checked actual SPLR6 motion and exclusively exports four files. `cargo xtask dev`
 is native. Finish authors scoped planar/cylindrical ribs, Smooth overrides and
 canonical PNG/PGM relief, layer enable/remove and stored-image reuse. Review retains
 H1 decisions, physical plate/region accounting, native coverage, surface exposure/
@@ -237,10 +247,10 @@ Large-input/projection refusals must preserve usable centerlines.
 The legacy browser frontend and its build/runtime paths have been removed.
 
 ```sh
-pnpm build:native     # locked matching engine, CLI and window
-pnpm dev              # build, then run the native window (dev:native is identical)
-pnpm gallery:native   # production theme/components, illustrative data, no engine
-pnpm test:native      # matching binaries, host checks, sequential actual-child checks
+cargo xtask build     # locked matching engine, CLI and window
+cargo xtask dev              # build, then run the native window (native Cargo entry point)
+cargo xtask gallery   # production theme/components, illustrative data, no engine
+cargo xtask test-native      # matching binaries, host checks, sequential actual-child checks
 ```
 
 The native route needs Rust/native build tools, Vulkan/Metal/DX12 graphics and
@@ -860,7 +870,7 @@ screen-reader and mixed-DPI behavior remain unqualified.
 ## macOS development and Linux cross-builds
 
 [`tools/macos/README.md`](../../tools/macos/README.md) owns ARM64 native Mac and
-Linux development cross-build setup. `pnpm macos doctor|check-core|build|bundle`
+Linux development cross-build setup. `cargo xtask macos doctor|check-core|build|bundle`
 keeps normal host Cargo behavior and builds the adjacent workbench/engine/CLI in
 the dev profile. Linux needs a privately provisioned Apple SDK, OSXCross and
 matching target LLVM link metadata; SDK-independent core checks are a narrower
@@ -870,9 +880,9 @@ remain a separate Mac-builder qualification.
 
 ## Packaging, CI and recording results
 
-`pnpm package` refuses a dirty worktree, checks contract drift, builds release
+`cargo xtask package` refuses a dirty worktree, checks Rust contract drift, builds release
 engine/workbench/CLI once with default features (inspection off), and collects
-notices. `CARGO_TARGET_DIR/release/bundle/` contains a target-named portable
+notices. `--profile dev` exercises the same layout without a release rebuild and records its development purpose. `CARGO_TARGET_DIR/release/bundle/` contains a target-named portable
 `.tar.gz`; Linux additionally gets a `.deb`. ARM64 macOS uses the shared audited `.app` metadata inside the archive;
 Windows gets adjacent `.exe` files. Windows/macOS builds, signing, notarization,
 installers, associations and upgrade behavior are not qualified by Linux evidence.
@@ -898,7 +908,7 @@ on a disposable supported host before claiming system-install or upgrade coverag
 
 Automatic remote CI is disabled for pushes and pull requests. Native platform
 packaging remains available only through explicit workflow dispatch. Run affected
-checks and real-surface smoke locally; full checks are `pnpm check` and `pnpm test`.
+checks and real-surface smoke locally; native checks are `cargo xtask check` and `cargo xtask test`; optional tooling gates are `pnpm check:tooling` and `pnpm test:tooling`.
 Neither compilation nor a local smoke establishes installed-platform or physical-machine
 qualification. Report actual failures, not a pass inferred from selected filters.
 

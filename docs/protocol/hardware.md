@@ -34,7 +34,7 @@ public definitions are operator declarations, not calibrated machine evidence.
 
 `hardware-catalog.ts` is trusted TypeScript authoring data against the generated
 Rust domain view. `pnpm contracts` generates inert `hardware-catalog.json`;
-`pnpm check` checks drift and TypeScript. Rust validates the embedded catalog.
+`pnpm check:tooling` checks drift and TypeScript. Rust validates the embedded catalog.
 `printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The setup catalog supplies the existing diagnostic Cartesian and complete Marlin
 software configurations and a two-face reference sheet. H2C is a catalog-only
 identity with unknown declared volume and no executable setup. Adding a model

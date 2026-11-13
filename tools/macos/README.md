@@ -14,30 +14,30 @@ not just a successful cross-build.
 
 ## Native Apple Silicon Mac
 
-Install Xcode command-line tools, Node/pnpm from the root manifests and the pinned
-Rust toolchain. No OSXCross environment should be sourced on a Mac.
+Install Xcode command-line tools and the pinned Rust toolchain. No OSXCross environment should be sourced on a Mac.
 
 ```sh
 rustup target add aarch64-apple-darwin
-pnpm install --frozen-lockfile
-pnpm macos doctor
-pnpm macos build
-pnpm macos bundle --output /absolute/new/Spiling-dev.app
+cargo xtask macos doctor
+cargo xtask macos build
+cargo xtask macos bundle --output /absolute/new/Spiling-dev.app
 open /absolute/new/Spiling-dev.app
 ```
 
 These commands build all three binaries in the **dev** profile. Ordinary
-`cargo build`, `cargo mac-arm`, and `pnpm dev` remain available. `pnpm dev` builds
+`cargo build`, `cargo mac-arm`, and `cargo xtask dev` remain available. `cargo xtask dev` builds
 adjacent host binaries before launching. `cargo run -p spiling-workbench` alone
 does not build its engine helper. `CARGO_TARGET_DIR` is honored. Source/binary
 identity, dirty status, toolchain and Mach-O audits are recorded inside the dev
 bundle. A dev bundle permits dirty source and is not a distributable package;
-`pnpm package` retains clean-source release/notices/source-archive requirements.
+`cargo xtask package` retains clean-source release/notices/source-archive requirements.
 
 The current CubeCL CPU backend provisions Tracel LLVM automatically on a native
 Mac. Metal is enabled for **workbench rendering**. Compute currently uses Vulkan
 when available or the CubeCL CPU backend; native Metal compute is not implemented.
 No feature removes CPU geometry/planning to make a cross-build easier.
+
+Native build/bundle commands use Rust directly and do not require Node or pnpm.
 
 ## Linux prerequisites
 
@@ -76,7 +76,7 @@ library, and a Mac `llvm-config` cannot be run on Linux. On an ARM64 Mac, after 
 native build has installed the matching LLVM bundle:
 
 ```sh
-pnpm macos capture-llvm --output /absolute/new/mac-llvm-queries
+cargo xtask macos capture-llvm --output /absolute/new/mac-llvm-queries
 # --prefix /path/to/tracel-llvm-23.1.0-4 may override the normal Mac cache path.
 ```
 
@@ -103,9 +103,9 @@ Do not commit SDK paths/assets or credentials. Then:
 
 ```sh
 rustup target add aarch64-apple-darwin
-pnpm macos doctor --toolchain /private/toolchain.json
-pnpm macos build --toolchain /private/toolchain.json
-pnpm macos bundle --toolchain /private/toolchain.json --output /absolute/new/Spiling-dev.app
+cargo xtask macos doctor --toolchain /private/toolchain.json
+cargo xtask macos build --toolchain /private/toolchain.json
+cargo xtask macos bundle --toolchain /private/toolchain.json --output /absolute/new/Spiling-dev.app
 ```
 
 `SPILING_MACOS_TOOLCHAIN` can supply the receipt path. The driver checks SDK
@@ -118,7 +118,7 @@ Use the receipt's checksum-verified original archives when reprovisioning.
 The SDK-independent step is useful immediately on Linux:
 
 ```sh
-pnpm macos check-core
+cargo xtask macos check-core
 ```
 
 It checks the real model-import/contracts crates for ARM64 macOS and executes
@@ -134,7 +134,8 @@ It independently reads load-command bounds, ARM64 architecture, deployment targe
 system dylib references and rpaths. Missing/ELF/Intel helpers, a higher OS floor or
 Homebrew/developer/unresolved dylibs fail. Initially the binaries must link only
 system dynamic libraries; package a new dependency's transitive closure explicitly
-before admitting it. The tool does not silently copy or rewrite dylibs.
+before admitting it. The tool does not silently copy or rewrite dylibs. `cargo xtask macos audit PATH`
+inspects an existing executable independently of SDK provisioning.
 
 Transfer an unsigned dev bundle using an archive that preserves executable modes:
 

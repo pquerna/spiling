@@ -8,23 +8,12 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "bootstrap": "node tools/run.mjs bootstrap",
-    "dev": "node tools/run.mjs dev",
-    "check": "node tools/run.mjs check",
-    "test": "node tools/run.mjs test",
     "bench:smoke": "node tools/run.mjs bench:smoke",
     "bench:slice": "node tools/run.mjs bench:slice",
     "bench:open": "node tools/run.mjs bench:open",
-    "package": "node tools/run.mjs package",
-    "macos": "node tools/run.mjs macos",
     "contracts": "node tools/run.mjs contracts",
-    "build": "node tools/run.mjs build",
     "smoke:cli": "node tools/run.mjs smoke:cli",
     "manufacturing:intent": "node --experimental-strip-types tools/compile-manufacturing-intent.mjs",
-    "dev:native": "node tools/run.mjs dev:native",
-    "build:native": "node tools/run.mjs build:native",
-    "gallery:native": "node tools/run.mjs gallery:native",
-    "test:native": "node tools/run.mjs test:native",
     "test:geometry-stress": "node tools/run.mjs test:geometry-stress",
     "compare:slicers": "node tools/run.mjs compare:slicers",
     "test:hardware": "node tools/run.mjs test:hardware",
@@ -33,11 +22,12 @@
     "test:material-catalogs": "node tools/run.mjs test:material-catalogs",
     "test:materials": "node tools/run.mjs test:materials",
     "test:parity": "node tools/run.mjs test:parity",
-    "infill:lab": "node tools/run.mjs infill:lab"
+    "infill:lab": "node tools/run.mjs infill:lab",
+    "check:tooling": "node tools/run.mjs check:tooling",
+    "test:tooling": "node tools/run.mjs test:tooling"
   },
   "devDependencies": {
     "prettier": "3.8.3",
-    "@types/node": "26.6.4",
-    "tsx": "4.23.15"
+    "@types/node": "26.6.4"
   }
 }

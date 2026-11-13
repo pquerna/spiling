@@ -62,7 +62,10 @@ impl BoundaryGrid {
         if segments.is_empty() || lo.iter().chain(&hi).any(|v| !v.is_finite()) {
             return Ok(None);
         }
-        let extent = [(hi[0] - lo[0]).max(f64::MIN_POSITIVE), (hi[1] - lo[1]).max(f64::MIN_POSITIVE)];
+        let extent = [
+            (hi[0] - lo[0]).max(f64::MIN_POSITIVE),
+            (hi[1] - lo[1]).max(f64::MIN_POSITIVE),
+        ];
         let cell = (extent[0] * extent[1] / segments.len() as f64)
             .sqrt()
             .max(2.0 * reach)
@@ -87,11 +90,21 @@ impl BoundaryGrid {
                 }
                 grid.entries = vec![0; *grid.starts.last().expect("cell offsets")];
             }
-            let mut fill = if pass == 1 { grid.starts.clone() } else { Vec::new() };
+            let mut fill = if pass == 1 {
+                grid.starts.clone()
+            } else {
+                Vec::new()
+            };
             for (index, segment) in grid.segments.iter().enumerate() {
                 check_cancel(cancel)?;
-                let [x0, y0] = grid.cell_of([segment[0][0].min(segment[1][0]), segment[0][1].min(segment[1][1])]);
-                let [x1, y1] = grid.cell_of([segment[0][0].max(segment[1][0]), segment[0][1].max(segment[1][1])]);
+                let [x0, y0] = grid.cell_of([
+                    segment[0][0].min(segment[1][0]),
+                    segment[0][1].min(segment[1][1]),
+                ]);
+                let [x1, y1] = grid.cell_of([
+                    segment[0][0].max(segment[1][0]),
+                    segment[0][1].max(segment[1][1]),
+                ]);
                 for y in y0..=y1 {
                     for x in x0..=x1 {
                         super::super::native::charge_support_clearance(work, cancel)?;
@@ -159,7 +172,8 @@ impl BoundaryGrid {
         cancel: &AtomicBool,
     ) -> Result<bool, ManufacturingError> {
         let [x0, y] = self.cell_of(point);
-        if point[1] < self.origin[1] || point[1] > self.origin[1] + self.cell * self.dims[1] as f64 {
+        if point[1] < self.origin[1] || point[1] > self.origin[1] + self.cell * self.dims[1] as f64
+        {
             return Ok(false);
         }
         let mut inside = false;

@@ -4,7 +4,7 @@ Spiling is a native BREP slicer and manufacturing workbench: it turns an importe
 
 This file is the critical information an agent needs to work here correctly, plus an index. Keep it short and current. It is not a status report, design record or changelog.
 
-**This repository is not open for outside contribution yet.** Product direction, priorities, current capability, research, plans and reasoning live in the private brain repository `pquerna/spiling-brain` (use a local checkout; read its `AGENTS.md` first). Start there for *what to do and why*; start here for *how to do it without breaking things*.
+**This repository is not open for outside contribution yet.** Product direction, priorities, current capability, research, plans and reasoning live in the private brain repository `pquerna/spiling-brain` (use a local checkout; read its `AGENTS.md` first). Start there for _what to do and why_; start here for _how to do it without breaking things_.
 
 ## 1. Non-negotiables
 
@@ -33,53 +33,54 @@ At the initial `0.1.0` release gate, decide the supported on-disk compatibility 
 
 ## 2. Where things live
 
-| Path | Owns |
-| --- | --- |
-| `apps/engine/` | Engine process; composes native services |
-| `apps/cli/`, `apps/workbench/` | Clients of the engine protocol; no planning logic |
-| `crates/contracts/` | IDs, revisions, commands, errors, manifests, plan/program contracts |
-| `crates/engine-client/` | Protocol client and child-process lifecycle |
-| `crates/core/`, `crates/core-ptac/` | Project transactions, undo, recovery; the `.spil` SQLite container |
-| `crates/chunks/` | Compressed immutable byte frames for large outputs |
-| `crates/geometry/` | Kernel adapter, STEP import, tessellation, sections, tolerant sections |
-| `crates/manufacturing/` | Planner (walls, fill, skins, supports, Cathedral), realization, emitter, verifier |
-| `crates/deposition-routing/` | Task ordering, seams and tool sequence |
-| `crates/compute/` | CubeCL CPU/GPU numeric batches; never geometry authority |
-| `crates/appearance/`, `crates/surface-fields/` | Colour matching; image fields for finishes |
-| `packages/protocol/` | Generated TypeScript contracts (do not hand-edit) |
-| `fixtures/`, `bench/`, `tools/` | Test corpus, workloads, generation and corpus harnesses |
+| Path                                           | Owns                                                                                          |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `xtask/`                                       | Cargo-native build, launch, checks, bundles, provenance and macOS tooling; no Node dependency |
+| `apps/engine/`                                 | Engine process; composes native services                                                      |
+| `apps/cli/`, `apps/workbench/`                 | Clients of the engine protocol; no planning logic                                             |
+| `crates/contracts/`                            | IDs, revisions, commands, errors, manifests, plan/program contracts                           |
+| `crates/engine-client/`                        | Protocol client and child-process lifecycle                                                   |
+| `crates/core/`, `crates/core-ptac/`            | Project transactions, undo, recovery; the `.spil` SQLite container                            |
+| `crates/chunks/`                               | Compressed immutable byte frames for large outputs                                            |
+| `crates/geometry/`                             | Kernel adapter, STEP import, tessellation, sections, tolerant sections                        |
+| `crates/manufacturing/`                        | Planner (walls, fill, skins, supports, Cathedral), realization, emitter, verifier             |
+| `crates/deposition-routing/`                   | Task ordering, seams and tool sequence                                                        |
+| `crates/compute/`                              | CubeCL CPU/GPU numeric batches; never geometry authority                                      |
+| `crates/appearance/`, `crates/surface-fields/` | Colour matching; image fields for finishes                                                    |
+| `packages/protocol/`                           | Generated TypeScript contracts (do not hand-edit)                                             |
+| `fixtures/`, `bench/`, `tools/`                | Test corpus, workloads, generation and corpus harnesses                                       |
 
 Dependencies point inward: contracts depend on nothing project-specific; geometry on contracts and SolidCore; manufacturing on contracts, geometry, compute and routing; core never on geometry or manufacturing; clients never own geometry or planning. Do not add a crate without a second consumer or a real isolation need.
 
 ## 3. How to work
 
 1. Read this file, then the brain's `AGENTS.md` and the live card for your task, then any `AGENT-RULES.md` along the directories you will touch.
-2. Change the owning area; reuse its patterns. Update every affected caller, contract and generated file together (`pnpm contracts`).
+2. Change the owning area; reuse its patterns. Update every affected caller, contract and generated file together (`cargo xtask contracts`; optional TypeScript authoring checks use `pnpm check:tooling`).
 3. Verify through the real surface, not unit tests alone:
    - `cargo test --locked -p <crate>` for touched crates (set `RUST_MIN_STACK=8388608`; use `--profile profiling` for manufacturing).
    - Real parts: `tools/realistic-corpus/run.py` against PrusaSlicer, with and without supports (`SPILING_CORPUS_SUPPORTS`); the wall generator census is `wall_census` in `crates/manufacturing/src/planner/walls/tests.rs`.
-   - `pnpm contracts --check`; Clippy with warnings denied on touched crates.
+   - `cargo xtask contracts --check`; optional TypeScript/observer checks use `pnpm check:tooling` and `pnpm test:tooling`. Clippy with warnings denied on touched crates.
 4. Commit with a message that states what changed, why, and what was verified, including known failures. Push to `main` after rebasing; never force-push. Brain changes are committed and pushed to the brain's `main` the same way.
 
 There is no remote CI. Report only commands you actually ran.
 
 ## 4. Index
 
-| Topic | Canonical document |
-| --- | --- |
-| Tolerance policy, curves, feature heights | [ADR012](docs/adr/012-tolerant-brep-curves-and-feature-heights.md) |
-| BREP authority and its limits | [ADR005](docs/adr/ADR005-native-first-development-geometry.md) |
-| Resource policy | [ADR009](docs/adr/009-resource-envelope-policy.md) |
-| Construction goals, layer heights | [ADR008](docs/adr/008-construction-goals.md) |
-| Workbench architecture | [ADR006](docs/adr/006-native-egui-workbench.md) |
-| Project storage | [ADR007](docs/adr/007-ptac-project-storage.md), [project-storage](docs/protocol/project-storage.md) |
-| Alternatives, print layouts | [ADR010](docs/adr/010-manufacturing-alternatives.md), [ADR011](docs/adr/011-print-layouts.md) |
-| Manufacturing plan, walls, fill, supports, Cathedral, materials | [protocol/manufacturing.md](docs/protocol/manufacturing.md) |
-| Projects, finishes, appearance | [protocol/project.md](docs/protocol/project.md) |
-| Hardware, library, control, replay, display, analysis | [docs/protocol/](docs/protocol/) |
-| Build, run, smoke and corpus procedures | [quality/development.md](docs/quality/development.md) |
-| Geometry and manufacturing evidence | [geometry](docs/quality/geometry-evidence.md), [manufacturing](docs/quality/manufacturing-evidence.md) |
-| SolidCore fork changes | [solidcore-upstream-review.md](docs/quality/solidcore-upstream-review.md) |
+| Topic                                                           | Canonical document                                                                                     |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Tolerance policy, curves, feature heights                       | [ADR012](docs/adr/012-tolerant-brep-curves-and-feature-heights.md)                                     |
+| BREP authority and its limits                                   | [ADR005](docs/adr/ADR005-native-first-development-geometry.md)                                         |
+| Resource policy                                                 | [ADR009](docs/adr/009-resource-envelope-policy.md)                                                     |
+| Construction goals, layer heights                               | [ADR008](docs/adr/008-construction-goals.md)                                                           |
+| Workbench architecture                                          | [ADR006](docs/adr/006-native-egui-workbench.md)                                                        |
+| Project storage                                                 | [ADR007](docs/adr/007-ptac-project-storage.md), [project-storage](docs/protocol/project-storage.md)    |
+| Alternatives, print layouts                                     | [ADR010](docs/adr/010-manufacturing-alternatives.md), [ADR011](docs/adr/011-print-layouts.md)          |
+| Manufacturing plan, walls, fill, supports, Cathedral, materials | [protocol/manufacturing.md](docs/protocol/manufacturing.md)                                            |
+| Projects, finishes, appearance                                  | [protocol/project.md](docs/protocol/project.md)                                                        |
+| Hardware, library, control, replay, display, analysis           | [docs/protocol/](docs/protocol/)                                                                       |
+| Build, run, smoke and corpus procedures                         | [quality/development.md](docs/quality/development.md)                                                  |
+| Geometry and manufacturing evidence                             | [geometry](docs/quality/geometry-evidence.md), [manufacturing](docs/quality/manufacturing-evidence.md) |
+| SolidCore fork changes                                          | [solidcore-upstream-review.md](docs/quality/solidcore-upstream-review.md)                              |
 
 ## 5. Local guidance files
 

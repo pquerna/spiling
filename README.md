@@ -36,25 +36,25 @@ read the owning evidence for supported positives and explicit refusals.
 
 This setup is for contributors evaluating the unfinished native workbench and software workflows, not for manufacturing or operating a machine.
 
-Install Node **24.x**, Rustup, and the [platform-native prerequisites](docs/quality/development.md#prerequisites), then:
+Install Rustup and the [platform-native prerequisites](docs/quality/development.md#prerequisites), then:
 
 ```sh
 git clone https://github.com/pquerna/spiling.git
 cd spiling
-npm install --global pnpm@10.32.1
-pnpm bootstrap
+cargo xtask bootstrap
 ```
 
-`pnpm dev` builds and opens the native Rust egui/wgpu workbench. It includes source
+`cargo xtask dev` builds and opens the native Rust egui/wgpu workbench. It includes source
 inspection/picking/sections, process and finish/image authoring, engine Preflight/
-Compile, fresh actual-program replay and exclusive export. `pnpm gallery:native`
+Compile, fresh actual-program replay and exclusive export. `cargo xtask gallery`
 shows the shared Graphite/Paper controls. The browser frontend has been retired.
 
-`pnpm package` builds matching release binaries with source, license and dependency
+`cargo xtask package` builds matching release binaries with source, license and dependency
 notices into a portable archive (plus Debian on Linux). See the [development and
 packaging guide](docs/quality/development.md) for prerequisites, checks and current
 platform/input limits. Windows/macOS packaging and physical-machine qualification
-remain separate gates.
+remain separate gates. Native builds and packaging require no Node or pnpm. Optional
+TypeScript authoring and independent observers have their own tooling setup in the guide.
 
 ## Technical documentation
 

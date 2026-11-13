@@ -905,7 +905,7 @@ native-face picking, world section overlays, cancellation/resume and engine/wind
 lifecycle on the local native GPU surface. Raw section jobs prepare the existing
 `PreparedSectionSource` once per definition, not unused material-map owners.
 Native correspondence, fresh roots/loops and unchanged work/source/output caps
-remain independent gates. Launch `pnpm dev`, import the unchanged fitting/housing
+remain independent gates. Launch `cargo xtask dev`, import the unchanged fitting/housing
 sources, add the declared shared occurrence poses and use the native face list,
 viewport picks and world-Z section controls. The [native-window procedure](development.md#native-egui-workbench)
 distinguishes host tests from actual display/dialog evidence.

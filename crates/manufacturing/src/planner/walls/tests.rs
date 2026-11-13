@@ -712,16 +712,22 @@ fn near_degenerate_circles() -> MultiPolygon<f64> {
 
 #[test]
 fn thin_features_widen_to_the_narrowest_bead_or_are_reported_omitted() {
-    let strip = |width: f64| MultiPolygon(vec![polygon![
-        (x: 0.0, y: 0.0),
-        (x: 20.0, y: 0.0),
-        (x: 20.0, y: width),
-        (x: 0.0, y: width),
-    ]]);
+    let strip = |width: f64| {
+        MultiPolygon(vec![polygon![
+            (x: 0.0, y: 0.0),
+            (x: 20.0, y: 0.0),
+            (x: 20.0, y: width),
+            (x: 0.0, y: width),
+        ]])
+    };
     // Narrower than the narrowest bead, wider than a quarter nozzle.
     let widened = plan_with(&strip(0.25), true);
     assert_eq!(widened.paths.len(), 1);
-    assert!(widened.thin_widened_mm > 19.0, "{}", widened.thin_widened_mm);
+    assert!(
+        widened.thin_widened_mm > 19.0,
+        "{}",
+        widened.thin_widened_mm
+    );
     assert_eq!(widened.thin_omitted_area_mm2, 0.0);
     // Thinner than a quarter nozzle: nothing printed, the area reported.
     let omitted = plan_with(&strip(0.05), true);

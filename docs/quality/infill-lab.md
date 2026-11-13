@@ -9,7 +9,7 @@ Remote CPU/CUDA comparisons over frozen systems use the isolated [evaluator cont
 
 ## Run and resume
 
-Install `uv` and the repository's pinned Node toolchain. Use `pnpm build:native` to build matching engine/CLI binaries under the normal [resource discipline](development.md), then copy them into a private, immutable experiment bin directory. Never replace shared build outputs during a campaign. The optional research dependencies install only through `infill:lab`, outside product builds and distributions. `uv.lock` freezes Python dependencies; `SPILING_UV` can select a local uv executable.
+Install `uv` and the repository's pinned Node toolchain. Use `cargo xtask build` to build matching engine/CLI binaries under the normal [resource discipline](development.md), then copy them into a private, immutable experiment bin directory. Never replace shared build outputs during a campaign. The optional research dependencies install only through `infill:lab`, outside product builds and distributions. `uv.lock` freezes Python dependencies; `SPILING_UV` can select a local uv executable.
 
 ```sh
 pnpm infill:lab test

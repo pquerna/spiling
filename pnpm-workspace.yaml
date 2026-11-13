@@ -4,6 +4,3 @@
 
 packages:
   - packages/*
-
-onlyBuiltDependencies:
-  - esbuild

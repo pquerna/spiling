@@ -294,12 +294,18 @@ pub fn planar_bounds_clear(
     reserve_mm: f64,
     required_gap_mm: f64,
 ) -> bool {
-    let required = Interval::point(reserve_mm).add(Interval::point(required_gap_mm)).hi;
+    let required = Interval::point(reserve_mm)
+        .add(Interval::point(required_gap_mm))
+        .hi;
     let gap = (0..2)
         .flat_map(|axis| {
             [
-                Interval::point(b[0][axis]).sub(Interval::point(a[1][axis])).lo,
-                Interval::point(a[0][axis]).sub(Interval::point(b[1][axis])).lo,
+                Interval::point(b[0][axis])
+                    .sub(Interval::point(a[1][axis]))
+                    .lo,
+                Interval::point(a[0][axis])
+                    .sub(Interval::point(b[1][axis]))
+                    .lo,
             ]
         })
         .fold(f64::NEG_INFINITY, f64::max);
@@ -325,14 +331,17 @@ pub fn prepare_planar_forbidden<'a>(
     cancel: &AtomicBool,
 ) -> Result<PreparedPlanarForbidden<'a>, GeometryError> {
     validate_forbidden(forbidden, work, cancel)?;
-    let bounds = forbidden
-        .iter()
-        .flat_map(|ring| &ring.points_mm)
-        .fold(None, |bounds: Option<[[f64; 2]; 2]>, p| {
+    let bounds = forbidden.iter().flat_map(|ring| &ring.points_mm).fold(
+        None,
+        |bounds: Option<[[f64; 2]; 2]>, p| {
             Some(bounds.map_or([[p[0], p[1]], [p[0], p[1]]], |[lo, hi]| {
-                [[lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]]
+                [
+                    [lo[0].min(p[0]), lo[1].min(p[1])],
+                    [hi[0].max(p[0]), hi[1].max(p[1])],
+                ]
             }))
-        });
+        },
+    );
     Ok(PreparedPlanarForbidden {
         loops: forbidden,
         bounds,
@@ -376,7 +385,14 @@ pub fn certify_planar_capsule_clearance_prepared(
             });
         }
     }
-    capsule_clearance_core(segment_xy_mm, forbidden.loops, policy, required, work, cancel)
+    capsule_clearance_core(
+        segment_xy_mm,
+        forbidden.loops,
+        policy,
+        required,
+        work,
+        cancel,
+    )
 }
 
 fn capsule_requirement(
@@ -530,15 +546,25 @@ mod tests {
                 for d in [[0.0, 0.0], [0.25, 0.0], [0.0, 0.3], [3.0, 1.0]] {
                     let segment = [[x, y], [x + d[0], y + d[1]]];
                     let full = certify_planar_capsule_clearance(
-                        segment, &mask, policy(), &mut work, &cancel,
+                        segment,
+                        &mask,
+                        policy(),
+                        &mut work,
+                        &cancel,
                     );
                     let fast = certify_planar_capsule_clearance_prepared(
-                        segment, &prepared, policy(), &mut work, &cancel,
+                        segment,
+                        &prepared,
+                        policy(),
+                        &mut work,
+                        &cancel,
                     );
                     assert_eq!(full.is_ok(), fast.is_ok(), "{segment:?}");
                     if let (Ok(full), Ok(fast)) = (full, fast) {
-                        let (full, fast) =
-                            (full.minimum_gap_mm().unwrap(), fast.minimum_gap_mm().unwrap());
+                        let (full, fast) = (
+                            full.minimum_gap_mm().unwrap(),
+                            fast.minimum_gap_mm().unwrap(),
+                        );
                         assert!(fast >= policy().required_gap_mm);
                         let inside = |p: [f64; 2]| p.iter().all(|v| (0.0..=10.0).contains(v));
                         if inside(segment[0]) || inside(segment[1]) {
@@ -564,12 +590,18 @@ mod tests {
         }
         assert!(checked > 0);
         let empty = prepare_planar_forbidden(&[], &mut work, &cancel).unwrap();
-        assert!(certify_planar_capsule_clearance_prepared(
-            [[0.0, 0.0], [1.0, 0.0]], &empty, policy(), &mut work, &cancel,
-        )
-        .unwrap()
-        .minimum_gap_mm()
-        .is_none());
+        assert!(
+            certify_planar_capsule_clearance_prepared(
+                [[0.0, 0.0], [1.0, 0.0]],
+                &empty,
+                policy(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .minimum_gap_mm()
+            .is_none()
+        );
     }
     #[test]
     fn filled_material_and_thin_crossings_are_not_boundary_only_clearance() {
@@ -696,23 +728,34 @@ mod tests {
                 for d in [[0.0, 0.0], [1.0, 0.0], [0.3, -0.8], [-1.5, 1.5]] {
                     let other = [o, [o[0] + d[0], o[1] + d[1]]];
                     let capsules = [
-                        PlanarCapsuleMm { segment_xy_mm: base, radius_mm: 0.2, endpoint_error_mm: 1e-6 },
-                        PlanarCapsuleMm { segment_xy_mm: other, radius_mm: 0.25, endpoint_error_mm: 2e-6 },
+                        PlanarCapsuleMm {
+                            segment_xy_mm: base,
+                            radius_mm: 0.2,
+                            endpoint_error_mm: 1e-6,
+                        },
+                        PlanarCapsuleMm {
+                            segment_xy_mm: other,
+                            radius_mm: 0.25,
+                            endpoint_error_mm: 2e-6,
+                        },
                     ];
                     let reserve = Interval::point(0.2)
                         .add(Interval::point(0.25))
                         .add(Interval::point(1e-6))
                         .add(Interval::point(2e-6));
                     let required = reserve.add(Interval::point(0.15));
-                    let lower = segment_distance_lower(base[0], base[1], other[0], other[1]).unwrap();
-                    let reference = lower >= required.hi
-                        && Interval::point(lower).sub(reserve).lo >= 0.15;
+                    let lower =
+                        segment_distance_lower(base[0], base[1], other[0], other[1]).unwrap();
+                    let reference =
+                        lower >= required.hi && Interval::point(lower).sub(reserve).lo >= 0.15;
                     let result =
                         certify_planar_capsule_pair_clearance(capsules, 0.15, &mut work, &cancel);
                     if let Ok(result) = result {
                         // The bounds gap is itself a lower bound of the distance.
                         let gap = result.minimum_gap_mm().unwrap();
-                        assert!(gap >= 0.15 && gap <= Interval::point(lower).sub(reserve).hi + 1e-9);
+                        assert!(
+                            gap >= 0.15 && gap <= Interval::point(lower).sub(reserve).hi + 1e-9
+                        );
                         if !reference {
                             panic!("bounds path accepted beyond the distance proof: {other:?}");
                         }
@@ -731,7 +774,12 @@ mod tests {
         assert!(planar_bounds_clear(b, a, 0.2, 0.25));
         assert!(!planar_bounds_clear(a, b, 0.3, 0.25));
         assert!(!planar_bounds_clear(a, [[0.5, 0.5], [3.0, 3.0]], 0.0, 0.0));
-        assert!(!planar_bounds_clear(a, [[f64::NAN, 0.0], [2.0, 1.0]], 0.0, 0.0));
+        assert!(!planar_bounds_clear(
+            a,
+            [[f64::NAN, 0.0], [2.0, 1.0]],
+            0.0,
+            0.0
+        ));
     }
     #[test]
     fn crossing_capsules_are_not_separated_by_distant_endpoints() {

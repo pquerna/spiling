@@ -192,7 +192,12 @@ impl TolerantModel {
         cancel: &AtomicBool,
         visit: impl FnMut(TolerantSupportPiece) -> ControlFlow<E>,
     ) -> Result<ControlFlow<E>, GeometryError> {
-        self.visit_support_projection_screened(interval, cancel, |_, _| ControlFlow::Continue(true), visit)
+        self.visit_support_projection_screened(
+            interval,
+            cancel,
+            |_, _| ControlFlow::Continue(true),
+            visit,
+        )
     }
 
     /// As [`Self::visit_support_projection`], but first offers each piece's
@@ -352,9 +357,13 @@ impl TolerantModel {
         for index in first..=bucket(interval[1]) {
             for &triangle in &self.buckets[index] {
                 cancelled(cancel)?;
-                let vertices = self.triangles[triangle as usize].map(|i| self.positions[i as usize]);
+                let vertices =
+                    self.triangles[triangle as usize].map(|i| self.positions[i as usize]);
                 let low = vertices.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
-                let high = vertices.iter().map(|p| p[2]).fold(f64::NEG_INFINITY, f64::max);
+                let high = vertices
+                    .iter()
+                    .map(|p| p[2])
+                    .fold(f64::NEG_INFINITY, f64::max);
                 // Each triangle once: in its lowest bucket within the range.
                 if bucket(low).max(first) != index || low >= interval[1] || high <= interval[0] {
                     continue;
