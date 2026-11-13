@@ -695,6 +695,7 @@ pub(crate) fn verify_actual(
         ));
     }
     let prime_exclusion = plan.validate_and_prime_exclusion(intent)?;
+    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     let execution = plan.execution_intent(intent)?;
     let intent = execution.as_ref();
 
@@ -1183,17 +1184,27 @@ pub(crate) fn verify_actual(
                     } else {
                         recipe.rectilinear_axis
                     };
-                    let mut fixed_axis =
-                        match policy {
-                            RectilinearAxisPolicy::X => 1,
-                            RectilinearAxisPolicy::Y => 0,
-                            RectilinearAxisPolicy::AlternatingXY => {
-                                if layer_index.is_multiple_of(2) { 1 } else { 0 }
+                    let course = *alternation
+                        .get(layer_index as usize)
+                        .ok_or_else(|| failed("deposition outside a planned layer"))?;
+                    let mut fixed_axis = match policy {
+                        RectilinearAxisPolicy::X => 1,
+                        RectilinearAxisPolicy::Y => 0,
+                        RectilinearAxisPolicy::AlternatingXY => {
+                            if course.is_multiple_of(2) {
+                                1
+                            } else {
+                                0
                             }
-                            RectilinearAxisPolicy::AlternatingYX => {
-                                if layer_index.is_multiple_of(2) { 0 } else { 1 }
+                        }
+                        RectilinearAxisPolicy::AlternatingYX => {
+                            if course.is_multiple_of(2) {
+                                0
+                            } else {
+                                1
                             }
-                        };
+                        }
+                    };
                     if deposition_kind == DepositionKind::SparseFill
                         && matches!(
                             recipe.sparse_infill,

@@ -1343,3 +1343,55 @@ fn frozen_support_snapshot_bounds_cache_bytes_when_header_capacity_grows() {
     assert!(index.retained_points() <= frozen_points);
     assert!(geo::BooleanOps::xor(&*returned, &expected).unsigned_area() < 1e-5);
 }
+
+#[test]
+fn course_groups_keep_ranges_above_a_split_bit_identical() {
+    let radius = |i: usize| 10.0 + (i as f64 * 0.37).sin() * 0.4;
+    let hole = |i: usize| 2.0 + (i as f64 * 0.29).cos() * 0.1;
+    // Nine courses; the split schedule divides course 2 into two layers.
+    let base = sections((0..9).map(|i| annulus(radius(i), hole(i))));
+    let split = sections(
+        (0..9)
+            .flat_map(|i| {
+                let parts = if i == 2 { vec![20, 21] } else { vec![i] };
+                parts.into_iter().map(|j| annulus(radius(j), hole(j)))
+            })
+            .collect::<Vec<_>>(),
+    );
+    let base_courses = (0..9).collect::<Vec<u32>>();
+    let split_courses = [0, 1, 2, 2, 3, 4, 5, 6, 7, 8];
+    let cancel = AtomicBool::new(false);
+    for clearance in [0.0, 0.3] {
+        let mut unsplit =
+            SkinNeighborhoods::with_courses(&base, &base_courses, clearance, 0).unwrap();
+        let mut grouped =
+            SkinNeighborhoods::with_courses(&split, &split_courses, clearance, 0).unwrap();
+        let mut ungrouped = SkinNeighborhoods::new(&split, clearance, 0).unwrap();
+        let query = |index: &mut SkinNeighborhoods<'_>, spans: &Sections, a, b| {
+            index
+                .survival(
+                    a,
+                    Some(b),
+                    source_points(spans),
+                    source_bytes(spans),
+                    &cancel,
+                )
+                .unwrap()
+                .clone()
+        };
+        // Every course range above the split keeps its exact decomposition.
+        for (a, b) in [(3, 5), (3, 8), (4, 7), (5, 6), (6, 8), (3, 3)] {
+            assert_eq!(
+                query(&mut unsplit, &base, a, b),
+                query(&mut grouped, &split, a + 1, b + 1)
+            );
+        }
+        // Complete and partial split groups intersect the same material as
+        // one span per position, up to Boolean evaluation order.
+        for (a, b) in [(0, 9), (1, 2), (2, 3), (3, 6), (2, 2), (0, 3), (1, 4)] {
+            let expected = query(&mut ungrouped, &split, a, b).unsigned_area();
+            let actual = query(&mut grouped, &split, a, b).unsigned_area();
+            assert!((expected - actual).abs() < 1e-6 * expected.max(1.0));
+        }
+    }
+}

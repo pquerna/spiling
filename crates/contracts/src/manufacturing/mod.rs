@@ -620,6 +620,7 @@ impl<'de> serde::de::Visitor<'de> for PathsSeed<'_> {
 #[serde(field_identifier, rename_all = "snake_case")]
 enum LayerField {
     Index,
+    HatchCourse,
     ZMm,
     LowerZMm,
     HeightMm,
@@ -636,6 +637,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LayerSeed<'_> {
             "PrintLayer",
             &[
                 "index",
+                "hatch_course",
                 "z_mm",
                 "lower_z_mm",
                 "height_mm",
@@ -655,6 +657,7 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut index = None;
+        let mut hatch_course = None;
         let mut z_mm = None;
         let mut lower_z_mm = None;
         let mut height_mm = None;
@@ -669,6 +672,12 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
                         return Err(serde::de::Error::duplicate_field("index"));
                     }
                     index = Some(map.next_value()?);
+                }
+                LayerField::HatchCourse => {
+                    if hatch_course.is_some() {
+                        return Err(serde::de::Error::duplicate_field("hatch_course"));
+                    }
+                    hatch_course = Some(map.next_value()?);
                 }
                 LayerField::ZMm => {
                     if z_mm.is_some() {
@@ -718,6 +727,8 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
         }
         Ok(PrintLayer {
             index: index.ok_or_else(|| serde::de::Error::missing_field("index"))?,
+            hatch_course: hatch_course
+                .ok_or_else(|| serde::de::Error::missing_field("hatch_course"))?,
             z_mm: z_mm.ok_or_else(|| serde::de::Error::missing_field("z_mm"))?,
             lower_z_mm: lower_z_mm.ok_or_else(|| serde::de::Error::missing_field("lower_z_mm"))?,
             height_mm: height_mm.ok_or_else(|| serde::de::Error::missing_field("height_mm"))?,
@@ -2670,6 +2681,13 @@ impl PlanarRegionCoverage {
 #[serde(deny_unknown_fields)]
 pub struct PrintLayer {
     pub index: u32,
+    /// Nominal course this layer belongs to, numbered bottom-up from zero.
+    /// Each base-schedule layer is one course; a refinement split divides a
+    /// course into thinner layers that keep it. Alternating hatch axes follow
+    /// [`hatch_alternation_keys`], derived from courses, so a split never
+    /// re-phases the layers above it. One course never exceeds one admissible
+    /// layer.
+    pub hatch_course: u32,
     pub z_mm: f64,
     pub lower_z_mm: f64,
     pub height_mm: f64,
@@ -2681,6 +2699,37 @@ pub struct PrintLayer {
     /// and independently qualified Bridge/permanent-interface construction.
     #[serde(deserialize_with = "diaphragm::skin_command_fits")]
     pub skin_command_fits: Vec<SkinCommandFitDomain>,
+}
+/// Alternation key of every layer, in one pass from the top. A layer outside refinement uses its
+/// hatch course. Within a maximal run of layers whose courses were split into
+/// several layers, the key counts down from the run's top layer, which keeps
+/// its course axis: every layer inside the run crosses its neighbors, the
+/// course above still crosses the run's top, and a refinement split never
+/// changes any layer above its run.
+pub fn hatch_alternation_keys(layers: &[PrintLayer]) -> Vec<u32> {
+    let refined = |layer: usize| {
+        let course = layers[layer].hatch_course;
+        layer
+            .checked_sub(1)
+            .is_some_and(|below| layers[below].hatch_course == course)
+            || layers
+                .get(layer + 1)
+                .is_some_and(|above| above.hatch_course == course)
+    };
+    let mut keys = vec![0; layers.len()];
+    let mut top: Option<usize> = None;
+    for index in (0..layers.len()).rev() {
+        if !refined(index) {
+            top = None;
+            keys[index] = layers[index].hatch_course;
+            continue;
+        }
+        let run_top = *top.get_or_insert(index);
+        keys[index] = layers[run_top]
+            .hatch_course
+            .saturating_add((run_top - index) as u32);
+    }
+    keys
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -3379,11 +3428,13 @@ impl NormalizedPrintPlan {
         }
         let envelope = &intent.printer.build_envelope;
         let mut lower_z = envelope.min[2];
+        let mut course_lower_z = lower_z;
         let mut segments = 0usize;
         let mut object_segments = 0usize;
         let complete = matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. });
         let mut object_xy = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
         let mut gap_start = None;
+        let alternation = hatch_alternation_keys(&self.layers);
         for (index, layer) in self.layers.iter().enumerate() {
             layer.region_coverage.validate(&intent.recipe)?;
             // The certificate and actual separator strokes are a bijection;
@@ -3450,19 +3501,38 @@ impl NormalizedPrintPlan {
                     "invalid variable-thickness layer index, deposition height or interior section height",
                 ));
             }
+            // Courses start at zero and advance by at most one per layer; the
+            // layers sharing one course together span one admissible layer.
+            let course_continues =
+                index > 0 && layer.hatch_course == self.layers[index - 1].hatch_course;
+            if !course_continues {
+                course_lower_z = layer.lower_z_mm;
+            }
+            if !(index == 0 && layer.hatch_course == 0
+                || index > 0
+                    && (course_continues
+                        || Some(layer.hatch_course)
+                            == self.layers[index - 1].hatch_course.checked_add(1)))
+                || layer.z_mm - course_lower_z
+                    > intent.layer_height_ceiling_mm()? + self.layer_quantization_mm
+            {
+                return Err(invalid(
+                    "hatch courses must advance by at most one and span at most one admissible layer",
+                ));
+            }
             lower_z = layer.z_mm;
-            let fixed_axis_for = |policy, index: u32| match policy {
+            let fixed_axis_for = |policy, course: u32| match policy {
                 RectilinearAxisPolicy::X => 1,
                 RectilinearAxisPolicy::Y => 0,
                 RectilinearAxisPolicy::AlternatingXY => {
-                    if index.is_multiple_of(2) {
+                    if course.is_multiple_of(2) {
                         1
                     } else {
                         0
                     }
                 }
                 RectilinearAxisPolicy::AlternatingYX => {
-                    if index.is_multiple_of(2) {
+                    if course.is_multiple_of(2) {
                         0
                     } else {
                         1
@@ -3722,8 +3792,11 @@ impl NormalizedPrintPlan {
                         | DepositionKind::SparseFill
                 )
                 .then(|| {
-                    let index = if path.physical_z_mm[0] == layer.lower_z_mm {
-                        layer.index
+                    // A landing-aligned coarse band follows the course of the
+                    // ordinary layer it lands beneath.
+                    let own = alternation[index];
+                    let course = if path.physical_z_mm[0] == layer.lower_z_mm {
+                        own
                     } else {
                         self.sparse_bands
                             .iter()
@@ -3732,7 +3805,14 @@ impl NormalizedPrintPlan {
                                     && band.last_layer == layer.index
                                     && band.owner == path.owner
                             })
-                            .map_or(layer.index, |band| band.last_layer + 1)
+                            .map_or(own, |band| {
+                                let landing = band.last_layer as usize + 1;
+                                if landing < self.layers.len() {
+                                    alternation[landing]
+                                } else {
+                                    own.saturating_add(1)
+                                }
+                            })
                     };
                     fixed_axis_for(
                         if path.kind == DepositionKind::TopSkin {
@@ -3740,7 +3820,7 @@ impl NormalizedPrintPlan {
                         } else {
                             intent.recipe.rectilinear_axis
                         },
-                        index,
+                        course,
                     )
                 });
                 if path.kind == DepositionKind::SparseFill

@@ -588,6 +588,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             layers: vec![PrintLayer {
                 skin_command_fits: Vec::new(),
                 index: 0,
+                hatch_course: 0,
                 lower_z_mm: 0.0,
                 z_mm: 0.2,
                 height_mm: 0.2,

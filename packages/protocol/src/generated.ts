@@ -991,7 +991,16 @@ frame_mm: [[number, number], [number, number]],
  */
 ceilings: Array<WebRoofCeiling>, };
 
-export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage,
+export type PrintLayer = { index: number,
+/**
+ * Nominal course this layer belongs to, numbered bottom-up from zero.
+ * Each base-schedule layer is one course; a refinement split divides a
+ * course into thinner layers that keep it. Alternating hatch axes follow
+ * [`hatch_alternation_keys`], derived from courses, so a split never
+ * re-phases the layers above it. One course never exceeds one admissible
+ * layer.
+ */
+hatch_course: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage,
 /**
  * Source-owned minimum-length realization, distinct from skin classification
  * and independently qualified Bridge/permanent-interface construction.

@@ -103,67 +103,56 @@ impl Deref for Material<'_> {
     }
 }
 
-/// Survival results by section range, kept across schedule retries of one
-/// lane. A range's result depends only on its own sections and their aligned
-/// dyadic decomposition, so it is reused verbatim while every section in the
-/// range keeps its span and schedule entries; nothing is approximated.
+/// Survival results kept across schedule retries of one lane. A range's
+/// result depends only on the sections of every course group it touches, the
+/// position of its ends inside the first and last group, and the groups'
+/// course positions (the aligned decomposition). The key is that complete
+/// input description, so a range keeps its result wherever a refinement
+/// moves its output indices; nothing is approximated.
 #[derive(Default)]
 pub(super) struct SurvivalMemo {
-    spans: Vec<Vec<[u64; 4]>>,
-    /// Section range -> shared result, its points and admitted bytes.
-    entries: std::collections::BTreeMap<(usize, usize), MemoEntry>,
+    entries: std::collections::BTreeMap<RangeKey, MemoEntry>,
     bytes: usize,
+    /// The pass that last attached was a complete schedule.
+    complete: bool,
 }
 
-type MemoEntry = (Arc<MultiPolygon<f64>>, usize, usize);
+/// First group position, both end offsets inside their groups, then per
+/// group its layer count followed by each layer's schedule identity.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RangeKey {
+    first_group: usize,
+    offsets: [usize; 2],
+    layers: Vec<[u64; 4]>,
+}
+
+impl RangeKey {
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.layers.capacity() * std::mem::size_of::<[u64; 4]>()
+    }
+}
+
+/// Shared result, its points, its admitted bytes and whether this pass used it.
+type MemoEntry = (Arc<MultiPolygon<f64>>, usize, usize, bool);
 
 impl SurvivalMemo {
-    /// Drop results whose range changed, then describe `sections`. Recorded
-    /// spans beyond a truncated pass stay valid while the schedule entries
-    /// they were sectioned from are unchanged.
-    fn rebind(
-        &mut self,
-        sections: &[SectionSpan],
-        layers: usize,
-        elevation: &dyn Fn(u32) -> [u64; 4],
-    ) {
-        let describe = |start: u32, end: u32| -> Vec<[u64; 4]> {
-            std::iter::once([u64::from(start), u64::from(end), 0, 0])
-                .chain((start..end).map(elevation))
-                .collect()
-        };
-        let mut spans: Vec<Vec<[u64; 4]>> = sections
-            .iter()
-            .map(|span| describe(span.start, span.end))
-            .collect();
-        let mut changed = spans
-            .iter()
-            .zip(&self.spans)
-            .position(|(new, old)| new != old)
-            .unwrap_or(spans.len().min(self.spans.len()));
-        if changed == spans.len() {
-            let mut next = spans.last().map_or(0, |span| span[0][1]);
-            for old in self.spans.drain(changed..) {
-                let [start, end, ..] = old[0];
-                if start != next || end > layers as u64 || old != describe(start as u32, end as u32)
-                {
-                    break;
+    /// Entries a complete pass did not use cannot serve a later one: drop them.
+    /// A truncated pass only ever sees a prefix, so it prunes nothing.
+    fn rebind(&mut self, complete: bool) {
+        if self.complete {
+            let mut released = 0usize;
+            self.entries.retain(|_, (_, _, bytes, used)| {
+                if !*used {
+                    released += *bytes;
                 }
-                next = end;
-                spans.push(old);
-            }
-            changed = spans.len();
+                *used
+            });
+            self.bytes -= released;
         }
-        let mut released = 0usize;
-        self.entries.retain(|(_, upper), (_, _, bytes)| {
-            let keep = *upper < changed;
-            if !keep {
-                released += *bytes;
-            }
-            keep
-        });
-        self.bytes -= released;
-        self.spans = spans;
+        for (_, _, _, used) in self.entries.values_mut() {
+            *used = false;
+        }
+        self.complete = complete;
     }
 }
 
@@ -185,7 +174,13 @@ fn shared_bytes(material: &MultiPolygon<f64>) -> usize {
 
 pub(super) struct SkinNeighborhoods<'a> {
     sections: &'a [SectionSpan],
+    /// Course groups: `None` places every span at its own position. Otherwise
+    /// the first span of each group, then `sections.len()`. Tree positions are
+    /// groups, so splitting one course never moves another's leaf.
+    groups: Option<Vec<usize>>,
     memo: Option<&'a mut SurvivalMemo>,
+    /// Per scheduled layer: its schedule identity, while a memo is attached.
+    identities: Vec<[u64; 4]>,
     // Raw final-D survival is independent of every neighbor's wall allocation.
     // Raw and cleared complete-tree slots share one allocation and retention pool.
     fill_clearance_mm: f64,
@@ -199,8 +194,28 @@ pub(super) struct SkinNeighborhoods<'a> {
     work: usize,
 }
 impl<'a> SkinNeighborhoods<'a> {
+    /// Every span at its own tree position.
+    #[cfg(test)]
     pub(super) fn new(
         sections: &'a [SectionSpan],
+        fill_clearance_mm: f64,
+        initial_work: usize,
+    ) -> Result<Self, ManufacturingError> {
+        Self::grouped(sections, None, fill_clearance_mm, initial_work)
+    }
+    /// Group spans by nondecreasing course key: consecutive spans with one key
+    /// share a tree leaf, intersected in ascending order.
+    pub(super) fn with_courses(
+        sections: &'a [SectionSpan],
+        courses: &[u32],
+        fill_clearance_mm: f64,
+        initial_work: usize,
+    ) -> Result<Self, ManufacturingError> {
+        Self::grouped(sections, Some(courses), fill_clearance_mm, initial_work)
+    }
+    fn grouped(
+        sections: &'a [SectionSpan],
+        courses: Option<&[u32]>,
         fill_clearance_mm: f64,
         initial_work: usize,
     ) -> Result<Self, ManufacturingError> {
@@ -213,8 +228,31 @@ impl<'a> SkinNeighborhoods<'a> {
         if sections.len() > MAX_PRINT_LAYERS as usize {
             return Err(resource("skin neighborhood span limit exceeded"));
         }
-        let base = sections
-            .len()
+        let groups = match courses {
+            Some(courses) if courses.len() != sections.len() => {
+                return Err(resource("skin neighborhood course count mismatch"));
+            }
+            Some(courses) if courses.windows(2).any(|pair| pair[0] == pair[1]) => {
+                if courses.windows(2).any(|pair| pair[0] > pair[1]) {
+                    return Err(resource("skin neighborhood courses must ascend"));
+                }
+                let mut starts = Vec::new();
+                starts
+                    .try_reserve_exact(sections.len() + 1)
+                    .map_err(|_| resource("skin neighborhood group allocation refused"))?;
+                starts.extend(
+                    (0..sections.len())
+                        .filter(|&span| span == 0 || courses[span - 1] != courses[span]),
+                );
+                starts.push(sections.len());
+                Some(starts)
+            }
+            _ => None,
+        };
+        let positions = groups
+            .as_ref()
+            .map_or(sections.len(), |starts| starts.len() - 1);
+        let base = positions
             .max(1)
             .checked_next_power_of_two()
             .ok_or_else(|| resource("skin neighborhood index overflow"))?;
@@ -243,7 +281,9 @@ impl<'a> SkinNeighborhoods<'a> {
         nodes.resize_with(count, || Cached::Missing);
         Ok(Self {
             sections,
+            groups,
             memo: None,
+            identities: Vec::new(),
             fill_clearance_mm,
             nodes,
             base,
@@ -260,11 +300,55 @@ impl<'a> SkinNeighborhoods<'a> {
     pub(super) fn attach_memo(
         &mut self,
         memo: &'a mut SurvivalMemo,
-        layers: usize,
-        elevation: &dyn Fn(u32) -> [u64; 4],
+        identities: Vec<[u64; 4]>,
+        complete: bool,
     ) {
-        memo.rebind(self.sections, layers, elevation);
+        memo.rebind(complete);
+        self.identities = identities;
         self.memo = Some(memo);
+    }
+    fn group_count(&self) -> usize {
+        self.groups
+            .as_ref()
+            .map_or(self.sections.len(), |starts| starts.len() - 1)
+    }
+    fn group_spans(&self, group: usize) -> std::ops::Range<usize> {
+        match &self.groups {
+            None => group..group + 1,
+            Some(starts) => starts[group]..starts[group + 1],
+        }
+    }
+    fn span_group(&self, span: usize) -> usize {
+        match &self.groups {
+            None => span,
+            Some(starts) => starts.partition_point(|&start| start <= span) - 1,
+        }
+    }
+    /// The complete input description of a span range; `None` without a memo.
+    fn range_key(&self, first: usize, last: usize) -> Option<RangeKey> {
+        self.memo.as_ref()?;
+        let [low, high] = [self.span_group(first), self.span_group(last)];
+        let spans = self.group_spans(low).start..self.group_spans(high).end;
+        let mut layers = Vec::new();
+        for group in low..=high {
+            let range = self.group_spans(group);
+            layers.push([range.len() as u64, 0, 0, 0]);
+            for span in range {
+                let span = &self.sections[span];
+                layers.push([u64::from(span.end - span.start), 1, 0, 0]);
+                layers.extend(
+                    self.identities
+                        .get(span.start as usize..span.end as usize)?
+                        .iter()
+                        .copied(),
+                );
+            }
+        }
+        Some(RangeKey {
+            first_group: low,
+            offsets: [first - spans.start, last - self.group_spans(high).start],
+            layers,
+        })
     }
     pub(super) fn work_mut(&mut self) -> &mut usize {
         &mut self.work
@@ -277,6 +361,11 @@ impl<'a> SkinNeighborhoods<'a> {
             .capacity()
             .saturating_mul(std::mem::size_of::<Cached>())
             .saturating_add(self.retained_owned_bytes)
+            .saturating_add(self.groups.as_ref().map_or(0, |starts| {
+                starts
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>())
+            }))
     }
     pub(super) fn freeze_retained_capacity(&mut self) -> usize {
         self.retained_capacity = self.retained;
@@ -314,6 +403,9 @@ impl<'a> SkinNeighborhoods<'a> {
             points: retained_points,
             bytes: external_owned_bytes
                 .checked_add(self.memo.as_ref().map_or(0, |memo| memo.bytes))
+                .and_then(|bytes| {
+                    bytes.checked_add(self.identities.capacity() * std::mem::size_of::<[u64; 4]>())
+                })
                 .ok_or_else(|| resource("skin neighborhood live byte overflow"))?,
         };
         self.admit(external, Usage::default(), cancel)?;
@@ -323,10 +415,12 @@ impl<'a> SkinNeighborhoods<'a> {
         if current >= self.sections.len() || neighbor >= self.sections.len() {
             return Err(resource("skin neighborhood span index out of range"));
         }
-        let range = (current.min(neighbor), current.max(neighbor));
-        if let Some((material, points, _)) =
-            self.memo.as_ref().and_then(|memo| memo.entries.get(&range))
+        let key = self.range_key(current.min(neighbor), current.max(neighbor));
+        if let Some((material, points, _, used)) = key
+            .as_ref()
+            .and_then(|key| self.memo.as_mut()?.entries.get_mut(key))
         {
+            *used = true;
             return Ok(Material {
                 storage: Storage::Cached(Arc::clone(material)),
                 points: *points,
@@ -334,12 +428,15 @@ impl<'a> SkinNeighborhoods<'a> {
             });
         }
         let result = self.survival_range(current, neighbor, external, cancel)?;
-        self.remember(range, result, external, cancel)
+        match key {
+            Some(key) => self.remember(key, result, external, cancel),
+            None => Ok(result),
+        }
     }
     /// Keep a computed range result when it fits beside the live working set.
     fn remember(
         &mut self,
-        range: (usize, usize),
+        range: RangeKey,
         result: Material<'a>,
         external: Usage,
         cancel: &AtomicBool,
@@ -353,7 +450,7 @@ impl<'a> SkinNeighborhoods<'a> {
             Storage::Temporary(material) => Arc::new(material),
             Storage::Borrowed(_) => unreachable!("borrowed leaves are returned above"),
         };
-        let bytes = shared_bytes(&shared);
+        let bytes = shared_bytes(&shared).saturating_add(range.bytes());
         let admitted = self
             .try_admit(external, Usage { points: 0, bytes }, cancel)?
             .is_some();
@@ -361,14 +458,14 @@ impl<'a> SkinNeighborhoods<'a> {
         if admitted {
             memo.bytes = memo.bytes.saturating_add(bytes);
             memo.entries
-                .insert(range, (Arc::clone(&shared), points, bytes));
+                .insert(range, (Arc::clone(&shared), points, bytes, true));
             return Ok(Material {
                 storage: Storage::Cached(shared),
                 points,
                 owned_bytes: 0,
             });
         }
-        let owned_bytes = bytes - super::native::MATERIAL_ARC_BYTES;
+        let owned_bytes = bytes - range.bytes() - super::native::MATERIAL_ARC_BYTES;
         Ok(match Arc::try_unwrap(shared) {
             Ok(material) => Material {
                 storage: Storage::Temporary(material),
@@ -390,23 +487,11 @@ impl<'a> SkinNeighborhoods<'a> {
         cancel: &AtomicBool,
     ) -> Result<Material<'a>, ManufacturingError> {
         self.intern_leaves(external, cancel)?;
-        let end = current
-            .max(neighbor)
-            .checked_add(1)
-            .ok_or_else(|| resource("skin neighborhood range overflow"))?;
-        let mut result = None;
-        self.query(
-            false,
-            1,
-            0,
-            self.base,
-            current.min(neighbor),
-            end,
-            external,
-            &mut result,
-            cancel,
-        )?;
-        let material = result.unwrap_or_else(Material::empty);
+        let first = current.min(neighbor);
+        let last = current.max(neighbor);
+        let material = self
+            .range(false, first, last, external, cancel)?
+            .unwrap_or_else(Material::empty);
 
         if material.0.is_empty() || self.fill_clearance_mm == 0.0 {
             return Ok(material);
@@ -418,22 +503,161 @@ impl<'a> SkinNeighborhoods<'a> {
         let temporary = material.temporary_usage();
         let cleared_external = external.add(temporary)?;
 
-        let mut cleared = None;
-        self.query(
-            true,
-            1,
-            0,
-            self.base,
-            current.min(neighbor),
-            end,
-            cleared_external,
-            &mut cleared,
-            cancel,
-        )?;
-        let cleared = cleared.unwrap_or_else(Material::empty);
+        let cleared = self
+            .range(true, first, last, cleared_external, cancel)?
+            .unwrap_or_else(Material::empty);
         self.admit(cleared_external, cleared.temporary_usage(), cancel)?;
 
         Ok(cleared)
+    }
+    /// Intersect spans `first..=last` in ascending order: a partial first
+    /// group span by span, every complete group through the aligned tree over
+    /// group positions, then a partial last group span by span.
+    fn range(
+        &mut self,
+        cleared: bool,
+        first: usize,
+        last: usize,
+        external: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Material<'a>>, ManufacturingError> {
+        let end = last
+            .checked_add(1)
+            .ok_or_else(|| resource("skin neighborhood range overflow"))?;
+        let [low, high] = [self.span_group(first), self.span_group(last)];
+        let low_spans = self.group_spans(low);
+        let high_spans = self.group_spans(high);
+        let [low_full, high_full] = [low_spans.start == first, high_spans.end == end];
+        let mut result = None;
+        if low == high && !(low_full && high_full) {
+            self.spans(cleared, first..end, external, &mut result, cancel)?;
+            return Ok(result);
+        }
+        if !low_full {
+            self.spans(cleared, first..low_spans.end, external, &mut result, cancel)?;
+        }
+        let tree = [
+            if low_full { low } else { low + 1 },
+            if high_full { high + 1 } else { high },
+        ];
+        if tree[0] < tree[1] {
+            self.query(
+                cleared,
+                1,
+                0,
+                self.base,
+                tree[0],
+                tree[1],
+                external,
+                &mut result,
+                cancel,
+            )?;
+        }
+        if !high_full {
+            self.spans(
+                cleared,
+                high_spans.start..end,
+                external,
+                &mut result,
+                cancel,
+            )?;
+        }
+        Ok(result)
+    }
+    /// One span's raw D or its fill-clearance erosion, never cached.
+    fn span_material(
+        &mut self,
+        cleared: bool,
+        span: usize,
+        external: Usage,
+        temporary: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<Material<'a>, ManufacturingError> {
+        let sections = self.sections;
+        let material = &sections
+            .get(span)
+            .ok_or_else(|| resource("skin neighborhood leaf index out of range"))?
+            .material;
+        if !cleared {
+            let points = checked_points(material, &mut self.work, cancel)?;
+            return Ok(Material {
+                storage: Storage::Borrowed(material),
+                points,
+                owned_bytes: 0,
+            });
+        }
+        let offset = region::offset_admitted(
+            material,
+            -self.fill_clearance_mm,
+            |scratch, scratch_owned_bytes, overlay| {
+                let live = temporary.add(Usage {
+                    points: scratch,
+                    bytes: scratch_owned_bytes,
+                })?;
+                self.admit(external, live, cancel)?;
+                if let Some((a, b)) = overlay {
+                    super::boolean::budget_accumulated(a, b, &mut self.work, cancel)?;
+                }
+                Ok(())
+            },
+            cancel,
+        )?;
+        let points = checked_points(&offset, &mut self.work, cancel)?;
+        let material = Material::owned(offset, points);
+        self.admit(external, temporary.add(material.temporary_usage())?, cancel)?;
+        Ok(material)
+    }
+    /// Accumulate individual spans into an ascending intersection.
+    fn spans(
+        &mut self,
+        cleared: bool,
+        spans: std::ops::Range<usize>,
+        external: Usage,
+        result: &mut Option<Material<'a>>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        for span in spans {
+            check_cancel(cancel)?;
+            charge(&mut self.work, 1)?;
+            if result
+                .as_ref()
+                .is_some_and(|material| material.0.is_empty())
+            {
+                return Ok(());
+            }
+            let temporary = result
+                .as_ref()
+                .map_or(Usage::default(), Material::temporary_usage);
+            let next = self.span_material(cleared, span, external, temporary, cancel)?;
+            self.accumulate(result, next, external, cancel)?;
+        }
+        Ok(())
+    }
+    fn accumulate(
+        &mut self,
+        result: &mut Option<Material<'a>>,
+        next: Material<'a>,
+        external: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let Some(previous) = result.as_ref() else {
+            *result = Some(next);
+            return Ok(());
+        };
+        if next.0.is_empty() {
+            *result = Some(Material::empty());
+            return Ok(());
+        }
+        let operands = previous.temporary_usage().add(next.temporary_usage())?;
+        self.admit(external, operands, cancel)?;
+        let material =
+            classification::intersection_accumulated(previous, &next, &mut self.work, cancel)?;
+        let points = checked_points(&material, &mut self.work, cancel)?;
+        let material = Material::owned(material, points);
+        self.admit(external, operands.add(material.temporary_usage())?, cancel)?;
+        check_cancel(cancel)?;
+        *result = Some(material);
+        Ok(())
     }
     fn admit(
         &mut self,
@@ -566,7 +790,11 @@ impl<'a> SkinNeighborhoods<'a> {
         if self.leaf_identities_ready {
             return Ok(());
         }
-        let count = self.sections.len();
+        // Only single-span leaves borrow D and may alias; a split course's
+        // leaf is its own intersection.
+        let count = (0..self.group_count())
+            .filter(|group| self.group_spans(*group).len() == 1)
+            .count();
         let slots = count
             .checked_mul(2)
             .ok_or_else(|| resource("skin leaf identity count overflow"))?;
@@ -603,11 +831,15 @@ impl<'a> SkinNeighborhoods<'a> {
             },
             cancel,
         )?;
-        for index in 0..count {
+        for group in 0..self.group_count() {
+            let spans = self.group_spans(group);
+            if spans.len() != 1 {
+                continue;
+            }
             check_cancel(cancel)?;
             // Validate even a unique input, which sorting need not inspect.
-            checked_points(&self.sections[index].material, &mut self.work, cancel)?;
-            order.push(index);
+            checked_points(&self.sections[spans.start].material, &mut self.work, cancel)?;
+            order.push(spans.start);
             scratch.push(0);
         }
         let mut width = 1;
@@ -665,8 +897,9 @@ impl<'a> SkinNeighborhoods<'a> {
         if self.fill_clearance_mm != 0.0 {
             charge(&mut self.work, count)?;
         }
-        for (index, canonical) in order.into_iter().zip(scratch) {
-            if index != canonical {
+        for (span, canonical) in order.into_iter().zip(scratch) {
+            if span != canonical {
+                let [index, canonical] = [self.span_group(span), self.span_group(canonical)];
                 self.nodes[self.base + index] = Cached::Alias(self.base + canonical);
                 if self.fill_clearance_mm != 0.0 {
                     self.nodes[3 * self.base + index] = Cached::Alias(3 * self.base + canonical);
@@ -696,21 +929,24 @@ impl<'a> SkinNeighborhoods<'a> {
             Some(Cached::Alias(canonical)) => {
                 let start = canonical
                     .checked_sub(tree_offset + self.base)
-                    .filter(|index| *index < self.sections.len())
+                    .filter(|index| *index < self.group_count())
                     .ok_or_else(|| resource("skin canonical leaf index out of range"))?;
                 (*canonical, start, start + 1)
             }
             _ => (cache_node, start, end),
         };
         let used = self.work;
+        let leaf_span = (start < self.group_count()).then(|| self.group_spans(start).start);
         let slot = self
             .nodes
             .get_mut(cache_node)
             .ok_or_else(|| resource("skin neighborhood node index out of range"))?;
         match slot {
             Cached::Leaf(points) => {
+                let span = leaf_span
+                    .ok_or_else(|| resource("skin neighborhood leaf index out of range"))?;
                 return Ok(Material {
-                    storage: Storage::Borrowed(&self.sections[start].material),
+                    storage: Storage::Borrowed(&self.sections[span].material),
                     points: *points,
                     owned_bytes: 0,
                 });
@@ -728,9 +964,48 @@ impl<'a> SkinNeighborhoods<'a> {
             Cached::Alias(_) => return Err(resource("skin canonical leaf alias chain")),
         }
         if end.checked_sub(start) == Some(1) {
+            if start >= self.group_count() {
+                return Err(resource("skin neighborhood leaf index out of range"));
+            }
+            let spans = self.group_spans(start);
+            if spans.len() > 1 {
+                // A split course: its layers in ascending order form one leaf.
+                let mut group = None;
+                for span in spans {
+                    check_cancel(cancel)?;
+                    if group
+                        .as_ref()
+                        .is_some_and(|material: &Material<'a>| material.0.is_empty())
+                    {
+                        break;
+                    }
+                    let live = temporary.add(
+                        group
+                            .as_ref()
+                            .map_or(Usage::default(), Material::temporary_usage),
+                    )?;
+                    let next = self.span_material(cleared, span, external, live, cancel)?;
+                    self.accumulate(&mut group, next, external, cancel)?;
+                }
+                let material = match group {
+                    Some(material) if !material.0.is_empty() => material,
+                    _ => {
+                        self.nodes[cache_node] = Cached::Empty;
+                        return Ok(Material::empty());
+                    }
+                };
+                let material = match material.storage {
+                    Storage::Temporary(_) => material,
+                    _ => {
+                        let points = material.points;
+                        Material::owned((*material).clone(), points)
+                    }
+                };
+                return self.cache_material(cache_node, material, external, temporary, cancel);
+            }
             let sections = self.sections;
             let material = &sections
-                .get(start)
+                .get(spans.start)
                 .ok_or_else(|| resource("skin neighborhood leaf index out of range"))?
                 .material;
             if cleared {
@@ -877,24 +1152,7 @@ impl<'a> SkinNeighborhoods<'a> {
         self.admit(external, temporary, cancel)?;
         if first <= start && end <= last {
             let next = self.build(cleared, node, start, end, external, temporary, cancel)?;
-            let Some(previous) = result.as_ref() else {
-                *result = Some(next);
-                return Ok(());
-            };
-            if next.0.is_empty() {
-                *result = Some(Material::empty());
-                return Ok(());
-            }
-            let operands = temporary.add(next.temporary_usage())?;
-            self.admit(external, operands, cancel)?;
-            let material =
-                classification::intersection_accumulated(previous, &next, &mut self.work, cancel)?;
-            let points = checked_points(&material, &mut self.work, cancel)?;
-            let material = Material::owned(material, points);
-            self.admit(external, operands.add(material.temporary_usage())?, cancel)?;
-            check_cancel(cancel)?;
-            *result = Some(material);
-            return Ok(());
+            return self.accumulate(result, next, external, cancel);
         }
         let (left, right, mid) = Self::children(node, start, end)?;
         // Ascending aligned disjoint nodes; no query-list allocation or sorting.

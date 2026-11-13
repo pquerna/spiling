@@ -1818,6 +1818,7 @@ fn startup_anchor_probe_keeps_original_physical_pair_after_splits() {
             z: (i + 1) as f64 * 0.1,
             sample: (i as f64 + 0.5) * 0.1,
             height: 0.1,
+            course: i,
         })
         .collect::<Vec<_>>();
     let scope = AnchorProbeScope::StartupPair {
@@ -1866,4 +1867,73 @@ fn protected_maximum_rebalances_true_and_command_intervals_at_the_process_ceilin
             }
         }
     }
+}
+
+#[test]
+fn refinement_splits_keep_their_course_and_every_axis_above() {
+    let mut schedule = (0..5)
+        .map(|i| LayerElevation {
+            lower_z: i as f64 * 0.2,
+            z: (i + 1) as f64 * 0.2,
+            sample: (i as f64 + 0.5) * 0.2,
+            height: 0.2,
+            course: i,
+        })
+        .collect::<Vec<_>>();
+    let axes = |schedule: &[LayerElevation]| {
+        (0..schedule.len())
+            .map(|index| {
+                (
+                    schedule[index].z.to_bits(),
+                    region::HatchAxis::for_policy(
+                        RectilinearAxisPolicy::AlternatingXY,
+                        hatch_key(schedule, index),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = axes(&schedule);
+    assert!(before.windows(2).all(|pair| pair[0].1 != pair[1].1));
+    native::split_layer(&mut schedule, 1, "course regression").unwrap();
+    let halves = axes(&schedule);
+    // The course's top layer keeps its axis and the next course still
+    // crosses it; the lower half crosses the upper and parallels the course
+    // below, the one parallel pair a single inserted layer must create.
+    assert_eq!(
+        schedule
+            .iter()
+            .map(|layer| layer.course)
+            .collect::<Vec<_>>(),
+        [0, 1, 1, 2, 3, 4]
+    );
+    assert_eq!(halves[2], before[1]);
+    assert_ne!(halves[1].1, halves[2].1);
+    assert_eq!(halves[0].1, halves[1].1);
+    native::split_layer(&mut schedule, 2, "course regression").unwrap();
+    let after = axes(&schedule);
+    assert_eq!(
+        schedule
+            .iter()
+            .map(|layer| layer.course)
+            .collect::<Vec<_>>(),
+        [0, 1, 1, 1, 2, 3, 4]
+    );
+    // Three layers in one course alternate fully; every unsplit layer keeps
+    // its axis wherever its index moved.
+    assert!(after.windows(2).all(|pair| pair[0].1 != pair[1].1));
+    for layer in [&before[0], &before[2], &before[3], &before[4]] {
+        assert!(after.contains(layer));
+    }
+    // Splitting the adjacent course extends the refined run: it alternates
+    // from the run's top, which still crosses the unsplit course above.
+    native::split_layer(&mut schedule, 4, "course regression").unwrap();
+    let run = axes(&schedule);
+    assert_eq!(
+        schedule.iter().map(|layer| layer.course).collect::<Vec<_>>(),
+        [0, 1, 1, 1, 2, 2, 3, 4]
+    );
+    assert_eq!(run[5].1, before[2].1);
+    assert!(run[1..].windows(2).all(|pair| pair[0].1 != pair[1].1));
+    assert_eq!(run[6..], before[3..]);
 }

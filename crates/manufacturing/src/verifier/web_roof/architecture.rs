@@ -263,6 +263,7 @@ mod skin_reservation_tests {
     fn fitted_skin_replaces_only_its_exact_collinear_owned_road_interval() {
         let mut layer = PrintLayer {
             index: 0,
+            hatch_course: 0,
             lower_z_mm: 0.0,
             z_mm: 0.2,
             height_mm: 0.2,

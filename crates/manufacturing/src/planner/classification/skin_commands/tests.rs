@@ -110,6 +110,7 @@ fn regenerated_sparse_roads_reserve_existing_fitted_skin_once() {
     paths.push(sparse);
     let mut layer = PrintLayer {
         index: 0,
+        hatch_course: 0,
         lower_z_mm: 0.0,
         z_mm: 0.4,
         height_mm: 0.4,

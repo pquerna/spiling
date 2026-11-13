@@ -234,12 +234,12 @@ fn interval(ends: [[f64; 3]; 2], along: usize) -> [f64; 2] {
         ends[0][along].max(ends[1][along]),
     ]
 }
-fn fixed_axis(policy: RectilinearAxisPolicy, layer: u32) -> usize {
+fn fixed_axis(policy: RectilinearAxisPolicy, course: u32) -> usize {
     match policy {
         RectilinearAxisPolicy::X => 1,
         RectilinearAxisPolicy::Y => 0,
-        RectilinearAxisPolicy::AlternatingXY => usize::from(layer.is_multiple_of(2)),
-        RectilinearAxisPolicy::AlternatingYX => usize::from(!layer.is_multiple_of(2)),
+        RectilinearAxisPolicy::AlternatingXY => usize::from(course.is_multiple_of(2)),
+        RectilinearAxisPolicy::AlternatingYX => usize::from(!course.is_multiple_of(2)),
     }
 }
 fn same_ends(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
@@ -427,6 +427,7 @@ pub(super) fn verify(
     let retained = retained_bytes(plan)?;
     let mut rows = Rows::default();
     let mut claimed = Vec::<bool>::new();
+    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (index, layer) in plan.layers.iter().enumerate() {
         if layer.skin_command_fits.is_empty() {
             continue;
@@ -470,7 +471,7 @@ pub(super) fn verify(
                 ProcessSkinKind::BottomSkin => recipe.rectilinear_axis,
                 ProcessSkinKind::TopSkin => recipe.top_skin_axis,
             };
-            let fixed = fixed_axis(policy, layer.index);
+            let fixed = fixed_axis(policy, alternation[index]);
             let along = 1 - fixed;
             for fit in &domain.fits {
                 cancelled(cancel)?;

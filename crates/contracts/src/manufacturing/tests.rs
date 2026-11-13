@@ -1853,6 +1853,7 @@ fn plan() -> NormalizedPrintPlan {
         layers: vec![PrintLayer {
             skin_command_fits: Vec::new(),
             index: 0,
+            hatch_course: 0,
             z_mm: 5.2,
             lower_z_mm: 5.0,
             height_mm: 0.2,
@@ -2743,6 +2744,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
             PrintLayer {
                 skin_command_fits: Vec::new(),
                 index: index as u32,
+                hatch_course: index as u32,
                 z_mm,
                 lower_z_mm: 5.0 + index as f64 * 0.2,
                 height_mm: 0.2,
@@ -3218,6 +3220,7 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     }
     let mut object = scheduled.layers[0].clone();
     object.index = 2;
+    object.hatch_course = 2;
     object.z_mm = 5.75;
     object.lower_z_mm = 5.5;
     object.section_z_mm = 5.625;
@@ -3244,6 +3247,7 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     scheduled.layers.push(PrintLayer {
         skin_command_fits: Vec::new(),
         index: 1,
+        hatch_course: 1,
         z_mm: 5.5,
         lower_z_mm: 5.5 - 0.25,
         height_mm: 0.25,
@@ -4941,4 +4945,36 @@ fn tolerant_coverage_can_have_no_native_work_without_fabricating_certificates() 
     assert!(coverage.validate().is_err());
     coverage.geometry_work = 1;
     coverage.validate().unwrap();
+}
+
+#[test]
+fn hatch_courses_start_at_zero_advance_by_one_and_span_one_layer() {
+    let valid = segmented_plan(&[&[1], &[1], &[1]]);
+    valid.validate(&intent()).unwrap();
+    // A skipped course, a nonzero start and one course stacked over two
+    // full-height layers would all hide a planner alternation error.
+    let ceiling = intent().layer_height_ceiling_mm().unwrap();
+    // An odd stack keeps every authored axis, so only the span can refuse.
+    let mut stacked = (ceiling / 0.2) as usize + 1;
+    stacked += 1 - stacked % 2;
+    let stack = vec![&[1usize][..]; stacked];
+    let mut one_course = segmented_plan(&stack);
+    for layer in &mut one_course.layers {
+        layer.hatch_course = 0;
+    }
+    for plan in [[0, 2, 3], [1, 2, 3]]
+        .map(|courses| {
+            let mut plan = valid.clone();
+            for (layer, course) in plan.layers.iter_mut().zip(courses) {
+                layer.hatch_course = course;
+            }
+            plan
+        })
+        .into_iter()
+        .chain([one_course])
+    {
+        let failure = plan.validate(&intent()).unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::InvalidSpecification);
+        assert!(failure.message.contains("hatch courses"), "{failure}");
+    }
 }
