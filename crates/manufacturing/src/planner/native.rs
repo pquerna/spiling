@@ -4093,7 +4093,7 @@ pub(super) fn certify_support_clearance(
 /// Outward enclosure of an emitted XYZ6 centerline point's displacement from
 /// its binary64 source plus its remaining physical-decimal endpoint error
 /// (each at most about one half micrometre per axis). Bounds screens only.
-const XYZ6_SCREEN_SLACK_MM: f64 = 1e-5;
+pub(super) const XYZ6_SCREEN_SLACK_MM: f64 = 1e-5;
 
 /// Raw XY bounds of a validated path and its largest bead width.
 fn path_xy_bounds(path: &DepositionPath) -> Option<([[f64; 2]; 2], f64)> {
