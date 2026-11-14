@@ -164,7 +164,8 @@ fn intent(supports: bool) -> ManufacturingIntent {
                 min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 0.6,
             },
-            max_feed_mm_s: 200.0,
+            max_print_feed_mm_s: 200.0,
+            max_travel_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
         },
     }

@@ -142,7 +142,7 @@ pub fn create_material_intent(
             top_skin_thickness_mm: 0.8_f64.max(height),
             bottom_skin_thickness_mm: 0.8_f64.max(height),
             print_speed_mm_s: selection.print_speed_mm_s(),
-            travel_speed_mm_s: printer.max_feed_mm_s,
+            travel_speed_mm_s: printer.max_travel_feed_mm_s,
             flow_multiplier: selection.flow_multiplier(),
             process: selection.process().clone(),
             supports: SupportPolicy::Disabled,
@@ -324,7 +324,7 @@ mod creation_tests {
         let restored = decode_intent(&serde_json::to_vec(&intent).unwrap()).unwrap();
         assert_eq!(restored, intent);
         let mut forged = intent.clone();
-        forged.printer.max_feed_mm_s *= 0.9;
+        forged.printer.max_print_feed_mm_s *= 0.9;
         assert!(
             forged.validate().is_err(),
             "profile thermal resolution cannot change installed capabilities"

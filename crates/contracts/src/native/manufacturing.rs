@@ -1037,7 +1037,8 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                 },
                 deposition_limits: required(value.deposition_limits, "deposition limits")?
                     .try_into()?,
-                max_feed_mm_s: value.max_feed_mm_s,
+                max_print_feed_mm_s: value.max_print_feed_mm_s,
+                max_travel_feed_mm_s: value.max_travel_feed_mm_s,
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
                 workflow: required(value.workflow, "job workflow")?.try_into()?,
             },
@@ -1068,7 +1069,8 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
                 z_mm: value.motion_resolution.z_mm,
             }),
             deposition_limits: Some(value.deposition_limits.try_into()?),
-            max_feed_mm_s: value.max_feed_mm_s,
+            max_print_feed_mm_s: value.max_print_feed_mm_s,
+            max_travel_feed_mm_s: value.max_travel_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
             workflow: Some(value.workflow.try_into()?),
         })

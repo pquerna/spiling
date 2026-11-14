@@ -167,7 +167,8 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 min_bead_height_mm: 0.0025,
                 max_bead_height_mm: 1.0,
             },
-            max_feed_mm_s: 100.0,
+            max_print_feed_mm_s: 100.0,
+            max_travel_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
@@ -961,7 +962,19 @@ fn printer_limits_and_explicit_flow_multiplier_are_authoritative() {
         ManufacturingErrorCode::InvalidSpecification
     );
     intent.printer.max_volumetric_flow_mm3_s = 100.0;
-    intent.printer.max_feed_mm_s = 19.0;
+    // Travel (20 mm/s) is bounded by the travel limit, deposition (10 mm/s)
+    // by the separate print limit.
+    intent.printer.max_travel_feed_mm_s = 19.0;
+    assert_eq!(
+        verify(GOLDEN, &plan, &intent, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    intent.printer.max_travel_feed_mm_s = 100.0;
+    intent.printer.max_print_feed_mm_s = 15.0;
+    assert!(verify(GOLDEN, &plan, &intent, &AtomicBool::new(false)).is_ok());
+    intent.printer.max_print_feed_mm_s = 9.0;
     assert_eq!(
         verify(GOLDEN, &plan, &intent, &AtomicBool::new(false))
             .unwrap_err()

@@ -65,9 +65,9 @@ impl ProcessPolicy {
             z_hop_mm,
             ..
         } = self.retraction
-            && (speed_mm_s > printer.max_feed_mm_s
+            && (speed_mm_s > printer.max_travel_feed_mm_s
                 || !(speed_mm_s * 60.0).is_finite()
-                || (speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > printer.max_feed_mm_s
+                || (speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > printer.max_travel_feed_mm_s
                 || z_hop_mm > printer.build_envelope.max[2] - printer.build_envelope.min[2])
         {
             return Err(invalid("retraction exceeds printer feed or Z envelope"));

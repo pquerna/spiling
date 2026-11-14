@@ -166,7 +166,7 @@ pub fn emit(
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
                         || feed <= 0.0
-                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                        || feed / 60.0 > intent.printer.max_travel_feed_mm_s
                     {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -203,7 +203,7 @@ pub fn emit(
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
                         || feed <= 0.0
-                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                        || feed / 60.0 > intent.printer.max_print_feed_mm_s
                     {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -268,9 +268,14 @@ pub fn emit(
                         )?;
                     }
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    let feed_limit = if matches!(event, Event::Travel(..)) {
+                        intent.printer.max_travel_feed_mm_s
+                    } else {
+                        intent.printer.max_print_feed_mm_s
+                    };
                     if !feed.is_finite()
                         || feed <= 0.0
-                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                        || feed / 60.0 > feed_limit
                     {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -390,7 +395,7 @@ pub fn emit(
         let retract_feed = (tool.retract_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
         if !retract_feed.is_finite()
             || retract_feed <= 0.0
-            || retract_feed / 60.0 > intent.printer.max_feed_mm_s
+            || retract_feed / 60.0 > intent.printer.max_travel_feed_mm_s
         {
             return Err(error(
                 ManufacturingErrorCode::InvalidSpecification,

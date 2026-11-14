@@ -124,7 +124,7 @@ impl SingleExtruderJob {
     }
     pub fn validate(&self, printer: &PrinterSpecification) -> Result<(), ManufacturingError> {
         self.validate_declaration()?;
-        if self.prime_speed_mm_s > printer.max_feed_mm_s {
+        if self.prime_speed_mm_s > printer.max_print_feed_mm_s {
             return Err(invalid("priming feed exceeds printer limit"));
         }
         for point in [

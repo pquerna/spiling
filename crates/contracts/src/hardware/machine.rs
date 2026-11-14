@@ -12,8 +12,9 @@
 //!   side)` from the edges, `min(20, bed_x − 2·margin)` long, at half the
 //!   nozzle diameter, purging 1.8× the nominal bead volume.
 //! - Park at the back-left margin and the top of the envelope, above any part.
-//! - Feed ceiling is the larger of print and travel feed; volumetric flow is the
-//!   declared hotend ceiling. Acceleration is recorded for time estimation.
+//! - Print feed bounds every extruding command, travel feed every other motion;
+//!   volumetric flow is the declared hotend ceiling. Acceleration is recorded
+//!   for time estimation.
 use super::{HardwareModelDefinition, HardwareSetupDefinition, PlateDefinition, text};
 use crate::{
     geometry::{AabbMm, RigidPoseMm, SourceHash},
@@ -461,7 +462,8 @@ impl MachineDescription {
                 min_bead_height_mm: v(MachineLimit::ZResolutionMm),
                 max_bead_height_mm: r6(v(MachineLimit::MaxBeadHeightPerNozzle) * nozzle),
             },
-            max_feed_mm_s: v(MachineLimit::MaxPrintFeedMmS).max(v(MachineLimit::MaxTravelFeedMmS)),
+            max_print_feed_mm_s: v(MachineLimit::MaxPrintFeedMmS),
+            max_travel_feed_mm_s: v(MachineLimit::MaxTravelFeedMmS),
             max_volumetric_flow_mm3_s: v(MachineLimit::MaxVolumetricFlowMm3S),
         };
         printer.validate().map_err(|e| e.to_string())?;

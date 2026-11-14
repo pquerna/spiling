@@ -64,7 +64,8 @@ fn intent() -> ManufacturingIntent {
                 // and height enclosures; this is not a process-boundary test.
                 max_bead_height_mm: 0.5,
             },
-            max_feed_mm_s: 200.0,
+            max_print_feed_mm_s: 200.0,
+            max_travel_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {

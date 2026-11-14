@@ -588,7 +588,12 @@ fn inspect_lifecycle(
             }) || feed <= 0.0
                 || (feed - speed * 60.0).abs() > F_HALF_STEP + arithmetic_slack(speed * 60.0)
                 || feed / 60.0
-                    > intent.printer.max_feed_mm_s + F_HALF_STEP / 60.0 + arithmetic_slack(speed)
+                    > if extrusion.is_some() {
+                        intent.printer.max_print_feed_mm_s
+                    } else {
+                        intent.printer.max_travel_feed_mm_s
+                    } + F_HALF_STEP / 60.0
+                        + arithmetic_slack(speed)
             {
                 return Err(failed("unsafe or mutated lifecycle endpoint/feed"));
             }
@@ -978,7 +983,7 @@ pub(crate) fn verify_actual(
                         || (!retract && delta <= 0.0)
                         || (feed - speed_mm_s * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
                         || feed <= 0.0
-                        || feed / 60.0 > printer.max_feed_mm_s + F_HALF_STEP / 60.0
+                        || feed / 60.0 > printer.max_travel_feed_mm_s + F_HALF_STEP / 60.0
                     {
                         return Err(failed(
                             "actual retraction distance, recovery or feed differs from policy",
@@ -1152,13 +1157,15 @@ pub(crate) fn verify_actual(
                 } else {
                     recipe.travel_speed_mm_s
                 };
+            let feed_limit = if source.is_some() {
+                printer.max_print_feed_mm_s
+            } else {
+                printer.max_travel_feed_mm_s
+            };
             if feed <= 0.0
                 || !expected_feed.is_finite()
                 || (feed - expected_feed).abs() > F_HALF_STEP + arithmetic_slack(expected_feed)
-                || feed / 60.0
-                    > printer.max_feed_mm_s
-                        + F_HALF_STEP / 60.0
-                        + arithmetic_slack(printer.max_feed_mm_s)
+                || feed / 60.0 > feed_limit + F_HALF_STEP / 60.0 + arithmetic_slack(feed_limit)
             {
                 return Err(failed(
                     "command feed violates expected speed or printer limit",

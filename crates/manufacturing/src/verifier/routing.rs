@@ -598,7 +598,7 @@ impl<'a> RouteState<'a> {
                     || (next - self.expected_e).abs()
                         > E_HALF_STEP + arithmetic_slack(self.expected_e)
                     || (feed - speed * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
-                    || feed / 60.0 > intent.printer.max_feed_mm_s
+                    || feed / 60.0 > intent.printer.max_print_feed_mm_s
                     || area * speed > process.max_volumetric_flow_mm3_s
                 {
                     return Err(failed(

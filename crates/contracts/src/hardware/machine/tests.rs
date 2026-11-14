@@ -94,13 +94,24 @@ fn small_bed_edits_rederive_lifecycle_inside_the_new_bed() {
 }
 
 #[test]
+fn published_print_cap_is_separate_from_travel() {
+    let s = described()
+        .into_iter()
+        .find(|s| s.id == "creality.ender-3-v3-se.04")
+        .unwrap();
+    // The Ender publishes a 250 mm/s print speed; travel inherits the family.
+    assert_eq!(s.printer.max_print_feed_mm_s, 250.0);
+    assert_eq!(s.printer.max_travel_feed_mm_s, 800.0);
+}
+
+#[test]
 fn generic_defaults_are_sized_for_modern_printers_and_sourced() {
     let s = described()
         .into_iter()
         .find(|s| s.id == "generic.klipper-cartesian.04")
         .unwrap();
     let m = s.machine.as_ref().unwrap();
-    assert!(s.printer.max_feed_mm_s >= 500.0);
+    assert!(s.printer.max_print_feed_mm_s >= 500.0);
     assert!(m.limit(MachineLimit::MaxAccelerationMmS2) >= 20_000.0);
     assert!(s.printer.max_volumetric_flow_mm3_s >= 25.0);
     assert!(m.limits.iter().all(|l| matches!(

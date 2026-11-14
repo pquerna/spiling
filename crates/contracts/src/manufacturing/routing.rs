@@ -840,7 +840,7 @@ impl FixedDualJob {
             ));
         }
         for tool in &self.tools {
-            if printer.max_feed_mm_s > tool.max_feed_mm_s {
+            if printer.max_print_feed_mm_s.max(printer.max_travel_feed_mm_s) > tool.max_feed_mm_s {
                 return Err(invalid(
                     "shared travel envelope exceeds a captured tool feed limit",
                 ));
@@ -1295,7 +1295,7 @@ mod uniform_family_tests {
                         3 => tool.minimum_reprime_volume_mm3 = 0.0,
                         4 => tool.retract_filament_mm = 11.0,
                         5 => tool.nozzle_diameter_mm = f64::NAN,
-                        6 => tool.max_feed_mm_s = printer.max_feed_mm_s - 1.0,
+                        6 => tool.max_feed_mm_s = printer.max_print_feed_mm_s - 1.0,
                         _ => tool.max_volumetric_flow_mm3_s = 0.0,
                     }
                     assert!(

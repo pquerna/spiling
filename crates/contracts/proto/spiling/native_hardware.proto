@@ -156,11 +156,15 @@ message PrinterSpecification {
   repeated MachineComponent components = 7;
   PrinterCapabilities capabilities = 8;
   double nozzle_diameter_mm = 9;
-  double max_feed_mm_s = 10;
+  reserved 10;
   double max_volumetric_flow_mm3_s = 11;
   JobWorkflow workflow = 12;
   DepositionLimits deposition_limits = 13;
   MotionResolution motion_resolution = 14;
+  // Extruding commands (deposition, priming, waste).
+  double max_print_feed_mm_s = 15;
+  // Non-extruding motion: travel, lifecycle moves and retraction.
+  double max_travel_feed_mm_s = 16;
 }
 message MotionResolution { double xy_mm = 1; double z_mm = 2; }
 message DiagnosticBodyOnly {}

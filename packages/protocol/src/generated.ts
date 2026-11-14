@@ -886,7 +886,15 @@ export type MachineComponentShape = { "kind": "box", bounds_mm: AabbMm, } | { "k
 
 export type MachineComponent = { id: string, role: MachineComponentRole, pose: RigidPoseMm, shape: MachineComponentShape, };
 
-export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, motion_resolution: MotionResolution, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
+export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, motion_resolution: MotionResolution, deposition_limits: DepositionLimits,
+/**
+ * Ceiling for every extruding command (deposition, priming, waste).
+ */
+max_print_feed_mm_s: number,
+/**
+ * Ceiling for non-extruding motion: travel, lifecycle moves, retraction.
+ */
+max_travel_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
 export type DepositionLimits = { min_bead_width_mm: number, max_bead_width_mm: number, min_bead_height_mm: number, max_bead_height_mm: number, };
 

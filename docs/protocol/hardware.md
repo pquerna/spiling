@@ -72,7 +72,7 @@ validation refuses a printer that differs from the derivation:
 | Deposition heights         | Z motion step up to `height_ratio × nozzle` (default 0.75)                                 |
 | Prime line                 | Back edge, `margin = min(10, 5% of the smaller bed side)`, `min(20, bed_x − 2·margin)` long, Z = nozzle/2, purging 1.8× nominal bead volume at 10 mm/s |
 | Park                       | `[margin, bed_y − margin, max_z]`: above any admitted part                                 |
-| Feed / flow ceilings       | `max(print feed, travel feed)`; declared volumetric flow                                   |
+| Feed / flow ceilings       | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow |
 | Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile |
 | Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
 

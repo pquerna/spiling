@@ -960,7 +960,10 @@ pub struct PrinterSpecification {
     pub nozzle_diameter_mm: f64,
     pub motion_resolution: MotionResolution,
     pub deposition_limits: DepositionLimits,
-    pub max_feed_mm_s: f64,
+    /// Ceiling for every extruding command (deposition, priming, waste).
+    pub max_print_feed_mm_s: f64,
+    /// Ceiling for non-extruding motion: travel, lifecycle moves, retraction.
+    pub max_travel_feed_mm_s: f64,
     pub max_volumetric_flow_mm3_s: f64,
 }
 impl PrinterSpecification {
@@ -984,7 +987,8 @@ impl PrinterSpecification {
         }
         positive(&[
             self.nozzle_diameter_mm,
-            self.max_feed_mm_s,
+            self.max_print_feed_mm_s,
+            self.max_travel_feed_mm_s,
             self.max_volumetric_flow_mm3_s,
         ])?;
         self.motion_resolution.validate()?;
@@ -1364,7 +1368,7 @@ impl ManufacturingIntent {
                     let flow = area * flow_factor * feed / 60.0;
                     if !feed.is_finite()
                         || feed < 0.000001
-                        || feed / 60.0 > tool.max_feed_mm_s.min(p.max_feed_mm_s)
+                        || feed / 60.0 > tool.max_feed_mm_s.min(p.max_print_feed_mm_s)
                         || !flow.is_finite()
                         || flow <= 0.0
                         || flow > process.max_volumetric_flow_mm3_s
@@ -1394,11 +1398,11 @@ impl ManufacturingIntent {
             || flow > self.effective_max_volumetric_flow_mm3_s()
             || !extrusion_per_mm.is_finite()
             || extrusion_per_mm <= 0.0
-            || r.print_speed_mm_s > p.max_feed_mm_s
-            || r.travel_speed_mm_s > p.max_feed_mm_s
+            || r.print_speed_mm_s > p.max_print_feed_mm_s
+            || r.travel_speed_mm_s > p.max_travel_feed_mm_s
             || !(r.travel_speed_mm_s * 60.0).is_finite()
             || r.travel_speed_mm_s * 60.0 < 0.000001
-            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_feed_mm_s
+            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_travel_feed_mm_s
         {
             return Err(invalid(
                 "recipe exceeds printer feed/rounded-bead flow limits or numeric range",
@@ -1421,7 +1425,7 @@ impl ManufacturingIntent {
             let process_extrusion = extrusion_per_mm * flow_factor;
             if !feed.is_finite()
                 || feed < 0.000001
-                || (feed * 1_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_feed_mm_s
+                || (feed * 1_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_print_feed_mm_s
                 || !process_extrusion.is_finite()
                 || process_extrusion <= 0.0
                 || !process_flow.is_finite()
@@ -1440,7 +1444,7 @@ impl ManufacturingIntent {
             let prime_flow =
                 job.prime_filament_length_mm * filament_area * job.prime_speed_mm_s / length;
             let prime_feed = (job.prime_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
-            if !prime_feed.is_finite() || prime_feed <= 0.0 || prime_feed / 60.0 > p.max_feed_mm_s {
+            if !prime_feed.is_finite() || prime_feed <= 0.0 || prime_feed / 60.0 > p.max_print_feed_mm_s {
                 return Err(invalid(
                     "priming feed exceeds printer limit at serialized precision",
                 ));
