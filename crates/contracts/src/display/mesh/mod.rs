@@ -295,7 +295,7 @@ impl MeshChunkBuilder {
             || !trim.is_finite()
             || carrier < 0.0
             || trim < 0.0
-            || carrier + trim > MESH_CARRIER_TOLERANCE_MM
+            || carrier + trim > self.profile.carrier_tolerance_mm()
         {
             return Err(invalid(
                 "native interpolation plus trim deviation exceeds profile",
@@ -319,7 +319,7 @@ impl MeshChunkBuilder {
         }
         // Separate achieved maxima must remain conservative when faces share a chunk.
         // Split rather than reject when maxima from distinct faces would exceed the budget.
-        if self.carrier.max(carrier) + self.trim.max(trim) > MESH_CARRIER_TOLERANCE_MM {
+        if self.carrier.max(carrier) + self.trim.max(trim) > self.profile.carrier_tolerance_mm() {
             self.flush()?;
         }
         self.clear_remap();
@@ -362,7 +362,7 @@ impl MeshChunkBuilder {
                         || !finite3(reconstructed)
                         || !error.is_finite()
                         || error > MESH_QUANTIZATION_TOLERANCE_MM
-                        || carrier + trim + error > MESH_SURFACE_TOLERANCE_MM
+                        || carrier + trim + error > self.profile.surface_tolerance_mm()
                     {
                         return Err(invalid("mesh quantization exceeds profile"));
                     }
@@ -392,8 +392,9 @@ impl MeshChunkBuilder {
             }
             self.carrier = self.carrier.max(carrier);
             self.trim = self.trim.max(trim);
-            if self.carrier + self.trim > MESH_CARRIER_TOLERANCE_MM
-                || self.carrier + self.trim + self.quantization > MESH_SURFACE_TOLERANCE_MM
+            if self.carrier + self.trim > self.profile.carrier_tolerance_mm()
+                || self.carrier + self.trim + self.quantization
+                    > self.profile.surface_tolerance_mm()
             {
                 return Err(invalid("combined chunk error exceeds profile"));
             }

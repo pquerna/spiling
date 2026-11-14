@@ -6,7 +6,9 @@ Licensed under the Open Software License version 3.0
 
 # SolidCore display conversion rules
 
-Ordinary source display selects `MeshTolerantMm005V1`: caller-monitored native
+Ordinary source display selects `MeshTolerantMm005V1`, or the next coarser
+tolerant level (`MeshTolerantMm02V1`, `MeshTolerantMm1V1`) through the same
+path with only the recorded allowance changed: caller-monitored native
 edge/face meshing, complete source-face ownership, sampled deviation reporting,
 closed oriented incidence and checked packing. It is disposable approximation,
 not coefficient certification or material authority. The proof obligations below

@@ -1926,3 +1926,87 @@ async fn explicit_source_memory_refusal_preserves_scene_and_allows_following_wor
     client.ping().await.unwrap();
     client.shutdown().await.unwrap();
 }
+
+async fn mesh_profiles(
+    client: &mut EngineClient,
+    definition: &DefinitionRecord,
+) -> std::collections::BTreeSet<String> {
+    let session_id = client.hello().session_id.clone();
+    let artifact_id = mesh_artifact(definition);
+    let mut offset = 0;
+    let mut profiles = std::collections::BTreeSet::new();
+    loop {
+        let GeometryResponse::ArtifactPage {
+            chunks,
+            next_offset,
+            ..
+        } = command(
+            client,
+            GeometryCommand::GetArtifactPage {
+                session_id: session_id.clone(),
+                artifact_id,
+                kind: ArtifactPageKind::Chunks,
+                offset,
+            },
+        )
+        .await
+        else {
+            panic!("expected mesh page");
+        };
+        for chunk in chunks {
+            let ArtifactChunkMetadata::Mesh { metadata } = chunk else {
+                panic!("expected mesh metadata");
+            };
+            profiles.insert(serde_json::to_string(&metadata.mesh_profile).unwrap());
+        }
+        match next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    profiles
+}
+
+#[tokio::test]
+async fn assembly_beyond_the_fine_scene_display_capacity_displays_every_part_coarser() {
+    // Metre-unit copies of the analytic ring torus: each fine preview alone
+    // is far larger than the whole unique-scene display capacity.
+    let directory = tempfile::tempdir().unwrap();
+    let original = include_str!("../../../fixtures/manufacturing/native/source-ring-torus.step");
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    const PARTS: usize = 3;
+    for index in 0..PARTS {
+        let path = directory.path().join(format!("ring-m-{index}.step"));
+        let text = original
+            .replace("SI_UNIT(.MILLI.,.METRE.)", "SI_UNIT($,.METRE.)")
+            .replace("analysis-source.step", &format!("ring-m-{index}.step"));
+        std::fs::write(&path, text).unwrap();
+        let operation = start_import(
+            &mut client,
+            NativePath::from_os_str(path.as_os_str()).unwrap(),
+            RigidPoseMm {
+                translation_mm: [index as f64 * 20_000.0, 0.0, 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        )
+        .await;
+        let job = wait_job_with_timeout(&mut client, operation, Duration::from_secs(1800)).await;
+        assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+    }
+    let summary = scene(&mut client).await;
+    assert!(summary.unique_mesh_bytes <= MAX_SCENE_MESH_BYTES);
+    let records = definitions(&mut client, &summary).await;
+    assert_eq!(records.len(), PARTS);
+    for record in &records {
+        // Every source face of every part is displayed.
+        mesh(&mut client, record).await;
+        let profiles = mesh_profiles(&mut client, record).await;
+        assert_eq!(profiles.len(), 1, "{profiles:?}");
+        assert!(
+            !profiles.contains("\"mesh-tolerant-mm-0.05-v1\""),
+            "{profiles:?}"
+        );
+        eprintln!("display profile {profiles:?}");
+    }
+    eprintln!("unique mesh bytes {}", summary.unique_mesh_bytes);
+}

@@ -39,6 +39,16 @@ between faces; native face candidates and adapter buffers are released before
 the next face query. Display precision is separate from manufacturing's finer
 source-section policy and grants no material authority.
 
+When the fine preview does not fit the remaining live/staged unique scene
+capacity (or its measured deviation exceeds the fine allowance), the engine
+generates the same source-mapped preview at the next coarser level:
+`mesh-tolerant-mm-0.2-v1` (carrier+trim 0.175 mm, surface 0.2 mm) and then
+`mesh-tolerant-mm-1-v1` (0.975 mm, 1.0 mm). Quantization keeps its 0.025 mm
+share; each chunk records its profile and decoders check its own allowance.
+Every source face is still published; coarsening never drops a face or part.
+Only when the coarsest level does not fit is the definition display-unavailable
+with an explicit reason, and the workbench names any coarser display level.
+
 The explicitly requested `mesh-trimmed-mm-0.05-v2` route retains independent
 coefficient carrier/trim certification. Both profiles use the same checked
 binary layout, source-face table, revision-aware picking and separate f32 error

@@ -9,13 +9,10 @@ import {
   MAX_GEOMETRY_CHUNK_BYTES,
   MAX_NATIVE_FACES,
   MAX_SCENE_MESH_BYTES,
-  MESH_CARRIER_TOLERANCE_MM,
   MESH_HEADER_BYTES,
-  MESH_PROFILE,
-  MESH_PREVIEW_PROFILE,
+  MESH_PROFILE_TOLERANCES_MM,
   MESH_QUANTIZATION_TOLERANCE_MM,
   MESH_SCHEMA_VERSION,
-  MESH_SURFACE_TOLERANCE_MM,
   NORMAL_NORM_TOLERANCE,
 } from "./generated.ts";
 import type { MeshChunkMetadata } from "./generated.ts";
@@ -88,9 +85,10 @@ function descriptor(metadata: MeshChunkMetadata, expected: MeshIdentity): void {
     fail("descriptor identity mismatch");
   if (
     metadata.schema_version !== MESH_SCHEMA_VERSION ||
-    (metadata.mesh_profile !== MESH_PROFILE && metadata.mesh_profile !== MESH_PREVIEW_PROFILE)
+    !Object.hasOwn(MESH_PROFILE_TOLERANCES_MM, metadata.mesh_profile)
   )
     fail("unsupported schema or mesh profile");
+  const allowance = MESH_PROFILE_TOLERANCES_MM[metadata.mesh_profile];
   uint(
     metadata.chunk_count,
     "chunk count",
@@ -111,11 +109,11 @@ function descriptor(metadata: MeshChunkMetadata, expected: MeshIdentity): void {
     carrier < 0 ||
     !Number.isFinite(trim) ||
     trim < 0 ||
-    carrier + trim > MESH_CARRIER_TOLERANCE_MM ||
+    carrier + trim > allowance.carrier ||
     !Number.isFinite(quantization) ||
     quantization < 0 ||
     quantization > MESH_QUANTIZATION_TOLERANCE_MM ||
-    carrier + trim + quantization > MESH_SURFACE_TOLERANCE_MM
+    carrier + trim + quantization > allowance.surface
   )
     fail("invalid profile error budget");
 }

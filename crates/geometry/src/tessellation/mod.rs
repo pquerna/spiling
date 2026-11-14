@@ -233,8 +233,8 @@ pub(crate) fn tessellate_with_work(
 ) -> Result<MeshArtifact, GeometryError> {
     check_cancel(cancel)?;
     budget.validate()?;
-    if profile == DisplayProfile::MeshTolerantMm005V1 {
-        return preview::tessellate(definition, cancel, budget, work, progress);
+    if profile.is_tolerant_preview() {
+        return preview::tessellate(definition, profile, cancel, budget, work, progress);
     }
     let faces = definition.face_ids();
     if faces.is_empty() || faces.len() > MAX_NATIVE_FACES as usize {

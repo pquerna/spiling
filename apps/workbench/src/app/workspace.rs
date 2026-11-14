@@ -156,6 +156,23 @@ impl Workbench {
                                     format!("Geometry only: {}", error.message),
                                 );
                             }
+                            if let Some(profile) = definition
+                                .chunks
+                                .first()
+                                .map(|chunk| chunk.metadata.mesh_profile)
+                                .filter(|&profile| {
+                                    profile.surface_tolerance_mm()
+                                        > MESH_SURFACE_TOLERANCE_MM
+                                })
+                            {
+                                ui.colored_label(
+                                    self.prefs.theme.tokens().warning,
+                                    format!(
+                                        "Coarser display (±{} mm) to fit the scene display capacity; geometry and slicing are unchanged",
+                                        profile.surface_tolerance_mm()
+                                    ),
+                                );
+                            }
                             egui::ScrollArea::vertical()
                                 .id_salt(occurrence.occurrence_id)
                                 .max_height(240.0)

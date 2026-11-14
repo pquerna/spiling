@@ -422,7 +422,7 @@ export type ImportFindingCode = "interpreted_units" | "degenerate_facets" | "dup
 
 export type MeshSourceFormat = "stl" | "three_mf";
 
-export type DisplayProfile = "mesh-trimmed-mm-0.05-v2" | "mesh-tolerant-mm-0.05-v1";
+export type DisplayProfile = "mesh-trimmed-mm-0.05-v2" | "mesh-tolerant-mm-0.05-v1" | "mesh-tolerant-mm-0.2-v1" | "mesh-tolerant-mm-1-v1";
 
 export type FaceRef = { session_id: SessionId, scene_revision: SceneRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, face_id: FaceId, };
 
@@ -1301,6 +1301,12 @@ export const SECTION_BOOLEAN_TOLERANCE_MM = 0.00001 as const;
 export const SECTION_PLANE_TOLERANCE_MM = 0.0001 as const;
 export const POSE_NORM_TOLERANCE = 0.0000000001 as const;
 export const NORMAL_NORM_TOLERANCE = 0.0001 as const;
+export const MESH_PROFILE_TOLERANCES_MM = {
+  "mesh-trimmed-mm-0.05-v2": { carrier: 0.025, surface: 0.05 },
+  "mesh-tolerant-mm-0.05-v1": { carrier: 0.025, surface: 0.05 },
+  "mesh-tolerant-mm-0.2-v1": { carrier: 0.175, surface: 0.2 },
+  "mesh-tolerant-mm-1-v1": { carrier: 0.975, surface: 1 },
+} as const;
 export const IMPORT_PROFILE = "step-native-trimmed-v2" as const;
 export const MESH_PROFILE = "mesh-trimmed-mm-0.05-v2" as const;
 export const MESH_PREVIEW_PROFILE = "mesh-tolerant-mm-0.05-v1" as const;

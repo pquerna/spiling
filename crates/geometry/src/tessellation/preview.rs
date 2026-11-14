@@ -7,12 +7,13 @@ use crate::{GeometryWorkBudget, MeshArtifact, check_cancel, kernel::Definition};
 use solidcore_mesh::{EdgeOptions, EdgeSet, FaceMesh, OutputOptions, TessellateOptions, Tolerance};
 use spiling_contracts::{
     display::{MeshBudget, MeshChunkBuilder},
-    geometry::{DisplayProfile, GeometryError, GeometryErrorCode, MESH_CARRIER_TOLERANCE_MM},
+    geometry::{DisplayProfile, GeometryError, GeometryErrorCode},
 };
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
 pub(super) fn tessellate(
     definition: &Definition,
+    profile: DisplayProfile,
     cancel: &AtomicBool,
     budget: MeshBudget,
     work: &mut GeometryWorkBudget,
@@ -29,9 +30,14 @@ pub(super) fn tessellate(
     {
         return Err(invalid("preview requires the complete source face table"));
     }
+    if !profile.is_tolerant_preview() {
+        return Err(invalid("preview requires a tolerant display profile"));
+    }
+    // One source-mapped path for every level; only the allowance differs.
+    let allowance = profile.carrier_tolerance_mm();
     let kernel = crate::make_kernel_context();
     let options = TessellateOptions {
-        chord_tolerance: Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25),
+        chord_tolerance: Tolerance::Absolute(allowance * 0.25),
         max_triangles_per_face: budget.triangles as usize,
         edge: EdgeOptions {
             max_segments: budget.vertices,
@@ -45,6 +51,16 @@ pub(super) fn tessellate(
         },
         measure_deviation: false,
         ..TessellateOptions::default()
+    };
+    // Coarser levels also relax the mesher's shading angle so the recorded
+    // distance allowance, still audited below, decides the triangle count.
+    let options = TessellateOptions {
+        angle_tolerance: match profile {
+            DisplayProfile::MeshTolerantMm02V1 => 30.0_f64.to_radians(),
+            DisplayProfile::MeshTolerantMm1V1 => 60.0_f64.to_radians(),
+            _ => options.angle_tolerance,
+        },
+        ..options
     };
     let mut update = DisplayProgress {
         stage: DisplayStage::PreparingEdges,
@@ -72,7 +88,7 @@ pub(super) fn tessellate(
     let mut builder = MeshChunkBuilder::with_budget(
         definition.id().clone(),
         faces.len() as u32,
-        DisplayProfile::MeshTolerantMm005V1,
+        profile,
         budget,
     )?;
     for (ordinal, &face) in faces.iter().enumerate() {
@@ -119,7 +135,7 @@ pub(super) fn tessellate(
         };
         let candidate = mesh_face(false, work)?;
         let carrier = validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
-        let (candidate, carrier) = if carrier + trim <= MESH_CARRIER_TOLERANCE_MM {
+        let (candidate, carrier) = if carrier + trim <= allowance {
             #[cfg(test)]
             {
                 measurements.0 += 1;
@@ -140,7 +156,7 @@ pub(super) fn tessellate(
                 .ok_or_else(|| invalid("preview face has no finite measured deviation"))?;
             (candidate, carrier)
         };
-        if !trim.is_finite() || trim < 0.0 || carrier + trim > MESH_CARRIER_TOLERANCE_MM {
+        if !trim.is_finite() || trim < 0.0 || carrier + trim > allowance {
             return Err(GeometryError::new(
                 GeometryErrorCode::ShapeErrorExceeded,
                 "measured preview deviation exceeds display profile",
@@ -717,6 +733,7 @@ mod tests {
                 .unwrap();
             let artifact = tessellate(
                 &definition,
+                DisplayProfile::MeshTolerantMm005V1,
                 &cancel,
                 MeshBudget::FROZEN,
                 &mut GeometryWorkBudget::query(),
@@ -773,7 +790,7 @@ mod tests {
         }
         assert!(
             validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap()
-                > MESH_CARRIER_TOLERANCE_MM
+                > spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM
         );
         candidate
             .uvs
@@ -797,6 +814,7 @@ mod tests {
         let definition = crate::from_step_bytes_with_cancel(&source, &cancel).unwrap();
         let artifact = tessellate(
             &definition,
+            DisplayProfile::MeshTolerantMm005V1,
             &cancel,
             MeshBudget::FROZEN,
             &mut GeometryWorkBudget::query(),
@@ -843,6 +861,7 @@ mod tests {
         assert_eq!(
             tessellate(
                 &definition,
+                DisplayProfile::MeshTolerantMm005V1,
                 &AtomicBool::new(true),
                 MeshBudget::FROZEN,
                 &mut GeometryWorkBudget::query(),
@@ -856,6 +875,7 @@ mod tests {
         assert_eq!(
             tessellate(
                 &definition,
+                DisplayProfile::MeshTolerantMm005V1,
                 &late_cancel,
                 MeshBudget::FROZEN,
                 &mut GeometryWorkBudget::query(),
@@ -868,6 +888,85 @@ mod tests {
             .unwrap_err()
             .code,
             GeometryErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn coarser_tolerant_profiles_keep_every_source_face_in_fewer_checked_triangles() {
+        let source = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/through-hole.step"),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(&source, &cancel).unwrap();
+        let mut previous: Option<(u32, u32)> = None;
+        for profile in DisplayProfile::TOLERANT_LADDER {
+            let artifact = tessellate(
+                &definition,
+                profile,
+                &cancel,
+                MeshBudget::FROZEN,
+                &mut GeometryWorkBudget::query(),
+                &mut |_| {},
+            )
+            .unwrap();
+            let mut visible_faces = BTreeSet::new();
+            for chunk in &artifact.chunks {
+                assert_eq!(chunk.descriptor.mesh_profile, profile);
+                let checked = CheckedMeshChunk::new(
+                    chunk.bytes.clone().into(),
+                    chunk
+                        .descriptor
+                        .clone()
+                        .into_metadata(SessionId::new(), ArtifactId::new(1).unwrap()),
+                )
+                .unwrap();
+                let metadata = checked.metadata();
+                assert!(
+                    metadata.carrier_deviation_mm + metadata.trim_deviation_mm
+                        <= profile.carrier_tolerance_mm()
+                );
+                let view = checked.view();
+                for triangle in 0..view.face_ordinals.len() {
+                    visible_faces.insert(view.face_ordinals.get(triangle).unwrap());
+                }
+            }
+            assert_eq!(visible_faces.len(), definition.faces().len(), "{profile:?}");
+            if let Some((triangles, bytes)) = previous {
+                assert!(artifact.triangle_count <= triangles, "{profile:?}");
+                assert!(artifact.total_bytes <= bytes, "{profile:?}");
+            }
+            previous = Some((artifact.triangle_count, artifact.total_bytes));
+        }
+        let (fine, coarse) = (
+            tessellate(
+                &definition,
+                DisplayProfile::MeshTolerantMm005V1,
+                &cancel,
+                MeshBudget::FROZEN,
+                &mut GeometryWorkBudget::query(),
+                &mut |_| {},
+            )
+            .unwrap(),
+            previous.unwrap(),
+        );
+        // The curved hole wall is what coarsening buys back.
+        assert!(
+            coarse.0 * 2 < fine.triangle_count,
+            "{} {}",
+            coarse.0,
+            fine.triangle_count
+        );
+        assert!(
+            tessellate(
+                &definition,
+                DisplayProfile::MeshTrimmedMm005V2,
+                &cancel,
+                MeshBudget::FROZEN,
+                &mut GeometryWorkBudget::query(),
+                &mut |_| {},
+            )
+            .is_err()
         );
     }
 

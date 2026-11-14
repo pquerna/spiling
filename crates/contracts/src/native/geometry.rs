@@ -634,6 +634,8 @@ impl TryFrom<i32> for DisplayProfile {
         {
             rpc::DisplayProfile::MeshTrimmedMm005V2 => Ok(Self::MeshTrimmedMm005V2),
             rpc::DisplayProfile::MeshTolerantMm005V1 => Ok(Self::MeshTolerantMm005V1),
+            rpc::DisplayProfile::MeshTolerantMm02V1 => Ok(Self::MeshTolerantMm02V1),
+            rpc::DisplayProfile::MeshTolerantMm1V1 => Ok(Self::MeshTolerantMm1V1),
             _ => Err("unspecified DisplayProfile".into()),
         }
     }
@@ -644,6 +646,8 @@ impl TryFrom<DisplayProfile> for rpc::DisplayProfile {
         Ok(match value {
             DisplayProfile::MeshTrimmedMm005V2 => Self::MeshTrimmedMm005V2,
             DisplayProfile::MeshTolerantMm005V1 => Self::MeshTolerantMm005V1,
+            DisplayProfile::MeshTolerantMm02V1 => Self::MeshTolerantMm02V1,
+            DisplayProfile::MeshTolerantMm1V1 => Self::MeshTolerantMm1V1,
         })
     }
 }

@@ -129,7 +129,7 @@ message ArtifactPage {
   repeated Artifact resources = 5;
 }
 enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; MICROMETRE = 4; CENTIMETRE = 5; FOOT = 6; }
-enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; MESH_TOLERANT_MM_005_V1 = 3; }
+enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; MESH_TOLERANT_MM_005_V1 = 3; MESH_TOLERANT_MM_02_V1 = 4; MESH_TOLERANT_MM_1_V1 = 5; }
 message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; }
 message NormalizedSource { string hash = 1; MeshSourceFormat format = 2; string selector = 3; repeated ImportFinding findings = 4; string object_name = 5; }
 enum MeshSourceFormat { MESH_SOURCE_FORMAT_UNSPECIFIED = 0; STL = 1; THREE_MF = 2; }

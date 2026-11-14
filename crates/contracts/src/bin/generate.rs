@@ -668,6 +668,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         output.push_str(&format!("export const {name} = {value} as const;\n"));
     }
+    // Every display profile's recorded allowance, keyed by its wire name.
+    output.push_str("export const MESH_PROFILE_TOLERANCES_MM = {\n");
+    for profile in [DisplayProfile::MeshTrimmedMm005V2]
+        .into_iter()
+        .chain(DisplayProfile::TOLERANT_LADDER)
+    {
+        output.push_str(&format!(
+            "  {}: {{ carrier: {}, surface: {} }},\n",
+            serde_json::to_string(&profile)?,
+            profile.carrier_tolerance_mm(),
+            profile.surface_tolerance_mm()
+        ));
+    }
+    output.push_str("} as const;\n");
     for (name, value) in [
         ("IMPORT_PROFILE", IMPORT_PROFILE),
         ("MESH_PROFILE", MESH_PROFILE),

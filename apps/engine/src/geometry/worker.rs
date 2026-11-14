@@ -865,26 +865,58 @@ impl Capacity {
         work: &mut GeometryWorkBudget,
         progress: &dyn Fn(String),
     ) -> Result<MeshArtifact, GeometryError> {
-        let mesh = definition.display(
-            DisplayProfile::MeshTolerantMm005V1,
-            cancel,
-            self.mesh,
-            work,
-            &mut |update| {
-                use spiling_geometry::DisplayStage;
-                let stage = match update.stage {
-                    DisplayStage::PreparingEdges => "preparing_edges",
-                    DisplayStage::TessellatingFace => "tessellating",
-                    DisplayStage::AuditingFace => "auditing",
-                    DisplayStage::FaceComplete => "face_complete",
-                    DisplayStage::Complete => "complete",
-                };
-                progress(format!(
-                    "display_{stage}_faces_{}_of_{}_attempt_{}",
-                    update.completed_faces, update.total_faces, update.attempt,
-                ));
-            },
-        )?;
+        // Select the finest tolerant preview that fits the remaining unique
+        // scene capacity. A coarser level is the same source-mapped display
+        // at a larger recorded allowance, never a dropped face or part; only
+        // when the coarsest level does not fit is the part display-unavailable.
+        let mut refusal = None;
+        for profile in DisplayProfile::TOLERANT_LADDER {
+            match self.tessellate_profile(definition, profile, cancel, work, progress) {
+                Ok(mesh) => return Ok(mesh),
+                Err(failure)
+                    if matches!(
+                        failure.code,
+                        GeometryErrorCode::ResourceLimit | GeometryErrorCode::ShapeErrorExceeded
+                    ) =>
+                {
+                    check_cancel(cancel)?;
+                    refusal = Some(failure);
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+        let failure = refusal.expect("the tolerant ladder is nonempty");
+        Err(error(
+            GeometryErrorCode::ResourceLimit,
+            format!(
+                "no display level up to the coarsest ({} mm) fits the remaining scene display capacity: {}",
+                DisplayProfile::MeshTolerantMm1V1.surface_tolerance_mm(),
+                failure.message
+            ),
+        ))
+    }
+    fn tessellate_profile(
+        &mut self,
+        definition: &Definition,
+        profile: DisplayProfile,
+        cancel: &AtomicBool,
+        work: &mut GeometryWorkBudget,
+        progress: &dyn Fn(String),
+    ) -> Result<MeshArtifact, GeometryError> {
+        let mesh = definition.display(profile, cancel, self.mesh, work, &mut |update| {
+            use spiling_geometry::DisplayStage;
+            let stage = match update.stage {
+                DisplayStage::PreparingEdges => "preparing_edges",
+                DisplayStage::TessellatingFace => "tessellating",
+                DisplayStage::AuditingFace => "auditing",
+                DisplayStage::FaceComplete => "face_complete",
+                DisplayStage::Complete => "complete",
+            };
+            progress(format!(
+                "display_{stage}_faces_{}_of_{}_attempt_{}",
+                update.completed_faces, update.total_faces, update.attempt,
+            ));
+        })?;
         if mesh.vertex_count > self.mesh.vertices
             || mesh.triangle_count > self.mesh.triangles
             || mesh.total_bytes > self.mesh.bytes
@@ -1838,6 +1870,68 @@ mod image_import_tests {
 mod geometry_only_tests {
     use super::*;
     use spiling_geometry::{BoundsPolicy, GeometryWorkBudget};
+
+    fn import_through_hole(budget: MeshBudget) -> ImportedDisplay {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/through-hole.step");
+        let (mut parts, _) = import(
+            ImportRequest {
+                options: ModelImportOptions::default(),
+                source: NativePath::from_os_str(path.as_os_str()).unwrap(),
+                allowed_reuse: BTreeSet::new(),
+                retained_source_bytes: 0,
+                budget,
+            },
+            &BTreeMap::new(),
+            &AtomicBool::new(false),
+            &mut GeometryWorkBudget::query(),
+            &|_| {},
+            &mut |_| {},
+        )
+        .unwrap();
+        parts.pop().unwrap().0.display
+    }
+
+    #[test]
+    fn display_selects_a_coarser_profile_when_the_fine_preview_does_not_fit() {
+        let ImportedDisplay::Mesh(fine) = import_through_hole(MeshBudget::FROZEN) else {
+            panic!("fine display")
+        };
+        assert!(
+            fine.chunks
+                .iter()
+                .all(|c| c.descriptor.mesh_profile == DisplayProfile::MeshTolerantMm005V1)
+        );
+        // Remaining scene capacity one byte short of the fine preview.
+        let ImportedDisplay::Mesh(coarse) = import_through_hole(MeshBudget {
+            bytes: fine.total_bytes - 1,
+            ..MeshBudget::FROZEN
+        }) else {
+            panic!("coarser display")
+        };
+        let profile = coarse.chunks[0].descriptor.mesh_profile;
+        assert_ne!(profile, DisplayProfile::MeshTolerantMm005V1);
+        assert!(
+            coarse
+                .chunks
+                .iter()
+                .all(|c| c.descriptor.mesh_profile == profile)
+        );
+        assert!(coarse.total_bytes < fine.total_bytes);
+        assert_eq!(
+            coarse.chunks[0].descriptor.face_count,
+            fine.chunks[0].descriptor.face_count
+        );
+        // Nothing fits: the part is explicitly display-unavailable.
+        let ImportedDisplay::Unavailable(error) = import_through_hole(MeshBudget {
+            bytes: 152,
+            ..MeshBudget::FROZEN
+        }) else {
+            panic!("unavailable")
+        };
+        assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+        assert!(error.message.contains("coarsest"), "{}", error.message);
+    }
 
     #[test]
     fn display_budget_refusal_preserves_native_queries_but_never_masks_cancellation() {
