@@ -35,7 +35,9 @@ for (let i = 0; i < args.length; i++) {
   const value = args[++i];
   options[key.slice(2)] = ["samples", "warmups", "timeout"].includes(key.slice(2))
     ? Number(value)
-    : key === "--interaction" ? value : resolve(root, value);
+    : key === "--interaction"
+      ? value
+      : resolve(root, value);
 }
 assert.equal(
   process.platform,
@@ -70,7 +72,10 @@ const digest = async (path) =>
 const input = options.source ?? options.project;
 const importing = Boolean(options.source);
 const failureInteraction = options.interaction === "failure";
-assert.ok(!options.interaction || failureInteraction && importing,"Only --source --interaction failure is supported");
+assert.ok(
+  !options.interaction || (failureInteraction && importing),
+  "Only --source --interaction failure is supported",
+);
 const identity = {
   preferences_sha256: createHash("sha256").update(preference).digest("hex"),
   ...(importing ? { source_sha256: await digest(input) } : { project_sha256: await digest(input) }),
@@ -116,10 +121,23 @@ for (let index = -options.warmups; index < options.samples; index++) {
   await mkdir(samplePreferences, { recursive: true });
   await writeFile(join(samplePreferences, "app.ron"), preference, { flag: "wx" });
   const stages = [];
-  let interaction=Promise.resolve();
-  let inspected=false,selected=false,located=false;
-  const controls=new Map();
-  const click=(row)=>invoke("python3",[join(root,"tools/native-window.py"),"click",String(applicationPid),String(row.x),String(row.y)],{timeout:10_000});
+  let interaction = Promise.resolve();
+  let inspected = false,
+    selected = false,
+    located = false;
+  const controls = new Map();
+  const click = (row) =>
+    invoke(
+      "python3",
+      [
+        join(root, "tools/native-window.py"),
+        "click",
+        String(applicationPid),
+        String(row.x),
+        String(row.y),
+      ],
+      { timeout: 10_000 },
+    );
   let stdout = "",
     stderr = "",
     pending = "",
@@ -127,12 +145,21 @@ for (let index = -options.warmups; index < options.samples; index++) {
     stopping = false;
   let applicationPid, enginePid, boundError, processMemory;
   const started = performance.now();
-  const child = spawn(join(bin, "spiling-workbench"), importing ? ["--import", input] : ["--read-only", "--open", input], {
-    cwd: root,
-    detached: true,
-    env: { ...process.env, XDG_DATA_HOME: sampleData, SPILING_OPEN_TRACE: "1", ...(failureInteraction ? {SPILING_IMPORT_INTERACTION_TRACE:"1"}:{}) },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawn(
+    join(bin, "spiling-workbench"),
+    importing ? ["--import", input] : ["--read-only", "--open", input],
+    {
+      cwd: root,
+      detached: true,
+      env: {
+        ...process.env,
+        XDG_DATA_HOME: sampleData,
+        SPILING_OPEN_TRACE: "1",
+        ...(failureInteraction ? { SPILING_IMPORT_INTERACTION_TRACE: "1" } : {}),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   const kill = (reason) => {
     boundError ??= reason;
     try {
@@ -143,7 +170,18 @@ for (let index = -options.warmups; index < options.samples; index++) {
   process.once("SIGINT", interrupted);
   process.once("SIGTERM", interrupted);
   const timer = setTimeout(() => {
-    void invoke("python3",[join(root,"tools/native-window.py"),"capture",String(applicationPid),join(options.output,`${prefix}.timeout.png`)],{timeout:5_000}).catch(()=>{}).finally(()=>kill("native opening/cleanup timed out"));
+    void invoke(
+      "python3",
+      [
+        join(root, "tools/native-window.py"),
+        "capture",
+        String(applicationPid),
+        join(options.output, `${prefix}.timeout.png`),
+      ],
+      { timeout: 5_000 },
+    )
+      .catch(() => {})
+      .finally(() => kill("native opening/cleanup timed out"));
   }, options.timeout);
   const stop = async () => {
     try {
@@ -224,24 +262,42 @@ for (let index = -options.warmups; index < options.samples; index++) {
       stages.push(row);
       if (row.process === "workbench") applicationPid = row.pid;
       if (row.process === "engine") enginePid = row.pid;
-      if (failureInteraction && ["import_failure_issue","import_failure_inspect","import_failure_locate"].includes(row.stage)) {
-        if (![row.x,row.y].every(Number.isFinite)) {kill("Invalid native control location");return;}
-        controls.set(row.stage,row);
-        if (row.stage === "import_failure_inspect" && !inspected) {inspected=true;interaction=interaction.then(()=>click(row));}
-        if (row.stage === "import_failure_locate" && !selected) {selected=true;interaction=interaction.then(()=>click(controls.get("import_failure_issue")));}
-        interaction.catch((e)=>kill(e.message));
+      if (
+        failureInteraction &&
+        ["import_failure_issue", "import_failure_inspect", "import_failure_locate"].includes(
+          row.stage,
+        )
+      ) {
+        if (![row.x, row.y].every(Number.isFinite)) {
+          kill("Invalid native control location");
+          return;
+        }
+        controls.set(row.stage, row);
+        if (row.stage === "import_failure_inspect" && !inspected) {
+          inspected = true;
+          interaction = interaction.then(() => click(row));
+        }
+        if (row.stage === "import_failure_locate" && !selected) {
+          selected = true;
+          interaction = interaction.then(() => click(controls.get("import_failure_issue")));
+        }
+        interaction.catch((e) => kill(e.message));
       }
       if (failureInteraction && row.stage === "import_failure_selected" && !located) {
-        located=true;
-        interaction=interaction.then(()=>click(controls.get("import_failure_locate")));
-        interaction.catch((e)=>kill(e.message));
+        located = true;
+        interaction = interaction.then(() => click(controls.get("import_failure_locate")));
+        interaction.catch((e) => kill(e.message));
       }
       if (failureInteraction && row.stage === "import_failure_located" && !stopping) {
-        stopping=true;
-        void interaction.then(stop).catch((e)=>kill(e.message));
+        stopping = true;
+        void interaction.then(stop).catch((e) => kill(e.message));
       }
       if (row.stage === "discard_confirmation_frame" && importing && stopping) {
-        void invoke("python3", [join(root, "tools/native-window.py"), "discard", String(applicationPid)], { timeout: 10_000 }).catch((e) => kill(e.message));
+        void invoke(
+          "python3",
+          [join(root, "tools/native-window.py"), "discard", String(applicationPid)],
+          { timeout: 10_000 },
+        ).catch((e) => kill(e.message));
       }
       if (row.stage === "source_frame_readback" && !failureInteraction && !stopping) {
         stopping = true;
@@ -276,12 +332,22 @@ for (let index = -options.warmups; index < options.samples; index++) {
   };
   const request = milestone(importing ? "import_requested" : "open_requested");
   if (failureInteraction) {
-    assert.ok(milestone("import_failed")>request && !stages.some((r)=>r.stage==="import_published"));
-    assert.ok(milestone("source_drawn")<=milestone("import_failure_located"));
-    assert.ok(milestone("import_failure_selected")<milestone("import_failure_located"));
-  } else assert.ok(milestone("source_drawn") <= milestone("source_frame_readback"), "Readback must follow actual source drawing");
+    assert.ok(
+      milestone("import_failed") > request && !stages.some((r) => r.stage === "import_published"),
+    );
+    assert.ok(milestone("source_drawn") <= milestone("import_failure_located"));
+    assert.ok(milestone("import_failure_selected") < milestone("import_failure_located"));
+  } else
+    assert.ok(
+      milestone("source_drawn") <= milestone("source_frame_readback"),
+      "Readback must follow actual source drawing",
+    );
   const result = {
-    benchmark: failureInteraction ? "native-import-failure-v1" : importing ? "native-import-v1" : "native-open-v1",
+    benchmark: failureInteraction
+      ? "native-import-failure-v1"
+      : importing
+        ? "native-import-v1"
+        : "native-open-v1",
     sample: index,
     samples: options.samples,
     warmups: options.warmups,
@@ -294,14 +360,23 @@ for (let index = -options.warmups; index < options.samples; index++) {
     kernel: stages.find((r) => r.process === "engine")?.kernel,
     engine_build: stderr.match(/Spiling native host: connected pid=\d+ build=(\S+)/)?.[1],
     first_frame_readback_us: milestone("first_frame_readback"),
-    ...(failureInteraction ? {import_to_failure_us:milestone("import_failed")-request,import_to_diagnostic_interaction_us:milestone("import_failure_located")-request} : importing ? {
-      import_to_published_us: milestone("import_published") - request,
-      import_to_source_readback_us: milestone("source_frame_readback") - request,
-    } : {
-      open_to_published_us: milestone("open_published") - request,
-      open_to_source_readback_us: milestone("source_frame_readback") - request,
-    }),
-    ...(failureInteraction ? {} : {launch_to_source_readback_us:milestone("source_frame_readback")}),
+    ...(failureInteraction
+      ? {
+          import_to_failure_us: milestone("import_failed") - request,
+          import_to_diagnostic_interaction_us: milestone("import_failure_located") - request,
+        }
+      : importing
+        ? {
+            import_to_published_us: milestone("import_published") - request,
+            import_to_source_readback_us: milestone("source_frame_readback") - request,
+          }
+        : {
+            open_to_published_us: milestone("open_published") - request,
+            open_to_source_readback_us: milestone("source_frame_readback") - request,
+          }),
+    ...(failureInteraction
+      ? {}
+      : { launch_to_source_readback_us: milestone("source_frame_readback") }),
     process_including_cleanup_ms: performance.now() - started,
     stages,
   };

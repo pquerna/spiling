@@ -36,7 +36,10 @@ test("tolerant preview profile retains checked packed admission and face mapping
   const preview = { ...metadata, mesh_profile: MESH_PREVIEW_PROFILE };
   const decoded = await decodeMesh(golden, preview, expected);
   assert.equal(preview.mesh_profile, "mesh-tolerant-mm-0.05-v1");
-  assert.deepEqual(decoded.faceOrdinals, (await decodeMesh(golden, metadata, expected)).faceOrdinals);
+  assert.deepEqual(
+    decoded.faceOrdinals,
+    (await decodeMesh(golden, metadata, expected)).faceOrdinals,
+  );
 });
 
 async function rehash(

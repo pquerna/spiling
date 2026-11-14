@@ -7,6 +7,8 @@ pnpm-lock.yaml
 LICENSE.md
 docs/reserach/
 node_modules/
+**/.venv/
+**/.pytest_cache/
 target/
 artifacts/
 .cache/
@@ -28,6 +30,7 @@ fixtures/geometry/scenes/large-origin.scene.json
 fixtures/geometry/independent-exporters/manifest.json
 # Trusted TypeScript authoring output is reproduced byte-for-byte by its tool.
 fixtures/manufacturing/solid-fill.intent.json
+fixtures/manufacturing/preferred-layers.intent.json
 
 # Preserve upstream snapshot bytes and attribution; its owner controls formatting.
 vendor/

@@ -881,7 +881,10 @@ test("an arc's edges may share its source line, and only depositions may", async
   const arc = await split((line) => line);
   assert.equal(arc.sourceLine(deposition + 1), arc.sourceLine(deposition));
   // Lines still never go back, and a travel never shares its line.
-  await assert.rejects(split((line) => line - 1), ReplayDecodeError);
+  await assert.rejects(
+    split((line) => line - 1),
+    ReplayDecodeError,
+  );
   const bytes = golden.slice(0);
   const data = new DataView(bytes);
   const at = REPLAY_HEADER_BYTES + deposition * REPLAY_RECORD_BYTES;
