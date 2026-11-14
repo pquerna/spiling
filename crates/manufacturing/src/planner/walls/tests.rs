@@ -751,8 +751,22 @@ fn thin_features_widen_to_the_narrowest_bead_or_are_reported_omitted() {
         ]])
     };
     // Narrower than the narrowest bead, wider than a quarter nozzle.
-    let widened = plan_with(&strip(0.25), true);
-    assert_eq!(widened.paths.len(), 1);
+    let source_width = 0.25;
+    let widened = plan_with(&strip(source_width), true);
+    let cap_inset = source_width * 0.5;
+    for (height, target) in [
+        (0.0, [cap_inset, 20.0 - cap_inset]),
+        (cap_inset, [0.0, 20.0]),
+        (source_width, [cap_inset, 20.0 - cap_inset]),
+    ] {
+        let (_, intervals) = cross_section(&widened, 1, height);
+        let intervals = intervals
+            .into_iter()
+            .map(|[start, end]| [start.max(target[0]), end.min(target[1])])
+            .filter(|[start, end]| start < end)
+            .collect();
+        assert_section_coverage(intervals, target);
+    }
     assert!(
         widened.thin_widened_mm > 19.0,
         "{}",

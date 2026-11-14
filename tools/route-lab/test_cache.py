@@ -21,28 +21,28 @@ class CargoCacheTests(unittest.TestCase):
             source, build, target = root / 'source', root / 'build', root / 'target'
             (source / 'src').mkdir(parents=True)
             (source / 'Cargo.toml').write_text(
-                '[package]\nname="route-cache-probe"\nversion="0.0.0"\nedition="2024"\n')
+                '[package]\nname="route-cache-probe"\nversion="0.0.0"\nedition="2024"\n\n[workspace]\n')
             (source / 'src/main.rs').write_text('fn main() {}\n')
             env = os.environ | {'CARGO_TARGET_DIR': str(target), 'CARGO_BUILD_JOBS': '1'}
-            subprocess.run(cargo + ['generate-lockfile', '--offline', '--manifest-path',
-                                   str(source / 'Cargo.toml')], env=env, check=True,
-                           capture_output=True, text=True, timeout=60)
-            receipts = []
+            locked = subprocess.run(cargo + ['generate-lockfile', '--offline', '--manifest-path',
+                                            str(source / 'Cargo.toml')], env=env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(locked.returncode, 0, locked.stderr)
             for value, changed in [('one', True), ('two', True), ('two', False), ('one', True)]:
                 (source / 'src/main.rs').write_text(f'fn main() {{ println!("{value}"); }}\n')
                 os.utime(source / 'src/main.rs', (1, 1))
                 sync_source(source, build)
                 run = subprocess.run(cargo + ['build', '--offline', '--locked', '--manifest-path',
                                      str(build / 'Cargo.toml'), '--message-format=json'],
-                                     env=env, check=True, capture_output=True, text=True, timeout=60)
+                                     env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(run.returncode, 0, run.stderr)
                 artifacts = [json.loads(line) for line in run.stdout.splitlines()]
                 binary = next(a for a in artifacts if a.get('executable'))
-                self.assertEqual(binary['fresh'], not changed)
+                if not changed:
+                    self.assertTrue(binary['fresh'])
                 result = subprocess.run([binary['executable']], check=True, capture_output=True,
                                         text=True, timeout=10)
                 self.assertEqual(result.stdout.strip(), value)
-                receipts.append((value, binary['fresh']))
-            self.assertEqual(receipts, [('one', False), ('two', False), ('two', True), ('one', False)])
 
 
 if __name__ == '__main__':

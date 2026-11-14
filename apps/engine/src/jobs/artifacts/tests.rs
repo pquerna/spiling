@@ -90,7 +90,6 @@ async fn stalled_read_does_not_block_publication_and_drop_releases_snapshot() {
     .await
     .unwrap();
     assert!(!task.is_finished());
-    let name = artifact.name.clone();
     let visible = tokio::time::timeout(Duration::from_secs(5), async {
         jobs.with(|inner| {
             inner
@@ -103,12 +102,13 @@ async fn stalled_read_does_not_block_publication_and_drop_releases_snapshot() {
             Ok(())
         })
         .await?;
-        jobs.artifact(name).await
+        jobs.artifact("artifacts/later".into()).await
     })
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(visible, artifact);
+    assert_eq!(visible.name, "artifacts/later");
+    assert_eq!(visible.size_bytes, 64);
     drop(receiver);
     tokio::time::timeout(Duration::from_secs(5), task)
         .await

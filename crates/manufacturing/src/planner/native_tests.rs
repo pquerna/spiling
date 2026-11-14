@@ -1351,7 +1351,7 @@ fn fine_layers_beyond_the_former_layer_ceiling_compile_and_verify() {
 }
 
 #[test]
-fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
+fn native_cantilever_clearance_is_reported_and_floating_gap_limits_are_explicit() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
     let mut enabled = intent(true);
     enabled.recipe.supports = SupportPolicy::Breakaway {
@@ -1360,15 +1360,18 @@ fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
         z_gap_mm: 0.2,
         interface_thickness_mm: 0.8,
     };
-    let unresolved = compile(scene.input(&enabled), &AtomicBool::new(false)).unwrap_err();
-    assert_eq!(
-        unresolved.code,
-        ManufacturingErrorCode::UnsupportedGeometry,
-        "{unresolved}"
+    let bundle = compile(scene.input(&enabled), &AtomicBool::new(false)).unwrap();
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
     );
     assert!(
-        unresolved.message.contains("support clearance"),
-        "{unresolved}"
+        crate::verify_bundle(&bundle, &AtomicBool::new(false))
+            .unwrap()
+            .verified
     );
     let floating = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0)]);
     enabled.recipe.supports = SupportPolicy::Breakaway {
@@ -1557,6 +1560,36 @@ fn assert_native_surface_retention(
         }
     }
     assert!(profile_vertices > 8, "no genuine sampled rib profile");
+}
+
+#[test]
+fn native_ribs_share_bed_birth_resolution_without_accepting_penetration_or_large_gaps() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(false);
+    let layer = rib_layer(&scene, 1);
+    scene.surface_overlays.layers.push(layer);
+    for (gap_mm, admitted) in [
+        (intent.printer.motion_resolution.z_mm * 0.5, true),
+        (intent.printer.motion_resolution.z_mm * 2.0, false),
+        (-super::LAYER_QUANTIZATION_MM * 2.0, false),
+    ] {
+        scene.occurrences[0].pose.translation_mm[2] = gap_mm;
+        let mut work = spiling_geometry::GeometryWorkBudget::compile();
+        let admission = preflight::admit(&scene.input(&intent), &cancel, &mut work).unwrap();
+        assert_eq!(
+            admission.report.disposition == PreflightDisposition::Admitted,
+            admitted,
+            "gap_mm={gap_mm}: {:?}",
+            admission.report
+        );
+        if admitted {
+            let bundle = compile(scene.input(&intent), &cancel).unwrap();
+            assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+        } else {
+            assert!(compile(scene.input(&intent), &cancel).is_err());
+        }
+    }
 }
 
 #[test]

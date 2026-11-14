@@ -407,7 +407,16 @@ mod tests {
             assert_eq!(source.to_vec().unwrap(), raw);
             let digest: [u8; 32] = Sha256::digest(&raw).into();
             assert_eq!(source.digest(), &digest);
-            assert_eq!(source.0.frames.len(), len.div_ceil(FRAME_BYTES));
+            let mut reader = source.reader();
+            let offset = len / 2;
+            reader.seek(SeekFrom::Start(offset as u64)).unwrap();
+            let mut suffix = Vec::new();
+            reader.read_to_end(&mut suffix).unwrap();
+            assert_eq!(suffix, raw[offset..]);
+            reader.seek(SeekFrom::Start(0)).unwrap();
+            let mut restored = Vec::new();
+            reader.read_to_end(&mut restored).unwrap();
+            assert_eq!(restored, raw);
         }
     }
 

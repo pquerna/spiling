@@ -903,8 +903,18 @@ fn test_comb_53_section_span_entity_tracing() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
     let sec = section_at_z(&def, 4.0).expect("sec");
+    assert_source_face_identity(&def, "box-mm.step");
+    assert_eq!(sec.loops().len(), 1, "original box material boundary");
+    assert_close(
+        loop_area(&sec, &sec.loops()[0]),
+        200.0,
+        0.5,
+        "box material area",
+    );
     for loop_index in 0..sec.loops().len() {
-        for span in sec.spans(loop_index).expect("native span provenance") {
+        let spans = sec.spans(loop_index).expect("native span provenance");
+        assert!(!spans.is_empty(), "material boundary needs native owners");
+        for span in spans {
             assert!(span.source_face_ordinal < def.faces().len());
             assert_eq!(def.face_ordinal(span.face), Some(span.source_face_ordinal));
         }

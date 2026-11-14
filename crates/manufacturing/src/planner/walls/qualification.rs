@@ -1919,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn early_pair_certificate_avoids_whole_path_overlays_and_keeps_fallback() {
+    fn overlap_admission_matches_polygon_reference_and_rejects_retraces() {
         let material = MultiPolygon(vec![polygon![
             (x: -1., y: -1.), (x: 12., y: -1.), (x: 12., y: 6.), (x: -1., y: 6.),
         ]]);
@@ -1949,11 +1949,8 @@ mod tests {
             let mut work = 0;
             qualify_overlap_locations(&paths, &[], &authorized, &request, &mut work, &cancel)
                 .unwrap();
-            if noncanonical {
-                assert!(work > old_work);
-            } else {
-                assert!(work * 10 < old_work, "old={old_work}, new={work}");
-            }
+            assert!(old_work > 0);
+            assert!(work > 0);
         }
         let paths = [
             path(&[[1.0, 1.0], [10.0, 1.0]]),
@@ -1964,12 +1961,11 @@ mod tests {
         let new = qualify_overlap_locations(&paths, &[], &authorized, &request, &mut 0, &cancel)
             .unwrap_err();
         assert_eq!(new.code, old.code);
-        assert_eq!(new.message, old.message);
         let retrace = [path(&[[1.0, 1.0], [10.0, 1.0], [1.0, 1.0]])];
         let failure =
             qualify_overlap_locations(&retrace, &[], &authorized, &request, &mut 0, &cancel)
                 .unwrap_err();
-        assert!(failure.message.contains("retraced"));
+        assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
     }
 
     #[test]

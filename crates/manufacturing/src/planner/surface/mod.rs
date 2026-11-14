@@ -340,8 +340,9 @@ pub(super) fn admit_extrusion(
             "native extrusion finish requires exactly zero actual build-Z from horizontal or normal displacement",
         ));
     }
-    if (source_bounds.min[2] - input.intent.printer.build_envelope.min[2]).abs()
-        > super::LAYER_QUANTIZATION_MM
+    let bed_gap_mm = source_bounds.min[2] - input.intent.printer.build_envelope.min[2];
+    if bed_gap_mm < -super::LAYER_QUANTIZATION_MM
+        || bed_gap_mm > input.intent.printer.motion_resolution.z_mm
     {
         return Err(unsupported(
             face_id,

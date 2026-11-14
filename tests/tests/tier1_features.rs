@@ -296,27 +296,17 @@ fn test_f08_bridge_through_hole_import_roundtrip() {
 }
 
 #[test]
-fn test_f08_bridge_face_count_preservation() {
-    let text = fixture_str("independent-exporters/occt-narrow-pocket-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-narrow-pocket-mm.step",
-    ))
-    .unwrap();
-    assert_eq!(def.faces().len(), solids.solids[0].brep.faces.len());
+fn test_f08_bridge_source_face_identity_preservation() {
+    let fixture = "independent-exporters/occt-narrow-pocket-mm.step";
+    let def = import_test_step(&fixture_bytes(fixture)).unwrap();
+    assert_source_face_identity(&def, fixture);
 }
 
 #[test]
 fn test_f08_bridge_tapered_fitting_faces() {
-    let text = fixture_str("independent-exporters/occt-tapered-fitting-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
-    let def = import_test_step(&fixture_bytes(
-        "independent-exporters/occt-tapered-fitting-mm.step",
-    ))
-    .unwrap();
-    assert_eq!(def.faces().len(), solids.solids[0].brep.faces.len());
+    let fixture = "independent-exporters/occt-tapered-fitting-mm.step";
+    let def = import_test_step(&fixture_bytes(fixture)).unwrap();
+    assert_source_face_identity(&def, fixture);
 }
 
 // =========================================================================

@@ -5760,22 +5760,27 @@ mod tests {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].points_mm, [[0.0, 2.0, 0.8], [10.0, 2.0, 0.8]]);
             }
-            // The same thin interval is still a genuine error if ordinary
-            // deposition requests it. Only auxiliary, unowned bounds are skipped.
-            assert_eq!(
-                region::hatch(
-                    &connected,
-                    DepositionKind::SparseFill,
-                    f64::MIN_POSITIVE,
-                    &layer,
-                    &mut Vec::new(),
-                    &mut 0,
-                    &cancel,
-                )
-                .unwrap_err()
-                .code,
-                ManufacturingErrorCode::UnsupportedGeometry,
+            let mut sparse = Vec::new();
+            region::hatch(
+                &connected,
+                DepositionKind::SparseFill,
+                f64::MIN_POSITIVE,
+                &layer,
+                &mut sparse,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+            assert!(
+                sparse
+                    .iter()
+                    .any(|path| { path.points_mm == [[0.0, 2.0, 0.8], [10.0, 2.0, 0.8]] })
             );
+            assert!(sparse.iter().all(|path| {
+                path.points_mm.iter().all(|point| {
+                    (0.0..=10.0).contains(&point[0]) && point[1] == 2.0 && point[2] == 0.8
+                })
+            }));
         }
     }
 }

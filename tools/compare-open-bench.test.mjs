@@ -34,8 +34,28 @@ test("native comparison permits changed executables and reports medians", () => 
     open_to_published_us: r.open_to_published_us / 2,
   }));
   const rows = compareOpen(samples(), after);
-  assert.equal(rows[1].speedup, 2);
-  assert.equal(rows[1].baseline_mad_us, 1);
+  const published = rows.find((row) => row.metric === "open_to_published_us");
+  assert.equal(published.speedup, 2);
+  assert.equal(published.baseline_mad_us, 1);
+});
+test("native comparison computes medians and deviation independently of sample order and outliers", () => {
+  const before = samples();
+  const after = samples();
+  for (const [index, value] of [9000, 10, 30].entries()) before[index].open_to_published_us = value;
+  for (const [index, value] of [15, 5000, 5].entries()) after[index].open_to_published_us = value;
+  const published = compareOpen(before, after).find((row) => row.metric === "open_to_published_us");
+  const expected = {
+    metric: "open_to_published_us",
+    baseline_samples: 3,
+    candidate_samples: 3,
+    baseline_median_us: 30,
+    candidate_median_us: 15,
+    speedup: 2,
+    baseline_mad_us: 20,
+    candidate_mad_us: 10,
+  };
+  for (const [field, value] of Object.entries(expected))
+    assert.equal(published[field], value, field);
 });
 test("native comparison refuses incomplete, duplicate, mixed and incomparable samples", () => {
   for (const mutate of [

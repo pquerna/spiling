@@ -4,6 +4,7 @@
 // The two software references are declared specifications (machine: null);
 // every other setup is derived from machine-descriptions.ts.
 import type {
+  AabbMm,
   HardwareCatalog,
   HardwareModelDefinition,
   PlateDefinition,
@@ -18,7 +19,10 @@ const model = {
   mounting_interface: "spiling.reference.220",
   declared_volume_mm: cartesian.build_envelope,
 } satisfies HardwareModelDefinition;
-const box = (x: number, y: number, z: number) => ({ min: [0, 0, 0], max: [x, y, z] });
+const box = (x: number, y: number, z: number): AabbMm => ({
+  min: [0, 0, 0],
+  max: [x, y, z],
+});
 // Models for machine-description setups (machine-descriptions.ts); the engine
 // derives each setup and its stock sheet from the machine facts. Vendor/model
 // text matches printer-references.ts so a reference finds its setup.

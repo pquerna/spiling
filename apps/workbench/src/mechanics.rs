@@ -354,8 +354,10 @@ mod tests {
             load_contacts(1, samples.len(), |index| samples.get(index).cloned()).unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].0, DVec3::new(2.0, 2.0, 3.0));
-        assert_eq!(contacts[0].1.len(), 2);
-        assert_eq!(samples[1].traction_mpa, [-10.0; 3]);
+        let points = &contacts[0].1;
+        assert_eq!(points.len(), 2);
+        assert!(points.contains(&DVec3::new(1.0, 2.0, 3.0)));
+        assert!(points.contains(&DVec3::new(3.0, 2.0, 3.0)));
     }
     #[test]
     fn shared_reserve_covers_retained_pending_and_renderer_field_data() {

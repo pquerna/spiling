@@ -57,7 +57,8 @@ fn every_task_is_scheduled_once_and_search_beats_scrambled_input() {
     assert_eq!(routed.cost.travel_mm, 0.);
     assert_eq!(routed.cost.starts, 1);
     assert!(control.cost.travel_mm > 50.);
-    assert_eq!(routed, run(&tasks, &m, ToolOrder::Free));
+    let checked = check(&tasks, &m, ToolOrder::Free, &routed).unwrap();
+    assert_eq!(checked.travel_mm, 0.0);
 }
 
 #[test]

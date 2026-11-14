@@ -137,6 +137,10 @@ fn source_face_ids_reject_zero_noncanonical_and_out_of_range_inputs() {
 
 #[test]
 fn finite_bounds_pose_and_provenance_are_checked_at_json_boundary() {
+    assert_eq!(
+        serde_json::from_str::<AabbMm>(r#"{"max":[1,1,1],"min":[0,0,0]}"#).unwrap(),
+        AabbMm::new([0.0; 3], [1.0; 3]).unwrap()
+    );
     assert!(AabbMm::new([f64::NAN, 0.0, 0.0], [1.0; 3]).is_err());
     assert!(AabbMm::new([2.0; 3], [1.0; 3]).is_err());
     assert!(serde_json::from_str::<AabbMm>(r#"{"min":[2,0,0],"max":[1,1,1]}"#).is_err());

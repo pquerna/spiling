@@ -117,9 +117,22 @@ def test_raw_tetrahedra_elevate_to_the_same_preserved_quadratic_operator():
     assert np.array_equal(nodes, cells)
     expected = prepare(original, Material(z_ratio=.25))
     actual = prepare(raw, Material(z_ratio=.25))
-    assert np.array_equal(expected.stiffness.indptr, actual.stiffness.indptr)
-    assert np.array_equal(expected.stiffness.indices, actual.stiffness.indices)
-    assert np.array_equal(expected.stiffness.data, actual.stiffness.data)
+    def same_operator(candidate):
+        assert candidate.shape == expected.stiffness.shape
+        reference_norm = sparse.linalg.norm(expected.stiffness)
+        assert reference_norm > 0
+        rounding = np.finfo(expected.stiffness.dtype).eps * expected.stiffness.shape[0]
+        assert sparse.linalg.norm(candidate - expected.stiffness) <= rounding * reference_norm
+
+    same_operator(actual.stiffness)
+    reordered = actual.stiffness.tocoo()
+    reordered = sparse.coo_matrix(
+        (reordered.data[::-1], (reordered.row[::-1], reordered.col[::-1])),
+        shape=reordered.shape,
+    )
+    same_operator(reordered)
+    with pytest.raises(AssertionError):
+        same_operator(actual.stiffness * 1.01)
     bad = AnalysisMesh(raw.points, raw.cells[[1,0,2,3]], raw.volume, raw.count,
                        raw.components, raw.bounds, raw.spacing, raw.grid_shape, "tet")
     with pytest.raises(ValueError, match="positive"):

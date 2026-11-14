@@ -123,16 +123,37 @@ fn every_manufacturing_error_code_is_typed_and_nonfatal() {
 
 #[test]
 fn fully_received_corrupt_bundle_hash_utf8_and_schema_are_nonfatal() {
+    let malformed_current_schema = format!(
+        r#"{{"schema_version":{},"unknown":true}}"#,
+        spiling_contracts::manufacturing::MANUFACTURING_SCHEMA_VERSION
+    );
     for bytes in [
         b"not JSON".as_slice(),
         b"\xff".as_slice(),
-        br#"{"schema_version":1,"unknown":true}"#.as_slice(),
+        malformed_current_schema.as_bytes(),
     ] {
         let record = manufacturing_record(bytes);
         let error = decode_manufacturing_artifact(bytes, &record).unwrap_err();
-        assert!(matches!(&error, ClientError::Manufacturing(_)));
+        assert!(matches!(
+            &error,
+            ClientError::Manufacturing(ManufacturingError {
+                code: ManufacturingErrorCode::CorruptArtifact,
+                ..
+            })
+        ));
         assert!(!error.is_fatal());
     }
+    let unsupported = br#"{"schema_version":0}"#;
+    let record = manufacturing_record(unsupported);
+    let error = decode_manufacturing_artifact(unsupported, &record).unwrap_err();
+    assert!(matches!(
+        &error,
+        ClientError::Manufacturing(ManufacturingError {
+            code: ManufacturingErrorCode::InvalidSpecification,
+            ..
+        })
+    ));
+    assert!(!error.is_fatal());
     let record = manufacturing_record(b"abc");
     for bytes in [b"def".as_slice(), b"ab".as_slice()] {
         let error = decode_manufacturing_artifact(bytes, &record).unwrap_err();

@@ -379,6 +379,27 @@ mod tests {
         assert_eq!(events, vec![2.0]);
     }
     #[test]
+    fn invalid_mapping_refuses_before_field_evaluation() {
+        let image = image();
+        for (repeats, phase, period, z_phase, min_z) in [
+            (0, 0.0, 4.0, 0.0, 0.0),
+            (1, -0.1, 4.0, 0.0, 0.0),
+            (1, 1.0, 4.0, 0.0, 0.0),
+            (1, f64::NAN, 4.0, 0.0, 0.0),
+            (1, 0.0, 0.0, 0.0, 0.0),
+            (1, 0.0, f64::INFINITY, 0.0, 0.0),
+            (1, 0.0, 4.0, -0.1, 0.0),
+            (1, 0.0, 4.0, 4.0, 0.0),
+            (1, 0.0, 4.0, f64::NAN, 0.0),
+            (1, 0.0, 4.0, 0.0, f64::INFINITY),
+        ] {
+            assert!(image.field(repeats, phase, period, z_phase, min_z).is_err());
+        }
+        let valid = image.field(3, 0.5, 4.0, 2.0, -8.0).unwrap();
+        assert!(valid.value(0.25, -7.0).is_finite());
+    }
+
+    #[test]
     fn canonical_allocation_is_shared() {
         let image = image();
         let bytes = Arc::clone(image.bytes());

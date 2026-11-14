@@ -1170,12 +1170,15 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert!(artifact["hash"].as_str().is_some());
     assert_eq!(artifact["summary"]["software_only"], true);
     let native_coverage = &artifact["summary"]["native_geometry"];
-    assert_eq!(native_coverage["evidence"], "certified");
-    let features = &native_coverage["source_feature_coverage"];
+    assert_eq!(native_coverage["evidence"], "tolerant");
+    assert_eq!(native_coverage["height_analysis_count"], 0);
+    assert_eq!(native_coverage["slab_count"], 0);
     assert_eq!(
-        features["disjoint_source_layer_count"],
-        native_coverage["certified_layer_count"]
+        native_coverage["certified_layer_count"],
+        artifact["summary"]["layers"]
     );
+    let features = &native_coverage["source_feature_coverage"];
+    assert_eq!(features["disjoint_source_layer_count"], 0);
     assert_eq!(features["invariant_source_union_layer_count"], 0);
     assert_eq!(features["native_interface_complex_layer_count"], 0);
     assert_eq!(features["owned_critical_slab_count"], 0);
