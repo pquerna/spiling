@@ -716,7 +716,9 @@ pub(crate) fn verify_actual(
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
-    let mut route = route_job.map(|job| routing::RouteState::new(job, plan, recipe));
+    let mut route = route_job
+        .map(|job| routing::RouteState::new(job, plan, recipe))
+        .transpose()?;
     let mut time = route_job
         .map(|job| cost::JobTimeBuilder::new(job, recipe))
         .transpose()?

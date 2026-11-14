@@ -161,6 +161,9 @@ message NativeOperationResult {
     AnalysisResultPrepared analysis_result_prepared = 20;
     AnalysisFacePreparation analysis_face_prepared = 21;
     AnalysisFastenerPreparation analysis_fastener_prepared = 22;
+    // The complete NativeOperationResult encoding when it does not fit one
+    // control frame: an immutable operation output read through ByteStream.
+    Artifact staged = 23;
   }
 }
 
@@ -209,6 +212,7 @@ message LayoutProposal {
   LayoutRequest request = 6; repeated LayoutPlacement placements = 7; repeated AabbMm footprints_mm = 8;
   uint32 requested_count = 9; uint32 placed_count = 10; uint32 candidates_examined = 11; VerificationReport verification = 12;
   uint32 manufacturing_attempts = 13; LayoutLimit limited_by = 14; repeated AdditionalPlateProposal additional_plates = 15;
+  optional string manufacturing_refusal = 16;
 }
 
 enum LayoutLimit { LAYOUT_LIMIT_UNSPECIFIED = 0; LAYOUT_QUANTITY_LIMIT = 1; LAYOUT_BUILD_AREA_LIMIT = 2; LAYOUT_MANUFACTURING_LIMIT = 4; LAYOUT_PLATE_LIMIT = 5; LAYOUT_OCCURRENCE_LIMIT = 6; }

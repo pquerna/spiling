@@ -10,6 +10,7 @@ mod native;
 mod performance;
 mod resources;
 mod session;
+mod transfer;
 use geometry::{Control, Reply};
 use jobs::Jobs;
 use native::NativeHost;
@@ -44,6 +45,7 @@ struct Service {
     stop: watch::Sender<bool>,
     observers: Arc<Semaphore>,
     downloads: Arc<Semaphore>,
+    transfers: transfer::Transfers,
 }
 #[tonic::async_trait]
 impl engine_server::Engine for Service {
@@ -184,20 +186,19 @@ impl artifacts_server::Artifacts for Service {
 #[tonic::async_trait]
 impl byte_stream_server::ByteStream for Service {
     type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
+    /// Staged uploads only; artifacts are published by engine operations.
     async fn write(
         &self,
-        _: Request<tonic::Streaming<WriteRequest>>,
+        req: Request<tonic::Streaming<WriteRequest>>,
     ) -> Result<Response<WriteResponse>, Status> {
-        Err(Status::unimplemented(
-            "artifacts are published by engine operations",
-        ))
+        Ok(Response::new(self.transfers.write(req.into_inner()).await?))
     }
     async fn query_write_status(
         &self,
         _: Request<QueryWriteStatusRequest>,
     ) -> Result<Response<QueryWriteStatusResponse>, Status> {
         Err(Status::unimplemented(
-            "external artifact writes are not supported",
+            "staged uploads are complete in one write; resumable writes are not supported",
         ))
     }
     async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
@@ -212,6 +213,21 @@ impl byte_stream_server::ByteStream for Service {
         }
         if req.read_limit < 0 {
             return Err(Status::invalid_argument("negative read limit"));
+        }
+        if req.resource_name.starts_with("blobs/") {
+            let fragments =
+                self.transfers
+                    .read(&req.resource_name, req.read_offset, req.read_limit)?;
+            let (tx, rx) = mpsc::channel(2);
+            tokio::spawn(async move {
+                let _permit = permit;
+                for fragment in fragments {
+                    if tx.send(fragment).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            return Ok(Response::new(ReceiverStream::new(rx)));
         }
         let info = self.jobs.artifact(req.resource_name.clone()).await?;
         if req.read_offset as u64 > info.size_bytes {
@@ -388,16 +404,18 @@ impl projects_server::Projects for Service {
         &self,
         req: Request<ProjectRequest>,
     ) -> Result<Response<ProjectReply>, Status> {
-        let command = req.into_inner().try_into().map_err(|e: String| {
+        let req = self.transfers.resolve(req.into_inner())?;
+        let command = req.try_into().map_err(|e: String| {
             request_error(spiling_contracts::native::project_request_status(&e))
         })?;
         match self.native.execute(Control::Project(command)).await? {
             Reply::Project(
                 response @ spiling_contracts::project::ProjectResponse::Error { .. },
             ) => Err(native::reply_error(Reply::Project(response))),
-            Reply::Project(response) => ProjectReply::try_from(response)
-                .map(Response::new)
-                .map_err(jobs::internal),
+            Reply::Project(response) => {
+                let reply = ProjectReply::try_from(response).map_err(jobs::internal)?;
+                Ok(Response::new(self.transfers.stage_reply(reply)?))
+            }
             reply => Err(native::reply_error(reply)),
         }
     }
@@ -792,6 +810,7 @@ impl manufacturing_server::Manufacturing for Service {
         let id = std::mem::take(&mut req.request_id);
         let parent = req.parent.clone();
         let digest = native_digest("Manufacturing.EvaluateAlternative", &req);
+        self.transfers.resolve_alternative(&mut req)?;
         let command = req.try_into().map_err(|error: String| {
             request_error(spiling_contracts::native::manufacturing_request_status(
                 &error,
@@ -818,16 +837,18 @@ impl manufacturing_server::Manufacturing for Service {
         &self,
         req: Request<ManufacturingRequest>,
     ) -> Result<Response<ManufacturingReply>, Status> {
-        let command = req.into_inner().try_into().map_err(|e: String| {
+        let req = self.transfers.resolve(req.into_inner())?;
+        let command = req.try_into().map_err(|e: String| {
             request_error(spiling_contracts::native::manufacturing_request_status(&e))
         })?;
         match self.native.execute(Control::Manufacturing(command)).await? {
             Reply::Manufacturing(
                 response @ spiling_contracts::manufacturing::ManufacturingResponse::Error { .. },
             ) => Err(native::reply_error(Reply::Manufacturing(response))),
-            Reply::Manufacturing(response) => ManufacturingReply::try_from(response)
-                .map(Response::new)
-                .map_err(jobs::internal),
+            Reply::Manufacturing(response) => {
+                let reply = ManufacturingReply::try_from(response).map_err(jobs::internal)?;
+                Ok(Response::new(self.transfers.stage_reply(reply)?))
+            }
             reply => Err(native::reply_error(reply)),
         }
     }
@@ -1151,6 +1172,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         stop,
         observers: Arc::new(Semaphore::new(16)),
         downloads: Arc::new(Semaphore::new(8)),
+        transfers: transfer::Transfers::default(),
     };
     let authenticate = move |request: Request<()>| -> Result<Request<()>, Status> {
         if request

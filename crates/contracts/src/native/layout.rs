@@ -156,6 +156,7 @@ impl TryFrom<rpc::LayoutProposal> for LayoutProposal {
                 Ok(rpc::LayoutLimit::LayoutOccurrenceLimit) => LayoutLimit::OccurrenceBudget,
                 _ => return Err("invalid layout limit".into()),
             },
+            manufacturing_refusal: v.manufacturing_refusal,
             verification: required(v.verification, "layout verification")?.try_into()?,
         };
         checked(r.validate())?;
@@ -199,6 +200,7 @@ impl TryFrom<LayoutProposal> for rpc::LayoutProposal {
                 LayoutLimit::PlateBudget => rpc::LayoutLimit::LayoutPlateLimit,
                 LayoutLimit::OccurrenceBudget => rpc::LayoutLimit::LayoutOccurrenceLimit,
             } as i32,
+            manufacturing_refusal: v.manufacturing_refusal,
             verification: Some(v.verification.try_into()?),
         })
     }

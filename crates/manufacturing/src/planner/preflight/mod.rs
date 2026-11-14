@@ -240,15 +240,16 @@ pub(super) fn admit<'work>(
                 add("invalid_surface_targets", "Surface material construction does not bind the immutable native source/face table".into(), Some(construction.occurrence_id), None);
             }
         }
+        // Assignment identities are unique by declaration, so equal sorted
+        // identity lists are exactly a source-ID bijection.
+        let sorted = |ids: &mut dyn Iterator<Item = OccurrenceId>| {
+            let mut ids: Vec<OccurrenceId> = ids.collect();
+            ids.sort_unstable();
+            ids
+        };
         if input.occurrences.len() != job.assignments.len()
-            || job.assignments.iter().any(|assignment| {
-                input
-                    .occurrences
-                    .iter()
-                    .filter(|occurrence| occurrence.occurrence_id == assignment.occurrence_id)
-                    .count()
-                    != 1
-            })
+            || sorted(&mut input.occurrences.iter().map(|o| o.occurrence_id))
+                != sorted(&mut job.assignments.iter().map(|a| a.occurrence_id))
         {
             add(
                 "fixed_dual_sources",
@@ -338,6 +339,14 @@ pub(super) fn admit<'work>(
             );
             false
         }
+    };
+    let reservations: BTreeMap<OccurrenceId, AabbMm> = match &input.intent.printer.workflow {
+        JobWorkflow::FixedDualMarlin { job } => job
+            .assignments
+            .iter()
+            .map(|assignment| (assignment.occurrence_id, assignment.work_envelope_mm))
+            .collect(),
+        _ => BTreeMap::new(),
     };
     let mut occurrence_bounds = BTreeMap::new();
     let mut surface_samples = 0usize;
@@ -443,11 +452,14 @@ pub(super) fn admit<'work>(
         result
             .native_bounds
             .insert(occurrence.occurrence_id, placed);
-        if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
-            match job.assignments.iter().find(|assignment| assignment.occurrence_id == occurrence.occurrence_id) {
-                Some(assignment) if (0..3).all(|axis| {
-                    placed.min[axis] >= assignment.work_envelope_mm.min[axis]
-                        && placed.max[axis] <= assignment.work_envelope_mm.max[axis]
+        if matches!(
+            input.intent.printer.workflow,
+            JobWorkflow::FixedDualMarlin { .. }
+        ) {
+            match reservations.get(&occurrence.occurrence_id) {
+                Some(reservation) if (0..3).all(|axis| {
+                    placed.min[axis] >= reservation.min[axis]
+                        && placed.max[axis] <= reservation.max[axis]
                 }) => {}
                 _ => add("fixed_dual_source_reservation", "Complete conservative native source bounds must lie within its explicit routed work reservation".into(), Some(occurrence.occurrence_id), None),
             }

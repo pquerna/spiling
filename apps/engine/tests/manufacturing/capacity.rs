@@ -190,3 +190,171 @@ async fn fill_plate_places_every_small_part_that_fits_and_reports_the_rest() {
     );
     client.shutdown().await.unwrap();
 }
+
+/// Grid origins whose +25 mm hotend offset never lands on another part: four
+/// 20 mm X windows 50 mm apart, rows below the waste lines at Y 160.
+fn fixed_dual_origins(count: usize) -> Vec<[f64; 2]> {
+    let mut origins = Vec::new();
+    for row in 0..43 {
+        for window in 0..4 {
+            for column in 0..6 {
+                origins.push([
+                    20.0 + 50.0 * f64::from(window) + 3.0 * f64::from(column),
+                    20.0 + 3.0 * f64::from(row),
+                ]);
+            }
+        }
+    }
+    origins.truncate(count);
+    origins
+}
+
+#[tokio::test]
+async fn fixed_dual_plate_beyond_former_caps_stages_its_intent_compiles_and_verifies() {
+    const PARTS: usize = 900; // far beyond the former 32 fixed-dual occurrences
+    let workspace = Workspace::new();
+    let mut client = spawn().await;
+    import(
+        &mut client,
+        &small_box(&workspace, "dual.step", [1.5, 1.5, 0.4]),
+    )
+    .await;
+    let origins = fixed_dual_origins(PARTS);
+    assert_eq!(origins.len(), PARTS);
+    let mut summary = scene(&mut client).await;
+    let GeometryResponse::ScenePage {
+        definitions,
+        occurrences,
+        ..
+    } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: summary.session_id.clone(),
+            revision: summary.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("occurrences")
+    };
+    let _ = definitions;
+    let first = occurrences[0].clone();
+    // Move the imported part to the first origin, then add the rest.
+    let project_revision = status(&mut client).await.0.revision;
+    let GeometryResponse::SceneChanged { summary: moved } = client
+        .geometry(GeometryCommand::SetInstancePose {
+            session_id: summary.session_id.clone(),
+            base_revision: summary.revision,
+            project_revision,
+            occurrence_id: first.occurrence_id,
+            pose: RigidPoseMm {
+                translation_mm: [origins[0][0], origins[0][1], 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("move")
+    };
+    summary = moved;
+    for origin in &origins[1..] {
+        let GeometryResponse::SceneChanged { summary: changed } = client
+            .geometry(GeometryCommand::AddInstance {
+                session_id: summary.session_id.clone(),
+                base_revision: summary.revision,
+                definition_id: first.definition_id.clone(),
+                pose: RigidPoseMm {
+                    translation_mm: [origin[0], origin[1], 0.0],
+                    ..RigidPoseMm::IDENTITY
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("instance")
+        };
+        summary = changed;
+    }
+    assert_eq!(summary.occurrence_count as usize, PARTS);
+    let mut placed = Vec::new();
+    let mut offset = 0;
+    loop {
+        let GeometryResponse::ScenePage {
+            occurrences,
+            next_offset,
+            ..
+        } = client
+            .geometry(GeometryCommand::GetScenePage {
+                session_id: summary.session_id.clone(),
+                revision: summary.revision,
+                kind: ScenePageKind::Occurrences,
+                offset,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("occurrence page")
+        };
+        placed.extend(occurrences);
+        match next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    let mut intent: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    let template = job.assignments[0].clone();
+    job.assignments = placed
+        .iter()
+        .map(|occurrence| {
+            let [x, y, _] = occurrence.pose.translation_mm;
+            OccurrenceMaterialAssignment {
+                occurrence_id: occurrence.occurrence_id,
+                work_envelope_mm: AabbMm::new([x - 0.7, y - 0.7, -1.0], [x + 2.2, y + 2.2, 9.0])
+                    .unwrap(),
+                ..template.clone()
+            }
+        })
+        .collect();
+    intent.validate().unwrap();
+    let wire = prost::Message::encoded_len(
+        &spiling_contracts::rpc::ManufacturingIntent::try_from(intent.clone()).unwrap(),
+    );
+    assert!(
+        wire > spiling_contracts::MAX_CONTROL_BYTES as usize,
+        "{wire}"
+    );
+    // Larger than one control frame: staged through ByteStream both ways.
+    set_intent(&mut client, intent.clone()).await;
+    let ManufacturingResponse::Status {
+        intent: Some(stored),
+        ..
+    } = client
+        .manufacturing(ManufacturingCommand::Get {
+            layout_id: current_layout(&client).await,
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("status")
+    };
+    assert_eq!(*stored, intent);
+    let record = compile(&mut client).await;
+    // Every part's perimeter and fill is planned, not a truncated plate.
+    assert!(
+        record.summary.paths as usize >= 2 * PARTS,
+        "{:?}",
+        record.summary
+    );
+    let (_, report) = inspect(&mut client).await;
+    assert!(report.verified);
+    client.shutdown().await.unwrap();
+}

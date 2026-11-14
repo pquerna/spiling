@@ -61,7 +61,7 @@ machine qualification.
 - `Engine.GetEngineInfo`, `Shutdown`, `RunDiagnostic`, `WatchOperation`.
 - Standard `google.longrunning.Operations.GetOperation`, `ListOperations`, `CancelOperation`, `WaitOperation`.
 - `Artifacts.GetArtifact` returns metadata; standard `google.bytestream.ByteStream.Read` streams bytes.
-- Standard optional DeleteOperation, ByteStream Write and QueryWriteStatus explicitly return UNIMPLEMENTED. List filters, wildcard parents and partial-success listing are unsupported.
+- `ByteStream.Write` accepts only staged uploads (below). Standard optional DeleteOperation and QueryWriteStatus explicitly return UNIMPLEMENTED; there are no resumable writes. List filters, wildcard parents and partial-success listing are unsupported.
 - `Geometry.Execute`, `ImportPart`, `StartSection`; `Projects.Execute`, `Open`, `Save`, `ImportSurfaceImageFinish`, `GetSurfaceImage`, `ImportAppearancePalette`, `CompareAppearance`, `GetAppearanceReport`; `Manufacturing.Execute`, `Compile`, `Verify` are typed protobuf native services. Short actions use typed oneofs; long actions return standard Operations.
 
 RunDiagnostic is a typed long-running action following [AIP-151](https://google.aip.dev/151). Its result is a standard Operation with typed DiagnosticMetadata in `metadata` and exactly one terminal `response` or `error`. The schema declares operation_info. Operations have names `diagnostics/{id}/operations/{uuid}`; this namespace does not create an authoring project.
@@ -130,8 +130,12 @@ contains every move/copy, requested/placed totals and software verification. A b
 found fill or partial fit is not a maximum-count or physical-clearance claim.
 The result distinguishes build-area, plate, occurrence-width and manufacturing-work
 limits; copies that are not placed are reported against the requested count.
-At most four complete manufacturing attempts may reduce only newly requested
-copies after a resource refusal; every existing occurrence remains included.
+When the complete plate is refused by this machine's manufacturing working set,
+the search decides the exact boundary: the first k placed copies compile and
+k+1 are refused (every existing occurrence remains included). The proposal
+reports `ManufacturingBudget` with `manufacturing_refusal` naming exactly which
+copies were dropped and the refusal that dropped them; attempts are counted,
+not capped.
 `Geometry.Execute.ApplyLayout` accepts only the exact retained proposal identity and
 both captured revisions. Core atomically moves occurrences and copies their scoped
 finish/process layers with fresh IDs and shared source/image assets. Apply is one
@@ -143,7 +147,7 @@ arrangement refuses until its explicit resource routing is qualified.
 
 An exclusive file lock permits one engine per store. SQLite WAL with FULL synchronization atomically commits operation admission, complete artifact blobs and output/state references. On reopen, unfinished operations become interrupted; they are never automatically replayed. Complete outputs remain retrievable after failure/cancellation/restart. Tests establish process-kill recovery, not a physical power-loss certification.
 
-Current common bounds are 128 retained operations, eight unfinished admitted operations and one shared execution permit. Diagnostics reserve at most 32 MiB total, with at most 64 chunks per operation and 256 KiB per diagnostic artifact. Native operations use a separate disk-backed artifact store bounded by `MAX_NATIVE_STORAGE_BYTES`. Request-specific reservations in the engine admission path cover selected immutable outputs; completion charges newly stored unique bytes. These disk reservations are not a live-RAM budget. Native metadata/output counts and session/runtime/core retention have independent bounds. No deletion/GC API is implemented. Capacity exhaustion is explicit RESOURCE_EXHAUSTED, never silent eviction or truncated success. The UI store is application-local persistent storage; CLI defaults to temporary storage unless `--store` is supplied.
+Current common bounds are 128 retained operations, eight unfinished admitted operations and one shared execution permit. Diagnostics reserve at most 32 MiB total, with at most 64 chunks per operation and 256 KiB per diagnostic artifact. Native operations use a separate disk-backed artifact store whose capacity is the store filesystem's actual free space less a slice kept for the machine (a twentieth of the disk, at most 2 GiB); there is no fixed store total. Request-specific reservations in the engine admission path cover selected immutable outputs and are admitted against that free space less the other unfinished reservations; completion charges newly stored unique bytes. These disk reservations are not a live-RAM budget. Native metadata/output counts and session/runtime/core retention have independent bounds. No deletion/GC API is implemented. Capacity exhaustion is explicit RESOURCE_EXHAUSTED, never silent eviction or truncated success. The UI store is application-local persistent storage; CLI defaults to temporary storage unless `--store` is supplied.
 
 Appearance import reserves no ledger output; Compare/GetAppearanceReport reserve at most1MiB for one immutable typed JSON report artifact. Original/canonical/parsed palette and history retention remain separately charged in Core, and ProjectInfo carries only bounded report metadata. No appearance fields or output change replay/manufacturing format versions.
 
@@ -166,6 +170,10 @@ Rejected-source errors may carry an `ImportDiagnostic` in the typed `DomainError
 ## Incremental artifacts and binary reads
 
 Each available descriptor names complete immutable bytes as `artifacts/{sha256}`, with size, checksum and media type. Availability is published in the same SQLite transaction as its bytes. Diagnostic descriptors are append-only and bounded to 64; repeated identical outputs may share content. Native outputs are published only after their promoted result, not at worker stage time. Overall diagnostic success is distinct from partial availability. Manufacturing exports require a complete independently verified bundle; an incomplete program is never a verified build. Each published manufacturing bundle is accompanied by its program as `artifacts/{program.hash}` with media type `application/x-spiling-manufacturing-program`; clients read it by the recorded descriptor and check its exact length and SHA-256. The engine streams program frames into the stored blob rather than materializing them.
+
+## Staged transfer
+
+One control message is at most 64 KiB. A `Projects.Execute` or `Manufacturing.Execute` request or reply that would not fit instead carries its complete protobuf encoding as `StagedBlob {sha256,size_bytes}` in the message's `staged` oneof arm, with every other outer field empty; small messages stay inline. An `EvaluateAlternative` start stages only its intent (`intent_blob`). Senders upload with one `ByteStream.Write` to `uploads/{uuid}/blobs/{sha256}/{size_bytes}` (canonical lowercase hex, contiguous offsets, fragments within one frame, `finish_write` on the last); the engine byte-admits each upload against fresh memory headroom, checks exact size and SHA-256, and the request naming it consumes it. Staged replies are read from `blobs/{sha256}/{size_bytes}` and released after one complete read; unread staged replies may be released to admit a new one, and reading one then fails NOT_FOUND so the client repeats the request. A staged message never names another. A terminal native result larger than one frame is published in the same ledger transaction as an immutable `application/x-spiling-native-result` artifact named by `NativeOperationResult.staged`; clients read it through ByteStream and check it before interpreting the operation. Sizes are `u32` widths; memory and disk admission, not a document ceiling, bound them.
 
 ByteStream Read uses its standard resource_name, read_offset and read_limit: zero limit reads to end; negative offsets/offsets beyond end fail OUT_OF_RANGE; negative limits fail INVALID_ARGUMENT. Stream messages carry byte fragments, not JSON/base64. Full client reads enforce the allocation bound, exact length and SHA-256. Partial-range callers must validate their range separately; a range does not redefine the artifact checksum.
 

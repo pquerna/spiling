@@ -501,7 +501,12 @@ export type LayoutProposal = { id: SourceHash, session_id: SessionId, project_id
  * for reporting and cancellation, never a limit. This never proves a
  * global packing optimum.
  */
-candidates_examined: number, manufacturing_attempts: number, limited_by: LayoutLimit, verification: VerificationReport, };
+candidates_examined: number, manufacturing_attempts: number, limited_by: LayoutLimit,
+/**
+ * When placed copies exceed this machine's manufacturing working set:
+ * exactly which copies were dropped and the refusal that dropped them.
+ */
+manufacturing_refusal: string | null, verification: VerificationReport, };
 
 export type NativePath = { "kind": "unix_bytes", hex: string, } | { "kind": "windows_wide", units: Array<number>, };
 
@@ -1247,7 +1252,6 @@ export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 80 as const;
 export const REPLAY_SCHEMA_VERSION = 6 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
-export const MAX_NATIVE_STORAGE_BYTES = 4294967296 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;
 export const MAX_LOOP_POINTS = 40000 as const;
@@ -1286,6 +1290,7 @@ export const MAX_PLAN_COUNT = 4294967295 as const;
 export const MAX_PROCESS_REGIONS = 65536 as const;
 export const MAX_MACHINE_COMPONENTS = 64 as const;
 export const MAX_PROFILE_JSON_BYTES = 65536 as const;
+export const MAX_INTENT_JSON_BYTES = 4294967295 as const;
 export const MAX_MANUFACTURING_ERROR_BYTES = 2048 as const;
 export const MAX_MANUFACTURING_LABEL_BYTES = 256 as const;
 export const MESH_CARRIER_TOLERANCE_MM = 0.025 as const;

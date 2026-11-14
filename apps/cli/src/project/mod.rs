@@ -185,10 +185,10 @@ fn intent(args: &mut impl Iterator<Item = OsString>) -> Result<ManufacturingInte
     NativePath::from_os_str(&path)?;
     let mut bytes = Vec::new();
     File::open(PathBuf::from(path))?
-        .take(MAX_PROFILE_JSON_BYTES as u64 + 1)
+        .take(u64::from(MAX_INTENT_JSON_BYTES) + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
-        return Err("manufacturing intent exceeds the profile JSON byte limit".into());
+    if bytes.len() > MAX_INTENT_JSON_BYTES as usize {
+        return Err("manufacturing intent exceeds the u32 staged-transfer width".into());
     }
     // The service owns specification validation; this is only bounded inert decoding.
     Ok(serde_json::from_slice(&bytes)?)
@@ -3921,7 +3921,7 @@ mod tests {
     }
 
     #[test]
-    fn intent_json_is_bounded_before_child_spawn() {
+    fn intent_json_beyond_one_control_frame_is_admitted_for_staged_transfer() {
         let root = env::temp_dir().join(format!("spiling-intent-{}", SessionId::new().as_str()));
         std::fs::create_dir(&root).unwrap();
         let file = root.join("intent.json");
@@ -3943,7 +3943,7 @@ mod tests {
                 None,
                 None
             )
-            .is_err()
+            .is_ok()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

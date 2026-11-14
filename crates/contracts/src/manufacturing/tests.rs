@@ -2622,12 +2622,6 @@ fn resource_and_utf8_error_boundaries_are_enforced() {
         .is_err()
     );
     assert_eq!(
-        decode_intent(&vec![b' '; MAX_PROFILE_JSON_BYTES as usize + 1])
-            .unwrap_err()
-            .code,
-        ManufacturingErrorCode::ResourceLimit
-    );
-    assert_eq!(
         decode_bundle(&vec![b' '; MAX_MANUFACTURING_BUNDLE_BYTES as usize + 1])
             .unwrap_err()
             .code,

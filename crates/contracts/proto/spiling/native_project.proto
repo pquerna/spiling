@@ -64,6 +64,9 @@ service Projects {
 message ProjectRequest {
  string parent = 1;
  oneof command {
+  // The complete ProjectRequest encoding, staged through ByteStream when it
+  // does not fit one control frame. Other outer fields are empty.
+  StagedBlob staged = 32;
   AttachAnalysisResultRequest attach_analysis_result = 31;
   EditAnalysisRequest edit_analysis = 29;
   SelectPrintLayoutRequest select_print_layout = 27;
@@ -206,7 +209,7 @@ message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord im
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
 message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14; MaterialCollectionRecord materials = 15; ProjectHardwareCapture hardware=16; repeated ManufacturingOptionInfo manufacturing_options = 17; string layout_id = 18; repeated PrintLayoutInfo layouts = 19; AnalysisDocument analysis = 20;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
-message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4; LibraryRecipeTransfer recipe = 5; ProjectRecipePage recipes = 6; ManufacturingOption manufacturing_option = 7;}}
+message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2; ProjectFilamentPage filaments = 3; LibraryFilamentRevision filament = 4; LibraryRecipeTransfer recipe = 5; ProjectRecipePage recipes = 6; ManufacturingOption manufacturing_option = 7; StagedBlob staged = 8; /* complete ProjectReply encoding staged through ByteStream */}}
 message ImportAppearancePaletteRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath source = 4; }
 message CompareAppearanceRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
 message GetAppearanceReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }

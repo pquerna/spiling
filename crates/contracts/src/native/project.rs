@@ -699,6 +699,7 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::Staged(_) => return Err("staged project request was not resolved".into()),
             C::SelectPrintLayout(v) => Self::SelectPrintLayout {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -1195,6 +1196,7 @@ impl TryFrom<rpc::ProjectReply> for ProjectResponse {
     fn try_from(v: rpc::ProjectReply) -> Result<Self, String> {
         use rpc::project_reply::Response as R;
         Ok(match required(v.response, "project reply")? {
+            R::Staged(_) => return Err("staged project reply was not resolved".into()),
             R::ManufacturingOption(value) => Self::ManufacturingOption {
                 option: value.try_into()?,
             },

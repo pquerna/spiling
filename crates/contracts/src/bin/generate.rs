@@ -546,7 +546,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "MAX_ENGINE_ARTIFACT_BYTES",
             u64::from(MAX_ENGINE_ARTIFACT_BYTES),
         ),
-        ("MAX_NATIVE_STORAGE_BYTES", MAX_NATIVE_STORAGE_BYTES),
         (
             "MAX_GEOMETRY_CHUNK_BYTES",
             u64::from(MAX_GEOMETRY_CHUNK_BYTES),
@@ -639,6 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("MAX_PROCESS_REGIONS", MAX_PROCESS_REGIONS as u64),
         ("MAX_MACHINE_COMPONENTS", u64::from(MAX_MACHINE_COMPONENTS)),
         ("MAX_PROFILE_JSON_BYTES", u64::from(MAX_PROFILE_JSON_BYTES)),
+        ("MAX_INTENT_JSON_BYTES", u64::from(MAX_INTENT_JSON_BYTES)),
         (
             "MAX_MANUFACTURING_ERROR_BYTES",
             MAX_MANUFACTURING_ERROR_BYTES as u64,

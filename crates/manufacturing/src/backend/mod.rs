@@ -39,6 +39,10 @@ pub fn emit(
             "Bambu Lab firmware takes a .gcode.3mf delivery package, which is not yet supported; the plan is valid but no program is emitted",
         ));
     }
+    let reservations = routed.map_or_else(
+        || Ok(crate::routing::Reservations::default()),
+        crate::routing::Reservations::new,
+    )?;
     let recipe = &intent.recipe;
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
     let travel_feed = recipe.travel_speed_mm_s * 60.0;
@@ -92,7 +96,7 @@ pub fn emit(
         writeln!(program, "M218 T1 X{:.6} Y{:.6} Z0.000000\nT0 S1\nG28\nM420 S0\nG92 E0\nM190 R{:.6}\nM104 T0 S{:.6}\nM104 T1 S{:.6}",
             offset[0], offset[1], job.bed_temperature_c, job.tools[0].standby_temperature_c, job.tools[1].standby_temperature_c).map_err(limit)?;
         let home = project_xyz6_point_mm(job.home_position_mm)?;
-        crate::routing::check_motion(home, home, 0, built_top, intent, job)?;
+        crate::routing::check_motion(home, home, 0, built_top, intent, job, &reservations)?;
         position = Some(home);
     }
     // Highest emitted Z of a complete job: the park lifts above it.
@@ -187,7 +191,15 @@ pub fn emit(
                         from[1] + new[1] - old[1],
                         from[2],
                     ];
-                    crate::routing::check_motion(shifted, shifted, tool, built_top, intent, job)?;
+                    crate::routing::check_motion(
+                        shifted,
+                        shifted,
+                        tool,
+                        built_top,
+                        intent,
+                        job,
+                        &reservations,
+                    )?;
                     writeln!(program, "T{tool} S1").map_err(limit)?;
                     position = Some(shifted);
                     active_tool = tool;
@@ -305,6 +317,7 @@ pub fn emit(
                             built_top,
                             intent,
                             job,
+                            &reservations,
                         )?;
                     }
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
@@ -462,8 +475,24 @@ pub fn emit(
                 "final feeder retract feed exceeds actual command envelope",
             ));
         }
-        crate::routing::check_motion(last, lift, active_tool, built_top, intent, job)?;
-        crate::routing::check_motion(lift, park, active_tool, built_top, intent, job)?;
+        crate::routing::check_motion(
+            last,
+            lift,
+            active_tool,
+            built_top,
+            intent,
+            job,
+            &reservations,
+        )?;
+        crate::routing::check_motion(
+            lift,
+            park,
+            active_tool,
+            built_top,
+            intent,
+            job,
+            &reservations,
+        )?;
         for _ in 0..2 {
             count_event(&mut travels)?;
         }

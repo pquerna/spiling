@@ -62,8 +62,10 @@ pub fn native_result(
 ) -> Result<Option<JobResult>, String> {
     match &operation.result {
         Some(google::longrunning::operation::Result::Response(any)) => {
+            // Inline results fit one control frame; a client installs a
+            // larger staged result only after its exact artifact check.
             if any.type_url != NATIVE_RESULT_TYPE
-                || any.value.len() > crate::MAX_CONTROL_BYTES as usize
+                || any.value.len() as u64 > super::transfer::MAX_STAGED_BLOB_BYTES
             {
                 return Err("unexpected or oversized native result".into());
             }
@@ -110,6 +112,7 @@ pub fn native_artifact_limit(media: &str) -> Result<u64, String> {
             Ok(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
+        super::transfer::NATIVE_RESULT_MEDIA_TYPE => Ok(super::transfer::MAX_STAGED_BLOB_BYTES),
         crate::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE => Ok(u64::from(
             crate::manufacturing::MAX_MANUFACTURING_PROGRAM_BYTES,
         )),
@@ -262,9 +265,6 @@ pub fn native_operation_view(
         bytes = bytes
             .checked_add(output.size_bytes)
             .ok_or("native output overflow")?;
-    }
-    if bytes > crate::geometry::MAX_NATIVE_STORAGE_BYTES {
-        return Err("native output budget exceeded".into());
     }
     let (result, error) = match &operation.result {
         Some(google::longrunning::operation::Result::Error(error)) => {
@@ -645,6 +645,7 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
     fn try_from(v: rpc::NativeOperationResult) -> Result<Self, String> {
         use rpc::native_operation_result::Result as R;
         Ok(match required(v.result, "native result")? {
+            R::Staged(_) => return Err("staged native result was not resolved".into()),
             R::ManufacturingAlternativeEvaluated(value) => {
                 Self::ManufacturingAlternativeEvaluated {
                     evaluation: value.try_into()?,

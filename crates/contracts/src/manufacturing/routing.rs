@@ -289,9 +289,6 @@ impl OccurrenceMaterial {
     }
 }
 
-/// Explicit software admission ceiling; existing segment/byte/route gates remain independent.
-pub const MAX_FIXED_DUAL_OCCURRENCES: usize = 32;
-
 /// Eligible interior routing is separate from product identity and external skins.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -377,7 +374,6 @@ impl FixedDualJob {
     }
     pub fn has_bound_interior(&self) -> bool {
         !self.assignments.is_empty()
-            && self.assignments.len() <= MAX_FIXED_DUAL_OCCURRENCES
             && self.assignments.iter().any(|a| a.interior.is_some())
             && self.surface_constructions.is_empty()
             && self.functional_construction.is_none()
@@ -479,9 +475,9 @@ impl FixedDualJob {
                 ));
             }
         }
-        if self.assignments.is_empty() || self.assignments.len() > MAX_FIXED_DUAL_OCCURRENCES {
+        if self.assignments.is_empty() || self.assignments.len() > MAX_OCCURRENCES as usize {
             return Err(resource(
-                "fixed-dual job requires 1–32 explicitly assigned occurrences",
+                "fixed-dual job requires explicitly assigned occurrences within the u32 occurrence width",
             ));
         }
         if self.assignments.len() > 2
@@ -496,14 +492,15 @@ impl FixedDualJob {
                 "larger fixed-dual plates require uniform separated occurrences without material constructions",
             ));
         }
-        for (index, assignment) in self.assignments.iter().enumerate() {
-            if self.assignments[..index]
-                .iter()
-                .any(|a| a.occurrence_id == assignment.occurrence_id)
-            {
-                return Err(invalid("each routed occurrence must have one assignment"));
-            }
+        let mut ids: Vec<OccurrenceId> = Vec::new();
+        ids.try_reserve_exact(self.assignments.len())
+            .map_err(|_| resource("fixed-dual assignment identity allocation failed"))?;
+        ids.extend(self.assignments.iter().map(|a| a.occurrence_id));
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("each routed occurrence must have one assignment"));
         }
+        drop(ids);
         for assignment in &self.assignments {
             assignment.material.validate_for_z_bounds([
                 assignment.work_envelope_mm.min[2],
@@ -597,16 +594,26 @@ impl FixedDualJob {
                 "the reference route requires a declared common polymer family unless all occurrences are uniform without construction or a complete functional construction explicitly requests mechanical capture",
             ));
         }
-        for (index, assignment) in self.assignments.iter().enumerate() {
-            let a = &assignment.work_envelope_mm;
-            for other in &self.assignments[..index] {
-                let b = &other.work_envelope_mm;
-                if !(0..2).any(|axis| a.max[axis] < b.min[axis] || b.max[axis] < a.min[axis]) {
-                    return Err(invalid(
-                        "routed occurrence work envelopes must be strictly separated in XY",
-                    ));
-                }
+        // Sweep by minimum X: a pair that is not strictly separated in X is
+        // still open when the later box starts, so every such pair is tested.
+        let mut order: Vec<&AabbMm> = Vec::new();
+        order
+            .try_reserve_exact(self.assignments.len())
+            .map_err(|_| resource("fixed-dual reservation sweep allocation failed"))?;
+        order.extend(self.assignments.iter().map(|a| &a.work_envelope_mm));
+        order.sort_by(|a, b| a.min[0].total_cmp(&b.min[0]));
+        let mut open: Vec<&AabbMm> = Vec::new();
+        for a in order {
+            open.retain(|b| b.max[0] >= a.min[0]);
+            if open
+                .iter()
+                .any(|b| a.max[1] >= b.min[1] && b.max[1] >= a.min[1])
+            {
+                return Err(invalid(
+                    "routed occurrence work envelopes must be strictly separated in XY",
+                ));
             }
+            open.push(a);
         }
         Ok(())
     }
@@ -947,7 +954,7 @@ impl FixedDualVerification {
 fn assignments<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<OccurrenceMaterialAssignment>, D::Error> {
-    bounded_vec::<D, _, MAX_FIXED_DUAL_OCCURRENCES>(d)
+    bounded_vec::<D, _, { MAX_OCCURRENCES as usize }>(d)
 }
 
 #[cfg(test)]
@@ -1660,7 +1667,7 @@ mod mixed_width_tests {
 mod plate_count_tests {
     use super::*;
     #[test]
-    fn plate_count_bound_is_shared_by_json_proto_and_domain_admission() {
+    fn large_plates_admit_every_separated_occurrence_through_json_proto_and_domain() {
         let mut intent = decode_intent(include_bytes!(
             "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"
         ))
@@ -1669,35 +1676,32 @@ mod plate_count_tests {
             unreachable!()
         };
         let template = job.assignments[0].clone();
-        job.assignments = (0..32)
+        // Far more than the former 32-occurrence ceiling: only XY separation,
+        // identity and the u32 occurrence width bound a plate.
+        // A 25 x 26 grid of 4 mm reservations below the waste lines at Y 160.
+        job.assignments = (0..650)
             .map(|i| {
-                let x = 20.0 + (i % 4) as f64 * 50.0;
-                let y = 20.0 + (i / 4) as f64 * 25.0;
+                let x = 10.0 + (i % 25) as f64 * 8.0;
+                let y = 10.0 + (i / 25) as f64 * 5.5;
                 OccurrenceMaterialAssignment {
                     occurrence_id: OccurrenceId::new(i + 1).unwrap(),
-                    work_envelope_mm: AabbMm::new(
-                        [x - 2.0, y - 2.0, 0.0],
-                        [x + 22.0, y + 12.0, 8.01],
-                    )
-                    .unwrap(),
+                    work_envelope_mm: AabbMm::new([x, y, 0.0], [x + 4.0, y + 4.0, 8.01]).unwrap(),
                     ..template.clone()
                 }
             })
             .collect();
         job.validate_declaration().unwrap();
         let wire: crate::rpc::FixedDualJob = job.clone().try_into().unwrap();
-        assert_eq!(FixedDualJob::try_from(wire.clone()).unwrap(), *job);
-        let mut over = wire;
-        over.assignments.push(over.assignments[0].clone());
-        assert!(FixedDualJob::try_from(over).is_err());
+        assert_eq!(FixedDualJob::try_from(wire).unwrap(), *job);
+        let mut touching = job.clone();
+        touching.assignments[649].work_envelope_mm.min[0] -= 4.0;
+        assert!(touching.validate_declaration().is_err());
+        let mut duplicate = job.clone();
+        duplicate.assignments[649].occurrence_id = duplicate.assignments[0].occurrence_id;
+        assert!(duplicate.validate_declaration().is_err());
         let bytes = serde_json::to_vec(&intent).unwrap();
+        assert!(bytes.len() > crate::MAX_CONTROL_BYTES as usize);
         assert_eq!(decode_intent(&bytes).unwrap(), intent);
-        let mut json = serde_json::to_value(&intent).unwrap();
-        let rows = json["printer"]["workflow"]["job"]["assignments"]
-            .as_array_mut()
-            .unwrap();
-        rows.push(rows[0].clone());
-        assert!(decode_intent(&serde_json::to_vec(&json).unwrap()).is_err());
     }
 }
 

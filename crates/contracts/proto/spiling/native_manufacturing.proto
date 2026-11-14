@@ -41,6 +41,9 @@ message ManufacturingRequest {
   string layout_id = 6;
   string parent = 1; // sessions/{session_uuid}
   oneof command {
+    // The complete ManufacturingRequest encoding, staged through ByteStream
+    // when it does not fit one control frame. Other outer fields are empty.
+    StagedBlob staged = 8;
     EditInteriorPolicyRequest edit_interior_policy = 7;
     GetManufacturingRequest get = 2;
     SetManufacturingIntentRequest set_intent = 3;
@@ -58,6 +61,7 @@ message EvaluateManufacturingAlternativeRequest {
   oneof construction {
     ManufacturingIntent intent = 5;
     InteriorPolicyOpportunity interior_policy = 7;
+    StagedBlob intent_blob = 8; // staged ManufacturingIntent
   }
 }
 enum ManufacturingInputGroup {
@@ -163,6 +167,7 @@ message ManufacturingReply {
   oneof result {
     ManufacturingStatus status = 1;
     MaterialReviewReport material_review = 2;
+    StagedBlob staged = 3; // complete ManufacturingReply encoding staged through ByteStream
   }
 }
 message ManufacturingStatus {

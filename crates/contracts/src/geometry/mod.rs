@@ -48,9 +48,6 @@ pub const MAX_DISPLAY_VERTICES: u32 = MAX_SCENE_MESH_BYTES / 24;
 pub const MAX_DISPLAY_TRIANGLES: u32 = MAX_SCENE_MESH_BYTES / 16;
 pub const MAX_SECTION_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_ENGINE_ARTIFACT_BYTES: u32 = 128 * 1024 * 1024;
-/// Disk-backed operation artifact store; one operation's outputs fit within it.
-/// Large results stream in and out; this is not a live-memory allowance.
-pub const MAX_NATIVE_STORAGE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_GEOMETRY_CHUNK_BYTES: u32 = 1024 * 1024;
 pub const MAX_DISPLAY_BUFFER_BYTES: u32 = 128 * 1024 * 1024;
 pub const MAX_LOOP_POINTS: u32 = 40_000;

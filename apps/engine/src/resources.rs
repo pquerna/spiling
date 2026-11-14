@@ -141,6 +141,12 @@ pub fn source_growth(retained: usize) -> Result<usize, GeometryError> {
     Ok(growth)
 }
 
+/// Fresh live bytes one staged ByteStream transfer may admit. Earlier staged
+/// transfers are already resident in the OS observation.
+pub fn transfer_growth() -> Result<usize, GeometryError> {
+    Ok(Headroom::current()?.growth(0, None))
+}
+
 /// Live working set one manufacturing operation (compile, alternative,
 /// preflight, inspection) may admit, observed fresh when the job starts.
 /// Inputs, sources and previous artifacts are already resident in the OS

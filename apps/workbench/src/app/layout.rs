@@ -207,11 +207,16 @@ impl Workbench {
             if !filled && p.total_placed() < p.requested_count {
                 ui.label(match p.limited_by {
                     LayoutLimit::BuildArea => "No further copy fits the build area",
-                    LayoutLimit::ManufacturingBudget => "Manufacturing work limit reached",
+                    LayoutLimit::ManufacturingBudget => {
+                        "This machine's manufacturing working set was reached"
+                    }
                     LayoutLimit::RequestedQuantity => "Quantity limit reached",
                     LayoutLimit::PlateBudget => "Project plate limit reached",
-                    LayoutLimit::OccurrenceBudget => "Part limit reached",
+                    LayoutLimit::OccurrenceBudget => "Occurrence identity width reached",
                 });
+            }
+            if let Some(reason) = &p.manufacturing_refusal {
+                ui.label(reason);
             }
             ui.weak(format!(
                 "{} layers · emitted program verified",

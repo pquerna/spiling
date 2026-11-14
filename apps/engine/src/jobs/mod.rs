@@ -163,6 +163,11 @@ pub struct Jobs {
     database_path: PathBuf,
 }
 impl Jobs {
+    fn store_dir(&self) -> PathBuf {
+        self.database_path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
+    }
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(path)?;
         let lock = std::fs::OpenOptions::new()

@@ -76,6 +76,9 @@ pub fn validate_layout_placements(placements: &[LayoutPlacement]) -> Result<(), 
     Ok(())
 }
 
+/// Width of the reported manufacturing refusal text (a message, not a limit on parts).
+pub const MAX_LAYOUT_REFUSAL_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutLimit {
@@ -104,7 +107,7 @@ impl AdditionalPlateProposal {
         if self.placements.iter().any(|p| !p.copy)
             || self.placements.len() != self.footprints_mm.len()
             || !self.verification.verified
-            || !(1..=4).contains(&self.manufacturing_attempts)
+            || self.manufacturing_attempts == 0
         {
             return Err(GeometryError::new(
                 GeometryErrorCode::InvalidGeometry,
@@ -138,6 +141,10 @@ pub struct LayoutProposal {
     pub candidates_examined: u32,
     pub manufacturing_attempts: u32,
     pub limited_by: LayoutLimit,
+    /// When placed copies exceed this machine's manufacturing working set:
+    /// exactly which copies were dropped and the refusal that dropped them.
+    #[serde(deserialize_with = "crate::appearance::required_option")]
+    pub manufacturing_refusal: Option<String>,
     pub verification: crate::manufacturing::VerificationReport,
 }
 impl LayoutProposal {
@@ -203,7 +210,13 @@ impl LayoutProposal {
             || self.placed_count == 0
             || self.total_placed() > self.requested_count
             || self.footprints_mm.len() != self.placed_count as usize
-            || !(1..=4).contains(&self.manufacturing_attempts)
+            || self.manufacturing_attempts == 0
+            || (self.limited_by == LayoutLimit::ManufacturingBudget)
+                != self.manufacturing_refusal.is_some()
+            || self
+                .manufacturing_refusal
+                .as_ref()
+                .is_some_and(|reason| reason.is_empty() || reason.len() > MAX_LAYOUT_REFUSAL_BYTES)
         {
             return Err(GeometryError::new(
                 GeometryErrorCode::InvalidGeometry,

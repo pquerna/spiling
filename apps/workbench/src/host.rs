@@ -445,15 +445,14 @@ impl Host {
     pub fn manufacturing(&self, command: ManufacturingCommand) -> Result<(), String> {
         // Validate variable-sized controls before bounded host admission; the engine
         // independently validates them and owns mutation authority.
+        // An intent larger than one control frame is staged through ByteStream
+        // by the engine client, so only the rest of the command is frame-bound.
+        let mut staged_bytes = 0usize;
         if let ManufacturingCommand::SetIntent { intent, .. }
         | ManufacturingCommand::EvaluateAlternative { intent, .. } = &command
         {
             intent.validate().map_err(|e| e.to_string())?;
-            if serde_json::to_vec(intent).map_err(|e| e.to_string())?.len()
-                > spiling_contracts::manufacturing::MAX_PROFILE_JSON_BYTES as usize
-            {
-                return Err("Manufacturing intent exceeds the control limit".into());
-            }
+            staged_bytes = serde_json::to_vec(intent).map_err(|e| e.to_string())?.len();
         }
         if let ManufacturingCommand::ApplyMaterialProfile { selection, .. } = &command {
             selection.validate().map_err(|e| e.to_string())?;
@@ -464,18 +463,27 @@ impl Host {
         if serde_json::to_vec(&command)
             .map_err(|e| e.to_string())?
             .len()
-            > spiling_contracts::MAX_CONTROL_BYTES as usize
+            > (spiling_contracts::MAX_CONTROL_BYTES as usize).saturating_add(staged_bytes)
         {
             return Err("Manufacturing command exceeds the host control limit".into());
         }
         self.send(Request::Manufacturing(Box::new(command)))
     }
     pub fn project(&self, command: ProjectCommand) -> Result<(), String> {
-        // Control slots have an additional byte bound; domain validity remains native authority.
+        // Control slots have an additional byte bound; domain validity remains
+        // native authority. A retained option's intent stages through ByteStream.
+        let staged_bytes = match &command {
+            ProjectCommand::RetainManufacturingOption { option, .. } => {
+                serde_json::to_vec(&option.intent)
+                    .map_err(|e| e.to_string())?
+                    .len()
+            }
+            _ => 0,
+        };
         if serde_json::to_vec(&command)
             .map_err(|e| e.to_string())?
             .len()
-            > 65536
+            > (spiling_contracts::MAX_CONTROL_BYTES as usize).saturating_add(staged_bytes)
         {
             return Err("Project edit exceeds the control limit".into());
         }

@@ -220,6 +220,73 @@ impl EngineRpc {
                 .into_inner(),
         )
     }
+    /// Upload content too large for one control frame through ByteStream and
+    /// return the reference the request carries instead.
+    pub async fn upload_staged(&self, bytes: Vec<u8>) -> Result<StagedBlob, ClientError> {
+        use spiling_contracts::native::transfer;
+        let blob = transfer::staged_blob(&bytes);
+        let name = transfer::upload_resource_name(&Uuid::new_v4(), &blob)
+            .map_err(ClientError::InvalidRequest)?;
+        let bytes: std::sync::Arc<[u8]> = bytes.into();
+        let fragments = bytes.len().div_ceil(transfer::STAGED_FRAGMENT_BYTES);
+        let requests = tokio_stream::iter((0..fragments).map(move |index| {
+            let start = index * transfer::STAGED_FRAGMENT_BYTES;
+            let end = (start + transfer::STAGED_FRAGMENT_BYTES).min(bytes.len());
+            WriteRequest {
+                resource_name: if index == 0 {
+                    name.clone()
+                } else {
+                    String::new()
+                },
+                write_offset: start as i64,
+                finish_write: index + 1 == fragments,
+                data: bytes[start..end].to_vec(),
+            }
+        }));
+        let response = byte_stream_client::ByteStreamClient::new(self.bulk_channel.clone())
+            .max_encoding_message_size(MAX_CONTROL_BYTES as usize)
+            .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+            .write(self.request(requests))
+            .await?
+            .into_inner();
+        if u64::try_from(response.committed_size).ok() != Some(blob.size_bytes) {
+            return Err(ClientError::Protocol(
+                "staged upload committed a different size".into(),
+            ));
+        }
+        Ok(blob)
+    }
+    /// Read one staged download and check its exact size and SHA-256.
+    pub async fn fetch_staged(&self, blob: &StagedBlob) -> Result<Vec<u8>, ClientError> {
+        use spiling_contracts::native::transfer;
+        let name = transfer::blob_resource_name(blob).map_err(ClientError::Protocol)?;
+        let size = usize::try_from(blob.size_bytes)
+            .map_err(|_| ClientError::Protocol("staged download exceeds address width".into()))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_| ClientError::Protocol("staged download allocation failed".into()))?;
+        let mut stream = self
+            .read_artifact_range(ReadRequest {
+                resource_name: name,
+                read_offset: 0,
+                read_limit: 0,
+            })
+            .await?;
+        while let Some(fragment) = stream.message().await? {
+            if fragment.data.is_empty()
+                || fragment.data.len() > transfer::STAGED_FRAGMENT_BYTES
+                || bytes.len() + fragment.data.len() > size
+            {
+                return Err(ClientError::Protocol(
+                    "staged download fragment range invalid".into(),
+                ));
+            }
+            bytes.extend_from_slice(&fragment.data);
+        }
+        transfer::verify_staged_bytes(blob, &bytes).map_err(ClientError::Protocol)?;
+        Ok(bytes)
+    }
     pub async fn read_artifact(&self, artifact: &Artifact) -> Result<Vec<u8>, ClientError> {
         self.read_bounded_artifact(
             &artifact.name,
@@ -248,7 +315,7 @@ impl EngineRpc {
 
     // Packed-format validators own hashing; keep transfer sizing separate so a
     // checked replay is not hashed once here and again by its packed validator.
-    async fn read_sized_artifact(
+    pub(crate) async fn read_sized_artifact(
         &self,
         name: &str,
         size_bytes: u64,

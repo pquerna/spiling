@@ -34,6 +34,15 @@ message DomainErrorDetail {
   ImportDiagnostic import_diagnostic = 5;
   oneof error { DomainError geometry = 1; DomainError project = 2; DomainError manufacturing = 3; DomainError library = 4; }
 }
+// Content too large for one control frame, staged through google.bytestream:
+// uploads write `uploads/{uuid}/blobs/{sha256}/{size_bytes}`, downloads read
+// `blobs/{sha256}/{size_bytes}`. The bytes are the referenced message's
+// protobuf encoding; the receiver checks size and SHA-256 before decoding.
+message StagedBlob {
+  string sha256 = 1;
+  uint64 size_bytes = 2;
+}
+
 message Artifact {
   string name = 1;
   uint64 size_bytes = 2;

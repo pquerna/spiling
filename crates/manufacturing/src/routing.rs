@@ -16,6 +16,49 @@ fn invalid(message: &str) -> ManufacturingError {
 fn overlaps(a: AabbMm, b: AabbMm) -> bool {
     (0..3).all(|axis| a.min[axis] <= b.max[axis] && b.min[axis] <= a.max[axis])
 }
+
+/// Source reservations ordered by minimum X so a per-motion clearance query
+/// visits only reservations whose X interval can meet the query, for any
+/// number of assigned occurrences. Every candidate still takes the exact test.
+#[derive(Default)]
+pub(crate) struct Reservations {
+    by_min_x: Vec<AabbMm>,
+    max_width: f64,
+}
+
+impl Reservations {
+    pub(crate) fn new(job: &FixedDualJob) -> Result<Self, ManufacturingError> {
+        let mut by_min_x = Vec::new();
+        by_min_x
+            .try_reserve_exact(job.assignments.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "reservation index allocation failed",
+                )
+            })?;
+        by_min_x.extend(job.assignments.iter().map(|a| a.work_envelope_mm));
+        by_min_x.sort_by(|a, b| a.min[0].total_cmp(&b.min[0]));
+        let max_width = by_min_x.iter().fold(0.0f64, |width, b| {
+            width.max((b.max[0] - b.min[0]).next_up())
+        });
+        Ok(Self {
+            by_min_x,
+            max_width,
+        })
+    }
+
+    /// True when `test` holds for any reservation whose X interval meets `[low, high]`.
+    fn any_meeting_x(&self, low: f64, high: f64, mut test: impl FnMut(AabbMm) -> bool) -> bool {
+        let reach = (low - self.max_width).next_down();
+        let start = self.by_min_x.partition_point(|b| b.min[0] < reach);
+        self.by_min_x[start..]
+            .iter()
+            .take_while(|b| b.min[0] <= high)
+            .any(|b| b.max[0] >= low && test(*b))
+    }
+}
+
 fn swept(a: [f64; 3], b: [f64; 3], min: [f64; 3], max: [f64; 3]) -> AabbMm {
     AabbMm {
         min: std::array::from_fn(|axis| (a[axis].min(b[axis]) + min[axis]).next_down()),
@@ -115,12 +158,11 @@ pub(crate) fn validate_plan(
             "complete repeated waste bead must fit within the declared bed footprint",
         ));
     }
+    let reservations = Reservations::new(job)?;
     if overlaps(waste[0], waste[1])
-        || waste.iter().any(|w| {
-            job.assignments
-                .iter()
-                .any(|a| overlaps(*w, a.work_envelope_mm))
-        })
+        || waste
+            .iter()
+            .any(|w| reservations.any_meeting_x(w.min[0], w.max[0], |a| overlaps(*w, a)))
     {
         return Err(invalid(
             "full repeated waste beads must be disjoint from both source reservations and each other",
@@ -218,6 +260,7 @@ pub(crate) fn check_motion(
     built_top: f64,
     intent: &ManufacturingIntent,
     job: &FixedDualJob,
+    reservations: &Reservations,
 ) -> Result<(), ManufacturingError> {
     let offset = job.tools[usize::from(tool)].offset_xy_mm;
     let carriage = |point: [f64; 3]| [point[0] - offset[0], point[1] - offset[1], point[2]];
@@ -271,18 +314,24 @@ pub(crate) fn check_motion(
         ],
     );
     let bed = intent.printer.build_envelope.min[2];
-    for mut obstacle in job.assignments.iter().map(|a| a.work_envelope_mm).chain([
+    let blocked = |mut obstacle: AabbMm| {
+        obstacle.max[2] = obstacle.max[2].min(built_top.next_up());
+        obstacle.min[2] <= obstacle.max[2] && (overlaps(tip, obstacle) || overlaps(body, obstacle))
+    };
+    let waste = [
         waste_bounds(job, 0, job.tools[0].waste_bead_width_mm, built_top, bed)?,
         waste_bounds(job, 1, job.tools[1].waste_bead_width_mm, built_top, bed)?,
-    ]) {
-        obstacle.max[2] = obstacle.max[2].min(built_top.next_up());
-        if obstacle.min[2] <= obstacle.max[2]
-            && (overlaps(tip, obstacle) || overlaps(body, obstacle))
-        {
-            return Err(invalid(
-                "inactive coplanar nozzle or carriage body cannot clear deposited source/waste reservation",
-            ));
-        }
+    ];
+    if waste.into_iter().any(blocked)
+        || reservations.any_meeting_x(
+            tip.min[0].min(body.min[0]),
+            tip.max[0].max(body.max[0]),
+            blocked,
+        )
+    {
+        return Err(invalid(
+            "inactive coplanar nozzle or carriage body cannot clear deposited source/waste reservation",
+        ));
     }
     // Fixtures have no admitted route-specific swept-body contract yet.
     if intent

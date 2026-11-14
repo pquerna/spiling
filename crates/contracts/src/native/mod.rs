@@ -26,6 +26,7 @@ mod replay;
 pub mod stock;
 mod storage;
 mod surface_inspection;
+pub mod transfer;
 pub use error::*;
 pub use geometry::*;
 pub use manufacturing::*;

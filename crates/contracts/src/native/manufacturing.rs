@@ -173,6 +173,7 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
                         .try_into()?,
                 })
             }
+            Command::Staged(_) => Err("staged manufacturing request was not resolved".into()),
             Command::SetIntent(request) => Ok(Self::SetIntent {
                 layout_id,
                 session_id,
@@ -270,6 +271,9 @@ impl TryFrom<rpc::EvaluateManufacturingAlternativeRequest> for ManufacturingComm
                     base_revision,
                     opportunity: opportunity.try_into()?,
                 })
+            }
+            Construction::IntentBlob(_) => {
+                Err("staged manufacturing intent was not resolved".into())
             }
             _ => Err("scoped policy evaluation must not supply a separate intent context".into()),
         }
@@ -1821,6 +1825,9 @@ impl TryFrom<rpc::ManufacturingReply> for ManufacturingResponse {
                 });
             }
             rpc::manufacturing_reply::Result::Status(status) => status,
+            rpc::manufacturing_reply::Result::Staged(_) => {
+                return Err("staged manufacturing reply was not resolved".into());
+            }
         };
         let artifact: Option<ManufacturingArtifactRecord> =
             status.artifact.map(TryInto::try_into).transpose()?;
@@ -3075,7 +3082,7 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
             .try_into()
             .map_err(|_| "fixed-dual job requires exactly two tools")?;
         if value.assignments.is_empty()
-            || value.assignments.len() > MAX_FIXED_DUAL_OCCURRENCES
+            || value.assignments.len() > crate::geometry::MAX_OCCURRENCES as usize
             || value.surface_constructions.len() > 16
         {
             return Err("fixed-dual assignment/construction limits exceeded".into());

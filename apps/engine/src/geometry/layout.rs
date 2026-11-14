@@ -458,21 +458,12 @@ fn prepare_single(
         .template
         .into_iter()
         .flat_map(|id| std::iter::repeat_n((id, true), (r.request.quantity - 1) as usize));
-    let route_count_limit =
-        if matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. }) {
-            MAX_FIXED_DUAL_OCCURRENCES
-        } else {
-            usize::MAX
-        };
     let mut work = 0;
     let mut occupied = Occupied::new(&occupied);
     // Identical shapes never fit lower than the previous one did: reservations
     // only grow, so its row bounds the dense search for the next copy.
     let mut previous: Option<([f64; 2], f64)> = None;
     for (index, (id, copy)) in sources.into_iter().chain(copies).enumerate() {
-        if footprints.len() >= route_count_limit {
-            break;
-        }
         progress(format!(
             "layout_placing_{}_of_{desired}",
             index + r.request.pinned.len() + 1
@@ -558,77 +549,115 @@ fn prepare_single(
     }
     let mut limited_by = if footprints.len() as u32 == desired {
         LayoutLimit::RequestedQuantity
-    } else if footprints.len() >= route_count_limit {
-        LayoutLimit::OccurrenceBudget
     } else {
         // The search decided every candidate position: the rest do not fit.
         LayoutLimit::BuildArea
     };
-    let mut manufacturing_attempts = 0;
-    let bundle = loop {
+    let pins = r.request.pinned.len();
+    // The first `copies` placed copies (in placement order) with every original.
+    let subset = |placements: &[LayoutPlacement], footprints: &[AabbMm], copies: usize| {
+        let mut kept_footprints = footprints[..pins].to_vec();
+        let mut kept_placements = vec![];
+        let mut seen = 0;
+        for (p, b) in placements.iter().zip(&footprints[pins..]) {
+            if !p.copy || seen < copies {
+                kept_placements.push(p.clone());
+                kept_footprints.push(*b);
+            }
+            if p.copy {
+                seen += 1;
+            }
+        }
+        (kept_placements, kept_footprints)
+    };
+    let stage = |placements: &[LayoutPlacement], r: &mut Request| -> Result<(), JobError> {
+        let trial = r.draft.preview(placements)?;
+        r.capture.occurrences = trial.occurrences.values().cloned().collect();
+        r.capture.intent = trial
+            .manufacturing_intent
+            .clone()
+            .ok_or_else(|| fail("Layout trial lost captured manufacturing intent"))?;
+        let (surface, process) = trial.scoped_documents();
+        r.capture
+            .surface_images
+            .retain(|hash, _| surface.images.iter().any(|r| &r.image_hash == hash));
+        r.capture.surface_overlays = Arc::new(surface);
+        r.capture.process_document = Arc::new(process);
+        Ok(())
+    };
+    let mut manufacturing_attempts = 0u32;
+    let mut compile = |placements: &[LayoutPlacement], r: &mut Request| -> Result<_, JobError> {
         manufacturing_attempts += 1;
         progress(format!(
             "layout_verifying_{}_parts_attempt_{manufacturing_attempts}",
-            footprints.len()
+            placements.len() + pins
         ));
-        let attempt = (|| -> Result<_, JobError> {
-            let trial = r.draft.preview(&placements)?;
-            r.capture.occurrences = trial.occurrences.values().cloned().collect();
-            r.capture.intent = trial
-                .manufacturing_intent
-                .clone()
-                .ok_or_else(|| fail("Layout trial lost captured manufacturing intent"))?;
-            let (surface, process) = trial.scoped_documents();
-            r.capture
-                .surface_images
-                .retain(|hash, _| surface.images.iter().any(|r| &r.image_hash == hash));
-            r.capture.surface_overlays = Arc::new(surface);
-            r.capture.process_document = Arc::new(process);
-            Ok(spiling_manufacturing::compile(
-                input(
-                    &r.capture,
-                    definitions,
-                    crate::resources::manufacturing_working_set()?,
-                ),
-                cancel,
-            )?)
-        })();
-        match attempt {
-            Ok(bundle) => break bundle,
-            Err(error) => {
-                let resource = matches!(&error,JobError::Manufacturing { error } if error.code == ManufacturingErrorCode::ResourceLimit)
-                    || matches!(&error,JobError::Project { error } if error.code == spiling_contracts::project::ProjectErrorCode::ResourceLimit);
-                let copies = placements.iter().filter(|p| p.copy).count();
-                if !resource || copies == 0 || manufacturing_attempts == 4 {
-                    return Err(error);
-                }
-                // Preserve every existing occurrence. A bounded best-found result may
-                // reduce only requested new copies when full manufacturing exhausts work.
-                let keep = if manufacturing_attempts == 3 {
-                    0
-                } else {
-                    copies / 2
-                };
-                let mut seen = 0;
-                let pins = r.request.pinned.len();
-                let mut kept_footprints = footprints[..pins].to_vec();
-                let mut kept_placements = vec![];
-                for (p, b) in placements
-                    .into_iter()
-                    .zip(footprints.into_iter().skip(pins))
-                {
-                    if !p.copy || seen < keep {
-                        kept_placements.push(p.clone());
-                        kept_footprints.push(b);
-                    }
-                    if p.copy {
-                        seen += 1;
-                    }
-                }
-                placements = kept_placements;
-                footprints = kept_footprints;
-                limited_by = LayoutLimit::ManufacturingBudget;
+        stage(placements, r)?;
+        Ok(spiling_manufacturing::compile(
+            input(
+                &r.capture,
+                definitions,
+                crate::resources::manufacturing_working_set()?,
+            ),
+            cancel,
+        )?)
+    };
+    let resource_refusal = |error: &JobError| {
+        matches!(error, JobError::Manufacturing { error } if error.code == ManufacturingErrorCode::ResourceLimit)
+            || matches!(error, JobError::Project { error } if error.code == spiling_contracts::project::ProjectErrorCode::ResourceLimit)
+    };
+    let mut manufacturing_refusal = None;
+    let bundle = match compile(&placements, &mut r) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            let copies = placements.iter().filter(|p| p.copy).count();
+            // A plate of copies only (an additional plate) keeps at least one.
+            let floor = usize::from(placements.len() == copies && pins == 0);
+            if !resource_refusal(&error) || copies <= floor {
+                return Err(error);
             }
+            // Exact boundary, never a blind cutback: `kept` copies compile and
+            // `refused` copies are refused by this machine's working set. Fewer
+            // placed copies never need more manufacturing resources, so this
+            // keeps the most copies a full compile admits.
+            let mut refused = (copies, error);
+            let (floor_placements, _) = subset(&placements, &footprints, floor);
+            let mut kept = (floor, compile(&floor_placements, &mut r)?);
+            while refused.0 - kept.0 > 1 {
+                super::check_cancel(cancel)?;
+                let trial = kept.0 + (refused.0 - kept.0) / 2;
+                let (trial_placements, _) = subset(&placements, &footprints, trial);
+                match compile(&trial_placements, &mut r) {
+                    Ok(bundle) => kept = (trial, bundle),
+                    Err(error) if resource_refusal(&error) => refused = (trial, error),
+                    Err(error) => return Err(error),
+                }
+            }
+            let (kept_copies, bundle) = kept;
+            let (kept_placements, kept_footprints) = subset(&placements, &footprints, kept_copies);
+            stage(&kept_placements, &mut r)?;
+            let reason = match &refused.1 {
+                JobError::Manufacturing { error } => error.message.clone(),
+                JobError::Project { error } => error.message.clone(),
+                JobError::Geometry { error } => error.message.clone(),
+            };
+            let mut reason = reason;
+            if reason.len() > MAX_LAYOUT_REFUSAL_BYTES / 2 {
+                let mut end = MAX_LAYOUT_REFUSAL_BYTES / 2;
+                while !reason.is_char_boundary(end) {
+                    end -= 1;
+                }
+                reason.truncate(end);
+            }
+            manufacturing_refusal = Some(format!(
+                "copies {} to {copies} were dropped: {kept_copies} of {copies} placed copies compile within this machine's manufacturing working set, and {} copies are refused: {reason}",
+                kept_copies + 1,
+                refused.0,
+            ));
+            placements = kept_placements;
+            footprints = kept_footprints;
+            limited_by = LayoutLimit::ManufacturingBudget;
+            bundle
         }
     };
     // Every whole actual nominal bead must remain in one disjoint construction
@@ -680,6 +709,7 @@ fn prepare_single(
         candidates_examined: work,
         manufacturing_attempts,
         limited_by,
+        manufacturing_refusal,
         verification: bundle.bundle.verification,
     };
     proposal.validate()?;
@@ -803,6 +833,11 @@ pub(super) fn prepare(
     } else {
         result.limited_by
     };
+    if result.limited_by != LayoutLimit::ManufacturingBudget {
+        // Every copy the first plate refused was placed elsewhere or the
+        // final limit names the real shortfall.
+        result.manufacturing_refusal = None;
+    }
     result.id = SourceHash::from_bytes(
         &serde_json::to_vec(&(&result.id, &result.request, &result.additional_plates))
             .map_err(|_| fail("Layout identity encoding failed"))?,

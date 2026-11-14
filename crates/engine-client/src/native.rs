@@ -68,6 +68,7 @@ pub struct NativeOperationWatch {
     name: String,
     stream: tonic::Streaming<spiling_contracts::google::longrunning::Operation>,
     terminal: bool,
+    rpc: EngineRpc,
 }
 impl NativeOperationWatch {
     pub fn name(&self) -> &str {
@@ -94,6 +95,7 @@ impl NativeOperationWatch {
                 "native operation watch name mismatch".into(),
             ));
         }
+        let operation = self.rpc.resolve_operation(operation).await?;
         let view = native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
         self.terminal = view.done;
         Ok(view)
@@ -101,6 +103,53 @@ impl NativeOperationWatch {
 }
 
 impl EngineRpc {
+    /// Replace a terminal result published as a staged artifact with its
+    /// checked complete content before the operation is interpreted.
+    async fn resolve_operation(
+        &self,
+        mut operation: spiling_contracts::google::longrunning::Operation,
+    ) -> Result<spiling_contracts::google::longrunning::Operation, ClientError> {
+        let Some(artifact) =
+            native::transfer::staged_native_result(&operation).map_err(ClientError::Protocol)?
+        else {
+            return Ok(operation);
+        };
+        let bytes = self
+            .read_sized_artifact(
+                &artifact.name,
+                artifact.size_bytes,
+                native::transfer::MAX_STAGED_BLOB_BYTES,
+            )
+            .await?;
+        native::transfer::install_native_result(&mut operation, &artifact, bytes)
+            .map_err(ClientError::Protocol)?;
+        Ok(operation)
+    }
+    /// Stage a complete request through ByteStream when it would not fit one
+    /// control frame; small requests travel inline.
+    async fn stage_request<M: native::transfer::StagedMessage>(
+        &self,
+        message: M,
+    ) -> Result<M, ClientError> {
+        if !native::transfer::exceeds_control_frame(message.encoded_len()) {
+            return Ok(message);
+        }
+        let bytes = message.encode_to_vec();
+        drop(message);
+        Ok(M::from_staged(self.upload_staged(bytes).await?))
+    }
+    /// Replace a staged reply with its checked complete downloaded message.
+    async fn resolve_reply<M: native::transfer::StagedMessage>(
+        &self,
+        message: M,
+    ) -> Result<M, ClientError> {
+        let Some(blob) = message.staged().cloned() else {
+            return Ok(message);
+        };
+        native::transfer::validate_staged_envelope(&message).map_err(ClientError::Protocol)?;
+        let bytes = self.fetch_staged(&blob).await?;
+        native::transfer::decode_staged(&blob, &bytes).map_err(ClientError::Protocol)
+    }
     /// Subscribe immediately to the durable current state and subsequent updates.
     /// Establishment is bounded; observation remains live until terminal/error/drop.
     pub async fn watch_native_operation(
@@ -116,6 +165,7 @@ impl EngineRpc {
             name,
             stream,
             terminal: false,
+            rpc: self.clone(),
         })
     }
 
@@ -503,11 +553,13 @@ impl EngineRpc {
                 })
             }
             ProjectCall::Execute(request) => {
+                let request = self.stage_request(*request).await?;
                 let reply = client
-                    .execute(self.request(bounded(*request)?))
+                    .execute(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
+                let reply = self.resolve_reply(reply).await?;
                 match ProjectResponse::try_from(reply).map_err(ClientError::Protocol)? {
                     ProjectResponse::Error { error } => Err(error.into()),
                     response => Ok(response),
@@ -700,11 +752,13 @@ impl EngineRpc {
             .max_encoding_message_size(MAX_CONTROL_BYTES as usize);
         match call {
             ManufacturingCall::Execute(request) => {
+                let request = self.stage_request(request).await?;
                 let reply = client
                     .execute(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
+                let reply = self.resolve_reply(reply).await?;
                 let response =
                     ManufacturingResponse::try_from(reply).map_err(ClientError::Protocol)?;
                 if let Some((revision, query, offset)) = expected_material_review {
@@ -724,7 +778,13 @@ impl EngineRpc {
                     response => Ok(response),
                 }
             }
-            ManufacturingCall::EvaluateAlternative(request) => {
+            ManufacturingCall::EvaluateAlternative(mut request) => {
+                if native::transfer::exceeds_control_frame(request.encoded_len())
+                    && let Some(bytes) = native::transfer::take_alternative_intent(&mut request)
+                {
+                    let blob = self.upload_staged(bytes).await?;
+                    native::transfer::set_alternative_staged(&mut request, blob);
+                }
                 let op = client
                     .evaluate_alternative(self.request(bounded(request)?))
                     .await
@@ -786,6 +846,7 @@ impl EngineRpc {
                 "operation response name mismatch".into(),
             ));
         }
+        let operation = self.resolve_operation(operation).await?;
         native::native_operation_view(&operation).map_err(ClientError::Protocol)
     }
     /// Query native support in world axes; does not mutate or hide an Apply.
@@ -833,6 +894,7 @@ impl EngineRpc {
                         "native contact observation name mismatch".into(),
                     ));
                 }
+                let operation = self.resolve_operation(operation).await?;
                 terminal =
                     native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
                 if terminal.done {

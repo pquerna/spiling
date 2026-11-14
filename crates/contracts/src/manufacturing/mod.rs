@@ -77,9 +77,13 @@ pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
 /// [ADR009]: ../../../../docs/adr/009-resource-envelope-policy.md
 pub const MAX_PLAN_COUNT: usize = u32::MAX as usize;
 pub const MAX_MACHINE_COMPONENTS: u32 = 64;
-/// An intent or profile travels whole in one authenticated control frame, so
-/// the frame is its byte bound; no smaller separate document ceiling.
+/// Material profiles, catalogs and review requests travel whole in one
+/// authenticated control frame, so the frame is their byte bound.
 pub const MAX_PROFILE_JSON_BYTES: u32 = crate::MAX_CONTROL_BYTES;
+/// An intent (with its printer specification) larger than one control frame
+/// is staged through ByteStream, so only the u32 staged-transfer width bounds
+/// the document; the engine byte-admits each staged transfer.
+pub const MAX_INTENT_JSON_BYTES: u32 = u32::MAX;
 pub const MAX_MANUFACTURING_ERROR_BYTES: usize = 2048;
 pub const MAX_MANUFACTURING_LABEL_BYTES: usize = 256;
 
@@ -1027,7 +1031,7 @@ impl PrinterSpecification {
                 return Err(invalid("duplicate machine component identity"));
             }
         }
-        json_bytes(self, MAX_PROFILE_JSON_BYTES as usize)?;
+        json_bytes(self, MAX_INTENT_JSON_BYTES as usize)?;
         Ok(())
     }
 }
@@ -1509,7 +1513,7 @@ impl ManufacturingIntent {
                 }
             }
         }
-        json_bytes(self, MAX_PROFILE_JSON_BYTES as usize)?;
+        json_bytes(self, MAX_INTENT_JSON_BYTES as usize)?;
         Ok(())
     }
 }
@@ -4853,7 +4857,7 @@ impl ManufacturingArtifactRecord {
 
 /// Bounded inert JSON admission. This does not execute TypeScript or replay G-code.
 pub fn decode_intent(bytes: &[u8]) -> Result<ManufacturingIntent, ManufacturingError> {
-    if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
+    if bytes.len() > MAX_INTENT_JSON_BYTES as usize {
         return Err(resource("intent JSON byte limit exceeded"));
     }
     let intent: ManufacturingIntent =

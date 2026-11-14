@@ -244,12 +244,14 @@ async fn quantity_overflow_is_atomic_scoped_and_independently_replayed_per_plate
     assert_eq!(proposal.limited_by, LayoutLimit::RequestedQuantity);
     let wire: spiling_contracts::rpc::LayoutProposal = proposal.clone().try_into().unwrap();
     assert_eq!(LayoutProposal::try_from(wire).unwrap(), proposal);
-    for fault in 0..4 {
+    for fault in 0..6 {
         let mut invalid = proposal.clone();
         match fault {
             0 => invalid.additional_plates[0].placements[0].copy = false,
             1 => invalid.additional_plates[0].verification.verified = false,
-            2 => invalid.additional_plates[0].manufacturing_attempts = 5,
+            2 => invalid.additional_plates[0].manufacturing_attempts = 0,
+            3 => invalid.manufacturing_refusal = Some("dropped".into()),
+            4 => invalid.limited_by = LayoutLimit::ManufacturingBudget,
             _ => invalid.placed_count += 1,
         }
         assert!(invalid.validate().is_err());

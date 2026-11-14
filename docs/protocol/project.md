@@ -105,8 +105,9 @@ existing unrelated parts remain. The top-level placements/footprints and
 only new copies of the selected template, source reservation bounds, its independent
 verification, candidates and manufacturing attempts. `requested_count` includes all
 current parts plus requested new copies; total placed is the current count plus all
-additional rows. Candidates are counted, not capped; each plate allows at most four
-manufacturing attempts, subject to the 16-plate limit and the u32 occurrence width.
+additional rows. Candidates and manufacturing attempts are counted, not capped
+(an exact copy boundary after a working-set refusal), subject to the 16-plate limit
+and the u32 occurrence width.
 Plate, occurrence, build-area and manufacturing limits remain explicit. Apply rechecks complete Core admission before creating all
 jobs as one history entry. No trial artifact becomes a current result. Fixed-dual
 routes do not gain automatic distribution support.

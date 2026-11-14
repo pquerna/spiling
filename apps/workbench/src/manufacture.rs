@@ -176,17 +176,20 @@ fn invalid(message: impl Into<String>) -> ClientError {
     ClientError::InvalidRequest(message.into())
 }
 fn read_declaration(path: &NativePath) -> Result<(Vec<u8>, String), String> {
+    read_declaration_within(path, MAX_PROFILE_JSON_BYTES)
+}
+fn read_declaration_within(path: &NativePath, limit: u32) -> Result<(Vec<u8>, String), String> {
     let path = PathBuf::from(path.to_os_string().map_err(|e| e.to_string())?);
     let file = std::fs::File::open(&path).map_err(|e| format!("Cannot open declaration: {e}"))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("Declaration must be a regular JSON file".into());
     }
     let mut bytes = Vec::new();
-    file.take(u64::from(MAX_PROFILE_JSON_BYTES) + 1)
+    file.take(u64::from(limit) + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_PROFILE_JSON_BYTES as usize {
-        return Err("Declaration exceeds the profile JSON byte limit".into());
+    if bytes.len() > limit as usize {
+        return Err("Declaration exceeds its JSON byte limit".into());
     }
     let label = spiling_contracts::geometry::bounded_text(
         &path.file_name().unwrap_or_default().to_string_lossy(),
@@ -195,7 +198,7 @@ fn read_declaration(path: &NativePath) -> Result<(Vec<u8>, String), String> {
     Ok((bytes, label))
 }
 pub fn read_intent(path: &NativePath) -> Result<(Arc<ManufacturingIntent>, String), String> {
-    let (bytes, label) = read_declaration(path)?;
+    let (bytes, label) = read_declaration_within(path, MAX_INTENT_JSON_BYTES)?;
     let intent = decode_intent(&bytes).map_err(|e| e.to_string())?;
     Ok((Arc::new(intent), label))
 }

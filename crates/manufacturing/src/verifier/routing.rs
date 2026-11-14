@@ -49,6 +49,10 @@ pub(super) struct RouteState<'a> {
     pub(super) selection_count: u32,
     pub(super) max_position_error_mm: f64,
     pub(super) max_extrusion_error_mm: f64,
+    /// Reservation boxes by minimum X with the widest X extent, so per-motion
+    /// clearance visits only reservations whose X interval can meet it.
+    reservations: Vec<[[f64; 3]; 2]>,
+    reservation_width: f64,
 }
 
 fn ticks(value: f64) -> Result<i64, ManufacturingError> {
@@ -76,7 +80,7 @@ impl<'a> RouteState<'a> {
         job: &'a FixedDualJob,
         plan: &'a NormalizedPrintPlan,
         recipe: &'a PlanarPrintRecipe,
-    ) -> Self {
+    ) -> Result<Self, ManufacturingError> {
         let account = |index: usize| RoutedToolAccounting {
             tool: index as u8,
             material_id: job.tools[index].material.id.clone(),
@@ -112,7 +116,28 @@ impl<'a> RouteState<'a> {
             selection_count: 0,
             max_position_error_mm: 0.0,
             max_extrusion_error_mm: 0.0,
+            reservations: Vec::new(),
+            reservation_width: 0.0,
         };
+        state
+            .reservations
+            .try_reserve_exact(job.assignments.len())
+            .map_err(|_| {
+                ManufacturingError::new(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "replay reservation index allocation failed",
+                )
+            })?;
+        for assignment in &job.assignments {
+            let bounds = &assignment.work_envelope_mm;
+            state.reservations.push([bounds.min, bounds.max]);
+            state.reservation_width = state
+                .reservation_width
+                .max((bounds.max[0] - bounds.min[0]).next_up());
+        }
+        state
+            .reservations
+            .sort_by(|a, b| a[0][0].total_cmp(&b[0][0]));
         state.push(Op::Bare(Command::Celsius));
         state.push(Op::Scalar(Command::VolumetricOff, 7, 0.0, None));
         state.push(Op::Scalar(Command::FeedScale, 5, 100.0, None));
@@ -134,7 +159,7 @@ impl<'a> RouteState<'a> {
                 Some(tool as u8),
             ));
         }
-        state
+        Ok(state)
     }
     fn push(&mut self, op: Op) {
         // Fixed-size lifecycle cursor, never a motion buffer.
@@ -305,11 +330,17 @@ impl<'a> RouteState<'a> {
         let intersects = |a: [[f64; 3]; 2], b: [[f64; 3]; 2]| {
             (0..3).all(|axis| a[0][axis] <= b[1][axis] && b[0][axis] <= a[1][axis])
         };
-        for assignment in &self.job.assignments {
-            let bounds = &assignment.work_envelope_mm;
+        let low = idle[0][0].min(body[0][0]);
+        let high = idle[1][0].max(body[1][0]);
+        let reach = (low - self.reservation_width).next_down();
+        let start = self.reservations.partition_point(|b| b[0][0] < reach);
+        for bounds in self.reservations[start..]
+            .iter()
+            .take_while(|b| b[0][0] <= high)
+        {
             let occupied = [
-                bounds.min,
-                [bounds.max[0], bounds.max[1], bounds.max[2].min(top)],
+                bounds[0],
+                [bounds[1][0], bounds[1][1], bounds[1][2].min(top)],
             ];
             if intersects(idle, occupied) || intersects(body, occupied) {
                 return Err(failed(

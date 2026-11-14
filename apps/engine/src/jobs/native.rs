@@ -9,7 +9,15 @@ use spiling_contracts::{
     NATIVE_METADATA_TYPE, NATIVE_RESULT_TYPE, geometry::SessionId, native_metadata,
 };
 
-const NATIVE_STORAGE_BUDGET: u64 = spiling_contracts::geometry::MAX_NATIVE_STORAGE_BYTES;
+/// Disk bytes the native artifact store may still claim on its filesystem.
+/// Capacity follows the actual free space where the store lives, minus a
+/// slice left for the rest of the machine: there is no fixed store total.
+fn native_storage_headroom(store: &std::path::Path) -> Result<u64, Status> {
+    let available = fs2::available_space(store).map_err(internal)?;
+    let total = fs2::total_space(store).map_err(internal)?;
+    let keep = (total / 20).min(2 * 1024 * 1024 * 1024);
+    Ok(available.saturating_sub(keep))
+}
 
 /// Immutable bytes published with a terminal native operation.
 pub(crate) enum ArtifactBytes<'a> {
@@ -183,6 +191,7 @@ impl Jobs {
         let parent = admission.parent;
         let digest = admission.digest;
         let reservation = admission.reservation;
+        let store = self.store_dir();
         let (op, created) = self.with(move |s| {
             let old: Option<(String, Vec<u8>)> = s.db.query_row(
                 "SELECT digest,operation FROM operations WHERE parent=? AND request_id=?", params![parent, request_id],
@@ -199,8 +208,21 @@ impl Jobs {
             if rows.len() >= MAX_OPERATIONS || rows.iter().filter(|b| Operation::decode(b.as_slice()).is_ok_and(|o| !o.done)).count() >= MAX_PENDING {
                 return Err(Status::resource_exhausted("operation admission capacity reached"));
             }
-            let reserved = u64::try_from(s.db.query_row("SELECT COALESCE(SUM(reserved_bytes),0) FROM operations WHERE name IN (SELECT name FROM native_operations)",[],|r| r.get::<_,i64>(0)).map_err(internal)?).map_err(internal)?;
-            if reservation > NATIVE_STORAGE_BUDGET.saturating_sub(reserved) { return Err(Status::resource_exhausted("native durable artifact reservation capacity reached")); }
+            // Completed operations already occupy disk; only unfinished
+            // reservations still claim free space.
+            let outstanding = {
+                let mut stmt = s.db.prepare("SELECT reserved_bytes,operation FROM operations WHERE name IN (SELECT name FROM native_operations)").map_err(internal)?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Vec<u8>>(1)?))).map_err(internal)?;
+                let mut outstanding = 0u64;
+                for row in rows {
+                    let (bytes, operation) = row.map_err(internal)?;
+                    if !Operation::decode(operation.as_slice()).map_err(internal)?.done {
+                        outstanding = outstanding.saturating_add(u64::try_from(bytes).map_err(internal)?);
+                    }
+                }
+                outstanding
+            };
+            if reservation > native_storage_headroom(&store)?.saturating_sub(outstanding) { return Err(Status::resource_exhausted("native durable artifact reservation exceeds free store disk space")); }
             let meta = NativeOperationMetadata {
                 state: NativeOperationState::NativeQueued as i32, state_version: 1,
                 session_id: session.as_str().to_owned(), captured_scene_revision: scene.get(), captured_project_revision: project.get(),
@@ -367,6 +389,7 @@ impl Jobs {
         result: Result<spiling_contracts::geometry::JobResult, RpcStatus>,
         buffers: Vec<(Artifact, ArtifactBytes<'_>)>,
     ) -> Result<(), Status> {
+        let store = self.store_dir();
         self.with_sync(|s| {
             let mut op = s.get(name)?;
             if op.done { return Ok(()); }
@@ -378,10 +401,28 @@ impl Jobs {
             meta.outputs = buffers.iter().map(|(artifact,_)|artifact.clone()).collect();
             meta.completed_units = 1;
             op.metadata = Some(pack_native(&meta));
+            // A result larger than one control frame is published as one
+            // immutable artifact in the same transaction and named instead.
+            let mut staged_result = None;
             match result {
                 Ok(result) => {
                     let result = NativeOperationResult::try_from(result).map_err(internal)?;
-                    op.result = Some(Outcome::Response(prost_types::Any {type_url:NATIVE_RESULT_TYPE.into(),value:result.encode_to_vec()}));
+                    let mut value = result.encode_to_vec();
+                    if spiling_contracts::native::transfer::exceeds_control_frame(value.len()) {
+                        let blob = spiling_contracts::native::transfer::staged_blob(&value);
+                        spiling_contracts::native::transfer::validate_staged_blob(&blob).map_err(Status::resource_exhausted)?;
+                        let artifact = Artifact {
+                            name: format!("artifacts/{}", blob.sha256),
+                            size_bytes: blob.size_bytes,
+                            sha256: blob.sha256,
+                            media_type: spiling_contracts::native::transfer::NATIVE_RESULT_MEDIA_TYPE.into(),
+                        };
+                        let reference = NativeOperationResult {
+                            result: Some(spiling_contracts::rpc::native_operation_result::Result::Staged(artifact.clone())),
+                        };
+                        staged_result = Some((artifact, std::mem::replace(&mut value, reference.encode_to_vec())));
+                    }
+                    op.result = Some(Outcome::Response(prost_types::Any {type_url:NATIVE_RESULT_TYPE.into(),value}));
                     terminal_native(&mut op, NativeOperationState::NativeSucceeded, None)?;
                 }
                 Err(error) => {
@@ -392,14 +433,9 @@ impl Jobs {
             }
             let mut size: u64 = 0;
             let tx = s.db.transaction().map_err(internal)?;
-            let mut used = u64::try_from(tx.query_row("SELECT COALESCE(SUM(length(bytes)),0) FROM artifacts JOIN artifact_types USING(name)", [], |r|r.get::<_,i64>(0)).map_err(internal)?).map_err(internal)?;
             for (artifact,bytes) in buffers {
                 let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM artifacts WHERE name=?)", [&artifact.name], |r|r.get(0)).map_err(internal)?;
                 if !exists {
-                    if artifact.size_bytes > NATIVE_STORAGE_BUDGET.saturating_sub(used) {
-                        return Err(Status::resource_exhausted("native immutable storage capacity reached"));
-                    }
-                    used += artifact.size_bytes;
                     size += artifact.size_bytes;
                     if size > reservation {
                         return Err(Status::resource_exhausted("native publication exceeds its admitted reservation"));
@@ -423,6 +459,17 @@ impl Jobs {
                         }
                     }
                     tx.execute("INSERT INTO artifact_types VALUES(?,?)",params![artifact.name,artifact.media_type]).map_err(internal)?;
+                }
+            }
+            if let Some((artifact, bytes)) = staged_result {
+                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM artifacts WHERE name=?)", [&artifact.name], |r|r.get(0)).map_err(internal)?;
+                if !exists {
+                    if artifact.size_bytes > native_storage_headroom(&store)? {
+                        return Err(Status::resource_exhausted("staged native result exceeds free store disk space"));
+                    }
+                    tx.execute("INSERT INTO artifacts VALUES(?,?)",params![artifact.name,bytes]).map_err(internal)?;
+                    tx.execute("INSERT INTO artifact_types VALUES(?,?)",params![artifact.name,artifact.media_type]).map_err(internal)?;
+                    size += artifact.size_bytes;
                 }
             }
             tx.execute("UPDATE operations SET operation=?,reserved_bytes=? WHERE name=?",params![op.encode_to_vec(),i64::try_from(size).map_err(internal)?,op.name]).map_err(internal)?;
