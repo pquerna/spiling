@@ -131,7 +131,7 @@ impl WallPlan {
             let count = path.checked_edges()?.len();
             *segments = segments
                 .checked_add(count)
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| resource("wall deposition segment limit exceeded"))?;
             let mut path = path.clone();
             path.physical_z_mm = [lower_z, upper_z];
@@ -626,7 +626,7 @@ fn refine(
     // patch; final actual occupancy, command and overlap qualification still gate it.
     let event = !stable && length <= 0.02 && bound <= FIT_ERROR_MM;
     if (stable && fit + (high_width - low_width) * 0.5 <= FIT_ERROR_MM) || event {
-        if output.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+        if output.len() >= crate::working_set::units() {
             return Err(resource("wall-cell subdivision limit exceeded"));
         }
         reserve_stage(output, 1, request, 0)?;
@@ -771,7 +771,7 @@ fn push_edge(
             "packed wall command escapes its physical width envelope: width={width_mm}, admitted={minimum}..{maximum}, supports={supports:?}, ordinal={ordinal}"
         )));
     }
-    if output.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+    if output.len() >= crate::working_set::units() {
         return Err(resource("wall command count exceeded"));
     }
     reserve_stage(output, 1, request, 0)?;

@@ -9,13 +9,10 @@ import {
   REPLAY_HEADER_BYTES,
   REPLAY_RECORD_BYTES,
   REPLAY_PAGE_EVENTS,
-  MAX_PRINT_LAYERS,
-  MAX_DEPOSITION_SEGMENTS,
-  MAX_TRAVEL_SEGMENTS,
+  MAX_PLAN_COUNT,
   MAX_MANUFACTURING_PROGRAM_BYTES,
   MAX_MANUFACTURING_LABEL_BYTES,
   MAX_PROCESS_REGIONS,
-  MAX_RETRACTIONS,
 } from "./generated.ts";
 import type { ReplayDisplayDescriptor } from "./generated.ts";
 import { bounds, hash, keys, uint, verifyHash, zero } from "./display.ts";
@@ -126,12 +123,12 @@ export async function decodeReplayDisplay(
   )
     fail("invalid verifier version");
   uint(info.event_count, "event count", fail, 2, MAX_REPLAY_EVENTS);
-  uint(info.deposition_count, "deposition count", fail, 1, MAX_DEPOSITION_SEGMENTS);
-  uint(info.travel_count, "travel count", fail, 1, MAX_TRAVEL_SEGMENTS);
-  uint(info.layer_count, "layer count", fail, 1, MAX_PRINT_LAYERS);
+  uint(info.deposition_count, "deposition count", fail, 1, MAX_PLAN_COUNT);
+  uint(info.travel_count, "travel count", fail, 1, MAX_PLAN_COUNT);
+  uint(info.layer_count, "layer count", fail, 1, MAX_PLAN_COUNT);
   uint(info.lifecycle_count, "lifecycle count", fail, 0, 4);
-  uint(info.process_count, "process count", fail, 0, 2 * MAX_RETRACTIONS);
-  uint(info.tool_epoch_count, "tool epoch count", fail, 0, MAX_DEPOSITION_SEGMENTS);
+  uint(info.process_count, "process count", fail, 0, MAX_PLAN_COUNT);
+  uint(info.tool_epoch_count, "tool epoch count", fail, 0, MAX_PLAN_COUNT);
   uint(info.waste_count, "waste count", fail, 0, info.deposition_count);
   const dual = info.tool_epoch_count > 0;
   if (

@@ -206,7 +206,7 @@ fn admit_index(count: usize, work: &usize) -> Result<(), ManufacturingError> {
     let bytes = count
         .checked_mul(std::mem::size_of::<Edge<'_>>() + std::mem::size_of::<usize>())
         .ok_or_else(proof_overflow)?;
-    let allowance = (spiling_contracts::manufacturing::MAX_DEPOSITION_SEGMENTS as usize)
+    let allowance = crate::working_set::units()
         .checked_mul(std::mem::size_of::<Coord<f64>>())
         .ok_or_else(proof_overflow)?;
     let levels = usize::BITS as usize - count.max(1).leading_zeros() as usize;

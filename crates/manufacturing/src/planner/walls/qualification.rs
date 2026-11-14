@@ -1125,7 +1125,7 @@ fn occupancy(
             check_cancel(cancel)?;
             commands = commands
                 .checked_add(1)
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| resource("wall occupancy command limit exceeded"))?;
             // Bound all command hull input vertices plus closure.
             // Flush BEFORE construction, so the next primitive and its scratch
@@ -1783,7 +1783,7 @@ fn unique(
     let count = paths.iter().try_fold(0usize, |count, path| {
         count
             .checked_add(path.checked_edges()?.len())
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| resource("wall uniqueness command limit exceeded"))
     })?;
     staging(request, count * std::mem::size_of::<Command>())?;
@@ -1802,7 +1802,7 @@ fn unique(
                 min: [ends[0][0].min(ends[1][0]), ends[0][1].min(ends[1][1])],
                 max: [ends[0][0].max(ends[1][0]), ends[0][1].max(ends[1][1])],
             });
-            if commands.len() > MAX_DEPOSITION_SEGMENTS as usize {
+            if commands.len() > crate::working_set::units() {
                 return Err(resource("wall uniqueness command limit exceeded"));
             }
         }

@@ -199,12 +199,10 @@ pub(crate) fn validate_plan(
             .checked_add(2)
             .ok_or_else(|| invalid("fixed-dual segment count overflow"))?;
     }
-    if count > MAX_DEPOSITION_SEGMENTS
-        || plan.layers.len().saturating_mul(2) > MAX_TOOL_SELECTIONS as usize
-    {
+    if plan.layers.len().saturating_mul(2) > MAX_PLAN_COUNT {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
-            "model/waste or tool selection budget exceeded",
+            "tool selections exceed their u32 representation",
         ));
     }
     Ok(())

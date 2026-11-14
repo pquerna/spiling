@@ -187,7 +187,7 @@ pub(super) fn verify(
                 let mut first = [0.0; 2];
                 for axis in 0..2 {
                     let n = ((max[axis] - min[axis]) / pitch).ceil().max(1.0);
-                    if !n.is_finite() || n > MAX_DEPOSITION_SEGMENTS as f64 {
+                    if !n.is_finite() || n > crate::working_set::units() as f64 {
                         return Err(failed(
                             "web + roof reconstructed lattice exceeds the command budget",
                         ));
@@ -195,7 +195,7 @@ pub(super) fn verify(
                     count[axis] = n as usize;
                     first[axis] = min[axis] + ((max[axis] - min[axis]) - (n - 1.0) * pitch) * 0.5;
                 }
-                if count[0].saturating_add(count[1]) > MAX_DEPOSITION_SEGMENTS as usize {
+                if count[0].saturating_add(count[1]) > crate::working_set::units() {
                     return Err(failed(
                         "web + roof reconstructed base lattice budget exceeded",
                     ));
@@ -225,7 +225,7 @@ pub(super) fn verify(
                 let mut require =
                     |fixed: usize, coordinate: f64, start: f64, stop: f64, work: &mut usize| {
                         charge(work, cancel)?;
-                        if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        if expected.len() >= crate::working_set::units() {
                             return Err(failed("web architecture expected-road budget exceeded"));
                         }
                         expected.push((fixed, coordinate, start, stop));
@@ -265,7 +265,8 @@ pub(super) fn verify(
                             first[fixed] + gap as f64 * pitch
                         };
                         let divisions = ((hi - lo) / recipe.web_roof_spacing_mm()).ceil().max(1.0);
-                        if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
+                        if !divisions.is_finite() || divisions > crate::working_set::units() as f64
+                        {
                             return Err(failed("web + roof reconstructed contact budget exceeded"));
                         }
                         for contact in 1..divisions as usize {
@@ -352,7 +353,7 @@ pub(super) fn verify(
                         for chord in hits.as_chunks::<2>().0 {
                             let (start, stop) = (start.max(chord[0]), stop.min(chord[1]));
                             if stop - start >= program_coordinates::MIN_DEPOSITION_COMMAND_MM {
-                                if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                                if expected.len() >= crate::working_set::units() {
                                     return Err(failed(
                                         "Cathedral clipped joint inventory budget exceeded",
                                     ));

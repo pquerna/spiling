@@ -7,9 +7,11 @@ use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
 // At most three actual intervals plus their first retained landing layer are
-// staged. The original admitted fine alternative remains untouched until commit.
+// staged (a combine-depth process choice, not a capacity limit; longer runs
+// start another band). Staging bytes are admitted against the operation's
+// working set. The original admitted fine alternative remains untouched until
+// commit.
 const MAX_BAND_INTERVALS: usize = 3;
-const MAX_STAGE_BYTES: usize = 4 * 1024 * 1024;
 
 fn replaced_sparse(path: &DepositionPath, owner: Option<DepositionOwner>) -> bool {
     path.owner == owner
@@ -60,11 +62,11 @@ fn hatch_coarse(
         })?;
     proposal_bytes
         .checked_add(budget.live_bytes)
-        .filter(|bytes| *bytes <= MAX_STAGE_BYTES)
+        .filter(|bytes| *bytes <= crate::working_set::bytes())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
-                "combined hatch proposal exceeds 4 MiB",
+                "combined hatch proposal exceeds the manufacturing working set",
             )
         })?;
     super::geometry_bytes(&[budget.outside_bytes, proposal_bytes])?;
@@ -85,11 +87,11 @@ fn hatch_coarse(
     if budget
         .live_bytes
         .saturating_add(super::bonds::path_bytes(&coarse))
-        > MAX_STAGE_BYTES
+        > crate::working_set::bytes()
     {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
-            "combined coarse staging exceeds4 MiB",
+            "combined coarse staging exceeds the manufacturing working set",
         ));
     }
     Ok(coarse)
@@ -392,10 +394,10 @@ pub(super) fn combine(
                 .iter()
                 .map(|l| super::bonds::path_bytes(&l.paths))
                 .sum::<usize>();
-            if live_bytes > MAX_STAGE_BYTES {
+            if live_bytes > crate::working_set::bytes() {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "combined sparse band staging exceeds 4 MiB",
+                    "combined sparse band staging exceeds the manufacturing working set",
                 ));
             }
             let segment_base = plan
@@ -438,10 +440,10 @@ pub(super) fn combine(
                 )?;
                 continue;
             }
-            if live_bytes + super::bonds::path_bytes(&coarse) > MAX_STAGE_BYTES {
+            if live_bytes + super::bonds::path_bytes(&coarse) > crate::working_set::bytes() {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "combined sparse band alternative exceeds 4 MiB",
+                    "combined sparse band alternative exceeds the manufacturing working set",
                 ));
             }
             super::geometry_bytes(&[
@@ -669,11 +671,11 @@ pub(super) fn combine(
             if live_bytes
                 .saturating_add(super::bonds::path_bytes(&coarse))
                 .saturating_add(landing_bytes)
-                > MAX_STAGE_BYTES
+                > crate::working_set::bytes()
             {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "combined landing role staging exceeds4 MiB",
+                    "combined landing role staging exceeds the manufacturing working set",
                 ));
             }
             let mut landing_roles = Vec::new();
@@ -806,7 +808,7 @@ fn aligned_row_domain(
         })?;
     if bytes.saturating_add(budget.live_bytes).saturating_add(
         paths.len() * (std::mem::size_of::<DepositionPath>() + 2 * std::mem::size_of::<[f64; 3]>()),
-    ) > MAX_STAGE_BYTES
+    ) > crate::working_set::bytes()
     {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
@@ -884,8 +886,8 @@ fn align_to_landing(
                 "landing-aligned row bytes overflow",
             )
         })?;
-    if bytes.saturating_add(budget.live_bytes) > MAX_STAGE_BYTES
-        || budget.segment_base.saturating_add(count) > MAX_DEPOSITION_SEGMENTS as usize
+    if bytes.saturating_add(budget.live_bytes) > crate::working_set::bytes()
+        || budget.segment_base.saturating_add(count) > crate::working_set::units()
     {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,

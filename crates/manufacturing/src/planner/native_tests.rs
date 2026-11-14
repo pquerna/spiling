@@ -1311,7 +1311,7 @@ fn affine_rational_native_source_is_admitted_and_replayed_without_family_fallbac
 }
 
 #[test]
-fn balanced_native_top_is_preserved_and_layer_resource_limits_are_explicit() {
+fn balanced_native_top_is_preserved_and_only_the_working_set_bounds_layers() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut intent = intent(false);
     intent.recipe.layer_height_mm = 0.399995;
@@ -1332,15 +1332,36 @@ fn balanced_native_top_is_preserved_and_layer_resource_limits_are_explicit() {
             .code,
         ManufacturingErrorCode::InvalidSpecification
     );
-    // On a printer that resolves it, the layer budget is the explicit limit.
+    // On a printer that resolves it, there is no layer cap: only the host's
+    // working-set allowance refuses, typed, before the schedule grows.
     intent.printer.motion_resolution.z_mm = 0.000001;
     intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
+    let mut input = scene.input(&intent);
+    input.working_set = crate::WorkingSet::new(1 << 20).unwrap();
     assert_eq!(
-        compile(scene.input(&intent), &AtomicBool::new(false))
-            .unwrap_err()
-            .code,
+        compile(input, &AtomicBool::new(false)).unwrap_err().code,
         ManufacturingErrorCode::ResourceLimit
     );
+}
+
+/// Stress: a fine-resolution printer slices the 8 mm box into more than the
+/// former 4096-layer ceiling, and the independent verifier accepts it.
+#[test]
+fn fine_layers_beyond_the_former_layer_ceiling_compile_and_verify() {
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut intent = intent(false);
+    intent.printer.motion_resolution.z_mm = 0.000001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
+    intent.recipe.layer_height_mm = 0.0019;
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(
+        bundle.plan.layers.len() > 4096,
+        "{} layers",
+        bundle.plan.layers.len()
+    );
+    assert_eq!(bundle.plan.layers.last().unwrap().z_mm, 8.0);
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
 }
 
 #[test]
@@ -2132,7 +2153,7 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             &scene.input(&intent),
             &scene.occurrences[0],
             bounds,
-            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            crate::working_set::units() / 4,
             &mut measured,
             &cancel,
         )
@@ -2144,7 +2165,7 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             &scene.input(&intent),
             &scene.occurrences[0],
             bounds,
-            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            crate::working_set::units() / 4,
             &mut limited,
             &cancel,
         )
@@ -2157,7 +2178,7 @@ fn finish_metadata_shares_native_work_across_faces_and_occurrences() {
             &scene.input(&intent),
             &scene.occurrences[1],
             placed,
-            MAX_DEPOSITION_SEGMENTS as usize / 4,
+            crate::working_set::units() / 4,
             &mut limited,
             &cancel,
         )
@@ -3002,8 +3023,11 @@ fn image_capture_disabled_references_metadata_and_event_budgets_are_not_bypassed
             .iter()
             .any(|check| !check.required && check.evidence == PreflightEvidence::NotEvaluated)
     );
+    // Dense image events have no layer cap; only the working set refuses.
+    let mut input = scene.input(&intent);
+    input.working_set = crate::WorkingSet::new(64 << 10).unwrap();
     assert_eq!(
-        compile(scene.input(&intent), &cancel).unwrap_err().code,
+        compile(input, &cancel).unwrap_err().code,
         ManufacturingErrorCode::ResourceLimit
     );
 }

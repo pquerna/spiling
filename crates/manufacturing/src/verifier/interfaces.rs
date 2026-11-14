@@ -33,7 +33,8 @@ pub(super) fn verify_two_axis_sparse(
         super::web_roof::verify(plan, recipe, work, cancel)?;
     }
     for (index, layer) in plan.layers.iter().enumerate() {
-        let mut families = [0u8; MAX_PROCESS_REGIONS];
+        // Line families per present region, sized by the layer's own regions.
+        let mut families = std::collections::BTreeMap::<u16, u8>::new();
         for path in layer.paths.iter().filter(|path| {
             path.kind == DepositionKind::SparseFill
                 || path.kind == DepositionKind::Bridge
@@ -58,8 +59,7 @@ pub(super) fn verify_two_axis_sparse(
                     "two-axis sparse row is not a positive build-X/Y segment",
                 ));
             }
-            families[usize::from(region_index).min(MAX_PROCESS_REGIONS - 1)] |=
-                if a[0] == b[0] { 1 } else { 2 };
+            *families.entry(region_index).or_default() |= if a[0] == b[0] { 1 } else { 2 };
             if usize::from(region_index) >= MAX_PROCESS_REGIONS {
                 return Err(failed(
                     "two-axis sparse row owner exceeds the region budget",
@@ -125,7 +125,10 @@ pub(super) fn verify_two_axis_sparse(
                 if region.area_mm2 > 0.0
                     && region.fraction > 0.0
                     && region.fraction < 1.0
-                    && families[region_index] != 3
+                    && u16::try_from(region_index)
+                        .ok()
+                        .and_then(|index| families.get(&index))
+                        != Some(&3)
                 {
                     return Err(failed(format!(
                         "two-axis sparse interior is missing an orthogonal line family: layer {}, region {region_index}",

@@ -78,7 +78,7 @@ pub struct WebRoofCeiling {
 fn ceilings<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WebRoofCeiling>, D::Error> {
     bounded_vec::<D, _, MAX_PRINT_LAYERS_USIZE>(d)
 }
-const MAX_PRINT_LAYERS_USIZE: usize = MAX_PRINT_LAYERS as usize;
+const MAX_PRINT_LAYERS_USIZE: usize = MAX_PLAN_COUNT;
 fn extent_bytes(extent: &[DiaphragmPolygonMm]) -> usize {
     extent
         .iter()
@@ -97,14 +97,14 @@ fn validate_extent(
     points: &mut usize,
 ) -> Result<(), ManufacturingError> {
     for p in extent {
-        if p.holes.len() > MAX_PROCESS_REGIONS {
+        if p.holes.len() > MAX_PLAN_COUNT {
             return Err(resource("web + roof hole limit exceeded"));
         }
         for ring in std::iter::once(&p.outer).chain(&p.holes) {
             *points = points
                 .checked_add(ring.len())
                 .ok_or_else(|| resource("web + roof point overflow"))?;
-            if *points > MAX_DEPOSITION_SEGMENTS as usize {
+            if *points > MAX_PLAN_COUNT {
                 return Err(resource("web + roof domain point limit exceeded"));
             }
             if ring.len() < 4
@@ -139,7 +139,7 @@ impl WebRoofDomain {
                 .sum::<usize>()
     }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if self.extent.is_empty() || self.extent.len() > MAX_PROCESS_REGIONS {
+        if self.extent.is_empty() || self.extent.len() > MAX_PLAN_COUNT {
             return Err(invalid("web + roof requires bounded classified domains"));
         }
         if self.frame_mm.iter().flatten().any(|v| !v.is_finite())

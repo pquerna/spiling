@@ -8,8 +8,10 @@
 //! and staging buffers and refuse with `ResourceLimit` before they would grow
 //! past this allowance. The allowance is selected by the host from the
 //! machine's actual memory headroom ([ADR009]); it is not a part-size rule.
-//! Format and protocol representation limits (bundle, program, layer and
-//! segment counts) stay separate constants in contracts.
+//! Counts that grow with the job (layers, height events, segments, travel
+//! and process events) are admitted against this allowance through
+//! [`records`]; they have no fixed ceiling. Only binary representation
+//! widths (u32 counts, bundle and program byte formats) stay in contracts.
 //!
 //! The allowance is installed once per public entry point (compile,
 //! preflight, verification) and read by the counting sites through
@@ -91,6 +93,13 @@ pub(crate) fn units() -> usize {
     current().bytes / std::mem::size_of::<geo::Coord<f64>>()
 }
 
+/// Records of `T` the operation's allowance could hold at once: the
+/// byte-derived bound for a count that grows with the job (layers, height
+/// events, segments), never a fixed cap.
+pub(crate) fn records<T>() -> usize {
+    current().bytes / std::mem::size_of::<T>().max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +111,7 @@ mod tests {
         scope(narrow, || {
             assert_eq!(bytes(), 1024);
             assert_eq!(units(), 1024 / 16);
+            assert_eq!(records::<f64>(), 1024 / 8);
             let inner = WorkingSet::new(64).unwrap();
             scope(inner, || assert_eq!(bytes(), 64));
             assert_eq!(bytes(), 1024);

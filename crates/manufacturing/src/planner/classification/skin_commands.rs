@@ -787,7 +787,7 @@ fn reserve_regional_material(
             paths.push(remainder);
             *segments = segments
                 .checked_add(1)
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| resource("skin fit regional split command limit exceeded"))?;
         }
         if left {

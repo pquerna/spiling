@@ -56,7 +56,7 @@ fn contains_portion(
         cancelled(cancel)?;
         let edges = polygon.outer.len() + polygon.holes.iter().map(Vec::len).sum::<usize>();
         charge(work, edges)?;
-        if edges > MAX_DEPOSITION_SEGMENTS as usize {
+        if edges > crate::working_set::units() {
             return Err(failed("mixed bridge domain exceeds point limit"));
         }
         hits.clear();

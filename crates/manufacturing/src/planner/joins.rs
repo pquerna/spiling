@@ -74,10 +74,10 @@ pub(super) fn append_z_events(
     {
         check_cancel(cancel)?;
         if let Err(position) = events.binary_search_by(|old| old.total_cmp(&height)) {
-            if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+            if events.len() >= crate::working_set::records::<f64>() {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "functional join event limit exceeded",
+                    "functional join events exceed the manufacturing working set",
                 ));
             }
             events.insert(position, height);

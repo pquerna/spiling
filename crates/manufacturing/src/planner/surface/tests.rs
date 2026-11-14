@@ -248,7 +248,7 @@ fn required_mixed_face_material_keeps_all_ribs_and_only_omits_image_displacement
             native.clone(),
             &fields,
             2.0,
-            MAX_DEPOSITION_SEGMENTS as usize,
+            crate::working_set::units(),
             &mut 0,
             &cancel
         )

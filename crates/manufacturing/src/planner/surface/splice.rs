@@ -8,9 +8,7 @@ use crate::{check_cancel, error};
 use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::line_intersection::line_intersection;
 use geo::{Area, Contains, Coord, Intersects, Line, LineString, MultiPolygon, Point, Polygon};
-use spiling_contracts::manufacturing::{
-    MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
-};
+use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use std::sync::atomic::AtomicBool;
 
 // Metadata reserves the other half for source/pose floating arithmetic.
@@ -659,7 +657,7 @@ pub(super) fn realize(
     retained
         .checked_add(14 * source_points)
         .and_then(|v| v.checked_add(8 * profile_points))
-        .filter(|v| *v <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|v| *v <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,

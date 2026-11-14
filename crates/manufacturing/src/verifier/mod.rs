@@ -659,7 +659,7 @@ fn inspect_lifecycle(
                     state.extrusion,
                     feed,
                     line,
-                    u16::MAX,
+                    replay::LIFECYCLE_LAYER,
                     if extrusion.is_some() { 7 } else { 6 },
                 )?;
             }
@@ -747,7 +747,7 @@ pub(crate) fn verify_actual(
     let mut lifecycle_index = 0usize;
     let mut finish_index = 0usize;
     let mut priming_filament_length_mm = 0.0;
-    let mut volume_layer = 0u16;
+    let mut volume_layer = 0u32;
     let mut layer_nominal_volume = 0.0;
     let mut layer_support_volume = 0.0;
     let mut support_deposition_segments = 0u32;
@@ -989,11 +989,8 @@ pub(crate) fn verify_actual(
                         .max((delta - desired).abs());
                     if retract {
                         recovery_moves = 0;
-                        retraction_count += 1;
+                        retraction_count = count_event(retraction_count)?;
                         retracted_filament_mm -= delta;
-                        if retraction_count > MAX_RETRACTIONS {
-                            return Err(failed("process event budget exceeded"));
-                        }
                     }
                     retracted_endpoint = if retract { Some(state.extrusion) } else { None };
                     state.extrusion = next_e;
@@ -1390,24 +1387,26 @@ pub(crate) fn verify_actual(
                 }
                 state.extrusion = next_e;
                 if support {
-                    support_deposition_segments += 1;
+                    support_deposition_segments = count_event(support_deposition_segments)?;
                     support_filament += delta_e;
                 } else {
-                    deposition_segments += 1;
+                    deposition_segments = count_event(deposition_segments)?;
                     object_filament += delta_e;
                 }
-                if deposition_segments + support_deposition_segments > MAX_DEPOSITION_SEGMENTS {
-                    return Err(failed("whole deposition budget exceeded"));
+                if deposition_segments
+                    .checked_add(support_deposition_segments)
+                    .is_none()
+                {
+                    return Err(failed(
+                        "deposition segment count exceeds its u32 representation",
+                    ));
                 }
             } else {
                 // Every stored path has an explicit entry travel; wall continuity
                 // never crosses a travel, even if endpoints happen to coincide.
                 first_wall_edge = None;
                 previous_wall_edge = None;
-                travel_segments += 1;
-                if travel_segments > MAX_TRAVEL_SEGMENTS {
-                    return Err(failed("travel event budget exceeded"));
-                }
+                travel_segments = count_event(travel_segments)?;
             }
             if let Some(sink) = replay.as_deref_mut() {
                 let kind = if source.is_none() {
@@ -1624,6 +1623,14 @@ mod interfaces;
 mod routing;
 mod skin_bridges;
 mod skin_commands;
+/// Verified counts are u32 summary fields; their width is the only count
+/// limit. The program itself is bounded by its byte format.
+fn count_event(count: u32) -> Result<u32, ManufacturingError> {
+    count
+        .checked_add(1)
+        .ok_or_else(|| failed("verified event count exceeds its u32 representation"))
+}
+
 #[cfg(test)]
 mod tests;
 mod web_roof;

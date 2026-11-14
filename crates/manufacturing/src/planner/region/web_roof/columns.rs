@@ -51,7 +51,7 @@ pub(in crate::planner) fn synthesize(
         Lattice::new(frame[0][1], frame[1][1], pitch)?,
     ];
     let base_count = lattices[0].count.saturating_add(lattices[1].count);
-    if base_count > MAX_DEPOSITION_SEGMENTS as usize {
+    if base_count > crate::working_set::units() {
         return Err(resource("Cathedral base column inventory exceeded"));
     }
     let mut work = 0;
@@ -76,12 +76,12 @@ pub(in crate::planner) fn synthesize(
                     (((bounds[1][axis] - bounds[0][axis]) / recipe.bead_width_mm)
                         .ceil()
                         .max(0.0)
-                        .min(f64::from(MAX_DEPOSITION_SEGMENTS))) as usize
+                        .min(crate::working_set::units() as f64)) as usize
                         + 2
                 })
                 .sum::<usize>(),
         )
-        .min(MAX_DEPOSITION_SEGMENTS as usize);
+        .min(crate::working_set::units());
     let roots_budget = seed_limit.saturating_mul(2 * std::mem::size_of::<f64>());
     super::super::super::remaining_geometry_units(
         0,
@@ -188,7 +188,7 @@ pub(in crate::planner) fn synthesize(
                                             .saturating_add(256),
                                     )?;
                                     charge(&mut work, columns.joints.len() - index, cancel)?;
-                                    if columns.joints.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                                    if columns.joints.len() >= crate::working_set::units() {
                                         return Err(resource(
                                             "Cathedral joint column budget exceeded",
                                         ));
@@ -220,7 +220,7 @@ pub(in crate::planner) fn synthesize(
                                 }) {
                                     continue;
                                 }
-                                if root_count >= MAX_DEPOSITION_SEGMENTS as usize {
+                                if root_count >= crate::working_set::units() {
                                     return Err(resource("Cathedral seed column budget exceeded"));
                                 }
                                 charge(&mut work, roots.len() - index, cancel)?;

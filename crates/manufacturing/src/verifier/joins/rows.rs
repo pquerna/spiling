@@ -33,11 +33,11 @@ fn reserve(entries: &mut Vec<Interval>, retained_bytes: usize) -> Result<(), Man
             .capacity()
             .saturating_mul(2)
             .max(64)
-            .min(MAX_DEPOSITION_SEGMENTS as usize)
+            .min(crate::working_set::units())
     } else {
         entries.capacity()
     };
-    if entries.len() >= MAX_DEPOSITION_SEGMENTS as usize
+    if entries.len() >= crate::working_set::units()
         || retained_bytes
             .checked_add(target * size_of::<Interval>())
             .is_none_or(|bytes| bytes as u64 > crate::working_set::bytes_u64())
@@ -122,7 +122,7 @@ fn sweep(
             if (start[fixed] <= row && row < end[fixed])
                 || (end[fixed] <= row && row < start[fixed])
             {
-                if hits.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                if hits.len() >= crate::working_set::units() {
                     return Err(resource());
                 }
                 hits.push(
@@ -168,7 +168,7 @@ fn append_expected(
                 .iter()
                 .map(|ring| ring.0.len())
                 .sum::<usize>();
-        if edges > MAX_DEPOSITION_SEGMENTS as usize
+        if edges > crate::working_set::units()
             || retained_bytes
                 .checked_add(entries.capacity() * size_of::<Interval>())
                 .and_then(|bytes| bytes.checked_add(edges.max(hits.capacity()) * size_of::<f64>()))
@@ -191,7 +191,7 @@ fn append_expected(
         let count = (((limits[1] - limits[0]) / pitch) * demand.fraction)
             .ceil()
             .max(1.0);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(resource());
         }
         let mut spacing = if count == 1.0 {

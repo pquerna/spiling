@@ -3,7 +3,7 @@
 
 use crate::{check_cancel, error};
 use spiling_contracts::manufacturing::{
-    DepositionPath, MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
+    DepositionPath, ManufacturingError, ManufacturingErrorCode,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -139,7 +139,7 @@ impl<'a> PreparedAnchorPaths<'a> {
             check_cancel(cancel)?;
             let edges = path.checked_edges()?;
             let edge_count = edges.len();
-            if prepared.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+            if prepared.len() >= crate::working_set::units() {
                 return Err(error(
                     ManufacturingErrorCode::ResourceLimit,
                     "prepared anchor path inventory exceeds segment budget",
@@ -167,7 +167,7 @@ impl<'a> PreparedAnchorPaths<'a> {
                 let growth = prepared
                     .capacity()
                     .max(16)
-                    .min(MAX_DEPOSITION_SEGMENTS as usize - prepared.len());
+                    .min(crate::working_set::units().saturating_sub(prepared.len()));
                 prepared.try_reserve_exact(growth).map_err(|_| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -252,7 +252,7 @@ impl Default for AnchorWorkspace {
         Self {
             intervals: Vec::new(),
             uncovered: Vec::new(),
-            record_limit: MAX_DEPOSITION_SEGMENTS as usize,
+            record_limit: crate::working_set::units(),
         }
     }
 }
@@ -299,7 +299,7 @@ impl AnchorWorkspace {
     pub(in crate::planner) fn set_budget(&mut self, remaining_records: usize) {
         self.intervals.clear();
         self.uncovered.clear();
-        self.record_limit = remaining_records.min(MAX_DEPOSITION_SEGMENTS as usize);
+        self.record_limit = remaining_records.min(crate::working_set::units());
     }
 
     pub(in crate::planner) fn retained_records(&self) -> usize {

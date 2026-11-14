@@ -158,7 +158,6 @@ impl LayerHeightAssessment {
             self.realized_max_mm,
         ])?;
         if self.layer_count == 0
-            || self.layer_count > MAX_PRINT_LAYERS
             || self.differing_layer_count > self.layer_count
             || self.realized_min_mm > self.realized_max_mm
             || (self.differing_layer_count == 0) != self.first_differing_layer.is_none()
@@ -182,7 +181,7 @@ impl LayerHeightAssessment {
         intent: &ManufacturingIntent,
         layers: &[PrintLayer],
     ) -> Result<Self, ManufacturingError> {
-        if layers.is_empty() || layers.len() > MAX_PRINT_LAYERS as usize {
+        if layers.is_empty() || layers.len() > MAX_PLAN_COUNT {
             return Err(invalid(
                 "layer-height assessment requires a bounded nonempty schedule",
             ));

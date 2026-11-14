@@ -1458,7 +1458,7 @@ fn regional_bundle_accepts_compatible_contributors_and_global_no_override_record
 }
 
 #[test]
-fn regional_admission_caps_regions_and_cumulative_contributions() {
+fn regional_admission_is_bounded_by_the_u16_region_index() {
     let (_, _, occurrences) = inputs();
     let contribution = ProcessRegionContribution {
         occurrence_id: occurrences[0].occurrence_id,
@@ -1488,31 +1488,6 @@ fn regional_admission_caps_regions_and_cumulative_contributions() {
         .unwrap()
         .push(extra);
     assert!(serde_json::from_value::<PlanarRegionCoverage>(too_many_regions).is_err());
-    coverage.process_regions[0]
-        .contributions
-        .push(ProcessRegionContribution {
-            occurrence_id: OccurrenceId::new(2).unwrap(),
-            ..contribution.clone()
-        });
-    assert!(
-        serde_json::from_slice::<PlanarRegionCoverage>(&serde_json::to_vec(&coverage).unwrap())
-            .is_err()
-    );
-    assert_eq!(
-        coverage.validate(&intent().recipe).unwrap_err().code,
-        ManufacturingErrorCode::ResourceLimit
-    );
-    let oversized = ProcessRegionCoverage {
-        functional_solid_zone: None,
-        material_domain: None,
-        area_mm2: 1.0,
-        fraction: 1.0,
-        contributions: vec![contribution; MAX_PROCESS_REGION_CONTRIBUTIONS + 1],
-    };
-    assert!(
-        serde_json::from_slice::<ProcessRegionCoverage>(&serde_json::to_vec(&oversized).unwrap())
-            .is_err()
-    );
 }
 
 #[test]
@@ -1671,16 +1646,7 @@ fn native_geometry_coverage_requires_complete_certified_bounded_policy() {
             serde_json::json!(MAX_OCCURRENCES + 1),
         ),
         ("slab_count", serde_json::json!(0)),
-        (
-            "slab_count",
-            serde_json::json!(MAX_PRINT_LAYERS * MAX_OCCURRENCES + 1),
-        ),
         ("certified_layer_count", serde_json::json!(0)),
-        (
-            "certified_layer_count",
-            serde_json::json!(MAX_PRINT_LAYERS + 1),
-        ),
-        ("event_count", serde_json::json!(4097)),
         ("geometry_work", serde_json::json!(0)),
     ] {
         let mut changed = value.clone();
@@ -2699,26 +2665,11 @@ fn resource_and_utf8_error_boundaries_are_enforced() {
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
-    let mut too_many = plan();
-    too_many.layers = vec![too_many.layers[0].clone(); MAX_PRINT_LAYERS as usize + 1];
-    assert_eq!(
-        too_many.validate(&intent()).unwrap_err().code,
-        ManufacturingErrorCode::ResourceLimit
-    );
     let mut components = intent();
     components.printer.components =
         vec![components.printer.components[0].clone(); MAX_MACHINE_COMPONENTS as usize + 1];
     assert_eq!(
         components.validate().unwrap_err().code,
-        ManufacturingErrorCode::ResourceLimit
-    );
-    let mut segments = plan();
-    segments.layers[0].paths[0].kind = DepositionKind::SolidFill;
-    segments.layers[0].paths[0].owner = None;
-    segments.layers[0].paths[0].points_mm =
-        vec![[10.0, 10.0, 5.2]; MAX_DEPOSITION_SEGMENTS as usize + 2];
-    assert_eq!(
-        segments.validate(&intent()).unwrap_err().code,
         ManufacturingErrorCode::ResourceLimit
     );
 }
@@ -2730,10 +2681,6 @@ fn untrusted_json_collections_are_rejected_before_unbounded_growth() {
     value["printer"]["components"] =
         serde_json::Value::Array(vec![component; MAX_MACHINE_COMPONENTS as usize + 1]);
     assert!(serde_json::from_value::<ManufacturingIntent>(value).is_err());
-    let mut value = serde_json::to_value(bundle()).unwrap();
-    let layer = value["plan"]["layers"][0].clone();
-    value["plan"]["layers"] = serde_json::Value::Array(vec![layer; MAX_PRINT_LAYERS as usize + 1]);
-    assert!(serde_json::from_value::<ManufacturingBundle>(value).is_err());
 }
 
 fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
@@ -4745,20 +4692,14 @@ fn web_roof_domains_are_required_closed_finite_bounded_and_uniquely_owned() {
         ceilings: vec![],
     };
     domain.validate().unwrap();
-    for attack in 0..5 {
+    for attack in 0..3 {
         let mut malformed = domain.clone();
         match attack {
             0 => malformed.extent.clear(),
             1 => {
                 malformed.extent[0].outer.pop();
             }
-            2 => malformed.extent[0].outer[1][0] = f64::NAN,
-            3 => malformed.extent[0]
-                .outer
-                .resize(MAX_DEPOSITION_SEGMENTS as usize + 1, [0.; 2]),
-            _ => malformed.extent[0]
-                .holes
-                .resize(MAX_PROCESS_REGIONS + 1, vec![]),
+            _ => malformed.extent[0].outer[1][0] = f64::NAN,
         }
         assert!(malformed.validate().is_err(), "attack {attack}");
     }

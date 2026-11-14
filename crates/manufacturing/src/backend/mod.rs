@@ -161,13 +161,7 @@ pub fn emit(
                 }
                 Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
                 Event::Extrusion(e, speed) => {
-                    process_events += 1;
-                    if process_events > MAX_PROCESS_EVENTS {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "stationary process event budget exceeded",
-                        ));
-                    }
+                    count_event(&mut process_events)?;
                     let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
@@ -204,14 +198,8 @@ pub fn emit(
                     let [lo, hi] = arc.xy_bounds();
                     writable_position([lo[0], lo[1], to[2]], intent)?;
                     writable_position([hi[0], hi[1], to[2]], intent)?;
-                    deposits += 1;
+                    count_event(&mut deposits)?;
                     built_top = built_top.max(to[2]);
-                    if deposits > MAX_DEPOSITION_SEGMENTS {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "actual model/waste or travel segment budget exceeded",
-                        ));
-                    }
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
                         || feed <= 0.0
@@ -264,16 +252,10 @@ pub fn emit(
                     let to = project_xyz6_point_mm(target)?;
                     writable_position(to, intent)?;
                     if matches!(event, Event::Deposit(..) | Event::Waste(..)) {
-                        deposits += 1;
+                        count_event(&mut deposits)?;
                         built_top = built_top.max(to[2]);
                     } else {
-                        travels += 1;
-                    }
-                    if deposits > MAX_DEPOSITION_SEGMENTS || travels > MAX_TRAVEL_SEGMENTS {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "actual model/waste or travel segment budget exceeded",
-                        ));
+                        count_event(&mut travels)?;
                     }
                     if let Some(job) = routed {
                         crate::routing::check_motion(
@@ -417,12 +399,10 @@ pub fn emit(
         }
         crate::routing::check_motion(last, lift, active_tool, built_top, intent, job)?;
         crate::routing::check_motion(lift, park, active_tool, built_top, intent, job)?;
-        if travels > MAX_TRAVEL_SEGMENTS - 2 || process_events >= 100_000 {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "final routed lifecycle budget exceeded",
-            ));
+        for _ in 0..2 {
+            count_event(&mut travels)?;
         }
+        count_event(&mut process_events)?;
         writeln!(program, "M400\nG1 E{rounded:.8} F{:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
@@ -460,4 +440,16 @@ fn limit(_: fmt::Error) -> ManufacturingError {
         ManufacturingErrorCode::ResourceLimit,
         "emitted program byte limit exceeded",
     )
+}
+
+/// Program counts are u32 on the wire; their width is the only count limit.
+/// Memory is bounded by the streamed program's byte format.
+fn count_event(counter: &mut u32) -> Result<(), ManufacturingError> {
+    *counter = counter.checked_add(1).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "program event count exceeds its u32 representation",
+        )
+    })?;
+    Ok(())
 }

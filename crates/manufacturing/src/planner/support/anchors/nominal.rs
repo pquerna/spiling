@@ -95,8 +95,7 @@ impl InventoryStats {
             block_len += 1;
             count = count.saturating_add(1);
             edges = edges.saturating_add(path.points_mm.len().saturating_sub(1));
-            if count > MAX_DEPOSITION_SEGMENTS as usize || edges > MAX_DEPOSITION_SEGMENTS as usize
-            {
+            if count > crate::working_set::units() || edges > crate::working_set::units() {
                 return Ok(None);
             }
         }
@@ -507,7 +506,7 @@ mod tests {
             compare_queries(paths, contacts, &mut prepared, &mut scalar, &mut screened);
         }
         let prepared = &mut prepared;
-        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
+        assert_eq!(screened.record_limit, crate::working_set::units());
         assert_eq!(
             screened
                 .gaps_nominal(
@@ -524,7 +523,7 @@ mod tests {
                 .code,
             ManufacturingErrorCode::Cancelled,
         );
-        assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
+        assert_eq!(screened.record_limit, crate::working_set::units());
     }
 
     fn compare_queries(
@@ -584,7 +583,7 @@ mod tests {
                         }
                         result => panic!("nominal screening mismatch: {result:?}"),
                     }
-                    assert_eq!(screened.record_limit, MAX_DEPOSITION_SEGMENTS as usize);
+                    assert_eq!(screened.record_limit, crate::working_set::units());
                 }
             }
         }

@@ -190,10 +190,10 @@ impl Domains {
         super::super::remaining_geometry_units(retained, live_bytes)?;
         let output_stride =
             3 * std::mem::size_of::<DepositionPath>() + 6 * std::mem::size_of::<[f64; 3]>();
-        let allowance = (MAX_DEPOSITION_SEGMENTS as usize - existing_segments)
+        let allowance = (crate::working_set::units().saturating_sub(existing_segments))
             .min((crate::working_set::units() - retained) / 2)
             .min((crate::working_set::bytes() - live_bytes) / output_stride);
-        let mut segments = MAX_DEPOSITION_SEGMENTS as usize - allowance;
+        let mut segments = crate::working_set::units().saturating_sub(allowance);
         let mut paths = Vec::new();
         let wall_centers = self.wall_centers.as_ref().unwrap_or(&self.centers);
         if interface.0.is_empty() || self.all_interface {
@@ -311,7 +311,7 @@ fn charge_hatch(
             bounds.max().x - bounds.min().x
         };
         let rows = ((extent / spacing) * fraction).ceil().max(1.0);
-        if !rows.is_finite() || rows > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !rows.is_finite() || rows > crate::working_set::units() as f64 {
             return Err(resource("support hatch row budget exceeded"));
         }
         let edges = polygon.exterior().0.len()
@@ -532,7 +532,7 @@ fn wall_piece(
             "support wall role crossing creates unresolved deposition",
         ));
     }
-    if *segments >= MAX_DEPOSITION_SEGMENTS as usize {
+    if *segments >= crate::working_set::units() {
         return Err(resource("retained support wall segment budget exceeded"));
     }
     let continuation =
@@ -665,16 +665,9 @@ mod tests {
         let cancel = AtomicBool::new(false);
         assert!(
             Domains::new(
-                &support,
-                &interface,
-                false,
-                0.6,
-                MAX_DEPOSITION_SEGMENTS as usize + 1,
-                0,
-                0,
-                &mut 0,
-                0,
-                &cancel
+                &support, &interface, false, 0.6,
+                // The former 2M command cap is not a retention limit.
+                2_000_001, 0, 0, &mut 0, 0, &cancel
             )
             .is_ok()
         );
@@ -947,7 +940,7 @@ mod tests {
                     &interface,
                     1.0,
                     &layer,
-                    MAX_DEPOSITION_SEGMENTS as usize,
+                    crate::working_set::units(),
                     &mut 0,
                     0,
                     &cancel

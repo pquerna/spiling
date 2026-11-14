@@ -13,7 +13,7 @@ fn lattice(frame: [[f64; 2]; 2], pitch: f64) -> Result<[Vec<f64>; 2], Manufactur
     let mut result: [Vec<f64>; 2] = std::array::from_fn(|_| Vec::new());
     for axis in 0..2 {
         let count = ((frame[1][axis] - frame[0][axis]) / pitch).ceil().max(1.0);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(failed(
                 "Cathedral column lattice exceeds the command budget",
             ));
@@ -22,7 +22,7 @@ fn lattice(frame: [[f64; 2]; 2], pitch: f64) -> Result<[Vec<f64>; 2], Manufactur
             frame[0][axis] + ((frame[1][axis] - frame[0][axis]) - (count - 1.0) * pitch) * 0.5;
         result[axis].extend((0..count as usize).map(|index| first + index as f64 * pitch));
     }
-    if result[0].len() + result[1].len() > MAX_DEPOSITION_SEGMENTS as usize {
+    if result[0].len() + result[1].len() > crate::working_set::units() {
         return Err(failed("Cathedral column base inventory exceeded"));
     }
     Ok(result)
@@ -46,7 +46,7 @@ pub(super) fn seeds(
                 .map_or(frame[0][fixed], |index| base[fixed][index]);
             let hi = base[fixed].get(gap).copied().unwrap_or(frame[1][fixed]);
             let count = ((hi - lo) / recipe.web_roof_spacing_mm()).ceil().max(1.0);
-            if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+            if !count.is_finite() || count > crate::working_set::units() as f64 {
                 return Err(failed("Cathedral reconstructed seed contacts exceeded"));
             }
             for index in 1..count as usize {
@@ -72,7 +72,7 @@ pub(super) fn seeds(
                         {
                             continue;
                         }
-                        if roots[0].len() + roots[1].len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        if roots[0].len() + roots[1].len() >= crate::working_set::units() {
                             return Err(failed(
                                 "Cathedral reconstructed local seed inventory exceeded",
                             ));
@@ -142,7 +142,7 @@ pub(super) fn reconstruct<'a>(
                             Ok(_) => {}
                             Err(index) => {
                                 charge_many(work, columns.joints.len() - index, cancel)?;
-                                if columns.joints.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                                if columns.joints.len() >= crate::working_set::units() {
                                     return Err(failed(
                                         "Cathedral joint column inventory exceeded",
                                     ));
@@ -169,7 +169,7 @@ pub(super) fn reconstruct<'a>(
                             }) {
                                 continue;
                             }
-                            if root_count >= MAX_DEPOSITION_SEGMENTS as usize {
+                            if root_count >= crate::working_set::units() {
                                 return Err(failed("Cathedral seed column inventory exceeded"));
                             }
                             charge_many(work, roots.len() - index, cancel)?;

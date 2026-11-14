@@ -280,11 +280,9 @@ impl InteriorSelection {
             }
             if let InteriorCandidateOutcome::Qualified { work } = &candidate.outcome {
                 positive(&[work.model_volume_mm3])?;
-                if work
-                    .interior_segments_per_tool
-                    .iter()
-                    .any(|n| *n > MAX_DEPOSITION_SEGMENTS)
-                    || work.interior_segments_per_tool.iter().sum::<u32>() > MAX_DEPOSITION_SEGMENTS
+                if work.interior_segments_per_tool[0]
+                    .checked_add(work.interior_segments_per_tool[1])
+                    .is_none()
                 {
                     return Err(resource("interior candidate segment budget exceeded"));
                 }
@@ -438,7 +436,7 @@ impl InteriorPolicyAssessment {
             positive(&[work.model_volume_mm3])?;
             if work.interior_segments_per_tool[0]
                 .checked_add(work.interior_segments_per_tool[1])
-                .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
+                .is_none()
             {
                 return Err(resource("policy work segment count exceeds bound"));
             }

@@ -5,7 +5,6 @@
 use super::*;
 
 pub const FIXED_DUAL_FIRMWARE_REVISION: &str = "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7";
-pub const MAX_TOOL_SELECTIONS: u32 = 50_000;
 
 /// One E8 extrusion quantum of filament length.
 pub const E_QUANTUM_MM: f64 = 1e-8;
@@ -909,7 +908,7 @@ impl FixedDualVerification {
             .sum()
     }
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if self.selection_count == 0 || self.selection_count > MAX_TOOL_SELECTIONS {
+        if self.selection_count == 0 {
             return Err(invalid("invalid decoded fixed-dual selection count"));
         }
         let mut segments = 0u32;
@@ -936,11 +935,6 @@ impl FixedDualVerification {
                 .checked_add(tool.model_deposition_segments)
                 .and_then(|value| value.checked_add(tool.waste_deposition_segments))
                 .ok_or_else(|| resource("routed segment count overflow"))?;
-        }
-        if segments > MAX_DEPOSITION_SEGMENTS {
-            return Err(resource(
-                "model and waste share the existing deposition segment budget",
-            ));
         }
         Ok(())
     }

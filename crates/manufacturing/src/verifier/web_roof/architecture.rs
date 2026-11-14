@@ -68,7 +68,7 @@ pub(super) fn panel_intervals(
             continue;
         }
         let center = bay[0] + (bay[1] - bay[0]) * 0.5;
-        if intervals.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+        if intervals.len() >= crate::working_set::units() {
             return Err(failed("web opening reconstructed interval budget exceeded"));
         }
         intervals.push([start, center - radius]);
@@ -100,7 +100,7 @@ pub(super) fn pier_roads(
                         if hi - lo < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
                             continue;
                         }
-                        if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        if expected.len() >= crate::working_set::units() {
                             return Err(failed("web pier reconstructed road budget exceeded"));
                         }
                         expected.push((fixed, coordinate, lo, hi));

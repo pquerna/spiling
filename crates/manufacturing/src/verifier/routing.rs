@@ -39,7 +39,7 @@ pub(super) struct RouteState<'a> {
     waste_ticks: [i64; 2],
     ready: [bool; 2],
     group: u32,
-    layer: u16,
+    layer: u32,
     safe_z: f64,
     accounting: [RoutedToolAccounting; 2],
     pub(super) expected_e: f64,
@@ -158,14 +158,14 @@ impl<'a> RouteState<'a> {
     }
     pub(super) fn begin_group(
         &mut self,
-        layer: u16,
+        layer: u32,
         tool: u8,
         motion: &MotionState,
         expected_e: f64,
     ) -> Result<(), ManufacturingError> {
         if self.stage != Stage::Groups
             || self.pending()
-            || u32::from(layer) != self.group / 2
+            || layer != self.group / 2
             || self.plan.routing_tool_orders[layer as usize][self.group as usize % 2] != tool
         {
             return Err(failed(
@@ -408,10 +408,10 @@ impl<'a> RouteState<'a> {
                 }
                 motion.extrusion = 0.0;
                 self.expected_e = 0.0;
-                self.selection_count += 1;
-                if self.selection_count > MAX_TOOL_SELECTIONS {
-                    return Err(failed("tool epoch budget exceeded"));
-                }
+                self.selection_count = self
+                    .selection_count
+                    .checked_add(1)
+                    .ok_or_else(|| failed("tool epoch count exceeds its u32 representation"))?;
                 if let Some(sink) = replay.as_deref_mut() {
                     sink.push_epoch(
                         motion
@@ -518,7 +518,11 @@ impl<'a> RouteState<'a> {
                         motion.extrusion,
                         feed,
                         line,
-                        if lifecycle { u16::MAX } else { self.layer },
+                        if lifecycle {
+                            super::replay::LIFECYCLE_LAYER
+                        } else {
+                            self.layer
+                        },
                         if lifecycle { 6 } else { 0 },
                     )?;
                 }

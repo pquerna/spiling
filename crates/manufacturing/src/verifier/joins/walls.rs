@@ -384,7 +384,7 @@ fn commands(
     let count = paths.iter().try_fold(0usize, |count, path| {
         count
             .checked_add(path.checked_edges()?.len())
-            .filter(|count| *count <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|count| *count <= crate::working_set::units())
             .ok_or_else(resource)
     })?;
     budget.reserve(

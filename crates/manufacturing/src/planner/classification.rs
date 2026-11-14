@@ -2349,7 +2349,7 @@ impl ClassifiedRegions {
                         .map(|path| path.points_mm.len() - 1)
                         .sum::<usize>(),
                 )
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -2462,7 +2462,7 @@ impl ClassifiedRegions {
             for path in normal.paths.into_iter().take(wall_count) {
                 output_segments = output_segments
                     .checked_add(path.points_mm.len() - 1)
-                    .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .filter(|n| *n <= crate::working_set::units())
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -4424,7 +4424,8 @@ mod ownership_tests {
     #[test]
     fn fixed_owned_admission_separates_units_from_bytes() {
         let mut admit = fixed_owned_budget(0, 0);
-        admit(MAX_DEPOSITION_SEGMENTS as usize + 1, 0).unwrap();
+        // The former 2M command cap is not a retained-unit limit.
+        admit(2_000_001, 0).unwrap();
         assert!(admit(0, crate::working_set::bytes() + 1).is_err());
         assert!(admit(crate::working_set::units() + 1, 0).is_err());
     }

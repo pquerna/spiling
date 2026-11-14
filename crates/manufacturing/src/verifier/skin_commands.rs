@@ -289,7 +289,7 @@ fn check_masks(
             max = max.max(point[fixed]);
         }
         let count = ((max - min) / solid_spacing).ceil().max(1.0);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(resource());
         }
         let spacing = if count == 1.0 { 0.0 } else { solid_spacing };

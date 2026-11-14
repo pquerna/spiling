@@ -90,7 +90,7 @@ impl Lattice {
             ));
         }
         let count = ((max - min) / pitch).ceil().max(1.0);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(resource("web + roof lattice exceeds the command budget"));
         }
         let first = min + ((max - min) - (count - 1.0) * pitch) * 0.5;
@@ -130,7 +130,7 @@ fn seed_webs(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<[Vec<f64>; 2], ManufacturingError> {
-    if lattices[0].count.saturating_add(lattices[1].count) > MAX_DEPOSITION_SEGMENTS as usize {
+    if lattices[0].count.saturating_add(lattices[1].count) > crate::working_set::units() {
         return Err(resource("web + roof base lattice budget exceeded"));
     }
     let mut roots = lattices.map(|l| {
@@ -156,7 +156,7 @@ fn seed_webs(
             let divisions = ((b - a) / layer.recipe.web_roof_spacing_mm())
                 .ceil()
                 .max(1.);
-            if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
+            if !divisions.is_finite() || divisions > crate::working_set::units() as f64 {
                 return Err(resource("web + roof seed contact budget exceeded"));
             }
             for contact in 1..divisions as usize {
@@ -180,7 +180,7 @@ fn seed_webs(
                         {
                             continue;
                         }
-                        if roots[0].len() + roots[1].len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                        if roots[0].len() + roots[1].len() >= crate::working_set::units() {
                             return Err(resource("web + roof local seed budget exceeded"));
                         }
                         roots[1 - fixed].push(seed);
@@ -294,7 +294,7 @@ pub(in crate::planner) fn hatch_with_budget(
                 let divisions = ((b - a) / layer.recipe.web_roof_spacing_mm())
                     .ceil()
                     .max(1.0);
-                if !divisions.is_finite() || divisions > MAX_DEPOSITION_SEGMENTS as f64 {
+                if !divisions.is_finite() || divisions > crate::working_set::units() as f64 {
                     return Err(resource("web + roof roof-contact budget exceeded"));
                 }
                 for contact in 1..divisions as usize {
@@ -336,7 +336,7 @@ pub(in crate::planner) fn hatch_with_budget(
                         let mut pending: Option<[f64; 2]> = None;
                         for (index, &root) in roots.iter().enumerate() {
                             proposals += 1;
-                            if proposals > MAX_DEPOSITION_SEGMENTS as usize {
+                            if proposals > crate::working_set::units() {
                                 return Err(resource("web + roof proposal budget exceeded"));
                             }
                             charge(&mut work, 1, cancel)?;
@@ -577,14 +577,19 @@ mod tests {
         };
         let domain = MultiPolygon(vec![geo::Rect::new([0.0, 0.0], [24.0, 24.0]).to_polygon()]);
         let mut paths = Vec::new();
-        let error = hatch(
-            &domain,
-            0.08,
-            &layer,
-            &mut paths,
-            &mut 0,
-            &AtomicBool::new(false),
-        )
+        // No count cap: the operation's working set refuses, typed, before
+        // the pathological roof grows.
+        let narrow = crate::WorkingSet::new(64 << 20).unwrap();
+        let error = crate::working_set::scope(narrow, || {
+            hatch(
+                &domain,
+                0.08,
+                &layer,
+                &mut paths,
+                &mut 0,
+                &AtomicBool::new(false),
+            )
+        })
         .unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::ResourceLimit);
         assert!(paths.len() < 100);

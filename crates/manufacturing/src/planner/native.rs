@@ -253,7 +253,7 @@ pub(super) fn encode_polygons<'a>(
             })?;
             point_count = point_count
                 .checked_add(ring.0.len())
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -421,10 +421,10 @@ fn split_resolved_layer(
             return Err(unresolved());
         }
     }
-    if schedule.len() >= MAX_PRINT_LAYERS as usize {
+    if schedule.len() >= crate::working_set::records::<LayerElevation>() {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
-            "native/field refinement exceeds the layer budget",
+            "native/field refinement exceeds the manufacturing working set",
         ));
     }
     let upper = LayerElevation {

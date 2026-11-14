@@ -65,7 +65,7 @@ pub(super) fn reconstruct(
                             .iter()
                             .any(|chord| chord[0] <= start && end <= chord[1])
                         {
-                            if expected.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                            if expected.len() >= crate::working_set::units() {
                                 return Err(failed(
                                     "web + roof automatic joint inventory budget exceeded",
                                 ));

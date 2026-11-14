@@ -69,10 +69,13 @@ impl JobTimeBuilder {
         state: &MotionState,
         auxiliary: bool,
     ) -> Result<(), ManufacturingError> {
-        self.ledger.command_count += 1;
-        if self.ledger.command_count > 1_000_000 {
-            return Err(failed("job time command inventory exceeded"));
-        }
+        // Every other category is a disjoint subset of the command count, so
+        // its u32 width is the only count limit.
+        self.ledger.command_count = self
+            .ledger
+            .command_count
+            .checked_add(1)
+            .ok_or_else(|| failed("job time command count exceeds its u32 representation"))?;
         let model = &self.ledger.model;
         match decoded.command {
             Command::Travel | Command::Deposit => {

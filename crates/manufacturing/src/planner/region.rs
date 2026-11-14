@@ -671,7 +671,7 @@ impl HatchRows {
         } else {
             (((max - min) / solid_spacing) * fraction).ceil().max(1.0)
         };
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(resource("rectilinear hatch row limit exceeded"));
         }
         let spacing = if count <= 1.0 {
@@ -743,7 +743,7 @@ impl HatchRows {
         };
         let origin = origin[usize::from(layer.axis == HatchAxis::X)];
         let (first, count) = Self::lattice_extent(bounds, spacing, origin);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 {
             return Err(resource("common phase hatch row limit exceeded"));
         }
         rows.start = origin + first * spacing;
@@ -785,7 +785,7 @@ pub(super) fn hatch_polygon(
     if rows.count == 0 {
         return Ok(());
     }
-    if rows.count > MAX_DEPOSITION_SEGMENTS as usize - *segments {
+    if rows.count > crate::working_set::units().saturating_sub(*segments) {
         return Err(resource("rectilinear hatch row limit exceeded"));
     }
     let mut hits = Vec::new();
@@ -849,7 +849,7 @@ pub(super) fn bridge_rows<'a>(
         ) && path.points_mm.len() == 2
             && grid(path.points_mm[0][fixed]) == grid(path.points_mm[1][fixed])
         {
-            if intervals.len() >= MAX_DEPOSITION_SEGMENTS as usize - *segments {
+            if intervals.len() >= crate::working_set::units().saturating_sub(*segments) {
                 return Err(resource("bridge row ownership scratch limit exceeded"));
             }
             intervals.push((
@@ -872,7 +872,7 @@ pub(super) fn bridge_rows<'a>(
     let mut hits = Vec::new();
     let mut local = Vec::new();
     let exclusion_edges = exclusions.iter().map(point_count).sum::<usize>();
-    if exclusion_edges > MAX_DEPOSITION_SEGMENTS as usize - *segments - intervals.len() {
+    if exclusion_edges > crate::working_set::units().saturating_sub(*segments + intervals.len()) {
         return Err(resource("bridge exclusion row scratch limit exceeded"));
     }
     let mut excluded = Vec::new();
@@ -896,7 +896,9 @@ pub(super) fn bridge_rows<'a>(
         for &piece in &intervals[begin..end] {
             check_cancel(cancel)?;
             if piece.1 <= grid(high) && piece.3 >= min && piece.3 < max {
-                if intervals.len() + local.len() >= MAX_DEPOSITION_SEGMENTS as usize - *segments {
+                if intervals.len() + local.len()
+                    >= crate::working_set::units().saturating_sub(*segments)
+                {
                     return Err(resource("bridge row ownership scratch limit exceeded"));
                 }
                 local.push(piece);
@@ -1003,7 +1005,7 @@ pub(super) fn bridge_rows<'a>(
                         + excluded.capacity()
                         + rows.len() * 2
                         + 2
-                        > MAX_DEPOSITION_SEGMENTS as usize - *segments
+                        > crate::working_set::units().saturating_sub(*segments)
                     {
                         return Err(resource("bridge row ownership scratch limit exceeded"));
                     }
@@ -1240,7 +1242,7 @@ pub(crate) fn nominal_volume_with_process(
     Ok(volume)
 }
 fn reserve_segments(count: &mut usize, additional: usize) -> Result<(), ManufacturingError> {
-    if additional > MAX_DEPOSITION_SEGMENTS as usize - *count {
+    if additional > crate::working_set::units().saturating_sub(*count) {
         return Err(resource("retained deposition segment limit exceeded"));
     }
     *count += additional;

@@ -1122,7 +1122,7 @@ fn emit_corners(
                 {
                     continue;
                 }
-                if contour_events.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                if contour_events.len() >= crate::working_set::units() {
                     return Err(resource("source contour event limit exceeded"));
                 }
                 let mut event = corner_birth(
@@ -1259,7 +1259,7 @@ fn emit_corners(
                 }
                 check_cancel(cancel)?;
                 boolean::charge(work, 1)?;
-                if samples.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                if samples.len() >= crate::working_set::units() {
                     return Err(resource("source contour width subdivision limit exceeded"));
                 }
                 reserve_stage(&mut samples, 1, &sampling_request, 0)?;
@@ -1267,14 +1267,14 @@ fn emit_corners(
             }
         }
         for event in events {
-            if samples.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+            if samples.len() >= crate::working_set::units() {
                 return Err(resource("source contour subdivision limit exceeded"));
             }
             reserve_stage(&mut samples, 1, &sampling_request, 0)?;
             samples.push((event.parameter, curve.at(event.parameter)));
             if let Some(bevel) = event.bevel.as_ref() {
                 for t in bevel.parameters {
-                    if samples.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+                    if samples.len() >= crate::working_set::units() {
                         return Err(resource(
                             "source inner bevel port subdivision limit exceeded",
                         ));
@@ -2075,7 +2075,7 @@ fn walk(
             if !step.is_finite() || step <= 0.0 {
                 return Err(unsupported("nonpositive medial arm interval"));
             }
-            if spans.len() >= MAX_DEPOSITION_SEGMENTS as usize {
+            if spans.len() >= crate::working_set::units() {
                 return Err(resource("medial arm subdivision limit exceeded"));
             }
             let next = length + step;

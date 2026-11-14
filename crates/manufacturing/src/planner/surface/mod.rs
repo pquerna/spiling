@@ -213,7 +213,7 @@ impl PreparedFinish {
         retained_points
             .checked_add(occupied.point_count)
             .and_then(|n| n.checked_add(5))
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -605,7 +605,7 @@ pub(super) fn metadata(
             i.image.record().width as usize * i.parameters.u_repeats as usize + 2
         });
         if !count.is_finite()
-            || count + 3.0 * image_events as f64 > (MAX_DEPOSITION_SEGMENTS as usize / 4) as f64
+            || count + 3.0 * image_events as f64 > (crate::working_set::units() / 4) as f64
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,

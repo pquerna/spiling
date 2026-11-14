@@ -217,17 +217,10 @@ fn plan_with(
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
     let mut survival_memo = neighborhood::SurvivalMemo::default();
-    let schedule_bytes = MAX_PRINT_LAYERS as usize * std::mem::size_of::<LayerElevation>();
+    // Refinement grows the schedule in place; every retry and admission
+    // charges its actual capacity against the working set.
     let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?;
-    remaining_geometry_units(0, geometry_bytes(&[outside, schedule_bytes])?)?;
-    schedule
-        .try_reserve_exact(MAX_PRINT_LAYERS as usize - schedule.len())
-        .map_err(|_| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "source-owned schedule capacity reservation refused",
-            )
-        })?;
+    remaining_geometry_units(0, geometry_bytes(&[outside])?)?;
     // Freeze the original startup pair's physical scope. Retrying by current
     // layer count would shrink that scope each time one interval is split.
     let probe_scope = match input.intent.recipe.supports {
@@ -1802,7 +1795,7 @@ fn admit_schedule<'model>(
             )?;
             segments = segments
                 .checked_add(additional)
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -2720,7 +2713,7 @@ impl ContinuousOccupied {
         self.point_count = self
             .point_count
             .checked_add(points)
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -3006,10 +2999,10 @@ fn refine_deposition_pair(
     if !lower && !upper {
         return Err(failure);
     }
-    if schedule.len() >= MAX_PRINT_LAYERS as usize {
+    if schedule.len() >= crate::working_set::records::<LayerElevation>() {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
-            "actual-anchor schedule refinement exceeds the layer budget",
+            "actual-anchor schedule refinement exceeds the manufacturing working set",
         ));
     }
     // Add only one candidate boundary. Splitting the thicker eligible interval
@@ -3079,7 +3072,13 @@ fn scheduled_layers(
     for fields in admission.surface_fields.values() {
         for field in fields {
             row_events.clear();
-            field.append_z_events(bed, top, &mut row_events, MAX_PRINT_LAYERS as usize, cancel)?;
+            field.append_z_events(
+                bed,
+                top,
+                &mut row_events,
+                crate::working_set::records::<LayerElevation>(),
+                cancel,
+            )?;
             // Equal row mappings on repeated occurrences must not consume the
             // event budget repeatedly. Reuse the native event insertion pattern.
             for event in row_events.drain(..) {
@@ -3096,21 +3095,21 @@ fn scheduled_layers(
                             image_contact_floors.binary_search_by(|old: &f64| old.total_cmp(&floor))
                     {
                         if events.len() + image_contact_floors.len()
-                            >= 3 * MAX_PRINT_LAYERS as usize
+                            >= crate::working_set::records::<f64>()
                         {
                             return Err(error(
                                 ManufacturingErrorCode::ResourceLimit,
-                                "combined native/image/contact event budget exceeded",
+                                "combined native/image/contact events exceed the manufacturing working set",
                             ));
                         }
                         image_contact_floors.insert(position, floor);
                     }
                 }
                 if let Err(position) = events.binary_search_by(|old| old.total_cmp(&event)) {
-                    if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+                    if events.len() >= crate::working_set::records::<f64>() {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
-                            "combined native/image event budget exceeded",
+                            "combined native/image events exceed the manufacturing working set",
                         ));
                     }
                     events.insert(position, event);
@@ -3141,17 +3140,17 @@ fn scheduled_layers(
                     ));
                 }
                 visited += 1;
-                if visited > 3 * MAX_PRINT_LAYERS as usize {
+                if visited > crate::working_set::records::<f64>() {
                     return Err(error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "material-cycle event work exceeds the existing layer budget",
+                        "material-cycle event work exceeds the manufacturing working set",
                     ));
                 }
                 if let Err(position) = events.binary_search_by(|old| old.total_cmp(&boundary)) {
-                    if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+                    if events.len() >= crate::working_set::records::<f64>() {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
-                            "combined native/field/material event budget exceeded",
+                            "combined native/field/material events exceed the manufacturing working set",
                         ));
                     }
                     events.insert(position, boundary);
@@ -3210,10 +3209,10 @@ fn scheduled_layers(
             }
             for boundary in [stop, stop - interface_thickness_mm] {
                 if boundary > bed && boundary < top {
-                    if row_events.len() + events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+                    if row_events.len() + events.len() >= crate::working_set::records::<f64>() {
                         return Err(error(
                             ManufacturingErrorCode::ResourceLimit,
-                            "combined native/field/support event budget exceeded",
+                            "combined native/field/support events exceed the manufacturing working set",
                         ));
                     }
                     row_events.push(boundary);
@@ -3221,11 +3220,11 @@ fn scheduled_layers(
             }
         }
         if row_events.len() + image_contact_floors.len() + events.len()
-            > 3 * MAX_PRINT_LAYERS as usize
+            > crate::working_set::records::<f64>()
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
-                "combined native/field/support/contact event budget exceeded",
+                "combined native/field/support/contact events exceed the manufacturing working set",
             ));
         }
         row_events.append(&mut image_contact_floors);
@@ -3382,9 +3381,9 @@ fn layer_schedule_with_bounds(
             "part is not taller than one Z step of the selected printer",
         ));
     }
-    let mut sorted = Vec::with_capacity(events.len().min(4 * MAX_PRINT_LAYERS as usize));
+    let mut sorted = Vec::with_capacity(events.len().min(crate::working_set::records::<f64>()));
     for &event in events {
-        if sorted.len() >= 4 * MAX_PRINT_LAYERS as usize {
+        if sorted.len() >= crate::working_set::records::<f64>() {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "horizontal native events exceed the layer budget",
@@ -3397,7 +3396,12 @@ fn layer_schedule_with_bounds(
     sorted.sort_by(f64::total_cmp);
     // Admit genuine boundaries before growing either buffer. No nominal grid
     // participates in event identity or interval construction.
-    let mut boundaries = Vec::with_capacity(sorted.len().min(MAX_PRINT_LAYERS as usize - 1) + 2);
+    let mut boundaries = Vec::with_capacity(
+        sorted
+            .len()
+            .min(crate::working_set::records::<LayerElevation>() - 1)
+            + 2,
+    );
     boundaries.extend([bed, top]);
     for event in sorted {
         let position = boundaries.partition_point(|boundary| *boundary < event);
@@ -3405,7 +3409,7 @@ fn layer_schedule_with_bounds(
         {
             continue;
         }
-        if boundaries.len() > MAX_PRINT_LAYERS as usize {
+        if boundaries.len() > crate::working_set::records::<LayerElevation>() {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "horizontal native events exceed the layer budget",
@@ -3421,11 +3425,11 @@ fn layer_schedule_with_bounds(
             || !nominal.is_finite()
             || nominal <= 0.0
             || !ratio.is_finite()
-            || ratio > MAX_PRINT_LAYERS as f64
+            || ratio > crate::working_set::records::<LayerElevation>() as f64
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
-                "layer schedule exceeds the layer budget",
+                "layer schedule exceeds the manufacturing working set",
             ));
         }
         let mut count = (ratio as usize).max(1);
@@ -3476,7 +3480,9 @@ fn layer_schedule_with_bounds(
             if !fits(count)? {
                 if count > 1 && fits(count - 1)? {
                     count -= 1;
-                } else if count < MAX_PRINT_LAYERS as usize && fits(count + 1)? {
+                } else if count < crate::working_set::records::<LayerElevation>()
+                    && fits(count + 1)?
+                {
                     count += 1;
                 } else {
                     return Err(error(
@@ -3497,10 +3503,10 @@ fn layer_schedule_with_bounds(
     let mut layer_count = 0;
     for interval in boundaries.windows(2) {
         layer_count += subdivisions(interval[0], interval[1])?;
-        if layer_count > MAX_PRINT_LAYERS as usize {
+        if layer_count > crate::working_set::records::<LayerElevation>() {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
-                "layer schedule exceeds the layer budget",
+                "layer schedule exceeds the manufacturing working set",
             ));
         }
     }
@@ -3605,10 +3611,10 @@ fn refine_surface_schedule(
             ));
         }
         layer_count += 1;
-        if layer_count > MAX_PRINT_LAYERS as usize {
+        if layer_count > crate::working_set::records::<LayerElevation>() {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
-                "image vertical error refinement exceeds the layer budget",
+                "image vertical error refinement exceeds the manufacturing working set",
             ));
         }
         pending.push(LayerElevation {
@@ -4290,7 +4296,7 @@ fn required_material<'a>(
         .0
         .len()
         .checked_add(source_owners.len())
-        .filter(|count| *count <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|count| *count <= crate::working_set::units())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,

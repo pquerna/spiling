@@ -12,9 +12,7 @@ use geo::{Area, Coord, Intersects, LineString, MultiPolygon, Point, Polygon};
 use spiling_contracts::geometry::{
     AabbMm, FaceId, GeometryErrorCode, OccurrenceRecord, SECTION_SAMPLING_TOLERANCE_MM,
 };
-use spiling_contracts::manufacturing::{
-    MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
-};
+use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer};
 use std::{
     f64::consts::{PI, TAU},
@@ -354,7 +352,7 @@ impl CylinderField {
             .sqrt()
             .ceil()
             .max(1.0);
-        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 / 4.0 {
+        if !count.is_finite() || count > crate::working_set::units() as f64 / 4.0 {
             return Err(resource(
                 "native-edge cylindrical subdivision exceeds sampling budget",
             ));
@@ -505,7 +503,7 @@ pub(super) fn realize(
     retained
         .checked_add(14 * source_points)
         .and_then(|v| v.checked_add(8 * capacity))
-        .filter(|v| *v <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|v| *v <= crate::working_set::units())
         .ok_or_else(|| resource("native cylindrical construction staging point budget exceeded"))?;
     // Sampling is pre-admitted; mandatory robust boundary proofs subsequently
     // admit their bounded index/sort and charge every exact candidate predicate.
@@ -1043,7 +1041,7 @@ mod tests {
                 source.clone(),
                 &field,
                 2.0,
-                MAX_DEPOSITION_SEGMENTS as usize,
+                crate::working_set::units(),
                 &mut 0,
                 &AtomicBool::new(false)
             )

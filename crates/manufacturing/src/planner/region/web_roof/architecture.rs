@@ -64,7 +64,7 @@ pub(super) fn perforate(
             let center = bay[0] + (bay[1] - bay[0]) * 0.5;
             output.extend([start, center - half]);
             start = center + half;
-            if output.len() > 2 * MAX_DEPOSITION_SEGMENTS as usize {
+            if output.len() > crate::working_set::units().saturating_mul(2) {
                 return Err(resource("web opening interval budget exceeded"));
             }
         }

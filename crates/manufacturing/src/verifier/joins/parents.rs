@@ -275,7 +275,7 @@ pub(super) fn verify(
             .sum(),
     )?;
     let retained = super::inventory::retained_bytes(plan)?;
-    if count > MAX_DEPOSITION_SEGMENTS as usize
+    if count > crate::working_set::units()
         || count
             .checked_mul(size_of::<Stroke>())
             .and_then(|bytes| bytes.checked_add(retained))

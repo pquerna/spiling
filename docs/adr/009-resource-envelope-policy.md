@@ -129,10 +129,14 @@ resident in that observation, so the planner and verifier count only their own
 simultaneously live geometry, caches and staging against it; there is no fixed
 256MiB planner ceiling. Optional `SPILING_MANUFACTURING_MEMORY_BYTES` selects a
 positive explicit allowance; invalid configuration refuses startup. Concurrent
-planning tasks share the allowance rather than each admitting all of it. Format
-and protocol representation limits (bundle, program, layer and segment counts)
-remain separate constants, and Core's held compressed-artifact allowance
-remains separate capacity debt.
+planning tasks share the allowance rather than each admitting all of it. Counts
+that grow with the job (layers, height events, deposition and travel segments,
+process events, tool selections, verified commands) have no fixed ceiling: the
+planner admits their records against the working set and the emitter and
+verifier only check the u32 width of the fields that carry them. Byte formats
+(bundle, program, replay display) and the control frame stay separate
+constants, and Core's held compressed-artifact allowance and the native
+durable-storage reservation remain separate capacity debt.
 
 Resident memory, not only counted live data, consumes that headroom. On glibc
 the engine bounds allocator arenas to four before any thread starts (an operator

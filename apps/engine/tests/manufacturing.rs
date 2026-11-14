@@ -1474,18 +1474,34 @@ async fn stale_cancelled_and_resource_limited_compilation_never_publish() {
     );
     assert!(job.outputs.is_empty());
     assert!(status(&mut client).await.1.is_none());
-    // Micrometre layers on a printer whose step admits them exceed the layer
-    // budget rather than the printer's resolution.
-    let mut too_many_layers = intent();
-    too_many_layers.printer.motion_resolution.z_mm = 0.000001;
-    too_many_layers.printer.deposition_limits.min_bead_height_mm = 0.001;
-    too_many_layers.recipe.layer_height_mm = 0.001;
-    set_intent(&mut client, too_many_layers).await;
+    client.ping().await.unwrap();
+    client.shutdown().await.unwrap();
+
+    // Thousands of micrometre layers have no layer cap; an engine whose selected
+    // manufacturing allowance cannot hold them refuses, typed, and publishes
+    // nothing.
+    let store = tempfile::tempdir().unwrap();
+    let mut command = tokio::process::Command::new(ENGINE);
+    command.env(
+        "SPILING_MANUFACTURING_MEMORY_BYTES",
+        (1u64 << 20).to_string(),
+    );
+    let mut client = EngineClient::spawn_command(command, store.path())
+        .await
+        .unwrap();
+    import(&mut client, &work.source("box-mm.step")).await;
+    let mut many_layers = intent();
+    many_layers.printer.motion_resolution.z_mm = 0.000001;
+    many_layers.printer.deposition_limits.min_bead_height_mm = 0.000001;
+    many_layers.recipe.layer_height_mm = 0.0019;
+    set_intent(&mut client, many_layers).await;
     let id = start_compile(&mut client).await;
     let job = wait(&mut client, id).await;
     assert!(
-        matches!(&job.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::ResourceLimit)
+        matches!(&job.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::ResourceLimit),
+        "{job:?}"
     );
+    assert!(job.outputs.is_empty());
     assert!(status(&mut client).await.1.is_none());
     client.ping().await.unwrap();
     client.shutdown().await.unwrap();

@@ -199,11 +199,11 @@ Native geometry work uses one whole-job cumulative monitored guard, including
 coefficient, correspondence and closed-capture work, without a work-unit ceiling.
 Explicit caller-selected guards retain deterministic cumulative exhaustion.
 Deposited-stroke anchor comparisons retain their cumulative 128-million-unit
-ceiling; planar construction/overlay work uses 16,384,000,000 cumulative units.
+ceiling; planar construction/overlay work is counted cumulatively, never capped.
 The separate finite stroke/overlay allowances bound those operations, not geometric
 error: no per-source override, retry reset or geometric-accuracy relaxation is
-implied. The 100,000 emitted-segment limit is separate from the 64 MiB
-manufacturing retained-geometry/staging allowance. A coordinate-equivalent
+implied. Emitted-segment counts have no fixed limit; they are admitted against
+the host-derived manufacturing working set. A coordinate-equivalent
 inventory bound derived from that byte allowance is an early arithmetic guard,
 not a command count or a substitute for allocated-capacity accounting. Physical
 skin queries reserve all outside owners separately from their own caches and

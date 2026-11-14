@@ -104,7 +104,7 @@ impl<'de, T: FitElement> DeserializeSeed<'de> for FitSlotSeed<'_, T> {
     }
 }
 impl FitElement for [f64; 2] {
-    const LIMIT: usize = MAX_DEPOSITION_SEGMENTS as usize;
+    const LIMIT: usize = MAX_PLAN_COUNT;
     fn admit<E: Error>(_: &mut SegmentBudget, points: &mut u32) -> Result<(), E> {
         *points = points
             .checked_sub(1)
@@ -120,7 +120,7 @@ impl FitElement for [f64; 2] {
     }
 }
 impl FitElement for Vec<[f64; 2]> {
-    const LIMIT: usize = MAX_PROCESS_REGIONS;
+    const LIMIT: usize = MAX_PLAN_COUNT;
     fn decode<'de, D: serde::Deserializer<'de>>(
         d: D,
         budget: &mut SegmentBudget,
@@ -130,7 +130,7 @@ impl FitElement for Vec<[f64; 2]> {
     }
 }
 impl FitElement for SkinCommandFit {
-    const LIMIT: usize = MAX_DEPOSITION_SEGMENTS as usize;
+    const LIMIT: usize = MAX_PLAN_COUNT;
     fn admit<E: Error>(budget: &mut SegmentBudget, _: &mut u32) -> Result<(), E> {
         budget.remaining_skin_fits = budget
             .remaining_skin_fits
@@ -158,7 +158,7 @@ struct PolygonSeed<'a> {
     points: &'a mut u32,
 }
 impl FitElement for DiaphragmPolygonMm {
-    const LIMIT: usize = MAX_PROCESS_REGIONS;
+    const LIMIT: usize = MAX_PLAN_COUNT;
     fn decode<'de, D: serde::Deserializer<'de>>(
         d: D,
         budget: &mut SegmentBudget,
@@ -435,7 +435,7 @@ impl<'de> Visitor<'de> for SkinCommandFitDomainSeed<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let (mut region_index, mut region, mut skin) = (None, None, None);
         let (mut regional, mut mandatory, mut source_owner, mut fits) = (None, None, None, None);
-        let mut points = MAX_DEPOSITION_SEGMENTS;
+        let mut points = u32::MAX;
         while let Some(field) = map.next_key::<DomainField>()? {
             match field {
                 DomainField::RegionIndex => {
@@ -602,8 +602,8 @@ mod tests {
                 .map(SkinCommandFitDomain::allocated_bytes)
                 .sum::<usize>();
         assert_eq!(allowance - budget.remaining_skin_fit_bytes, retained);
-        assert_eq!(budget.remaining_skin_fits, MAX_DEPOSITION_SEGMENTS - 2);
-        assert_eq!(budget.remaining_segments, MAX_DEPOSITION_SEGMENTS);
+        assert_eq!(budget.remaining_skin_fits, u32::MAX - 2);
+        assert_eq!(budget.remaining_segments, u32::MAX);
 
         // Simulate the very same borrow across two layer fields. Nested mask,
         // hole, contributor, identity and witness capacity must fit together,
@@ -649,7 +649,7 @@ mod tests {
             + 4 * size_of::<Vec<[f64; 2]>>()
             + size_of::<[f64; 2]>()
             - 1;
-        let mut points = MAX_DEPOSITION_SEGMENTS;
+        let mut points = u32::MAX;
         let error = FitVecSeed::<DiaphragmPolygonMm>::new(&mut budget, &mut points)
             .deserialize(&mut serde_json::Deserializer::from_str(
                 r#"[{"outer":[],"holes":[[[0.0,0.0]]]}]"#,

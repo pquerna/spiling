@@ -81,23 +81,23 @@ impl JobTimeLedger {
         .iter()
         .any(|v| !v.is_finite() || *v < 0.0)
             || self.command_count == 0
-            || self.command_count > 1_000_000
-            || self.model_moves > MAX_DEPOSITION_SEGMENTS
-            || self.auxiliary_moves > MAX_DEPOSITION_SEGMENTS
-            || self.travel_moves > MAX_TRAVEL_SEGMENTS + 2
-            || self.feeder_moves > 100_000
-            || self.selections_per_tool.iter().any(|n| *n > 25_000)
         {
             return Err(invalid(
                 "job time ledger exceeds finite command/time bounds",
             ));
         }
-        let accounted = self.model_moves
-            + self.auxiliary_moves
-            + self.travel_moves
-            + self.feeder_moves
-            + self.selections_per_tool.iter().sum::<u32>();
-        if self.command_count < accounted {
+        let accounted = [
+            self.model_moves,
+            self.auxiliary_moves,
+            self.travel_moves,
+            self.feeder_moves,
+            self.selections_per_tool[0],
+            self.selections_per_tool[1],
+        ]
+        .into_iter()
+        .map(u64::from)
+        .sum::<u64>();
+        if u64::from(self.command_count) < accounted {
             return Err(invalid(
                 "job time command count omits accounted movement/selection work",
             ));

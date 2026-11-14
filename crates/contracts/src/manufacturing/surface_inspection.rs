@@ -82,7 +82,6 @@ pub(super) fn validate_surface_inspections(
             .filter(|c| c.faces.iter().any(|f| f.face_id == record.face_id))
             .ok_or_else(|| corrupt("surface exposure has no source-face construction"))?;
         if record.interval_count == 0
-            || record.interval_count > MAX_PRINT_LAYERS
             || records[..index].iter().any(|r| {
                 r.construction_index == record.construction_index && r.face_id == record.face_id
             })

@@ -271,7 +271,7 @@ pub(super) fn construct(
             }
             *segments = segments
                 .checked_add(1)
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= crate::working_set::units())
                 .ok_or_else(|| resource("separator segment budget exceeded"))?;
             paths.push(DepositionPath {
                 material_domain: None,

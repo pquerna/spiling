@@ -631,14 +631,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "MAX_MANUFACTURING_RETAINED_BYTES",
             MAX_MANUFACTURING_RETAINED_BYTES,
         ),
-        ("MAX_PRINT_LAYERS", u64::from(MAX_PRINT_LAYERS)),
+        ("MAX_PLAN_COUNT", MAX_PLAN_COUNT as u64),
         ("MAX_PROCESS_REGIONS", MAX_PROCESS_REGIONS as u64),
-        (
-            "MAX_DEPOSITION_SEGMENTS",
-            u64::from(MAX_DEPOSITION_SEGMENTS),
-        ),
-        ("MAX_TRAVEL_SEGMENTS", u64::from(MAX_TRAVEL_SEGMENTS)),
-        ("MAX_RETRACTIONS", u64::from(MAX_RETRACTIONS)),
         ("MAX_MACHINE_COMPONENTS", u64::from(MAX_MACHINE_COMPONENTS)),
         ("MAX_PROFILE_JSON_BYTES", u64::from(MAX_PROFILE_JSON_BYTES)),
         (

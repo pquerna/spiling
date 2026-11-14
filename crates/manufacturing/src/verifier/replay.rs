@@ -4,6 +4,9 @@
 use spiling_contracts::{geometry::AabbMm, manufacturing::*};
 use std::io::{Read, Write};
 
+/// Layer of the fixed start/end lifecycle moves.
+pub(crate) const LIFECYCLE_LAYER: u32 = u32::MAX;
+
 /// Optional bounded byte sink; no per-motion object vector or planner positions.
 pub(crate) struct ReplaySink {
     bytes: spiling_chunks::ChunkWriter,
@@ -60,7 +63,7 @@ impl ReplaySink {
         position: [f64; 3],
         tool: u8,
         line: u32,
-        layer: u16,
+        layer: u32,
     ) -> Result<(), ManufacturingError> {
         self.active_tool = u32::from(tool);
         self.push(position, 0.0, 0.0, line, layer, 14)
@@ -71,7 +74,7 @@ impl ReplaySink {
         e: f64,
         feed: f64,
         line: u32,
-        layer: u16,
+        layer: u32,
         kind: u8,
     ) -> Result<(), ManufacturingError> {
         self.push_associated(position, e, feed, line, layer, kind, None)
@@ -83,35 +86,32 @@ impl ReplaySink {
         e: f64,
         feed: f64,
         line: u32,
-        layer: u16,
+        layer: u32,
         kind: u8,
         association: Option<super::expected::Association>,
     ) -> Result<(), ManufacturingError> {
         if self.omitted {
             return Ok(());
         }
-        let count = match kind {
-            0 => self.travels,
-            6 | 7 => self.lifecycle,
-            11 | 12 => self.process,
-            14 => self.epochs,
-            _ => self.depositions,
-        };
-        let max = if matches!(kind, 6 | 7) {
-            4
-        } else if kind == 14 {
-            MAX_TOOL_SELECTIONS
-        } else if kind == 0 {
-            MAX_TRAVEL_SEGMENTS
-        } else {
-            MAX_PROCESS_EVENTS
-        };
-        if count >= max {
-            return Err(ManufacturingError::new(
-                ManufacturingErrorCode::ResourceLimit,
-                "replay category event budget exceeded",
-            ));
+        // Category counts are bounded by the display byte budget below; only
+        // the fixed lifecycle has a semantic count.
+        if matches!(kind, 6 | 7) && self.lifecycle >= 4 {
+            return Err(super::failed("replay lifecycle exceeds its four moves"));
         }
+        // SPLR records carry a u16 layer with `u16::MAX` reserved for
+        // lifecycle moves. A taller program omits its display, never its
+        // verification.
+        let record_layer = if layer == LIFECYCLE_LAYER {
+            u16::MAX
+        } else {
+            match u16::try_from(layer) {
+                Ok(layer) if layer != u16::MAX => layer,
+                _ => {
+                    self.omitted = true;
+                    return Ok(());
+                }
+            }
+        };
         if self.events >= self.expected_events {
             // Only an explicitly constrained sink can omit output. Production
             // derives its representation from the admitted command counts.
@@ -142,7 +142,7 @@ impl ReplaySink {
         record[24..32].copy_from_slice(&e.to_le_bytes());
         record[32..40].copy_from_slice(&feed.to_le_bytes());
         record[40..44].copy_from_slice(&line.to_le_bytes());
-        record[44..46].copy_from_slice(&layer.to_le_bytes());
+        record[44..46].copy_from_slice(&record_layer.to_le_bytes());
         record[46] = kind;
         record[47] =
             u8::from(self.events != 0 && kind != 14) | if association.is_some() { 2 } else { 0 };
@@ -182,7 +182,7 @@ impl ReplaySink {
         if self.omitted {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::ResourceLimit,
-                "actual motion exceeds the replay display budget",
+                "actual motion exceeds the replay display format (bytes or u16 layer index)",
             ));
         }
         if self.events == 0 || !self.process.is_multiple_of(2) {

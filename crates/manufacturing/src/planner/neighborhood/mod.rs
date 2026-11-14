@@ -5,9 +5,7 @@
 use super::{SectionSpan, classification, region};
 use crate::{check_cancel, error};
 use geo::{Coord, MultiPolygon};
-use spiling_contracts::manufacturing::{
-    MAX_PRINT_LAYERS, ManufacturingError, ManufacturingErrorCode,
-};
+use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
 use std::{
     cmp::Ordering,
     ops::Deref,
@@ -225,7 +223,7 @@ impl<'a> SkinNeighborhoods<'a> {
                 "fill-bead clearance must be finite and nonnegative",
             ));
         }
-        if sections.len() > MAX_PRINT_LAYERS as usize {
+        if sections.len() > crate::working_set::units() {
             return Err(resource("skin neighborhood span limit exceeded"));
         }
         let groups = match courses {

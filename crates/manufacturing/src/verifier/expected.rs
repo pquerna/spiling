@@ -111,7 +111,7 @@ pub(super) struct Association {
 #[derive(Clone, Copy)]
 pub(super) enum Action {
     BeginTool {
-        layer: u16,
+        layer: u32,
         tool: u8,
     },
     Fan(u8),
@@ -119,7 +119,7 @@ pub(super) enum Action {
         target: [f64; 3],
         tool: Option<u8>,
         source: Option<[f64; 3]>,
-        layer: u16,
+        layer: u32,
         role: DepositionKind,
         association: Option<Association>,
         closes_wall: bool,
@@ -128,7 +128,7 @@ pub(super) enum Action {
     },
     Recovery {
         retract: bool,
-        layer: u16,
+        layer: u32,
         role: DepositionKind,
     },
 }
@@ -145,7 +145,7 @@ pub(super) struct Expected<'a> {
     fan: Option<u8>,
     loaded: bool,
     routing: Option<&'a FixedDualJob>,
-    previous_group: Option<(u16, u8)>,
+    previous_group: Option<(u32, u8)>,
     groups_started: u8,
     safe_z: f64,
 }
@@ -180,7 +180,7 @@ impl<'a> Expected<'a> {
         let p = &self.plan.layers[self.layer].paths[self.path];
         let target = p.points_mm[0];
         let path_tool = self.routing.map(|job| job.tool_for_path(p)).transpose()?;
-        let layer = self.layer as u16;
+        let layer = self.layer as u32;
         let role = p.kind;
         let travel = |target| {
             Some(Action::Move {
@@ -307,9 +307,9 @@ impl Iterator for Expected<'_> {
                     let tool = order[self.groups_started as usize];
                     self.groups_started += 1;
                     self.position = Some(job.waste_end_mm(tool, self.plan.layers[self.layer].z_mm));
-                    self.previous_group = Some((self.layer as u16, tool));
+                    self.previous_group = Some((self.layer as u32, tool));
                     return Some(Ok(Action::BeginTool {
-                        layer: self.layer as u16,
+                        layer: self.layer as u32,
                         tool,
                     }));
                 }
@@ -355,7 +355,7 @@ impl Iterator for Expected<'_> {
                     target,
                     tool: self.routing.map(|_| self.previous_group.unwrap().1),
                     source: Some(source),
-                    layer: self.layer as u16,
+                    layer: self.layer as u32,
                     role: path.kind,
                     association: Some(Association {
                         width: edge.width_mm,

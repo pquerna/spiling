@@ -5,16 +5,18 @@
 use super::*;
 use crate::ArtifactView;
 
-/// Representation ceiling derived from admitted command-category counts, not RAM.
-pub const MAX_REPLAY_DISPLAY_BYTES: u32 =
-    REPLAY_HEADER_BYTES as u32 + MAX_REPLAY_EVENTS * REPLAY_RECORD_BYTES as u32;
+/// Byte ceiling of one replay display artifact. It is charged to the native
+/// durable-storage reservation with the bundle and program; a job whose
+/// motion exceeds it omits display events rather than failing verification.
+pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 1 << 30;
 /// Maximum independently indexed record span; pages are raw SPLR records,
 /// never standalone SPLR streams.
 pub const REPLAY_PAGE_EVENTS: u32 = 65_536;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 80;
+/// Records that fit [`MAX_REPLAY_DISPLAY_BYTES`].
 pub const MAX_REPLAY_EVENTS: u32 =
-    MAX_DEPOSITION_SEGMENTS + MAX_TRAVEL_SEGMENTS + 2 * MAX_RETRACTIONS + MAX_TOOL_SELECTIONS + 4;
+    (MAX_REPLAY_DISPLAY_BYTES - REPLAY_HEADER_BYTES as u32) / REPLAY_RECORD_BYTES as u32;
 pub const REPLAY_SCHEMA_VERSION: u32 = 6;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
@@ -138,16 +140,13 @@ impl ReplayDisplayInfo {
             || self.event_count == 0
             || self.event_count > MAX_REPLAY_EVENTS
             || self.deposition_count == 0
-            || self.deposition_count > MAX_DEPOSITION_SEGMENTS
             || self.travel_count == 0
-            || self.travel_count > MAX_TRAVEL_SEGMENTS
             || if self.tool_epoch_count == 0 {
                 self.waste_count != 0 || !matches!(self.lifecycle_count, 0 | 4)
             } else {
                 self.lifecycle_count != 2
                     || self.tool_epoch_count < self.layer_count + 1
                     || self.tool_epoch_count > self.layer_count.saturating_mul(2).saturating_add(1)
-                    || self.tool_epoch_count > MAX_TOOL_SELECTIONS
                     || self.layer_count.checked_mul(2) != Some(self.waste_count)
                     || self.waste_count >= self.deposition_count
                     || self
@@ -156,7 +155,6 @@ impl ReplayDisplayInfo {
                         .and_then(|n| n.checked_sub(2))
                         != Some(self.process_count)
             }
-            || self.process_count > 2 * MAX_RETRACTIONS
             || self
                 .deposition_count
                 .checked_add(self.travel_count)
@@ -165,7 +163,6 @@ impl ReplayDisplayInfo {
                 .and_then(|n| n.checked_add(self.tool_epoch_count))
                 != Some(self.event_count)
             || self.layer_count == 0
-            || self.layer_count > MAX_PRINT_LAYERS
         {
             return Err(corrupt("invalid replay schema or counts"));
         }

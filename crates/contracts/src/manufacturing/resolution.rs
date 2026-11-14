@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
-use super::{MAX_PRINT_LAYERS, ManufacturingError, invalid, resource};
+use super::{MAX_PLAN_COUNT, ManufacturingError, invalid, resource};
 use crate::{
     geometry::{FaceId, OccurrenceId, SourceHash},
     surface::{SurfaceFinish, SurfaceLayerId, SurfaceOverlays},
@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const MAX_SURFACE_RESOLUTION_REPRESENTATIVES: usize = 8;
-pub const MAX_SURFACE_RESOLUTION_RECORDS: usize =
-    MAX_PRINT_LAYERS as usize * crate::surface::MAX_SURFACE_LAYERS;
+pub const MAX_SURFACE_RESOLUTION_RECORDS: usize = MAX_PLAN_COUNT;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SurfaceFeatureClass {
@@ -135,8 +134,6 @@ impl SurfaceResolution {
             + u64::from(self.below_nominal_resolution)
             + u64::from(self.unavailable);
         if sum != u64::from(self.evaluated_witnesses)
-            || self.evaluated_witnesses > 20_000_000
-            || self.layer_index >= MAX_PRINT_LAYERS
             || !self.source_z_mm.is_finite()
             || !self.max_residual_lower_mm.is_finite()
             || !self.max_residual_upper_mm.is_finite()
@@ -265,10 +262,7 @@ impl SurfaceResolutionTotals {
             .checked_add(self.ambiguous)
             .and_then(|n| n.checked_add(self.below_nominal_resolution))
             .and_then(|n| n.checked_add(self.unavailable));
-        if sum != Some(self.evaluated_witnesses)
-            || self.evaluated_witnesses > 20_000_000
-            || self.unavailable > 0 && self.coverage_complete
-        {
+        if sum != Some(self.evaluated_witnesses) || self.unavailable > 0 && self.coverage_complete {
             return Err(invalid("invalid surface resolution totals"));
         }
         Ok(())

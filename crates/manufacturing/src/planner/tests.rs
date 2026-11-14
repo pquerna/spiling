@@ -665,7 +665,7 @@ fn cancellation_and_retained_segment_budget_precede_path_growth() {
         region::OrdinaryHatchPhase::Centered,
         classified_bytes,
         &[],
-        &mut (MAX_DEPOSITION_SEGMENTS as usize),
+        &mut (crate::working_set::units()),
         |units, bytes, _| remaining_geometry_units(units, bytes).map(|_| ()),
         &AtomicBool::new(false),
     );
@@ -841,8 +841,14 @@ fn true_height_schedule_and_physical_skin_neighborhoods_are_bounded() {
     let merged = layer_schedule(0.0, 1.0, 0.4, &[0.4, 0.4001]).unwrap();
     assert!(merged.iter().any(|layer| layer.z == 0.4));
     assert!(merged.iter().all(|layer| layer.z != 0.4001));
+    // A 1000 km part has no layer cap; the working set refuses it, typed,
+    // before the schedule is allocated.
+    let narrow = crate::WorkingSet::new(64 << 20).unwrap();
     assert_eq!(
-        layer_schedule(0.0, 1e9, 0.4, &[]).err().unwrap().code,
+        crate::working_set::scope(narrow, || layer_schedule(0.0, 1e9, 0.4, &[]))
+            .err()
+            .unwrap()
+            .code,
         ManufacturingErrorCode::ResourceLimit
     );
 }
@@ -911,9 +917,9 @@ fn phase_offset_dense_row_events_do_not_create_nominal_grid_slivers() {
 }
 
 #[test]
-fn integral_decimal_ratios_use_roundoff_safe_layer_budget_admission() {
+fn integral_decimal_ratios_use_roundoff_safe_layer_admission_without_a_layer_cap() {
     for bed in [0.0, 17.0, -17.0] {
-        for count in [3, 170, MAX_PRINT_LAYERS as usize] {
+        for count in [3, 170, 4096, 20_000] {
             let top = bed + count as f64 * 0.2;
             let schedule = layer_schedule(bed, top, 0.2, &[]).unwrap();
             assert_eq!(schedule.len(), count, "roundoff must not add a layer");
@@ -933,9 +939,12 @@ fn integral_decimal_ratios_use_roundoff_safe_layer_budget_admission() {
             }
         }
     }
-    let events: Vec<_> = (1..=MAX_PRINT_LAYERS).map(|index| index as f64).collect();
+    // Only the operation's working set bounds the schedule: a narrow
+    // allowance refuses with a typed resource error before growing.
+    let events: Vec<_> = (1..=200).map(|index| index as f64).collect();
+    let narrow = crate::WorkingSet::new(1024).unwrap();
     assert_eq!(
-        layer_schedule(0.0, MAX_PRINT_LAYERS as f64 + 1.0, 1.0, &events)
+        crate::working_set::scope(narrow, || layer_schedule(0.0, 201.0, 1.0, &events))
             .err()
             .unwrap()
             .code,

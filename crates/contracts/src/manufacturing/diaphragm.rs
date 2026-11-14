@@ -13,13 +13,12 @@ pub struct DiaphragmPolygonMm {
     pub holes: Vec<Vec<[f64; 2]>>,
 }
 fn diaphragm_ring<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[f64; 2]>, D::Error> {
-    bounded_vec::<D, _, { MAX_DEPOSITION_SEGMENTS as usize }>(d)
+    bounded_vec::<D, _, { MAX_PLAN_COUNT }>(d)
 }
 fn diaphragm_holes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Vec<[f64; 2]>>, D::Error> {
     #[derive(Deserialize)]
     struct Ring(#[serde(deserialize_with = "diaphragm_ring")] Vec<[f64; 2]>);
-    bounded_vec::<D, Ring, MAX_PROCESS_REGIONS>(d)
-        .map(|rings| rings.into_iter().map(|r| r.0).collect())
+    bounded_vec::<D, Ring, MAX_PLAN_COUNT>(d).map(|rings| rings.into_iter().map(|r| r.0).collect())
 }
 /// Explicit plate ownership is separate from the authored sparse values. Paths
 /// use ordinary SolidFill/Bridge process and the identified Regional wire owner.
@@ -41,7 +40,7 @@ pub struct ProcessDiaphragmCoverage {
 pub(super) fn diaphragm_extent<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<DiaphragmPolygonMm>, D::Error> {
-    bounded_vec::<D, _, MAX_PROCESS_REGIONS>(d)
+    bounded_vec::<D, _, MAX_PLAN_COUNT>(d)
 }
 pub(super) fn process_diaphragms<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -91,7 +90,7 @@ impl SkinBridgeDomain {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         let mut points = 0usize;
         for domain in [&self.regional, &self.mandatory, &self.source_owner] {
-            if domain.is_empty() || domain.len() > MAX_PROCESS_REGIONS {
+            if domain.is_empty() || domain.len() > MAX_PLAN_COUNT {
                 return Err(invalid(
                     "mixed skin bridge requires nonempty classified and source-owner domains",
                 ));
@@ -101,7 +100,7 @@ impl SkinBridgeDomain {
                     points = points
                         .checked_add(ring.len())
                         .ok_or_else(|| resource("mixed bridge point overflow"))?;
-                    if points > MAX_DEPOSITION_SEGMENTS as usize {
+                    if points > MAX_PLAN_COUNT {
                         return Err(resource("mixed bridge domain point limit exceeded"));
                     }
                     if ring.len() < 4
@@ -243,14 +242,14 @@ impl SkinCommandFitDomain {
                 "skin command fitting requires captured effective region ownership",
             ));
         }
-        if self.fits.is_empty() || self.fits.len() > MAX_DEPOSITION_SEGMENTS as usize {
+        if self.fits.is_empty() || self.fits.len() > MAX_PLAN_COUNT {
             return Err(invalid(
                 "skin command fitting requires bounded actual witnesses",
             ));
         }
         let mut points = 0usize;
         for domain in [&self.regional, &self.mandatory, &self.source_owner] {
-            if domain.is_empty() || domain.len() > MAX_PROCESS_REGIONS {
+            if domain.is_empty() || domain.len() > MAX_PLAN_COUNT {
                 return Err(invalid(
                     "skin command fitting requires classified and source-owner domains",
                 ));
@@ -260,7 +259,7 @@ impl SkinCommandFitDomain {
                     points = points
                         .checked_add(ring.len())
                         .ok_or_else(|| resource("skin command fitting point overflow"))?;
-                    if points > MAX_DEPOSITION_SEGMENTS as usize {
+                    if points > MAX_PLAN_COUNT {
                         return Err(resource("skin command fitting domain point limit exceeded"));
                     }
                     if ring.len() < 4
@@ -319,7 +318,7 @@ impl ProcessDiaphragmCoverage {
             || !self.physical_z_mm.iter().all(|z| z.is_finite())
             || self.physical_z_mm[0] >= self.physical_z_mm[1]
             || self.extent.is_empty()
-            || self.extent.len() > MAX_PROCESS_REGIONS
+            || self.extent.len() > MAX_PLAN_COUNT
         {
             return Err(invalid(
                 "invalid permanent diaphragm extent or physical slab",
@@ -336,7 +335,7 @@ impl ProcessDiaphragmCoverage {
                 points = points
                     .checked_add(ring.len())
                     .ok_or_else(|| resource("diaphragm point overflow"))?;
-                if points > MAX_DEPOSITION_SEGMENTS as usize {
+                if points > MAX_PLAN_COUNT {
                     return Err(resource("diaphragm extent point limit exceeded"));
                 }
                 if ring.len() < 4

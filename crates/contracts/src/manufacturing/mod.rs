@@ -66,18 +66,18 @@ pub const MAX_MANUFACTURING_PROGRAM_BYTES: u32 = 512 * 1024 * 1024;
 /// Core's live/history/staging allowance for held compressed bundle and
 /// program frames. Planner/verifier working sets are host-admitted instead.
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 256 * 1024 * 1024;
-pub const MAX_PRINT_LAYERS: u32 = 4096;
-/// Job-wide deposition total, a checked count rather than an allocation.
-pub const MAX_DEPOSITION_SEGMENTS: u32 = 2_000_000;
-/// An admitted path may require lift, XY travel and landing. Fixed-dual waste
-/// entries have the same bound and share the deposition inventory.
-pub const MAX_TRAVEL_SEGMENTS: u32 = 3 * MAX_DEPOSITION_SEGMENTS;
-/// Stationary retract/recover events; each pair accompanies at most one travel.
-pub const MAX_PROCESS_EVENTS: u32 = MAX_TRAVEL_SEGMENTS;
-/// Retractions accompany at most one deposition path each.
-pub const MAX_RETRACTIONS: u32 = MAX_DEPOSITION_SEGMENTS;
+/// Plan, summary, program and replay counts (layers, segments, travels,
+/// process events, selections) are u32 fields: their width is the only fixed
+/// count limit. The engine admits the bytes a job's counts imply against the
+/// machine-derived manufacturing working set ([ADR009]), and decoding is
+/// bounded by [`MAX_MANUFACTURING_BUNDLE_BYTES`].
+///
+/// [ADR009]: ../../../../docs/adr/009-resource-envelope-policy.md
+pub const MAX_PLAN_COUNT: usize = u32::MAX as usize;
 pub const MAX_MACHINE_COMPONENTS: u32 = 64;
-pub const MAX_PROFILE_JSON_BYTES: u32 = 32_768;
+/// An intent or profile travels whole in one authenticated control frame, so
+/// the frame is its byte bound; no smaller separate document ceiling.
+pub const MAX_PROFILE_JSON_BYTES: u32 = crate::MAX_CONTROL_BYTES;
 pub const MAX_MANUFACTURING_ERROR_BYTES: usize = 2048;
 pub const MAX_MANUFACTURING_LABEL_BYTES: usize = 256;
 
@@ -249,12 +249,12 @@ struct SegmentBudget {
 impl SegmentBudget {
     fn new() -> Self {
         Self {
-            remaining_segments: MAX_DEPOSITION_SEGMENTS,
+            remaining_segments: u32::MAX,
             // Every run spans at least two edges.
-            remaining_arcs: MAX_DEPOSITION_SEGMENTS / 2,
-            remaining_widths: MAX_DEPOSITION_SEGMENTS,
+            remaining_arcs: u32::MAX / 2,
+            remaining_widths: u32::MAX,
             remaining_width_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
-            remaining_skin_fits: MAX_DEPOSITION_SEGMENTS,
+            remaining_skin_fits: u32::MAX,
             remaining_skin_fit_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
         }
     }
@@ -603,7 +603,7 @@ impl<'de> serde::de::Visitor<'de> for PathsSeed<'_> {
     }
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut paths = Vec::new();
-        while paths.len() < MAX_DEPOSITION_SEGMENTS as usize {
+        while paths.len() < MAX_PLAN_COUNT {
             match seq.next_element_seed(PathSeed(&mut *self.0))? {
                 Some(path) => paths.push(path),
                 None => return Ok(paths),
@@ -757,7 +757,7 @@ impl<'de> serde::de::Visitor<'de> for LayersSeed<'_> {
     }
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut layers = Vec::new();
-        while layers.len() < MAX_PRINT_LAYERS as usize {
+        while layers.len() < MAX_PLAN_COUNT {
             match seq.next_element_seed(LayerSeed(&mut *self.0))? {
                 Some(layer) => layers.push(layer),
                 None => return Ok(layers),
@@ -1565,7 +1565,7 @@ impl WidthProfile {
         match self {
             Self::Constant { width_mm } => positive(std::slice::from_ref(width_mm)),
             Self::PerEdge { widths_mm } => {
-                if widths_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+                if widths_mm.len() > MAX_PLAN_COUNT {
                     return Err(resource("deposition width allocation limit exceeded"));
                 }
                 if widths_mm
@@ -1590,7 +1590,7 @@ impl WidthProfile {
                 }
             }
             Self::PerEdge { widths_mm } => {
-                if widths_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+                if widths_mm.len() > MAX_PLAN_COUNT {
                     return Err(resource("deposition width allocation limit exceeded"));
                 }
                 if widths_mm.len() != points_len - 1 {
@@ -1988,8 +1988,13 @@ impl DepositionPath {
         Ok(())
     }
 }
-pub const MAX_PROCESS_REGIONS: usize = 256;
-pub const MAX_PROCESS_REGION_CONTRIBUTIONS: usize = 256;
+/// Regional owners are addressed by a u16 `region_index`; that width is the
+/// region limit. Geometry within a region (polygons, holes, points) is
+/// bounded by [`MAX_PLAN_COUNT`] and the working set, not by this.
+pub const MAX_PROCESS_REGIONS: usize = 1 << 16;
+/// Contributions scale with placed occurrences; their count is bounded by
+/// the bundle bytes, not a fixed ceiling.
+pub const MAX_PROCESS_REGION_CONTRIBUTIONS: usize = MAX_PLAN_COUNT;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -2106,7 +2111,7 @@ struct RawProcessInterfaceCoverage {
 fn interface_bonds<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<[ProcessEndpointBond; 2]>, D::Error> {
-    bounded_vec::<D, _, { MAX_DEPOSITION_SEGMENTS as usize }>(d)
+    bounded_vec::<D, _, { MAX_PLAN_COUNT }>(d)
 }
 fn interface_centerlines<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -2122,7 +2127,7 @@ fn interface_centerlines<'de, D: serde::Deserializer<'de>>(
             mut seq: A,
         ) -> Result<Self::Value, A::Error> {
             let mut lines = Vec::new();
-            let limit = MAX_DEPOSITION_SEGMENTS as usize;
+            let limit = MAX_PLAN_COUNT;
             while lines.len() < limit {
                 let Some(line) = seq.next_element()? else {
                     return Ok(lines);
@@ -2159,11 +2164,11 @@ impl ProcessInterfaceCoverage {
         {
             return Err(invalid("invalid separator interface dimensions or axis"));
         }
-        if self.centerlines_mm.capacity() > MAX_DEPOSITION_SEGMENTS as usize {
+        if self.centerlines_mm.capacity() > MAX_PLAN_COUNT {
             return Err(resource("separator centerline allocation limit exceeded"));
         }
         if self.endpoint_bonds.len() != self.centerlines_mm.len()
-            || self.endpoint_bonds.capacity() > MAX_DEPOSITION_SEGMENTS as usize
+            || self.endpoint_bonds.capacity() > MAX_PLAN_COUNT
         {
             return Err(invalid(
                 "separator endpoints require one bounded actual bond witness each",
@@ -2232,7 +2237,7 @@ fn process_interfaces<'de, D: serde::Deserializer<'de>>(
                     return Ok(interfaces);
                 };
                 count += interface.centerlines_mm.len();
-                if count > MAX_DEPOSITION_SEGMENTS as usize {
+                if count > MAX_PLAN_COUNT {
                     return Err(serde::de::Error::custom(
                         "separator centerline limit exceeded",
                     ));
@@ -2381,7 +2386,7 @@ fn process_regions<'de, D: serde::Deserializer<'de>>(
     impl<'de> serde::de::Visitor<'de> for Regions {
         type Value = Vec<ProcessRegionCoverage>;
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("at most 256 process regions and 256 total contributions")
+            f.write_str("process regions addressable by a u16 region index")
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(
             self,
@@ -2542,7 +2547,7 @@ impl PlanarRegionCoverage {
                 .checked_add(interface.centerlines_mm.capacity())
                 .ok_or_else(|| resource("separator centerline allocation overflow"))?;
         }
-        if centerline_capacity > MAX_DEPOSITION_SEGMENTS as usize {
+        if centerline_capacity > MAX_PLAN_COUNT {
             return Err(resource("separator centerline allocation limit exceeded"));
         }
         if self.process_diaphragms.capacity() > MAX_PROCESS_REGIONS {
@@ -2783,10 +2788,7 @@ impl NativeFeatureCoverageSummary {
             .checked_add(self.invariant_source_union_layer_count)
             .and_then(|count| count.checked_add(self.native_interface_complex_layer_count))
             .ok_or_else(|| invalid("source feature layer count overflow"))?;
-        if layers > MAX_PRINT_LAYERS
-            || self.owned_critical_slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
-            || (layers == 0 && self.owned_critical_slab_count != 0)
-        {
+        if layers == 0 && self.owned_critical_slab_count != 0 {
             return Err(invalid("invalid native source feature coverage counts"));
         }
         Ok(())
@@ -2826,9 +2828,6 @@ impl NativeGeometryCoverageSummary {
             || self.achieved_shape_error_mm > self.requested_shape_error_mm
             || self.height_analysis_count > MAX_OCCURRENCES
             || self.certified_layer_count == 0
-            || self.certified_layer_count > MAX_PRINT_LAYERS
-            || self.slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
-            || self.event_count > 4096
             || (self.geometry_work == 0 && self.evidence == PreflightEvidence::Certified)
             || !matches!(
                 self.evidence,
@@ -2884,7 +2883,7 @@ impl NativeGeometryCoverageSummary {
         Ok(())
     }
 }
-pub const MAX_SPARSE_BANDS: usize = MAX_PRINT_LAYERS as usize * MAX_PROCESS_REGIONS;
+pub const MAX_SPARSE_BANDS: usize = MAX_PLAN_COUNT;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SparseBandVeto {
@@ -2930,7 +2929,7 @@ fn sparse_bands<'de, D: serde::Deserializer<'de>>(
 }
 
 fn routing_tool_orders<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[u8; 2]>, D::Error> {
-    bounded_vec::<D, _, { MAX_PRINT_LAYERS as usize }>(d)
+    bounded_vec::<D, _, { MAX_PLAN_COUNT }>(d)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -3094,7 +3093,7 @@ impl NormalizedPrintPlan {
                 fit_count = fit_count
                     .checked_add(domain.fits.len())
                     .ok_or_else(|| resource("skin fitting witness count overflow"))?;
-                if fit_count > MAX_DEPOSITION_SEGMENTS as usize {
+                if fit_count > MAX_PLAN_COUNT {
                     return Err(resource("cumulative skin fitting witness limit exceeded"));
                 }
                 if domain.fits.iter().any(|fit| {
@@ -3201,7 +3200,7 @@ impl NormalizedPrintPlan {
         if self.layers.is_empty() {
             return Err(invalid("print plan is empty"));
         }
-        if self.layers.len() > MAX_PRINT_LAYERS as usize {
+        if self.layers.len() > MAX_PLAN_COUNT {
             return Err(resource("print layer limit exceeded"));
         }
         if self.native_geometry.certified_layer_count as usize != self.layers.len() {
@@ -3385,7 +3384,7 @@ impl NormalizedPrintPlan {
                     routed_segments = routed_segments
                         .checked_add(path.points_mm.len() - 1)
                         .ok_or_else(|| resource("fixed-dual model and waste count overflow"))?;
-                    if routed_segments > MAX_DEPOSITION_SEGMENTS as usize {
+                    if routed_segments > MAX_PLAN_COUNT {
                         return Err(resource(
                             "fixed-dual model and waste share the existing segment budget",
                         ));
@@ -3784,7 +3783,7 @@ impl NormalizedPrintPlan {
                 ) {
                     object_segments += path.points_mm.len() - 1;
                 }
-                if segments > MAX_DEPOSITION_SEGMENTS as usize {
+                if segments > MAX_PLAN_COUNT {
                     return Err(resource("deposition segment limit exceeded"));
                 }
                 // Automatic walls include open thin-feature and junction arms.
@@ -4164,9 +4163,7 @@ impl VerificationReport {
             .deposition_segments
             .checked_add(self.support_deposition_segments)
             .and_then(|n| n.checked_add(waste_segments))
-            .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
-            || self.retraction_count > MAX_RETRACTIONS
-            || self.travel_segments > MAX_TRAVEL_SEGMENTS
+            .is_none()
         {
             return Err(resource("verification segment limit exceeded"));
         }
@@ -4293,7 +4290,6 @@ impl ManufacturingSummary {
             ));
         }
         if self.layers == 0
-            || self.layers > MAX_PRINT_LAYERS
             || self.paths == 0
             || self
                 .deposition_segments
@@ -4303,7 +4299,7 @@ impl ManufacturingSummary {
                 .deposition_segments
                 .checked_add(self.support_deposition_segments)
                 .and_then(|n| n.checked_add(waste_segments))
-                .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
+                .is_none()
         {
             return Err(invalid("invalid manufacturing summary counts"));
         }

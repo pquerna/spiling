@@ -70,6 +70,17 @@ pub(crate) fn canonicalize_with_tool_order(
     Ok(())
 }
 
+/// Streamed counts are u32 on the wire; their width is the only count limit.
+fn count_event(counter: &mut u32) -> Result<(), ManufacturingError> {
+    *counter = counter.checked_add(1).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "realized event count exceeds its u32 representation",
+        )
+    })?;
+    Ok(())
+}
+
 pub(crate) fn stream(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -217,18 +228,7 @@ pub(crate) fn stream(
                         [target[0], target[1], safe],
                         target,
                     ] {
-                        travels = travels.checked_add(1).ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "routed travel count overflow",
-                            )
-                        })?;
-                        if travels > MAX_TRAVEL_SEGMENTS {
-                            return Err(error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "routed travel budget exceeded",
-                            ));
-                        }
+                        count_event(&mut travels)?;
                         emit(Event::Travel(point, recipe.travel_speed_mm_s))?;
                     }
                 }
@@ -245,13 +245,7 @@ pub(crate) fn stream(
                     // The route above owns the lifted entry; body retraction is
                     // explicitly disabled and feeder debt belongs to selections.
                 } else if !retract {
-                    if travels == MAX_TRAVEL_SEGMENTS {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "realized travel budget exceeded",
-                        ));
-                    }
-                    travels += 1;
+                    count_event(&mut travels)?;
                     emit(Event::Travel(target, recipe.travel_speed_mm_s))?;
                 } else {
                     let RetractionPolicy::Enabled {
@@ -263,13 +257,8 @@ pub(crate) fn stream(
                     else {
                         unreachable!()
                     };
-                    if process_events > MAX_PROCESS_EVENTS - 2 {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "process event budget exceeded",
-                        ));
-                    }
-                    process_events += 2;
+                    count_event(&mut process_events)?;
+                    count_event(&mut process_events)?;
                     emit(Event::Extrusion(extrusion - distance_mm, speed_mm_s))?;
                     let from = position.unwrap();
                     let base_z = from[2].max(target[2]);
@@ -294,13 +283,7 @@ pub(crate) fn stream(
                         [Some(target), None, None]
                     };
                     for p in targets.into_iter().flatten() {
-                        if travels == MAX_TRAVEL_SEGMENTS {
-                            return Err(error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "realized travel budget exceeded",
-                            ));
-                        }
-                        travels += 1;
+                        count_event(&mut travels)?;
                         emit(Event::Travel(p, recipe.travel_speed_mm_s))?;
                     }
                     emit(Event::Extrusion(extrusion, speed_mm_s))?;

@@ -3190,7 +3190,7 @@ fn validate_tool_accounting(value: &RoutedToolAccounting) -> Result<(), String> 
         || value
             .model_deposition_segments
             .checked_add(value.waste_deposition_segments)
-            .is_none_or(|count| count > MAX_DEPOSITION_SEGMENTS)
+            .is_none()
     {
         return Err("invalid routed tool accounting".into());
     }

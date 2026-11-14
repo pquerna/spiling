@@ -464,7 +464,7 @@ pub(super) fn admit<'work>(
                 input,
                 occurrence,
                 placed,
-                (MAX_DEPOSITION_SEGMENTS as usize / 4).saturating_sub(surface_samples),
+                (crate::working_set::units() / 4).saturating_sub(surface_samples),
                 result.geometry_work,
                 cancel,
             ) {
