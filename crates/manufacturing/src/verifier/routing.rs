@@ -651,7 +651,7 @@ impl<'a> RouteState<'a> {
                             width: self.job.tools[tool].waste_bead_width_mm,
                             physical_z: [layer.lower_z_mm, layer.z_mm],
                             owner: None,
-                            external_wall: false,
+                            exposed: false,
                         }),
                     )?;
                 }

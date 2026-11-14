@@ -695,9 +695,13 @@ The speed of every single-tool deposition edge follows one declared rule
 independent verifier recomputes from the plan and intent:
 
 1. Base speed. With `recipe.role_speeds`, the role's speed: outer wall for a
-   wall path marked `external_wall` (the lane against the part surface, set by
+   wall path marked `exposed` (the lane against the part surface, set by
    the wall generator), inner wall for other walls and separators, sparse,
-   solid (and bottom skin), top skin, support (and interface) or bridge,
+   solid (and bottom skin), top skin for a top-skin path marked `exposed`
+   (no material in the next scheduled layer covers it, set by the planner
+   after the layer's paths are final; covered top skin is internal solid
+   and takes the solid speed, as PrusaSlicer's top/internal-solid split),
+   support (and interface) or bridge,
    capped on layer 0 by the first-layer wall speed (walls, separators) or
    first-layer infill speed (everything else), and by the recipe's material
    print speed. A Bridge owned by a sparse process region (fraction below

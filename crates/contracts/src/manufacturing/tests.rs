@@ -1842,7 +1842,7 @@ fn plan() -> NormalizedPrintPlan {
                     [10.0, 10.0, 5.2],
                 ],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             }],
         }],
     }
@@ -2333,7 +2333,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
             },
             points_mm: vec![[30.0, 30.0, 5.2], [31.0, 31.0, 5.2]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         });
         if matches!(
             kind,
@@ -2695,7 +2695,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                             })
                             .collect(),
                         arcs: Vec::new(),
-                        external_wall: false,
+                        exposed: false,
                     })
                     .collect(),
             }
@@ -2983,7 +2983,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
     mixed.layers[0]
@@ -3753,7 +3753,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     planned.validate(&intent()).unwrap();
     assert_eq!(
@@ -3914,7 +3914,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     captured.verification.deposition_segments += 1;
     let rebind = |bundle: &mut ManufacturingBundle| {
@@ -4213,7 +4213,7 @@ fn varying_width_path() -> DepositionPath {
             [10.0, 10.0, 5.2],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }
 }
 
@@ -4819,7 +4819,7 @@ fn arc_wall(points: usize, radius: f64) -> DepositionPath {
         physical_z_mm: [0.0, 0.2],
         points_mm,
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }
 }
 

@@ -313,7 +313,7 @@ mod tests {
                 physical_z_mm: [0.0, 0.2],
                 points_mm: points.into_iter().map(|[x, y]| [x, y, 0.2]).collect(),
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             })
             .collect()
     }

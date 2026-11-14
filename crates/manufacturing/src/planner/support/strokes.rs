@@ -407,7 +407,7 @@ mod tests {
             physical_z_mm: [8.0, 8.4],
             points_mm: points.to_vec(),
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         let runs: Vec<_> = StrokeRuns::for_path(&path).unwrap().collect();
         assert_eq!(runs, [(2, 3, 0.6), (3, 4, 0.6), (4, 5, 0.6), (5, 2, 0.6)]);
@@ -421,7 +421,7 @@ mod tests {
                 owner: None,
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             },
             DepositionPath {
                 material_domain: None,
@@ -431,7 +431,7 @@ mod tests {
                 owner: None,
                 points_mm: vec![[23.3, 0.3, 8.0], [42.7, 0.3, 8.0]],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             },
         ];
         let mut query = AnchorWorkspace::default();
@@ -463,7 +463,7 @@ mod tests {
             physical_z_mm: [0.0, 0.4],
             points_mm: points.to_vec(),
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         assert_eq!(
             StrokeRuns::for_path(&path).unwrap().collect::<Vec<_>>(),
@@ -520,7 +520,7 @@ mod tests {
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         });
         let path = DepositionPath {
             material_domain: None,
@@ -534,7 +534,7 @@ mod tests {
             ),
             points_mm: vec![[0.4, 0.0, 0.8], [1.6, 0.0, 0.8]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         let cancel = AtomicBool::new(false);
         let mut query = AnchorWorkspace::default();
@@ -610,7 +610,7 @@ mod tests {
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         });
         let cancel = AtomicBool::new(false);
         let mut query = AnchorWorkspace::default();
@@ -630,7 +630,7 @@ mod tests {
                 ),
                 points_mm: vec![[a, 0.0, 0.8], [b, 0.0, 0.8]],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             };
             let gaps = query
                 .gaps(
@@ -682,7 +682,7 @@ mod dimension_tests {
             physical_z_mm: [0.4, 0.5],
             points_mm: vec![[0.0, 0.0, 0.5], [0.4, 0.0, 0.5]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         let mut lower = DepositionPath {
             material_domain: None,
@@ -694,7 +694,7 @@ mod dimension_tests {
             physical_z_mm: [0.3, 0.4],
             points_mm: vec![[0.0, -1.0, 0.4], [0.0, 1.0, 0.4]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         let mut anchors = AnchorWorkspace::default();
         let first = analyze(

@@ -26,7 +26,7 @@ fn scene(skin: ProcessSkinKind, axis: region::HatchAxis, hole: bool) -> Scene {
         owner: Some(DepositionOwner::MandatorySkin { skin }),
         points_mm: vec![[1.1, 0.0, 1.2], [1.355, 0.0, 1.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     };
     let mut previous = DepositionPath {
         material_domain: None,
@@ -36,7 +36,7 @@ fn scene(skin: ProcessSkinKind, axis: region::HatchAxis, hole: bool) -> Scene {
         owner: None,
         points_mm: vec![[0.75, -1.0, 0.8], [0.75, 1.0, 0.8]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     };
     let mut contact = DepositionPath {
         material_domain: None,
@@ -46,7 +46,7 @@ fn scene(skin: ProcessSkinKind, axis: region::HatchAxis, hole: bool) -> Scene {
         owner: None,
         points_mm: vec![[3.0, -1.0, 0.4], [3.0, 1.0, 0.4]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     };
     let mut fill = polygon![
         (x: 1.1, y: -2.0), (x: 4.0, y: -2.0),

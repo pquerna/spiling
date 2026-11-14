@@ -543,7 +543,7 @@ mod tests {
                 [1.0, 1.0, 0.2],
             ],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }
     }
 

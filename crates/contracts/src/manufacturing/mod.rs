@@ -503,7 +503,7 @@ enum PathField {
     MaterialDomain,
     PointsMm,
     Arcs,
-    ExternalWall,
+    Exposed,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
@@ -519,7 +519,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
                 "material_domain",
                 "points_mm",
                 "arcs",
-                "external_wall",
+                "exposed",
             ],
             self,
         )
@@ -538,7 +538,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let mut physical_z_mm = None;
         let mut points_mm = None;
         let mut arcs = None;
-        let mut external_wall = None;
+        let mut exposed = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
                 PathField::MaterialDomain => {
@@ -583,11 +583,11 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     arcs = Some(map.next_value_seed(ArcsSeed(&mut *self.0))?);
                 }
-                PathField::ExternalWall => {
-                    if external_wall.is_some() {
-                        return Err(serde::de::Error::duplicate_field("external_wall"));
+                PathField::Exposed => {
+                    if exposed.is_some() {
+                        return Err(serde::de::Error::duplicate_field("exposed"));
                     }
-                    external_wall = Some(map.next_value()?);
+                    exposed = Some(map.next_value()?);
                 }
             }
         }
@@ -602,8 +602,8 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
             // An omitted list is an empty one: the path has no arc runs.
             arcs: arcs.unwrap_or_default(),
-            // Omitted, like arcs, when false: an inner or non-wall path.
-            external_wall: external_wall.unwrap_or_default(),
+            // Omitted, like arcs, when false: an inner, covered or non-surface path.
+            exposed: exposed.unwrap_or_default(),
         };
         path.validate_owner().map_err(serde::de::Error::custom)?;
         Ok(path)
@@ -1854,12 +1854,16 @@ pub struct DepositionPath {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<ArcRun>>", optional)]
     pub arcs: Vec<ArcRun>,
-    /// The wall bead against the part's surface (outermost lane of its
-    /// boundary): it takes the outer-wall speed. Only a Wall-owned path may
-    /// set it (a wall lowered to Bridge keeps it); serialized only when true.
+    /// The bead lies on the part's exposed surface: a wall's outermost lane
+    /// against the part boundary, or top skin with no material deposited
+    /// directly above it. Exposed walls take the outer-wall speed and exposed
+    /// top skin the top-skin speed; covered top skin is internal solid and
+    /// takes the solid-infill speed. Only Wall-owned paths (a wall lowered to
+    /// Bridge keeps it) and mandatory TopSkin paths may set it; serialized
+    /// only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[ts(as = "Option<bool>", optional)]
-    pub external_wall: bool,
+    pub exposed: bool,
 }
 
 /// Largest distance of a run's points from its circle. The commanded arc and
@@ -2097,7 +2101,13 @@ impl DepositionPath {
             }
             _ => self.owner.is_none(),
         };
-        if !valid || (self.external_wall && self.owner != Some(DepositionOwner::Wall)) {
+        let exposable = self.owner == Some(DepositionOwner::Wall)
+            || (self.kind == DepositionKind::TopSkin
+                && self.owner
+                    == Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::TopSkin,
+                    }));
+        if !valid || (self.exposed && !exposable) {
             return Err(invalid(
                 "deposition role disagrees with immutable construction ownership",
             ));

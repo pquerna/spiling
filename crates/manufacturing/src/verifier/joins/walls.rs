@@ -1162,7 +1162,7 @@ mod tests {
                 [inset, inset, 0.2],
             ],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }
     }
 

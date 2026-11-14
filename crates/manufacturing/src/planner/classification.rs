@@ -2928,7 +2928,7 @@ impl ClassifiedRegions {
                                         vec![core, transition, skin_end]
                                     },
                                     arcs: Vec::new(),
-                                    external_wall: false,
+                                    exposed: false,
                                 }],
                                 whole_rows: Vec::new(),
                                 process_interfaces: Vec::new(),
@@ -4344,7 +4344,7 @@ mod ownership_tests {
             physical_z_mm: [0., h],
             points_mm: vec![[0., y, h], [2.0 * y, y, h]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         });
         let mut workspace = super::super::support::AnchorWorkspace::default();
         let mut work = 0;
@@ -4448,7 +4448,7 @@ mod skin_bridge_tests {
             physical_z_mm: [5.0, 5.4],
             points_mm: points.iter().map(|p| [p[0], p[1], 5.4]).collect(),
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }
     }
 
@@ -4576,7 +4576,7 @@ mod skin_bridge_tests {
             physical_z_mm: [floor - 0.0983, floor],
             points_mm: vec![[98.9, y, floor], [121.1, y, floor]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         })
         .to_vec();
         previous.push(DepositionPath {
@@ -4590,7 +4590,7 @@ mod skin_bridge_tests {
                 [120., 101.6750000119207, floor],
             ],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         });
         let required = vec![DepositionPath {
             material_domain: None,
@@ -4603,7 +4603,7 @@ mod skin_bridge_tests {
                 [transition[0], 101.90000000596024, transition[2]],
             ],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }];
         let mut workspace = AnchorWorkspace::default();
         let mut work = 0;
@@ -4777,7 +4777,7 @@ mod split_skin_tests {
                         physical_z_mm: [0., 0.2],
                         points_mm: vec![[a[0], a[1], 0.2], [b[0], b[1], 0.2]],
                         arcs: Vec::new(),
-                        external_wall: false,
+                        exposed: false,
                     }
                 };
                 let mut previous = vec![

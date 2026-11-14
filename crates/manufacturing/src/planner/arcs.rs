@@ -223,7 +223,7 @@ mod tests {
             physical_z_mm: [0.0, 0.2],
             points_mm: points,
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }
     }
 

@@ -6,7 +6,8 @@
 //! [`super::hatch_alternation_keys`]; the verifier still decodes and bounds
 //! actual feed and volumetric flow from the emitted bytes itself.
 //!
-//! 1. Base speed: a role speed (outer/inner wall, sparse, solid/bottom, top,
+//! 1. Base speed: a role speed (outer/inner wall, sparse, solid/bottom and
+//!    covered top skin, exposed top skin,
 //!    support, bridge), capped by the first-layer wall or infill speed on layer 0 and by the
 //!    recipe's material print speed; without role speeds, the uniform print
 //!    speed times the first-layer/bridge speed factors.
@@ -76,7 +77,7 @@ pub fn base_speed_mm_s(
     recipe: &PlanarPrintRecipe,
     process: &CapturedDepositionProcess<'_>,
     kind: DepositionKind,
-    external_wall: bool,
+    exposed: bool,
     layer: u32,
 ) -> f64 {
     let Some(speeds) = &recipe.role_speeds else {
@@ -90,11 +91,14 @@ pub fn base_speed_mm_s(
         return speed;
     };
     let mut speed = match kind {
-        DepositionKind::Perimeter if external_wall => speeds.outer_wall_mm_s,
+        DepositionKind::Perimeter if exposed => speeds.outer_wall_mm_s,
         DepositionKind::Perimeter | DepositionKind::SeparatorWall => speeds.inner_wall_mm_s,
         DepositionKind::SparseFill => speeds.sparse_infill_mm_s,
         DepositionKind::SolidFill | DepositionKind::BottomSkin => speeds.solid_infill_mm_s,
-        DepositionKind::TopSkin => speeds.top_skin_mm_s,
+        // Only the exposed top surface takes the top speed; top skin under
+        // the next layer's material is internal solid.
+        DepositionKind::TopSkin if exposed => speeds.top_skin_mm_s,
+        DepositionKind::TopSkin => speeds.solid_infill_mm_s,
         DepositionKind::Bridge => speeds.bridge_mm_s,
         DepositionKind::Support | DepositionKind::SupportInterface => speeds.support_mm_s,
     };
@@ -169,7 +173,7 @@ pub fn unslowed_edges<'a>(
     let process = intent.process_for_path(path)?;
     let routed = matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. });
     let role = speed_role(&intent.recipe, owning, path.kind, path.owner);
-    let base = base_speed_mm_s(&intent.recipe, &process, role, path.external_wall, layer)
+    let base = base_speed_mm_s(&intent.recipe, &process, role, path.exposed, layer)
         .min(intent.printer.max_print_feed_mm_s);
     let flow = flow_factor(&process, path.kind, layer);
     let height = path.height_mm();

@@ -308,14 +308,9 @@ pub(crate) fn stream(
                 }
                 // Role speed, then the flow ceiling per edge width, then the
                 // layer's cooling scale ([`speeds`]).
-                let base = speeds::base_speed_mm_s(
-                    recipe,
-                    &process,
-                    role,
-                    path.external_wall,
-                    layer.index,
-                )
-                .min(intent.printer.max_print_feed_mm_s);
+                let base =
+                    speeds::base_speed_mm_s(recipe, &process, role, path.exposed, layer.index)
+                        .min(intent.printer.max_print_feed_mm_s);
                 let flow = speeds::flow_factor(&process, path.kind, layer.index);
                 let height = path.height_mm();
                 let edge_speed = |width: f64| {

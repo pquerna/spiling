@@ -1124,11 +1124,15 @@ physical_z_mm: [number, number], points_mm: Array<[number, number, number]>,
  */
 arcs?: Array<ArcRun>,
 /**
- * The wall bead against the part's surface (outermost lane of its
- * boundary): it takes the outer-wall speed. Only a Wall-owned path may
- * set it (a wall lowered to Bridge keeps it); serialized only when true.
+ * The bead lies on the part's exposed surface: a wall's outermost lane
+ * against the part boundary, or top skin with no material deposited
+ * directly above it. Exposed walls take the outer-wall speed and exposed
+ * top skin the top-skin speed; covered top skin is internal solid and
+ * takes the solid-infill speed. Only Wall-owned paths (a wall lowered to
+ * Bridge keeps it) and mandatory TopSkin paths may set it; serialized
+ * only when true.
  */
-external_wall?: boolean, };
+exposed?: boolean, };
 
 export type ArcRun = { first: number, last: number, center_mm: [number, number],
 /**

@@ -13,6 +13,7 @@ use neighborhood::SkinNeighborhoods;
 mod bonds;
 mod cathedral;
 mod combined;
+mod exposure;
 mod native;
 mod partition;
 mod preflight;
@@ -1813,7 +1814,7 @@ fn admit_schedule<'model>(
                     physical_z_mm: [elevation.lower_z, z],
                     points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
                     arcs: Vec::new(),
-                    external_wall: false,
+                    exposed: false,
                 });
             }
             let mut coverage = coverage.clone();
@@ -2331,6 +2332,7 @@ fn admit_schedule<'model>(
         )?;
         construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
         drop_unprintable_rows(&mut layers)?;
+        exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
         support::object_volumes(&mut layers, input.intent)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;

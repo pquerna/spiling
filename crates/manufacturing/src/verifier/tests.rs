@@ -269,7 +269,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                             [1.0, 1.0, 1.0],
                         ],
                         arcs: Vec::new(),
-                        external_wall: false,
+                        exposed: false,
                     },
                     DepositionPath {
                         material_domain: None,
@@ -279,7 +279,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                         physical_z_mm: [0.0, 1.0],
                         points_mm: vec![[2.0, 2.0, 1.0], [6.0, 2.0, 1.0]],
                         arcs: Vec::new(),
-                        external_wall: false,
+                        exposed: false,
                     },
                 ],
             },
@@ -300,7 +300,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                     physical_z_mm: [1.0, 2.0],
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
                     arcs: Vec::new(),
-                    external_wall: false,
+                    exposed: false,
                 }],
             },
         ],
@@ -577,7 +577,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
             [1.0, 1.0, 1.0],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }];
     refresh_volumes(&intent, &mut plan);
     let program = "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\nG1 X4 Y1 Z1 E2.25 F600\nG1 X1 Y1 Z1 E3 F600\n";
@@ -762,7 +762,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }];
     refresh_volumes(&intent, &mut plan);
     let program =
@@ -812,7 +812,7 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
             [1.0, 1.0, 0.2],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
     intent.recipe.process.first_layer_flow_factor = 1.1;
@@ -865,7 +865,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.011_999_49, 1.016_000_49, 0.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     let length = distance(
         plan.layers[0].paths[0].points_mm[0],
@@ -898,7 +898,7 @@ fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
         physical_z_mm: [0.0, 0.000_01],
         points_mm: vec![[1.0, 1.0, 0.000_01], [1.02, 1.0, 0.000_01]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     // E=3e-8 is the ordinary E8 rounding of this nominal stroke, but its
     // independently inverted width is about 0.47124 rather than 0.45 mm.
@@ -920,7 +920,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.02, 1.0, 0.2], [1.0, 1.0, 0.2]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     // Nominal widths meet 0.20/mm. Actual E8 commands invert to about
     // 0.450997545 and 0.455003076: their gradient exceeds the frozen limit.
@@ -945,7 +945,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
             [1.0, 1.0, 0.2],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     // Both stored interior transitions are below 0.20/mm; only last→first
     // violates it. Emission matching the same bad plan is not independent proof.
@@ -1038,7 +1038,7 @@ fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         220_000
     ];
@@ -1081,7 +1081,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         40_000
     ];
@@ -1129,7 +1129,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         };
         100_000
     ];
@@ -1254,6 +1254,55 @@ fn role_speeds_flow_ceiling_and_cooling_slowdown_replay_independently() {
     assert_eq!(report.cooling_slowed_layers, 0);
     assert_eq!(report.minimum_cooling_scale, 1.0);
     assert!(verify(&program, &plan, &fast, &cancel).is_err());
+}
+
+/// Only top skin with nothing above it takes the top-skin speed; covered top
+/// skin is internal solid. The verifier recomputes the rule from the plan's
+/// declared exposure and refuses the other speed.
+#[test]
+fn exposed_top_skin_takes_top_speed_and_covered_top_skin_solid_speed() {
+    let (mut intent, mut plan) = complete_fixture();
+    intent.printer.max_volumetric_flow_mm3_s = 1000.0;
+    intent.printer.max_print_feed_mm_s = intent.printer.max_print_feed_mm_s.max(100.0);
+    intent.recipe.print_speed_mm_s = 100.0;
+    intent.recipe.process.minimum_layer_time_s = 0.0;
+    intent.recipe.process.fan_short_layer_time_s = 0.0;
+    intent.recipe.top_skin_axis = intent.recipe.rectilinear_axis;
+    intent.recipe.role_speeds = Some(RoleSpeeds {
+        first_layer_mm_s: 20.0,
+        first_layer_infill_mm_s: 30.0,
+        outer_wall_mm_s: 40.0,
+        inner_wall_mm_s: 45.0,
+        sparse_infill_mm_s: 50.0,
+        solid_infill_mm_s: 60.0,
+        top_skin_mm_s: 25.0,
+        support_mm_s: 40.0,
+        bridge_mm_s: 25.0,
+    });
+    intent.validate().unwrap();
+    let top = &mut plan.layers[1].paths[0];
+    top.kind = DepositionKind::TopSkin;
+    top.owner = Some(DepositionOwner::MandatorySkin {
+        skin: ProcessSkinKind::TopSkin,
+    });
+    refresh_volumes(&intent, &mut plan);
+    plan.validate(&intent).unwrap();
+    let cancel = AtomicBool::new(false);
+    let covered = emit_text(&plan, &intent, &cancel).unwrap();
+    verify(&covered, &plan, &intent, &cancel).unwrap();
+    let mut surface = plan.clone();
+    surface.layers[1].paths[0].exposed = true;
+    surface.validate(&intent).unwrap();
+    let exposed = emit_text(&surface, &intent, &cancel).unwrap();
+    verify(&exposed, &surface, &intent, &cancel).unwrap();
+    assert!(covered.contains(" F3600.000000\n"), "{covered}");
+    assert!(exposed.contains(" F1500.000000\n"), "{exposed}");
+    assert!(verify(&covered, &surface, &intent, &cancel).is_err());
+    assert!(verify(&exposed, &plan, &intent, &cancel).is_err());
+    // Exposure is a wall or mandatory top-skin declaration only.
+    let mut solid = plan.clone();
+    solid.layers[0].paths[1].exposed = true;
+    assert!(solid.validate(&intent).is_err());
 }
 
 #[test]
@@ -1664,7 +1713,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -1674,7 +1723,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -1684,7 +1733,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
     ];
     plan.layers[0].region_coverage.support_area_mm2 = 4.0;
@@ -1699,7 +1748,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [1.0, 1.5],
         points_mm: vec![[11.0, 1.0, 1.5], [15.0, 1.0, 1.5]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }];
     refresh_volumes(&intent, &mut plan);
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
@@ -2001,7 +2050,7 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
             [7.0, 1.0, 1.0],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -2124,7 +2173,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
             [10.0, 10.0, 1.0],
         ],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     plan.layers[0].paths[1].points_mm = vec![[20.0, 2.0, 1.0], [2.0, 2.0, 1.0]];
     refresh_volumes(&intent, &mut plan);
@@ -2308,7 +2357,7 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
                 physical_z_mm: [1.0, 2.0],
                 points_mm: vec![[5.0, 4.0, 2.0], [5.0, 1.0, 2.0]],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             });
         }
         refresh_volumes(&intent, &mut plan);
@@ -2613,7 +2662,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[2.0, 2.0, 0.1], [6.0, 2.0, 0.1]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     };
     plan.layers[0].lower_z_mm = 0.0;
     plan.layers[0].z_mm = 0.1;
@@ -2862,7 +2911,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
                 physical_z_mm: [layer.lower_z_mm, layer.z_mm],
                 points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
                 arcs: Vec::new(),
-                external_wall: false,
+                exposed: false,
             }];
             layer
         })
@@ -2878,7 +2927,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         physical_z_mm: [0.1, 0.4],
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     plan.sparse_bands = vec![SparseBandDecision {
         landing_aligned: false,
@@ -3051,7 +3100,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
                 [1.0, 1.0, layer.z_mm],
             ],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }];
     }
     // The lower separator anchor is actual earlier deposition, not a future
@@ -3064,7 +3113,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     plan.layers[0].paths.push(DepositionPath {
         material_domain: None,
@@ -3074,7 +3123,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[1.0, 3.0, 0.1], [5.0, 3.0, 0.1]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     let fine = &mut plan.layers[1];
     fine.paths.extend([
@@ -3088,7 +3137,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -3098,7 +3147,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -3108,7 +3157,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -3118,7 +3167,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.225, 3.0, 0.2], [4.775, 3.0, 0.2]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
     ]);
     fine.region_coverage.process_regions = [0.2, 0.4]
@@ -3293,7 +3342,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [0.0, 1.0],
         points_mm: fit.fitted_mm.to_vec(),
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }];
     layer.skin_command_fits = vec![SkinCommandFitDomain {
         region_index: 0,
@@ -3607,7 +3656,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[x[0], row, 1.0], [x[1], row, 1.0]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         })
         .collect();
     let layer = &mut plan.layers[1];
@@ -3623,7 +3672,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [1.0, 2.0],
         points_mm: vec![[2.0, row, 2.0], [boundary, row, 2.0], [5.4, row, 2.0]],
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     }];
     layer.region_coverage.wall_area_mm2 = 14.0;
     layer.region_coverage.bottom_skin_area_mm2 = 1.2;

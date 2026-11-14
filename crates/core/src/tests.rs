@@ -656,7 +656,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                     ),
                     points_mm: vec![[1.0, 1.0, 0.2], end],
                     arcs: Vec::new(),
-                    external_wall: false,
+                    exposed: false,
                 }],
                 region_coverage,
             }],

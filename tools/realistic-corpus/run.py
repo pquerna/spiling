@@ -270,13 +270,26 @@ def prusa(step, cwd):
     info = {"ok": ok, "seconds": round(time.time() - started, 2)}
     if ok:
         info["g1_lines"] = 0
+        # PrusaSlicer slices its own tessellation of the STEP: record whether
+        # it is closed and any layer it skipped, so a reference with phantom
+        # tops/bottoms from a broken slice is visible in the comparison.
+        layers = []
         for line in open(gcode, errors="replace"):
-            if line.startswith("G1 "):
+            if line.startswith(";Z:"):
+                layers.append(float(line[3:]))
+            elif line.startswith("G1 "):
                 info["g1_lines"] += 1
             elif line.startswith("; estimated printing time (normal mode) ="):
                 info["estimated_seconds"] = duration_seconds(line.split("=", 1)[1])
             elif line.startswith("; filament used [mm] ="):
                 info["filament_mm"] = float(line.split("=", 1)[1])
+        step_layer = recipe["layer_height_mm"] if DEFAULTS else 0.2
+        info["skipped_layers"] = sum(
+            max(0, round((b - a) / step_layer) - 1) for a, b in zip(layers, layers[1:]))
+        mesh = subprocess.run(["prusa-slicer", "--info", step], cwd=cwd, capture_output=True,
+                              text=True, timeout=TIMEOUT).stdout
+        m = re.search(r"open_edges = (\d+)", mesh)
+        info["open_edges"] = int(m.group(1)) if m else 0
     else:
         info["message"] = (proc.stderr or proc.stdout)[-300:]
     return info

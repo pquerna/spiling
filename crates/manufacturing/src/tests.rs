@@ -2287,7 +2287,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
         physical_z_mm: [layer.lower_z_mm, layer.z_mm],
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
         arcs: Vec::new(),
-        external_wall: false,
+        exposed: false,
     });
     assert_reemitted_interface_refuses(forged, &intent);
 }
@@ -3145,7 +3145,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
         DepositionPath {
             material_domain: None,
@@ -3157,7 +3157,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         },
     ];
     let recipe = &intent.recipe;

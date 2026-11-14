@@ -996,7 +996,7 @@ fn assemble(
                 points_mm,
                 arcs: Vec::new(),
                 // Every edge on the outermost lane: against the part's surface.
-                external_wall: correspondence[correspondence_base..]
+                exposed: correspondence[correspondence_base..]
                     .iter()
                     .all(|c| c.ordinal == 0),
             };

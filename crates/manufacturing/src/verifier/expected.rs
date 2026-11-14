@@ -106,7 +106,7 @@ pub(super) struct Association {
     pub width: f64,
     pub physical_z: [f64; 2],
     pub owner: Option<DepositionOwner>,
-    pub external_wall: bool,
+    pub exposed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -399,7 +399,7 @@ impl Iterator for Expected<'_> {
                         width: edge.width_mm,
                         physical_z: path.physical_z_mm,
                         owner,
-                        external_wall: path.external_wall,
+                        exposed: path.exposed,
                     }),
                     closes_wall: path.owner == Some(DepositionOwner::Wall)
                         && path.points_mm.first() == path.points_mm.last()

@@ -1895,7 +1895,7 @@ mod tests {
             physical_z_mm: [0.0, 0.2],
             points_mm: points.iter().map(|p| [p[0], p[1], 0.2]).collect(),
             arcs: Vec::new(),
-            external_wall: false,
+            exposed: false,
         }
     }
 

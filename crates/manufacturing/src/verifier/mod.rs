@@ -1254,7 +1254,7 @@ pub(crate) fn verify_actual(
                     recipe,
                     &process,
                     move_speed_role,
-                    association.external_wall,
+                    association.exposed,
                     layer_index,
                 )
                 .min(printer.max_print_feed_mm_s);

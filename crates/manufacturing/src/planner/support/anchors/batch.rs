@@ -161,7 +161,7 @@ mod tests {
                         [position + 2.0, -4.0, 0.2],
                     ],
                     arcs: Vec::new(),
-                    external_wall: false,
+                    exposed: false,
                 }
             })
             .collect::<Vec<_>>();
