@@ -22,7 +22,6 @@ generate(WORK / 'inputs')
 compatibility(WORK / 'inputs')
 base = json.loads((REPO/'fixtures/manufacturing/complete-sparse.intent.json').read_text())
 base['recipe']['infill_fraction'] = .15
-base['printer']['workflow']['job']['park_position_mm'][2] = 210
 results = []
 
 def call(args, name, cwd):

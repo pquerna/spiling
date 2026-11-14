@@ -120,7 +120,7 @@ export type FirmwareFamily = "marlin2" | "prusa_buddy" | "klipper" | "bambu_lab"
 
 export type MachineKinematics = "bed_slinger" | "core_xy";
 
-export type BedLevelling = "manual" | "probe_mesh";
+export type BedLevelling = "manual" | "probe_mesh" | "stored_mesh";
 
 export type MachineLimit = "bed_x_mm" | "bed_y_mm" | "max_z_mm" | "nozzle_diameter_mm" | "filament_diameter_mm" | "max_print_feed_mm_s" | "max_travel_feed_mm_s" | "max_acceleration_mm_s2" | "max_volumetric_flow_mm3_s" | "max_nozzle_temperature_c" | "min_extrusion_temperature_c" | "max_bed_temperature_c" | "min_bead_width_per_nozzle" | "max_bead_width_per_nozzle" | "max_bead_height_per_nozzle" | "xy_resolution_mm" | "z_resolution_mm" | "toolhead_radius_mm" | "toolhead_height_mm";
 
@@ -128,17 +128,26 @@ export type FactSource = { "kind": "published", reference: string, } | { "kind":
 
 export type SourcedLimit = { key: MachineLimit, value: number, source: FactSource, };
 
-export type MachineLayer = { id: string, parent: string | null, firmware: FirmwareFamily | null, kinematics: MachineKinematics | null, levelling: BedLevelling | null, heated_bed: boolean | null, arc_moves: boolean | null, limits: Array<SourcedLimit>, };
+export type MachineLayer = { id: string, parent: string | null, firmware: FirmwareFamily | null, kinematics: MachineKinematics | null, levelling: BedLevelling | null, heated_bed: boolean | null, arc_moves: boolean | null,
+/**
+ * Model identifier the firmware checks (Prusa `M862.3`), if any.
+ */
+printer_model: string | null, limits: Array<SourcedLimit>, };
 
 export type MachineDescription = { id: string,
 /**
  * Inheritance chain, root first, ending with `id`.
  */
-lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean,
+lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean, printer_model: string | null,
 /**
  * Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
  */
-limits: Array<SourcedLimit>, };
+limits: Array<SourcedLimit>,
+/**
+ * Operator start/end blocks (for example Klipper `START_PRINT` and
+ * `END_PRINT` macros) with declared effects; null uses the typed table.
+ */
+start_block: LifecycleBlock | null, end_block: LifecycleBlock | null, };
 
 export type MachineSetupDeclaration = { id: string, label: string,
 /**
@@ -710,7 +719,7 @@ export type PrinterCoordinateFrame = "right_handed_millimetres";
 
 export type MotionSpace = "cartesian_xyz";
 
-export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extruder_gcode_v1" | "marlin2_fixed_dual_gcode_v1";
+export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extruder_gcode_v1" | "marlin2_fixed_dual_gcode_v1" | "prusa_marlin_single_extruder_gcode_v1" | "klipper_single_extruder_gcode_v1" | "bambu_lab_gcode3mf_v1";
 
 export type JobWorkflow = { "kind": "diagnostic_body_only" } | { "kind": "complete_marlin", job: SingleExtruderJob, } | { "kind": "fixed_dual_marlin", job: FixedDualJob, };
 
@@ -721,10 +730,11 @@ export type SingleExtruderJob = { machine_id: string, firmware_version: string, 
  */
 prime_start_mm: [number, number, number], prime_end_mm: [number, number, number], prime_filament_length_mm: number, prime_speed_mm_s: number,
 /**
- * Final park Z must exceed all object and priming coordinates. The backend
- * lifts vertically first, then moves XY at this Z, then barriers/shuts down.
+ * XY park position. The park lifts vertically from the last position to
+ * the highest emitted Z plus `park_clearance_mm` (capped at the envelope
+ * top, and strictly above the last position), then moves here at that Z.
  */
-park_position_mm: [number, number, number], };
+park_xy_mm: [number, number], park_clearance_mm: number, lifecycle: FirmwareLifecycle, };
 
 export type DeclaredJobTimeModel = { id: string, revision: string, linear_acceleration_mm_s2: number, filament_acceleration_mm_s2: number, tool_activation_seconds: [number, number], command_overhead_seconds: number, };
 

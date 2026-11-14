@@ -763,6 +763,13 @@ impl TryFrom<rpc::OutputDialect> for OutputDialect {
                 Ok(Self::Marlin2SingleExtruderGcodeV1)
             }
             rpc::OutputDialect::Marlin2FixedDualGcodeV1 => Ok(Self::Marlin2FixedDualGcodeV1),
+            rpc::OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => {
+                Ok(Self::PrusaMarlinSingleExtruderGcodeV1)
+            }
+            rpc::OutputDialect::KlipperSingleExtruderGcodeV1 => {
+                Ok(Self::KlipperSingleExtruderGcodeV1)
+            }
+            rpc::OutputDialect::BambuLabGcode3mfV1 => Ok(Self::BambuLabGcode3mfV1),
             _ => Err("unsupported output dialect".into()),
         }
     }
@@ -774,6 +781,11 @@ impl TryFrom<OutputDialect> for rpc::OutputDialect {
             OutputDialect::CartesianAbsoluteGcodeV1 => Ok(Self::CartesianAbsoluteGcodeV1),
             OutputDialect::Marlin2SingleExtruderGcodeV1 => Ok(Self::Marlin2SingleExtruderGcodeV1),
             OutputDialect::Marlin2FixedDualGcodeV1 => Ok(Self::Marlin2FixedDualGcodeV1),
+            OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => {
+                Ok(Self::PrusaMarlinSingleExtruderGcodeV1)
+            }
+            OutputDialect::KlipperSingleExtruderGcodeV1 => Ok(Self::KlipperSingleExtruderGcodeV1),
+            OutputDialect::BambuLabGcode3mfV1 => Ok(Self::BambuLabGcode3mfV1),
         }
     }
 }
@@ -955,8 +967,13 @@ impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
                         prime_end_mm: required(job.prime_end_mm, "prime end")?.try_into()?,
                         prime_filament_length_mm: job.prime_filament_length_mm,
                         prime_speed_mm_s: job.prime_speed_mm_s,
-                        park_position_mm: required(job.park_position_mm, "park position")?
-                            .try_into()?,
+                        park_xy_mm: <[f64; 2]>::try_from(job.park_xy_mm.as_slice())
+                            .map_err(|_| "park XY requires exactly two values".to_string())?,
+                        park_clearance_mm: job.park_clearance_mm,
+                        lifecycle: super::hardware::lifecycle_from_rpc(required(
+                            job.lifecycle,
+                            "firmware lifecycle",
+                        )?)?,
                     },
                 }
             }
@@ -998,7 +1015,9 @@ impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
                         prime_end_mm: Some(job.prime_end_mm.try_into()?),
                         prime_filament_length_mm: job.prime_filament_length_mm,
                         prime_speed_mm_s: job.prime_speed_mm_s,
-                        park_position_mm: Some(job.park_position_mm.try_into()?),
+                        park_xy_mm: job.park_xy_mm.to_vec(),
+                        park_clearance_mm: job.park_clearance_mm,
+                        lifecycle: Some(super::hardware::lifecycle_to_rpc(job.lifecycle)),
                     })
                 }
             }),
@@ -2434,7 +2453,9 @@ mod job_wire_tests {
                 prime_end_mm: [low[0] + 11.0, low[1] + 1.0, low[2] + 0.2],
                 prime_filament_length_mm: 1.0,
                 prime_speed_mm_s: 5.0,
-                park_position_mm: [low[0], low[1], low[2] + 10.0],
+                park_xy_mm: [low[0], low[1]],
+                park_clearance_mm: 10.0,
+                lifecycle: FirmwareLifecycle::software_reference(),
             },
         };
         let wire = rpc::ManufacturingIntent::try_from(intent.clone()).unwrap();

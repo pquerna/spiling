@@ -260,7 +260,7 @@ try {
   quantityIntent.printer.build_envelope.max = [30, 24, 220];
   quantityIntent.printer.workflow.job.prime_start_mm = [5, 23, 0.2];
   quantityIntent.printer.workflow.job.prime_end_mm = [25, 23, 0.2];
-  quantityIntent.printer.workflow.job.park_position_mm = [0, 23, 20];
+  quantityIntent.printer.workflow.job.park_xy_mm = [0, 23];
   const quantityProfile = join(directory, "quantity-intent.json");
   await writeFile(quantityProfile, JSON.stringify(quantityIntent));
   const quantityProject = join(directory, "quantity.spil");

@@ -19,14 +19,16 @@ pub enum JobWorkflow {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HomingCoordinateContract {
-    /// Native Cartesian XYZ, no workspace/home offsets or leveling transforms.
+    /// Native Cartesian XYZ after homing, without workspace/home offsets. A
+    /// firmware bed mesh, when the lifecycle activates one, corrects Z below
+    /// command space and is reported, not modelled.
     MarlinNativeCartesian,
 }
 
 /// Declared provenance is not measured qualification. Hashes identify externally
 /// supplied firmware configuration and calibration records, not engine approval.
-/// Complete Marlin configuration must compile TEMPERATURE_UNITS_SUPPORT/M149;
-/// temperatures below are integral Celsius targets despite their f64 wire type.
+/// The printer's output dialect renders the declared `lifecycle`; temperatures
+/// below are integral Celsius targets despite their f64 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SingleExtruderJob {
@@ -47,9 +49,12 @@ pub struct SingleExtruderJob {
     pub prime_end_mm: [f64; 3],
     pub prime_filament_length_mm: f64,
     pub prime_speed_mm_s: f64,
-    /// Final park Z must exceed all object and priming coordinates. The backend
-    /// lifts vertically first, then moves XY at this Z, then barriers/shuts down.
-    pub park_position_mm: [f64; 3],
+    /// XY park position. The park lifts vertically from the last position to
+    /// the highest emitted Z plus `park_clearance_mm` (capped at the envelope
+    /// top, and strictly above the last position), then moves here at that Z.
+    pub park_xy_mm: [f64; 2],
+    pub park_clearance_mm: f64,
+    pub lifecycle: FirmwareLifecycle,
 }
 impl SingleExtruderJob {
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
@@ -65,6 +70,7 @@ impl SingleExtruderJob {
             self.maximum_bed_temperature_c,
             self.prime_filament_length_mm,
             self.prime_speed_mm_s,
+            self.park_clearance_mm,
         ])?;
         if [
             self.nozzle_temperature_c,
@@ -101,7 +107,7 @@ impl SingleExtruderJob {
             self.home_position_mm,
             self.prime_start_mm,
             self.prime_end_mm,
-            self.park_position_mm,
+            [self.park_xy_mm[0], self.park_xy_mm[1], 0.0],
         ] {
             if point.iter().any(|value| !value.is_finite()) {
                 return Err(invalid(
@@ -112,12 +118,9 @@ impl SingleExtruderJob {
         let length = (self.prime_end_mm[0] - self.prime_start_mm[0])
             .hypot(self.prime_end_mm[1] - self.prime_start_mm[1])
             .hypot(self.prime_end_mm[2] - self.prime_start_mm[2]);
-        if length <= 0.0
-            || !length.is_finite()
-            || self.park_position_mm[2] <= self.prime_start_mm[2].max(self.prime_end_mm[2])
-        {
+        if length <= 0.0 || !length.is_finite() || self.park_clearance_mm > 1000.0 {
             return Err(invalid(
-                "priming requires a nonzero bounded line and park clearance",
+                "priming requires a nonzero bounded line and bounded park clearance",
             ));
         }
         Ok(())
@@ -127,11 +130,16 @@ impl SingleExtruderJob {
         if self.prime_speed_mm_s > printer.max_print_feed_mm_s {
             return Err(invalid("priming feed exceeds printer limit"));
         }
+        let park = [
+            self.park_xy_mm[0],
+            self.park_xy_mm[1],
+            printer.build_envelope.max[2],
+        ];
         for point in [
             self.home_position_mm,
             self.prime_start_mm,
             self.prime_end_mm,
-            self.park_position_mm,
+            park,
         ] {
             if (0..3).any(|a| {
                 point[a] < printer.build_envelope.min[a] || point[a] > printer.build_envelope.max[a]
@@ -140,6 +148,14 @@ impl SingleExtruderJob {
                     "lifecycle command endpoint exceeds command-space envelope",
                 ));
             }
+        }
+        if printer.build_envelope.max[2] <= self.prime_start_mm[2].max(self.prime_end_mm[2]) {
+            return Err(invalid("park needs clearance above the prime line"));
+        }
+        self.lifecycle
+            .validate(printer.capabilities.output_dialect, self)?;
+        for (_, block) in self.lifecycle.blocks() {
+            block.validate(printer.capabilities.output_dialect)?;
         }
         Ok(())
     }

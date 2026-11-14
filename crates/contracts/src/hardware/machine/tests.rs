@@ -40,14 +40,15 @@ fn derived_lifecycle_lies_inside_the_bed_and_parks_above_any_part() {
             panic!("derived setups are complete jobs");
         };
         let e = s.printer.build_envelope;
-        for p in [job.prime_start_mm, job.prime_end_mm, job.park_position_mm] {
+        let park = [job.park_xy_mm[0], job.park_xy_mm[1], e.max[2]];
+        for p in [job.prime_start_mm, job.prime_end_mm, park] {
             assert!(
                 (0..3).all(|a| p[a] >= e.min[a] && p[a] <= e.max[a]),
                 "{}",
                 s.id
             );
         }
-        assert_eq!(job.park_position_mm[2], e.max[2]);
+        assert_eq!(job.park_clearance_mm, 10.0);
         assert!(job.prime_start_mm[1] < e.max[1]);
     }
 }
@@ -90,7 +91,7 @@ fn small_bed_edits_rederive_lifecycle_inside_the_new_bed() {
         unreachable!()
     };
     assert_eq!(job.prime_start_mm, [9.0, 171.0, 0.2]);
-    assert_eq!(job.park_position_mm, [9.0, 171.0, 180.0]);
+    assert_eq!(job.park_xy_mm, [9.0, 171.0]);
 }
 
 #[test]
@@ -143,6 +144,7 @@ fn inheritance_refuses_cycles_missing_facts_and_foreign_defaults() {
         levelling: None,
         heated_bed: None,
         arc_moves: None,
+        printer_model: None,
         limits: vec![],
     };
     let cycle = [base("a", Some("b")), base("b", Some("a"))];
@@ -174,4 +176,79 @@ fn machine_description_has_checked_wire_roundtrip() {
         let back: HardwareSetupDefinition = wire.try_into().unwrap();
         assert_eq!(s, back);
     }
+}
+
+#[test]
+fn firmware_family_selects_dialect_and_lifecycle_table() {
+    use crate::manufacturing::{LifecycleBlock, LifecycleStep as S, OutputDialect as D};
+    let setups = described();
+    let get = |id: &str| setups.iter().find(|s| s.id == id).unwrap();
+    let lifecycle = |s: &HardwareSetupDefinition| match &s.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => job.lifecycle.clone(),
+        _ => unreachable!(),
+    };
+    let expect = [
+        ("creality.ender-3-v3-se.04", D::Marlin2SingleExtruderGcodeV1),
+        (
+            "generic.marlin-bedslinger.04",
+            D::Marlin2SingleExtruderGcodeV1,
+        ),
+        ("prusa.mk4s.04", D::PrusaMarlinSingleExtruderGcodeV1),
+        (
+            "generic.klipper-cartesian.04",
+            D::KlipperSingleExtruderGcodeV1,
+        ),
+        ("bambulab.a1.04", D::BambuLabGcode3mfV1),
+        ("bambulab.a1-mini.04", D::BambuLabGcode3mfV1),
+    ];
+    for (id, dialect) in expect {
+        let s = get(id);
+        assert_eq!(s.printer.capabilities.output_dialect, dialect, "{id}");
+        let l = lifecycle(s);
+        // Probe-mesh printers level every print, after homing and bed wait.
+        let home = l.start.iter().position(|x| *x == S::Home).unwrap();
+        let probe = l.start.iter().position(|x| *x == S::ProbeMesh).unwrap();
+        assert!(home < probe, "{id}");
+        assert!(!l.start.contains(&S::LevellingOff) && !l.start.contains(&S::CelsiusUnits));
+        assert_eq!(
+            l.start.contains(&S::VolumetricOff),
+            matches!(
+                dialect,
+                D::Marlin2SingleExtruderGcodeV1 | D::BambuLabGcode3mfV1
+            ),
+            "{id}"
+        );
+    }
+    let mk4s = lifecycle(get("prusa.mk4s.04"));
+    assert_eq!(
+        mk4s.start[..2],
+        [
+            S::NozzleCheck,
+            S::ModelCheck {
+                model: "MK4S".into()
+            }
+        ]
+    );
+    // Stored-mesh Marlin restores the mesh; Klipper macros replace the table.
+    let mut marlin = get("generic.marlin-bedslinger.04").clone();
+    let m = marlin.machine.as_mut().unwrap();
+    m.levelling = BedLevelling::StoredMesh;
+    marlin.rederive().unwrap();
+    assert!(lifecycle(&marlin).start.contains(&S::RestoreMesh));
+    let mut klipper = get("generic.klipper-cartesian.04").clone();
+    let m = klipper.machine.as_mut().unwrap();
+    m.start_block = Some(LifecycleBlock::klipper_start_print());
+    m.end_block = Some(LifecycleBlock::klipper_end_print());
+    klipper.rederive().unwrap();
+    let l = lifecycle(&klipper);
+    assert!(!l.start.contains(&S::Home) && !l.start.contains(&S::ProbeMesh));
+    assert!(l.start.contains(&S::RestoreModes) && l.start.contains(&S::ResetExtrusion));
+    assert_eq!(l.end.len(), 4, "{:?}", l.end);
+    // A block line too long for Marlin's command buffer refuses derivation.
+    let mut long = get("generic.marlin-bedslinger.04").clone();
+    let m = long.machine.as_mut().unwrap();
+    let mut block = LifecycleBlock::klipper_end_print();
+    block.lines = vec![format!("M117 {}", "x".repeat(96))];
+    m.end_block = Some(block);
+    assert!(long.rederive().is_err());
 }

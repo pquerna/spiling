@@ -16,7 +16,7 @@ def test_compile_removes_only_owned_inputs_before_saved_return_and_export(tmp_pa
 
     source=tmp_path/'original.step';source.write_bytes(b'original source remains owned by caller')
     intent=tmp_path/'base.json'
-    intent.write_text(json.dumps(dict(printer=dict(workflow=dict(job=dict(park_position_mm=[0,0,20]))),recipe={})))
+    intent.write_text(json.dumps(dict(printer=dict(workflow=dict(job=dict(park_xy_mm=[0,0]))),recipe={})))
     binaries=tmp_path/'bin';binaries.mkdir()
     for name in ('spiling-cli','spiling-engine'):
         (binaries/name).write_bytes(name.encode())

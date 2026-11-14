@@ -35,6 +35,7 @@ const layer = (l: Partial<MachineLayer> & Pick<MachineLayer, "id" | "limits">): 
   levelling: null,
   heated_bed: null,
   arc_moves: null,
+  printer_model: null,
   ...l,
 });
 
@@ -89,6 +90,8 @@ const mk4s = layer({
   parent: fff.id,
   firmware: "prusa_buddy",
   kinematics: "bed_slinger",
+  // Checked by the firmware's M862.3 (PrusaSlicer printer_model).
+  printer_model: "MK4S",
   // Speed, acceleration and flow are not published; family defaults apply.
   limits: published(mk4sUrl, {
     bed_x_mm: 250,

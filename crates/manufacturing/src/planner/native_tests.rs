@@ -4169,10 +4169,10 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
                 .all(|edge| edge.width_mm <= 0.46))
     );
     let text = bundle.program_text().unwrap();
-    assert!(text.contains("M109 R210.000000"));
+    assert!(text.contains("M109 R210"));
     assert!(text.contains("M106 S255"));
     for tampered in [
-        text.replacen("M109 R210.000000", "M109 R190.000000", 1),
+        text.replacen("M109 R210", "M109 R190", 1),
         text.replacen("M106 S255", "M106 S128", 1),
         text.replacen("F1260.000000", "F2100.000000", 1),
     ] {

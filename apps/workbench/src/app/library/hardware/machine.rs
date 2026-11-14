@@ -360,6 +360,28 @@ fn machine_fact_fields(ui: &mut egui::Ui, machine: &mut MachineDescription) {
         machine.levelling,
         machine.lineage.join(" → ")
     ));
+    egui::ComboBox::from_label("Bed levelling")
+        .selected_text(format!("{:?}", machine.levelling))
+        .show_ui(ui, |ui| {
+            for (value, label) in [
+                (BedLevelling::Manual, "Manual · no firmware mesh"),
+                (BedLevelling::ProbeMesh, "Probe a mesh every print"),
+                (BedLevelling::StoredMesh, "Restore the stored mesh"),
+            ] {
+                ui.selectable_value(&mut machine.levelling, value, label);
+            }
+        });
+    ui.collapsing("Start and end G-code blocks", |ui| {
+        ui.weak("Operator or printer macros are emitted verbatim. Declare what each block does; the verifier checks the program around it and reports the block, without interpreting it. Placeholders: {bed_temperature_c}, {nozzle_temperature_c}.");
+        if machine.firmware == FirmwareFamily::Klipper
+            && ui.button("Use Klipper START_PRINT / END_PRINT macros").clicked()
+        {
+            machine.start_block = Some(LifecycleBlock::klipper_start_print());
+            machine.end_block = Some(LifecycleBlock::klipper_end_print());
+        }
+        block_editor(ui, "Start block", &mut machine.start_block, true);
+        block_editor(ui, "End block", &mut machine.end_block, false);
+    });
     egui::Grid::new("machine-facts")
         .num_columns(2)
         .show(ui, |ui| {
@@ -375,4 +397,101 @@ fn machine_fact_fields(ui: &mut egui::Ui, machine: &mut MachineDescription) {
                 ui.end_row();
             }
         });
+}
+
+use spiling_contracts::manufacturing::{
+    BlockEffects, ExtrusionEffect, LevellingEffect, LifecycleBlock, ModeEffect, PositionEffect,
+    ThermalEffect,
+};
+
+/// Edit one optional opaque block and its declared effects.
+fn block_editor(ui: &mut egui::Ui, title: &str, block: &mut Option<LifecycleBlock>, start: bool) {
+    ui.push_id(title, |ui| {
+        let mut enabled = block.is_some();
+        ui.checkbox(&mut enabled, title);
+        if !enabled {
+            *block = None;
+            return;
+        }
+        let b = block.get_or_insert_with(|| LifecycleBlock {
+            label: title.into(),
+            lines: vec!["M117 Printing".into()],
+            effects: BlockEffects::NONE,
+        });
+        field(ui, "Label", &mut b.label);
+        let mut text = b.lines.join("\n");
+        ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .code_editor()
+                .desired_rows(3),
+        );
+        b.lines = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(Into::into)
+            .collect();
+        let e = &mut b.effects;
+        if start {
+            ui.checkbox(&mut e.homes, "Homes all axes");
+        }
+        let mut lost = e.position == PositionEffect::Unknown;
+        ui.checkbox(
+            &mut lost,
+            "Moves the toolhead (position unknown afterwards)",
+        );
+        e.position = if lost || e.homes || e.motors_off {
+            PositionEffect::Unknown
+        } else {
+            PositionEffect::Preserved
+        };
+        let mut modes = e.modes == ModeEffect::Unknown;
+        ui.checkbox(&mut modes, "May change units/positioning modes");
+        e.modes = if modes {
+            ModeEffect::Unknown
+        } else {
+            ModeEffect::Preserved
+        };
+        egui::ComboBox::from_label("Extrusion axis afterwards")
+            .selected_text(format!("{:?}", e.extrusion))
+            .show_ui(ui, |ui| {
+                for v in [
+                    ExtrusionEffect::Preserved,
+                    ExtrusionEffect::Reset,
+                    ExtrusionEffect::Unknown,
+                ] {
+                    ui.selectable_value(&mut e.extrusion, v, format!("{v:?}"));
+                }
+            });
+        egui::ComboBox::from_label("Bed levelling afterwards")
+            .selected_text(format!("{:?}", e.levelling))
+            .show_ui(ui, |ui| {
+                for v in [
+                    LevellingEffect::Unchanged,
+                    LevellingEffect::Active,
+                    LevellingEffect::Off,
+                ] {
+                    ui.selectable_value(&mut e.levelling, v, format!("{v:?}"));
+                }
+            });
+        for (label, value) in [("Bed heater", &mut e.bed), ("Nozzle heater", &mut e.nozzle)] {
+            egui::ComboBox::from_label(label)
+                .selected_text(format!("{value:?}"))
+                .show_ui(ui, |ui| {
+                    for v in [
+                        ThermalEffect::Unchanged,
+                        ThermalEffect::Target,
+                        ThermalEffect::Wait,
+                        ThermalEffect::Off,
+                    ] {
+                        ui.selectable_value(value, v, format!("{v:?}"));
+                    }
+                });
+        }
+        if !start {
+            ui.checkbox(&mut e.fan_off, "Turns the fan off");
+            ui.checkbox(&mut e.motors_off, "Releases the motors");
+        }
+        // Dialect checks (line length, effects) surface through re-derivation.
+    });
 }

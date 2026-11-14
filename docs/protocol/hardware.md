@@ -71,17 +71,40 @@ validation refuses a printer that differs from the derivation:
 | Deposition widths          | `[min_ratio, max_ratio] × nozzle` (defaults 0.75–1.875, so 0.30–0.75 mm at 0.4 mm)          |
 | Deposition heights         | Z motion step up to `height_ratio × nozzle` (default 0.75)                                 |
 | Prime line                 | Back edge, `margin = min(10, 5% of the smaller bed side)`, `min(20, bed_x − 2·margin)` long, Z = nozzle/2, purging 1.8× nominal bead volume at 10 mm/s |
-| Park                       | `[margin, bed_y − margin, max_z]`: above any admitted part                                 |
+| Park                       | XY `[margin, bed_y − margin]` after a vertical lift 10 mm above the highest emitted Z, capped at `max_z` (no long Z move on tall machines) |
+| Dialect and lifecycle      | Firmware family selects the output dialect and its lifecycle table; levelling capability selects the levelling step; operator blocks replace the typed steps they declare |
 | Feed / flow ceilings       | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow |
 | Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile |
 | Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
 
-Acceleration, kinematics and levelling are recorded for time estimation and
-lifecycle work but do not change today's program. Every derived setup emits
-the Marlin 2 single-extruder lifecycle; the recorded firmware family names the
-target but per-family start/end sequences are not yet implemented, so
-programs for Prusa, Bambu and Klipper firmware are not machine ready. Unheated
-beds refuse explicitly because the lifecycle requires a bed temperature.
+Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
+Prusa Buddy, `klipper` → Klipper, `bambu_lab` → the Bambu placeholder, which
+plans but refuses emission until `.gcode.3mf` delivery exists. Levelling is
+`manual` (no levelling command), `probe_mesh` (probe every print after homing
+and waiting for the bed) or `stored_mesh` (restore a stored mesh; Prusa Buddy
+keeps none and probes). `printer_model` names the model the firmware checks
+(Prusa `M862.3`, `MK4S`).
+
+The lifecycle table (`MachineDescription::derive_lifecycle`) is, in order:
+Prusa nozzle/model checks; feed, flow and fan resets (plus `M200 D0` on
+Marlin); the operator start block; bed target and a non-oozing standby nozzle
+(150 °C, Prusa 170 °C and waited, for its loadcell probe); home; wait for the
+bed; levelling; wait for the print nozzle; prime. The end is barrier, park,
+barrier, the operator end block, then heaters, fan and motors off. A typed step
+the operator block declares it covers is omitted, and modes or E the block may
+change are re-established. References: Creality `*fastabl*` and Prusa MK4S start
+G-code in PrusaSlicer's bundled profiles, and
+[Klipper's slicer guidance](https://www.klipper3d.org/Slicers.html). Optional
+`start_block`/`end_block` on the description carry operator macros such as
+Klipper `START_PRINT`/`END_PRINT` with declared effects; see the
+[manufacturing lifecycle](manufacturing.md#firmware-lifecycle). Acceleration and
+kinematics are recorded for time estimation but do not change today's program.
+Unheated beds refuse explicitly because the lifecycle requires a bed
+temperature. Programs remain software-validated, not machine ready.
+
+The workbench edits levelling and the start/end blocks (with a Klipper macro
+preset) alongside the numeric facts; the CLI carries them in the typed
+`replace-hardware` setup record.
 
 The workbench edits any fact of a configured setup, re-deriving on every edit
 and showing derivation refusals. A custom setup starts from any

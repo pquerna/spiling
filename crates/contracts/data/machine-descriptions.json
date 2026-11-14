@@ -7,6 +7,7 @@
       "levelling": "probe_mesh",
       "heated_bed": true,
       "arc_moves": true,
+      "printer_model": null,
       "id": "generic.fff",
       "limits": [
         {
@@ -170,6 +171,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": false,
+      "printer_model": null,
       "id": "generic.klipper-cartesian",
       "limits": []
     },
@@ -180,6 +182,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "printer_model": null,
       "id": "generic.marlin-bedslinger",
       "limits": [
         {
@@ -215,6 +218,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "printer_model": "MK4S",
       "id": "prusa.mk4s",
       "limits": [
         {
@@ -282,6 +286,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "printer_model": null,
       "id": "bambulab.a1",
       "limits": [
         {
@@ -381,6 +386,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "printer_model": null,
       "id": "bambulab.a1-mini",
       "limits": [
         {
@@ -464,6 +470,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "printer_model": null,
       "id": "creality.ender-3-v3-se",
       "limits": [
         {

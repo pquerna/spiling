@@ -11,7 +11,11 @@
 //! - Prime line along the back edge, `margin = min(10, 5% of the smaller bed
 //!   side)` from the edges, `min(20, bed_x − 2·margin)` long, at half the
 //!   nozzle diameter, purging 1.8× the nominal bead volume.
-//! - Park at the back-left margin and the top of the envelope, above any part.
+//! - Park at the back-left margin after a vertical lift of 10 mm above the
+//!   highest emitted Z (capped at the envelope top).
+//! - Output dialect and lifecycle from the firmware family's table
+//!   (`derive_lifecycle`), levelling from the declared capability, with any
+//!   operator start/end block inserted and the typed steps it covers omitted.
 //! - Print feed bounds every extruding command, travel feed every other motion;
 //!   volumetric flow is the declared hotend ceiling. Acceleration is recorded
 //!   for time estimation.
@@ -19,18 +23,19 @@ use super::{HardwareModelDefinition, HardwareSetupDefinition, PlateDefinition, t
 use crate::{
     geometry::{AabbMm, RigidPoseMm, SourceHash},
     manufacturing::{
-        DepositionLimits, HomingCoordinateContract, JobWorkflow, MANUFACTURING_SCHEMA_VERSION,
-        MachineComponent, MachineComponentRole, MachineComponentShape, MotionResolution,
-        MotionSpace, OutputDialect, PrinterCapabilities, PrinterCoordinateFrame,
-        PrinterSpecification, SingleExtruderJob,
+        DepositionLimits, ExtrusionEffect, FirmwareLifecycle, HomingCoordinateContract,
+        JobWorkflow, LevellingEffect, LifecycleBlock, LifecycleStep, MANUFACTURING_SCHEMA_VERSION,
+        MachineComponent, MachineComponentRole, MachineComponentShape, ModeEffect,
+        MotionResolution, MotionSpace, OutputDialect, PrinterCapabilities, PrinterCoordinateFrame,
+        PrinterSpecification, SingleExtruderJob, ThermalEffect,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
 
-/// Firmware family recorded for the machine. Until per-family lifecycle data
-/// exists, every derived setup emits the Marlin 2 single-extruder dialect.
+/// Firmware family recorded for the machine; it selects the output dialect
+/// and the lifecycle table.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FirmwareFamily {
@@ -48,8 +53,12 @@ pub enum MachineKinematics {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BedLevelling {
+    /// No firmware mesh; the lifecycle commands no levelling.
     Manual,
+    /// Probe a mesh every print after homing.
     ProbeMesh,
+    /// Activate a mesh stored in the firmware.
+    StoredMesh,
 }
 
 /// Numeric machine facts. Every complete description carries each key once.
@@ -198,6 +207,9 @@ pub struct MachineLayer {
     pub heated_bed: Option<bool>,
     #[serde(deserialize_with = "required_option")]
     pub arc_moves: Option<bool>,
+    /// Model identifier the firmware checks (Prusa `M862.3`), if any.
+    #[serde(deserialize_with = "required_option")]
+    pub printer_model: Option<String>,
     pub limits: Vec<SourcedLimit>,
 }
 
@@ -214,8 +226,16 @@ pub struct MachineDescription {
     pub levelling: BedLevelling,
     pub heated_bed: bool,
     pub arc_moves: bool,
+    #[serde(deserialize_with = "required_option")]
+    pub printer_model: Option<String>,
     /// Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
     pub limits: Vec<SourcedLimit>,
+    /// Operator start/end blocks (for example Klipper `START_PRINT` and
+    /// `END_PRINT` macros) with declared effects; null uses the typed table.
+    #[serde(deserialize_with = "required_option")]
+    pub start_block: Option<LifecycleBlock>,
+    #[serde(deserialize_with = "required_option")]
+    pub end_block: Option<LifecycleBlock>,
 }
 
 const MAX_LAYERS: usize = 64;
@@ -223,6 +243,12 @@ const MAX_LAYERS: usize = 64;
 impl MachineDescription {
     pub fn validate(&self) -> Result<(), String> {
         text(&self.id)?;
+        if let Some(model) = &self.printer_model {
+            text(model)?;
+        }
+        for block in [&self.start_block, &self.end_block].into_iter().flatten() {
+            block.validate(self.dialect()).map_err(|e| e.to_string())?;
+        }
         if self.lineage.is_empty()
             || self.lineage.len() > MAX_LAYERS
             || self.lineage.last() != Some(&self.id)
@@ -308,6 +334,7 @@ impl MachineDescription {
         let mut limits = BTreeMap::new();
         let (mut firmware, mut kinematics, mut levelling, mut heated, mut arcs) =
             (None, None, None, None, None);
+        let mut printer_model = None;
         for layer in &chain {
             text(&layer.id)?;
             let mut declared = std::collections::BTreeSet::new();
@@ -327,6 +354,7 @@ impl MachineDescription {
             levelling = layer.levelling.or(levelling);
             heated = layer.heated_bed.or(heated);
             arcs = layer.arc_moves.or(arcs);
+            printer_model = layer.printer_model.clone().or(printer_model);
         }
         let missing = |what: &str| format!("machine {leaf} does not declare {what}");
         let limits = MachineLimit::ALL
@@ -341,7 +369,10 @@ impl MachineDescription {
             levelling: levelling.ok_or_else(|| missing("bed levelling"))?,
             heated_bed: heated.ok_or_else(|| missing("whether the bed is heated"))?,
             arc_moves: arcs.ok_or_else(|| missing("arc move support"))?,
+            printer_model,
             limits,
+            start_block: None,
+            end_block: None,
         };
         d.validate()?;
         Ok(d)
@@ -370,7 +401,7 @@ impl MachineDescription {
         let v = |k| self.limit(k);
         let nozzle = v(MachineLimit::NozzleDiameterMm);
         let envelope = self.build_envelope();
-        let [bx, by, mz] = envelope.max;
+        let [bx, by, _] = envelope.max;
         let margin = r6((0.05 * bx.min(by)).min(10.0));
         let prime_length = r6((bx - 2.0 * margin).min(20.0));
         let prime_z = r6(0.5 * nozzle);
@@ -419,7 +450,7 @@ impl MachineDescription {
             capabilities: PrinterCapabilities {
                 motion_space: MotionSpace::CartesianXyz,
                 extruders: 1,
-                output_dialect: OutputDialect::Marlin2SingleExtruderGcodeV1,
+                output_dialect: self.dialect(),
                 generated_supports: true,
                 arc_moves: self.arc_moves,
             },
@@ -448,7 +479,9 @@ impl MachineDescription {
                     prime_end_mm: [r6(margin + prime_length), r6(by - margin), prime_z],
                     prime_filament_length_mm: prime_filament,
                     prime_speed_mm_s: 10f64.min(v(MachineLimit::MaxPrintFeedMmS)),
-                    park_position_mm: [margin, r6(by - margin), mz],
+                    park_xy_mm: [margin, r6(by - margin)],
+                    park_clearance_mm: 10.0,
+                    lifecycle: self.derive_lifecycle(),
                 },
             },
             nozzle_diameter_mm: nozzle,
@@ -491,11 +524,113 @@ impl MachineDescription {
     }
     fn firmware_label(&self) -> &'static str {
         match self.firmware {
-            FirmwareFamily::Marlin2 => "marlin2 (Marlin 2 single-extruder emission)",
-            FirmwareFamily::PrusaBuddy => "prusa-buddy (Marlin 2 single-extruder emission)",
-            FirmwareFamily::Klipper => "klipper (Marlin 2 single-extruder emission)",
-            FirmwareFamily::BambuLab => "bambu-lab (Marlin 2 single-extruder emission)",
+            FirmwareFamily::Marlin2 => "marlin2",
+            FirmwareFamily::PrusaBuddy => "prusa-buddy",
+            FirmwareFamily::Klipper => "klipper",
+            FirmwareFamily::BambuLab => "bambu-lab (.gcode.3mf delivery not yet supported)",
         }
+    }
+    pub fn dialect(&self) -> OutputDialect {
+        match self.firmware {
+            FirmwareFamily::Marlin2 => OutputDialect::Marlin2SingleExtruderGcodeV1,
+            FirmwareFamily::PrusaBuddy => OutputDialect::PrusaMarlinSingleExtruderGcodeV1,
+            FirmwareFamily::Klipper => OutputDialect::KlipperSingleExtruderGcodeV1,
+            FirmwareFamily::BambuLab => OutputDialect::BambuLabGcode3mfV1,
+        }
+    }
+
+    /// The firmware family's lifecycle table. Start: feed/flow/fan resets
+    /// (plus `M200 D0` on Marlin, nozzle/model checks on Prusa), the operator
+    /// start block, heat the bed and a non-oozing standby nozzle, home, wait
+    /// for the bed, level per capability, wait for the print nozzle, prime.
+    /// End: barrier, lift and park, barrier, the operator end block, heaters,
+    /// fan and motors off. A typed step the operator block declares it covers
+    /// is omitted. References: Creality `*fastabl*` and Prusa MK4S start
+    /// G-code in PrusaSlicer's bundled profiles; Klipper
+    /// <https://www.klipper3d.org/Slicers.html>.
+    pub fn derive_lifecycle(&self) -> FirmwareLifecycle {
+        use LifecycleStep as S;
+        let prusa = self.firmware == FirmwareFamily::PrusaBuddy;
+        let mut start = Vec::new();
+        if prusa {
+            start.push(S::NozzleCheck);
+            if let Some(model) = &self.printer_model {
+                start.push(S::ModelCheck {
+                    model: model.clone(),
+                });
+            }
+        }
+        start.extend([S::FeedScaleReset, S::FlowScaleReset]);
+        if matches!(
+            self.firmware,
+            FirmwareFamily::Marlin2 | FirmwareFamily::BambuLab
+        ) {
+            start.push(S::VolumetricOff);
+        }
+        start.push(S::FanOff);
+        let none = crate::manufacturing::BlockEffects::NONE;
+        let begin = self.start_block.as_ref().map_or(none, |b| b.effects);
+        if let Some(block) = &self.start_block {
+            start.push(S::Block {
+                block: block.clone(),
+            });
+        }
+        // Loadcell probing (Prusa) needs a settled, non-oozing nozzle.
+        let standby = Some(if prusa { 170.0 } else { 150.0 });
+        if begin.bed == ThermalEffect::Unchanged {
+            start.push(S::BedTarget);
+        }
+        if begin.nozzle == ThermalEffect::Unchanged {
+            start.push(S::NozzleTarget { standby_c: standby });
+            if prusa {
+                start.push(S::NozzleWait { standby_c: standby });
+            }
+        }
+        if !begin.homes {
+            start.push(S::Home);
+        }
+        if begin.modes == ModeEffect::Unknown {
+            start.push(S::RestoreModes);
+        }
+        if begin.bed != ThermalEffect::Wait {
+            start.push(S::BedWait);
+        }
+        if begin.levelling != LevellingEffect::Active {
+            match self.levelling {
+                BedLevelling::Manual => {}
+                BedLevelling::ProbeMesh => start.push(S::ProbeMesh),
+                // Prusa Buddy keeps no stored mesh; it probes each print.
+                BedLevelling::StoredMesh if prusa => start.push(S::ProbeMesh),
+                BedLevelling::StoredMesh => start.push(S::RestoreMesh),
+            }
+        }
+        if begin.nozzle != ThermalEffect::Wait {
+            start.push(S::NozzleWait { standby_c: None });
+        }
+        if begin.extrusion == ExtrusionEffect::Unknown {
+            start.push(S::ResetExtrusion);
+        }
+        start.push(S::Prime);
+        let mut end = vec![S::Barrier, S::Park, S::Barrier];
+        let finish = self.end_block.as_ref().map_or(none, |b| b.effects);
+        if let Some(block) = &self.end_block {
+            end.push(S::Block {
+                block: block.clone(),
+            });
+        }
+        if finish.nozzle != ThermalEffect::Off {
+            end.push(S::NozzleOff);
+        }
+        if finish.bed != ThermalEffect::Off {
+            end.push(S::BedOff);
+        }
+        if !finish.fan_off {
+            end.push(S::FanOff);
+        }
+        if !finish.motors_off {
+            end.push(S::MotorsOff);
+        }
+        FirmwareLifecycle { start, end }
     }
 }
 fn r6(v: f64) -> f64 {

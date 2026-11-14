@@ -659,7 +659,11 @@ const FIRMWARE: [FirmwareFamily; 4] = [
 ];
 const KINEMATICS: [MachineKinematics; 2] =
     [MachineKinematics::BedSlinger, MachineKinematics::CoreXy];
-const LEVELLING: [BedLevelling; 2] = [BedLevelling::Manual, BedLevelling::ProbeMesh];
+const LEVELLING: [BedLevelling; 3] = [
+    BedLevelling::Manual,
+    BedLevelling::ProbeMesh,
+    BedLevelling::StoredMesh,
+];
 impl TryFrom<rpc::MachineDescription> for MachineDescription {
     type Error = String;
     fn try_from(v: rpc::MachineDescription) -> Result<Self, String> {
@@ -672,6 +676,9 @@ impl TryFrom<rpc::MachineDescription> for MachineDescription {
             levelling: enum_value(&LEVELLING, v.levelling, "bed levelling")?,
             heated_bed: v.heated_bed,
             arc_moves: v.arc_moves,
+            printer_model: v.printer_model,
+            start_block: v.start_block.map(block_from_rpc).transpose()?,
+            end_block: v.end_block.map(block_from_rpc).transpose()?,
             limits: v
                 .limits
                 .into_iter()
@@ -703,6 +710,9 @@ impl TryFrom<MachineDescription> for rpc::MachineDescription {
             levelling: enum_index(&LEVELLING, v.levelling),
             heated_bed: v.heated_bed,
             arc_moves: v.arc_moves,
+            printer_model: v.printer_model,
+            start_block: v.start_block.map(block_to_rpc),
+            end_block: v.end_block.map(block_to_rpc),
             limits: v
                 .limits
                 .into_iter()
@@ -721,5 +731,153 @@ impl TryFrom<MachineDescription> for rpc::MachineDescription {
             id: v.id,
             lineage: v.lineage,
         })
+    }
+}
+
+use crate::manufacturing::{
+    BlockEffects, ExtrusionEffect, FirmwareLifecycle, LevellingEffect, LifecycleBlock,
+    LifecycleStep, ModeEffect, PositionEffect, ThermalEffect,
+};
+const POSITION: [PositionEffect; 2] = [PositionEffect::Preserved, PositionEffect::Unknown];
+const THERMAL: [ThermalEffect; 4] = [
+    ThermalEffect::Unchanged,
+    ThermalEffect::Target,
+    ThermalEffect::Wait,
+    ThermalEffect::Off,
+];
+const LEVELLING_EFFECT: [LevellingEffect; 3] = [
+    LevellingEffect::Unchanged,
+    LevellingEffect::Active,
+    LevellingEffect::Off,
+];
+const EXTRUSION: [ExtrusionEffect; 3] = [
+    ExtrusionEffect::Preserved,
+    ExtrusionEffect::Reset,
+    ExtrusionEffect::Unknown,
+];
+const MODES: [ModeEffect; 2] = [ModeEffect::Preserved, ModeEffect::Unknown];
+
+fn block_from_rpc(v: rpc::LifecycleBlock) -> Result<LifecycleBlock, String> {
+    let e = required(v.effects, "block effects")?;
+    Ok(LifecycleBlock {
+        label: v.label,
+        lines: v.lines,
+        effects: BlockEffects {
+            homes: e.homes,
+            position: enum_value(&POSITION, e.position, "position effect")?,
+            levelling: enum_value(&LEVELLING_EFFECT, e.levelling, "levelling effect")?,
+            bed: enum_value(&THERMAL, e.bed, "bed effect")?,
+            nozzle: enum_value(&THERMAL, e.nozzle, "nozzle effect")?,
+            extrusion: enum_value(&EXTRUSION, e.extrusion, "extrusion effect")?,
+            modes: enum_value(&MODES, e.modes, "mode effect")?,
+            fan_off: e.fan_off,
+            motors_off: e.motors_off,
+        },
+    })
+}
+fn block_to_rpc(v: LifecycleBlock) -> rpc::LifecycleBlock {
+    let e = v.effects;
+    rpc::LifecycleBlock {
+        label: v.label,
+        lines: v.lines,
+        effects: Some(rpc::BlockEffects {
+            homes: e.homes,
+            position: enum_index(&POSITION, e.position),
+            levelling: enum_index(&LEVELLING_EFFECT, e.levelling),
+            bed: enum_index(&THERMAL, e.bed),
+            nozzle: enum_index(&THERMAL, e.nozzle),
+            extrusion: enum_index(&EXTRUSION, e.extrusion),
+            modes: enum_index(&MODES, e.modes),
+            fan_off: e.fan_off,
+            motors_off: e.motors_off,
+        }),
+    }
+}
+fn step_from_rpc(v: rpc::LifecycleStep) -> Result<LifecycleStep, String> {
+    use LifecycleStep as S;
+    use rpc::lifecycle_step::Step as R;
+    Ok(match required(v.step, "lifecycle step")? {
+        R::CelsiusUnits(()) => S::CelsiusUnits,
+        R::VolumetricOff(()) => S::VolumetricOff,
+        R::FeedScaleReset(()) => S::FeedScaleReset,
+        R::FlowScaleReset(()) => S::FlowScaleReset,
+        R::FanOff(()) => S::FanOff,
+        R::NozzleCheck(()) => S::NozzleCheck,
+        R::ModelCheck(model) => S::ModelCheck { model },
+        R::BedTarget(()) => S::BedTarget,
+        R::BedWait(()) => S::BedWait,
+        R::NozzleTarget(stage) => S::NozzleTarget {
+            standby_c: stage.standby_c,
+        },
+        R::NozzleWait(stage) => S::NozzleWait {
+            standby_c: stage.standby_c,
+        },
+        R::Home(()) => S::Home,
+        R::ProbeMesh(()) => S::ProbeMesh,
+        R::RestoreMesh(()) => S::RestoreMesh,
+        R::LevellingOff(()) => S::LevellingOff,
+        R::RestoreModes(()) => S::RestoreModes,
+        R::ResetExtrusion(()) => S::ResetExtrusion,
+        R::Prime(()) => S::Prime,
+        R::Barrier(()) => S::Barrier,
+        R::Park(()) => S::Park,
+        R::NozzleOff(()) => S::NozzleOff,
+        R::BedOff(()) => S::BedOff,
+        R::MotorsOff(()) => S::MotorsOff,
+        R::Block(block) => S::Block {
+            block: block_from_rpc(block)?,
+        },
+    })
+}
+fn step_to_rpc(v: LifecycleStep) -> rpc::LifecycleStep {
+    use LifecycleStep as S;
+    use rpc::lifecycle_step::Step as R;
+    let step = match v {
+        S::CelsiusUnits => R::CelsiusUnits(()),
+        S::VolumetricOff => R::VolumetricOff(()),
+        S::FeedScaleReset => R::FeedScaleReset(()),
+        S::FlowScaleReset => R::FlowScaleReset(()),
+        S::FanOff => R::FanOff(()),
+        S::NozzleCheck => R::NozzleCheck(()),
+        S::ModelCheck { model } => R::ModelCheck(model),
+        S::BedTarget => R::BedTarget(()),
+        S::BedWait => R::BedWait(()),
+        S::NozzleTarget { standby_c } => R::NozzleTarget(rpc::NozzleStage { standby_c }),
+        S::NozzleWait { standby_c } => R::NozzleWait(rpc::NozzleStage { standby_c }),
+        S::Home => R::Home(()),
+        S::ProbeMesh => R::ProbeMesh(()),
+        S::RestoreMesh => R::RestoreMesh(()),
+        S::LevellingOff => R::LevellingOff(()),
+        S::RestoreModes => R::RestoreModes(()),
+        S::ResetExtrusion => R::ResetExtrusion(()),
+        S::Prime => R::Prime(()),
+        S::Barrier => R::Barrier(()),
+        S::Park => R::Park(()),
+        S::NozzleOff => R::NozzleOff(()),
+        S::BedOff => R::BedOff(()),
+        S::MotorsOff => R::MotorsOff(()),
+        S::Block { block } => R::Block(block_to_rpc(block)),
+    };
+    rpc::LifecycleStep { step: Some(step) }
+}
+/// Checked lifecycle adapters; the job's validation checks the sequence.
+pub(crate) fn lifecycle_from_rpc(v: rpc::FirmwareLifecycle) -> Result<FirmwareLifecycle, String> {
+    Ok(FirmwareLifecycle {
+        start: v
+            .start
+            .into_iter()
+            .map(step_from_rpc)
+            .collect::<Result<_, _>>()?,
+        end: v
+            .end
+            .into_iter()
+            .map(step_from_rpc)
+            .collect::<Result<_, _>>()?,
+    })
+}
+pub(crate) fn lifecycle_to_rpc(v: FirmwareLifecycle) -> rpc::FirmwareLifecycle {
+    rpc::FirmwareLifecycle {
+        start: v.start.into_iter().map(step_to_rpc).collect(),
+        end: v.end.into_iter().map(step_to_rpc).collect(),
     }
 }

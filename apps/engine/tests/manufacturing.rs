@@ -1697,7 +1697,9 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
             prime_end_mm: [-5.0, -10.0, 0.2],
             prime_filament_length_mm: 1.0,
             prime_speed_mm_s: 5.0,
-            park_position_mm: [0.0, 0.0, 30.0],
+            park_xy_mm: [0.0, 0.0],
+            park_clearance_mm: 10.0,
+            lifecycle: FirmwareLifecycle::software_reference(),
         },
     };
     requested.recipe.infill_fraction = 0.35;

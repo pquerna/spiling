@@ -116,6 +116,10 @@ enum OutputDialect {
   CARTESIAN_ABSOLUTE_GCODE_V1 = 1;
   MARLIN2_SINGLE_EXTRUDER_GCODE_V1 = 2;
   MARLIN2_FIXED_DUAL_GCODE_V1 = 3;
+  PRUSA_MARLIN_SINGLE_EXTRUDER_GCODE_V1 = 4;
+  KLIPPER_SINGLE_EXTRUDER_GCODE_V1 = 5;
+  // Planning only: emission refuses until .gcode.3mf delivery exists.
+  BAMBU_LAB_GCODE_3MF_V1 = 6;
 }
 message PrinterCapabilities {
   MotionSpace motion_space = 1;
@@ -187,7 +191,7 @@ message SingleExtruderJob {
   HomingCoordinateContract homing_contract = 5;
   Vec3 home_position_mm = 6;
   // Temperature targets/limits are finite positive integral Celsius degrees.
-  // Complete configuration must compile TEMPERATURE_UNITS_SUPPORT (M149 C).
+  // The declared lifecycle emits M149 C only when it declares celsius_units.
   double nozzle_temperature_c = 7;
   double bed_temperature_c = 8;
   double minimum_extrusion_temperature_c = 9;
@@ -199,7 +203,91 @@ message SingleExtruderJob {
   Vec3 prime_end_mm = 13;
   double prime_filament_length_mm = 14;
   double prime_speed_mm_s = 15;
-  Vec3 park_position_mm = 16;
+  reserved 16;
+  // Exactly two values: XY park position.
+  repeated double park_xy_mm = 17;
+  double park_clearance_mm = 18;
+  FirmwareLifecycle lifecycle = 19;
+}
+
+// Declared start/end lifecycle; values follow the Rust enum order from 1.
+enum PositionEffect {
+  POSITION_EFFECT_UNSPECIFIED = 0;
+  POSITION_EFFECT_PRESERVED = 1;
+  POSITION_EFFECT_UNKNOWN = 2;
+}
+enum ThermalEffect {
+  THERMAL_EFFECT_UNSPECIFIED = 0;
+  THERMAL_EFFECT_UNCHANGED = 1;
+  THERMAL_EFFECT_TARGET = 2;
+  THERMAL_EFFECT_WAIT = 3;
+  THERMAL_EFFECT_OFF = 4;
+}
+enum LevellingEffect {
+  LEVELLING_EFFECT_UNSPECIFIED = 0;
+  LEVELLING_EFFECT_UNCHANGED = 1;
+  LEVELLING_EFFECT_ACTIVE = 2;
+  LEVELLING_EFFECT_OFF = 3;
+}
+enum ExtrusionEffect {
+  EXTRUSION_EFFECT_UNSPECIFIED = 0;
+  EXTRUSION_EFFECT_PRESERVED = 1;
+  EXTRUSION_EFFECT_RESET = 2;
+  EXTRUSION_EFFECT_UNKNOWN = 3;
+}
+enum ModeEffect {
+  MODE_EFFECT_UNSPECIFIED = 0;
+  MODE_EFFECT_PRESERVED = 1;
+  MODE_EFFECT_UNKNOWN = 2;
+}
+message BlockEffects {
+  bool homes = 1;
+  PositionEffect position = 2;
+  LevellingEffect levelling = 3;
+  ThermalEffect bed = 4;
+  ThermalEffect nozzle = 5;
+  ExtrusionEffect extrusion = 6;
+  ModeEffect modes = 7;
+  bool fan_off = 8;
+  bool motors_off = 9;
+}
+message LifecycleBlock {
+  string label = 1;
+  repeated string lines = 2;
+  BlockEffects effects = 3;
+}
+message NozzleStage { optional double standby_c = 1; }
+message LifecycleStep {
+  oneof step {
+    google.protobuf.Empty celsius_units = 1;
+    google.protobuf.Empty volumetric_off = 2;
+    google.protobuf.Empty feed_scale_reset = 3;
+    google.protobuf.Empty flow_scale_reset = 4;
+    google.protobuf.Empty fan_off = 5;
+    google.protobuf.Empty nozzle_check = 6;
+    string model_check = 7;
+    google.protobuf.Empty bed_target = 8;
+    google.protobuf.Empty bed_wait = 9;
+    NozzleStage nozzle_target = 10;
+    NozzleStage nozzle_wait = 11;
+    google.protobuf.Empty home = 12;
+    google.protobuf.Empty probe_mesh = 13;
+    google.protobuf.Empty restore_mesh = 14;
+    google.protobuf.Empty levelling_off = 15;
+    google.protobuf.Empty restore_modes = 16;
+    google.protobuf.Empty reset_extrusion = 17;
+    google.protobuf.Empty prime = 18;
+    google.protobuf.Empty barrier = 19;
+    google.protobuf.Empty park = 20;
+    google.protobuf.Empty nozzle_off = 21;
+    google.protobuf.Empty bed_off = 22;
+    google.protobuf.Empty motors_off = 23;
+    LifecycleBlock block = 24;
+  }
+}
+message FirmwareLifecycle {
+  repeated LifecycleStep start = 1;
+  repeated LifecycleStep end = 2;
 }
 
 enum FixedDualConfiguration {
@@ -440,6 +528,7 @@ enum BedLevelling {
   BED_LEVELLING_UNSPECIFIED = 0;
   BED_LEVELLING_MANUAL = 1;
   BED_LEVELLING_PROBE_MESH = 2;
+  BED_LEVELLING_STORED_MESH = 3;
 }
 // Values follow MachineLimit::ALL order, starting at 1.
 enum MachineLimit {
@@ -466,7 +555,7 @@ enum MachineLimit {
 }
 message FactSource {oneof kind {string published=1;string family_default=2;google.protobuf.Empty operator_declared=3;}}
 message SourcedLimit {MachineLimit key=1;double value=2;FactSource source=3;}
-message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;}
+message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;optional string printer_model=9;LifecycleBlock start_block=10;LifecycleBlock end_block=11;}
 message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;MachineDescription machine=5;}
 message PlateFaceDefinition {string key=1;string label=2;string surface=3;AabbMm usable_mm=4;repeated AabbMm keepouts_mm=5;double max_bed_celsius=6;}
 message PlateDefinition {string id=1;string label=2;string mounting_interface=3;double thickness_mm=4;double surface_z_mm=5;repeated PlateFaceDefinition faces=6;string source=7;}

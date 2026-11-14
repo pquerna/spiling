@@ -11,7 +11,10 @@ use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
 use std::sync::atomic::AtomicBool;
 
-/// Emit the explicit diagnostic or complete typed Marlin workflow; replay is mandatory.
+mod lifecycle;
+
+/// Emit the explicit diagnostic, complete single-extruder or fixed-dual
+/// workflow in the printer's dialect; replay is mandatory.
 pub fn emit(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -29,6 +32,13 @@ pub fn emit(
         }
         _ => None,
     };
+    let dialect = intent.printer.capabilities.output_dialect;
+    if dialect == OutputDialect::BambuLabGcode3mfV1 {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedCapability,
+            "Bambu Lab firmware takes a .gcode.3mf delivery package, which is not yet supported; the plan is valid but no program is emitted",
+        ));
+    }
     let recipe = &intent.recipe;
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
     let travel_feed = recipe.travel_speed_mm_s * 60.0;
@@ -38,7 +48,12 @@ pub fn emit(
             "backend feed or extrusion cannot be represented at declared precision",
         ));
     }
-    let mut program = BoundedProgram(ChunkWriter::new(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)));
+    let mut program = BoundedProgram {
+        writer: ChunkWriter::new(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)),
+        max_line: dialect.max_line_bytes(),
+        line: 0,
+        long_line: false,
+    };
     program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n").map_err(limit)?;
     if routed.is_none() {
         program.write_str("G92 E0\n").map_err(limit)?;
@@ -71,53 +86,62 @@ pub fn emit(
         crate::routing::check_motion(home, home, 0, built_top, intent, job)?;
         position = Some(home);
     }
+    // Highest emitted Z of a complete job: the park lifts above it.
+    let mut top_z = f64::NEG_INFINITY;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
-        // Reviewed Marlin 2 subset: resets scale/volumetric state, homes native
-        // axes, explicitly disables leveling, and waits for heating OR cooling.
-        program
-            .write_str("M149 C\nM200 D0\nM220 S100\nM221 S100\nM107\nG28\nM420 S0\n")
-            .map_err(limit)?;
-        writeln!(
-            program,
-            "M190 R{:.6}\nM109 R{:.6}",
-            job.bed_temperature_c, job.nozzle_temperature_c
-        )
-        .map_err(limit)?;
-        let start = project_xyz6_point_mm(job.prime_start_mm)?;
-        let end = project_xyz6_point_mm(job.prime_end_mm)?;
-        writable_position(start, intent)?;
-        writable_position(end, intent)?;
-        if start == end {
-            return Err(error(
-                ManufacturingErrorCode::InvalidSpecification,
-                "priming collapses at coordinate precision",
-            ));
+        for step in &job.lifecycle.start {
+            match lifecycle::render(step, &intent.printer, job) {
+                lifecycle::Emit::Lines(lines) => {
+                    for line in lines {
+                        writeln!(program, "{line}").map_err(limit)?;
+                    }
+                }
+                lifecycle::Emit::Park => {
+                    return Err(error(
+                        ManufacturingErrorCode::InvalidSpecification,
+                        "park in the start sequence",
+                    ));
+                }
+                lifecycle::Emit::Prime => {
+                    let start = project_xyz6_point_mm(job.prime_start_mm)?;
+                    let end = project_xyz6_point_mm(job.prime_end_mm)?;
+                    writable_position(start, intent)?;
+                    writable_position(end, intent)?;
+                    if start == end {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "priming collapses at coordinate precision",
+                        ));
+                    }
+                    writeln!(
+                        program,
+                        "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+                        start[0], start[1], start[2], travel_feed
+                    )
+                    .map_err(limit)?;
+                    extrusion = job.prime_filament_length_mm;
+                    emitted_extrusion = (extrusion * 100_000_000.0).round() / 100_000_000.0;
+                    if emitted_extrusion <= 0.0 {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "priming extrusion collapses",
+                        ));
+                    }
+                    writeln!(
+                        program,
+                        "G1 X{:.6} Y{:.6} Z{:.6} E{:.8} F{:.6}",
+                        end[0],
+                        end[1],
+                        end[2],
+                        extrusion,
+                        job.prime_speed_mm_s * 60.0
+                    )
+                    .map_err(limit)?;
+                    position = Some(end);
+                    top_z = start[2].max(end[2]);
+                }
+            }
         }
-        writeln!(
-            program,
-            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
-            start[0], start[1], start[2], travel_feed
-        )
-        .map_err(limit)?;
-        extrusion = job.prime_filament_length_mm;
-        emitted_extrusion = (extrusion * 100_000_000.0).round() / 100_000_000.0;
-        if emitted_extrusion <= 0.0 {
-            return Err(error(
-                ManufacturingErrorCode::InvalidSpecification,
-                "priming extrusion collapses",
-            ));
-        }
-        writeln!(
-            program,
-            "G1 X{:.6} Y{:.6} Z{:.6} E{:.8} F{:.6}",
-            end[0],
-            end[1],
-            end[2],
-            extrusion,
-            job.prime_speed_mm_s * 60.0
-        )
-        .map_err(limit)?;
-        position = Some(end);
     }
     let (last, last_extrusion) = crate::realization::stream(
         plan,
@@ -245,6 +269,7 @@ pub fn emit(
                     .map_err(limit)?;
                     emitted_extrusion = rounded;
                     position = Some(to);
+                    top_z = top_z.max(to[2]);
                 }
                 Event::Travel(target, speed)
                 | Event::Deposit(target, _, speed)
@@ -273,10 +298,7 @@ pub fn emit(
                     } else {
                         intent.printer.max_print_feed_mm_s
                     };
-                    if !feed.is_finite()
-                        || feed <= 0.0
-                        || feed / 60.0 > feed_limit
-                    {
+                    if !feed.is_finite() || feed <= 0.0 || feed / 60.0 > feed_limit {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
                             "actual emitted feed exceeds printer limit or precision",
@@ -345,39 +367,59 @@ pub fn emit(
                         .map_err(limit)?;
                     }
                     position = Some(to);
+                    top_z = top_z.max(to[2]);
                 }
             }
             Ok(())
         },
     )?;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
-        let last = last.unwrap();
-        let lift = project_xyz6_point_mm([last[0], last[1], job.park_position_mm[2]])?;
-        let park = project_xyz6_point_mm(job.park_position_mm)?;
-        writable_position(lift, intent)?;
-        writable_position(park, intent)?;
-        if lift[2] <= project_xyz6_coordinate_mm(last[2])? {
-            return Err(error(
+        let mut last = last.ok_or_else(|| {
+            error(
                 ManufacturingErrorCode::InvalidSpecification,
-                "park clearance collapses at coordinate precision",
-            ));
+                "park without a known position",
+            )
+        })?;
+        for step in &job.lifecycle.end {
+            match lifecycle::render(step, &intent.printer, job) {
+                lifecycle::Emit::Lines(lines) => {
+                    for line in lines {
+                        writeln!(program, "{line}").map_err(limit)?;
+                    }
+                }
+                lifecycle::Emit::Prime => {
+                    return Err(error(
+                        ManufacturingErrorCode::InvalidSpecification,
+                        "prime in the end sequence",
+                    ));
+                }
+                lifecycle::Emit::Park => {
+                    // Lift above everything emitted, never to a fixed height.
+                    let height = (top_z.max(last[2]) + job.park_clearance_mm)
+                        .min(intent.printer.build_envelope.max[2]);
+                    let lift = project_xyz6_point_mm([last[0], last[1], height])?;
+                    let park =
+                        project_xyz6_point_mm([job.park_xy_mm[0], job.park_xy_mm[1], height])?;
+                    writable_position(lift, intent)?;
+                    writable_position(park, intent)?;
+                    if lift[2] <= project_xyz6_coordinate_mm(last[2])? || lift[2] <= top_z {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "park clearance above the highest emitted Z collapses within the envelope",
+                        ));
+                    }
+                    for target in [lift, park] {
+                        writeln!(
+                            program,
+                            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+                            target[0], target[1], target[2], travel_feed
+                        )
+                        .map_err(limit)?;
+                    }
+                    last = park;
+                }
+            }
         }
-        program.write_str("M400\n").map_err(limit)?;
-        writeln!(
-            program,
-            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
-            lift[0], lift[1], lift[2], travel_feed
-        )
-        .map_err(limit)?;
-        writeln!(
-            program,
-            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
-            park[0], park[1], park[2], travel_feed
-        )
-        .map_err(limit)?;
-        program
-            .write_str("M400\nM104 S0\nM140 S0\nM107\nM84\n")
-            .map_err(limit)?;
     }
     if let Some(job) = routed {
         let last = position.unwrap();
@@ -412,7 +454,13 @@ pub fn emit(
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
     check_cancel(cancel)?;
-    program.0.finish().map_err(|_| {
+    if program.long_line {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedCapability,
+            "a command line exceeds the firmware's command buffer (Marlin/Prusa MAX_CMD_SIZE, 95 bytes)",
+        ));
+    }
+    program.writer.finish().map_err(|_| {
         error(
             ManufacturingErrorCode::ResourceLimit,
             "emitted program byte limit exceeded",
@@ -433,11 +481,27 @@ fn writable_position(
     Ok(())
 }
 /// Program text compressed frame by frame as it is emitted, refusing output
-/// beyond the program byte limit.
-struct BoundedProgram(ChunkWriter);
+/// beyond the program byte limit and recording any line longer than the
+/// dialect's firmware command buffer.
+struct BoundedProgram {
+    writer: ChunkWriter,
+    max_line: Option<usize>,
+    line: usize,
+    long_line: bool,
+}
 impl Write for BoundedProgram {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        std::io::Write::write_all(&mut self.0, s.as_bytes()).map_err(|_| fmt::Error)
+        if let Some(max) = self.max_line {
+            for byte in s.bytes() {
+                if byte == b'\n' {
+                    self.line = 0;
+                } else {
+                    self.line += 1;
+                    self.long_line |= self.line > max;
+                }
+            }
+        }
+        std::io::Write::write_all(&mut self.writer, s.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 fn limit(_: fmt::Error) -> ManufacturingError {

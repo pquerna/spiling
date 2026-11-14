@@ -149,7 +149,7 @@ async fn layout_partial_fit_keeps_existing_parts_and_pin_conflicts_are_explicit(
     if let JobWorkflow::CompleteMarlin { job } = &mut profile.printer.workflow {
         job.prime_start_mm = [10.0, 29.0, 0.2];
         job.prime_end_mm = [30.0, 29.0, 0.2];
-        job.park_position_mm = [0.0, 29.0, 20.0];
+        job.park_xy_mm = [0.0, 29.0];
     }
     profile.validate().unwrap();
     set_intent(&mut client, profile).await;
@@ -217,7 +217,7 @@ async fn quantity_overflow_is_atomic_scoped_and_independently_replayed_per_plate
     if let JobWorkflow::CompleteMarlin { job } = &mut profile.printer.workflow {
         job.prime_start_mm = [5.0, 23.0, 0.2];
         job.prime_end_mm = [25.0, 23.0, 0.2];
-        job.park_position_mm = [0.0, 23.0, 20.0];
+        job.park_xy_mm = [0.0, 23.0];
     }
     profile.validate().unwrap();
     set_intent(&mut client, profile).await;

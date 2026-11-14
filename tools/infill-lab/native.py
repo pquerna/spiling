@@ -123,11 +123,6 @@ class Native:
         shutil.copyfile(source, owned_source)
         source_hash = file_hash(owned_source)
         intent = json.loads(self.base_intent.read_text())
-        # The reference's 20 mm final park was sized for tiny coupons. Keep
-        # actual workflow clearance above this unchanged source; engine checks
-        # the captured position against its machine envelope independently.
-        job = intent["printer"]["workflow"]["job"]
-        job["park_position_mm"][2] = max(job["park_position_mm"][2], size[2] + 5.0)
         recipe = intent["recipe"]
         recipe.update(
             infill_fraction=candidate.fraction,

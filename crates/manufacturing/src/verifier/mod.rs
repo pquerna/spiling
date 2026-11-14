@@ -18,6 +18,7 @@ mod construction;
 mod cost;
 mod expected;
 mod joins;
+mod lifecycle;
 mod replay;
 pub(crate) use replay::ReplaySink;
 
@@ -527,8 +528,6 @@ fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
 }
 
 enum Lifecycle {
-    Bare(Command),
-    Scalar(Command, usize, f64),
     Motion([f64; 3], f64, Option<f64>),
 }
 struct MotionState {
@@ -545,25 +544,9 @@ fn inspect_lifecycle(
     replay: Option<&mut ReplaySink>,
     prime_exclusion: Option<PrimeExclusionBoundsMm>,
 ) -> Result<(f64, f64), ManufacturingError> {
-    let mut position_error = 0.0;
+    let position_error;
     let mut extrusion_error = 0.0;
     match operation {
-        Lifecycle::Bare(command) => {
-            if decoded.command != command {
-                return Err(failed("missing or reordered lifecycle state/barrier"));
-            }
-        }
-        Lifecycle::Scalar(command, field, value) => {
-            if decoded.command != command
-                || decoded.fields[field].is_none_or(|actual| {
-                    (actual - value).abs() > F_HALF_STEP + arithmetic_slack(value)
-                })
-            {
-                return Err(failed(
-                    "lifecycle modal or thermal command differs from specification",
-                ));
-            }
-        }
         Lifecycle::Motion(target, speed, extrusion) => {
             let command = if extrusion.is_some() {
                 Command::Deposit
@@ -749,8 +732,9 @@ pub(crate) fn verify_actual(
         JobWorkflow::DiagnosticBodyOnly | JobWorkflow::FixedDualMarlin { .. } => None,
         JobWorkflow::CompleteMarlin { job } => Some(job),
     };
-    let mut lifecycle_index = 0usize;
-    let mut finish_index = 0usize;
+    let mut lifecycle = job.map(|job| lifecycle::Lifecycle::new(job, printer));
+    let max_line = printer.capabilities.output_dialect.max_line_bytes();
+    let mut max_z = f64::NEG_INFINITY;
     let mut priming_filament_length_mm = 0.0;
     let mut volume_layer = 0u32;
     let mut layer_nominal_volume = 0.0;
@@ -769,9 +753,55 @@ pub(crate) fn verify_actual(
     let mut lines = ProgramLines::new(program.reader());
     'lines: while let Some((line_index, line)) = lines.next()? {
         cancelled(cancel)?;
+        if max_line.is_some_and(|max| line.len() > max) {
+            return Err(failed(format!(
+                "program line {} exceeds the firmware command buffer",
+                line_index + 1
+            )));
+        }
+        // Declared lifecycle text (dialect commands, opaque block lines) is
+        // matched exactly rather than decoded.
+        if let Some(lc) = lifecycle.as_mut()
+            && setup_index == setup_len
+        {
+            let item = if lc.in_start() {
+                lc.next_start()
+            } else if expected.peek().is_none() {
+                lc.next_end()
+            } else {
+                None
+            };
+            if let Some(lifecycle::Item::Text(text)) = item {
+                if text == line {
+                    lc.pop();
+                    lc.accepted_text(&mut state);
+                    continue;
+                }
+                if line
+                    .split_once(';')
+                    .map_or(line, |(code, _)| code)
+                    .trim()
+                    .is_empty()
+                {
+                    continue;
+                }
+                return Err(failed(format!(
+                    "program line {}: expected declared lifecycle command {text:?}",
+                    line_index + 1
+                )));
+            }
+        }
         let decoded = decode(line, route.is_some())
             .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
         let Some(decoded) = decoded else { continue };
+        let top_before = max_z;
+        if matches!(
+            decoded.command,
+            Command::Travel | Command::Deposit | Command::Arc(_)
+        ) && let Some(z) = decoded.fields[2]
+        {
+            max_z = max_z.max(z);
+        }
         if let Some(time) = &mut time {
             time.observe(
                 &decoded,
@@ -814,70 +844,70 @@ pub(crate) fn verify_actual(
         let filament_area = route
             .as_ref()
             .map_or(filament_area, routing::RouteState::filament_area);
-        if let Some(job) = job {
-            let operation = if lifecycle_index < 11 {
-                let op = match lifecycle_index {
-                    0 => Lifecycle::Bare(Command::Celsius),
-                    1 => Lifecycle::Scalar(Command::VolumetricOff, 7, 0.0),
-                    2 => Lifecycle::Scalar(Command::FeedScale, 5, 100.0),
-                    3 => Lifecycle::Scalar(Command::FlowScale, 5, 100.0),
-                    4 => Lifecycle::Bare(Command::FanOff),
-                    5 => Lifecycle::Bare(Command::Home),
-                    6 => Lifecycle::Scalar(Command::LevelingOff, 5, 0.0),
-                    7 => Lifecycle::Scalar(Command::WaitBed, 6, job.bed_temperature_c),
-                    8 => Lifecycle::Scalar(Command::WaitNozzle, 6, job.nozzle_temperature_c),
-                    9 => Lifecycle::Motion(job.prime_start_mm, recipe.travel_speed_mm_s, None),
-                    _ => Lifecycle::Motion(
+        if let (Some(job), Some(lc)) = (job, lifecycle.as_mut()) {
+            let item = if lc.in_start() {
+                lc.next_start()
+            } else if expected.peek().is_none() {
+                Some(
+                    lc.next_end()
+                        .ok_or_else(|| failed("extra command after shutdown"))?,
+                )
+            } else {
+                None
+            };
+            if let Some(item) = item {
+                let kind = match item {
+                    lifecycle::Item::PrimeTravel => 0,
+                    lifecycle::Item::PrimeLine => 1,
+                    lifecycle::Item::Lift => 2,
+                    lifecycle::Item::ParkXy => 3,
+                    lifecycle::Item::Text(_) | lifecycle::Item::Applied(_) => {
+                        return Err(failed(format!(
+                            "program line {}: command differs from the declared lifecycle step",
+                            line_index + 1
+                        )));
+                    }
+                };
+                lc.check_motion(kind, &state)?;
+                lc.pop();
+                let operation = match kind {
+                    0 => Lifecycle::Motion(job.prime_start_mm, recipe.travel_speed_mm_s, None),
+                    1 => Lifecycle::Motion(
                         job.prime_end_mm,
                         job.prime_speed_mm_s,
                         Some(job.prime_filament_length_mm),
                     ),
-                };
-                lifecycle_index += 1;
-                Some(op)
-            } else if expected.peek().is_none() {
-                let last = state
-                    .position
-                    .ok_or_else(|| failed("park without deposition"))?;
-                let op = match finish_index {
-                    0 => Lifecycle::Bare(Command::Barrier),
-                    1 => Lifecycle::Motion(
-                        [last[0], last[1], job.park_position_mm[2]],
-                        recipe.travel_speed_mm_s,
-                        None,
-                    ),
-                    2 => Lifecycle::Motion(job.park_position_mm, recipe.travel_speed_mm_s, None),
-                    3 => Lifecycle::Bare(Command::Barrier),
-                    4 => Lifecycle::Scalar(Command::NozzleOff, 5, 0.0),
-                    5 => Lifecycle::Scalar(Command::BedOff, 5, 0.0),
-                    6 => Lifecycle::Bare(Command::FanOff),
-                    7 => Lifecycle::Bare(Command::MotorsOff),
-                    _ => return Err(failed("extra command after shutdown")),
-                };
-                finish_index += 1;
-                Some(op)
-            } else {
-                None
-            };
-            if let Some(operation) = operation {
-                if finish_index == 2
-                    && state.position.is_some_and(|last| {
-                        decoded.fields[0] != Some(last[0])
+                    2 => {
+                        let last = state
+                            .position
+                            .ok_or_else(|| failed("park from an unknown position"))?;
+                        let height = (top_before.max(last[2]) + job.park_clearance_mm)
+                            .min(printer.build_envelope.max[2]);
+                        let lift = project_xyz6_point_mm([last[0], last[1], height])?;
+                        if lift[2] <= last[2]
+                            || lift[2] <= top_before
+                            || decoded.fields[0] != Some(last[0])
                             || decoded.fields[1] != Some(last[1])
-                            || decoded.fields[2].is_some_and(|z| z <= last[2])
-                    })
-                {
-                    return Err(failed(
-                        "final lift must be vertical with representable clearance",
-                    ));
-                }
-                if finish_index == 3
-                    && state
-                        .position
-                        .is_some_and(|last| decoded.fields[2] != Some(last[2]))
-                {
-                    return Err(failed("final XY park must preserve clearance Z"));
-                }
+                        {
+                            return Err(failed(
+                                "final lift must be vertical and clear the highest emitted Z",
+                            ));
+                        }
+                        lc.lift_z = Some(lift[2]);
+                        Lifecycle::Motion(lift, recipe.travel_speed_mm_s, None)
+                    }
+                    _ => {
+                        let z = lc.lift_z.ok_or_else(|| failed("XY park without a lift"))?;
+                        if decoded.fields[2] != Some(z) {
+                            return Err(failed("final XY park must preserve clearance Z"));
+                        }
+                        Lifecycle::Motion(
+                            [job.park_xy_mm[0], job.park_xy_mm[1], z],
+                            recipe.travel_speed_mm_s,
+                            None,
+                        )
+                    }
+                };
                 let (position_error, extrusion_error) = inspect_lifecycle(
                     &decoded,
                     operation,
@@ -889,10 +919,7 @@ pub(crate) fn verify_actual(
                 )?;
                 max_position_error_mm = max_position_error_mm.max(position_error);
                 max_extrusion_error_mm = max_extrusion_error_mm.max(extrusion_error);
-                if decoded.command == Command::Home {
-                    state.position = Some(job.home_position_mm);
-                }
-                if lifecycle_index == 11 && expected_e == 0.0 {
+                if kind == 1 {
                     priming_filament_length_mm = state.extrusion;
                     expected_e = job.prime_filament_length_mm;
                 }
@@ -1453,10 +1480,13 @@ pub(crate) fn verify_actual(
         || remaining.is_some()
         || deposition_segments + support_deposition_segments == 0
         || retracted_endpoint.is_some()
-        || (job.is_some() && (lifecycle_index != 11 || finish_index != 8))
+        || lifecycle.as_mut().is_some_and(|lc| !lc.done())
         || route.as_ref().is_some_and(|routed| !routed.done())
     {
         return Err(failed("program is missing setup or normalized motions"));
+    }
+    if let Some(lc) = &lifecycle {
+        lc.check_shutdown()?;
     }
     verify_region_volume(
         &plan.layers[volume_layer as usize],
@@ -1549,8 +1579,8 @@ pub(crate) fn verify_actual(
             },
             "Minimum skin commands: complete original required interval, same-row minimum-only construction, captured ordinary winner/source/holes and actual final-stroke bijection; added volume is stroke-derived, not enlarged mandatory area".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
-            if routing.is_some() { "Fixed-dual Marlin 2.1.2.5: explicit offsets and S1 logical/carriage frame, selection E0 epochs, per-feeder exact E8 debt, addressed heating/cooling waits, supported waste and both-hotend shutdown independently decoded".into() } else if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
-            if routing.is_some() { "Decoded per-tool model/waste filament and volume; full expected source reservation associations and conservative inactive-nozzle/carriage-prefix sweeps. No measured physical support or clearance claim".into() } else if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
+            if routing.is_some() { "Fixed-dual Marlin 2.1.2.5: explicit offsets and S1 logical/carriage frame, selection E0 epochs, per-feeder exact E8 debt, addressed heating/cooling waits, supported waste and both-hotend shutdown independently decoded".into() } else if let Some(job) = job { format!("{:?} lifecycle, {}+{} declared steps in order: homing before motion; modes, zero E, waited bed/nozzle before priming; lift {} mm above highest Z; XY park; shutdown", printer.capabilities.output_dialect, job.lifecycle.start.len(), job.lifecycle.end.len(), job.park_clearance_mm) } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
+            if routing.is_some() { "Decoded per-tool model/waste filament and volume; full expected source reservation associations and conservative inactive-nozzle/carriage-prefix sweeps. No measured physical support or clearance claim".into() } else if job.is_some() { "Integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
         ],
         limitations: vec![
             "SOFTWARE VALIDATION ONLY, NOT MACHINE READY; no physical printer support or printability certification".into(),
@@ -1559,7 +1589,7 @@ pub(crate) fn verify_actual(
             if routing.is_some() { "Only declared conservative coplanar-nozzle/carriage reservations checked; no physical tool geometry, homing trajectory or general fixture collision certification".into() } else { "No collisions or component/fixture clearance validation; component shapes are metadata only".into() },
             "No firmware behavior, execution, calibration or hardware accuracy validation".into(),
             "Homing path, thermal sensor truth, firmware configuration and calibration records are declared, not physically measured or certified".into(),
-            if routing.is_some() || job.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
+            if routing.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else if job.is_some() { "Complete-job lifecycle/modal/wait/barrier semantics checked in software only; firmware acceptance follows the dialect's documented command set, not execution".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
             "Generated supports/bridges are bounded software geometry/process only; no physical support certification or swept-bead guarantee".into(),
         ],
         deposition_segments,
@@ -1617,6 +1647,12 @@ pub(crate) fn verify_actual(
     }
     if unsupported_layers > 0 {
         report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no support reached from the build plate; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
+    }
+    if let (Some(job), Some(lc)) = (job, &lifecycle) {
+        report.limitations.insert(0, lc.levelling_report().into());
+        for (index, block) in lifecycle::block_limitations(job).into_iter().enumerate() {
+            report.limitations.insert(index, block);
+        }
     }
     report.validate()?;
     if let Some(selection) = &plan.interior_selection {

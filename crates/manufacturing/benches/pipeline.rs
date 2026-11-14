@@ -150,10 +150,6 @@ impl Scene {
         let mut intent = decode_intent(SINGLE_TOOL)?;
         intent.recipe.infill_fraction = infill;
         intent.recipe.layer_height_mm = layer;
-        // Park above the scaled part, within the build envelope.
-        if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
-            job.park_position_mm[2] = (size[2] + 10.0).min(intent.printer.build_envelope.max[2]);
-        }
         let occurrences = vec![OccurrenceRecord {
             occurrence_id: OccurrenceId::new(1).expect("one occurrence"),
             definition_id: definition.id().clone(),

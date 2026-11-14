@@ -139,7 +139,6 @@ def main():
     intent = json.loads(arguments.intent.read_text())
     intent["recipe"]["infill_fraction"] = 0.15
     intent["recipe"]["layer_height_mm"] = 0.2
-    intent["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
     if arguments.supports == "disabled":
         intent["recipe"]["supports"] = {"kind": "disabled"}
     elif intent["recipe"]["supports"].get("kind") != "breakaway":

@@ -173,7 +173,6 @@ def exercise(args, name, source, fraction, spacing, metadata):
     )
     # All examples fit the captured bed. Raise only final park above the tallest
     # 24 mm probe; native admission still owns source/prime/park clearance.
-    intent["printer"]["workflow"]["job"]["park_position_mm"][2] = 30
     intent_file = folder / "intent.json"
     intent_file.write_text(json.dumps(intent))
     project = folder / "Web and roof.spil"

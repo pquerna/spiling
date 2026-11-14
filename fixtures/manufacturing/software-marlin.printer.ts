@@ -37,7 +37,32 @@ const printer = {
       prime_end_mm: [30, 210, 0.2],
       prime_filament_length_mm: 1.5,
       prime_speed_mm_s: 10,
-      park_position_mm: [0, 210, 20],
+      park_xy_mm: [0, 210],
+      park_clearance_mm: 10,
+      // The generic Marlin 2 table without a firmware mesh.
+      lifecycle: {
+        start: [
+          { kind: "feed_scale_reset" },
+          { kind: "flow_scale_reset" },
+          { kind: "volumetric_off" },
+          { kind: "fan_off" },
+          { kind: "bed_target" },
+          { kind: "nozzle_target", standby_c: 150 },
+          { kind: "home" },
+          { kind: "bed_wait" },
+          { kind: "nozzle_wait", standby_c: null },
+          { kind: "prime" },
+        ],
+        end: [
+          { kind: "barrier" },
+          { kind: "park" },
+          { kind: "barrier" },
+          { kind: "nozzle_off" },
+          { kind: "bed_off" },
+          { kind: "fan_off" },
+          { kind: "motors_off" },
+        ],
+      },
     },
   },
 } satisfies PrinterSpecification;

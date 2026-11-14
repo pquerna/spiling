@@ -1153,7 +1153,9 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             prime_end_mm: [20.0, 10.0, 1.0],
             prime_filament_length_mm: 1.0,
             prime_speed_mm_s: 5.0,
-            park_position_mm: [0.0, 0.0, 10.0],
+            park_xy_mm: [0.0, 0.0],
+            park_clearance_mm: 10.0,
+            lifecycle: FirmwareLifecycle::software_reference(),
         },
     };
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
@@ -1173,7 +1175,8 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
     assert_eq!(bytes.len(), REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 13);
-    assert_eq!(bounds.max, [20.0, 10.0, 10.0]);
+    // The park lifts 10 mm above the highest emitted Z (2 mm), not to a fixed height.
+    assert_eq!(bounds.max, [20.0, 10.0, 12.0]);
     assert_eq!(&bytes[28..32], &4u32.to_le_bytes());
     assert_eq!(bytes[96 + 46], 6);
     assert_eq!(bytes[96 + REPLAY_RECORD_BYTES + 46], 7);
@@ -1233,16 +1236,16 @@ fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations(
         ("M220 S100", "M220 S90"),
         ("M221 S100", "M221 S110"),
         ("G28\n", ""),
-        ("M420 S0", "M420 S1"),
-        ("M190 R60.000000", "M190 S60"),
-        ("M109 R200.000000", "M109 R190"),
-        ("M109 R200.000000\n", ""),
+        ("G28\n", "G28\nM420 S1\n"),
+        ("M190 R60", "M190 S60"),
+        ("M109 R200", "M109 R190"),
+        ("M109 R200\n", ""),
+        ("M104 S150\n", ""),
         ("M400\n", ""),
         ("M104 S0", "M104 S200"),
-        ("M84\n", ""),
+        ("M84 X Y E\n", ""),
         ("M82\n", "M83\n"),
         ("G90\n", "G91\n"),
-        ("Z10.000000", "Z1.000000"),
         ("E1.00000000", "E2.00000000"),
         ("G28", "START_PRINT"),
         ("M107", "M106 S255"),
@@ -1265,7 +1268,7 @@ fn complete_job_rejects_unsafe_or_incompatible_specifications() {
         if let JobWorkflow::CompleteMarlin { job } = &mut bad.printer.workflow {
             match mutation {
                 0 => job.prime_end_mm[0] = 101.0,
-                1 => job.park_position_mm[2] = 2.0,
+                1 => job.park_xy_mm[0] = 500.0,
                 2 => job.nozzle_temperature_c = 100.0,
                 3 => job.prime_filament_length_mm = 101.0,
                 _ => job.firmware_version = String::new(),
@@ -1286,21 +1289,32 @@ fn region_nominal_measurement_mutation_is_not_trusted() {
 }
 
 #[test]
-fn complete_job_requires_integral_celsius_and_explicit_temperature_units() {
+fn complete_job_requires_integral_celsius_and_declared_temperature_units() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    for replacement in [
-        "",
-        "M149 F\n",
-        "M149 K\n",
-        "M149\n",
-        "M149 C F\n",
-        "M149 C1\n",
-    ] {
-        let mutated = program.replacen("M149 C\n", replacement, 1);
+    // M149 needs a non-default Marlin build option: only a declared step emits it.
+    assert!(!program.contains("M149"));
+    assert!(
+        verify(
+            &program.replacen("G28\n", "M149 C\nG28\n", 1),
+            &plan,
+            &intent,
+            &cancel
+        )
+        .is_err()
+    );
+    let mut celsius = intent.clone();
+    if let JobWorkflow::CompleteMarlin { job } = &mut celsius.printer.workflow {
+        job.lifecycle.start.insert(0, LifecycleStep::CelsiusUnits);
+    }
+    let declared = emit_text(&plan, &celsius, &cancel).unwrap();
+    assert!(declared.contains("\nM149 C\n"));
+    verify(&declared, &plan, &celsius, &cancel).unwrap();
+    for replacement in ["", "M149 F\n", "M149\n", "M149 C1\n"] {
+        let mutated = declared.replacen("M149 C\n", replacement, 1);
         assert!(
-            verify(&mutated, &plan, &intent, &cancel).is_err(),
+            verify(&mutated, &plan, &celsius, &cancel).is_err(),
             "{replacement:?}"
         );
     }
@@ -4125,4 +4139,350 @@ fn scheduled_free_tool_order_reduces_actual_selections_and_keeps_all_waste() {
         assert_eq!(a.waste_filament_length_mm, b.waste_filament_length_mm);
         assert_eq!(a.waste_volume_mm3, b.waste_volume_mm3);
     }
+}
+
+/// The complete fixture in a shipped setup's dialect with its derived lifecycle.
+fn shipped_dialect(
+    setup: &spiling_contracts::hardware::HardwareSetupDefinition,
+) -> ManufacturingIntent {
+    let (mut intent, _) = complete_fixture();
+    let JobWorkflow::CompleteMarlin { job: derived } = &setup.printer.workflow else {
+        panic!("derived setups are complete jobs");
+    };
+    intent.printer.capabilities.output_dialect = setup.printer.capabilities.output_dialect;
+    if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+        job.lifecycle = derived.lifecycle.clone();
+    }
+    intent
+}
+
+/// Static acceptance: every command an emitted program uses, by dialect, with
+/// the documentation that defines it. Opaque block lines are excluded (they
+/// are reported, not interpreted).
+fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
+    // Marlin: https://marlinfw.org/docs/gcode/<code>.html for each code.
+    const MARLIN: &[&str] = &[
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M82", "M84", "M104", "M106",
+        "M107", "M109", "M140", "M190", "M200", "M220", "M221", "M400", "M420",
+    ];
+    // Prusa Buddy: Marlin-derived codes, plus M555/M862.x/G29 per
+    // https://help.prusa3d.com/article/buddy-firmware-specific-g-code-commands_633112
+    // and PrusaSlicer's MK4S start G-code (G29 P1/P3.2/P3.13/A).
+    const PRUSA: &[&str] = &[
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M82", "M84", "M104", "M106",
+        "M107", "M109", "M140", "M190", "M220", "M221", "M400", "M555", "M862.1", "M862.3",
+    ];
+    // Klipper: https://www.klipper3d.org/G-Codes.html (G21 is a registered
+    // no-op in klippy/extras/gcode_move.py); G2/G3 need [gcode_arcs].
+    const KLIPPER: &[&str] = &[
+        "G0",
+        "G1",
+        "G21",
+        "G28",
+        "G90",
+        "G92",
+        "M82",
+        "M84",
+        "M104",
+        "M106",
+        "M107",
+        "M109",
+        "M140",
+        "M190",
+        "M220",
+        "M221",
+        "M400",
+        "BED_MESH_CALIBRATE",
+        "BED_MESH_PROFILE",
+        "BED_MESH_CLEAR",
+    ];
+    let code = line.split_once(';').map_or(line, |(code, _)| code).trim();
+    let Some(word) = code.split_ascii_whitespace().next() else {
+        return Ok(());
+    };
+    let set = match dialect {
+        OutputDialect::Marlin2SingleExtruderGcodeV1 => MARLIN,
+        OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => PRUSA,
+        OutputDialect::KlipperSingleExtruderGcodeV1 => KLIPPER,
+        _ => return Err(format!("{dialect:?} has no documented command set")),
+    };
+    if !set.contains(&word) {
+        return Err(format!(
+            "{word} is not in the {dialect:?} command set: {line}"
+        ));
+    }
+    // Klipper's M109/M190 read only S; R would leave the target at zero.
+    if dialect == OutputDialect::KlipperSingleExtruderGcodeV1
+        && matches!(word, "M109" | "M190")
+        && !code
+            .split_ascii_whitespace()
+            .nth(1)
+            .is_some_and(|w| w.starts_with('S'))
+    {
+        return Err(format!("Klipper waits take S: {line}"));
+    }
+    if dialect.max_line_bytes().is_some_and(|max| line.len() > max) {
+        return Err(format!("line exceeds the firmware command buffer: {line}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn shipped_setups_emit_only_their_dialects_documented_commands() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let mut dialects = std::collections::BTreeSet::new();
+    for setup in catalog.setups.iter().filter(|s| s.machine.is_some()) {
+        let intent = shipped_dialect(setup);
+        let dialect = intent.printer.capabilities.output_dialect;
+        if dialect == OutputDialect::BambuLabGcode3mfV1 {
+            let error = emit_text(&plan, &intent, &cancel).unwrap_err();
+            assert_eq!(error.code, ManufacturingErrorCode::UnsupportedCapability);
+            assert!(error.message.contains(".gcode.3mf"), "{error:?}");
+            continue;
+        }
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        let report = verify(&program, &plan, &intent, &cancel).unwrap();
+        assert!(
+            !program.contains("M420 S0") && !program.contains("M149"),
+            "{}",
+            setup.id
+        );
+        for line in program.lines() {
+            documented(dialect, line).unwrap_or_else(|e| panic!("{}: {e}", setup.id));
+        }
+        // Mesh levelling is commanded, never disabled, and reported.
+        let probe = match dialect {
+            OutputDialect::KlipperSingleExtruderGcodeV1 => "\nBED_MESH_CALIBRATE\n",
+            OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => "\nG29 A\n",
+            _ => "\nG28\nM190 R60\nG29\n",
+        };
+        assert!(program.contains(probe), "{}: {program}", setup.id);
+        assert!(
+            report.limitations.iter().any(|l| l.contains("mesh probed")),
+            "{}",
+            setup.id
+        );
+        dialects.insert(format!("{dialect:?}"));
+    }
+    assert_eq!(dialects.len(), 3, "{dialects:?}");
+}
+
+#[test]
+fn prusa_lifecycle_checks_printer_and_probes_at_standby() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "prusa.mk4s.04")
+        .unwrap();
+    let intent = shipped_dialect(setup);
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    let start: Vec<&str> = program.lines().skip(5).take(17).collect();
+    assert_eq!(
+        start,
+        [
+            "M862.1 P1",
+            "M862.3 P \"MK4S\"",
+            "M220 S100",
+            "M221 S100",
+            "M107",
+            "M140 S60",
+            "M104 S170",
+            "M109 R170",
+            "G28",
+            "M190 R60",
+            "M555 X0 Y0 W100 H100",
+            "G29 P1",
+            "G29 P3.2",
+            "G29 P3.13",
+            "G29 A",
+            "M109 R200",
+            "G0 X10.000000 Y10.000000 Z1.000000 F1200.000000",
+        ],
+        "{program}"
+    );
+    verify(&program, &plan, &intent, &cancel).unwrap();
+    for (from, to) in [
+        ("M862.3 P \"MK4S\"", "M862.3 P \"MK3S\""),
+        ("G29 A\n", ""),
+        ("M109 R170\n", ""),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
+}
+
+fn klipper_macros() -> (LifecycleBlock, LifecycleBlock) {
+    (
+        LifecycleBlock::klipper_start_print(),
+        LifecycleBlock::klipper_end_print(),
+    )
+}
+
+#[test]
+fn opaque_blocks_are_checked_by_declared_effects_and_reported_not_refused() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let mut setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "generic.klipper-cartesian.04")
+        .unwrap()
+        .clone();
+    let (start, end) = klipper_macros();
+    let machine = setup.machine.as_mut().unwrap();
+    machine.start_block = Some(start);
+    machine.end_block = Some(end);
+    setup.rederive().unwrap();
+    let intent = shipped_dialect(&setup);
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    // The macro homes, levels and heats: the table omits what it covers and
+    // re-establishes modes and E it may have changed.
+    assert!(
+        program.contains(
+            "M107\nSTART_PRINT BED_TEMP=60 EXTRUDER_TEMP=200\nG21\nG90\nM82\nG92 E0\nG0 X10.000000"
+        ),
+        "{program}"
+    );
+    assert!(!program.contains("G28") && !program.contains("BED_MESH") && !program.contains("M109"));
+    assert!(program.ends_with("M400\nEND_PRINT\n"), "{program}");
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(report.verified);
+    let opaque: Vec<_> = report
+        .limitations
+        .iter()
+        .filter(|l| l.starts_with("Opaque "))
+        .collect();
+    assert_eq!(opaque.len(), 2, "{:?}", report.limitations);
+    assert!(opaque[0].contains("START_PRINT") && opaque[0].contains("homes, position unknown"));
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.contains("declared active by an opaque block"))
+    );
+    // Opaque content is still bound byte for byte, and the program around it
+    // must restore what the block's effects leave unknown.
+    for (from, to) in [
+        ("EXTRUDER_TEMP=200", "EXTRUDER_TEMP=260"),
+        ("G92 E0\nG0 X10", "G0 X10"),
+        ("G90\nM82\nG92 E0\n", "G92 E0\n"),
+        ("END_PRINT\n", ""),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert_ne!(mutated, program, "{from}");
+        assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
+}
+
+#[test]
+fn a_block_that_does_not_home_cannot_be_followed_by_motion() {
+    let (mut intent, plan) = complete_fixture();
+    let (mut block, _) = klipper_macros();
+    block.label = "operator preamble".into();
+    block.lines = vec!["M117 Printing".into()];
+    block.effects.homes = false;
+    let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow else {
+        unreachable!()
+    };
+    // The declaration loses the position and homing never follows: refused.
+    job.lifecycle.start.retain(|s| *s != LifecycleStep::Home);
+    job.lifecycle.start.insert(
+        0,
+        LifecycleStep::Block {
+            block: block.clone(),
+        },
+    );
+    let error = intent.validate().unwrap_err();
+    assert!(error.message.contains("before homing"), "{error:?}");
+    // A block that keeps the position and changes nothing is reported, not refused.
+    let (mut intent, plan2) = complete_fixture();
+    block.effects = BlockEffects::NONE;
+    if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+        job.lifecycle
+            .start
+            .insert(0, LifecycleStep::Block { block });
+    }
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan2, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan2, &intent, &cancel).unwrap();
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.contains("'operator preamble'"))
+    );
+    // Independently of validation, replay refuses motion without homing.
+    let mutated = program.replacen("G28\n", "", 1);
+    let error = verify(&mutated, &plan2, &intent, &cancel).unwrap_err();
+    assert!(
+        error.message.contains("G28") || error.message.contains("homing"),
+        "{error:?}"
+    );
+    let _ = plan;
+}
+
+#[test]
+fn park_lifts_a_clearance_above_the_highest_emitted_z_not_to_the_envelope_top() {
+    let (mut intent, plan) = complete_fixture();
+    intent.printer.build_envelope.max[2] = 1000.0;
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    verify(&program, &plan, &intent, &cancel).unwrap();
+    let z = |l: &str| {
+        l.split(' ')
+            .find_map(|w| w.strip_prefix('Z'))
+            .map(|z| z.parse::<f64>().unwrap())
+    };
+    let motions: Vec<&str> = program
+        .lines()
+        .filter(|l| {
+            l.starts_with("G0 ")
+                || l.starts_with("G1 X")
+                || l.starts_with("G2 ")
+                || l.starts_with("G3 ")
+        })
+        .collect();
+    let (park, body) = motions
+        .split_last_chunk::<2>()
+        .map(|(b, p)| (p, b))
+        .unwrap();
+    let body_top = body
+        .iter()
+        .filter_map(|l| z(l))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let top = body_top + 10.0;
+    assert!(top < 100.0, "{top}");
+    assert_eq!(z(park[0]), Some(top));
+    assert_eq!(z(park[1]), Some(top));
+    // A forged lower lift is refused.
+    let mutated = program.replace(&format!("Z{top:.6}"), &format!("Z{:.6}", top - 5.0));
+    assert!(verify(&mutated, &plan, &intent, &cancel).is_err());
+}
+
+#[test]
+fn block_lines_must_fit_the_firmware_command_buffer() {
+    let (mut intent, _) = complete_fixture();
+    let (mut block, _) = klipper_macros();
+    block.lines = vec![format!("M117 {}", "x".repeat(100))];
+    block.effects = BlockEffects::NONE;
+    if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+        job.lifecycle
+            .start
+            .insert(0, LifecycleStep::Block { block });
+    }
+    assert!(intent.validate().is_err());
+    intent.printer.capabilities.output_dialect = OutputDialect::KlipperSingleExtruderGcodeV1;
+    if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+        // Klipper has no M200; its table never declares it.
+        job.lifecycle
+            .start
+            .retain(|s| *s != LifecycleStep::VolumetricOff);
+    }
+    intent.validate().unwrap();
 }

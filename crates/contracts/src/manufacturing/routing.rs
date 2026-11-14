@@ -840,7 +840,11 @@ impl FixedDualJob {
             ));
         }
         for tool in &self.tools {
-            if printer.max_print_feed_mm_s.max(printer.max_travel_feed_mm_s) > tool.max_feed_mm_s {
+            if printer
+                .max_print_feed_mm_s
+                .max(printer.max_travel_feed_mm_s)
+                > tool.max_feed_mm_s
+            {
                 return Err(invalid(
                     "shared travel envelope exceeds a captured tool feed limit",
                 ));

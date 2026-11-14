@@ -29,6 +29,8 @@ pub use replay::*;
 pub use replay_index::*;
 mod job;
 pub use job::*;
+mod lifecycle;
+pub use lifecycle::*;
 mod material;
 mod material_review;
 pub use material_review::*;
@@ -800,8 +802,16 @@ pub enum MotionSpace {
 #[serde(rename_all = "snake_case")]
 pub enum OutputDialect {
     CartesianAbsoluteGcodeV1,
+    /// Generic Marlin 2 firmware.
     Marlin2SingleExtruderGcodeV1,
     Marlin2FixedDualGcodeV1,
+    /// Prusa Buddy firmware (Marlin-derived, Prusa printer/MBL commands).
+    PrusaMarlinSingleExtruderGcodeV1,
+    /// Klipper G-code (Marlin-flavoured moves, Klipper extended commands).
+    KlipperSingleExtruderGcodeV1,
+    /// Bambu Lab firmware. It takes a `.gcode.3mf` delivery package, which is
+    /// not produced yet: planning works, emission refuses explicitly.
+    BambuLabGcode3mfV1,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -997,7 +1007,9 @@ impl PrinterSpecification {
         self.capabilities.validate()?;
         match (&self.workflow, self.capabilities.output_dialect) {
             (JobWorkflow::DiagnosticBodyOnly, OutputDialect::CartesianAbsoluteGcodeV1) => {}
-            (JobWorkflow::CompleteMarlin { job }, OutputDialect::Marlin2SingleExtruderGcodeV1) => {
+            (JobWorkflow::CompleteMarlin { job }, dialect)
+                if dialect.single_extruder_lifecycle() =>
+            {
                 job.validate(self)?
             }
             (JobWorkflow::FixedDualMarlin { job }, OutputDialect::Marlin2FixedDualGcodeV1) => {
@@ -1402,7 +1414,8 @@ impl ManufacturingIntent {
             || r.travel_speed_mm_s > p.max_travel_feed_mm_s
             || !(r.travel_speed_mm_s * 60.0).is_finite()
             || r.travel_speed_mm_s * 60.0 < 0.000001
-            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_travel_feed_mm_s
+            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0
+                > p.max_travel_feed_mm_s
         {
             return Err(invalid(
                 "recipe exceeds printer feed/rounded-bead flow limits or numeric range",
@@ -1444,7 +1457,10 @@ impl ManufacturingIntent {
             let prime_flow =
                 job.prime_filament_length_mm * filament_area * job.prime_speed_mm_s / length;
             let prime_feed = (job.prime_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
-            if !prime_feed.is_finite() || prime_feed <= 0.0 || prime_feed / 60.0 > p.max_print_feed_mm_s {
+            if !prime_feed.is_finite()
+                || prime_feed <= 0.0
+                || prime_feed / 60.0 > p.max_print_feed_mm_s
+            {
                 return Err(invalid(
                     "priming feed exceeds printer limit at serialized precision",
                 ));
@@ -3430,12 +3446,15 @@ impl NormalizedPrintPlan {
                 }
             }
         }
-        // Both current output identities use the reviewed Cartesian XYZ6
+        // Every current output identity uses the reviewed Cartesian XYZ6
         // contract. A future dialect must choose its representation explicitly.
         match intent.printer.capabilities.output_dialect {
             OutputDialect::CartesianAbsoluteGcodeV1
             | OutputDialect::Marlin2SingleExtruderGcodeV1
-            | OutputDialect::Marlin2FixedDualGcodeV1 => {}
+            | OutputDialect::Marlin2FixedDualGcodeV1
+            | OutputDialect::PrusaMarlinSingleExtruderGcodeV1
+            | OutputDialect::KlipperSingleExtruderGcodeV1
+            | OutputDialect::BambuLabGcode3mfV1 => {}
         }
         let envelope = &intent.printer.build_envelope;
         let mut lower_z = envelope.min[2];
@@ -3904,12 +3923,15 @@ impl NormalizedPrintPlan {
             }
         }
         if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
+            // The park lifts above the highest emitted Z, within the envelope.
             if self
                 .layers
                 .iter()
-                .any(|layer| job.park_position_mm[2] <= layer.z_mm)
+                .any(|layer| layer.z_mm >= intent.printer.build_envelope.max[2])
             {
-                return Err(invalid("final park must clear every deposition layer"));
+                return Err(invalid(
+                    "final park needs clearance above every deposition layer within the envelope",
+                ));
             }
             let [object_min, object_max] = &mut object_xy;
             for (axis, (minimum, maximum)) in
