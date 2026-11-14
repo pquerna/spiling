@@ -35,16 +35,21 @@ const layer = (l: Partial<MachineLayer> & Pick<MachineLayer, "id" | "limits">): 
   levelling: null,
   heated_bed: null,
   arc_moves: null,
+  extruder_drive: null,
   printer_model: null,
   ...l,
 });
 
 // Root of every FFF description. Deposition ratios: widths 0.75–1.875 × nozzle
-// (0.30–0.75 mm at 0.4 mm), heights up to 0.75 × nozzle.
+// (0.30–0.75 mm at 0.4 mm), heights up to 0.75 × nozzle. Role speeds are
+// sized for a modern direct-drive machine (Orca/Bambu-class defaults); the
+// volumetric flow ceiling (machine and material) slows any role that would
+// exceed it, so a high role speed is never the reason a job refuses.
 const fff = layer({
   id: "generic.fff",
   heated_bed: true,
   arc_moves: true,
+  extruder_drive: "direct_drive",
   levelling: "probe_mesh",
   limits: family("generic.fff", {
     bed_x_mm: 350,
@@ -66,6 +71,15 @@ const fff = layer({
     z_resolution_mm: 0.0025,
     toolhead_radius_mm: 10,
     toolhead_height_mm: 25,
+    first_layer_speed_mm_s: 50,
+    first_layer_infill_speed_mm_s: 100,
+    outer_wall_speed_mm_s: 200,
+    inner_wall_speed_mm_s: 300,
+    sparse_infill_speed_mm_s: 300,
+    solid_infill_speed_mm_s: 250,
+    top_skin_speed_mm_s: 200,
+    support_speed_mm_s: 150,
+    bridge_speed_mm_s: 50,
   }),
 });
 const klipper = layer({
@@ -77,14 +91,18 @@ const klipper = layer({
   arc_moves: false,
   limits: [],
 });
+// A classic Marlin bed-slinger: Bowden extruder (Ender-3 class).
 const marlin = layer({
   id: "generic.marlin-bedslinger",
   parent: fff.id,
   firmware: "marlin2",
   kinematics: "bed_slinger",
+  extruder_drive: "bowden",
   limits: family("generic.marlin-bedslinger", { bed_x_mm: 300, bed_y_mm: 300, max_z_mm: 300 }),
 });
 const mk4sUrl = "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/";
+const prusaBundle = (section: string) =>
+  `PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini ${section}`;
 const mk4s = layer({
   id: "prusa.mk4s",
   parent: fff.id,
@@ -92,16 +110,35 @@ const mk4s = layer({
   kinematics: "bed_slinger",
   // Checked by the firmware's M862.3 (PrusaSlicer printer_model).
   printer_model: "MK4S",
-  // Speed, acceleration and flow are not published; family defaults apply.
-  limits: published(mk4sUrl, {
-    bed_x_mm: 250,
-    bed_y_mm: 210,
-    max_z_mm: 220,
-    nozzle_diameter_mm: 0.4,
-    filament_diameter_mm: 1.75,
-    max_nozzle_temperature_c: 290,
-    max_bed_temperature_c: 120,
-  }),
+  // Firmware motion limits and role speeds as Prusa publishes them in
+  // PrusaSlicer's bundled profile; volumetric flow inherits the family.
+  limits: [
+    ...published(mk4sUrl, {
+      bed_x_mm: 250,
+      bed_y_mm: 210,
+      max_z_mm: 220,
+      nozzle_diameter_mm: 0.4,
+      filament_diameter_mm: 1.75,
+      max_nozzle_temperature_c: 290,
+      max_bed_temperature_c: 120,
+    }),
+    ...published(prusaBundle("[printer:Original Prusa MK4S 0.4 nozzle]"), {
+      max_print_feed_mm_s: 300,
+      max_travel_feed_mm_s: 300,
+      max_acceleration_mm_s2: 4000,
+    }),
+    ...published(prusaBundle("[print:0.20mm SPEED @MK4S 0.4]"), {
+      first_layer_speed_mm_s: 40,
+      first_layer_infill_speed_mm_s: 100,
+      outer_wall_speed_mm_s: 170,
+      inner_wall_speed_mm_s: 170,
+      sparse_infill_speed_mm_s: 200,
+      solid_infill_speed_mm_s: 200,
+      top_skin_speed_mm_s: 100,
+      support_speed_mm_s: 120,
+      bridge_speed_mm_s: 50,
+    }),
+  ],
 });
 // bambulab.com tech-spec tables, as reproduced by an authorised reseller.
 const a1Url = "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)";
@@ -148,9 +185,11 @@ const a1Mini = layer({
   }),
 });
 const enderUrl = "https://www.creality.com/support/creality-ender-3-v3-se";
+// Direct-drive "Sprite" extruder, unlike the Bowden family it inherits.
 const ender = layer({
   id: "creality.ender-3-v3-se",
   parent: marlin.id,
+  extruder_drive: "direct_drive",
   limits: [
     ...published("https://www.creality.com/products/creality-ender-3-v3-se", {
       bed_x_mm: 220,

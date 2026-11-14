@@ -46,11 +46,13 @@ record cannot authorize a dialect, firmware, connector or physical process.
 ## Machine descriptions and derived setups
 
 A `MachineDescription` is a small set of machine facts: firmware family,
-kinematics, bed levelling, heated bed, arc support and one `SourcedLimit` per
-`MachineLimit` (bed X/Y, maximum Z, nozzle and filament diameter, print and
-travel feed, acceleration, volumetric flow, nozzle/extrusion/bed temperatures,
-bead width/height ratios to the nozzle, XY/Z motion steps and toolhead
-clearance). Each limit records its source: `published` (a manufacturer
+kinematics, bed levelling, heated bed, arc support, extruder drive
+(`direct_drive` or `bowden`) and one `SourcedLimit` per `MachineLimit` (bed
+X/Y, maximum Z, nozzle and filament diameter, print and travel feed,
+acceleration, volumetric flow, nozzle/extrusion/bed temperatures, bead
+width/height ratios to the nozzle, XY/Z motion steps, toolhead clearance and
+the per-role speeds: first-layer wall, first-layer infill, outer wall, inner wall, sparse infill,
+solid infill, top skin, support, bridge). Each limit records its source: `published` (a manufacturer
 specification reference), `family_default` (the declaring family layer) or
 `operator_declared` (an edit).
 
@@ -58,8 +60,14 @@ Authoring layers inherit: `generic.fff` → family (`generic.klipper-cartesian`,
 `generic.marlin-bedslinger`) → printer, and a child overrides only what it
 knows. Family defaults are sized for modern printers (600 mm/s print feed,
 800 mm/s travel, 20 000 mm/s² acceleration, 32 mm³/s flow, 350 mm generic
-volume) so a default limit is never the reason a job refuses or is throttled
-when the real printer could do it. Unpublished values inherit the default
+volume; role speeds 50 first-layer wall, 100 first-layer infill, 200 outer wall, 300 inner wall and
+sparse, 250 solid, 200 top, 150 support, 50 bridge mm/s, direct drive) so a
+default limit is never the reason a job refuses or is throttled when the real
+printer could do it: the volumetric flow ceiling slows a role that would
+exceed it. `generic.marlin-bedslinger` is a Bowden machine; the Ender-3 V3 SE
+overrides it with its direct-drive extruder. The MK4S takes Prusa's published
+firmware limits (300 mm/s, 4000 mm/s²) and role speeds from PrusaSlicer 2.9.4's
+bundled `0.20mm SPEED @MK4S 0.4` preset. Unpublished values inherit the default
 instead of an aggregator's figure. Resolution records the lineage.
 
 The setup's `PrinterSpecification` is derived, never authored, and setup
@@ -74,7 +82,8 @@ validation refuses a printer that differs from the derivation:
 | Park                       | XY `[margin, bed_y − margin]` after a vertical lift 10 mm above the highest emitted Z, capped at `max_z` (no long Z move on tall machines) |
 | Dialect and lifecycle      | Firmware family selects the output dialect and its lifecycle table; levelling capability selects the levelling step; operator blocks replace the typed steps they declare |
 | Feed / flow ceilings       | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow |
-| Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile |
+| Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile. A machine without a heated bed declares maximum bed 0 °C: its bed is off and its lifecycle has no bed steps |
+| Print-time model           | `timing_model` from the declared acceleration and Marlin's 0.013 mm junction deviation, for the verifier's estimate only |
 | Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
 
 Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
@@ -89,7 +98,12 @@ The lifecycle table (`MachineDescription::derive_lifecycle`) is, in order:
 Prusa nozzle/model checks; feed, flow and fan resets (plus `M200 D0` on
 Marlin); the operator start block; bed target and a non-oozing standby nozzle
 (150 °C, Prusa 170 °C and waited, for its loadcell probe); home; wait for the
-bed; levelling; wait for the print nozzle; prime. The end is barrier, park,
+bed; levelling; wait for the print nozzle; prime. Waits use the first-layer
+targets; a captured material profile supplies the standby temperature
+(PrusaSlicer's MK4S probes PLA/ABS at 170, PET at 175, FLEX at 210 °C).
+Prusa's `M555` probe area follows PrusaSlicer's MK4S formula over the first
+layer's XY bounds (whole millimetres, at least 32 mm wide, 4 mm below the part),
+not the full bed. The end is barrier, park,
 barrier, the operator end block, then heaters, fan and motors off. A typed step
 the operator block declares it covers is omitted, and modes or E the block may
 change are re-established. References: Creality `*fastabl*` and Prusa MK4S start
@@ -97,10 +111,9 @@ G-code in PrusaSlicer's bundled profiles, and
 [Klipper's slicer guidance](https://www.klipper3d.org/Slicers.html). Optional
 `start_block`/`end_block` on the description carry operator macros such as
 Klipper `START_PRINT`/`END_PRINT` with declared effects; see the
-[manufacturing lifecycle](manufacturing.md#firmware-lifecycle). Acceleration and
-kinematics are recorded for time estimation but do not change today's program.
-Unheated beds refuse explicitly because the lifecycle requires a bed
-temperature. Programs remain software-validated, not machine ready.
+[manufacturing lifecycle](manufacturing.md#firmware-lifecycle). Acceleration
+sets the print-time estimate; kinematics are recorded but do not change the
+program. Programs remain software-validated, not machine ready.
 
 The workbench edits levelling and the start/end blocks (with a Klipper macro
 preset) alongside the numeric facts; the CLI carries them in the typed

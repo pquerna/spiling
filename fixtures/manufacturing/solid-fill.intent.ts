@@ -42,11 +42,17 @@ const intent = {
         minimum_travel_mm: 2,
         z_hop_mm: 0.2,
       },
+      minimum_layer_time_s: 0,
+      minimum_print_speed_mm_s: 10,
+      fan_short_layer_time_s: 0,
+      fan_short_layer_pwm: 255,
     },
     supports: { kind: "disabled" },
     seam_policy: { kind: "nearest" },
     rectilinear_axis: "alternating_xy",
     top_skin_axis: "alternating_xy",
+    role_speeds: null,
+    first_layer_height_mm: null,
   },
 } satisfies ManufacturingIntent;
 

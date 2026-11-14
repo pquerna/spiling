@@ -7,6 +7,7 @@
       "levelling": "probe_mesh",
       "heated_bed": true,
       "arc_moves": true,
+      "extruder_drive": "direct_drive",
       "printer_model": null,
       "id": "generic.fff",
       "limits": [
@@ -161,6 +162,78 @@
             "kind": "family_default",
             "family": "generic.fff"
           }
+        },
+        {
+          "key": "first_layer_speed_mm_s",
+          "value": 50,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "first_layer_infill_speed_mm_s",
+          "value": 100,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "outer_wall_speed_mm_s",
+          "value": 200,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "inner_wall_speed_mm_s",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "sparse_infill_speed_mm_s",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "solid_infill_speed_mm_s",
+          "value": 250,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "top_skin_speed_mm_s",
+          "value": 200,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "support_speed_mm_s",
+          "value": 150,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "bridge_speed_mm_s",
+          "value": 50,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
         }
       ]
     },
@@ -171,6 +244,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": false,
+      "extruder_drive": null,
       "printer_model": null,
       "id": "generic.klipper-cartesian",
       "limits": []
@@ -182,6 +256,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "extruder_drive": "bowden",
       "printer_model": null,
       "id": "generic.marlin-bedslinger",
       "limits": [
@@ -218,6 +293,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "extruder_drive": null,
       "printer_model": "MK4S",
       "id": "prusa.mk4s",
       "limits": [
@@ -276,6 +352,102 @@
             "kind": "published",
             "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
           }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [printer:Original Prusa MK4S 0.4 nozzle]"
+          }
+        },
+        {
+          "key": "max_travel_feed_mm_s",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [printer:Original Prusa MK4S 0.4 nozzle]"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 4000,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [printer:Original Prusa MK4S 0.4 nozzle]"
+          }
+        },
+        {
+          "key": "first_layer_speed_mm_s",
+          "value": 40,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "first_layer_infill_speed_mm_s",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "outer_wall_speed_mm_s",
+          "value": 170,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "inner_wall_speed_mm_s",
+          "value": 170,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "sparse_infill_speed_mm_s",
+          "value": 200,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "solid_infill_speed_mm_s",
+          "value": 200,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "top_skin_speed_mm_s",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "support_speed_mm_s",
+          "value": 120,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
+        },
+        {
+          "key": "bridge_speed_mm_s",
+          "value": 50,
+          "source": {
+            "kind": "published",
+            "reference": "PrusaSlicer 2.9.4 resources/profiles/PrusaResearch.ini [print:0.20mm SPEED @MK4S 0.4]"
+          }
         }
       ]
     },
@@ -286,6 +458,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "extruder_drive": null,
       "printer_model": null,
       "id": "bambulab.a1",
       "limits": [
@@ -386,6 +559,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "extruder_drive": null,
       "printer_model": null,
       "id": "bambulab.a1-mini",
       "limits": [
@@ -470,6 +644,7 @@
       "levelling": null,
       "heated_bed": null,
       "arc_moves": null,
+      "extruder_drive": "direct_drive",
       "printer_model": null,
       "id": "creality.ender-3-v3-se",
       "limits": [

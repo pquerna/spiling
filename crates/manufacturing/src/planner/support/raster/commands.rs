@@ -386,6 +386,7 @@ mod tests {
             owner: None,
             points_mm: ring.0.iter().map(|p| [p.x, p.y, 0.2]).collect(),
             arcs: Vec::new(),
+            external_wall: false,
         }
     }
     fn attempt(

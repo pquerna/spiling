@@ -122,13 +122,13 @@ export type MachineKinematics = "bed_slinger" | "core_xy";
 
 export type BedLevelling = "manual" | "probe_mesh" | "stored_mesh";
 
-export type MachineLimit = "bed_x_mm" | "bed_y_mm" | "max_z_mm" | "nozzle_diameter_mm" | "filament_diameter_mm" | "max_print_feed_mm_s" | "max_travel_feed_mm_s" | "max_acceleration_mm_s2" | "max_volumetric_flow_mm3_s" | "max_nozzle_temperature_c" | "min_extrusion_temperature_c" | "max_bed_temperature_c" | "min_bead_width_per_nozzle" | "max_bead_width_per_nozzle" | "max_bead_height_per_nozzle" | "xy_resolution_mm" | "z_resolution_mm" | "toolhead_radius_mm" | "toolhead_height_mm";
+export type MachineLimit = "bed_x_mm" | "bed_y_mm" | "max_z_mm" | "nozzle_diameter_mm" | "filament_diameter_mm" | "max_print_feed_mm_s" | "max_travel_feed_mm_s" | "max_acceleration_mm_s2" | "max_volumetric_flow_mm3_s" | "max_nozzle_temperature_c" | "min_extrusion_temperature_c" | "max_bed_temperature_c" | "min_bead_width_per_nozzle" | "max_bead_width_per_nozzle" | "max_bead_height_per_nozzle" | "xy_resolution_mm" | "z_resolution_mm" | "toolhead_radius_mm" | "toolhead_height_mm" | "first_layer_speed_mm_s" | "outer_wall_speed_mm_s" | "inner_wall_speed_mm_s" | "sparse_infill_speed_mm_s" | "solid_infill_speed_mm_s" | "top_skin_speed_mm_s" | "support_speed_mm_s" | "bridge_speed_mm_s" | "first_layer_infill_speed_mm_s";
 
 export type FactSource = { "kind": "published", reference: string, } | { "kind": "family_default", family: string, } | { "kind": "operator_declared" };
 
 export type SourcedLimit = { key: MachineLimit, value: number, source: FactSource, };
 
-export type MachineLayer = { id: string, parent: string | null, firmware: FirmwareFamily | null, kinematics: MachineKinematics | null, levelling: BedLevelling | null, heated_bed: boolean | null, arc_moves: boolean | null,
+export type MachineLayer = { id: string, parent: string | null, firmware: FirmwareFamily | null, kinematics: MachineKinematics | null, levelling: BedLevelling | null, heated_bed: boolean | null, arc_moves: boolean | null, extruder_drive: ExtruderDrive | null,
 /**
  * Model identifier the firmware checks (Prusa `M862.3`), if any.
  */
@@ -138,7 +138,7 @@ export type MachineDescription = { id: string,
 /**
  * Inheritance chain, root first, ending with `id`.
  */
-lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean, printer_model: string | null,
+lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean, extruder_drive: ExtruderDrive, printer_model: string | null,
 /**
  * Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
  */
@@ -739,7 +739,19 @@ prime_start_mm: [number, number, number], prime_end_mm: [number, number, number]
  * the highest emitted Z plus `park_clearance_mm` (capped at the envelope
  * top, and strictly above the last position), then moves here at that Z.
  */
-park_xy_mm: [number, number], park_clearance_mm: number, lifecycle: FirmwareLifecycle, };
+park_xy_mm: [number, number], park_clearance_mm: number, lifecycle: FirmwareLifecycle,
+/**
+ * First-layer targets: the lifecycle waits for these, and the body sets
+ * `nozzle_temperature_c`/`bed_temperature_c` (without waiting) as the
+ * second layer begins when they differ. A bed temperature of zero is an
+ * unheated (off) bed; `maximum_bed_temperature_c` zero declares a
+ * machine without a heated bed.
+ */
+first_layer_nozzle_temperature_c: number, first_layer_bed_temperature_c: number,
+/**
+ * Declared motion limits for the independent print-time estimate.
+ */
+timing_model: PrintTimeModel | null, };
 
 export type DeclaredJobTimeModel = { id: string, revision: string, linear_acceleration_mm_s2: number, filament_acceleration_mm_s2: number, tool_activation_seconds: [number, number], command_overhead_seconds: number, };
 
@@ -937,7 +949,23 @@ export type LayerHeightSelection = { height_mm: number, reason: LayerHeightReaso
 
 export type LayerHeightAssessment = { policy: LayerHeightPolicy, requested_mm: number, selected_mm: number, reason: LayerHeightReason, realized_min_mm: number, realized_max_mm: number, layer_count: number, differing_layer_count: number, first_differing_layer: number | null, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, layer_height_policy: LayerHeightPolicy, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy, };
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, layer_height_policy: LayerHeightPolicy, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number,
+/**
+ * Uniform deposition speed when `role_speeds` is null; with role speeds,
+ * the material's cap on every deposition speed.
+ */
+print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy,
+/**
+ * Per-role deposition speeds; null keeps the uniform `print_speed_mm_s`
+ * with the process first-layer/bridge speed factors. See
+ * [`speeds`] for the rule, including the flow and cooling slowdowns.
+ */
+role_speeds: RoleSpeeds | null,
+/**
+ * Height of the first layer above the bed; null schedules it like any
+ * other layer.
+ */
+first_layer_height_mm: number | null, };
 
 export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], } | { "kind": "distributed" };
 
@@ -949,7 +977,20 @@ export type WebArchitecture = { opening: WebOpening | null, pier_rib_depth_mm: n
 
 export type WebOpening = { bottom_z_mm: number, height_mm: number, width_mm: number, cap_height_mm: number, pier_width_mm: number, };
 
-export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
+export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy,
+/**
+ * Cooling slowdown: a layer whose deposition would take less than this
+ * is slowed uniformly until it takes this long, never below
+ * `minimum_print_speed_mm_s` (nor above its unslowed speed). Zero
+ * disables the slowdown. Single-tool workflows only.
+ */
+minimum_layer_time_s: number, minimum_print_speed_mm_s: number,
+/**
+ * Layers whose unslowed deposition takes less than this run the part
+ * fan at `fan_short_layer_pwm` (the maximum fan) instead of
+ * `fan_after_first_layers` (the minimum). Zero disables.
+ */
+fan_short_layer_time_s: number, fan_short_layer_pwm: number, };
 
 export type RetractionPolicy = { "kind": "disabled" } | { "kind": "enabled", distance_mm: number, speed_mm_s: number, minimum_travel_mm: number, z_hop_mm: number, };
 
@@ -973,7 +1014,11 @@ export type MaterialDefinition = { id: string, revision: string, manufacturer: s
 
 export type MaterialFiller = { kind: MaterialFillerKind, mass_fraction: number | null, };
 
-export type MaterialToolSetup = { hotend_id: string, nozzle_material: string, abrasion_resistant_nozzle: boolean, cooling_configuration_id: string, };
+export type MaterialToolSetup = { hotend_id: string, nozzle_material: string, abrasion_resistant_nozzle: boolean, cooling_configuration_id: string,
+/**
+ * The installed extruder drive; it selects the profile's retraction.
+ */
+extruder_drive: ExtruderDrive, };
 
 export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, source_hash: SourceHash, };
 
@@ -984,9 +1029,30 @@ export type MaterialProcessProfile = { id: string, revision: string, material: M
  * profile is never bound to one printer identity or revision, so editing
  * a printer's other facts keeps its profiles.
  */
-nozzle_diameter_mm: number, hotend_id: string, nozzle_material: string, cooling_configuration_id: string, deposition_limits: DepositionLimits, nozzle_temperature_c: number, bed_temperature_c: number, print_speed_mm_s: number, flow_multiplier: number, max_volumetric_flow_mm3_s: number, process: ProcessPolicy, source: MaterialProfileSource, };
+nozzle_diameter_mm: number, hotend_id: string, nozzle_material: string, cooling_configuration_id: string, deposition_limits: DepositionLimits, nozzle_temperature_c: number,
+/**
+ * Zero is an off bed (the material prints unheated).
+ */
+bed_temperature_c: number, first_layer_nozzle_temperature_c: number, first_layer_bed_temperature_c: number,
+/**
+ * Non-oozing nozzle temperature while the bed heats, homes and probes.
+ */
+standby_nozzle_temperature_c: number,
+/**
+ * The material cannot print on an unheated bed.
+ */
+requires_heated_bed: boolean,
+/**
+ * The material's cap on every deposition speed.
+ */
+print_speed_mm_s: number, flow_multiplier: number, max_volumetric_flow_mm3_s: number,
+/**
+ * Direct-drive process; `bowden_retraction` replaces its retraction on
+ * a Bowden setup.
+ */
+process: ProcessPolicy, bowden_retraction: RetractionPolicy, source: MaterialProfileSource, };
 
-export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, bed_temperature_c: number | null, print_speed_mm_s: number | null, flow_multiplier: number | null, process: ProcessPolicy | null, };
+export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, bed_temperature_c: number | null, print_speed_mm_s: number | null, flow_multiplier: number | null, process: ProcessPolicy | null, first_layer_nozzle_temperature_c: number | null, first_layer_bed_temperature_c: number | null, };
 
 export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup: MaterialToolSetup, overrides: MaterialProfileOverrides, };
 
@@ -1048,7 +1114,13 @@ physical_z_mm: [number, number], points_mm: Array<[number, number, number]>,
  * the path's geometry for every planar check; an arc-capable printer
  * receives each run as one circular move.
  */
-arcs?: Array<ArcRun>, };
+arcs?: Array<ArcRun>,
+/**
+ * The wall bead against the part's surface (outermost lane of its
+ * boundary): it takes the outer-wall speed. Only a Wall-owned path may
+ * set it (a wall lowered to Bridge keeps it); serialized only when true.
+ */
+external_wall?: boolean, };
 
 export type ArcRun = { first: number, last: number, center_mm: [number, number],
 /**
@@ -1151,7 +1223,22 @@ routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelect
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { job_time: JobTimeLedger | null, layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null, };
+export type VerificationReport = { job_time: JobTimeLedger | null, layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null,
+/**
+ * Object/support deposition segments whose feed the volumetric flow
+ * ceiling lowered below their role speed.
+ */
+flow_limited_segments: number,
+/**
+ * Layers slowed to meet the minimum layer time, and the smallest uniform
+ * speed scale among them (1 when none).
+ */
+cooling_slowed_layers: number, minimum_cooling_scale: number,
+/**
+ * Print time estimated from the decoded commands under the job's
+ * declared print-time model; null without one. Not a measurement.
+ */
+estimated_seconds: number | null, };
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 

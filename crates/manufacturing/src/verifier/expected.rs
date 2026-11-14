@@ -106,6 +106,7 @@ pub(super) struct Association {
     pub width: f64,
     pub physical_z: [f64; 2],
     pub owner: Option<DepositionOwner>,
+    pub external_wall: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -115,12 +116,16 @@ pub(super) enum Action {
         tool: u8,
     },
     Fan(u8),
+    /// Single-extruder later-layer nozzle/bed targets (no wait).
+    NozzleTarget(f64),
+    BedTarget(f64),
     Move {
         target: [f64; 3],
         tool: Option<u8>,
         source: Option<[f64; 3]>,
         layer: u32,
         role: DepositionKind,
+        speed_role: DepositionKind,
         association: Option<Association>,
         closes_wall: bool,
         /// The planned arc run this edge starts, if any.
@@ -129,15 +134,21 @@ pub(super) enum Action {
     Recovery {
         retract: bool,
         layer: u32,
-        role: DepositionKind,
+        /// The role the speed rule and fan follow ([`speeds::speed_role`]).
+        speed_role: DepositionKind,
     },
 }
 pub(super) struct Expected<'a> {
     plan: &'a NormalizedPrintPlan,
+    intent: &'a ManufacturingIntent,
     recipe: &'a PlanarPrintRecipe,
+    /// The current layer's declared cooling decision, recomputed here.
+    cooling: Option<(usize, speeds::LayerCooling)>,
+    /// The later-layer temperature targets have been expected.
+    later_targets: bool,
     layer: usize,
     path: usize,
-    prefix: [Option<Action>; 8],
+    prefix: [Option<Action>; 10],
     prefix_index: usize,
     edge: usize,
     edges: Option<DepositionEdges<'a>>,
@@ -152,16 +163,19 @@ pub(super) struct Expected<'a> {
 impl<'a> Expected<'a> {
     pub(super) fn new(
         plan: &'a NormalizedPrintPlan,
-        recipe: &'a PlanarPrintRecipe,
+        intent: &'a ManufacturingIntent,
         position: Option<[f64; 3]>,
         routing: Option<&'a FixedDualRouter<'a>>,
     ) -> Self {
         Self {
             plan,
-            recipe,
+            intent,
+            recipe: &intent.recipe,
+            cooling: None,
+            later_targets: false,
             layer: 0,
             path: 0,
-            prefix: [None; 8],
+            prefix: [None; 10],
             prefix_index: 0,
             edge: 0,
             edges: None,
@@ -182,36 +196,54 @@ impl<'a> Expected<'a> {
         let path_tool = self.routing.map(|job| job.tool_for_path(p)).transpose()?;
         let layer = self.layer as u32;
         let role = p.kind;
+        let speed_role =
+            speeds::speed_role(self.recipe, &self.plan.layers[self.layer], role, p.owner);
         let travel = |target| {
             Some(Action::Move {
                 target,
                 source: None,
                 layer,
                 role,
+                speed_role,
                 tool: path_tool,
                 association: None,
                 closes_wall: false,
                 arc: None,
             })
         };
-        self.prefix = [None; 8];
+        self.prefix = [None; 10];
         self.prefix_index = 0;
         self.edge = 1;
         self.edges = Some(p.checked_edges()?);
+        if self.cooling.is_none_or(|(layer, _)| layer != self.layer) {
+            let cooling = speeds::layer_cooling(self.intent, &self.plan.layers[self.layer], layer)?;
+            self.cooling = Some((self.layer, cooling));
+        }
+        let short = self.cooling.is_some_and(|(_, c)| c.short);
         let policy = self
             .routing
             .zip(path_tool)
             .map_or(&self.recipe.process, |(job, tool)| {
                 job.tools[usize::from(tool)].process(self.recipe)
             });
-        let pwm = if role == DepositionKind::Bridge {
-            policy.bridge_fan_pwm
-        } else if self.layer == 0 {
-            policy.fan_first_layers
-        } else {
-            policy.fan_after_first_layers
-        };
+        let pwm = speeds::path_fan_pwm(policy, speed_role, layer, short);
         let mut n = 0;
+        // The second layer's first path is preceded by the later-layer
+        // targets when they differ from the first-layer ones.
+        if let JobWorkflow::CompleteMarlin { job } = &self.intent.printer.workflow
+            && self.layer > 0
+            && !self.later_targets
+        {
+            self.later_targets = true;
+            if job.nozzle_temperature_c != job.first_layer_nozzle_temperature_c {
+                self.prefix[n] = Some(Action::NozzleTarget(job.nozzle_temperature_c));
+                n += 1;
+            }
+            if job.bed_temperature_c != job.first_layer_bed_temperature_c {
+                self.prefix[n] = Some(Action::BedTarget(job.bed_temperature_c));
+                n += 1;
+            }
+        }
         if let Some(job) = self.routing {
             let tool = job.tool_for_path(p)?;
             if self.previous_group != Some((layer, tool)) {
@@ -249,7 +281,7 @@ impl<'a> Expected<'a> {
             self.prefix[n] = Some(Action::Recovery {
                 retract: true,
                 layer,
-                role,
+                speed_role,
             });
             n += 1;
             let RetractionPolicy::Enabled { z_hop_mm, .. } = self.recipe.process.retraction else {
@@ -270,7 +302,7 @@ impl<'a> Expected<'a> {
             self.prefix[n] = Some(Action::Recovery {
                 retract: false,
                 layer,
-                role,
+                speed_role,
             });
         }
         self.loaded = true;
@@ -357,10 +389,17 @@ impl Iterator for Expected<'_> {
                     source: Some(source),
                     layer: self.layer as u32,
                     role: path.kind,
+                    speed_role: speeds::speed_role(
+                        self.recipe,
+                        &self.plan.layers[self.layer],
+                        path.kind,
+                        path.owner,
+                    ),
                     association: Some(Association {
                         width: edge.width_mm,
                         physical_z: path.physical_z_mm,
                         owner,
+                        external_wall: path.external_wall,
                     }),
                     closes_wall: path.owner == Some(DepositionOwner::Wall)
                         && path.points_mm.first() == path.points_mm.last()

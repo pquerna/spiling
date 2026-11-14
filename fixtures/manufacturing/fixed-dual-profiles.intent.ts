@@ -33,6 +33,10 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
     deposition_limits: tool.deposition_limits,
     nozzle_temperature_c: index === 0 ? 200 : 205,
     bed_temperature_c: job.bed_temperature_c,
+    first_layer_nozzle_temperature_c: index === 0 ? 200 : 205,
+    first_layer_bed_temperature_c: job.bed_temperature_c,
+    standby_nozzle_temperature_c: 150,
+    requires_heated_bed: false,
     print_speed_mm_s: index === 0 ? 30 : 18,
     flow_multiplier: 1,
     max_volumetric_flow_mm3_s: 6,
@@ -41,6 +45,7 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
       first_layer_speed_factor: index === 0 ? 0.5 : 0.75,
       fan_after_first_layers: index === 0 ? 128 : 160,
     },
+    bowden_retraction: shared.recipe.process.retraction,
     source: {
       kind: "synthetic_test",
       source_id: "material-profile-test-source.txt",
@@ -53,6 +58,7 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
     nozzle_material: "brass",
     abrasion_resistant_nozzle: false,
     cooling_configuration_id: "shared-reference-fan",
+    extruder_drive: "direct_drive",
   },
   overrides: {
     nozzle_temperature_c: null,
@@ -60,6 +66,8 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
     print_speed_mm_s: null,
     flow_multiplier: null,
     process: null,
+    first_layer_nozzle_temperature_c: null,
+    first_layer_bed_temperature_c: null,
   },
 });
 const tools = job.tools.map((tool, index) => ({

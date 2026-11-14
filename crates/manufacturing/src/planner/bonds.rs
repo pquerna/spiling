@@ -283,6 +283,7 @@ pub(super) fn construct(
                 owner: None,
                 points_mm: Vec::from(ends),
                 arcs: Vec::new(),
+                external_wall: false,
             });
         }
     }

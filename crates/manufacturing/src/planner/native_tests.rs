@@ -4143,6 +4143,7 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
     ))
     .unwrap();
     selection.overrides.nozzle_temperature_c = Some(210.0);
+    selection.overrides.first_layer_nozzle_temperature_c = Some(215.0);
     selection.profile.deposition_limits.max_bead_width_mm = 0.46;
     selection.profile.process.max_bridge_span_mm = 25.0;
     let resolved = crate::resolve_material_profile(&current, selection).unwrap();
@@ -4165,10 +4166,15 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
                 .all(|edge| edge.width_mm <= 0.46))
     );
     let text = bundle.program_text().unwrap();
-    assert!(text.contains("M109 R210"));
+    // The start waits at the first-layer target; the second layer sets the
+    // later-layer target without waiting.
+    assert!(text.contains("M109 R215"));
+    assert!(text.contains("\nM104 S210\n"));
     assert!(text.contains("M106 S255"));
     for tampered in [
-        text.replacen("M109 R210", "M109 R190", 1),
+        text.replacen("M109 R215", "M109 R190", 1),
+        text.replacen("\nM104 S210\n", "\nM104 S215\n", 1),
+        text.replacen("\nM104 S210\n", "\n", 1),
         text.replacen("M106 S255", "M106 S128", 1),
         text.replacen("F1260.000000", "F2100.000000", 1),
     ] {
@@ -4953,4 +4959,82 @@ fn anchor_refinement_exhausts_a_split_that_shortened_nothing() {
     // Outside every split interval a span is a fresh request.
     exhaust_or_refine(&mut schedule, 7, &input, failure(), Some(0.9), &mut work).unwrap();
     assert_eq!(schedule.len(), 9);
+}
+
+/// The defaults path: MK4S + generic PLA + standard quality, compiled and
+/// independently replayed. Role speeds, the flow ceiling and minimum layer
+/// time slow deposition and are reported instead of refusing; the first layer
+/// is 0.2 mm at its own temperature and speed; relative E; a time estimate.
+#[test]
+fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
+    use spiling_contracts::hardware::{ProjectHardwareCapture, builtin_catalog};
+    let catalog = builtin_catalog().unwrap();
+    let setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "prusa.mk4s.04")
+        .unwrap()
+        .clone();
+    let plate = catalog
+        .plates
+        .iter()
+        .find(|p| p.mounting_interface == setup.model.mounting_interface)
+        .unwrap()
+        .clone();
+    let face = plate.faces[0].key.clone();
+    let selection = crate::generic_selection(&setup, "PLA").unwrap();
+    let hardware = Arc::new(ProjectHardwareCapture {
+        setup,
+        plate,
+        face,
+        accessories: Vec::new(),
+    });
+    let mut intent =
+        crate::create_default_intent(hardware, selection, crate::QualityPreset::Standard).unwrap();
+    intent.recipe.supports = SupportPolicy::Disabled;
+    let speeds = intent.recipe.role_speeds.unwrap();
+    assert_eq!(speeds.outer_wall_mm_s, 170.0);
+    assert_eq!(intent.recipe.first_layer_height_mm, Some(0.2));
+    let scene = NativeScene::new(BOX, &[translated(100.0, 100.0, 0.0)]);
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let report = crate::verify_bundle(&bundle, &cancel).unwrap();
+    assert!(report.verified);
+    assert_eq!(bundle.plan.layers[0].z_mm, 0.2);
+    // A 20x10 mm box layer takes well under PLA's 6 s minimum layer time.
+    assert!(report.cooling_slowed_layers > 0, "{report:?}");
+    assert!(report.minimum_cooling_scale < 1.0);
+    // Sparse infill at 200 mm/s would need 17 mm3/s; PLA's ceiling is 15.
+    assert!(report.flow_limited_segments > 0, "{report:?}");
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.starts_with("Speeds lowered to meet declared limits"))
+    );
+    let seconds = report.estimated_seconds.unwrap();
+    assert!(seconds > 30.0 && seconds < 3600.0, "{seconds}");
+    let text = bundle.program_text().unwrap();
+    assert!(text.contains("\nM83\n"));
+    // First layer at 220, then 215 without waiting; fan off on layer one.
+    assert!(text.contains("M109 R220"));
+    assert!(text.contains("\nM104 S215\n"));
+    assert_eq!(
+        text.matches("M140 S60").count(),
+        1,
+        "PLA's bed target is unchanged"
+    );
+    // Outer walls at 170 mm/s exist on later layers, first-layer walls at 40.
+    assert!(text.contains(" F10200.000000"), "outer wall feed");
+    assert!(text.contains(" F2400.000000"), "first-layer feed");
+    for tampered in [
+        text.replacen(" F10200.000000", " F10260.000000", 1),
+        text.replacen("\nM104 S215\n", "\n", 1),
+        text.replacen("M109 R220", "M109 R215", 1),
+    ] {
+        assert_ne!(tampered, text);
+        assert!(
+            crate::verifier::verify(&chunks(&tampered), &bundle.plan, &intent, &cancel).is_err()
+        );
+    }
 }

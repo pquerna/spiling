@@ -55,6 +55,37 @@ pub struct SingleExtruderJob {
     pub park_xy_mm: [f64; 2],
     pub park_clearance_mm: f64,
     pub lifecycle: FirmwareLifecycle,
+    /// First-layer targets: the lifecycle waits for these, and the body sets
+    /// `nozzle_temperature_c`/`bed_temperature_c` (without waiting) as the
+    /// second layer begins when they differ. A bed temperature of zero is an
+    /// unheated (off) bed; `maximum_bed_temperature_c` zero declares a
+    /// machine without a heated bed.
+    pub first_layer_nozzle_temperature_c: f64,
+    pub first_layer_bed_temperature_c: f64,
+    /// Declared motion limits for the independent print-time estimate.
+    #[serde(deserialize_with = "required_option")]
+    pub timing_model: Option<PrintTimeModel>,
+}
+/// Declared motion limits for estimating print time from decoded commands:
+/// one acceleration for every move and Marlin-style junction deviation.
+/// Not measured machine behaviour.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PrintTimeModel {
+    pub acceleration_mm_s2: f64,
+    pub junction_deviation_mm: f64,
+}
+impl PrintTimeModel {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if !(1.0..=500_000.0).contains(&self.acceleration_mm_s2)
+            || !(0.000_001..=1.0).contains(&self.junction_deviation_mm)
+        {
+            return Err(invalid(
+                "print-time model requires bounded acceleration and junction deviation",
+            ));
+        }
+        Ok(())
+    }
 }
 impl SingleExtruderJob {
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
@@ -64,17 +95,34 @@ impl SingleExtruderJob {
         label(&self.firmware_version)?;
         positive(&[
             self.nozzle_temperature_c,
-            self.bed_temperature_c,
+            self.first_layer_nozzle_temperature_c,
             self.minimum_extrusion_temperature_c,
             self.maximum_nozzle_temperature_c,
-            self.maximum_bed_temperature_c,
             self.prime_filament_length_mm,
             self.prime_speed_mm_s,
             self.park_clearance_mm,
         ])?;
+        if let Some(model) = &self.timing_model {
+            model.validate()?;
+        }
+        let beds = [
+            self.bed_temperature_c,
+            self.first_layer_bed_temperature_c,
+            self.maximum_bed_temperature_c,
+        ];
+        if beds.iter().any(|t| !t.is_finite() || *t < 0.0)
+            || (self.maximum_bed_temperature_c == 0.0
+                && (self.bed_temperature_c != 0.0 || self.first_layer_bed_temperature_c != 0.0))
+        {
+            return Err(invalid(
+                "bed temperatures are zero (off) or positive, and zero on a machine without a heated bed",
+            ));
+        }
         if [
             self.nozzle_temperature_c,
+            self.first_layer_nozzle_temperature_c,
             self.bed_temperature_c,
+            self.first_layer_bed_temperature_c,
             self.minimum_extrusion_temperature_c,
             self.maximum_nozzle_temperature_c,
             self.maximum_bed_temperature_c,
@@ -94,7 +142,10 @@ impl SingleExtruderJob {
         }
         if self.nozzle_temperature_c < self.minimum_extrusion_temperature_c
             || self.nozzle_temperature_c > self.maximum_nozzle_temperature_c
+            || self.first_layer_nozzle_temperature_c < self.minimum_extrusion_temperature_c
+            || self.first_layer_nozzle_temperature_c > self.maximum_nozzle_temperature_c
             || self.bed_temperature_c > self.maximum_bed_temperature_c
+            || self.first_layer_bed_temperature_c > self.maximum_bed_temperature_c
             || self.maximum_nozzle_temperature_c > 500.0
             || self.maximum_bed_temperature_c > 200.0
             || self.prime_filament_length_mm > 100.0

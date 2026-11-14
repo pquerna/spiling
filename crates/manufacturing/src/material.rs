@@ -13,6 +13,7 @@ pub fn resolve_material_profile(
     current.validate()?;
     selection.validate()?;
     let mut resolved = current.clone();
+    let selection = fit_selection(selection, &resolved.printer)?;
     let profile = &selection.profile;
     resolved.recipe.material_id.clone_from(&profile.material.id);
     resolved
@@ -22,21 +23,94 @@ pub fn resolve_material_profile(
     resolved.recipe.filament_diameter_mm = profile.material.filament_diameter_mm;
     resolved.recipe.print_speed_mm_s = selection.print_speed_mm_s();
     resolved.recipe.flow_multiplier = selection.flow_multiplier();
-    resolved.recipe.process = selection.process().clone();
+    resolved.recipe.process = selection.process();
     let JobWorkflow::CompleteMarlin { job } = &mut resolved.printer.workflow else {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::InvalidSpecification,
             "material profiles currently require a complete single-extruder Marlin job",
         ));
     };
-    job.nozzle_temperature_c = selection.nozzle_temperature_c();
-    job.bed_temperature_c = selection.bed_temperature_c();
+    apply_thermal(job, &selection);
     resolved.material_profile = Some(ResolvedMaterialProfile {
         resolver_version: MATERIAL_RESOLVER_VERSION,
         selection,
     });
     resolved.validate()?;
     Ok(resolved)
+}
+
+/// Explicit overrides a printer needs to accept a profile: the material
+/// print speed within the printer's print feed, and an off bed on a machine
+/// without a heated bed (refused when the material needs one).
+fn fit_selection(
+    mut selection: MaterialProfileSelection,
+    printer: &PrinterSpecification,
+) -> Result<MaterialProfileSelection, ManufacturingError> {
+    if selection.print_speed_mm_s() > printer.max_print_feed_mm_s {
+        selection.overrides.print_speed_mm_s = Some(printer.max_print_feed_mm_s);
+    }
+    // Temperatures beyond the machine's declared limits clamp to them.
+    if let JobWorkflow::CompleteMarlin { job } = &printer.workflow {
+        let nozzle = |t: f64| {
+            t.clamp(
+                job.minimum_extrusion_temperature_c,
+                job.maximum_nozzle_temperature_c,
+            )
+        };
+        let o = &mut selection.overrides;
+        let (n, f) = (
+            selection.profile.nozzle_temperature_c,
+            selection.profile.first_layer_nozzle_temperature_c,
+        );
+        if o.nozzle_temperature_c.is_none() && nozzle(n) != n {
+            o.nozzle_temperature_c = Some(nozzle(n));
+        }
+        if o.first_layer_nozzle_temperature_c.is_none() && nozzle(f) != f {
+            o.first_layer_nozzle_temperature_c = Some(nozzle(f));
+        }
+        let max_bed = job.maximum_bed_temperature_c;
+        let (b, fb) = (
+            selection.profile.bed_temperature_c,
+            selection.profile.first_layer_bed_temperature_c,
+        );
+        if max_bed > 0.0 && o.bed_temperature_c.is_none() && b > max_bed {
+            o.bed_temperature_c = Some(max_bed);
+        }
+        if max_bed > 0.0 && o.first_layer_bed_temperature_c.is_none() && fb > max_bed {
+            o.first_layer_bed_temperature_c = Some(max_bed);
+        }
+    }
+    if let JobWorkflow::CompleteMarlin { job } = &printer.workflow
+        && job.maximum_bed_temperature_c == 0.0
+    {
+        if selection.profile.requires_heated_bed {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::UnsupportedCapability,
+                "the selected material requires a heated bed and the printer declares none",
+            ));
+        }
+        selection.overrides.bed_temperature_c = Some(0.0);
+        selection.overrides.first_layer_bed_temperature_c = Some(0.0);
+    }
+    selection.validate()?;
+    Ok(selection)
+}
+
+/// Job temperatures and the lifecycle's standby nozzle from a selection.
+fn apply_thermal(job: &mut SingleExtruderJob, selection: &MaterialProfileSelection) {
+    job.nozzle_temperature_c = selection.nozzle_temperature_c();
+    job.bed_temperature_c = selection.bed_temperature_c();
+    job.first_layer_nozzle_temperature_c = selection.first_layer_nozzle_temperature_c();
+    job.first_layer_bed_temperature_c = selection.first_layer_bed_temperature_c();
+    let standby = selection.profile.standby_nozzle_temperature_c;
+    for step in &mut job.lifecycle.start {
+        if let LifecycleStep::NozzleTarget { standby_c } | LifecycleStep::NozzleWait { standby_c } =
+            step
+            && standby_c.is_some()
+        {
+            *standby_c = Some(standby);
+        }
+    }
 }
 
 /// Resolve one explicitly addressed loaded tool; preserve all other tool captures.
@@ -75,26 +149,72 @@ pub fn resolve_tool_material_profile(
     Ok(resolved)
 }
 
+/// Print quality: layer heights and bead widths from the nozzle, the way
+/// PrusaSlicer's DRAFT / SPEED (standard) / QUALITY presets scale them
+/// (0.28 / 0.20 / 0.15 mm at a 0.4 mm nozzle, first layer 0.2 mm, 0.45 mm
+/// beads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityPreset {
+    Draft,
+    Standard,
+    Fine,
+}
+impl QualityPreset {
+    pub fn layer_height_mm(self, nozzle_mm: f64) -> f64 {
+        let ratio = match self {
+            Self::Draft => 0.7,
+            Self::Standard => 0.5,
+            Self::Fine => 0.375,
+        };
+        (ratio * nozzle_mm * 100.0).round() / 100.0
+    }
+    pub fn first_layer_height_mm(self, nozzle_mm: f64) -> f64 {
+        (0.5 * nozzle_mm * 100.0).round() / 100.0
+    }
+    pub fn bead_width_mm(self, nozzle_mm: f64) -> f64 {
+        (1.125 * nozzle_mm * 1_000_000.0).round() / 1_000_000.0
+    }
+}
+
+fn r6(v: f64) -> f64 {
+    (v * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// Create the first complete, explicit recipe from an operator-selected setup
-/// and material. This is creation, never a fallback for omitted wire fields or
-/// an overwrite of an existing recipe. Captured values survive saved return.
+/// and material at standard quality. This is creation, never a fallback for
+/// omitted wire fields or an overwrite of an existing recipe.
 pub fn create_material_intent(
     hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
     selection: MaterialProfileSelection,
 ) -> Result<ManufacturingIntent, ManufacturingError> {
-    hardware
-        .validate()
-        .map_err(|e| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e))?;
+    create_default_intent(hardware, selection, QualityPreset::Standard)
+}
+
+/// The defaults: printer + material + quality. Role speeds come from the
+/// machine description (a declared software setup inherits the generic FFF
+/// family), each within the printer's print feed; the volumetric flow and
+/// minimum layer time slow them where needed and the verifier reports it.
+/// Two walls, 15 % sparse infill, top skin max(0.7 mm, 5 layers), bottom
+/// max(0.5 mm, 3 layers) and automatic breakaway supports. Captured values
+/// survive saved return.
+pub fn create_default_intent(
+    hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
+    selection: MaterialProfileSelection,
+    quality: QualityPreset,
+) -> Result<ManufacturingIntent, ManufacturingError> {
+    let invalid =
+        |e: String| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e);
+    hardware.validate().map_err(invalid)?;
     selection.validate()?;
     let mut printer = hardware.setup.printer.clone();
+    let selection = fit_selection(selection, &printer)?;
     let JobWorkflow::CompleteMarlin { job } = &mut printer.workflow else {
         return Err(ManufacturingError::new(
             ManufacturingErrorCode::UnsupportedCapability,
             "standard material settings require an explicitly selected complete single-tool Marlin setup",
         ));
     };
-    job.nozzle_temperature_c = selection.nozzle_temperature_c();
-    job.bed_temperature_c = selection.bed_temperature_c();
+    apply_thermal(job, &selection);
     let limits = printer.deposition_limits;
     let profile_limits = selection.profile.deposition_limits;
     let min_width = limits
@@ -115,10 +235,34 @@ pub fn create_material_intent(
             "selected setup and material have no common bead envelope",
         ));
     }
-    let width = (printer.nozzle_diameter_mm * 1.125)
+    let nozzle = printer.nozzle_diameter_mm;
+    let width = quality
+        .bead_width_mm(nozzle)
         .max(min_height)
         .clamp(min_width, max_width);
-    let height = 0.2_f64.clamp(min_height, max_height.min(width));
+    let height = quality
+        .layer_height_mm(nozzle)
+        .clamp(min_height, max_height.min(width));
+    let first = quality
+        .first_layer_height_mm(nozzle)
+        .clamp(min_height, max_height.min(width));
+    let mut speeds = match &hardware.setup.machine {
+        Some(machine) => machine.role_speeds(),
+        None => spiling_contracts::hardware::generic_role_speeds().map_err(invalid)?,
+    };
+    for speed in [
+        &mut speeds.first_layer_mm_s,
+        &mut speeds.first_layer_infill_mm_s,
+        &mut speeds.outer_wall_mm_s,
+        &mut speeds.inner_wall_mm_s,
+        &mut speeds.sparse_infill_mm_s,
+        &mut speeds.solid_infill_mm_s,
+        &mut speeds.top_skin_mm_s,
+        &mut speeds.support_mm_s,
+        &mut speeds.bridge_mm_s,
+    ] {
+        *speed = speed.min(printer.max_print_feed_mm_s);
+    }
     let material = &selection.profile.material;
     let mut intent = ManufacturingIntent {
         hardware: Some(hardware),
@@ -128,7 +272,7 @@ pub fn create_material_intent(
         }),
         recipe: PlanarPrintRecipe {
             id: "spiling.standard-planar".into(),
-            revision: "1".into(),
+            revision: "2".into(),
             material_id: material.id.clone(),
             material_revision: material.revision.clone(),
             filament_diameter_mm: material.filament_diameter_mm,
@@ -136,24 +280,77 @@ pub fn create_material_intent(
             layer_height_policy: LayerHeightPolicy::Preferred,
             bead_width_mm: width,
             sparse_infill: SparseInfillPolicy::Fine,
-            perimeter_count: 3,
+            perimeter_count: 2,
             infill_fraction: 0.15,
-            top_skin_thickness_mm: 0.8_f64.max(height),
-            bottom_skin_thickness_mm: 0.8_f64.max(height),
+            top_skin_thickness_mm: r6(0.7_f64.max(5.0 * height)),
+            bottom_skin_thickness_mm: r6(0.5_f64.max(3.0 * height)),
             print_speed_mm_s: selection.print_speed_mm_s(),
             travel_speed_mm_s: printer.max_travel_feed_mm_s,
             flow_multiplier: selection.flow_multiplier(),
-            process: selection.process().clone(),
+            process: selection.process(),
             supports: SupportPolicy::Disabled,
             seam_policy: SeamPolicy::Nearest,
             rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
+            role_speeds: Some(speeds),
+            first_layer_height_mm: Some(first),
         },
         printer,
     };
     intent.recipe.supports = intent.automatic_support_policy()?;
     intent.validate()?;
     Ok(intent)
+}
+
+/// The generic profile of a polymer family for a setup's nozzle, with the
+/// setup's installed tool: the generic brass hotend and part fan the generic
+/// profiles are keyed to, and the machine's extruder drive (direct drive for a
+/// declared software setup without machine facts).
+pub fn generic_selection(
+    setup: &spiling_contracts::hardware::HardwareSetupDefinition,
+    polymer_family: &str,
+) -> Result<MaterialProfileSelection, ManufacturingError> {
+    let invalid =
+        |e: String| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e);
+    let family = generic_polymer_family(polymer_family).ok_or_else(|| {
+        invalid(format!(
+            "no generic profile covers material {polymer_family:?}"
+        ))
+    })?;
+    let nozzle = setup.printer.nozzle_diameter_mm;
+    let profile = generic_material_profiles()
+        .map_err(invalid)?
+        .into_iter()
+        .find(|p| p.material.polymer_family == family && p.nozzle_diameter_mm == nozzle)
+        .ok_or_else(|| {
+            invalid(format!(
+                "no generic {family} profile for a {nozzle} mm nozzle"
+            ))
+        })?;
+    let selection = MaterialProfileSelection {
+        setup: MaterialToolSetup {
+            hotend_id: profile.hotend_id.clone(),
+            nozzle_material: profile.nozzle_material.clone(),
+            abrasion_resistant_nozzle: false,
+            cooling_configuration_id: profile.cooling_configuration_id.clone(),
+            extruder_drive: setup
+                .machine
+                .as_ref()
+                .map_or(ExtruderDrive::DirectDrive, |m| m.extruder_drive),
+        },
+        profile,
+        overrides: MaterialProfileOverrides {
+            nozzle_temperature_c: None,
+            bed_temperature_c: None,
+            print_speed_mm_s: None,
+            flow_multiplier: None,
+            process: None,
+            first_layer_nozzle_temperature_c: None,
+            first_layer_bed_temperature_c: None,
+        },
+    };
+    selection.validate()?;
+    Ok(selection)
 }
 
 #[cfg(test)]

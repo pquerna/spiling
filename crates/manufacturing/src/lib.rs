@@ -7,8 +7,8 @@ pub mod backend;
 mod material;
 mod selection;
 pub use material::{
-    create_material_intent, resolve_material_profile, resolve_tool_material_profile,
-    review_materials,
+    QualityPreset, create_default_intent, create_material_intent, generic_selection,
+    resolve_material_profile, resolve_tool_material_profile, review_materials,
 };
 pub mod planner;
 mod realization;
@@ -30,9 +30,9 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "100";
-pub const EMITTER_VERSION: &str = "19";
-pub const VERIFIER_VERSION: &str = "46";
+pub const PLANNER_VERSION: &str = "101";
+pub const EMITTER_VERSION: &str = "20";
+pub const VERIFIER_VERSION: &str = "47";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

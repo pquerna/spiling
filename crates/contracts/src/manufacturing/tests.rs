@@ -1153,11 +1153,17 @@ fn intent() -> ManufacturingIntent {
                 bridge_fan_pwm: 255,
                 max_bridge_span_mm: 5.0,
                 retraction: RetractionPolicy::Disabled,
+                minimum_layer_time_s: 0.0,
+                minimum_print_speed_mm_s: 10.0,
+                fan_short_layer_time_s: 0.0,
+                fan_short_layer_pwm: 255,
             },
             supports: SupportPolicy::Disabled,
             seam_policy: SeamPolicy::Nearest,
             rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
+            role_speeds: None,
+            first_layer_height_mm: None,
         },
     }
 }
@@ -1836,6 +1842,7 @@ fn plan() -> NormalizedPrintPlan {
                     [10.0, 10.0, 5.2],
                 ],
                 arcs: Vec::new(),
+                external_wall: false,
             }],
         }],
     }
@@ -1900,6 +1907,10 @@ fn bundle() -> ManufacturingBundle {
             retraction_count: 0,
             retracted_filament_mm: 0.0,
             routing: None,
+            flow_limited_segments: 0,
+            cooling_slowed_layers: 0,
+            minimum_cooling_scale: 1.0,
+            estimated_seconds: None,
         },
     }
 }
@@ -2128,8 +2139,11 @@ fn profiles_reject_nonfinite_ranges_capabilities_flow_and_duplicate_components()
     changed = valid.clone();
     changed.recipe.travel_speed_mm_s = 151.0;
     assert!(changed.validate().is_err());
+    // A low flow ceiling slows deposition instead of refusing; zero refuses.
     changed = valid.clone();
     changed.printer.max_volumetric_flow_mm3_s = 0.001;
+    changed.validate().unwrap();
+    changed.printer.max_volumetric_flow_mm3_s = 0.0;
     assert!(changed.validate().is_err());
     changed = valid.clone();
     changed
@@ -2319,6 +2333,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
             },
             points_mm: vec![[30.0, 30.0, 5.2], [31.0, 31.0, 5.2]],
             arcs: Vec::new(),
+            external_wall: false,
         });
         if matches!(
             kind,
@@ -2680,6 +2695,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                             })
                             .collect(),
                         arcs: Vec::new(),
+                        external_wall: false,
                     })
                     .collect(),
             }
@@ -2909,7 +2925,7 @@ fn process_policy_rejects_numeric_flow_feed_and_serialization_excess() {
             1 => data.recipe.process.first_layer_speed_factor = 1.1,
             2 => data.recipe.process.bridge_speed_factor = f64::NAN,
             3 => data.recipe.process.first_layer_flow_factor = f64::INFINITY,
-            4 => data.recipe.process.bridge_flow_factor = 1000.0,
+            4 => data.recipe.process.minimum_layer_time_s = -1.0,
             5 => data.recipe.process.max_bridge_span_mm = -1.0,
             6 => data.recipe.process.first_layer_speed_factor = 1e-30,
             7 => {
@@ -2967,6 +2983,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
     mixed.layers[0]
@@ -3736,6 +3753,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     planned.validate(&intent()).unwrap();
     assert_eq!(
@@ -3896,6 +3914,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     captured.verification.deposition_segments += 1;
     let rebind = |bundle: &mut ManufacturingBundle| {
@@ -4194,6 +4213,7 @@ fn varying_width_path() -> DepositionPath {
             [10.0, 10.0, 5.2],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     }
 }
 
@@ -4735,6 +4755,7 @@ fn arc_wall(points: usize, radius: f64) -> DepositionPath {
         physical_z_mm: [0.0, 0.2],
         points_mm,
         arcs: Vec::new(),
+        external_wall: false,
     }
 }
 

@@ -438,6 +438,9 @@ fn choose(
             required
         };
         let needed = span(ends, along);
+        // The verifier admits projected XYZ6 intervals exactly and raw ones
+        // within its arithmetic slack; admit no more than it does.
+        let slack = |value: f64| if projected { 0.0 } else { slack(value) };
         let row = required[0][fixed];
         rows.read(
             &domain.mandatory,
@@ -782,6 +785,7 @@ fn reserve_regional_material(
                 physical_z_mm: p.physical_z_mm,
                 points_mm: vec![ends[0], ends[1]],
                 arcs: Vec::new(),
+                external_wall: false,
             };
             remainder.points_mm[low_index][along] = fitted_span[1];
             paths.push(remainder);

@@ -17,6 +17,17 @@ pub struct ProcessPolicy {
     pub bridge_fan_pwm: u8,
     pub max_bridge_span_mm: f64,
     pub retraction: RetractionPolicy,
+    /// Cooling slowdown: a layer whose deposition would take less than this
+    /// is slowed uniformly until it takes this long, never below
+    /// `minimum_print_speed_mm_s` (nor above its unslowed speed). Zero
+    /// disables the slowdown. Single-tool workflows only.
+    pub minimum_layer_time_s: f64,
+    pub minimum_print_speed_mm_s: f64,
+    /// Layers whose unslowed deposition takes less than this run the part
+    /// fan at `fan_short_layer_pwm` (the maximum fan) instead of
+    /// `fan_after_first_layers` (the minimum). Zero disables.
+    pub fan_short_layer_time_s: f64,
+    pub fan_short_layer_pwm: u8,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -48,9 +59,24 @@ impl ProcessPolicy {
             self.bridge_speed_factor,
             self.bridge_flow_factor,
             self.max_bridge_span_mm,
+            self.minimum_print_speed_mm_s,
         ])?;
         if self.first_layer_speed_factor > 1.0 || self.bridge_speed_factor > 1.0 {
             return Err(invalid("process speed factors must be in (0,1]"));
+        }
+        for time in [self.minimum_layer_time_s, self.fan_short_layer_time_s] {
+            if !time.is_finite() || !(0.0..=3600.0).contains(&time) {
+                return Err(invalid(
+                    "cooling layer times must be finite seconds in [0,3600]",
+                ));
+            }
+        }
+        if !(self.minimum_print_speed_mm_s * 60.0).is_finite()
+            || self.minimum_print_speed_mm_s * 60.0 < 0.000001
+        {
+            return Err(invalid(
+                "minimum print speed cannot be represented at declared precision",
+            ));
         }
         self.retraction.validate()?;
         Ok(())

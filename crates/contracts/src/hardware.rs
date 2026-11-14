@@ -274,8 +274,20 @@ impl ProjectHardwareCapture {
             if let crate::manufacturing::JobWorkflow::CompleteMarlin { job } =
                 &mut installed.workflow
             {
-                job.nozzle_temperature_c = profile.selection.nozzle_temperature_c();
-                job.bed_temperature_c = profile.selection.bed_temperature_c();
+                let s = &profile.selection;
+                job.nozzle_temperature_c = s.nozzle_temperature_c();
+                job.bed_temperature_c = s.bed_temperature_c();
+                job.first_layer_nozzle_temperature_c = s.first_layer_nozzle_temperature_c();
+                job.first_layer_bed_temperature_c = s.first_layer_bed_temperature_c();
+                // The material's standby replaces the setup's starting value.
+                for step in &mut job.lifecycle.start {
+                    if let crate::manufacturing::LifecycleStep::NozzleTarget { standby_c }
+                    | crate::manufacturing::LifecycleStep::NozzleWait { standby_c } = step
+                        && standby_c.is_some()
+                    {
+                        *standby_c = Some(s.profile.standby_nozzle_temperature_c);
+                    }
+                }
             }
         }
         if installed != intent.printer {
@@ -283,7 +295,9 @@ impl ProjectHardwareCapture {
         }
         if match &intent.printer.workflow {
             crate::manufacturing::JobWorkflow::DiagnosticBodyOnly => 0.0,
-            crate::manufacturing::JobWorkflow::CompleteMarlin { job } => job.bed_temperature_c,
+            crate::manufacturing::JobWorkflow::CompleteMarlin { job } => {
+                job.bed_temperature_c.max(job.first_layer_bed_temperature_c)
+            }
             crate::manufacturing::JobWorkflow::FixedDualMarlin { job } => job.bed_temperature_c,
         } > self.selected_face()?.max_bed_celsius
         {
@@ -789,6 +803,37 @@ pub fn builtin_catalog() -> Result<HardwareCatalog, String> {
     }
     c.validate()?;
     Ok(c)
+}
+
+/// The role speeds of the generic FFF root every family inherits: the
+/// defaults for a declared software setup without machine facts.
+pub fn generic_role_speeds() -> Result<crate::manufacturing::RoleSpeeds, String> {
+    let machines: MachineCatalog =
+        serde_json::from_str(include_str!("../data/machine-descriptions.json"))
+            .map_err(|e| e.to_string())?;
+    let root = machines
+        .layers
+        .iter()
+        .find(|l| l.id == "generic.fff")
+        .ok_or("the generic FFF machine layer is missing")?;
+    let v = |key: MachineLimit| {
+        root.limits
+            .iter()
+            .find(|l| l.key == key)
+            .map(|l| l.value)
+            .ok_or_else(|| format!("generic FFF layer lacks {}", key.label()))
+    };
+    Ok(crate::manufacturing::RoleSpeeds {
+        first_layer_mm_s: v(MachineLimit::FirstLayerSpeedMmS)?,
+        outer_wall_mm_s: v(MachineLimit::OuterWallSpeedMmS)?,
+        inner_wall_mm_s: v(MachineLimit::InnerWallSpeedMmS)?,
+        sparse_infill_mm_s: v(MachineLimit::SparseInfillSpeedMmS)?,
+        solid_infill_mm_s: v(MachineLimit::SolidInfillSpeedMmS)?,
+        top_skin_mm_s: v(MachineLimit::TopSkinSpeedMmS)?,
+        support_mm_s: v(MachineLimit::SupportSpeedMmS)?,
+        bridge_mm_s: v(MachineLimit::BridgeSpeedMmS)?,
+        first_layer_infill_mm_s: v(MachineLimit::FirstLayerInfillSpeedMmS)?,
+    })
 }
 
 #[cfg(test)]

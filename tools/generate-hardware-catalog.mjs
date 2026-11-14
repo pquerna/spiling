@@ -7,6 +7,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import catalog from "../crates/contracts/data/hardware-catalog.ts";
 import references from "../crates/contracts/data/printer-references.ts";
 import machines from "../crates/contracts/data/machine-descriptions.ts";
+import materials from "../crates/contracts/data/material-profiles.ts";
 const args = process.argv.slice(2);
 if (args.length > 1 || (args.length && args[0] !== "--check"))
   throw new Error(
@@ -53,3 +54,12 @@ if (args[0] === "--check") {
   if ((await readFile(machineOutput, "utf8")) !== machineText)
     throw new Error("Machine description drift; run pnpm contracts");
 } else await writeFile(machineOutput, machineText);
+
+if (!Array.isArray(materials) || new Set(materials.map((m) => m.id)).size !== materials.length)
+  throw new Error("Material author must export uniquely identified profiles");
+const materialOutput = new URL("../crates/contracts/data/material-profiles.json", import.meta.url);
+const materialText = JSON.stringify(materials, null, 2) + "\n";
+if (args[0] === "--check") {
+  if ((await readFile(materialOutput, "utf8")) !== materialText)
+    throw new Error("Material profile drift; run pnpm contracts");
+} else await writeFile(materialOutput, materialText);

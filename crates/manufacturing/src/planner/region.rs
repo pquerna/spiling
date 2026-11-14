@@ -1194,6 +1194,7 @@ fn push_path(
         },
         points_mm,
         arcs: Vec::new(),
+        external_wall: false,
     });
     Ok(())
 }

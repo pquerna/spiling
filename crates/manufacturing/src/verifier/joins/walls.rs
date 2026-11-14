@@ -1127,11 +1127,17 @@ mod tests {
                 bridge_fan_pwm: 255,
                 max_bridge_span_mm: 5.0,
                 retraction: RetractionPolicy::Disabled,
+                minimum_layer_time_s: 0.0,
+                minimum_print_speed_mm_s: 10.0,
+                fan_short_layer_time_s: 0.0,
+                fan_short_layer_pwm: 255,
             },
             supports: SupportPolicy::Disabled,
             seam_policy: SeamPolicy::Nearest,
             rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
+            role_speeds: None,
+            first_layer_height_mm: None,
         }
     }
 
@@ -1156,6 +1162,7 @@ mod tests {
                 [inset, inset, 0.2],
             ],
             arcs: Vec::new(),
+            external_wall: false,
         }
     }
 

@@ -168,13 +168,41 @@ impl CatalogRecord {
             name: self.origin.provider.clone(),
             sha256: self.origin.content.clone(),
         };
+        // A recognised polymer family and a declared diameter make the
+        // catalog filament usable: it carries a material identity and the
+        // family's generic profiles. Nothing is assumed when either is absent.
+        let family = declaration
+            .material_label
+            .as_deref()
+            .and_then(crate::manufacturing::generic_polymer_family);
+        let material = family
+            .zip(declaration.diameter_mm)
+            .map(
+                |(family, diameter)| crate::manufacturing::MaterialDefinition {
+                    id: format!("catalog.{}", self.origin.id),
+                    revision: self.origin.revision.clone(),
+                    manufacturer: declaration
+                        .brand
+                        .clone()
+                        .unwrap_or_else(|| self.origin.provider.clone()),
+                    product: name.clone(),
+                    polymer_family: family.into(),
+                    filler: None,
+                    filament_diameter_mm: diameter,
+                    requires_abrasion_resistant_nozzle: false,
+                },
+            );
+        let profiles = match &material {
+            Some(material) => crate::manufacturing::generic_profiles_for(material)?,
+            None => Vec::new(),
+        };
         let definition = crate::library::FilamentDefinition {
             name: format!("{} {}", declaration.brand.as_deref().unwrap_or(""), name)
                 .trim()
                 .into(),
             declaration: declaration.clone(),
             catalog_origin: Some(Box::new(self.clone())),
-            material: None,
+            material,
             color_name: Some(name.clone()),
             appearance: Some(crate::library::DeclaredAppearance {
                 color: crate::appearance::AppearanceColor::Srgb {
@@ -182,7 +210,7 @@ impl CatalogRecord {
                 },
                 source: source.clone(),
             }),
-            profiles: vec![],
+            profiles,
             source,
         };
         definition.validate()?;
@@ -348,6 +376,28 @@ mod tests {
             .unwrap()
             .remove("diameter_mm");
         assert!(serde_json::from_value::<crate::library::FilamentDefinition>(json).is_err());
+    }
+    #[test]
+    fn a_declared_polymer_family_derives_generic_profiles() {
+        let mut row = record();
+        if let CatalogItem::Filament { declaration, .. } = &mut row.item {
+            declaration.diameter_mm = Some(1.75);
+            declaration.material_label = Some("Silk PLA+".into());
+        }
+        row.origin.content = row.item.content_hash().unwrap();
+        let d = row.filament_definition().unwrap();
+        let material = d.material.as_ref().unwrap();
+        assert_eq!(material.polymer_family, "PLA");
+        assert_eq!(material.id, "catalog.ocean-pla");
+        assert_eq!(d.profiles.len(), 5, "one generic profile per nozzle class");
+        assert!(d.profiles.iter().all(|p| &p.material == material));
+        assert!(d.profiles.iter().any(|p| p.nozzle_diameter_mm == 0.4));
+        if let CatalogItem::Filament { declaration, .. } = &mut row.item {
+            declaration.material_label = Some("Nylon".into());
+        }
+        row.origin.content = row.item.content_hash().unwrap();
+        let d = row.filament_definition().unwrap();
+        assert!(d.material.is_none() && d.profiles.is_empty());
     }
     #[test]
     fn pages_refuse_duplicate_source_identities_and_stale_continuations() {

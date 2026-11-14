@@ -133,7 +133,7 @@ transactions, invalidate manufacturing and preserve history/scene ownership.
 - Required `capabilities.arc_moves`: the firmware interpolates XY circular moves given as G2/G3 with I/J centers. Planned arc runs are emitted as arcs only for such a printer, never in the fixed-dual dialect (which refuses the declaration); every other printer receives the same runs as their chords. The Marlin software reference printer declares it, as Marlin 2 builds `ARC_SUPPORT` by default.
 - Required `workflow` is `{kind:"diagnostic_body_only"}`, `{kind:"complete_marlin",job:SingleExtruderJob}`, or `{kind:"fixed_dual_marlin",job:FixedDualJob}`; count/workflow/dialect mismatches fail.
 
-`SingleExtruderJob` requires bounded `machine_id`, a named `firmware_version`, `configuration_hash`, `calibration_record_hash`, `homing_contract:"marlin_native_cartesian"`, `home_position_mm`, `nozzle_temperature_c`, `bed_temperature_c`, `minimum_extrusion_temperature_c`, `maximum_nozzle_temperature_c`, `maximum_bed_temperature_c`, `prime_start_mm`, `prime_end_mm`, `prime_filament_length_mm`, `prime_speed_mm_s`, `park_xy_mm`, `park_clearance_mm` and the declared `lifecycle` (below). Hashes identify external declarations, not host approval or physical qualification. Temperatures are positive integral Celsius; requested nozzle temperature is within declared minimum/maximum, bed within maximum, maxima are bounded to 500/200°C and priming to 100 mm filament. All lifecycle endpoints and feeds obey the printer envelope/limits; priming also obeys nominal volumetric flow.
+`SingleExtruderJob` requires bounded `machine_id`, a named `firmware_version`, `configuration_hash`, `calibration_record_hash`, `homing_contract:"marlin_native_cartesian"`, `home_position_mm`, `nozzle_temperature_c`, `bed_temperature_c`, `first_layer_nozzle_temperature_c`, `first_layer_bed_temperature_c`, `minimum_extrusion_temperature_c`, `maximum_nozzle_temperature_c`, `maximum_bed_temperature_c`, `prime_start_mm`, `prime_end_mm`, `prime_filament_length_mm`, `prime_speed_mm_s`, `park_xy_mm`, `park_clearance_mm`, the declared `lifecycle` (below) and required-nullable `timing_model {acceleration_mm_s2, junction_deviation_mm}`. Hashes identify external declarations, not host approval or physical qualification. Temperatures are integral Celsius; nozzle targets are within declared minimum/maximum, bed targets within maximum, maxima are bounded to 500/200°C and priming to 100 mm filament. A bed target of 0 is an off bed; `maximum_bed_temperature_c` 0 declares a machine without a heated bed, whose bed targets must be 0. The start lifecycle heats and waits at the first-layer targets (an off first-layer bed has no bed target or wait step and priming does not wait for it); before the first path above the first layer the body sets the later-layer `M104 S`/`M140 S` targets without waiting when they differ. All lifecycle endpoints and feeds obey the printer envelope/limits; priming also obeys nominal volumetric flow.
 
 The complete-job firmware contract requires native Cartesian coordinates after homing without workspace/home offsets or skew, one active extruder, and no firmware extrusion modifiers or fixed G0 feed override. A firmware bed mesh the lifecycle activates corrects Z below command space; it is reported, not modelled. Configuration/calibration hashes do not prove these assumptions. Prime segments must avoid conservatively expanded all-layer object XY bounds, regardless of Z, holes or gaps; admission includes coordinate-rounding padding. The park lifts vertically from the last position to the highest emitted Z plus `park_clearance_mm`, capped at the envelope top, and must stay strictly above the last position and every emitted Z; it then moves to `park_xy_mm` at that height. Every layer must lie below the envelope top.
 
@@ -201,7 +201,9 @@ source identity/revision/hash; none is a measured-process qualification.
 persistent base revision. Rust manufacturing resolution validates the exact
 printer ID/revision/nozzle diameter, hotend/nozzle-material/cooling configuration and declared nozzle
 compatibility; only the complete single-extruder Marlin workflow is supported.
-Without an existing intent, an unaddressed Apply requires an explicitly selected complete single-tool Marlin hardware capture. It creates a complete standard planar recipe: nozzle-scaled width and preferred 0.2 mm layers within the common declared envelope, three perimeters, 15% rectilinear interior, 0.8 mm minimum skins and Automatic supports. No printer or material is inferred. An addressed tool still requires its existing routed construction. Creation is one ordinary Core intent transaction; saved return never reruns defaults.
+Without an existing intent, an unaddressed Apply requires an explicitly selected complete single-tool Marlin hardware capture. It creates the defaults (`create_default_intent`, standard quality): `QualityPreset` draft/standard/fine layers of 0.7/0.5/0.375 × nozzle (0.28/0.20/0.15 mm at 0.4 mm, as PrusaSlicer's DRAFT/SPEED/QUALITY presets), a 0.5 × nozzle first layer and 1.125 × nozzle beads within the common declared envelope; two walls; 15% rectilinear interior; top skin max(0.7 mm, 5 layers) and bottom max(0.5 mm, 3 layers); travel at the printer's travel feed; role speeds from the machine description (a declared software setup inherits the generic family), each within the print feed; and Automatic supports. A material print speed above the printer's print feed, temperatures beyond the machine's declared limits and the bed of a machine without a heated bed become explicit captured overrides (a material that requires a heated bed refuses there). No printer or material is inferred.
+
+Generic profiles (`generic_material_profiles`, authored in `crates/contracts/data/material-profiles.ts`) cover PLA, PETG, ABS, ASA and TPU for 0.25/0.4/0.5/0.6/0.8 mm nozzles with a generic brass hotend and part fan. They carry first-layer and later nozzle/bed temperatures, a standby temperature, whether the material needs a heated bed, the fan (first layer off, minimum, short-layer maximum, bridge), minimum layer time and speed, a direct-drive and a Bowden retraction (the installed `MaterialToolSetup.extruder_drive` selects one), a volumetric flow ceiling and a material print-speed cap. Values follow PrusaSlicer 2.9.4's bundled generic presets (cited per family, with the bundle's hash), between its MK3S-era and MK4S values where they differ; they are declared starting points, not calibrations. `generic_selection` pairs a setup with the profile of a polymer family for its nozzle. A catalog filament whose declared material label names one of these families (`Silk PLA+` is PLA, `PCTG` prints as PETG) and whose diameter is declared derives a material identity and the family's profiles, so it is usable; otherwise it carries none. An addressed tool still requires its existing routed construction. Creation is one ordinary Core intent transaction; saved return never reruns defaults.
 
 With an existing intent, the operation resolves supported explicit overrides over profile values, updates
 recipe material/diameter/speed/flow/process and job thermal targets, then commits
@@ -675,6 +677,56 @@ Independent emitted-program verification reconstructs the original mandatory row
 Required `process_interfaces` accounts each explicitly authorized separator band once, separately in `separator_area_mm2`, never as dense/sparse fill. Each record binds source/provenance, the two stable effective `region_indices`, finite actual centerlines, admitted bead width, half-bead maximum bonding overlap and actual endpoint witnesses. Separator path segments biject to those lines; actual extrusion is counted once from final strokes, including authorized physical overlap rather than an averaged density.
 
 Scheduled-M reuse is a held tolerant section: a span keeps its first layer's section over each following layer whose own section agrees with it within the profile tolerance (same rings, every vertex within it of the other's ring), compared against the held section so error never accumulates. Mapped image finishes keep one-layer spans. Realized D and each applied field retain independent identity/invariance obligations. Horizontal/image events and full-height occupancy remain separate. The full-height inner-material query below proves only its eligible subset, never whole-part invariance.
+
+## Deposition speeds and cooling
+
+The speed of every single-tool deposition edge follows one declared rule
+(`contracts::manufacturing::speeds`), which realization applies and the
+independent verifier recomputes from the plan and intent:
+
+1. Base speed. With `recipe.role_speeds`, the role's speed: outer wall for a
+   wall path marked `external_wall` (the lane against the part surface, set by
+   the wall generator), inner wall for other walls and separators, sparse,
+   solid (and bottom skin), top skin, support (and interface) or bridge,
+   capped on layer 0 by the first-layer wall speed (walls, separators) or
+   first-layer infill speed (everything else), and by the recipe's material
+   print speed. A Bridge owned by a sparse process region (fraction below
+   one), sparse infill spanning the rows beneath it, takes the sparse speed
+   and ordinary fan (`speeds::speed_role`); its flow and bridge construction
+   checks keep the Bridge role. With `role_speeds` null, the uniform print speed times the
+   first-layer and bridge speed factors, as before. Never above the printer's
+   print feed.
+2. Volumetric flow ceiling. An edge whose bead (`(w-h)h + π(h/2)²` times the
+   flow factors) would exceed the effective flow ceiling at that speed slows
+   to the ceiling, less a 1e-6 relative margin so rounded commands stay inside
+   it. This replaces the former refusal for single-tool jobs; fixed-dual
+   routes keep their admitted speeds and refuse an excess.
+3. Cooling. A layer whose deposition chords at those speeds take less than
+   `process.minimum_layer_time_s` slow uniformly until they take that long,
+   never below `minimum_print_speed_mm_s` (nor above an edge's own speed). A
+   layer shorter than `fan_short_layer_time_s` runs the part fan at
+   `fan_short_layer_pwm` instead of `fan_after_first_layers`; bridges keep the
+   bridge fan and the first layer its own.
+
+`recipe.first_layer_height_mm`, when set, places the first schedule boundary
+that far above the bed and keeps that interval one layer (a native feature
+inside it still splits it). The verification report states
+`flow_limited_segments`, `cooling_slowed_layers` and `minimum_cooling_scale`,
+and a limitation line names them whenever a deposition was slowed. Role
+speeds, a first-layer height and a cooling slowdown currently require a
+single-tool workflow.
+
+## Print-time estimate
+
+A complete job with `timing_model` gets required-nullable
+`VerificationReport.estimated_seconds` from the verifier's own decoded
+commands: every XYZ move (arc length for G2/G3) is a trapezoid at its decoded
+feed under the declared acceleration; consecutive moves join at the Marlin
+junction-deviation speed; a 64-move lookahead plans each window as if the
+machine stops after it, the way a firmware planner buffer does; E-only
+retraction and recovery stop at their own feed. Heating, homing and opaque
+blocks are excluded. It is a software estimate for comparison with other
+slicers' estimates, not a measured duration.
 
 ## Declared job timing
 

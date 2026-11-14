@@ -4576,6 +4576,7 @@ mod tests {
             },
             points_mm: vec![[a, 0.0, z], [b, 0.0, z]],
             arcs: Vec::new(),
+            external_wall: false,
         }
     }
 
@@ -4960,6 +4961,7 @@ mod tests {
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
+            external_wall: false,
         });
         for nested in [false, true] {
             let required = vec![
@@ -5081,6 +5083,7 @@ mod tests {
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                     arcs: Vec::new(),
+                    external_wall: false,
                 })
                 .collect();
             let mut candidate = RasterCandidate {
@@ -5191,6 +5194,7 @@ mod tests {
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                     arcs: Vec::new(),
+                    external_wall: false,
                 })
             });
             for (left_end, right_start, connected) in [
@@ -5299,6 +5303,7 @@ mod tests {
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
+            external_wall: false,
         });
         for (reorientation, missing_anchor, limit) in [
             (false, false, 6.0),
@@ -5390,6 +5395,7 @@ mod tests {
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
+            external_wall: false,
         });
         let layer = region::HatchLayer {
             roof: None,
@@ -5723,6 +5729,7 @@ mod tests {
             }),
             points_mm: vec![[1.0, 2.0, 0.8], [9.0, 2.0, 0.8]],
             arcs: Vec::new(),
+            external_wall: false,
         }];
         let polygon = |points: Vec<(f64, f64)>| Polygon::new(geo::LineString::from(points), vec![]);
         for tip in [2.0, 2.0 - 0.00000001] {

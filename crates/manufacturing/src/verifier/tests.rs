@@ -201,8 +201,14 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 bridge_fan_pwm: 255,
                 max_bridge_span_mm: 5.0,
                 retraction: RetractionPolicy::Disabled,
+                minimum_layer_time_s: 0.0,
+                minimum_print_speed_mm_s: 10.0,
+                fan_short_layer_time_s: 0.0,
+                fan_short_layer_pwm: 255,
             },
             supports: SupportPolicy::Disabled,
+            role_speeds: None,
+            first_layer_height_mm: None,
         },
     };
     let mut plan = NormalizedPrintPlan {
@@ -263,6 +269,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                             [1.0, 1.0, 1.0],
                         ],
                         arcs: Vec::new(),
+                        external_wall: false,
                     },
                     DepositionPath {
                         material_domain: None,
@@ -272,6 +279,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                         physical_z_mm: [0.0, 1.0],
                         points_mm: vec![[2.0, 2.0, 1.0], [6.0, 2.0, 1.0]],
                         arcs: Vec::new(),
+                        external_wall: false,
                     },
                 ],
             },
@@ -292,6 +300,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                     physical_z_mm: [1.0, 2.0],
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
                     arcs: Vec::new(),
+                    external_wall: false,
                 }],
             },
         ],
@@ -568,6 +577,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
             [1.0, 1.0, 1.0],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     }];
     refresh_volumes(&intent, &mut plan);
     let program = "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\nG1 X4 Y1 Z1 E2.25 F600\nG1 X1 Y1 Z1 E3 F600\n";
@@ -752,6 +762,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
         arcs: Vec::new(),
+        external_wall: false,
     }];
     refresh_volumes(&intent, &mut plan);
     let program =
@@ -801,6 +812,7 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
             [1.0, 1.0, 0.2],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     });
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
     intent.recipe.process.first_layer_flow_factor = 1.1;
@@ -853,6 +865,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.011_999_49, 1.016_000_49, 0.2]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     let length = distance(
         plan.layers[0].paths[0].points_mm[0],
@@ -885,6 +898,7 @@ fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
         physical_z_mm: [0.0, 0.000_01],
         points_mm: vec![[1.0, 1.0, 0.000_01], [1.02, 1.0, 0.000_01]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     // E=3e-8 is the ordinary E8 rounding of this nominal stroke, but its
     // independently inverted width is about 0.47124 rather than 0.45 mm.
@@ -906,6 +920,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![[1.0, 1.0, 0.2], [1.02, 1.0, 0.2], [1.0, 1.0, 0.2]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     // Nominal widths meet 0.20/mm. Actual E8 commands invert to about
     // 0.450997545 and 0.455003076: their gradient exceeds the frozen limit.
@@ -930,6 +945,7 @@ fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
             [1.0, 1.0, 0.2],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     });
     // Both stored interior transitions are below 0.20/mm; only last→first
     // violates it. Emission matching the same bad plan is not independent proof.
@@ -953,12 +969,14 @@ fn printer_limits_and_explicit_flow_multiplier_are_authoritative() {
     intent.recipe.flow_multiplier = 1.0;
     intent.printer.max_volumetric_flow_mm3_s = 7.86;
     assert!(verify(GOLDEN, &plan, &intent, &AtomicBool::new(false)).is_ok());
+    // Below the golden's flow, the declared rule slows deposition, so the
+    // unslowed golden feed is refused by replay.
     intent.printer.max_volumetric_flow_mm3_s = 7.0;
     assert_eq!(
         verify(GOLDEN, &plan, &intent, &AtomicBool::new(false))
             .unwrap_err()
             .code,
-        ManufacturingErrorCode::InvalidSpecification
+        ManufacturingErrorCode::VerificationFailed
     );
     intent.printer.max_volumetric_flow_mm3_s = 100.0;
     // Travel (20 mm/s) is bounded by the travel limit, deposition (10 mm/s)
@@ -1020,6 +1038,7 @@ fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         };
         220_000
     ];
@@ -1062,6 +1081,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         };
         40_000
     ];
@@ -1109,6 +1129,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         };
         100_000
     ];
@@ -1155,10 +1176,168 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             park_xy_mm: [0.0, 0.0],
             park_clearance_mm: 10.0,
             lifecycle: FirmwareLifecycle::software_reference(),
+            first_layer_nozzle_temperature_c: 200.0,
+            first_layer_bed_temperature_c: 60.0,
+            timing_model: None,
         },
     };
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
     (intent, plan)
+}
+
+/// Role speeds, the flow ceiling and the minimum layer time slow deposition;
+/// the verifier recomputes the declared rule and refuses any other feed or fan.
+#[test]
+fn role_speeds_flow_ceiling_and_cooling_slowdown_replay_independently() {
+    let (mut intent, plan) = complete_fixture();
+    intent.recipe.role_speeds = Some(RoleSpeeds {
+        first_layer_mm_s: 20.0,
+        first_layer_infill_mm_s: 30.0,
+        outer_wall_mm_s: 40.0,
+        inner_wall_mm_s: 45.0,
+        sparse_infill_mm_s: 50.0,
+        solid_infill_mm_s: 45.0,
+        top_skin_mm_s: 35.0,
+        support_mm_s: 40.0,
+        bridge_mm_s: 25.0,
+    });
+    intent.printer.max_volumetric_flow_mm3_s = 2.0;
+    intent.recipe.process.minimum_layer_time_s = 60.0;
+    intent.recipe.process.minimum_print_speed_mm_s = 0.5;
+    intent.recipe.process.fan_short_layer_time_s = 120.0;
+    intent.recipe.process.fan_short_layer_pwm = 200;
+    intent.validate().unwrap();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(report.flow_limited_segments > 0, "{report:?}");
+    assert!(report.cooling_slowed_layers > 0 && report.minimum_cooling_scale < 1.0);
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.starts_with("Speeds lowered"))
+    );
+    // Later layers are short: maximum fan, never the ordinary one.
+    assert!(program.contains("M106 S200"), "{program}");
+    // Every deposition is within the 2 mm3/s ceiling at its decoded feed.
+    let line = program
+        .lines()
+        .filter(|l| l.starts_with("G1 X"))
+        .nth(4)
+        .unwrap()
+        .to_string();
+    let feed = line.split_ascii_whitespace().last().unwrap().to_string();
+    let value: f64 = feed[1..].parse().unwrap();
+    for wrong in [value * 1.01, value * 0.99] {
+        let mutated = program.replacen(&line, &line.replacen(&feed, &format!("F{wrong:.6}"), 1), 1);
+        assert!(
+            verify(&mutated, &plan, &intent, &cancel).is_err(),
+            "{wrong}"
+        );
+    }
+    assert!(
+        verify(
+            &program.replacen("M106 S200", "M106 S128", 1),
+            &plan,
+            &intent,
+            &cancel
+        )
+        .is_err()
+    );
+    // Without the slowdown the same plan replays at the unslowed rule.
+    let mut fast = intent.clone();
+    fast.recipe.process.minimum_layer_time_s = 0.0;
+    let unslowed = emit_text(&plan, &fast, &cancel).unwrap();
+    assert_ne!(unslowed, program);
+    let report = verify(&unslowed, &plan, &fast, &cancel).unwrap();
+    assert_eq!(report.cooling_slowed_layers, 0);
+    assert_eq!(report.minimum_cooling_scale, 1.0);
+    assert!(verify(&program, &plan, &fast, &cancel).is_err());
+}
+
+#[test]
+fn first_layer_targets_then_later_targets_and_unheated_beds() {
+    let (mut intent, plan) = complete_fixture();
+    if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+        job.first_layer_nozzle_temperature_c = 215.0;
+        job.first_layer_bed_temperature_c = 65.0;
+    }
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(program.contains("M140 S65\n") && program.contains("M109 R215\n"));
+    assert!(program.contains("\nM104 S200\nM140 S60\n"), "{program}");
+    for (from, to) in [
+        ("\nM104 S200\nM140 S60\n", "\nM140 S60\n"),
+        ("\nM104 S200\nM140 S60\n", "\nM104 S200\n"),
+        ("\nM104 S200\nM140 S60\n", "\nM104 S205\nM140 S60\n"),
+        ("M109 R215", "M109 R200"),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert_ne!(mutated, program, "{from}");
+        assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
+    // A machine without a heated bed: off bed, no bed steps, still verified.
+    let (mut unheated, _) = complete_fixture();
+    if let JobWorkflow::CompleteMarlin { job } = &mut unheated.printer.workflow {
+        job.maximum_bed_temperature_c = 0.0;
+        job.bed_temperature_c = 0.0;
+        job.first_layer_bed_temperature_c = 0.0;
+        job.lifecycle
+            .start
+            .retain(|s| !matches!(s, LifecycleStep::BedTarget | LifecycleStep::BedWait));
+        job.lifecycle
+            .end
+            .retain(|s| !matches!(s, LifecycleStep::BedOff));
+    }
+    unheated.validate().unwrap();
+    let program = emit_text(&plan, &unheated, &cancel).unwrap();
+    verify(&program, &plan, &unheated, &cancel).unwrap();
+    assert!(
+        !program.contains("M140") && !program.contains("M190"),
+        "{program}"
+    );
+    let mut waits = unheated.clone();
+    if let JobWorkflow::CompleteMarlin { job } = &mut waits.printer.workflow {
+        job.lifecycle.start.insert(0, LifecycleStep::BedWait);
+    }
+    assert!(waits.validate().is_err(), "an off bed has no bed wait");
+    let mut heated = unheated;
+    if let JobWorkflow::CompleteMarlin { job } = &mut heated.printer.workflow {
+        job.bed_temperature_c = 60.0;
+    }
+    assert!(
+        heated.validate().is_err(),
+        "no bed target without a heated bed"
+    );
+}
+
+#[test]
+fn print_time_estimate_follows_the_declared_motion_model() {
+    let (mut intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let report = verify(
+        &emit_text(&plan, &intent, &cancel).unwrap(),
+        &plan,
+        &intent,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(report.estimated_seconds, None, "no model, no estimate");
+    let mut seconds = Vec::new();
+    for acceleration in [500.0, 5000.0] {
+        if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
+            job.timing_model = Some(PrintTimeModel {
+                acceleration_mm_s2: acceleration,
+                junction_deviation_mm: 0.013,
+            });
+        }
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        let report = verify(&program, &plan, &intent, &cancel).unwrap();
+        seconds.push(report.estimated_seconds.unwrap());
+    }
+    assert!(seconds[0] > seconds[1] && seconds[1] > 0.0, "{seconds:?}");
 }
 
 #[test]
@@ -1471,6 +1650,10 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             minimum_travel_mm: 1.0,
             z_hop_mm: 0.25,
         },
+        minimum_layer_time_s: 0.0,
+        minimum_print_speed_mm_s: 10.0,
+        fan_short_layer_time_s: 0.0,
+        fan_short_layer_pwm: 255,
     };
     plan.layers[0].paths = vec![
         DepositionPath {
@@ -1481,6 +1664,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -1490,6 +1674,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -1499,6 +1684,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         },
     ];
     plan.layers[0].region_coverage.support_area_mm2 = 4.0;
@@ -1513,6 +1699,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [1.0, 1.5],
         points_mm: vec![[11.0, 1.0, 1.5], [15.0, 1.0, 1.5]],
         arcs: Vec::new(),
+        external_wall: false,
     }];
     refresh_volumes(&intent, &mut plan);
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
@@ -1814,6 +2001,7 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
             [7.0, 1.0, 1.0],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     });
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -1936,6 +2124,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
             [10.0, 10.0, 1.0],
         ],
         arcs: Vec::new(),
+        external_wall: false,
     });
     plan.layers[0].paths[1].points_mm = vec![[20.0, 2.0, 1.0], [2.0, 2.0, 1.0]];
     refresh_volumes(&intent, &mut plan);
@@ -2119,6 +2308,7 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
                 physical_z_mm: [1.0, 2.0],
                 points_mm: vec![[5.0, 4.0, 2.0], [5.0, 1.0, 2.0]],
                 arcs: Vec::new(),
+                external_wall: false,
             });
         }
         refresh_volumes(&intent, &mut plan);
@@ -2423,6 +2613,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[2.0, 2.0, 0.1], [6.0, 2.0, 0.1]],
         arcs: Vec::new(),
+        external_wall: false,
     };
     plan.layers[0].lower_z_mm = 0.0;
     plan.layers[0].z_mm = 0.1;
@@ -2671,6 +2862,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
                 physical_z_mm: [layer.lower_z_mm, layer.z_mm],
                 points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
                 arcs: Vec::new(),
+                external_wall: false,
             }];
             layer
         })
@@ -2686,6 +2878,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         physical_z_mm: [0.1, 0.4],
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     plan.sparse_bands = vec![SparseBandDecision {
         landing_aligned: false,
@@ -2858,6 +3051,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
                 [1.0, 1.0, layer.z_mm],
             ],
             arcs: Vec::new(),
+            external_wall: false,
         }];
     }
     // The lower separator anchor is actual earlier deposition, not a future
@@ -2870,6 +3064,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     plan.layers[0].paths.push(DepositionPath {
         material_domain: None,
@@ -2879,6 +3074,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[1.0, 3.0, 0.1], [5.0, 3.0, 0.1]],
         arcs: Vec::new(),
+        external_wall: false,
     });
     let fine = &mut plan.layers[1];
     fine.paths.extend([
@@ -2892,6 +3088,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -2901,6 +3098,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -2910,6 +3108,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -2919,6 +3118,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.225, 3.0, 0.2], [4.775, 3.0, 0.2]],
             arcs: Vec::new(),
+            external_wall: false,
         },
     ]);
     fine.region_coverage.process_regions = [0.2, 0.4]
@@ -3093,6 +3293,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [0.0, 1.0],
         points_mm: fit.fitted_mm.to_vec(),
         arcs: Vec::new(),
+        external_wall: false,
     }];
     layer.skin_command_fits = vec![SkinCommandFitDomain {
         region_index: 0,
@@ -3406,6 +3607,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[x[0], row, 1.0], [x[1], row, 1.0]],
             arcs: Vec::new(),
+            external_wall: false,
         })
         .collect();
     let layer = &mut plan.layers[1];
@@ -3421,6 +3623,7 @@ fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         physical_z_mm: [1.0, 2.0],
         points_mm: vec![[2.0, row, 2.0], [boundary, row, 2.0], [5.4, row, 2.0]],
         arcs: Vec::new(),
+        external_wall: false,
     }];
     layer.region_coverage.wall_area_mm2 = 14.0;
     layer.region_coverage.bottom_skin_area_mm2 = 1.2;
@@ -4359,7 +4562,8 @@ fn prusa_lifecycle_checks_printer_and_probes_at_standby() {
             "M109 R170",
             "G28",
             "M190 R60",
-            "M555 X0 Y0 W100 H100",
+            // PrusaSlicer's MK4S probe area over the first layer's bounds.
+            "M555 X1 Y0 W32 H5",
             "G29 P1",
             "G29 P3.2",
             "G29 P3.13",

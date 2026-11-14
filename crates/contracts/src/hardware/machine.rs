@@ -23,11 +23,12 @@ use super::{HardwareModelDefinition, HardwareSetupDefinition, PlateDefinition, t
 use crate::{
     geometry::{AabbMm, RigidPoseMm, SourceHash},
     manufacturing::{
-        DepositionLimits, ExtrusionEffect, FirmwareLifecycle, HomingCoordinateContract,
-        JobWorkflow, LevellingEffect, LifecycleBlock, LifecycleStep, MANUFACTURING_SCHEMA_VERSION,
-        MachineComponent, MachineComponentRole, MachineComponentShape, ModeEffect,
-        MotionResolution, MotionSpace, OutputDialect, PrinterCapabilities, PrinterCoordinateFrame,
-        PrinterSpecification, SingleExtruderJob, ThermalEffect,
+        DepositionLimits, ExtruderDrive, ExtrusionEffect, FirmwareLifecycle,
+        HomingCoordinateContract, JobWorkflow, LevellingEffect, LifecycleBlock, LifecycleStep,
+        MANUFACTURING_SCHEMA_VERSION, MachineComponent, MachineComponentRole,
+        MachineComponentShape, ModeEffect, MotionResolution, MotionSpace, OutputDialect,
+        PrinterCapabilities, PrinterCoordinateFrame, PrinterSpecification, SingleExtruderJob,
+        ThermalEffect,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -84,9 +85,18 @@ pub enum MachineLimit {
     ZResolutionMm,
     ToolheadRadiusMm,
     ToolheadHeightMm,
+    FirstLayerSpeedMmS,
+    OuterWallSpeedMmS,
+    InnerWallSpeedMmS,
+    SparseInfillSpeedMmS,
+    SolidInfillSpeedMmS,
+    TopSkinSpeedMmS,
+    SupportSpeedMmS,
+    BridgeSpeedMmS,
+    FirstLayerInfillSpeedMmS,
 }
 impl MachineLimit {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 28] = [
         Self::BedXMm,
         Self::BedYMm,
         Self::MaxZMm,
@@ -106,6 +116,15 @@ impl MachineLimit {
         Self::ZResolutionMm,
         Self::ToolheadRadiusMm,
         Self::ToolheadHeightMm,
+        Self::FirstLayerSpeedMmS,
+        Self::OuterWallSpeedMmS,
+        Self::InnerWallSpeedMmS,
+        Self::SparseInfillSpeedMmS,
+        Self::SolidInfillSpeedMmS,
+        Self::TopSkinSpeedMmS,
+        Self::SupportSpeedMmS,
+        Self::BridgeSpeedMmS,
+        Self::FirstLayerInfillSpeedMmS,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -128,6 +147,15 @@ impl MachineLimit {
             Self::ZResolutionMm => "Z motion step (mm)",
             Self::ToolheadRadiusMm => "Toolhead clearance radius (mm)",
             Self::ToolheadHeightMm => "Toolhead clearance height (mm)",
+            Self::FirstLayerSpeedMmS => "First-layer speed (mm/s)",
+            Self::OuterWallSpeedMmS => "Outer wall speed (mm/s)",
+            Self::InnerWallSpeedMmS => "Inner wall speed (mm/s)",
+            Self::SparseInfillSpeedMmS => "Sparse infill speed (mm/s)",
+            Self::SolidInfillSpeedMmS => "Solid infill speed (mm/s)",
+            Self::TopSkinSpeedMmS => "Top skin speed (mm/s)",
+            Self::SupportSpeedMmS => "Support speed (mm/s)",
+            Self::BridgeSpeedMmS => "Bridge speed (mm/s)",
+            Self::FirstLayerInfillSpeedMmS => "First-layer infill speed (mm/s)",
         }
     }
     fn admits(self, v: f64) -> bool {
@@ -135,11 +163,22 @@ impl MachineLimit {
             Self::BedXMm | Self::BedYMm | Self::MaxZMm => 10.0..=5000.0,
             Self::NozzleDiameterMm => 0.1..=3.0,
             Self::FilamentDiameterMm => 1.0..=3.5,
-            Self::MaxPrintFeedMmS | Self::MaxTravelFeedMmS => 1.0..=5000.0,
+            Self::MaxPrintFeedMmS
+            | Self::MaxTravelFeedMmS
+            | Self::FirstLayerSpeedMmS
+            | Self::OuterWallSpeedMmS
+            | Self::InnerWallSpeedMmS
+            | Self::SparseInfillSpeedMmS
+            | Self::SolidInfillSpeedMmS
+            | Self::TopSkinSpeedMmS
+            | Self::SupportSpeedMmS
+            | Self::BridgeSpeedMmS
+            | Self::FirstLayerInfillSpeedMmS => 1.0..=5000.0,
             Self::MaxAccelerationMmS2 => 1.0..=500_000.0,
             Self::MaxVolumetricFlowMm3S => 0.1..=1000.0,
             Self::MaxNozzleTemperatureC | Self::MinExtrusionTemperatureC => 1.0..=500.0,
-            Self::MaxBedTemperatureC => 1.0..=200.0,
+            // Zero declares a machine without a heated bed.
+            Self::MaxBedTemperatureC => 0.0..=200.0,
             Self::MinBeadWidthPerNozzle | Self::MaxBeadWidthPerNozzle => 0.25..=4.0,
             Self::MaxBeadHeightPerNozzle => 0.05..=1.0,
             Self::XyResolutionMm | Self::ZResolutionMm => {
@@ -207,6 +246,8 @@ pub struct MachineLayer {
     pub heated_bed: Option<bool>,
     #[serde(deserialize_with = "required_option")]
     pub arc_moves: Option<bool>,
+    #[serde(deserialize_with = "required_option")]
+    pub extruder_drive: Option<ExtruderDrive>,
     /// Model identifier the firmware checks (Prusa `M862.3`), if any.
     #[serde(deserialize_with = "required_option")]
     pub printer_model: Option<String>,
@@ -226,6 +267,7 @@ pub struct MachineDescription {
     pub levelling: BedLevelling,
     pub heated_bed: bool,
     pub arc_moves: bool,
+    pub extruder_drive: ExtruderDrive,
     #[serde(deserialize_with = "required_option")]
     pub printer_model: Option<String>,
     /// Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
@@ -277,7 +319,8 @@ impl MachineDescription {
             }
         }
         let v = |k| self.limit(k);
-        if v(MachineLimit::MinBeadWidthPerNozzle) > v(MachineLimit::MaxBeadWidthPerNozzle)
+        if (self.heated_bed != (v(MachineLimit::MaxBedTemperatureC) > 0.0))
+            || v(MachineLimit::MinBeadWidthPerNozzle) > v(MachineLimit::MaxBeadWidthPerNozzle)
             || v(MachineLimit::MaxBeadHeightPerNozzle) > v(MachineLimit::MaxBeadWidthPerNozzle)
             || v(MachineLimit::MinExtrusionTemperatureC) > v(MachineLimit::MaxNozzleTemperatureC)
             || v(MachineLimit::ZResolutionMm)
@@ -334,6 +377,7 @@ impl MachineDescription {
         let mut limits = BTreeMap::new();
         let (mut firmware, mut kinematics, mut levelling, mut heated, mut arcs) =
             (None, None, None, None, None);
+        let mut drive = None;
         let mut printer_model = None;
         for layer in &chain {
             text(&layer.id)?;
@@ -354,6 +398,7 @@ impl MachineDescription {
             levelling = layer.levelling.or(levelling);
             heated = layer.heated_bed.or(heated);
             arcs = layer.arc_moves.or(arcs);
+            drive = layer.extruder_drive.or(drive);
             printer_model = layer.printer_model.clone().or(printer_model);
         }
         let missing = |what: &str| format!("machine {leaf} does not declare {what}");
@@ -369,6 +414,7 @@ impl MachineDescription {
             levelling: levelling.ok_or_else(|| missing("bed levelling"))?,
             heated_bed: heated.ok_or_else(|| missing("whether the bed is heated"))?,
             arc_moves: arcs.ok_or_else(|| missing("arc move support"))?,
+            extruder_drive: drive.ok_or_else(|| missing("its extruder drive"))?,
             printer_model,
             limits,
             start_block: None,
@@ -378,6 +424,22 @@ impl MachineDescription {
         Ok(d)
     }
 
+    /// The machine's per-role deposition speeds, each within its print feed.
+    pub fn role_speeds(&self) -> crate::manufacturing::RoleSpeeds {
+        let cap = self.limit(MachineLimit::MaxPrintFeedMmS);
+        let v = |k| self.limit(k).min(cap);
+        crate::manufacturing::RoleSpeeds {
+            first_layer_mm_s: v(MachineLimit::FirstLayerSpeedMmS),
+            outer_wall_mm_s: v(MachineLimit::OuterWallSpeedMmS),
+            inner_wall_mm_s: v(MachineLimit::InnerWallSpeedMmS),
+            sparse_infill_mm_s: v(MachineLimit::SparseInfillSpeedMmS),
+            solid_infill_mm_s: v(MachineLimit::SolidInfillSpeedMmS),
+            top_skin_mm_s: v(MachineLimit::TopSkinSpeedMmS),
+            support_mm_s: v(MachineLimit::SupportSpeedMmS),
+            bridge_mm_s: v(MachineLimit::BridgeSpeedMmS),
+            first_layer_infill_mm_s: v(MachineLimit::FirstLayerInfillSpeedMmS),
+        }
+    }
     pub fn build_envelope(&self) -> AabbMm {
         AabbMm {
             min: [0.0; 3],
@@ -392,12 +454,6 @@ impl MachineDescription {
     /// Derive the complete printer specification for setup `id`/`name`.
     pub fn derive_printer(&self, id: &str, name: &str) -> Result<PrinterSpecification, String> {
         self.validate()?;
-        if !self.heated_bed {
-            return Err(
-                "unheated beds are not yet supported: the current lifecycle requires a bed temperature"
-                    .into(),
-            );
-        }
         let v = |k| self.limit(k);
         let nozzle = v(MachineLimit::NozzleDiameterMm);
         let envelope = self.build_envelope();
@@ -469,9 +525,15 @@ impl MachineDescription {
                     homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
                     home_position_mm: [0.0; 3],
                     // Generic starting targets; a captured material profile owns
-                    // the operating temperatures.
+                    // the operating temperatures. An unheated machine's bed is off.
                     nozzle_temperature_c: 200f64.clamp(min_extrusion, max_nozzle),
                     bed_temperature_c: 60f64.min(max_bed),
+                    first_layer_nozzle_temperature_c: 200f64.clamp(min_extrusion, max_nozzle),
+                    first_layer_bed_temperature_c: 60f64.min(max_bed),
+                    timing_model: Some(crate::manufacturing::PrintTimeModel {
+                        acceleration_mm_s2: v(MachineLimit::MaxAccelerationMmS2),
+                        junction_deviation_mm: MARLIN_JUNCTION_DEVIATION_MM,
+                    }),
                     minimum_extrusion_temperature_c: min_extrusion,
                     maximum_nozzle_temperature_c: max_nozzle,
                     maximum_bed_temperature_c: max_bed,
@@ -577,7 +639,8 @@ impl MachineDescription {
         }
         // Loadcell probing (Prusa) needs a settled, non-oozing nozzle.
         let standby = Some(if prusa { 170.0 } else { 150.0 });
-        if begin.bed == ThermalEffect::Unchanged {
+        let heated = self.heated_bed;
+        if heated && begin.bed == ThermalEffect::Unchanged {
             start.push(S::BedTarget);
         }
         if begin.nozzle == ThermalEffect::Unchanged {
@@ -592,7 +655,7 @@ impl MachineDescription {
         if begin.modes == ModeEffect::Unknown {
             start.push(S::RestoreModes);
         }
-        if begin.bed != ThermalEffect::Wait {
+        if heated && begin.bed != ThermalEffect::Wait {
             start.push(S::BedWait);
         }
         if begin.levelling != LevellingEffect::Active {
@@ -621,7 +684,7 @@ impl MachineDescription {
         if finish.nozzle != ThermalEffect::Off {
             end.push(S::NozzleOff);
         }
-        if finish.bed != ThermalEffect::Off {
+        if heated && finish.bed != ThermalEffect::Off {
             end.push(S::BedOff);
         }
         if !finish.fan_off {
@@ -633,6 +696,9 @@ impl MachineDescription {
         FirmwareLifecycle { start, end }
     }
 }
+/// Marlin's default junction deviation (`JUNCTION_DEVIATION_MM`), used for
+/// every family's print-time estimate.
+pub const MARLIN_JUNCTION_DEVIATION_MM: f64 = 0.013;
 fn r6(v: f64) -> f64 {
     (v * 1_000_000.0).round() / 1_000_000.0
 }

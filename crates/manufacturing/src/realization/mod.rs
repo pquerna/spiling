@@ -26,6 +26,10 @@ pub(crate) enum Event {
     ResetExtrusion,
     HotendTarget(u8, f64),
     HotendWait(u8, f64),
+    /// Single-extruder nozzle/bed targets set without waiting (the
+    /// first-layer to later-layer change).
+    NozzleTarget(f64),
+    BedTarget(f64),
 }
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
@@ -104,8 +108,16 @@ pub(crate) fn stream(
     let mut fan = None;
     let mut travels = 0u32;
     let mut process_events = 0u32;
+    // Later-layer temperature targets are set before the first path above
+    // the first layer.
+    let mut later_targets = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => Some(job),
+        _ => None,
+    };
     for layer in &plan.layers {
         check_cancel(cancel)?;
+        // The declared speed rule's cooling decision for this layer.
+        let cooling = speeds::layer_cooling(intent, layer, layer.index)?;
         let order: &[u8] = if routed.is_some() {
             plan.routing_tool_orders
                 .get(layer.index as usize)
@@ -209,15 +221,20 @@ pub(crate) fn stream(
                 {
                     continue;
                 }
+                if layer.index > 0
+                    && let Some(job) = later_targets.take()
+                {
+                    if job.nozzle_temperature_c != job.first_layer_nozzle_temperature_c {
+                        emit(Event::NozzleTarget(job.nozzle_temperature_c))?;
+                    }
+                    if job.bed_temperature_c != job.first_layer_bed_temperature_c {
+                        emit(Event::BedTarget(job.bed_temperature_c))?;
+                    }
+                }
                 let process = intent.process_for_path(path)?;
                 let target = path.points_mm[0];
-                let pwm = if path.kind == DepositionKind::Bridge {
-                    process.policy.bridge_fan_pwm
-                } else if layer.index == 0 {
-                    process.policy.fan_first_layers
-                } else {
-                    process.policy.fan_after_first_layers
-                };
+                let role = speeds::speed_role(recipe, layer, path.kind, path.owner);
+                let pwm = speeds::path_fan_pwm(process.policy, role, layer.index, cooling.short);
                 if fan != Some(pwm) {
                     emit(Event::Fan(pwm))?;
                     fan = Some(pwm);
@@ -289,17 +306,29 @@ pub(crate) fn stream(
                     }
                     emit(Event::Extrusion(extrusion, speed_mm_s))?;
                 }
-                let mut speed = process.speed_mm_s;
-                let mut flow = process.flow_multiplier;
-                if layer.index == 0 {
-                    speed *= process.policy.first_layer_speed_factor;
-                    flow *= process.policy.first_layer_flow_factor;
-                }
-                if path.kind == DepositionKind::Bridge {
-                    speed *= process.policy.bridge_speed_factor;
-                    flow *= process.policy.bridge_flow_factor;
-                }
+                // Role speed, then the flow ceiling per edge width, then the
+                // layer's cooling scale ([`speeds`]).
+                let base = speeds::base_speed_mm_s(
+                    recipe,
+                    &process,
+                    role,
+                    path.external_wall,
+                    layer.index,
+                )
+                .min(intent.printer.max_print_feed_mm_s);
+                let flow = speeds::flow_factor(&process, path.kind, layer.index);
                 let height = path.height_mm();
+                let edge_speed = |width: f64| {
+                    let (unslowed, _) = speeds::flow_limited_speed_mm_s(
+                        base,
+                        width,
+                        height,
+                        flow,
+                        process.max_volumetric_flow_mm3_s,
+                        routed.is_some(),
+                    );
+                    cooling.speed_mm_s(unslowed, recipe.process.minimum_print_speed_mm_s)
+                };
                 let mut runs = if intent.printer.capabilities.arc_moves && routed.is_none() {
                     path.arcs.as_slice()
                 } else {
@@ -338,7 +367,7 @@ pub(crate) fn stream(
                             center,
                             run.clockwise,
                             extrusion,
-                            speed,
+                            edge_speed(edge.width_mm),
                         ))?;
                         resume = last;
                         continue;
@@ -370,7 +399,11 @@ pub(crate) fn stream(
                                 .powi(2)
                     });
                     extrusion += command_length * area / filament_area;
-                    emit(Event::Deposit(edge.points_mm[1], extrusion, speed))?;
+                    emit(Event::Deposit(
+                        edge.points_mm[1],
+                        extrusion,
+                        edge_speed(edge.width_mm),
+                    ))?;
                 }
                 position = path.points_mm.last().copied();
             }

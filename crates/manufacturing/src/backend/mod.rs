@@ -101,9 +101,10 @@ pub fn emit(
     }
     // Highest emitted Z of a complete job: the park lifts above it.
     let mut top_z = f64::NEG_INFINITY;
+    let mesh_area = lifecycle::first_layer_mesh_area(plan, &intent.printer);
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         for step in &job.lifecycle.start {
-            match lifecycle::render(step, &intent.printer, job) {
+            match lifecycle::render(step, &intent.printer, job, mesh_area) {
                 lifecycle::Emit::Lines(lines) => {
                     for line in lines {
                         writeln!(program, "{line}").map_err(limit)?;
@@ -171,6 +172,13 @@ pub fn emit(
                 }
                 Event::HotendWait(tool, temperature) => {
                     writeln!(program, "M109 T{tool} R{temperature:.6}").map_err(limit)?
+                }
+                // Single-extruder later-layer targets, integral Celsius.
+                Event::NozzleTarget(temperature) => {
+                    writeln!(program, "M104 S{temperature:.0}").map_err(limit)?
+                }
+                Event::BedTarget(temperature) => {
+                    writeln!(program, "M140 S{temperature:.0}").map_err(limit)?
                 }
                 Event::ResetExtrusion => {
                     program.write_str("G92 E0\n").map_err(limit)?;
@@ -412,7 +420,7 @@ pub fn emit(
             )
         })?;
         for step in &job.lifecycle.end {
-            match lifecycle::render(step, &intent.printer, job) {
+            match lifecycle::render(step, &intent.printer, job, mesh_area) {
                 lifecycle::Emit::Lines(lines) => {
                     for line in lines {
                         writeln!(program, "{line}").map_err(limit)?;

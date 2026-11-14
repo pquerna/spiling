@@ -1906,6 +1906,8 @@ async fn execute(
                         print_speed_mm_s: None,
                         flow_multiplier: None,
                         process: None,
+                        first_layer_nozzle_temperature_c: None,
+                        first_layer_bed_temperature_c: None,
                     },
                 };
                 match client

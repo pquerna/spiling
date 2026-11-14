@@ -39,6 +39,11 @@ const printer = {
       prime_speed_mm_s: 10,
       park_xy_mm: [0, 210],
       park_clearance_mm: 10,
+      first_layer_nozzle_temperature_c: 200,
+      first_layer_bed_temperature_c: 60,
+      // Marlin's default acceleration and junction deviation, for the
+      // print-time estimate only.
+      timing_model: { acceleration_mm_s2: 3000, junction_deviation_mm: 0.013 },
       // The generic Marlin 2 table without a firmware mesh.
       lifecycle: {
         start: [

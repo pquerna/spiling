@@ -500,6 +500,7 @@ mod tests {
                 [2.0000004, 11.0, physical[1]],
             ],
             arcs: Vec::new(),
+            external_wall: false,
         }
     }
     #[test]

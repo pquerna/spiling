@@ -44,7 +44,9 @@ pub(super) enum Levelling {
 pub(super) struct Lifecycle<'a> {
     job: &'a SingleExtruderJob,
     dialect: OutputDialect,
-    envelope: [f64; 2],
+    /// Prusa `M555` probe area `[X, Y, W, H]` from the decoded plan's first
+    /// layer, computed here independently of the backend.
+    mesh_area: [f64; 4],
     nozzle_mm: f64,
     start: std::slice::Iter<'a, LifecycleStep>,
     end: std::slice::Iter<'a, LifecycleStep>,
@@ -64,12 +66,15 @@ pub(super) struct Lifecycle<'a> {
 }
 
 impl<'a> Lifecycle<'a> {
-    pub fn new(job: &'a SingleExtruderJob, printer: &'a PrinterSpecification) -> Self {
-        let e = printer.build_envelope;
+    pub fn new(
+        job: &'a SingleExtruderJob,
+        printer: &'a PrinterSpecification,
+        plan: &NormalizedPrintPlan,
+    ) -> Self {
         Self {
             job,
             dialect: printer.capabilities.output_dialect,
-            envelope: [e.max[0] - e.min[0], e.max[1] - e.min[1]],
+            mesh_area: mesh_area(plan, printer.build_envelope),
             nozzle_mm: printer.nozzle_diameter_mm,
             start: job.lifecycle.start.iter(),
             end: job.lifecycle.end.iter(),
@@ -137,9 +142,8 @@ impl<'a> Lifecycle<'a> {
     }
 
     fn temperature(&self, standby_c: &Option<f64>) -> f64 {
-        standby_c.map_or(self.job.nozzle_temperature_c, |t| {
-            t.min(self.job.nozzle_temperature_c)
-        })
+        let print = self.job.first_layer_nozzle_temperature_c;
+        standby_c.map_or(print, |t| t.min(print))
     }
 
     fn expand(&mut self, step: &'a LifecycleStep) {
@@ -147,7 +151,8 @@ impl<'a> Lifecycle<'a> {
         let klipper = self.dialect == OutputDialect::KlipperSingleExtruderGcodeV1;
         let prusa = self.dialect == OutputDialect::PrusaMarlinSingleExtruderGcodeV1;
         let wait = if klipper { 'S' } else { 'R' };
-        let bed = self.job.bed_temperature_c;
+        // The start sequence heats to the first-layer targets.
+        let bed = self.job.first_layer_bed_temperature_c;
         let text: Vec<String> = match step {
             S::CelsiusUnits => vec!["M149 C".into()],
             S::VolumetricOff => vec!["M200 D0".into()],
@@ -167,7 +172,10 @@ impl<'a> Lifecycle<'a> {
             S::Home => vec!["G28".into()],
             S::ProbeMesh if klipper => vec!["BED_MESH_CALIBRATE".into()],
             S::ProbeMesh if prusa => vec![
-                format!("M555 X0 Y0 W{} H{}", self.envelope[0], self.envelope[1]),
+                format!(
+                    "M555 X{} Y{} W{} H{}",
+                    self.mesh_area[0], self.mesh_area[1], self.mesh_area[2], self.mesh_area[3]
+                ),
                 "G29 P1".into(),
                 "G29 P3.2".into(),
                 "G29 P3.13".into(),
@@ -193,7 +201,7 @@ impl<'a> Lifecycle<'a> {
                     line.replace("{bed_temperature_c}", &format!("{bed:.0}"))
                         .replace(
                             "{nozzle_temperature_c}",
-                            &format!("{:.0}", self.job.nozzle_temperature_c),
+                            &format!("{:.0}", self.job.first_layer_nozzle_temperature_c),
                         )
                 })
                 .collect(),
@@ -234,7 +242,8 @@ impl<'a> Lifecycle<'a> {
                 } else {
                     Heat::Target
                 };
-                self.nozzle_print = self.temperature(standby_c) == self.job.nozzle_temperature_c;
+                self.nozzle_print =
+                    self.temperature(standby_c) == self.job.first_layer_nozzle_temperature_c;
             }
             S::RestoreModes => self.modes = true,
             S::ResetExtrusion => self.extrusion_known = true,
@@ -320,7 +329,10 @@ impl<'a> Lifecycle<'a> {
                 if !self.extrusion_known || state.extrusion != 0.0 {
                     return Err(failed("priming without a known zero extrusion axis"));
                 }
-                if self.bed != Heat::Wait || self.nozzle != Heat::Wait || !self.nozzle_print {
+                // An off (0 °C) first-layer bed has nothing to wait for.
+                let bed_ready = self.bed == Heat::Wait
+                    || (self.job.first_layer_bed_temperature_c == 0.0 && self.bed == Heat::Off);
+                if !bed_ready || self.nozzle != Heat::Wait || !self.nozzle_print {
                     return Err(failed(
                         "priming before waiting for the bed and print nozzle temperatures",
                     ));
@@ -411,4 +423,33 @@ pub(super) fn block_limitations(job: &SingleExtruderJob) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// PrusaSlicer's MK4S probe area over the first layer's XY bounds (whole
+/// millimetres, at least 32 mm wide, 4 mm below the part), within the bed.
+fn mesh_area(plan: &NormalizedPrintPlan, bed: spiling_contracts::geometry::AabbMm) -> [f64; 4] {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for point in plan
+        .layers
+        .first()
+        .into_iter()
+        .flat_map(|layer| &layer.paths)
+        .flat_map(|path| &path.points_mm)
+    {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(point[axis]);
+            hi[axis] = hi[axis].max(point[axis]);
+        }
+    }
+    let size = [bed.max[0] - bed.min[0], bed.max[1] - bed.min[1]];
+    if !(lo[0] <= hi[0] && lo[1] <= hi[1]) {
+        return [0.0, 0.0, size[0], size[1]];
+    }
+    let (lo, hi) = (lo.map(f64::floor), hi.map(f64::ceil));
+    let x = ((lo[0] + 32.0).min(size[0]) - 32.0).max(0.0);
+    let y = (lo[1] - 4.0).max(0.0);
+    let w = (lo[0] + 32.0).max(hi[0]).min(size[0]) - x;
+    let h = hi[1].min(size[1]) - y;
+    [x, y, w, h]
 }

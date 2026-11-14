@@ -1,0 +1,1657 @@
+[
+  {
+    "id": "spiling.generic-pla.0.25",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-pla",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PLA",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.25,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.1875,
+      "max_bead_width_mm": 0.46875,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.1875
+    },
+    "nozzle_temperature_c": 215,
+    "bed_temperature_c": 60,
+    "first_layer_nozzle_temperature_c": 220,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 15,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 255,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 6,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 17,
+      "fan_short_layer_pwm": 255
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PLA], [filament:Generic PLA @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-pla.0.40",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-pla",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PLA",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.4,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 215,
+    "bed_temperature_c": 60,
+    "first_layer_nozzle_temperature_c": 220,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 15,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 255,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 6,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 17,
+      "fan_short_layer_pwm": 255
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PLA], [filament:Generic PLA @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-pla.0.50",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-pla",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PLA",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.5,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.375,
+      "max_bead_width_mm": 0.9375,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.375
+    },
+    "nozzle_temperature_c": 215,
+    "bed_temperature_c": 60,
+    "first_layer_nozzle_temperature_c": 220,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 15,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 255,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 6,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 17,
+      "fan_short_layer_pwm": 255
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PLA], [filament:Generic PLA @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-pla.0.60",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-pla",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PLA",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.6,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 1.125,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.45
+    },
+    "nozzle_temperature_c": 215,
+    "bed_temperature_c": 60,
+    "first_layer_nozzle_temperature_c": 220,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 15,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 255,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 6,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 17,
+      "fan_short_layer_pwm": 255
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PLA], [filament:Generic PLA @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-pla.0.80",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-pla",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PLA",
+      "polymer_family": "PLA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.8,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.6,
+      "max_bead_width_mm": 1.5,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.6
+    },
+    "nozzle_temperature_c": 215,
+    "bed_temperature_c": 60,
+    "first_layer_nozzle_temperature_c": 220,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 15,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 255,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 6,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 17,
+      "fan_short_layer_pwm": 255
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PLA], [filament:Generic PLA @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-petg.0.25",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-petg",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PETG",
+      "polymer_family": "PETG",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.25,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.1875,
+      "max_bead_width_mm": 0.46875,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.1875
+    },
+    "nozzle_temperature_c": 240,
+    "bed_temperature_c": 90,
+    "first_layer_nozzle_temperature_c": 240,
+    "first_layer_bed_temperature_c": 85,
+    "standby_nozzle_temperature_c": 175,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 10,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 128,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 6,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PETG], [filament:Generic PETG @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-petg.0.40",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-petg",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PETG",
+      "polymer_family": "PETG",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.4,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 240,
+    "bed_temperature_c": 90,
+    "first_layer_nozzle_temperature_c": 240,
+    "first_layer_bed_temperature_c": 85,
+    "standby_nozzle_temperature_c": 175,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 10,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 128,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 6,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PETG], [filament:Generic PETG @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-petg.0.50",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-petg",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PETG",
+      "polymer_family": "PETG",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.5,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.375,
+      "max_bead_width_mm": 0.9375,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.375
+    },
+    "nozzle_temperature_c": 240,
+    "bed_temperature_c": 90,
+    "first_layer_nozzle_temperature_c": 240,
+    "first_layer_bed_temperature_c": 85,
+    "standby_nozzle_temperature_c": 175,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 10,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 128,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 6,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PETG], [filament:Generic PETG @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-petg.0.60",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-petg",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PETG",
+      "polymer_family": "PETG",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.6,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 1.125,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.45
+    },
+    "nozzle_temperature_c": 240,
+    "bed_temperature_c": 90,
+    "first_layer_nozzle_temperature_c": 240,
+    "first_layer_bed_temperature_c": 85,
+    "standby_nozzle_temperature_c": 175,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 10,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 128,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 6,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PETG], [filament:Generic PETG @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-petg.0.80",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-petg",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic PETG",
+      "polymer_family": "PETG",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.8,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.6,
+      "max_bead_width_mm": 1.5,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.6
+    },
+    "nozzle_temperature_c": 240,
+    "bed_temperature_c": 90,
+    "first_layer_nozzle_temperature_c": 240,
+    "first_layer_bed_temperature_c": 85,
+    "standby_nozzle_temperature_c": 175,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 10,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 128,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 6,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic PETG], [filament:Generic PETG @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-abs.0.25",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-abs",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ABS",
+      "polymer_family": "ABS",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.25,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.1875,
+      "max_bead_width_mm": 0.46875,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.1875
+    },
+    "nozzle_temperature_c": 255,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 255,
+    "first_layer_bed_temperature_c": 100,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 12,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 38,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 64,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 20,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 30,
+      "fan_short_layer_pwm": 38
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic ABS], [filament:Generic ABS @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-abs.0.40",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-abs",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ABS",
+      "polymer_family": "ABS",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.4,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 255,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 255,
+    "first_layer_bed_temperature_c": 100,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 12,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 38,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 64,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 20,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 30,
+      "fan_short_layer_pwm": 38
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic ABS], [filament:Generic ABS @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-abs.0.50",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-abs",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ABS",
+      "polymer_family": "ABS",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.5,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.375,
+      "max_bead_width_mm": 0.9375,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.375
+    },
+    "nozzle_temperature_c": 255,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 255,
+    "first_layer_bed_temperature_c": 100,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 12,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 38,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 64,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 20,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 30,
+      "fan_short_layer_pwm": 38
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic ABS], [filament:Generic ABS @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-abs.0.60",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-abs",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ABS",
+      "polymer_family": "ABS",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.6,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 1.125,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.45
+    },
+    "nozzle_temperature_c": 255,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 255,
+    "first_layer_bed_temperature_c": 100,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 12,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 38,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 64,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 20,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 30,
+      "fan_short_layer_pwm": 38
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic ABS], [filament:Generic ABS @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-abs.0.80",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-abs",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ABS",
+      "polymer_family": "ABS",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.8,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.6,
+      "max_bead_width_mm": 1.5,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.6
+    },
+    "nozzle_temperature_c": 255,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 255,
+    "first_layer_bed_temperature_c": 100,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 12,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 38,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 64,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 20,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 30,
+      "fan_short_layer_pwm": 38
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic ABS], [filament:Generic ABS @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-asa.0.25",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-asa",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ASA",
+      "polymer_family": "ASA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.25,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.1875,
+      "max_bead_width_mm": 0.46875,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.1875
+    },
+    "nozzle_temperature_c": 260,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 260,
+    "first_layer_bed_temperature_c": 105,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 11,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 51,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 77,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 15,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 51
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Prusament ASA]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-asa.0.40",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-asa",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ASA",
+      "polymer_family": "ASA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.4,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 260,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 260,
+    "first_layer_bed_temperature_c": 105,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 11,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 51,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 77,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 15,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 51
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Prusament ASA]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-asa.0.50",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-asa",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ASA",
+      "polymer_family": "ASA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.5,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.375,
+      "max_bead_width_mm": 0.9375,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.375
+    },
+    "nozzle_temperature_c": 260,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 260,
+    "first_layer_bed_temperature_c": 105,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 11,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 51,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 77,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 15,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 51
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Prusament ASA]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-asa.0.60",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-asa",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ASA",
+      "polymer_family": "ASA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.6,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 1.125,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.45
+    },
+    "nozzle_temperature_c": 260,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 260,
+    "first_layer_bed_temperature_c": 105,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 11,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 51,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 77,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 15,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 51
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Prusament ASA]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-asa.0.80",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-asa",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic ASA",
+      "polymer_family": "ASA",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.8,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.6,
+      "max_bead_width_mm": 1.5,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.6
+    },
+    "nozzle_temperature_c": 260,
+    "bed_temperature_c": 110,
+    "first_layer_nozzle_temperature_c": 260,
+    "first_layer_bed_temperature_c": 105,
+    "standby_nozzle_temperature_c": 170,
+    "requires_heated_bed": true,
+    "print_speed_mm_s": 600,
+    "flow_multiplier": 1,
+    "max_volumetric_flow_mm3_s": 11,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 51,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 77,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 35,
+        "minimum_travel_mm": 1.5,
+        "z_hop_mm": 0.2
+      },
+      "minimum_layer_time_s": 15,
+      "minimum_print_speed_mm_s": 15,
+      "fan_short_layer_time_s": 20,
+      "fan_short_layer_pwm": 51
+    },
+    "bowden_retraction": {
+      "kind": "enabled",
+      "distance_mm": 5,
+      "speed_mm_s": 40,
+      "minimum_travel_mm": 2,
+      "z_hop_mm": 0
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Prusament ASA]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-tpu.0.25",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-tpu",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic TPU",
+      "polymer_family": "TPU",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.25,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.1875,
+      "max_bead_width_mm": 0.46875,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.1875
+    },
+    "nozzle_temperature_c": 230,
+    "bed_temperature_c": 50,
+    "first_layer_nozzle_temperature_c": 230,
+    "first_layer_bed_temperature_c": 50,
+    "standby_nozzle_temperature_c": 210,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 50,
+    "flow_multiplier": 1.08,
+    "max_volumetric_flow_mm3_s": 3,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 179,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 2.5,
+        "speed_mm_s": 20,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 100,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "disabled"
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic FLEX], [filament:Generic FLEX @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-tpu.0.40",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-tpu",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic TPU",
+      "polymer_family": "TPU",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.4,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "nozzle_temperature_c": 230,
+    "bed_temperature_c": 50,
+    "first_layer_nozzle_temperature_c": 230,
+    "first_layer_bed_temperature_c": 50,
+    "standby_nozzle_temperature_c": 210,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 50,
+    "flow_multiplier": 1.08,
+    "max_volumetric_flow_mm3_s": 3,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 179,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 2.5,
+        "speed_mm_s": 20,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 100,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "disabled"
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic FLEX], [filament:Generic FLEX @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-tpu.0.50",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-tpu",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic TPU",
+      "polymer_family": "TPU",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.5,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.375,
+      "max_bead_width_mm": 0.9375,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.375
+    },
+    "nozzle_temperature_c": 230,
+    "bed_temperature_c": 50,
+    "first_layer_nozzle_temperature_c": 230,
+    "first_layer_bed_temperature_c": 50,
+    "standby_nozzle_temperature_c": 210,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 50,
+    "flow_multiplier": 1.08,
+    "max_volumetric_flow_mm3_s": 3,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 179,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 2.5,
+        "speed_mm_s": 20,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 100,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "disabled"
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic FLEX], [filament:Generic FLEX @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-tpu.0.60",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-tpu",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic TPU",
+      "polymer_family": "TPU",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.6,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 1.125,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.45
+    },
+    "nozzle_temperature_c": 230,
+    "bed_temperature_c": 50,
+    "first_layer_nozzle_temperature_c": 230,
+    "first_layer_bed_temperature_c": 50,
+    "standby_nozzle_temperature_c": 210,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 50,
+    "flow_multiplier": 1.08,
+    "max_volumetric_flow_mm3_s": 3,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 179,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 2.5,
+        "speed_mm_s": 20,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 100,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "disabled"
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic FLEX], [filament:Generic FLEX @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  },
+  {
+    "id": "spiling.generic-tpu.0.80",
+    "revision": "1",
+    "material": {
+      "id": "spiling.generic-tpu",
+      "revision": "1",
+      "manufacturer": "Generic",
+      "product": "Generic TPU",
+      "polymer_family": "TPU",
+      "filler": null,
+      "filament_diameter_mm": 1.75,
+      "requires_abrasion_resistant_nozzle": false
+    },
+    "nozzle_diameter_mm": 0.8,
+    "hotend_id": "generic",
+    "nozzle_material": "brass",
+    "cooling_configuration_id": "part-fan",
+    "deposition_limits": {
+      "min_bead_width_mm": 0.6,
+      "max_bead_width_mm": 1.5,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.6
+    },
+    "nozzle_temperature_c": 230,
+    "bed_temperature_c": 50,
+    "first_layer_nozzle_temperature_c": 230,
+    "first_layer_bed_temperature_c": 50,
+    "standby_nozzle_temperature_c": 210,
+    "requires_heated_bed": false,
+    "print_speed_mm_s": 50,
+    "flow_multiplier": 1.08,
+    "max_volumetric_flow_mm3_s": 3,
+    "process": {
+      "first_layer_speed_factor": 1,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 77,
+      "bridge_speed_factor": 1,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 179,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 2.5,
+        "speed_mm_s": 20,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0
+      },
+      "minimum_layer_time_s": 10,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 100,
+      "fan_short_layer_pwm": 128
+    },
+    "bowden_retraction": {
+      "kind": "disabled"
+    },
+    "source": {
+      "kind": "imported_recommendation",
+      "source_id": "PrusaSlicer 2.9.4 PrusaResearch.ini [filament:Generic FLEX], [filament:Generic FLEX @MK4S]",
+      "source_revision": "2.4.0",
+      "source_hash": "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c"
+    }
+  }
+]

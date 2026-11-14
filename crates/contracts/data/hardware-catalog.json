@@ -405,6 +405,12 @@
               210
             ],
             "park_clearance_mm": 10,
+            "first_layer_nozzle_temperature_c": 200,
+            "first_layer_bed_temperature_c": 60,
+            "timing_model": {
+              "acceleration_mm_s2": 3000,
+              "junction_deviation_mm": 0.013
+            },
             "lifecycle": {
               "start": [
                 {

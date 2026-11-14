@@ -534,6 +534,13 @@ impl TryFrom<rpc::ProcessPolicy> for ProcessPolicy {
                     .map_err(|_| "fan PWM exceeds 255")?,
                 max_bridge_span_mm: value.max_bridge_span_mm,
                 retraction: required(value.retraction, "retraction policy")?.try_into()?,
+                minimum_layer_time_s: value.minimum_layer_time_s,
+                minimum_print_speed_mm_s: value.minimum_print_speed_mm_s,
+                fan_short_layer_time_s: value.fan_short_layer_time_s,
+                fan_short_layer_pwm: value
+                    .fan_short_layer_pwm
+                    .try_into()
+                    .map_err(|_| "fan PWM exceeds 255")?,
             },
             Self::validate,
         )
@@ -553,6 +560,10 @@ impl TryFrom<ProcessPolicy> for rpc::ProcessPolicy {
             bridge_fan_pwm: value.bridge_fan_pwm.into(),
             max_bridge_span_mm: value.max_bridge_span_mm,
             retraction: Some(value.retraction.try_into()?),
+            minimum_layer_time_s: value.minimum_layer_time_s,
+            minimum_print_speed_mm_s: value.minimum_print_speed_mm_s,
+            fan_short_layer_time_s: value.fan_short_layer_time_s,
+            fan_short_layer_pwm: value.fan_short_layer_pwm.into(),
         })
     }
 }
@@ -978,6 +989,12 @@ impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
                             job.lifecycle,
                             "firmware lifecycle",
                         )?)?,
+                        first_layer_nozzle_temperature_c: job.first_layer_nozzle_temperature_c,
+                        first_layer_bed_temperature_c: job.first_layer_bed_temperature_c,
+                        timing_model: job.timing_model.map(|m| PrintTimeModel {
+                            acceleration_mm_s2: m.acceleration_mm_s2,
+                            junction_deviation_mm: m.junction_deviation_mm,
+                        }),
                     },
                 }
             }
@@ -1022,6 +1039,12 @@ impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
                         park_xy_mm: job.park_xy_mm.to_vec(),
                         park_clearance_mm: job.park_clearance_mm,
                         lifecycle: Some(super::hardware::lifecycle_to_rpc(job.lifecycle)),
+                        first_layer_nozzle_temperature_c: job.first_layer_nozzle_temperature_c,
+                        first_layer_bed_temperature_c: job.first_layer_bed_temperature_c,
+                        timing_model: job.timing_model.map(|m| rpc::PrintTimeModel {
+                            acceleration_mm_s2: m.acceleration_mm_s2,
+                            junction_deviation_mm: m.junction_deviation_mm,
+                        }),
                     })
                 }
             }),
@@ -1361,6 +1384,18 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 top_skin_axis: rpc::RectilinearAxisPolicy::try_from(value.top_skin_axis)
                     .map_err(|_| "unknown top skin axis policy")?
                     .try_into()?,
+                role_speeds: value.role_speeds.map(|s| RoleSpeeds {
+                    first_layer_mm_s: s.first_layer_mm_s,
+                    outer_wall_mm_s: s.outer_wall_mm_s,
+                    inner_wall_mm_s: s.inner_wall_mm_s,
+                    sparse_infill_mm_s: s.sparse_infill_mm_s,
+                    solid_infill_mm_s: s.solid_infill_mm_s,
+                    top_skin_mm_s: s.top_skin_mm_s,
+                    support_mm_s: s.support_mm_s,
+                    bridge_mm_s: s.bridge_mm_s,
+                    first_layer_infill_mm_s: s.first_layer_infill_mm_s,
+                }),
+                first_layer_height_mm: value.first_layer_height_mm,
             },
             Self::validate,
         )
@@ -1392,6 +1427,18 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             seam_policy: Some(value.seam_policy.try_into()?),
             rectilinear_axis: rpc::RectilinearAxisPolicy::try_from(value.rectilinear_axis)? as i32,
             top_skin_axis: rpc::RectilinearAxisPolicy::try_from(value.top_skin_axis)? as i32,
+            role_speeds: value.role_speeds.map(|s| rpc::RoleSpeeds {
+                first_layer_mm_s: s.first_layer_mm_s,
+                outer_wall_mm_s: s.outer_wall_mm_s,
+                inner_wall_mm_s: s.inner_wall_mm_s,
+                sparse_infill_mm_s: s.sparse_infill_mm_s,
+                solid_infill_mm_s: s.solid_infill_mm_s,
+                top_skin_mm_s: s.top_skin_mm_s,
+                support_mm_s: s.support_mm_s,
+                bridge_mm_s: s.bridge_mm_s,
+                first_layer_infill_mm_s: s.first_layer_infill_mm_s,
+            }),
+            first_layer_height_mm: value.first_layer_height_mm,
         })
     }
 }
@@ -1712,6 +1759,10 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
                 support_filament_length_mm: value.support_filament_length_mm,
                 retraction_count: value.retraction_count,
                 retracted_filament_mm: value.retracted_filament_mm,
+                flow_limited_segments: value.flow_limited_segments,
+                cooling_slowed_layers: value.cooling_slowed_layers,
+                minimum_cooling_scale: value.minimum_cooling_scale,
+                estimated_seconds: value.estimated_seconds,
             },
             Self::validate,
         )
@@ -1741,6 +1792,10 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
             support_filament_length_mm: value.support_filament_length_mm,
             retraction_count: value.retraction_count,
             retracted_filament_mm: value.retracted_filament_mm,
+            flow_limited_segments: value.flow_limited_segments,
+            cooling_slowed_layers: value.cooling_slowed_layers,
+            minimum_cooling_scale: value.minimum_cooling_scale,
+            estimated_seconds: value.estimated_seconds,
         })
     }
 }
@@ -2408,6 +2463,10 @@ mod tests {
             support_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
+            flow_limited_segments: 0,
+            cooling_slowed_layers: 0,
+            minimum_cooling_scale: 1.0,
+            estimated_seconds: None,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);
@@ -2461,6 +2520,9 @@ mod job_wire_tests {
                 park_xy_mm: [low[0], low[1]],
                 park_clearance_mm: 10.0,
                 lifecycle: FirmwareLifecycle::software_reference(),
+                first_layer_nozzle_temperature_c: 200.0,
+                first_layer_bed_temperature_c: 60.0,
+                timing_model: None,
             },
         };
         let wire = rpc::ManufacturingIntent::try_from(intent.clone()).unwrap();
@@ -3859,6 +3921,10 @@ mod routed_report_wire_tests {
             retraction_count: 2,
             retracted_filament_mm: 2.0,
             routing: Some(routing.clone()),
+            flow_limited_segments: 0,
+            cooling_slowed_layers: 0,
+            minimum_cooling_scale: 1.0,
+            estimated_seconds: None,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);
@@ -4116,6 +4182,7 @@ impl TryFrom<rpc::MaterialToolSetup> for MaterialToolSetup {
                     "abrasion_resistant_nozzle",
                 )?,
                 cooling_configuration_id: value.cooling_configuration_id,
+                extruder_drive: drive_from_rpc(value.extruder_drive)?,
             },
             Self::validate,
         )
@@ -4131,6 +4198,7 @@ impl TryFrom<MaterialToolSetup> for rpc::MaterialToolSetup {
             nozzle_material: value.nozzle_material,
             abrasion_resistant_nozzle: Some(value.abrasion_resistant_nozzle),
             cooling_configuration_id: value.cooling_configuration_id,
+            extruder_drive: drive_to_rpc(value.extruder_drive),
         })
     }
 }
@@ -4188,6 +4256,12 @@ impl TryFrom<rpc::MaterialProcessProfile> for MaterialProcessProfile {
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
                 process: required(value.process, "process")?.try_into()?,
                 source: required(value.source, "source")?.try_into()?,
+                first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+                first_layer_bed_temperature_c: value.first_layer_bed_temperature_c,
+                standby_nozzle_temperature_c: value.standby_nozzle_temperature_c,
+                requires_heated_bed: value.requires_heated_bed,
+                bowden_retraction: required(value.bowden_retraction, "bowden retraction")?
+                    .try_into()?,
             },
             Self::validate,
         )
@@ -4214,6 +4288,11 @@ impl TryFrom<MaterialProcessProfile> for rpc::MaterialProcessProfile {
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
             process: Some(value.process.try_into()?),
             source: Some(value.source.try_into()?),
+            first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+            first_layer_bed_temperature_c: value.first_layer_bed_temperature_c,
+            standby_nozzle_temperature_c: value.standby_nozzle_temperature_c,
+            requires_heated_bed: value.requires_heated_bed,
+            bowden_retraction: Some(value.bowden_retraction.try_into()?),
         })
     }
 }
@@ -4228,6 +4307,8 @@ impl TryFrom<rpc::MaterialProfileOverrides> for MaterialProfileOverrides {
                 print_speed_mm_s: value.print_speed_mm_s,
                 flow_multiplier: value.flow_multiplier,
                 process: value.process.map(TryInto::try_into).transpose()?,
+                first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+                first_layer_bed_temperature_c: value.first_layer_bed_temperature_c,
             },
             Self::validate,
         )
@@ -4243,6 +4324,8 @@ impl TryFrom<MaterialProfileOverrides> for rpc::MaterialProfileOverrides {
             print_speed_mm_s: value.print_speed_mm_s,
             flow_multiplier: value.flow_multiplier,
             process: value.process.map(TryInto::try_into).transpose()?,
+            first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+            first_layer_bed_temperature_c: value.first_layer_bed_temperature_c,
         })
     }
 }
@@ -4585,5 +4668,19 @@ impl TryFrom<MaterialCandidateReview> for rpc::MaterialCandidateReview {
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
         })
+    }
+}
+
+pub(super) fn drive_to_rpc(drive: ExtruderDrive) -> i32 {
+    (match drive {
+        ExtruderDrive::DirectDrive => rpc::ExtruderDrive::DirectDrive,
+        ExtruderDrive::Bowden => rpc::ExtruderDrive::Bowden,
+    }) as i32
+}
+pub(super) fn drive_from_rpc(value: i32) -> Result<ExtruderDrive, String> {
+    match rpc::ExtruderDrive::try_from(value) {
+        Ok(rpc::ExtruderDrive::DirectDrive) => Ok(ExtruderDrive::DirectDrive),
+        Ok(rpc::ExtruderDrive::Bowden) => Ok(ExtruderDrive::Bowden),
+        _ => Err("unknown extruder drive".into()),
     }
 }

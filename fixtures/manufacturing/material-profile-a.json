@@ -36,7 +36,11 @@
       "max_bridge_span_mm": 10,
       "retraction": {
         "kind": "disabled"
-      }
+      },
+      "minimum_layer_time_s": 0,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 0,
+      "fan_short_layer_pwm": 255
     },
     "source": {
       "kind": "synthetic_test",
@@ -45,19 +49,29 @@
       "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
     },
     "hotend_id": "synthetic-hotend-1",
-    "nozzle_material": "brass"
+    "nozzle_material": "brass",
+    "first_layer_nozzle_temperature_c": 200,
+    "first_layer_bed_temperature_c": 60,
+    "standby_nozzle_temperature_c": 150,
+    "requires_heated_bed": false,
+    "bowden_retraction": {
+      "kind": "disabled"
+    }
   },
   "setup": {
     "nozzle_material": "brass",
     "abrasion_resistant_nozzle": false,
     "cooling_configuration_id": "synthetic-cooling-1",
-    "hotend_id": "synthetic-hotend-1"
+    "hotend_id": "synthetic-hotend-1",
+    "extruder_drive": "direct_drive"
   },
   "overrides": {
     "nozzle_temperature_c": null,
     "bed_temperature_c": null,
     "print_speed_mm_s": null,
     "flow_multiplier": null,
-    "process": null
+    "process": null,
+    "first_layer_nozzle_temperature_c": null,
+    "first_layer_bed_temperature_c": null
   }
 }

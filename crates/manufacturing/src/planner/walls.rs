@@ -995,6 +995,10 @@ fn assemble(
                 physical_z_mm: [lower_z, upper_z],
                 points_mm,
                 arcs: Vec::new(),
+                // Every edge on the outermost lane: against the part's surface.
+                external_wall: correspondence[correspondence_base..]
+                    .iter()
+                    .all(|c| c.ordinal == 0),
             };
             let original = fitting::OriginalPath {
                 edges,

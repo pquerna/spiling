@@ -571,6 +571,7 @@ fn wall_piece(
             owner: None,
             points_mm: vec![from, to],
             arcs: Vec::new(),
+            external_wall: false,
         });
     }
     Ok(())

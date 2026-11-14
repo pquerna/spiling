@@ -586,6 +586,7 @@ mod tests {
             physical_z_mm: interval,
             points_mm: points,
             arcs: Vec::new(),
+            external_wall: false,
         };
         let base = MaterialConstructionRole::FunctionalBase;
         let region = MaterialConstructionRole::FunctionalRegion;

@@ -1813,6 +1813,7 @@ fn admit_schedule<'model>(
                     physical_z_mm: [elevation.lower_z, z],
                     points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
                     arcs: Vec::new(),
+                    external_wall: false,
                 });
             }
             let mut coverage = coverage.clone();
@@ -3314,8 +3315,9 @@ fn goal_layer_schedule(
         LayerHeightPolicy::ProtectedMaximum => (0.0, nominal),
     };
     let merge_mm = intent.printer.motion_resolution.z_mm;
+    let first = intent.recipe.first_layer_height_mm;
     let schedule =
-        layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events, merge_mm)?;
+        layer_schedule_with_bounds(bed, top, nominal, minimum, maximum, events, merge_mm, first)?;
     let command_admitted = |layer: &LayerElevation| -> Result<bool, ManufacturingError> {
         Ok(
             intent.admits_deposition(intent.recipe.bead_width_mm, layer.z - layer.lower_z)
@@ -3342,6 +3344,7 @@ fn goal_layer_schedule(
                     .min(intent.recipe.bead_width_mm),
                 events,
                 merge_mm,
+                first,
             );
         }
     }
@@ -3358,9 +3361,25 @@ fn layer_schedule(
     nominal: f64,
     events: &[f64],
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
-    layer_schedule_with_bounds(bed, top, nominal, 0.0, nominal, events, REFERENCE_Z_STEP_MM)
+    layer_schedule_with_bounds(
+        bed,
+        top,
+        nominal,
+        0.0,
+        nominal,
+        events,
+        REFERENCE_Z_STEP_MM,
+        None,
+    )
 }
 
+/// `first`, when set, is the first layer's height above the bed: one
+/// boundary there, and that interval is one layer (a native event inside it
+/// still splits it).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one schedule over explicit captured bounds; no hidden policy struct"
+)]
 fn layer_schedule_with_bounds(
     bed: f64,
     top: f64,
@@ -3369,6 +3388,7 @@ fn layer_schedule_with_bounds(
     maximum: f64,
     events: &[f64],
     merge_mm: f64,
+    first: Option<f64>,
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
     // ADR012: heights closer than the printer's Z step are one commanded
     // height. The bed and top anchor; otherwise the lowest of a cluster stays,
@@ -3404,7 +3424,10 @@ fn layer_schedule_with_bounds(
             + 2,
     );
     boundaries.extend([bed, top]);
-    for event in sorted {
+    let first_end = first
+        .map(|height| bed + height)
+        .filter(|z| top - *z > merge_mm);
+    for event in first_end.into_iter().chain(sorted) {
         let position = boundaries.partition_point(|boundary| *boundary < event);
         if event - boundaries[position - 1] <= merge_mm || boundaries[position] - event <= merge_mm
         {
@@ -3420,6 +3443,9 @@ fn layer_schedule_with_bounds(
     }
     let subdivisions = |start: f64, end: f64| -> Result<usize, ManufacturingError> {
         let width = end - start;
+        if start == bed && Some(end) == first_end && width <= maximum {
+            return Ok(1);
+        }
         let ratio = (width / nominal).floor().max(1.0);
         if !width.is_finite()
             || width <= 0.0

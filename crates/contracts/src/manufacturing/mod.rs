@@ -501,6 +501,7 @@ enum PathField {
     MaterialDomain,
     PointsMm,
     Arcs,
+    ExternalWall,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
@@ -516,6 +517,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
                 "material_domain",
                 "points_mm",
                 "arcs",
+                "external_wall",
             ],
             self,
         )
@@ -534,6 +536,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let mut physical_z_mm = None;
         let mut points_mm = None;
         let mut arcs = None;
+        let mut external_wall = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
                 PathField::MaterialDomain => {
@@ -578,6 +581,12 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     arcs = Some(map.next_value_seed(ArcsSeed(&mut *self.0))?);
                 }
+                PathField::ExternalWall => {
+                    if external_wall.is_some() {
+                        return Err(serde::de::Error::duplicate_field("external_wall"));
+                    }
+                    external_wall = Some(map.next_value()?);
+                }
             }
         }
         let path = DepositionPath {
@@ -591,6 +600,8 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
             // An omitted list is an empty one: the path has no arc runs.
             arcs: arcs.unwrap_or_default(),
+            // Omitted, like arcs, when false: an inner or non-wall path.
+            external_wall: external_wall.unwrap_or_default(),
         };
         path.validate_owner().map_err(serde::de::Error::custom)?;
         Ok(path)
@@ -1166,6 +1177,8 @@ pub struct PlanarPrintRecipe {
     pub infill_fraction: f64,
     pub top_skin_thickness_mm: f64,
     pub bottom_skin_thickness_mm: f64,
+    /// Uniform deposition speed when `role_speeds` is null; with role speeds,
+    /// the material's cap on every deposition speed.
     pub print_speed_mm_s: f64,
     pub travel_speed_mm_s: f64,
     pub flow_multiplier: f64,
@@ -1174,7 +1187,62 @@ pub struct PlanarPrintRecipe {
     pub seam_policy: SeamPolicy,
     pub rectilinear_axis: RectilinearAxisPolicy,
     pub top_skin_axis: RectilinearAxisPolicy,
+    /// Per-role deposition speeds; null keeps the uniform `print_speed_mm_s`
+    /// with the process first-layer/bridge speed factors. See
+    /// [`speeds`] for the rule, including the flow and cooling slowdowns.
+    #[serde(deserialize_with = "required_option")]
+    pub role_speeds: Option<RoleSpeeds>,
+    /// Height of the first layer above the bed; null schedules it like any
+    /// other layer.
+    #[serde(deserialize_with = "required_option")]
+    pub first_layer_height_mm: Option<f64>,
 }
+/// Deposition speeds by role, mm/s. Travel stays `travel_speed_mm_s`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RoleSpeeds {
+    /// Cap on first-layer walls.
+    pub first_layer_mm_s: f64,
+    /// Cap on every other first-layer deposition (infill, skin, support).
+    pub first_layer_infill_mm_s: f64,
+    pub outer_wall_mm_s: f64,
+    pub inner_wall_mm_s: f64,
+    pub sparse_infill_mm_s: f64,
+    /// Solid infill and bottom skin.
+    pub solid_infill_mm_s: f64,
+    pub top_skin_mm_s: f64,
+    /// Support and support interface.
+    pub support_mm_s: f64,
+    pub bridge_mm_s: f64,
+}
+impl RoleSpeeds {
+    pub fn all(&self) -> [f64; 9] {
+        [
+            self.first_layer_mm_s,
+            self.first_layer_infill_mm_s,
+            self.outer_wall_mm_s,
+            self.inner_wall_mm_s,
+            self.sparse_infill_mm_s,
+            self.solid_infill_mm_s,
+            self.top_skin_mm_s,
+            self.support_mm_s,
+            self.bridge_mm_s,
+        ]
+    }
+    pub fn validate(&self, max_print_feed_mm_s: f64) -> Result<(), ManufacturingError> {
+        positive(&self.all())?;
+        if self.all().iter().any(|speed| {
+            !(speed * 60.0).is_finite() || speed * 60.0 < 0.000001 || *speed > max_print_feed_mm_s
+        }) {
+            return Err(invalid(
+                "role speeds must be representable and within the printer print feed",
+            ));
+        }
+        Ok(())
+    }
+}
+pub mod speeds;
+
 /// ADR012 profile tolerance `ε_xy`: the one recorded bound on section
 /// deviation from the true surface, never a per-recipe choice.
 pub const PROFILE_TOLERANCE_MM: f64 = 0.01;
@@ -1253,6 +1321,17 @@ impl PlanarPrintRecipe {
             ));
         }
         validate_global_infill_fraction(self.infill_fraction)?;
+        if let Some(first) = self.first_layer_height_mm
+            && (!first.is_finite()
+                || first <= 0.0
+                || first > self.bead_width_mm
+                || (self.layer_height_policy == LayerHeightPolicy::ProtectedMaximum
+                    && first > self.layer_height_mm))
+        {
+            return Err(invalid(
+                "first layer height must be positive, at most the bead width and, under a protected maximum, at most the layer height",
+            ));
+        }
         Ok(())
     }
 }
@@ -1319,6 +1398,26 @@ impl ManufacturingIntent {
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
+        if let Some(speeds) = &r.role_speeds {
+            speeds.validate(p.max_print_feed_mm_s)?;
+        }
+        if let Some(first) = r.first_layer_height_mm
+            && !self.admits_deposition(r.bead_width_mm, first)
+        {
+            return Err(invalid(
+                "first layer height exceeds the printer/material deposition envelope",
+            ));
+        }
+        let routed = matches!(p.workflow, JobWorkflow::FixedDualMarlin { .. });
+        if routed
+            && (r.role_speeds.is_some()
+                || r.first_layer_height_mm.is_some()
+                || r.process.minimum_layer_time_s > 0.0)
+        {
+            return Err(invalid(
+                "role speeds, a first-layer height and cooling slowdown currently require a single-tool workflow",
+            ));
+        }
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
             if matches!(
                 r.sparse_infill,
@@ -1329,6 +1428,11 @@ impl ManufacturingIntent {
                 ));
             }
             for tool in &job.tools {
+                if tool.process(r).minimum_layer_time_s > 0.0 {
+                    return Err(invalid(
+                        "cooling slowdown currently requires a single-tool workflow",
+                    ));
+                }
                 if tool.process(r).max_bridge_span_mm != r.process.max_bridge_span_mm {
                     return Err(invalid(
                         "tool-specific bridge span requires a qualified regional anchor consumer",
@@ -1419,7 +1523,8 @@ impl ManufacturingIntent {
             || filament_area <= 0.0
             || !flow.is_finite()
             || flow <= 0.0
-            || flow > self.effective_max_volumetric_flow_mm3_s()
+            // A single-tool deposition slows to the flow ceiling instead.
+            || (routed && flow > self.effective_max_volumetric_flow_mm3_s())
             || !extrusion_per_mm.is_finite()
             || extrusion_per_mm <= 0.0
             || r.print_speed_mm_s > p.max_print_feed_mm_s
@@ -1455,7 +1560,7 @@ impl ManufacturingIntent {
                 || process_extrusion <= 0.0
                 || !process_flow.is_finite()
                 || process_flow <= 0.0
-                || process_flow > self.effective_max_volumetric_flow_mm3_s()
+                || (routed && process_flow > self.effective_max_volumetric_flow_mm3_s())
             {
                 return Err(invalid(
                     "process override exceeds printer feed/flow or serialized precision",
@@ -1747,6 +1852,12 @@ pub struct DepositionPath {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<ArcRun>>", optional)]
     pub arcs: Vec<ArcRun>,
+    /// The wall bead against the part's surface (outermost lane of its
+    /// boundary): it takes the outer-wall speed. Only a Wall-owned path may
+    /// set it (a wall lowered to Bridge keeps it); serialized only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub external_wall: bool,
 }
 
 /// Largest distance of a run's points from its circle. The commanded arc and
@@ -1984,7 +2095,7 @@ impl DepositionPath {
             }
             _ => self.owner.is_none(),
         };
-        if !valid {
+        if !valid || (self.external_wall && self.owner != Some(DepositionOwner::Wall)) {
             return Err(invalid(
                 "deposition role disagrees with immutable construction ownership",
             ));
@@ -3743,11 +3854,14 @@ impl NormalizedPrintPlan {
                         * process.flow_multiplier
                         * first_flow
                         * bridge_flow;
+                    // A single-tool edge slows to the flow ceiling ([`speeds`]);
+                    // a routed job's admitted speed must already fit it.
                     if !area.is_finite()
                         || area <= 0.0
                         || !feed.is_finite()
                         || feed < 0.000001
-                        || area * feed / 60.0 > process.max_volumetric_flow_mm3_s
+                        || (owning_tool.is_some()
+                            && area * feed / 60.0 > process.max_volumetric_flow_mm3_s)
                     {
                         return Err(invalid(
                             "path dimensions exceed emitted-feed volumetric flow limit",
@@ -4156,9 +4270,30 @@ pub struct VerificationReport {
     pub retracted_filament_mm: f64,
     #[serde(deserialize_with = "required_option")]
     pub routing: Option<FixedDualVerification>,
+    /// Object/support deposition segments whose feed the volumetric flow
+    /// ceiling lowered below their role speed.
+    pub flow_limited_segments: u32,
+    /// Layers slowed to meet the minimum layer time, and the smallest uniform
+    /// speed scale among them (1 when none).
+    pub cooling_slowed_layers: u32,
+    pub minimum_cooling_scale: f64,
+    /// Print time estimated from the decoded commands under the job's
+    /// declared print-time model; null without one. Not a measurement.
+    #[serde(deserialize_with = "required_option")]
+    pub estimated_seconds: Option<f64>,
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if !(self.minimum_cooling_scale > 0.0 && self.minimum_cooling_scale <= 1.0)
+            || (self.cooling_slowed_layers == 0) != (self.minimum_cooling_scale == 1.0)
+            || self
+                .estimated_seconds
+                .is_some_and(|t| !t.is_finite() || t < 0.0)
+        {
+            return Err(invalid(
+                "verification speed report or print-time estimate is inconsistent",
+            ));
+        }
         if let Some(time) = &self.job_time {
             time.validate()?;
             let route = self

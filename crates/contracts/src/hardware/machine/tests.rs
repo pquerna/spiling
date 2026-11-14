@@ -146,6 +146,7 @@ fn inheritance_refuses_cycles_missing_facts_and_foreign_defaults() {
         arc_moves: None,
         printer_model: None,
         limits: vec![],
+        extruder_drive: None,
     };
     let cycle = [base("a", Some("b")), base("b", Some("a"))];
     assert!(

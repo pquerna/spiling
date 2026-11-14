@@ -493,6 +493,7 @@ impl Actor {
                         nozzle_material: profile.nozzle_material.clone(),
                         abrasion_resistant_nozzle: false,
                         cooling_configuration_id: profile.cooling_configuration_id.clone(),
+                        extruder_drive: ExtruderDrive::DirectDrive,
                     });
                 self.nonce += 1;
                 Arc::make_mut(&mut self.state.manufacturing).loaded_material =
@@ -517,6 +518,8 @@ impl Actor {
                                 print_speed_mm_s: None,
                                 flow_multiplier: None,
                                 process: None,
+                                first_layer_nozzle_temperature_c: None,
+                                first_layer_bed_temperature_c: None,
                             },
                         },
                     }));

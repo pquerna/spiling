@@ -504,12 +504,18 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
                 bridge_fan_pwm: 0,
                 max_bridge_span_mm: 10.0,
                 retraction: spiling_contracts::manufacturing::RetractionPolicy::Disabled,
+                minimum_layer_time_s: 0.0,
+                minimum_print_speed_mm_s: 10.0,
+                fan_short_layer_time_s: 0.0,
+                fan_short_layer_pwm: 255,
             },
             supports: spiling_contracts::manufacturing::SupportPolicy::Disabled,
             seam_policy: spiling_contracts::manufacturing::SeamPolicy::Nearest,
             rectilinear_axis:
                 spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
             top_skin_axis: spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
+            role_speeds: None,
+            first_layer_height_mm: None,
         },
     }
 }
@@ -650,6 +656,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                     ),
                     points_mm: vec![[1.0, 1.0, 0.2], end],
                     arcs: Vec::new(),
+                    external_wall: false,
                 }],
                 region_coverage,
             }],
@@ -686,6 +693,10 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             retraction_count: 0,
             retracted_filament_mm: 0.0,
             routing: None,
+            flow_limited_segments: 0,
+            cooling_slowed_layers: 0,
+            minimum_cooling_scale: 1.0,
+            estimated_seconds: None,
         },
     }
 }

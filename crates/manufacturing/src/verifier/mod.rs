@@ -739,7 +739,13 @@ pub(crate) fn verify_actual(
         cancel,
     )?;
     let mut expected =
-        expected::Expected::new(plan, recipe, initial_position, route_router.as_ref()).peekable();
+        expected::Expected::new(plan, intent, initial_position, route_router.as_ref()).peekable();
+    // The declared cooling decision of the layer being replayed, and the
+    // speed report: layers slowed for cooling and flow-limited segments.
+    let mut cooling: Option<(u32, speeds::LayerCooling)> = None;
+    let mut cooling_slowed_layers = 0u32;
+    let mut minimum_cooling_scale = 1.0f64;
+    let mut flow_limited_segments = 0u32;
     // A complete single-extruder job commands relative E (M83): each decoded
     // E word is a delta, accumulated here on the exact E8 lattice into the
     // absolute position every later check consumes.
@@ -769,7 +775,11 @@ pub(crate) fn verify_actual(
         JobWorkflow::DiagnosticBodyOnly | JobWorkflow::FixedDualMarlin { .. } => None,
         JobWorkflow::CompleteMarlin { job } => Some(job),
     };
-    let mut lifecycle = job.map(|job| lifecycle::Lifecycle::new(job, printer));
+    let mut lifecycle = job.map(|job| lifecycle::Lifecycle::new(job, printer, plan));
+    let mut estimate = job
+        .and_then(|job| job.timing_model.as_ref())
+        .map(cost::PrintTimeEstimate::new)
+        .transpose()?;
     let max_line = printer.capabilities.output_dialect.max_line_bytes();
     let mut max_z = f64::NEG_INFINITY;
     let mut priming_filament_length_mm = 0.0;
@@ -847,6 +857,9 @@ pub(crate) fn verify_actual(
         ) && let Some(z) = decoded.fields[2]
         {
             max_z = max_z.max(z);
+        }
+        if let Some(estimate) = &mut estimate {
+            estimate.observe(&decoded, &state)?;
         }
         if let Some(time) = &mut time {
             time.observe(
@@ -1003,10 +1016,22 @@ pub(crate) fn verify_actual(
                     fan_state = Some(pwm);
                     continue 'lines;
                 }
+                expected::Action::NozzleTarget(target) => {
+                    if decoded.command != Command::NozzleOff || decoded.fields[5] != Some(target) {
+                        return Err(failed("missing or mutated later-layer nozzle target"));
+                    }
+                    continue 'lines;
+                }
+                expected::Action::BedTarget(target) => {
+                    if decoded.command != Command::BedOff || decoded.fields[5] != Some(target) {
+                        return Err(failed("missing or mutated later-layer bed target"));
+                    }
+                    continue 'lines;
+                }
                 expected::Action::Recovery {
                     retract,
                     layer,
-                    role,
+                    speed_role: role,
                 } => {
                     let RetractionPolicy::Enabled {
                         distance_mm,
@@ -1025,13 +1050,14 @@ pub(crate) fn verify_actual(
                             "missing, reordered or nonstationary retraction/recovery",
                         ));
                     }
-                    let pwm = if role == DepositionKind::Bridge {
-                        recipe.process.bridge_fan_pwm
-                    } else if layer == 0 {
-                        recipe.process.fan_first_layers
-                    } else {
-                        recipe.process.fan_after_first_layers
+                    let short = match cooling.filter(|(index, _)| *index == layer) {
+                        Some((_, c)) => c.short,
+                        None => {
+                            speeds::layer_cooling(intent, &plan.layers[layer as usize], layer)?
+                                .short
+                        }
                     };
+                    let pwm = speeds::path_fan_pwm(&recipe.process, role, layer, short);
                     if fan_state != Some(pwm)
                         || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
                     {
@@ -1090,6 +1116,7 @@ pub(crate) fn verify_actual(
                     source,
                     layer,
                     role,
+                    speed_role,
                     association,
                     closes_wall,
                     arc,
@@ -1098,12 +1125,13 @@ pub(crate) fn verify_actual(
                     source,
                     tool,
                     layer,
-                    role,
+                    (role, speed_role),
                     association,
                     closes_wall,
                     arc,
                 ),
             };
+            let (deposition_kind, move_speed_role) = deposition_kind;
             let (decoded, arc_segment) = match arc_replay.as_mut() {
                 Some(replay) => {
                     let (virtual_move, segment) = replay.step(target, source, run_start)?;
@@ -1125,13 +1153,22 @@ pub(crate) fn verify_actual(
                 layer_support_volume = 0.0;
             }
             let process = intent.process_for_tool(source_tool)?;
-            let wanted_fan = if deposition_kind == DepositionKind::Bridge {
-                process.policy.bridge_fan_pwm
-            } else if layer_index == 0 {
-                process.policy.fan_first_layers
-            } else {
-                process.policy.fan_after_first_layers
-            };
+            if cooling.is_none_or(|(index, _)| index != layer_index) {
+                let layer =
+                    speeds::layer_cooling(intent, &plan.layers[layer_index as usize], layer_index)?;
+                if layer.slowed() {
+                    cooling_slowed_layers = count_event(cooling_slowed_layers)?;
+                    minimum_cooling_scale = minimum_cooling_scale.min(layer.scale);
+                }
+                cooling = Some((layer_index, layer));
+            }
+            let layer_cooling = cooling.map_or(speeds::LayerCooling::NONE, |(_, c)| c);
+            let wanted_fan = speeds::path_fan_pwm(
+                process.policy,
+                move_speed_role,
+                layer_index,
+                layer_cooling.short,
+            );
             if fan_state != Some(wanted_fan) {
                 return Err(failed(
                     "motion without independently decoded queued process fan state",
@@ -1208,15 +1245,32 @@ pub(crate) fn verify_actual(
             }
             max_position_error_mm = max_position_error_mm.max(distance(position, target));
             let feed = decoded.fields[4].ok_or_else(|| failed("missing feed"))?;
-            let mut process_speed = process.speed_mm_s;
-            let mut process_flow = process.flow_multiplier;
-            if layer_index == 0 {
-                process_speed *= process.policy.first_layer_speed_factor;
-                process_flow *= process.policy.first_layer_flow_factor;
-            }
-            if deposition_kind == DepositionKind::Bridge {
-                process_speed *= process.policy.bridge_speed_factor;
-                process_flow *= process.policy.bridge_flow_factor;
+            let process_flow = speeds::flow_factor(&process, deposition_kind, layer_index);
+            // The declared speed rule: role speed, the volumetric flow
+            // ceiling at this edge's width and the layer's cooling scale.
+            let mut process_speed = 0.0;
+            if let Some(association) = association {
+                let base = speeds::base_speed_mm_s(
+                    recipe,
+                    &process,
+                    move_speed_role,
+                    association.external_wall,
+                    layer_index,
+                )
+                .min(printer.max_print_feed_mm_s);
+                let (unslowed, limited) = speeds::flow_limited_speed_mm_s(
+                    base,
+                    association.width,
+                    association.physical_z[1] - association.physical_z[0],
+                    process_flow,
+                    process.max_volumetric_flow_mm3_s,
+                    route.is_some(),
+                );
+                if limited {
+                    flow_limited_segments = count_event(flow_limited_segments)?;
+                }
+                process_speed =
+                    layer_cooling.speed_mm_s(unslowed, recipe.process.minimum_print_speed_mm_s);
             }
             let volume_per_mm = association.map_or(0.0, |association| {
                 let height = association.physical_z[1] - association.physical_z[0];
@@ -1652,6 +1706,10 @@ pub(crate) fn verify_actual(
         retraction_count,
         retracted_filament_mm,
         routing,
+        flow_limited_segments,
+        cooling_slowed_layers,
+        minimum_cooling_scale,
+        estimated_seconds: estimate.map(cost::PrintTimeEstimate::finish).transpose()?,
     };
     let mut unsupported_layers = 0usize;
     let mut largest_recorded_span = 0.0_f64;
@@ -1690,6 +1748,9 @@ pub(crate) fn verify_actual(
     }
     if omitted_wall_layers > 0 {
         report.limitations.insert(0, format!("Support wall omitted on {omitted_wall_layers} layers where no minimum-length command fits the support domain; {omitted_wall_mm:.4} mm in total."));
+    }
+    if report.flow_limited_segments > 0 || report.cooling_slowed_layers > 0 {
+        report.limitations.insert(0, format!("Speeds lowered to meet declared limits: {} deposition segments slowed to the volumetric flow ceiling; {} layers slowed to the minimum layer time {:.1} s (slowest at {:.0}% of its speed).", report.flow_limited_segments, report.cooling_slowed_layers, recipe.process.minimum_layer_time_s, report.minimum_cooling_scale * 100.0));
     }
     if unsupported_layers > 0 {
         report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no support reached from the build plate; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));

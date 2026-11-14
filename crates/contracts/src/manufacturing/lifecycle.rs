@@ -84,7 +84,8 @@ impl BlockEffects {
     };
 }
 
-/// Placeholders a block line may contain; each renders as integral Celsius.
+/// Placeholders a block line may contain; each renders the first-layer
+/// target (the temperature the start sequence heats to) as integral Celsius.
 pub const BLOCK_PLACEHOLDERS: [&str; 2] = ["{bed_temperature_c}", "{nozzle_temperature_c}"];
 
 /// Opaque operator/printer lines, emitted verbatim after placeholder
@@ -215,12 +216,14 @@ pub enum LifecycleStep {
     ModelCheck {
         model: String,
     },
-    /// `M140 S<bed>`.
+    /// `M140 S<bed>` at the first-layer bed temperature.
     BedTarget,
-    /// Wait for the bed at the job temperature (`M190 R`, Klipper `M190 S`).
+    /// Wait for the bed at the first-layer temperature (`M190 R`, Klipper
+    /// `M190 S`). An off (0 °C) bed has neither step.
     BedWait,
-    /// `M104 S<t>`: the standby temperature, capped at the job nozzle
-    /// temperature, or the job nozzle temperature when `standby_c` is null.
+    /// `M104 S<t>`: the standby temperature (a material profile supplies it),
+    /// capped at the first-layer nozzle temperature, or the first-layer
+    /// nozzle temperature when `standby_c` is null.
     NozzleTarget {
         #[serde(deserialize_with = "required_option")]
         standby_c: Option<f64>,
@@ -359,7 +362,10 @@ impl FirmwareLifecycle {
                     if !s.modes || !s.extrusion_zero {
                         return refuse("priming requires established modes and E at zero");
                     }
-                    if s.bed != Heat::Wait || s.nozzle != Nozzle::Print(Heat::Wait) {
+                    // An off (0 °C) bed has nothing to wait for.
+                    let bed_ready = s.bed == Heat::Wait
+                        || (job.first_layer_bed_temperature_c == 0.0 && s.bed == Heat::Off);
+                    if !bed_ready || s.nozzle != Nozzle::Print(Heat::Wait) {
                         return refuse("priming requires waited bed and nozzle temperatures");
                     }
                     // The prime travel is a full absolute XYZ move.
@@ -474,6 +480,13 @@ fn apply(
             {
                 return Err(invalid("printer model check must be a short identifier"));
             }
+        }
+        LifecycleStep::BedTarget | LifecycleStep::BedWait
+            if job.first_layer_bed_temperature_c == 0.0 =>
+        {
+            return Err(invalid(
+                "an off (0 °C) first-layer bed has no bed target or wait step",
+            ));
         }
         LifecycleStep::BedTarget => s.bed = s.bed.max(Heat::Target),
         LifecycleStep::BedWait => s.bed = Heat::Wait,

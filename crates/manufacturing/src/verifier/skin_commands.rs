@@ -265,7 +265,14 @@ fn check_masks(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let fixed = 1 - along;
-    let construction = [path.points_mm[0], path.points_mm[1]];
+    // A fitted row lengthened as a Bridge reaches its anchors beyond the
+    // fitted command; that extension is proved by the bridge's own lower
+    // anchor check. The fit's masks bind the fitted command itself.
+    let construction = if path.kind == DepositionKind::Bridge {
+        fit.fitted_mm
+    } else {
+        [path.points_mm[0], path.points_mm[1]]
+    };
     let width = constant_width(path)?;
     let solid_spacing =
         ((width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2)) / height;

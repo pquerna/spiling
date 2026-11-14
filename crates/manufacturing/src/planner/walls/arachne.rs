@@ -245,6 +245,8 @@ pub(super) fn plan(
             }),
         );
         let constant = edge_widths.iter().all(|w| *w == edge_widths[0]);
+        // Lane 0 lies against its boundary: the part's surface.
+        let external_wall = chain.lane == 0;
         paths.push(DepositionPath {
             material_domain: None,
             kind: DepositionKind::Perimeter,
@@ -264,6 +266,7 @@ pub(super) fn plan(
                 .map(|p| [p[0], p[1], request.upper_z])
                 .collect(),
             arcs: Vec::new(),
+            external_wall,
         });
     }
     // A section thinner than the minimum feature everywhere has no bead;

@@ -384,6 +384,10 @@ message VerificationReport {
   uint32 retraction_count = 15;
   double retracted_filament_mm = 16;
   FixedDualVerification routing = 17;
+  uint32 flow_limited_segments = 20;
+  uint32 cooling_slowed_layers = 21;
+  double minimum_cooling_scale = 22;
+  optional double estimated_seconds = 23;
 }
 
 // Actual replay qualifies nominal layer/owner associations; no measured optics.

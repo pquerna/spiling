@@ -788,6 +788,7 @@ mod dimension_tests {
                         [x + 3.0, -2.0, 0.2],
                     ],
                     arcs: Vec::new(),
+                    external_wall: false,
                 }
             })
             .collect::<Vec<_>>();
@@ -871,6 +872,7 @@ mod dimension_tests {
             physical_z_mm: [0.0, 0.2],
             points_mm: vec![[1000.0, 1000.0, 0.2], [1001.0, 1000.0, 0.2]],
             arcs: Vec::new(),
+            external_wall: false,
         };
         let cancel = AtomicBool::new(false);
         for invalid in 0..3 {

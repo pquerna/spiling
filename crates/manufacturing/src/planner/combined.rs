@@ -921,6 +921,7 @@ fn align_to_landing(
                 .map(|p| [p[0], p[1], hatch.z])
                 .collect(),
             arcs: Vec::new(),
+            external_wall: false,
         });
     }
     Ok(result)

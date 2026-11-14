@@ -29,7 +29,11 @@
       "max_bridge_span_mm": 5,
       "retraction": {
         "kind": "disabled"
-      }
+      },
+      "minimum_layer_time_s": 0,
+      "minimum_print_speed_mm_s": 10,
+      "fan_short_layer_time_s": 0,
+      "fan_short_layer_pwm": 255
     },
     "supports": {
       "kind": "disabled"
@@ -38,7 +42,9 @@
       "kind": "nearest"
     },
     "rectilinear_axis": "alternating_xy",
-    "top_skin_axis": "alternating_xy"
+    "top_skin_axis": "alternating_xy",
+    "role_speeds": null,
+    "first_layer_height_mm": null
   },
   "laws": {
     "name": "Explicit orthotropic planned-hook hypothesis; uncalibrated effective core at 30%",
@@ -223,7 +229,11 @@
         "max_bridge_span_mm": 5,
         "retraction": {
           "kind": "disabled"
-        }
+        },
+        "minimum_layer_time_s": 0,
+        "minimum_print_speed_mm_s": 10,
+        "fan_short_layer_time_s": 0,
+        "fan_short_layer_pwm": 255
       },
       "supports": {
         "kind": "disabled"
@@ -232,7 +242,9 @@
         "kind": "nearest"
       },
       "rectilinear_axis": "alternating_xy",
-      "top_skin_axis": "alternating_xy"
+      "top_skin_axis": "alternating_xy",
+      "role_speeds": null,
+      "first_layer_height_mm": null
     }
   },
   "maximum_span_mm": 12,

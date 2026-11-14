@@ -41,6 +41,21 @@ message PlanarPrintRecipe {
   RectilinearAxisPolicy rectilinear_axis = 19;
   SparseInfillPolicy sparse_infill = 20;
   RectilinearAxisPolicy top_skin_axis = 21;
+  // Absent: uniform print_speed_mm_s with the process speed factors.
+  RoleSpeeds role_speeds = 24;
+  optional double first_layer_height_mm = 25;
+}
+// Deposition speeds by role, mm/s.
+message RoleSpeeds {
+  double first_layer_mm_s = 1;
+  double outer_wall_mm_s = 2;
+  double inner_wall_mm_s = 3;
+  double sparse_infill_mm_s = 4;
+  double solid_infill_mm_s = 5;
+  double top_skin_mm_s = 6;
+  double support_mm_s = 7;
+  double bridge_mm_s = 8;
+  double first_layer_infill_mm_s = 9;
 }
 message NearestSeam {}
 message CombineEligibleSparseInfill { double max_height_mm = 1; }
@@ -207,6 +222,13 @@ message SingleExtruderJob {
   repeated double park_xy_mm = 17;
   double park_clearance_mm = 18;
   FirmwareLifecycle lifecycle = 19;
+  double first_layer_nozzle_temperature_c = 20;
+  double first_layer_bed_temperature_c = 21;
+  PrintTimeModel timing_model = 22;
+}
+message PrintTimeModel {
+  double acceleration_mm_s2 = 1;
+  double junction_deviation_mm = 2;
 }
 
 // Declared start/end lifecycle; values follow the Rust enum order from 1.
@@ -551,10 +573,19 @@ enum MachineLimit {
   MACHINE_LIMIT_Z_RESOLUTION_MM = 17;
   MACHINE_LIMIT_TOOLHEAD_RADIUS_MM = 18;
   MACHINE_LIMIT_TOOLHEAD_HEIGHT_MM = 19;
+  MACHINE_LIMIT_FIRST_LAYER_SPEED_MM_S = 20;
+  MACHINE_LIMIT_OUTER_WALL_SPEED_MM_S = 21;
+  MACHINE_LIMIT_INNER_WALL_SPEED_MM_S = 22;
+  MACHINE_LIMIT_SPARSE_INFILL_SPEED_MM_S = 23;
+  MACHINE_LIMIT_SOLID_INFILL_SPEED_MM_S = 24;
+  MACHINE_LIMIT_TOP_SKIN_SPEED_MM_S = 25;
+  MACHINE_LIMIT_SUPPORT_SPEED_MM_S = 26;
+  MACHINE_LIMIT_BRIDGE_SPEED_MM_S = 27;
+  MACHINE_LIMIT_FIRST_LAYER_INFILL_SPEED_MM_S = 28;
 }
 message FactSource {oneof kind {string published=1;string family_default=2;google.protobuf.Empty operator_declared=3;}}
 message SourcedLimit {MachineLimit key=1;double value=2;FactSource source=3;}
-message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;optional string printer_model=9;LifecycleBlock start_block=10;LifecycleBlock end_block=11;}
+message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;optional string printer_model=9;LifecycleBlock start_block=10;LifecycleBlock end_block=11;ExtruderDrive extruder_drive=12;}
 message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;MachineDescription machine=5;}
 message PlateFaceDefinition {string key=1;string label=2;string surface=3;AabbMm usable_mm=4;repeated AabbMm keepouts_mm=5;double max_bed_celsius=6;}
 message PlateDefinition {string id=1;string label=2;string mounting_interface=3;double thickness_mm=4;double surface_z_mm=5;repeated PlateFaceDefinition faces=6;string source=7;}

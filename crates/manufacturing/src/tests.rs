@@ -98,8 +98,14 @@ fn intent() -> ManufacturingIntent {
                 bridge_fan_pwm: 255,
                 max_bridge_span_mm: 5.0,
                 retraction: RetractionPolicy::Disabled,
+                minimum_layer_time_s: 0.0,
+                minimum_print_speed_mm_s: 10.0,
+                fan_short_layer_time_s: 0.0,
+                fan_short_layer_pwm: 255,
             },
             supports: SupportPolicy::Disabled,
+            role_speeds: None,
+            first_layer_height_mm: None,
         },
     }
 }
@@ -2281,6 +2287,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
         physical_z_mm: [layer.lower_z_mm, layer.z_mm],
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
         arcs: Vec::new(),
+        external_wall: false,
     });
     assert_reemitted_interface_refuses(forged, &intent);
 }
@@ -2993,12 +3000,17 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
         data = intent();
         match case {
             0 => data.recipe.print_speed_mm_s = 201.0,
-            1 => data.printer.max_volumetric_flow_mm3_s = 0.01,
+            1 => data.printer.max_volumetric_flow_mm3_s = 0.0,
             2 => data.recipe.flow_multiplier = f64::NAN,
             _ => data.recipe.infill_fraction = -0.01,
         }
         assert!(scene.compile(&data).is_err());
     }
+    // A low flow ceiling slows deposition to it instead of refusing.
+    data = intent();
+    data.printer.max_volumetric_flow_mm3_s = 0.5;
+    let slowed = scene.compile(&data).unwrap();
+    assert!(slowed.verification.flow_limited_segments > 0);
     data = intent();
     // A layer thinner than the printer's Z step is outside the process
     // envelope; the layer budget itself is covered by the schedule tests.
@@ -3133,6 +3145,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
             arcs: Vec::new(),
+            external_wall: false,
         },
         DepositionPath {
             material_domain: None,
@@ -3144,6 +3157,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
             arcs: Vec::new(),
+            external_wall: false,
         },
     ];
     let recipe = &intent.recipe;

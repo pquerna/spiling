@@ -30,7 +30,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".spiling.engine.ManufacturingRequest.command",
         ".spiling.engine.EvaluateManufacturingAlternativeRequest.construction",
         ".spiling.engine.ManufacturingReply.result",
-        ".spiling.engine.JobWorkflow.workflow",
         ".spiling.engine.AppearancePaletteRow.evidence",
     ] {
         prost.type_attribute(

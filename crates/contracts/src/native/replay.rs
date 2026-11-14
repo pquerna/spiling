@@ -418,6 +418,10 @@ mod tests {
                 support_filament_length_mm: 0.0,
                 retraction_count: 0,
                 retracted_filament_mm: 0.0,
+                flow_limited_segments: 0,
+                cooling_slowed_layers: 0,
+                minimum_cooling_scale: 1.0,
+                estimated_seconds: None,
             },
             resource: crate::ArtifactView {
                 name: format!("artifacts/{}", record.hash.as_str()),
