@@ -219,3 +219,35 @@ fn incomplete_machine_is_inventory_without_mount_or_project_authority() {
     json.as_object_mut().unwrap().remove("configuration");
     assert!(serde_json::from_value::<OwnedMachine>(json).is_err());
 }
+#[test]
+fn shipped_setups_resolve_by_id_label_or_words_and_never_guess() {
+    let catalog = builtin_catalog().unwrap();
+    assert_eq!(
+        catalog.find_setup("prusa.mk4s.04").unwrap().id,
+        "prusa.mk4s.04"
+    );
+    assert_eq!(
+        catalog.find_setup("prusa mk4s · 0.4 mm").unwrap().id,
+        "prusa.mk4s.04"
+    );
+    assert_eq!(
+        catalog.find_setup("Ender 3 v3").unwrap().id,
+        "creality.ender-3-v3-se.04"
+    );
+    assert_eq!(
+        catalog.find_setup("klipper").unwrap().id,
+        "generic.klipper-cartesian.04"
+    );
+    let ambiguous = catalog.find_setup("generic").unwrap_err();
+    assert!(ambiguous.contains("ambiguous") && ambiguous.contains("klipper"));
+    let a1 = catalog.find_setup("a1").unwrap_err();
+    assert!(a1.contains("a1-mini"), "{a1}");
+    let missing = catalog.find_setup("voron").unwrap_err();
+    assert!(missing.contains("prusa.mk4s.04"), "{missing}");
+    assert!(catalog.find_setup("  ").is_err());
+    for setup in &catalog.setups {
+        let capture = catalog.stock_capture(setup).unwrap();
+        assert_eq!(capture.setup, *setup);
+        assert_eq!(capture.face, capture.plate.faces[0].key);
+    }
+}

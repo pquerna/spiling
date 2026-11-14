@@ -7,9 +7,10 @@ pub mod backend;
 mod material;
 mod selection;
 pub use material::{
-    QualityPreset, create_default_intent, create_material_intent, generic_selection,
-    resolve_material_profile, resolve_tool_material_profile, review_materials,
+    create_default_intent, create_material_intent, create_requested_intent, filament_selection,
+    generic_selection, resolve_material_profile, resolve_tool_material_profile, review_materials,
 };
+pub use spiling_contracts::manufacturing::{QualityPreset, SupportChoice};
 pub mod planner;
 mod realization;
 mod routing;

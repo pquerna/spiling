@@ -10,6 +10,7 @@ import "spiling/native_common.proto";
 import "spiling/native_hardware.proto";
 import "spiling/native_project.proto";
 import "spiling/native_material.proto";
+import "spiling/native_library.proto";
 import "spiling/native_appearance.proto";
 
 service Manufacturing {
@@ -49,6 +50,7 @@ message ManufacturingRequest {
     SetManufacturingIntentRequest set_intent = 3;
     ApplyMaterialProfileRequest apply_material_profile = 4;
     ReviewMaterialsRequest review_materials = 5;
+    CreateDefaultIntentRequest create_default_intent = 9;
   }
 }
 message GetManufacturingRequest {}
@@ -99,6 +101,32 @@ message ApplyMaterialProfileRequest {
   optional string tool_id = 3;
   uint32 base_revision = 1;
   MaterialProfileSelection selection = 2;
+}
+enum QualityPreset {
+  QUALITY_PRESET_UNSPECIFIED = 0;
+  QUALITY_PRESET_DRAFT = 1;
+  QUALITY_PRESET_STANDARD = 2;
+  QUALITY_PRESET_FINE = 3;
+}
+enum SupportChoice {
+  SUPPORT_CHOICE_UNSPECIFIED = 0;
+  SUPPORT_CHOICE_AUTOMATIC = 1;
+  SUPPORT_CHOICE_OFF = 2;
+}
+message DefaultProjectFilament {
+  LibraryFilamentRef reference = 1;
+  optional string profile_id = 2;
+}
+// Printer: the project's captured hardware. Replaces any current intent.
+message CreateDefaultIntentRequest {
+  uint32 base_revision = 1;
+  QualityPreset quality = 2;
+  SupportChoice supports = 3;
+  oneof material {
+    string generic_family = 4;
+    DefaultProjectFilament project_filament = 5;
+    MaterialProfileSelection profile = 6;
+  }
 }
 message SetManufacturingIntentRequest {
   uint32 base_revision = 1; // Project revision, not scene publication revision.

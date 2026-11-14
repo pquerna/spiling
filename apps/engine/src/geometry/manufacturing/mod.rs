@@ -272,6 +272,59 @@ impl Runtime {
                 self.synchronize_native_pins();
                 Ok(self.manufacturing_status())
             }
+            ManufacturingCommand::CreateDefaultIntent {
+                layout_id: _,
+                session_id,
+                base_revision,
+                request,
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                let snapshot = self.project.snapshot();
+                let hardware = snapshot.hardware.clone().ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::NoIntent,
+                        "choose a printer setup before creating default settings",
+                    )
+                })?;
+                let materials = snapshot.materials.clone();
+                let intent = spiling_manufacturing::create_requested_intent(
+                    hardware,
+                    &request,
+                    |reference| {
+                        let missing = || {
+                            ManufacturingError::new(
+                                ManufacturingErrorCode::InvalidSpecification,
+                                "the filament is not captured in this project",
+                            )
+                        };
+                        let collection = materials
+                            .as_ref()
+                            .ok_or_else(missing)?
+                            .document()
+                            .map_err(|e| {
+                                ManufacturingError::new(
+                                    ManufacturingErrorCode::InvalidSpecification,
+                                    e.to_string(),
+                                )
+                            })?;
+                        collection
+                            .revisions
+                            .into_iter()
+                            .find(|r| &r.reference == reference)
+                            .map(|r| r.definition)
+                            .ok_or_else(missing)
+                    },
+                )?;
+                let edit = self
+                    .project
+                    .prepare(Edit::SetManufacturingIntent {
+                        intent: Arc::new(intent),
+                    })
+                    .map_err(project_error)?;
+                self.project.commit(edit).map_err(project_error)?;
+                self.synchronize_native_pins();
+                Ok(self.manufacturing_status())
+            }
             ManufacturingCommand::Preflight {
                 layout_id: _,
                 session_id,

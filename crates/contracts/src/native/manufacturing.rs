@@ -126,6 +126,18 @@ impl TryFrom<ManufacturingCommand> for rpc::ManufacturingRequest {
                     }),
                 )
             }
+            ManufacturingCommand::CreateDefaultIntent {
+                layout_id: _,
+                session_id,
+                base_revision,
+                request,
+            } => {
+                request.validate().map_err(|e| e.message)?;
+                (
+                    session_id,
+                    Command::CreateDefaultIntent(default_intent_to_rpc(base_revision, request)?),
+                )
+            }
             _ => return Err("long manufacturing command requires its dedicated RPC".into()),
         };
         let parent = format!("sessions/{}", session_id.as_str());
@@ -173,6 +185,12 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
                         .try_into()?,
                 })
             }
+            Command::CreateDefaultIntent(request) => Ok(Self::CreateDefaultIntent {
+                layout_id,
+                session_id,
+                base_revision: ProjectRevision(request.base_revision),
+                request: default_intent_from_rpc(request)?,
+            }),
             Command::Staged(_) => Err("staged manufacturing request was not resolved".into()),
             Command::SetIntent(request) => Ok(Self::SetIntent {
                 layout_id,
@@ -182,6 +200,75 @@ impl TryFrom<rpc::ManufacturingRequest> for ManufacturingCommand {
             }),
         }
     }
+}
+fn default_intent_to_rpc(
+    base_revision: ProjectRevision,
+    request: DefaultIntentRequest,
+) -> Result<rpc::CreateDefaultIntentRequest, String> {
+    use rpc::create_default_intent_request::Material;
+    Ok(rpc::CreateDefaultIntentRequest {
+        base_revision: base_revision.get(),
+        quality: match request.quality {
+            QualityPreset::Draft => rpc::QualityPreset::Draft,
+            QualityPreset::Standard => rpc::QualityPreset::Standard,
+            QualityPreset::Fine => rpc::QualityPreset::Fine,
+        } as i32,
+        supports: match request.supports {
+            SupportChoice::Automatic => rpc::SupportChoice::Automatic,
+            SupportChoice::Off => rpc::SupportChoice::Off,
+        } as i32,
+        material: Some(match request.material {
+            DefaultMaterialChoice::Generic { polymer_family } => {
+                Material::GenericFamily(polymer_family)
+            }
+            DefaultMaterialChoice::ProjectFilament {
+                reference,
+                profile_id,
+            } => Material::ProjectFilament(rpc::DefaultProjectFilament {
+                reference: Some(reference.try_into()?),
+                profile_id,
+            }),
+            DefaultMaterialChoice::Profile { selection } => {
+                Material::Profile((*selection).try_into()?)
+            }
+        }),
+    })
+}
+fn default_intent_from_rpc(
+    request: rpc::CreateDefaultIntentRequest,
+) -> Result<DefaultIntentRequest, String> {
+    use rpc::create_default_intent_request::Material;
+    let request = DefaultIntentRequest {
+        quality: match rpc::QualityPreset::try_from(request.quality)
+            .map_err(|_| "unknown quality preset")?
+        {
+            rpc::QualityPreset::Draft => QualityPreset::Draft,
+            rpc::QualityPreset::Standard => QualityPreset::Standard,
+            rpc::QualityPreset::Fine => QualityPreset::Fine,
+            rpc::QualityPreset::Unspecified => return Err("unspecified quality preset".into()),
+        },
+        supports: match rpc::SupportChoice::try_from(request.supports)
+            .map_err(|_| "unknown support choice")?
+        {
+            rpc::SupportChoice::Automatic => SupportChoice::Automatic,
+            rpc::SupportChoice::Off => SupportChoice::Off,
+            rpc::SupportChoice::Unspecified => return Err("unspecified support choice".into()),
+        },
+        material: match required(request.material, "default material")? {
+            Material::GenericFamily(polymer_family) => {
+                DefaultMaterialChoice::Generic { polymer_family }
+            }
+            Material::ProjectFilament(f) => DefaultMaterialChoice::ProjectFilament {
+                reference: required(f.reference, "project filament reference")?.try_into()?,
+                profile_id: f.profile_id,
+            },
+            Material::Profile(selection) => DefaultMaterialChoice::Profile {
+                selection: Box::new(selection.try_into()?),
+            },
+        },
+    };
+    request.validate().map_err(|e| e.message)?;
+    Ok(request)
 }
 impl TryFrom<ManufacturingCommand> for rpc::CompileManufacturingRequest {
     type Error = String;

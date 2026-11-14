@@ -149,33 +149,6 @@ pub fn resolve_tool_material_profile(
     Ok(resolved)
 }
 
-/// Print quality: layer heights and bead widths from the nozzle, the way
-/// PrusaSlicer's DRAFT / SPEED (standard) / QUALITY presets scale them
-/// (0.28 / 0.20 / 0.15 mm at a 0.4 mm nozzle, first layer 0.2 mm, 0.45 mm
-/// beads).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QualityPreset {
-    Draft,
-    Standard,
-    Fine,
-}
-impl QualityPreset {
-    pub fn layer_height_mm(self, nozzle_mm: f64) -> f64 {
-        let ratio = match self {
-            Self::Draft => 0.7,
-            Self::Standard => 0.5,
-            Self::Fine => 0.375,
-        };
-        (ratio * nozzle_mm * 100.0).round() / 100.0
-    }
-    pub fn first_layer_height_mm(self, nozzle_mm: f64) -> f64 {
-        (0.5 * nozzle_mm * 100.0).round() / 100.0
-    }
-    pub fn bead_width_mm(self, nozzle_mm: f64) -> f64 {
-        (1.125 * nozzle_mm * 1_000_000.0).round() / 1_000_000.0
-    }
-}
-
 fn r6(v: f64) -> f64 {
     (v * 1_000_000.0).round() / 1_000_000.0
 }
@@ -187,7 +160,12 @@ pub fn create_material_intent(
     hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
     selection: MaterialProfileSelection,
 ) -> Result<ManufacturingIntent, ManufacturingError> {
-    create_default_intent(hardware, selection, QualityPreset::Standard)
+    create_default_intent(
+        hardware,
+        selection,
+        QualityPreset::Standard,
+        SupportChoice::Automatic,
+    )
 }
 
 /// The defaults: printer + material + quality. Role speeds come from the
@@ -195,12 +173,14 @@ pub fn create_material_intent(
 /// family), each within the printer's print feed; the volumetric flow and
 /// minimum layer time slow them where needed and the verifier reports it.
 /// Two walls, 15 % sparse infill, top skin max(0.7 mm, 5 layers), bottom
-/// max(0.5 mm, 3 layers) and automatic breakaway supports. Captured values
+/// max(0.5 mm, 3 layers) and, when requested, the printer's automatic
+/// supports. The recipe identity names the quality preset. Captured values
 /// survive saved return.
 pub fn create_default_intent(
     hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
     selection: MaterialProfileSelection,
     quality: QualityPreset,
+    supports: SupportChoice,
 ) -> Result<ManufacturingIntent, ManufacturingError> {
     let invalid =
         |e: String| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e);
@@ -271,8 +251,8 @@ pub fn create_default_intent(
             selection: selection.clone(),
         }),
         recipe: PlanarPrintRecipe {
-            id: "spiling.standard-planar".into(),
-            revision: "2".into(),
+            id: quality.recipe_id(),
+            revision: "1".into(),
             material_id: material.id.clone(),
             material_revision: material.revision.clone(),
             filament_diameter_mm: material.filament_diameter_mm,
@@ -297,9 +277,120 @@ pub fn create_default_intent(
         },
         printer,
     };
-    intent.recipe.supports = intent.automatic_support_policy()?;
+    if supports == SupportChoice::Automatic {
+        intent.recipe.supports = intent.automatic_support_policy()?;
+    }
     intent.validate()?;
     Ok(intent)
+}
+
+/// The one-step defaults: the material choice resolved against the captured
+/// printer, then [`create_default_intent`]. `filament` returns the project's
+/// captured filament revision for a reference.
+pub fn create_requested_intent(
+    hardware: std::sync::Arc<spiling_contracts::hardware::ProjectHardwareCapture>,
+    request: &DefaultIntentRequest,
+    filament: impl FnOnce(
+        &spiling_contracts::library::FilamentRef,
+    )
+        -> Result<spiling_contracts::library::FilamentDefinition, ManufacturingError>,
+) -> Result<ManufacturingIntent, ManufacturingError> {
+    request.validate()?;
+    let selection = match &request.material {
+        DefaultMaterialChoice::Generic { polymer_family } => {
+            generic_selection(&hardware.setup, polymer_family)?
+        }
+        DefaultMaterialChoice::ProjectFilament {
+            reference,
+            profile_id,
+        } => filament_selection(
+            &hardware.setup,
+            &filament(reference)?,
+            profile_id.as_deref(),
+        )?,
+        DefaultMaterialChoice::Profile { selection } => (**selection).clone(),
+    };
+    create_default_intent(hardware, selection, request.quality, request.supports)
+}
+
+/// The profile of a captured filament for a setup's nozzle (exactly one, or
+/// the named one), with the tool setup the profile is keyed to and the
+/// machine's extruder drive, as [`generic_selection`] does for generics.
+pub fn filament_selection(
+    setup: &spiling_contracts::hardware::HardwareSetupDefinition,
+    filament: &spiling_contracts::library::FilamentDefinition,
+    profile_id: Option<&str>,
+) -> Result<MaterialProfileSelection, ManufacturingError> {
+    let invalid =
+        |e: String| ManufacturingError::new(ManufacturingErrorCode::InvalidSpecification, e);
+    let nozzle = setup.printer.nozzle_diameter_mm;
+    let candidates: Vec<&MaterialProcessProfile> = filament
+        .profiles
+        .iter()
+        .filter(|p| profile_id.is_none_or(|id| p.id == id))
+        .filter(|p| p.nozzle_diameter_mm == nozzle)
+        .collect();
+    let profile = match candidates.as_slice() {
+        [one] => (*one).clone(),
+        [] => {
+            return Err(invalid(format!(
+                "filament {:?} has no profile{} for a {nozzle} mm nozzle (profiles: {})",
+                filament.name,
+                profile_id.map_or(String::new(), |id| format!(" {id}")),
+                if filament.profiles.is_empty() {
+                    "none".into()
+                } else {
+                    filament
+                        .profiles
+                        .iter()
+                        .map(|p| format!("{} @ {} mm", p.id, p.nozzle_diameter_mm))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )));
+        }
+        many => {
+            return Err(invalid(format!(
+                "filament {:?} has several {nozzle} mm profiles; choose one of {}",
+                filament.name,
+                many.iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    };
+    tool_selection(setup, profile)
+}
+
+fn tool_selection(
+    setup: &spiling_contracts::hardware::HardwareSetupDefinition,
+    profile: MaterialProcessProfile,
+) -> Result<MaterialProfileSelection, ManufacturingError> {
+    let selection = MaterialProfileSelection {
+        setup: MaterialToolSetup {
+            hotend_id: profile.hotend_id.clone(),
+            nozzle_material: profile.nozzle_material.clone(),
+            abrasion_resistant_nozzle: false,
+            cooling_configuration_id: profile.cooling_configuration_id.clone(),
+            extruder_drive: setup
+                .machine
+                .as_ref()
+                .map_or(ExtruderDrive::DirectDrive, |m| m.extruder_drive),
+        },
+        profile,
+        overrides: MaterialProfileOverrides {
+            nozzle_temperature_c: None,
+            bed_temperature_c: None,
+            print_speed_mm_s: None,
+            flow_multiplier: None,
+            process: None,
+            first_layer_nozzle_temperature_c: None,
+            first_layer_bed_temperature_c: None,
+        },
+    };
+    selection.validate()?;
+    Ok(selection)
 }
 
 /// The generic profile of a polymer family for a setup's nozzle, with the
@@ -327,30 +418,7 @@ pub fn generic_selection(
                 "no generic {family} profile for a {nozzle} mm nozzle"
             ))
         })?;
-    let selection = MaterialProfileSelection {
-        setup: MaterialToolSetup {
-            hotend_id: profile.hotend_id.clone(),
-            nozzle_material: profile.nozzle_material.clone(),
-            abrasion_resistant_nozzle: false,
-            cooling_configuration_id: profile.cooling_configuration_id.clone(),
-            extruder_drive: setup
-                .machine
-                .as_ref()
-                .map_or(ExtruderDrive::DirectDrive, |m| m.extruder_drive),
-        },
-        profile,
-        overrides: MaterialProfileOverrides {
-            nozzle_temperature_c: None,
-            bed_temperature_c: None,
-            print_speed_mm_s: None,
-            flow_multiplier: None,
-            process: None,
-            first_layer_nozzle_temperature_c: None,
-            first_layer_bed_temperature_c: None,
-        },
-    };
-    selection.validate()?;
-    Ok(selection)
+    tool_selection(setup, profile)
 }
 
 #[cfg(test)]
@@ -550,5 +618,109 @@ mod creation_tests {
         let mut wrong = hardware.as_ref().clone();
         wrong.setup.printer.nozzle_diameter_mm = 0.6;
         assert!(create_material_intent(Arc::new(wrong), selection).is_err());
+    }
+
+    #[test]
+    fn one_step_defaults_cover_every_shipped_single_tool_setup_and_record_the_choice() {
+        let catalog = builtin_catalog().unwrap();
+        let mut created = 0;
+        for setup in &catalog.setups {
+            let hardware = Arc::new(catalog.stock_capture(setup).unwrap());
+            for family in spiling_contracts::manufacturing::GENERIC_FAMILIES {
+                for quality in QualityPreset::ALL {
+                    for supports in [SupportChoice::Automatic, SupportChoice::Off] {
+                        let request = DefaultIntentRequest {
+                            material: DefaultMaterialChoice::Generic {
+                                polymer_family: family.to_lowercase(),
+                            },
+                            quality,
+                            supports,
+                        };
+                        let result = create_requested_intent(hardware.clone(), &request, |_| {
+                            unreachable!("generic choices need no project filament")
+                        });
+                        if !matches!(setup.printer.workflow, JobWorkflow::CompleteMarlin { .. }) {
+                            assert_eq!(
+                                result.unwrap_err().code,
+                                ManufacturingErrorCode::UnsupportedCapability
+                            );
+                            continue;
+                        }
+                        let intent = result.unwrap();
+                        intent.validate().unwrap();
+                        created += 1;
+                        assert_eq!(intent.hardware.as_deref(), Some(hardware.as_ref()));
+                        assert_eq!(
+                            QualityPreset::from_recipe_id(&intent.recipe.id),
+                            Some(quality)
+                        );
+                        let profile = &intent.material_profile.as_ref().unwrap().selection.profile;
+                        assert_eq!(profile.material.polymer_family, family);
+                        assert_eq!(
+                            matches!(intent.recipe.supports, SupportPolicy::Disabled),
+                            supports == SupportChoice::Off
+                        );
+                        assert_eq!(
+                            intent.recipe.layer_height_mm,
+                            quality.layer_height_mm(setup.printer.nozzle_diameter_mm)
+                        );
+                    }
+                }
+            }
+        }
+        // MK4S, both Bambu, Ender-3 V3 SE, generic Klipper/Marlin, the Marlin reference.
+        assert_eq!(created, 7 * 5 * 3 * 2);
+    }
+    #[test]
+    fn project_filaments_choose_their_nozzle_profile_or_explain_why_not() {
+        let catalog = builtin_catalog().unwrap();
+        let setup = catalog.find_setup("prusa.mk4s.04").unwrap();
+        let material = MaterialDefinition {
+            id: "catalog.example".into(),
+            revision: "1".into(),
+            manufacturer: "Example".into(),
+            product: "Example PETG".into(),
+            polymer_family: "PETG".into(),
+            filler: None,
+            filament_diameter_mm: 1.75,
+            requires_abrasion_resistant_nozzle: false,
+        };
+        let profiles = generic_profiles_for(&material).unwrap();
+        use spiling_contracts::library::*;
+        let mut filament = FilamentDefinition {
+            declaration: FilamentDeclaration {
+                brand: Some("Example".into()),
+                material_label: Some("PETG".into()),
+                diameter_mm: Some(1.75),
+                hueforge_td_mm: None,
+            },
+            catalog_origin: None,
+            name: "Example PETG".into(),
+            material: Some(material),
+            color_name: None,
+            appearance: None,
+            profiles: Vec::new(),
+            source: DefinitionSource::Operator,
+        };
+        filament.profiles = profiles.clone();
+        let selection = filament_selection(setup, &filament, None).unwrap();
+        assert_eq!(selection.profile.nozzle_diameter_mm, 0.4);
+        assert_eq!(selection.profile.material.id, "catalog.example");
+        let mut doubled = filament.clone();
+        let mut twin = profiles[1].clone();
+        twin.id.push_str(".twin");
+        doubled.profiles.push(twin.clone());
+        let error = filament_selection(setup, &doubled, None).unwrap_err();
+        assert!(error.message.contains("choose one of"), "{}", error.message);
+        assert_eq!(
+            filament_selection(setup, &doubled, Some(&twin.id))
+                .unwrap()
+                .profile
+                .id,
+            twin.id
+        );
+        filament.profiles.retain(|p| p.nozzle_diameter_mm != 0.4);
+        let error = filament_selection(setup, &filament, None).unwrap_err();
+        assert!(error.message.contains("0.4 mm nozzle"), "{}", error.message);
     }
 }

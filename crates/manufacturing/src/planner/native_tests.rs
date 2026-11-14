@@ -4989,9 +4989,15 @@ fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
         face,
         accessories: Vec::new(),
     });
-    let mut intent =
-        crate::create_default_intent(hardware, selection, crate::QualityPreset::Standard).unwrap();
-    intent.recipe.supports = SupportPolicy::Disabled;
+    let intent = crate::create_default_intent(
+        hardware,
+        selection,
+        crate::QualityPreset::Standard,
+        crate::SupportChoice::Off,
+    )
+    .unwrap();
+    assert_eq!(intent.recipe.supports, SupportPolicy::Disabled);
+    assert_eq!(intent.recipe.id, "spiling.default.standard");
     let speeds = intent.recipe.role_speeds.unwrap();
     assert_eq!(speeds.outer_wall_mm_s, 170.0);
     assert_eq!(intent.recipe.first_layer_height_mm, Some(0.2));

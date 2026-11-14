@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".spiling.engine.GeometryReply.response",
         ".spiling.engine.NativeOperationResult.result",
         ".spiling.engine.ManufacturingRequest.command",
+        ".spiling.engine.CreateDefaultIntentRequest.material",
         ".spiling.engine.EvaluateManufacturingAlternativeRequest.construction",
         ".spiling.engine.ManufacturingReply.result",
         ".spiling.engine.AppearancePaletteRow.evidence",

@@ -4472,6 +4472,70 @@ fn material_capture_is_required_nullable_and_typed_profile_adapters_reject_unkno
 }
 
 #[test]
+fn default_intent_requests_round_trip_every_material_source_and_refuse_unknowns() {
+    let selection: MaterialProfileSelection = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/material-profile-a.json"
+    ))
+    .unwrap();
+    let materials = [
+        DefaultMaterialChoice::Generic {
+            polymer_family: "PETG".into(),
+        },
+        DefaultMaterialChoice::ProjectFilament {
+            reference: crate::library::FilamentRef {
+                id: crate::library::FilamentId("6f1c0a52-8a7e-4c55-9f3e-2b1d6c0e7a11".into()),
+                revision: SourceHash::from_bytes(b"filament"),
+            },
+            profile_id: Some("profile".into()),
+        },
+        DefaultMaterialChoice::Profile {
+            selection: Box::new(selection),
+        },
+    ];
+    for (material, (quality, supports)) in materials.into_iter().zip([
+        (QualityPreset::Draft, SupportChoice::Off),
+        (QualityPreset::Standard, SupportChoice::Automatic),
+        (QualityPreset::Fine, SupportChoice::Off),
+    ]) {
+        let command = ManufacturingCommand::CreateDefaultIntent {
+            layout_id: crate::project::PrintLayoutId::new(),
+            session_id: SessionId::new(),
+            base_revision: crate::project::ProjectRevision(3),
+            request: DefaultIntentRequest {
+                material,
+                quality,
+                supports,
+            },
+        };
+        let wire = crate::rpc::ManufacturingRequest::try_from(command.clone()).unwrap();
+        assert_eq!(
+            ManufacturingCommand::try_from(wire.clone()).unwrap(),
+            command
+        );
+        let mut unspecified = wire;
+        if let Some(crate::rpc::manufacturing_request::Command::CreateDefaultIntent(r)) =
+            &mut unspecified.command
+        {
+            r.quality = 0;
+        }
+        assert!(ManufacturingCommand::try_from(unspecified).is_err());
+    }
+    let unknown = ManufacturingCommand::CreateDefaultIntent {
+        layout_id: crate::project::PrintLayoutId::new(),
+        session_id: SessionId::new(),
+        base_revision: crate::project::ProjectRevision(3),
+        request: DefaultIntentRequest {
+            material: DefaultMaterialChoice::Generic {
+                polymer_family: "wood".into(),
+            },
+            quality: QualityPreset::Standard,
+            supports: SupportChoice::Off,
+        },
+    };
+    assert!(crate::rpc::ManufacturingRequest::try_from(unknown).is_err());
+}
+
+#[test]
 fn mixed_tool_fine_schedule_uses_primary_profile_and_every_waste_interval() {
     let mut intent = decode_intent(include_bytes!(
         "../../../../fixtures/manufacturing/mixed-width-combined.intent.json"

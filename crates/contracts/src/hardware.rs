@@ -764,6 +764,79 @@ impl HardwareCatalog {
         Ok(())
     }
 }
+impl HardwareCatalog {
+    /// The shipped setup an operator names: its exact id, its exact label
+    /// (case-insensitive), or the one setup whose id or label contains every
+    /// word of the query. Ambiguity and absence are errors that list the
+    /// candidates; nothing is chosen silently.
+    pub fn find_setup(&self, query: &str) -> Result<&HardwareSetupDefinition, String> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Err("name a printer setup".into());
+        }
+        if let Some(s) = self
+            .setups
+            .iter()
+            .find(|s| s.id.to_lowercase() == q || s.label.to_lowercase() == q)
+        {
+            return Ok(s);
+        }
+        let words: Vec<&str> = q.split_whitespace().collect();
+        let matches: Vec<&HardwareSetupDefinition> = self
+            .setups
+            .iter()
+            .filter(|s| {
+                let hay = format!("{} {}", s.id, s.label).to_lowercase();
+                words.iter().all(|w| hay.contains(w))
+            })
+            .collect();
+        let list = |setups: &[&HardwareSetupDefinition]| {
+            setups
+                .iter()
+                .map(|s| format!("{} ({})", s.id, s.label))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match matches.as_slice() {
+            [one] => Ok(one),
+            [] => Err(format!(
+                "no shipped printer setup matches {query:?}; shipped setups: {}",
+                list(&self.setups.iter().collect::<Vec<_>>())
+            )),
+            many => Err(format!(
+                "printer {query:?} is ambiguous; it matches {}",
+                list(many)
+            )),
+        }
+    }
+    /// The capture of a shipped setup on its stock plate and the plate's
+    /// first declared face.
+    pub fn stock_capture(
+        &self,
+        setup: &HardwareSetupDefinition,
+    ) -> Result<ProjectHardwareCapture, String> {
+        let plate = self
+            .plates
+            .iter()
+            .find(|p| p.mounting_interface == setup.model.mounting_interface)
+            .ok_or_else(|| format!("setup {} has no stock plate", setup.id))?
+            .clone();
+        let face = plate
+            .faces
+            .first()
+            .ok_or_else(|| format!("plate {} declares no face", plate.id))?
+            .key
+            .clone();
+        let capture = ProjectHardwareCapture {
+            setup: setup.clone(),
+            plate,
+            face,
+            accessories: Vec::new(),
+        };
+        capture.validate()?;
+        Ok(capture)
+    }
+}
 /// Declared models, plates and software reference setups, plus one derived
 /// setup and stock plate for each machine-description setup.
 pub fn builtin_catalog() -> Result<HardwareCatalog, String> {

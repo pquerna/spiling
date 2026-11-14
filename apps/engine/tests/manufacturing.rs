@@ -3168,3 +3168,147 @@ async fn setup_and_first_material_create_automatic_supports_and_survive_saved_re
     assert_eq!(restored_bundle.provenance.intent, *created);
     returned.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn one_step_defaults_need_a_printer_then_create_record_and_compile() {
+    let mut client = spawn().await;
+    let work = Workspace::new();
+    let source = work.source("through-hole.step");
+    let initial = scene(&mut client).await;
+    let GeometryResponse::OperationAccepted { operation } = client
+        .geometry(GeometryCommand::ImportPart {
+            session_id: initial.session_id,
+            base_revision: initial.revision,
+            source: native(&source),
+            options: spiling_contracts::geometry::ModelImportOptions::default(),
+            initial_pose: RigidPoseMm {
+                translation_mm: [50.0, 50.0, 2.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("import")
+    };
+    assert_eq!(
+        wait(&mut client, operation.name).await.status,
+        JobStatus::Completed
+    );
+    let request = |supports| DefaultIntentRequest {
+        material: DefaultMaterialChoice::Generic {
+            polymer_family: "PETG".into(),
+        },
+        quality: QualityPreset::Draft,
+        supports,
+    };
+    let before = status(&mut client).await.0;
+    let error = client
+        .manufacturing(ManufacturingCommand::CreateDefaultIntent {
+            layout_id: before.layout_id.clone(),
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            request: request(SupportChoice::Off),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, ClientError::Manufacturing(e) if e.code == ManufacturingErrorCode::NoIntent && e.message.contains("printer")),
+        "{error:?}"
+    );
+    assert_eq!(
+        status(&mut client).await.0,
+        before,
+        "a refusal changes nothing"
+    );
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let capture = catalog
+        .stock_capture(catalog.find_setup("generic klipper").unwrap())
+        .unwrap();
+    client
+        .project(ProjectCommand::SetHardware {
+            layout_id: before.layout_id.clone(),
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            capture: Some(std::sync::Arc::new(capture.clone())),
+        })
+        .await
+        .unwrap();
+    let mut created = None;
+    for supports in [SupportChoice::Automatic, SupportChoice::Off] {
+        let current = status(&mut client).await.0;
+        let ManufacturingResponse::Status {
+            intent: Some(intent),
+            ..
+        } = client
+            .manufacturing(ManufacturingCommand::CreateDefaultIntent {
+                layout_id: current.layout_id,
+                session_id: client.hello().session_id.clone(),
+                base_revision: current.revision,
+                request: request(supports),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("defaults did not create an intent")
+        };
+        assert_eq!(intent.hardware.as_deref(), Some(&capture));
+        assert_eq!(intent.recipe.id, "spiling.default.draft");
+        assert_eq!(intent.recipe.layer_height_mm, 0.28);
+        assert_eq!(
+            intent
+                .material_profile
+                .as_ref()
+                .unwrap()
+                .selection
+                .profile
+                .material
+                .polymer_family,
+            "PETG"
+        );
+        assert_eq!(
+            matches!(intent.recipe.supports, SupportPolicy::Disabled),
+            supports == SupportChoice::Off
+        );
+        created = Some(intent);
+    }
+    // The created intent is an ordinary intent: undo returns the previous one.
+    let current = status(&mut client).await.0;
+    let undo_scene = scene(&mut client).await;
+    client
+        .project(ProjectCommand::Undo {
+            session_id: undo_scene.session_id,
+            base_revision: undo_scene.revision,
+        })
+        .await
+        .unwrap();
+    let ManufacturingResponse::Status {
+        intent: Some(previous),
+        ..
+    } = client
+        .manufacturing(ManufacturingCommand::Get {
+            layout_id: current.layout_id.clone(),
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("status")
+    };
+    assert!(matches!(
+        previous.recipe.supports,
+        SupportPolicy::Breakaway { .. }
+    ));
+    assert!(created.is_some_and(|c| c.recipe.supports == SupportPolicy::Disabled));
+    // The part floats 2 mm above the bed: the automatic-support intent prints it.
+    let record = compile(&mut client).await;
+    let bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    assert!(bundle.verification.verified);
+    assert!(
+        bundle
+            .verification
+            .estimated_seconds
+            .is_some_and(|s| s > 0.0)
+    );
+    client.shutdown().await.unwrap();
+}

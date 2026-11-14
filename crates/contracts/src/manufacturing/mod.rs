@@ -31,6 +31,8 @@ mod job;
 pub use job::*;
 mod lifecycle;
 pub use lifecycle::*;
+mod defaults;
+pub use defaults::*;
 mod material;
 mod material_review;
 pub use material_review::*;
@@ -5183,6 +5185,14 @@ pub enum ManufacturingCommand {
         base_revision: ProjectRevision,
         selection: MaterialProfileSelection,
     },
+    /// Create a complete intent from the project's printer and a material,
+    /// quality and support choice, replacing any current intent (undoable).
+    CreateDefaultIntent {
+        layout_id: crate::project::PrintLayoutId,
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        request: DefaultIntentRequest,
+    },
     Compile {
         layout_id: crate::project::PrintLayoutId,
         session_id: SessionId,
@@ -5221,6 +5231,7 @@ impl ManufacturingCommand {
             | Self::EditInteriorPolicy { layout_id, .. }
             | Self::ReviewMaterials { layout_id, .. }
             | Self::ApplyMaterialProfile { layout_id, .. }
+            | Self::CreateDefaultIntent { layout_id, .. }
             | Self::Compile { layout_id, .. }
             | Self::EvaluateAlternative { layout_id, .. }
             | Self::EvaluateInteriorPolicy { layout_id, .. }

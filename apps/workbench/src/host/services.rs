@@ -160,6 +160,7 @@ impl Actor {
             ManufacturingCommand::SetIntent { .. } => "Apply full manufacturing intent",
             ManufacturingCommand::EditInteriorPolicy { .. } => "Apply interior tool policy",
             ManufacturingCommand::ApplyMaterialProfile { .. } => "Apply captured material profile",
+            ManufacturingCommand::CreateDefaultIntent { .. } => "Create print settings",
             ManufacturingCommand::Preflight { .. } => "Manufacturing preflight",
             ManufacturingCommand::Compile { .. } => "Compile manufacturing",
             ManufacturingCommand::Inspect { .. } => "Fresh actual-program verification",
@@ -176,6 +177,7 @@ impl Actor {
             ManufacturingCommand::SetIntent { .. }
                 | ManufacturingCommand::EditInteriorPolicy { .. }
                 | ManufacturingCommand::ApplyMaterialProfile { .. }
+                | ManufacturingCommand::CreateDefaultIntent { .. }
         );
         let material = matches!(&command, ManufacturingCommand::ApplyMaterialProfile { .. });
         let settings_apply = match &command {
