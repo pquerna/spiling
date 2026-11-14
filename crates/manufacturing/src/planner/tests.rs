@@ -148,6 +148,8 @@ pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
         supports: SupportPolicy::Disabled,
         role_speeds: None,
         first_layer_height_mm: None,
+        skirt: None,
+        brim: None,
     }
 }
 

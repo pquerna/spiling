@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod adhesion;
 mod arcs;
 pub(crate) mod boolean;
 use boolean::budget as boolean_budget;
@@ -2334,6 +2335,7 @@ fn admit_schedule<'model>(
         drop_unprintable_rows(&mut layers)?;
         exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
         support::object_volumes(&mut layers, input.intent)?;
+        let adhesion = adhesion::plan(&mut layers, &sections, input.intent, cancel)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
         }
@@ -2363,6 +2365,7 @@ fn admit_schedule<'model>(
             material_domains: std::mem::take(&mut construction.stored),
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             sparse_bands: Vec::new(),
+            adhesion,
             process_resolution: process_captures
                 .iter()
                 .flat_map(|capture| {

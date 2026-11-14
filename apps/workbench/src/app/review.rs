@@ -134,6 +134,7 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     ui.collapsing("Actual accounting",|ui|{
         ui.label(format!("Object: {} strokes · {:.4} mm³ · {:.4} mm filament",report.deposition_segments,report.deposited_volume_mm3,report.filament_length_mm));
         ui.label(format!("Support: {} strokes · {:.4} mm³ · {:.4} mm filament",report.support_deposition_segments,report.support_deposited_volume_mm3,report.support_filament_length_mm));
+        if report.adhesion_deposition_segments>0 {ui.label(format!("Skirt/brim: {} strokes · {:.4} mm filament",report.adhesion_deposition_segments,report.adhesion_filament_length_mm));}
         ui.label(format!("{} retractions · {:.4} mm withdrawn, distinct from deposition",report.retraction_count,report.retracted_filament_mm));
         ui.label(format!("{} lifecycle motions · {:.4} mm prime / route waste filament",report.lifecycle_motion_count,report.priming_filament_length_mm));
         if let Some(routing)=&report.routing {ui.label(format!("{} decoded tool selections",routing.selection_count));for tool in &routing.tools {ui.label(format!("Tool {} · {}: {} model strokes, {:.4} mm³ / {:.4} mm filament; {} waste strokes, {:.4} mm³ / {:.4} mm filament; final feeder debt {:.8} mm",tool.tool,tool.material_id,tool.model_deposition_segments,tool.model_volume_mm3,tool.model_filament_length_mm,tool.waste_deposition_segments,tool.waste_volume_mm3,tool.waste_filament_length_mm,tool.outstanding_retraction_mm));}}

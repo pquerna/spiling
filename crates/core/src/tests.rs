@@ -516,6 +516,8 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             top_skin_axis: spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
             role_speeds: None,
             first_layer_height_mm: None,
+            skirt: None,
+            brim: None,
         },
     }
 }
@@ -610,6 +612,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             process_resolution: vec![],
             sparse_bands: vec![],
+            adhesion: Default::default(),
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.01,
                 achieved_shape_error_mm: 0.0,
@@ -690,6 +693,8 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
             routing: None,

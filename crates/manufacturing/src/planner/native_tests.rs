@@ -266,24 +266,13 @@ fn actual_fixture_contact_gap(bundle: &ManufacturingBundle, source_floor: f64) -
         .layers
         .iter()
         .find(|layer| {
-            layer.section_z_mm > source_floor
-                && layer.paths.iter().any(|path| {
-                    !matches!(
-                        path.kind,
-                        DepositionKind::Support | DepositionKind::SupportInterface
-                    )
-                })
+            layer.section_z_mm > source_floor && layer.paths.iter().any(|path| path.kind.is_model())
         })
         .unwrap();
     let object_bottom = first_object
         .paths
         .iter()
-        .filter(|path| {
-            !matches!(
-                path.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            )
-        })
+        .filter(|path| path.kind.is_model())
         .flat_map(|path| &path.points_mm)
         .map(|point| xyz6(point[2]) - first_object.height_mm)
         .fold(f64::INFINITY, f64::min);
@@ -1233,10 +1222,7 @@ fn mixed_anchor_native_perimeter_remains_closed_under_bridge_process() {
             .flat_map(|layer| layer
                 .paths
                 .iter()
-                .filter(|path| !matches!(
-                    path.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                ))
+                .filter(|path| path.kind.is_model())
                 .filter(|path| path.points_mm.first() == path.points_mm.last())
                 .map(move |path| (
                     layer.index,
@@ -3316,12 +3302,7 @@ fn assert_native_family_compile_and_replay(
                 .sqrt();
             let outer_radius = ((5.0 + surface_error).powi(2) - local_z.powi(2)).sqrt();
             let mut extents = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
-            for path in layer.paths.iter().filter(|path| {
-                !matches!(
-                    path.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                )
-            }) {
+            for path in layer.paths.iter().filter(|path| path.kind.is_model()) {
                 for edge in path.checked_edges().unwrap() {
                     for point in edge.points_mm {
                         for axis in 0..2 {
@@ -4285,10 +4266,7 @@ fn rounded_housing_disabled_supports_refines_startup_and_replays() {
             .layers
             .iter()
             .flat_map(|layer| &layer.paths)
-            .all(|path| !matches!(
-                path.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            ))
+            .all(|path| path.kind.is_model())
     );
     visit_fresh_replayed_object_segments(&bundle, |_, _| {});
 }
@@ -4998,6 +4976,12 @@ fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
     .unwrap();
     assert_eq!(intent.recipe.supports, SupportPolicy::Disabled);
     assert_eq!(intent.recipe.id, "spiling.default.standard");
+    // PLA's default brim waits for a narrow, tall island; the skirt is on.
+    assert!(intent.recipe.skirt.is_some());
+    assert_eq!(
+        intent.recipe.brim.map(|b| b.placement),
+        Some(BrimPlacement::NarrowTall)
+    );
     let speeds = intent.recipe.role_speeds.unwrap();
     assert_eq!(speeds.outer_wall_mm_s, 170.0);
     assert_eq!(intent.recipe.first_layer_height_mm, Some(0.2));
@@ -5020,6 +5004,8 @@ fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
     );
     let seconds = report.estimated_seconds.unwrap();
     assert!(seconds > 30.0 && seconds < 3600.0, "{seconds}");
+    assert!(bundle.plan.adhesion.skirt_paths >= 1 && bundle.plan.adhesion.brim_paths == 0);
+    assert!(report.adhesion_deposition_segments > 0 && report.adhesion_filament_length_mm > 0.0);
     let text = bundle.program_text().unwrap();
     assert!(text.contains("\nM83\n"));
     // First layer at 220, then 215 without waiting; fan off on layer one.
@@ -5042,5 +5028,174 @@ fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
         assert!(
             crate::verifier::verify(&chunks(&tampered), &bundle.plan, &intent, &cancel).is_err()
         );
+    }
+}
+
+fn mk4s_pla_default_intent() -> ManufacturingIntent {
+    use spiling_contracts::hardware::{ProjectHardwareCapture, builtin_catalog};
+    let catalog = builtin_catalog().unwrap();
+    let setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "prusa.mk4s.04")
+        .unwrap()
+        .clone();
+    let plate = catalog
+        .plates
+        .iter()
+        .find(|p| p.mounting_interface == setup.model.mounting_interface)
+        .unwrap()
+        .clone();
+    let face = plate.faces[0].key.clone();
+    let selection = crate::generic_selection(&setup, "PLA").unwrap();
+    let hardware = Arc::new(ProjectHardwareCapture {
+        setup,
+        plate,
+        face,
+        accessories: Vec::new(),
+    });
+    crate::create_default_intent(
+        hardware,
+        selection,
+        crate::QualityPreset::Standard,
+        crate::SupportChoice::Off,
+    )
+    .unwrap()
+}
+
+/// Skirt and brim are first-layer loops planned through the ordinary
+/// pipeline, printed first (skirt, then brim), counted apart from the model
+/// and independently checked: a brim over the part or a skirt inside its
+/// distance refuses.
+#[test]
+fn skirt_and_brim_are_first_layer_non_model_loops_checked_independently() {
+    let mut intent = mk4s_pla_default_intent();
+    intent.recipe.brim = Some(BrimPolicy {
+        width_mm: 3.0,
+        separation_mm: 0.0,
+        placement: BrimPlacement::Always,
+    });
+    let scene = NativeScene::new(BOX, &[translated(100.0, 100.0, 0.0)]);
+    let cancel = AtomicBool::new(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let report = crate::verify_bundle(&bundle, &cancel).unwrap();
+    let plan = &bundle.plan;
+    let adhesion = plan.adhesion;
+    assert_eq!(adhesion.brim_islands, 1);
+    assert!(adhesion.brim_paths >= 6, "{adhesion:?}");
+    assert!(adhesion.skirt_paths >= 1);
+    assert_eq!(
+        adhesion.skirt_loops_outside_envelope + adhesion.brim_loops_outside_envelope,
+        0
+    );
+    let first = &plan.layers[0].paths;
+    let kinds: Vec<_> = first.iter().map(|p| p.kind).collect();
+    let skirt = adhesion.skirt_paths as usize;
+    let brim = adhesion.brim_paths as usize;
+    assert!(
+        kinds[..skirt].iter().all(|k| *k == DepositionKind::Skirt),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds[skirt..skirt + brim]
+            .iter()
+            .all(|k| *k == DepositionKind::Brim)
+    );
+    assert!(kinds[skirt + brim..].iter().all(|k| k.is_model()));
+    assert!(
+        plan.layers[1..]
+            .iter()
+            .all(|l| l.paths.iter().all(|p| p.kind.is_model()))
+    );
+    let skirt_length: f64 = first[..skirt]
+        .iter()
+        .flat_map(|p| p.points_mm.windows(2))
+        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+        .sum();
+    assert!(skirt_length >= 100.0, "{skirt_length}");
+    assert!(report.adhesion_deposition_segments > 0);
+    let segments: usize = first[..skirt + brim]
+        .iter()
+        .map(|p| p.points_mm.len() - 1)
+        .sum();
+    assert_eq!(report.adhesion_deposition_segments as usize, segments);
+    // Display replay records them as non-model deposition (kind 15).
+    use spiling_contracts::manufacturing::{
+        ManufacturingArtifactRecord, REPLAY_HEADER_BYTES, REPLAY_MEDIA_TYPE, REPLAY_RECORD_BYTES,
+        ReplayDisplayDescriptor, VerificationOutput, validate_replay_display,
+    };
+    let bytes = encode(&bundle);
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&bytes);
+    let replay =
+        crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
+            .unwrap()
+            .replay
+            .unwrap();
+    let replay_bytes = replay.bytes.to_vec().unwrap();
+    let kind15 = replay_bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
+        .filter(|r| r[46] == 15)
+        .count();
+    assert_eq!(kind15, segments);
+    let replay_hash = spiling_contracts::geometry::SourceHash::from_bytes(&replay_bytes);
+    let descriptor = ReplayDisplayDescriptor {
+        pages: replay.pages.clone(),
+        info: replay.info,
+        resource: spiling_contracts::ArtifactView {
+            name: format!("artifacts/{}", replay_hash.as_str()),
+            size_bytes: replay_bytes.len().to_string(),
+            sha256: replay_hash.as_str().into(),
+            media_type: REPLAY_MEDIA_TYPE.into(),
+        },
+    };
+    descriptor
+        .validate_for_record(&ManufacturingArtifactRecord {
+            hash,
+            input_hash: bundle.provenance.input_hash.clone(),
+            byte_count: bytes.len() as u32,
+            summary: bundle.summary(),
+            program: bundle.bundle.program.clone(),
+        })
+        .unwrap();
+    validate_replay_display(&replay_bytes, &descriptor).unwrap();
+    // No brim on this low box under the PLA default placement.
+    let mut automatic = intent.clone();
+    automatic.recipe.brim.as_mut().unwrap().placement = BrimPlacement::NarrowTall;
+    let low = compile(scene.input(&automatic), &cancel).unwrap();
+    assert_eq!(
+        (low.plan.adhesion.brim_islands, low.plan.adhesion.brim_paths),
+        (0, 0)
+    );
+    // A brim loop over the part's own wall, or a skirt pulled inside its
+    // distance, is refused by the independent check of the emitted program.
+    let wall = first
+        .iter()
+        .find(|p| p.owner == Some(DepositionOwner::Wall))
+        .unwrap()
+        .points_mm
+        .clone();
+    let mut over = plan.clone();
+    over.layers[0].paths[skirt].points_mm = wall;
+    let mut inside = plan.clone();
+    inside.adhesion = AdhesionSummary {
+        skirt_paths: 1,
+        ..adhesion
+    };
+    inside.layers[0].paths.drain(1..skirt);
+    let ring = &mut inside.layers[0].paths[0].points_mm;
+    let center = [110.0, 105.0];
+    for p in ring.iter_mut() {
+        p[0] = center[0] + (p[0] - center[0]) * 0.97;
+        p[1] = center[1] + (p[1] - center[1]) * 0.97;
+    }
+    for (tampered, reason) in [(over, "brim bead covers part"), (inside, "skirt is closer")] {
+        tampered.validate(&intent).unwrap();
+        let program = crate::backend::emit(&tampered, &intent, &cancel).unwrap();
+        let text = String::from_utf8(program.to_vec().unwrap()).unwrap();
+        let failure =
+            crate::verifier::verify(&chunks(&text), &tampered, &intent, &cancel).unwrap_err();
+        assert!(failure.message.contains(reason), "{failure:?}");
     }
 }

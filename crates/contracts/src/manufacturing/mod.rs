@@ -1198,6 +1198,84 @@ pub struct PlanarPrintRecipe {
     /// other layer.
     #[serde(deserialize_with = "required_option")]
     pub first_layer_height_mm: Option<f64>,
+    /// First-layer skirt; null prints none.
+    #[serde(deserialize_with = "required_option")]
+    pub skirt: Option<SkirtPolicy>,
+    /// First-layer brim; null prints none.
+    #[serde(deserialize_with = "required_option")]
+    pub brim: Option<BrimPolicy>,
+}
+/// Closed loops of recipe bead width around the convex outline of all
+/// first-layer deposition (part, brim and support), printed before anything
+/// else on the first layer. Single-tool jobs only.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkirtPolicy {
+    /// Loops printed at least.
+    pub loops: u32,
+    /// Clear gap between the nearest first-layer bead and the inner loop.
+    pub distance_mm: f64,
+    /// Further loops are added until the skirt deposits at least this length.
+    pub minimum_length_mm: f64,
+}
+/// Where a brim is planned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrimPlacement {
+    /// Around the outline of the whole first layer.
+    Always,
+    /// Only when some first-layer island stands tall on a narrow base: its
+    /// part height is at least [`AUTOMATIC_BRIM_ASPECT`] times the narrower
+    /// side of the bounds of its base (the island grown by the material
+    /// above it within the bottom skin thickness). The brim then surrounds
+    /// that island and every island within reach of it.
+    NarrowTall,
+}
+/// Height over narrowest footprint extent from which [`BrimPlacement::NarrowTall`]
+/// plans a brim.
+pub const AUTOMATIC_BRIM_ASPECT: f64 = 3.0;
+/// Closed loops of recipe bead width outside the outer outline of first-layer
+/// islands (never inside their holes), the innermost attached to the part's
+/// first layer. Single-tool jobs only.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BrimPolicy {
+    /// Brim width from the part's outline; loops at bead spacing fill it.
+    pub width_mm: f64,
+    /// Clear gap between the part's outline and the innermost brim bead,
+    /// at most half a bead so the brim stays attached.
+    pub separation_mm: f64,
+    pub placement: BrimPlacement,
+}
+impl SkirtPolicy {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self.loops == 0
+            || !self.distance_mm.is_finite()
+            || self.distance_mm <= 0.0
+            || !self.minimum_length_mm.is_finite()
+            || self.minimum_length_mm < 0.0
+        {
+            return Err(invalid(
+                "skirt requires at least one loop, a positive distance and a finite minimum length",
+            ));
+        }
+        Ok(())
+    }
+}
+impl BrimPolicy {
+    pub fn validate(&self, bead_width_mm: f64) -> Result<(), ManufacturingError> {
+        if !self.width_mm.is_finite()
+            || self.width_mm < bead_width_mm
+            || !self.separation_mm.is_finite()
+            || self.separation_mm < 0.0
+            || self.separation_mm > 0.5 * bead_width_mm
+        {
+            return Err(invalid(
+                "brim requires a width of at least one bead and a separation of at most half a bead",
+            ));
+        }
+        Ok(())
+    }
 }
 /// Deposition speeds by role, mm/s. Travel stays `travel_speed_mm_s`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
@@ -1323,6 +1401,12 @@ impl PlanarPrintRecipe {
             ));
         }
         validate_global_infill_fraction(self.infill_fraction)?;
+        if let Some(skirt) = &self.skirt {
+            skirt.validate()?;
+        }
+        if let Some(brim) = &self.brim {
+            brim.validate(self.bead_width_mm)?;
+        }
         if let Some(first) = self.first_layer_height_mm
             && (!first.is_finite()
                 || first <= 0.0
@@ -1414,10 +1498,12 @@ impl ManufacturingIntent {
         if routed
             && (r.role_speeds.is_some()
                 || r.first_layer_height_mm.is_some()
-                || r.process.minimum_layer_time_s > 0.0)
+                || r.process.minimum_layer_time_s > 0.0
+                || r.skirt.is_some()
+                || r.brim.is_some())
         {
             return Err(invalid(
-                "role speeds, a first-layer height and cooling slowdown currently require a single-tool workflow",
+                "role speeds, a first-layer height, cooling slowdown, skirt and brim currently require a single-tool workflow",
             ));
         }
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
@@ -1638,6 +1724,26 @@ pub enum DepositionKind {
     Support,
     SupportInterface,
     SeparatorWall,
+    /// Closed first-layer loops around the whole footprint at a distance:
+    /// intentional non-model deposition that primes the nozzle.
+    Skirt,
+    /// Closed first-layer loops attached to the part's outline, widening its
+    /// bed contact: intentional non-model deposition removed after printing.
+    Brim,
+}
+impl DepositionKind {
+    /// Skirt and brim: intentional first-layer non-model deposition.
+    pub fn is_adhesion(self) -> bool {
+        matches!(self, Self::Skirt | Self::Brim)
+    }
+    /// Generated support construction.
+    pub fn is_support(self) -> bool {
+        matches!(self, Self::Support | Self::SupportInterface)
+    }
+    /// Deposition of the part itself: neither support nor skirt/brim.
+    pub fn is_model(self) -> bool {
+        !self.is_support() && !self.is_adhesion()
+    }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -3115,6 +3221,20 @@ pub struct NormalizedPrintPlan {
     pub process_resolution: Vec<ProcessRegionResolution>,
     #[serde(deserialize_with = "sparse_bands")]
     pub sparse_bands: Vec<SparseBandDecision>,
+    pub adhesion: AdhesionSummary,
+}
+/// The first layer's skirt and brim as planned: closed path counts equal to
+/// the first layer's Skirt and Brim paths, and the requested loops left out
+/// because they would leave the build envelope.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdhesionSummary {
+    pub skirt_paths: u32,
+    pub skirt_loops_outside_envelope: u32,
+    /// First-layer islands the brim surrounds; zero when no brim was planned.
+    pub brim_islands: u32,
+    pub brim_paths: u32,
+    pub brim_loops_outside_envelope: u32,
 }
 /// Conservative object XY ownership envelope, padded for command serialization.
 pub type PrimeExclusionBoundsMm = [[f64; 2]; 2]; // [minimum XY, maximum XY]
@@ -3596,6 +3716,7 @@ impl NormalizedPrintPlan {
         let mut course_lower_z = lower_z;
         let mut segments = 0usize;
         let mut object_segments = 0usize;
+        let (mut skirt_paths, mut brim_paths) = (0u32, 0u32);
         let complete = matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. });
         let mut object_xy = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
         let mut gap_start = None;
@@ -3755,12 +3876,7 @@ impl NormalizedPrintPlan {
                     );
                 }
             } else if let Some(support_top) = gap_start {
-                if !layer.paths.iter().any(|p| {
-                    !matches!(
-                        p.kind,
-                        DepositionKind::Support | DepositionKind::SupportInterface
-                    )
-                }) {
+                if !layer.paths.iter().any(|p| p.kind.is_model()) {
                     return Err(invalid("contact gap must end at actual object deposition"));
                 }
                 let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
@@ -3769,12 +3885,7 @@ impl NormalizedPrintPlan {
                 let object_bottom = layer
                     .paths
                     .iter()
-                    .filter(|path| {
-                        !matches!(
-                            path.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        )
-                    })
+                    .filter(|path| path.kind.is_model())
                     .try_fold(f64::INFINITY, |bottom, path| {
                         program_coordinates::project_xyz6_bead_height_mm(
                             path.physical_z_mm[1],
@@ -3791,12 +3902,7 @@ impl NormalizedPrintPlan {
                 }
                 gap_start = None;
             }
-            let has_object = layer.paths.iter().any(|p| {
-                !matches!(
-                    p.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                )
-            });
+            let has_object = layer.paths.iter().any(|p| p.kind.is_model());
             let has_support = layer.paths.iter().any(|p| {
                 matches!(
                     p.kind,
@@ -3814,6 +3920,28 @@ impl NormalizedPrintPlan {
                 path.validate_owner()?;
                 let physical = path.physical_z_mm;
                 let path_height = path.height_mm();
+                if path.kind.is_adhesion() {
+                    let requested = match path.kind {
+                        DepositionKind::Skirt => intent.recipe.skirt.is_some(),
+                        _ => intent.recipe.brim.is_some(),
+                    };
+                    if index != 0
+                        || !requested
+                        || path.points_mm.len() < 4
+                        || path.points_mm.first() != path.points_mm.last()
+                        || !matches!(path.width, WidthProfile::Constant { .. })
+                        || physical[0] != layer.lower_z_mm
+                    {
+                        return Err(invalid(
+                            "skirt and brim are closed constant-width first-layer loops of a requested recipe policy",
+                        ));
+                    }
+                    if path.kind == DepositionKind::Skirt {
+                        skirt_paths += 1;
+                    } else {
+                        brim_paths += 1;
+                    }
+                }
                 if !physical.iter().all(|z| z.is_finite()) || physical[1] != layer.z_mm {
                     return Err(invalid(&format!(
                         "path physical interval exceeds owning layer: physical_z={physical:?}, height={path_height}, layer_z={}",
@@ -3937,10 +4065,7 @@ impl NormalizedPrintPlan {
                 segments = segments
                     .checked_add(path.points_mm.len() - 1)
                     .ok_or_else(|| resource("segment count overflow"))?;
-                if !matches!(
-                    path.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                ) {
+                if path.kind.is_model() {
                     object_segments += path.points_mm.len() - 1;
                 }
                 if segments > MAX_PLAN_COUNT {
@@ -4112,6 +4237,22 @@ impl NormalizedPrintPlan {
         if segments == 0 || object_segments == 0 {
             return Err(invalid("print plan has no object deposition"));
         }
+        let adhesion = &self.adhesion;
+        if adhesion.skirt_paths != skirt_paths
+            || adhesion.brim_paths != brim_paths
+            || (adhesion.brim_islands == 0) != (brim_paths == 0)
+            || (intent.recipe.skirt.is_none()
+                && (adhesion.skirt_paths | adhesion.skirt_loops_outside_envelope) != 0)
+            || (intent.recipe.brim.is_none()
+                && (adhesion.brim_islands
+                    | adhesion.brim_paths
+                    | adhesion.brim_loops_outside_envelope)
+                    != 0)
+        {
+            return Err(invalid(
+                "adhesion summary disagrees with the first layer's skirt and brim paths",
+            ));
+        }
         Ok(if complete { Some(object_xy) } else { None })
     }
 }
@@ -4278,6 +4419,9 @@ pub struct VerificationReport {
     pub support_deposition_segments: u32,
     pub support_deposited_volume_mm3: f64,
     pub support_filament_length_mm: f64,
+    /// Skirt and brim: intentional non-model first-layer deposition.
+    pub adhesion_deposition_segments: u32,
+    pub adhesion_filament_length_mm: f64,
     pub retraction_count: u32,
     pub retracted_filament_mm: f64,
     #[serde(deserialize_with = "required_option")]
@@ -4347,9 +4491,18 @@ impl VerificationReport {
             .deposition_segments
             .checked_add(self.support_deposition_segments)
             .and_then(|n| n.checked_add(waste_segments))
+            .and_then(|n| n.checked_add(self.adhesion_deposition_segments))
             .is_none()
         {
             return Err(resource("verification segment limit exceeded"));
+        }
+        if !self.adhesion_filament_length_mm.is_finite()
+            || self.adhesion_filament_length_mm < 0.0
+            || (self.adhesion_deposition_segments == 0) != (self.adhesion_filament_length_mm == 0.0)
+        {
+            return Err(invalid(
+                "verification skirt/brim count disagrees with its filament",
+            ));
         }
         if let Some(routing) = &self.routing
             && (self.retraction_count != routing.selection_count
@@ -4427,6 +4580,8 @@ pub struct ManufacturingSummary {
     pub support_deposition_segments: u32,
     pub support_deposited_volume_mm3: f64,
     pub support_filament_length_mm: f64,
+    pub adhesion_deposition_segments: u32,
+    pub adhesion_filament_length_mm: f64,
     pub software_only: bool,
     pub surface_resolution: SurfaceResolutionTotals,
     pub native_geometry: NativeGeometryCoverageSummary,
@@ -4473,17 +4628,19 @@ impl ManufacturingSummary {
                 "native geometry coverage does not bind summary layers",
             ));
         }
+        let deposited = self
+            .deposition_segments
+            .checked_add(self.support_deposition_segments)
+            .and_then(|n| n.checked_add(self.adhesion_deposition_segments));
         if self.layers == 0
             || self.paths == 0
-            || self
-                .deposition_segments
-                .checked_add(self.support_deposition_segments)
-                .is_none_or(|n| self.paths > n)
-            || self
-                .deposition_segments
-                .checked_add(self.support_deposition_segments)
+            || deposited.is_none_or(|n| self.paths > n)
+            || deposited
                 .and_then(|n| n.checked_add(waste_segments))
                 .is_none()
+            || !self.adhesion_filament_length_mm.is_finite()
+            || self.adhesion_filament_length_mm < 0.0
+            || (self.adhesion_deposition_segments == 0) != (self.adhesion_filament_length_mm == 0.0)
         {
             return Err(invalid("invalid manufacturing summary counts"));
         }
@@ -4918,18 +5075,19 @@ impl ManufacturingBundle {
         self.program.validate()?;
         let mut object_count = 0usize;
         let mut support_count = 0usize;
+        let mut adhesion_count = 0usize;
         for path in self.plan.layers.iter().flat_map(|l| &l.paths) {
-            if matches!(
-                path.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            ) {
+            if path.kind.is_support() {
                 support_count += path.points_mm.len() - 1;
+            } else if path.kind.is_adhesion() {
+                adhesion_count += path.points_mm.len() - 1;
             } else {
                 object_count += path.points_mm.len() - 1;
             }
         }
         if self.verification.deposition_segments as usize != object_count
             || self.verification.support_deposition_segments as usize != support_count
+            || self.verification.adhesion_deposition_segments as usize != adhesion_count
         {
             return Err(invalid(
                 "verification/plan object or support segment count mismatch",
@@ -4958,6 +5116,8 @@ impl ManufacturingBundle {
             support_deposition_segments: self.verification.support_deposition_segments,
             support_deposited_volume_mm3: self.verification.support_deposited_volume_mm3,
             support_filament_length_mm: self.verification.support_filament_length_mm,
+            adhesion_deposition_segments: self.verification.adhesion_deposition_segments,
+            adhesion_filament_length_mm: self.verification.adhesion_filament_length_mm,
             routing: self.verification.routing.clone(),
             software_only: true,
             surface_resolution: SurfaceResolutionTotals::from_records(

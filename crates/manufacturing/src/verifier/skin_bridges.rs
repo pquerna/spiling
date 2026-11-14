@@ -209,11 +209,7 @@ pub(super) fn verify(
             let actual = || {
                 projected_edges(
                     previous.paths.iter().filter(|lower| {
-                        lower.physical_z_mm[1] == path.physical_z_mm[0]
-                            && !matches!(
-                                lower.kind,
-                                DepositionKind::Support | DepositionKind::SupportInterface
-                            )
+                        lower.physical_z_mm[1] == path.physical_z_mm[0] && lower.kind.is_model()
                     }),
                     true,
                 )
@@ -252,11 +248,7 @@ pub(super) fn verify(
             // the separate whole-stroke XYZ6 proof below owns actual anchoring.
             let skin_length = (raw_skin_end[along] - raw_transition[along]).abs();
             let nominal = previous.paths.iter().filter(|lower| {
-                lower.physical_z_mm[1] == path.physical_z_mm[0]
-                    && !matches!(
-                        lower.kind,
-                        DepositionKind::Support | DepositionKind::SupportInterface
-                    )
+                lower.physical_z_mm[1] == path.physical_z_mm[0] && lower.kind.is_model()
             });
             let nearest = anchors.gaps(
                 AnchorCandidate {

@@ -373,6 +373,8 @@ message ManufacturingSummary {
   NativeGeometryCoverageSummary native_geometry = 11;
   repeated ProcessRegionResolution process_resolution = 12;
   FixedDualVerification routing = 13;
+  uint32 adhesion_deposition_segments = 15;
+  double adhesion_filament_length_mm = 16;
 }
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }
@@ -416,6 +418,8 @@ message VerificationReport {
   uint32 cooling_slowed_layers = 21;
   double minimum_cooling_scale = 22;
   optional double estimated_seconds = 23;
+  uint32 adhesion_deposition_segments = 24;
+  double adhesion_filament_length_mm = 25;
 }
 
 // Actual replay qualifies nominal layer/owner associations; no measured optics.

@@ -1164,6 +1164,8 @@ fn intent() -> ManufacturingIntent {
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
             role_speeds: None,
             first_layer_height_mm: None,
+            skirt: None,
+            brim: None,
         },
     }
 }
@@ -1813,6 +1815,7 @@ fn plan() -> NormalizedPrintPlan {
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],
+        adhesion: Default::default(),
         process_resolution: vec![],
         sampling_tolerance_mm: 0.005,
         surface_tolerance_mm: 0.001,
@@ -1904,6 +1907,8 @@ fn bundle() -> ManufacturingBundle {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
             routing: None,

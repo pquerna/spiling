@@ -965,7 +965,15 @@ role_speeds: RoleSpeeds | null,
  * Height of the first layer above the bed; null schedules it like any
  * other layer.
  */
-first_layer_height_mm: number | null, };
+first_layer_height_mm: number | null,
+/**
+ * First-layer skirt; null prints none.
+ */
+skirt: SkirtPolicy | null,
+/**
+ * First-layer brim; null prints none.
+ */
+brim: BrimPolicy | null, };
 
 export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], } | { "kind": "distributed" };
 
@@ -1104,7 +1112,7 @@ export type ManufacturingInputGroup = "hardware" | "material_profile" | "printer
 
 export type ManufacturingInputChange = { group: ManufacturingInputGroup, path: string, before: string | null, after: string | null, };
 
-export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
+export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall" | "skirt" | "brim";
 
 export type WidthProfile = { "kind": "constant", width_mm: number, } | { "kind": "per_edge", widths_mm: Array<number>, };
 
@@ -1231,11 +1239,15 @@ export type NormalizedPrintPlan = {
  * Both mandatory service groups per actual layer for the bounded dual route.
  * Single-tool plans retain an empty table. Entries are permutations of 0,1.
  */
-routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
+routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, adhesion: AdhesionSummary, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { job_time: JobTimeLedger | null, layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null,
+export type VerificationReport = { job_time: JobTimeLedger | null, layer_height: LayerHeightAssessment, verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number,
+/**
+ * Skirt and brim: intentional non-model first-layer deposition.
+ */
+adhesion_deposition_segments: number, adhesion_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, routing: FixedDualVerification | null,
 /**
  * Object/support deposition segments whose feed the volumetric flow
  * ceiling lowered below their role speed.
@@ -1288,7 +1300,7 @@ export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_i
 
 export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
 
-export type ManufacturingSummary = { layer_height: LayerHeightAssessment, layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
+export type ManufacturingSummary = { layer_height: LayerHeightAssessment, layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, adhesion_deposition_segments: number, adhesion_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, routing: FixedDualVerification | null, };
 
 export type ProgramDescriptor = { hash: SourceHash,
 /**

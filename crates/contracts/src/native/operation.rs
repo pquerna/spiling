@@ -194,6 +194,8 @@ pub(super) fn validate_verified(
         || report.support_deposition_segments != record.summary.support_deposition_segments
         || report.support_deposited_volume_mm3 != record.summary.support_deposited_volume_mm3
         || report.support_filament_length_mm != record.summary.support_filament_length_mm
+        || report.adhesion_deposition_segments != record.summary.adhesion_deposition_segments
+        || report.adhesion_filament_length_mm != record.summary.adhesion_filament_length_mm
         || report.deposited_volume_mm3 != record.summary.deposited_volume_mm3
         || report.filament_length_mm != record.summary.filament_length_mm
         || report.routing != record.summary.routing

@@ -110,7 +110,7 @@ pub const ROLES: [&str; 16] = [
     "Unretract",
     "Separator wall",
     "Tool epoch",
-    "Waste",
+    "Skirt, brim, waste",
 ];
 fn event_range(
     events: &[(u32, u32)],

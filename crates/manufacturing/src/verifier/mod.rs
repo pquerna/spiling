@@ -14,6 +14,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 };
 use spiling_contracts::manufacturing::*;
 
+mod adhesion;
 mod construction;
 mod cost;
 mod expected;
@@ -789,6 +790,8 @@ pub(crate) fn verify_actual(
     let mut support_deposition_segments = 0u32;
     let mut object_filament = 0.0;
     let mut support_filament = 0.0;
+    let mut adhesion_deposition_segments = 0u32;
+    let mut adhesion_filament = 0.0;
     let mut retraction_count = 0u32;
     let mut retracted_filament_mm = 0.0;
     let mut retracted_endpoint = None;
@@ -1378,13 +1381,11 @@ pub(crate) fn verify_actual(
                     hardware.admits_bounds(&actual).map_err(|e| failed(&e))?;
                 }
                 let nominal_length = distance(source, target);
-                let support = matches!(
-                    deposition_kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                );
+                let support = deposition_kind.is_support();
+                let adhesion = deposition_kind.is_adhesion();
                 if support {
                     layer_support_volume += nominal_length * volume_per_mm;
-                } else {
+                } else if !adhesion {
                     layer_nominal_volume += nominal_length * volume_per_mm;
                 }
                 if retracted_endpoint.is_some() {
@@ -1523,12 +1524,16 @@ pub(crate) fn verify_actual(
                 if support {
                     support_deposition_segments = count_event(support_deposition_segments)?;
                     support_filament += delta_e;
+                } else if adhesion {
+                    adhesion_deposition_segments = count_event(adhesion_deposition_segments)?;
+                    adhesion_filament += delta_e;
                 } else {
                     deposition_segments = count_event(deposition_segments)?;
                     object_filament += delta_e;
                 }
                 if deposition_segments
                     .checked_add(support_deposition_segments)
+                    .and_then(|n| n.checked_add(adhesion_deposition_segments))
                     .is_none()
                 {
                     return Err(failed(
@@ -1556,6 +1561,8 @@ pub(crate) fn verify_actual(
                         DepositionKind::Support => 9,
                         DepositionKind::SupportInterface => 10,
                         DepositionKind::SeparatorWall => 13,
+                        // Non-model deposition without a model owner.
+                        DepositionKind::Skirt | DepositionKind::Brim => 15,
                     }
                 };
                 sink.push_associated(
@@ -1596,6 +1603,7 @@ pub(crate) fn verify_actual(
     for layer in plan.layers.iter().skip(volume_layer as usize + 1) {
         verify_region_volume(layer, 0.0, 0.0)?;
     }
+    adhesion::verify(plan, recipe, cancel)?;
     let mut geometry_work = 0usize;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut plate_contacts = Vec::new();
@@ -1703,6 +1711,8 @@ pub(crate) fn verify_actual(
         support_deposition_segments,
         support_deposited_volume_mm3: support_filament * filament_area,
         support_filament_length_mm: support_filament,
+        adhesion_deposition_segments,
+        adhesion_filament_length_mm: adhesion_filament,
         retraction_count,
         retracted_filament_mm,
         routing,
@@ -1751,6 +1761,13 @@ pub(crate) fn verify_actual(
     }
     if report.flow_limited_segments > 0 || report.cooling_slowed_layers > 0 {
         report.limitations.insert(0, format!("Speeds lowered to meet declared limits: {} deposition segments slowed to the volumetric flow ceiling; {} layers slowed to the minimum layer time {:.1} s (slowest at {:.0}% of its speed).", report.flow_limited_segments, report.cooling_slowed_layers, recipe.process.minimum_layer_time_s, report.minimum_cooling_scale * 100.0));
+    }
+    let adhesion = &plan.adhesion;
+    if adhesion.skirt_loops_outside_envelope > 0 || adhesion.brim_loops_outside_envelope > 0 {
+        report.limitations.insert(0, format!("Skirt/brim loops left out because they would leave the build envelope: {} skirt, {} brim.", adhesion.skirt_loops_outside_envelope, adhesion.brim_loops_outside_envelope));
+    }
+    if report.adhesion_deposition_segments > 0 {
+        report.coverage.push(format!("Skirt {} / brim {} loops ({} islands) checked as non-model: clear of part/support beads, skirt at its distance, brim attached; no adhesion claim", adhesion.skirt_paths, adhesion.brim_paths, adhesion.brim_islands));
     }
     if unsupported_layers > 0 {
         report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no support reached from the build plate; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));

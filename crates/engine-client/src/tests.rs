@@ -84,6 +84,8 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             surface_resolution: spiling_contracts::manufacturing::SurfaceResolutionTotals::empty(),
             software_only: true,
             routing: None,

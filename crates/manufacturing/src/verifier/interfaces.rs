@@ -193,10 +193,7 @@ pub(super) fn verify_projected_byte_geometry(
                 let length = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
                 let edges = projected_edges(
                     previous.paths.iter().filter(|p| {
-                        !matches!(
-                            p.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        ) && p.physical_z_mm[1] == path.physical_z_mm[0]
+                        p.kind.is_model() && p.physical_z_mm[1] == path.physical_z_mm[0]
                     }),
                     true,
                 );
@@ -295,15 +292,8 @@ pub(super) fn verify_projected_byte_geometry(
                 if (low - previous.z_mm).abs() > arithmetic {
                     return Err(failed("separator crosses a physical lower-deposition gap"));
                 }
-                let edges = projected_edges(
-                    previous.paths.iter().filter(|p| {
-                        !matches!(
-                            p.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        )
-                    }),
-                    true,
-                );
+                let edges =
+                    projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true);
                 let length = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
                 for gap in anchors.gaps_edges(
                     AnchorCandidate {
@@ -789,10 +779,7 @@ pub(super) fn verify_earlier_fine_paths(
             if prepared.is_none() {
                 prepared = Some(PreparedAnchorPaths::new(
                     previous.paths.iter().filter(|path| {
-                        !matches!(
-                            path.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        ) && path.physical_z_mm[1] == layer.lower_z_mm
+                        path.kind.is_model() && path.physical_z_mm[1] == layer.lower_z_mm
                     }),
                     cancel,
                 )?);
@@ -992,15 +979,7 @@ pub(super) fn verify_bridge_lower(
     if (layer.lower_z_mm - previous.z_mm).abs() > arithmetic {
         return Err(failed("actual Bridge crosses a lower deposition gap"));
     }
-    let edges = projected_edges(
-        previous.paths.iter().filter(|p| {
-            !matches!(
-                p.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            )
-        }),
-        true,
-    );
+    let edges = projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true);
     let length = (stroke[1][0] - stroke[0][0]).hypot(stroke[1][1] - stroke[0][1]);
     let mut genuine = false;
     for gap in anchors.gaps_edges(

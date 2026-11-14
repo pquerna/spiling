@@ -352,6 +352,8 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                adhesion_deposition_segments: 0,
+                adhesion_filament_length_mm: 0.0,
                 surface_resolution: SurfaceResolutionTotals::empty(),
             },
         };
@@ -416,6 +418,8 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                adhesion_deposition_segments: 0,
+                adhesion_filament_length_mm: 0.0,
                 retraction_count: 0,
                 retracted_filament_mm: 0.0,
                 flow_limited_segments: 0,

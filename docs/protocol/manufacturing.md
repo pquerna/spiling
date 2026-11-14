@@ -688,6 +688,19 @@ Required `process_interfaces` accounts each explicitly authorized separator band
 
 Scheduled-M reuse is a held tolerant section: a span keeps its first layer's section over each following layer whose own section agrees with it within the profile tolerance (same rings, every vertex within it of the other's ring), compared against the held section so error never accumulates. Mapped image finishes keep one-layer spans. Realized D and each applied field retain independent identity/invariance obligations. Horizontal/image events and full-height occupancy remain separate. The full-height inner-material query below proves only its eligible subset, never whole-part invariance.
 
+## Skirt and brim
+
+`recipe.skirt` and `recipe.brim` are required-nullable (null plans none); single-tool workflows only. Defaults (`create_default_intent`): skirt on, one loop 2 mm clear of the first layer with loops added until 100 mm of bead is deposited; brim 5 mm wide at zero separation, `always` for ABS, ASA and TPU, `narrow_tall` for PLA and PETG.
+
+After every model and support path of the first layer is final, the planner (`planner/adhesion.rs`) adds closed constant-width loops of recipe bead width as `Brim` and `Skirt` paths (owner null), routed through the ordinary scheduler with the first layer split into three barriers: skirt, then brim, then everything else.
+
+- Brim: exact outward offsets of the union of the outer outlines of the brimmed first-layer islands (holes are never brimmed), at bead spacing `w - h(1 - π/4)`, the innermost at `separation + spacing/2`, enough loops to fill `width_mm`. `always` brims every island; `narrow_tall` brims an island whose part height reaches `AUTOMATIC_BRIM_ASPECT` (3) times the narrower side of its base bounds (the first-layer island grown by the material above it within the bottom skin thickness, so a part resting on a fillet is measured by what it stands on), plus every island within brim reach of a brimmed one, so no loop passes over an unbrimmed island. With first-layer support, the brim surrounds the support base too (the union includes rectangles enclosing every support bead) and therefore every island.
+- Skirt: offsets of the convex outline of every first-layer bead (part, brim, support) at `distance + both half widths`, plus one minimum loop edge. A convex outline offset by `r` has length `perimeter + 2πr`, so the requested loop count (at least `loops`, more until `minimum_length_mm`) is known before construction.
+
+Loop vertices closer than 2.5 times the minimum command length to the previous kept vertex are dropped so every edge is printable. A loop level that would leave the build envelope is not planned and nothing outside it either; `NormalizedPrintPlan.adhesion` records the Skirt and Brim path counts, the brimmed islands and the requested loops left out, and plan validation binds them to the first layer. Speeds: the outer-wall role speed under the first-layer wall cap; first-layer flow.
+
+The verifier, after matching emitted moves to the plan, counts skirt and brim separately (`VerificationReport`/`ManufacturingSummary` `adhesion_deposition_segments`, `adhesion_filament_length_mm`; neither model nor support volume) and checks them on its own: no skirt or brim bead covers a model or support bead's centreline, the skirt stays its declared distance clear of every other first-layer bead, and the brim touches the part's first layer within its separation. Left-out loops become a report limitation. SPLR records them as kind 15 (non-model deposition, no model owner). These are software declarations: no adhesion, warping or removal claim.
+
 ## Deposition speeds and cooling
 
 The speed of every single-tool deposition edge follows one declared rule

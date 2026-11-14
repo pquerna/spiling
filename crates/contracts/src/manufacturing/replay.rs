@@ -240,6 +240,7 @@ impl ReplayDisplayDescriptor {
             || self.info.deposition_count
                 != record.summary.deposition_segments
                     + record.summary.support_deposition_segments
+                    + record.summary.adhesion_deposition_segments
                     + self.info.waste_count
         {
             return Err(corrupt("replay descriptor disagrees with bundle record"));
@@ -407,7 +408,7 @@ pub fn validate_replay_reader(
                         0
                     })
             || (dual && (tool > 1 || (kind != 14 && tool as usize != active_tool)))
-            || (!dual && (tool != 0 || kind >= 14))
+            || (!dual && (tool != 0 || kind == 14))
             || (index == 0
                 && if dual {
                     kind != 14

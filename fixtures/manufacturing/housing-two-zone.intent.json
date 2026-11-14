@@ -252,6 +252,8 @@
     "rectilinear_axis": "x",
     "top_skin_axis": "x",
     "role_speeds": null,
-    "first_layer_height_mm": null
+    "first_layer_height_mm": null,
+    "skirt": null,
+    "brim": null
   }
 }

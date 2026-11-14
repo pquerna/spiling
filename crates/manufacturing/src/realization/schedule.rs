@@ -102,9 +102,23 @@ pub(super) fn apply(
     })?;
     // Export the construction's actual attachment receipts, not a role rank.
     let dependencies = attachment_dependencies(plan, cancel)?;
-    for (barrier, layer) in plan.layers.iter().enumerate() {
+    // A layer is one barrier; a first layer with a skirt or brim prints the
+    // skirt, then the brim, then everything else, as three barriers.
+    let mut base = 0u32;
+    for layer in &plan.layers {
         check_cancel(cancel)?;
+        let staged = layer.paths.iter().any(|path| path.kind.is_adhesion());
         for path in &layer.paths {
+            let barrier = base
+                + if !staged {
+                    0
+                } else {
+                    match path.kind {
+                        DepositionKind::Skirt => 0,
+                        DepositionKind::Brim => 1,
+                        _ => 2,
+                    }
+                };
             let points = &path.points_mm;
             let length: f64 = points.windows(2).map(|p| distance(p[0], p[1])).sum();
             tasks.push(routing::Task {
@@ -123,7 +137,7 @@ pub(super) fn apply(
                     .as_ref()
                     .map_or(Ok(0), |job| job.tool_for_path(path))?
                     .into(),
-                barrier: barrier as u32,
+                barrier,
                 prerequisites: &dependencies[tasks.len()],
                 duration_s: length / intent.process_for_path(path)?.speed_mm_s,
                 seam_policy: (closed(path) && path.owner == Some(DepositionOwner::Wall))
@@ -131,6 +145,7 @@ pub(super) fn apply(
                 physical_z_mm: path.physical_z_mm,
             });
         }
+        base += if staged { 3 } else { 1 };
     }
     let scheduled = routing::schedule(&tasks, &machine, order, cancel);
     drop(tasks);

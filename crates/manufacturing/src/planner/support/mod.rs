@@ -3564,7 +3564,7 @@ pub(in crate::planner) fn object_volumes(
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
             .paths
             .iter()
-            .filter(|path| !support_role(path.kind))
+            .filter(|path| path.kind.is_model())
             .try_fold(0.0, |sum, path| {
                 let process = intent.process_for_path(path)?;
                 Ok::<_, ManufacturingError>(

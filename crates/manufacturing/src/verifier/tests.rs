@@ -209,6 +209,8 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             supports: SupportPolicy::Disabled,
             role_speeds: None,
             first_layer_height_mm: None,
+            skirt: None,
+            brim: None,
         },
     };
     let mut plan = NormalizedPrintPlan {
@@ -219,6 +221,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         material_domains: Vec::new(),
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sparse_bands: vec![],
+        adhesion: Default::default(),
         process_resolution: Vec::new(),
         native_geometry: NativeGeometryCoverageSummary {
             requested_shape_error_mm: intent.recipe.native_shape_error_mm(),

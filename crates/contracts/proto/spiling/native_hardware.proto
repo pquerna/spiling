@@ -44,6 +44,24 @@ message PlanarPrintRecipe {
   // Absent: uniform print_speed_mm_s with the process speed factors.
   RoleSpeeds role_speeds = 24;
   optional double first_layer_height_mm = 25;
+  // Absent: no skirt / no brim.
+  SkirtPolicy skirt = 26;
+  BrimPolicy brim = 27;
+}
+message SkirtPolicy {
+  uint32 loops = 1;
+  double distance_mm = 2;
+  double minimum_length_mm = 3;
+}
+enum BrimPlacement {
+  BRIM_PLACEMENT_UNSPECIFIED = 0;
+  BRIM_PLACEMENT_ALWAYS = 1;
+  BRIM_PLACEMENT_NARROW_TALL = 2;
+}
+message BrimPolicy {
+  double width_mm = 1;
+  double separation_mm = 2;
+  BrimPlacement placement = 3;
 }
 // Deposition speeds by role, mm/s.
 message RoleSpeeds {

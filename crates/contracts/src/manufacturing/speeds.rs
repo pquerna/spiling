@@ -7,8 +7,9 @@
 //! actual feed and volumetric flow from the emitted bytes itself.
 //!
 //! 1. Base speed: a role speed (outer/inner wall, sparse, solid/bottom and
-//!    covered top skin, exposed top skin,
-//!    support, bridge), capped by the first-layer wall or infill speed on layer 0 and by the
+//!    covered top skin, exposed top skin, support, bridge; skirt and brim
+//!    take the outer-wall speed), capped by the first-layer wall (walls,
+//!    skirt, brim) or infill speed on layer 0 and by the
 //!    recipe's material print speed; without role speeds, the uniform print
 //!    speed times the first-layer/bridge speed factors.
 //! 2. Flow ceiling (single tool): an edge whose bead would exceed the
@@ -101,10 +102,15 @@ pub fn base_speed_mm_s(
         DepositionKind::TopSkin => speeds.solid_infill_mm_s,
         DepositionKind::Bridge => speeds.bridge_mm_s,
         DepositionKind::Support | DepositionKind::SupportInterface => speeds.support_mm_s,
+        // First-layer loops: the outer-wall speed under the first-layer wall cap.
+        DepositionKind::Skirt | DepositionKind::Brim => speeds.outer_wall_mm_s,
     };
     if layer == 0 {
         speed = speed.min(match kind {
-            DepositionKind::Perimeter | DepositionKind::SeparatorWall => speeds.first_layer_mm_s,
+            DepositionKind::Perimeter
+            | DepositionKind::SeparatorWall
+            | DepositionKind::Skirt
+            | DepositionKind::Brim => speeds.first_layer_mm_s,
             _ => speeds.first_layer_infill_mm_s,
         });
     }

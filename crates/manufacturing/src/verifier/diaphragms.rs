@@ -134,12 +134,10 @@ fn lower(
         ];
         let length = (endpoints[1][0] - endpoints[0][0]).hypot(endpoints[1][1] - endpoints[0][1]);
         let actual = projected_edges(
-            previous.paths.iter().filter(|p| {
-                !matches!(
-                    p.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                ) && p.physical_z_mm[1] == path.physical_z_mm[0]
-            }),
+            previous
+                .paths
+                .iter()
+                .filter(|p| p.kind.is_model() && p.physical_z_mm[1] == path.physical_z_mm[0]),
             true,
         );
         for gap in anchors.gaps_edges(

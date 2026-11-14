@@ -246,7 +246,30 @@ def prusa_ini_from_intent(path):
     return path
 
 
-def prusa(step, cwd):
+def adhesion_args(brimmed):
+    """PrusaSlicer skirt/brim matching the recipe: one-layer skirt loops at
+    the same distance and minimum (PrusaSlicer's minimum is filament length),
+    an outer-only brim only where Spiling planned one (PrusaSlicer has no
+    narrow/tall placement)."""
+    recipe = INTENT["recipe"]
+    skirt, brim = recipe.get("skirt"), recipe.get("brim")
+    args = ["--skirts", str(skirt["loops"] if skirt else 0), "--skirt-height", "1"]
+    if skirt:
+        h = recipe.get("first_layer_height_mm") or recipe["layer_height_mm"]
+        w = recipe["bead_width_mm"]
+        bead = (w - h) * h + 3.141592653589793 * (h / 2) ** 2
+        filament = 3.141592653589793 * (recipe["filament_diameter_mm"] / 2) ** 2
+        args += ["--skirt-distance", str(skirt["distance_mm"]),
+                 "--min-skirt-length", str(round(skirt["minimum_length_mm"] * bead / filament, 4))]
+    if brim and brimmed:
+        args += ["--brim-width", str(brim["width_mm"]), "--brim-separation", str(brim["separation_mm"]),
+                 "--brim-type", "outer_only"]
+    else:
+        args += ["--brim-width", "0"]
+    return args
+
+
+def prusa(step, cwd, brimmed=False):
     started = time.time()
     gcode = os.path.join(cwd, "prusa.gcode")
     recipe = INTENT["recipe"]
@@ -261,6 +284,7 @@ def prusa(step, cwd):
         args = ["--layer-height", str(layer), "--fill-density", f"{round(fraction * 100)}%"]
     # Spiling's generated supports stand on the build plate only.
     args += ["--support-material", "--support-material-buildplate-only"] if SUPPORTS != "disabled" else []
+    args += adhesion_args(brimmed)
     try:
         proc = subprocess.run(["prusa-slicer", "--export-gcode", *args, "--center", center, "-o", gcode, step],
                               cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
@@ -301,9 +325,10 @@ def spiling_report(stdout):
         m = re.search(r'"%s":\s*(-?[0-9.eE+-]+)' % key, stdout)
         return float(m.group(1)) if m else None
     report = {k: number(k) for k in ("filament_length_mm", "support_filament_length_mm",
-                                     "priming_filament_length_mm", "estimated_seconds")}
+                                     "adhesion_filament_length_mm", "priming_filament_length_mm",
+                                     "estimated_seconds")}
     parts = [report[k] for k in ("filament_length_mm", "support_filament_length_mm",
-                                 "priming_filament_length_mm")]
+                                 "adhesion_filament_length_mm", "priming_filament_length_mm")]
     report["total_filament_mm"] = round(sum(v for v in parts if v is not None), 3)
     return report
 
@@ -317,38 +342,43 @@ def part(name, intent, results):
     shutil.copy(src, local)
     record = {"part": name, "bytes": os.path.getsize(src),
               "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
-    record["prusa"] = prusa(local, cwd)
     settings = ["--intent", intent] if intent else defaults_args()
     create = run_cli(["create", "p.spil", "--import", "source.step", *settings,
                       "--center-all-on-bed", "--compile", "--save"], cwd)
     record["spiling_compile"] = create
     record["settings"] = settings
+    plan = None
     if create["ok"]:
         os.remove(local)
         ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
         record["spiling_return"] = ret
         if ret["ok"]:
-            stdout = open(os.path.join(cwd, "open.stdout.json")).read()
-            m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
-            record["deposition_segments"] = int(m.group(1)) if m else None
-            m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
-            record["filament_mm"] = float(m.group(1)) if m else None
-            report = spiling_report(stdout)
-            record["spiling"] = report
-            reference = record["prusa"]
-            if reference.get("filament_mm") and report["total_filament_mm"]:
-                record["filament_ratio"] = round(report["total_filament_mm"] / reference["filament_mm"], 4)
-            if reference.get("estimated_seconds") and report.get("estimated_seconds"):
-                record["time_ratio"] = round(report["estimated_seconds"] / reference["estimated_seconds"], 4)
             plan = json.load(open(os.path.join(cwd, "out", "plan.json")))
-            layers = plan["layers"]
-            spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
-            record["layers"] = len(layers)
-            record["overhang_layers"] = sum(1 for v in spans if v > 0)
-            record["max_overhang_mm"] = round(max(spans, default=0), 3)
-            record["ceiling_layers"] = sum(
-                1 for l in layers
-                if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
+    # PrusaSlicer slices the original source after Spiling, so its brim can
+    # follow the brim Spiling planned.
+    record["prusa"] = prusa(src, cwd, brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
+    if plan is not None:
+        stdout = open(os.path.join(cwd, "open.stdout.json")).read()
+        m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
+        record["deposition_segments"] = int(m.group(1)) if m else None
+        m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
+        record["filament_mm"] = float(m.group(1)) if m else None
+        report = spiling_report(stdout)
+        record["spiling"] = report
+        reference = record["prusa"]
+        if reference.get("filament_mm") and report["total_filament_mm"]:
+            record["filament_ratio"] = round(report["total_filament_mm"] / reference["filament_mm"], 4)
+        if reference.get("estimated_seconds") and report.get("estimated_seconds"):
+            record["time_ratio"] = round(report["estimated_seconds"] / reference["estimated_seconds"], 4)
+        record["adhesion"] = plan["adhesion"]
+        layers = plan["layers"]
+        spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
+        record["layers"] = len(layers)
+        record["overhang_layers"] = sum(1 for v in spans if v > 0)
+        record["max_overhang_mm"] = round(max(spans, default=0), 3)
+        record["ceiling_layers"] = sum(
+            1 for l in layers
+            if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
     with LOCK:
         results.write(json.dumps(record) + "\n")
         results.flush()

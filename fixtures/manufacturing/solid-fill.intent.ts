@@ -53,6 +53,8 @@ const intent = {
     top_skin_axis: "alternating_xy",
     role_speeds: null,
     first_layer_height_mm: null,
+    skirt: null,
+    brim: null,
   },
 } satisfies ManufacturingIntent;
 

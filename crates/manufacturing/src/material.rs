@@ -274,6 +274,16 @@ pub fn create_default_intent(
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
             role_speeds: Some(speeds),
             first_layer_height_mm: Some(first),
+            skirt: Some(SkirtPolicy {
+                loops: DEFAULT_SKIRT_LOOPS,
+                distance_mm: DEFAULT_SKIRT_DISTANCE_MM,
+                minimum_length_mm: DEFAULT_SKIRT_MINIMUM_LENGTH_MM,
+            }),
+            brim: Some(BrimPolicy {
+                width_mm: DEFAULT_BRIM_WIDTH_MM.max(width),
+                separation_mm: 0.0,
+                placement: default_brim_placement(&material.polymer_family),
+            }),
         },
         printer,
     };
@@ -391,6 +401,24 @@ fn tool_selection(
     };
     selection.validate()?;
     Ok(selection)
+}
+
+/// Default skirt: one loop 2 mm clear of the first layer (PrusaSlicer's and
+/// OrcaSlicer's distance), with loops added until 100 mm of bead primes the
+/// nozzle.
+pub const DEFAULT_SKIRT_LOOPS: u32 = 1;
+pub const DEFAULT_SKIRT_DISTANCE_MM: f64 = 2.0;
+pub const DEFAULT_SKIRT_MINIMUM_LENGTH_MM: f64 = 100.0;
+/// Default brim width from the part outline.
+pub const DEFAULT_BRIM_WIDTH_MM: f64 = 5.0;
+
+/// Shrinking, warping and flexible polymers (ABS, ASA, TPU) always get a
+/// brim; PLA and PETG only under a narrow, tall first-layer island.
+pub fn default_brim_placement(polymer_family: &str) -> BrimPlacement {
+    match spiling_contracts::manufacturing::generic_polymer_family(polymer_family) {
+        Some("ABS" | "ASA" | "TPU") => BrimPlacement::Always,
+        _ => BrimPlacement::NarrowTall,
+    }
 }
 
 /// The generic profile of a polymer family for a setup's nozzle, with the

@@ -606,10 +606,7 @@ fn certify_polygon_capsules(
         charge_support_clearance(support_work, cancel)?;
         for path in &layer.paths {
             charge_support_clearance(support_work, cancel)?;
-            if !matches!(
-                path.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            ) {
+            if path.kind.is_model() {
                 continue;
             }
             let edges = path.checked_edges()?;
@@ -838,11 +835,7 @@ fn certify_deposited_clearance(
         let mut applicable = None;
         for support in &support_layer.paths {
             charge_support_clearance(work, cancel)?;
-            if !matches!(
-                support.kind,
-                DepositionKind::Support | DepositionKind::SupportInterface
-            ) || support.points_mm.len() < 2
-            {
+            if support.kind.is_model() || support.points_mm.len() < 2 {
                 continue;
             }
             if applicable.is_none() {

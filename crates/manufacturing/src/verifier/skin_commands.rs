@@ -652,10 +652,7 @@ pub(super) fn verify(
                     }
                     let earlier = projected_edges(
                         previous.paths.iter().filter(|lower| {
-                            !matches!(
-                                lower.kind,
-                                DepositionKind::Support | DepositionKind::SupportInterface
-                            ) && lower.physical_z_mm[1] == path.physical_z_mm[0]
+                            lower.kind.is_model() && lower.physical_z_mm[1] == path.physical_z_mm[0]
                         }),
                         true,
                     );

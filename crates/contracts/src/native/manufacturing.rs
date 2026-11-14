@@ -1483,6 +1483,29 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                     first_layer_infill_mm_s: s.first_layer_infill_mm_s,
                 }),
                 first_layer_height_mm: value.first_layer_height_mm,
+                skirt: value.skirt.map(|s| SkirtPolicy {
+                    loops: s.loops,
+                    distance_mm: s.distance_mm,
+                    minimum_length_mm: s.minimum_length_mm,
+                }),
+                brim: value
+                    .brim
+                    .map(|b| {
+                        Ok::<_, String>(BrimPolicy {
+                            width_mm: b.width_mm,
+                            separation_mm: b.separation_mm,
+                            placement: match rpc::BrimPlacement::try_from(b.placement)
+                                .map_err(|_| "unknown brim placement")?
+                            {
+                                rpc::BrimPlacement::Always => BrimPlacement::Always,
+                                rpc::BrimPlacement::NarrowTall => BrimPlacement::NarrowTall,
+                                rpc::BrimPlacement::Unspecified => {
+                                    return Err("unspecified brim placement".into());
+                                }
+                            },
+                        })
+                    })
+                    .transpose()?,
             },
             Self::validate,
         )
@@ -1526,6 +1549,19 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
                 first_layer_infill_mm_s: s.first_layer_infill_mm_s,
             }),
             first_layer_height_mm: value.first_layer_height_mm,
+            skirt: value.skirt.map(|s| rpc::SkirtPolicy {
+                loops: s.loops,
+                distance_mm: s.distance_mm,
+                minimum_length_mm: s.minimum_length_mm,
+            }),
+            brim: value.brim.map(|b| rpc::BrimPolicy {
+                width_mm: b.width_mm,
+                separation_mm: b.separation_mm,
+                placement: match b.placement {
+                    BrimPlacement::Always => rpc::BrimPlacement::Always,
+                    BrimPlacement::NarrowTall => rpc::BrimPlacement::NarrowTall,
+                } as i32,
+            }),
         })
     }
 }
@@ -1741,6 +1777,8 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
                 support_deposition_segments: value.support_deposition_segments,
                 support_deposited_volume_mm3: value.support_deposited_volume_mm3,
                 support_filament_length_mm: value.support_filament_length_mm,
+                adhesion_deposition_segments: value.adhesion_deposition_segments,
+                adhesion_filament_length_mm: value.adhesion_filament_length_mm,
                 surface_resolution: required(
                     value.surface_resolution,
                     "surface resolution totals",
@@ -1774,6 +1812,8 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
             support_deposition_segments: value.support_deposition_segments,
             support_deposited_volume_mm3: value.support_deposited_volume_mm3,
             support_filament_length_mm: value.support_filament_length_mm,
+            adhesion_deposition_segments: value.adhesion_deposition_segments,
+            adhesion_filament_length_mm: value.adhesion_filament_length_mm,
             surface_resolution: Some(value.surface_resolution.try_into()?),
             native_geometry: Some(value.native_geometry.try_into()?),
             process_resolution: value
@@ -1844,6 +1884,8 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
                 support_deposition_segments: value.support_deposition_segments,
                 support_deposited_volume_mm3: value.support_deposited_volume_mm3,
                 support_filament_length_mm: value.support_filament_length_mm,
+                adhesion_deposition_segments: value.adhesion_deposition_segments,
+                adhesion_filament_length_mm: value.adhesion_filament_length_mm,
                 retraction_count: value.retraction_count,
                 retracted_filament_mm: value.retracted_filament_mm,
                 flow_limited_segments: value.flow_limited_segments,
@@ -1877,6 +1919,8 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
             support_deposition_segments: value.support_deposition_segments,
             support_deposited_volume_mm3: value.support_deposited_volume_mm3,
             support_filament_length_mm: value.support_filament_length_mm,
+            adhesion_deposition_segments: value.adhesion_deposition_segments,
+            adhesion_filament_length_mm: value.adhesion_filament_length_mm,
             retraction_count: value.retraction_count,
             retracted_filament_mm: value.retracted_filament_mm,
             flow_limited_segments: value.flow_limited_segments,
@@ -2380,6 +2424,8 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                adhesion_deposition_segments: 0,
+                adhesion_filament_length_mm: 0.0,
                 surface_resolution: SurfaceResolutionTotals::empty(),
                 native_geometry: NativeGeometryCoverageSummary {
                     requested_shape_error_mm: 0.02,
@@ -2548,6 +2594,8 @@ mod tests {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             retraction_count: 0,
             retracted_filament_mm: 0.0,
             flow_limited_segments: 0,
@@ -4005,6 +4053,8 @@ mod routed_report_wire_tests {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             retraction_count: 2,
             retracted_filament_mm: 2.0,
             routing: Some(routing.clone()),
@@ -4043,6 +4093,8 @@ mod routed_report_wire_tests {
             support_deposition_segments: 0,
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
+            adhesion_deposition_segments: 0,
+            adhesion_filament_length_mm: 0.0,
             surface_resolution: SurfaceResolutionTotals::empty(),
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.02,

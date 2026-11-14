@@ -106,6 +106,8 @@ fn intent() -> ManufacturingIntent {
             supports: SupportPolicy::Disabled,
             role_speeds: None,
             first_layer_height_mm: None,
+            skirt: None,
+            brim: None,
         },
     }
 }
@@ -2179,12 +2181,7 @@ fn assert_reemitted_interface_refuses(
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
             .paths
             .iter()
-            .filter(|p| {
-                !matches!(
-                    p.kind,
-                    DepositionKind::Support | DepositionKind::SupportInterface
-                )
-            })
+            .filter(|p| p.kind.is_model())
             .map(|p| {
                 let h = p.height_mm();
                 let flow = intent.recipe.flow_multiplier;

@@ -31,9 +31,9 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "102";
-pub const EMITTER_VERSION: &str = "21";
-pub const VERIFIER_VERSION: &str = "48";
+pub const PLANNER_VERSION: &str = "103";
+pub const EMITTER_VERSION: &str = "22";
+pub const VERIFIER_VERSION: &str = "49";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -273,6 +273,7 @@ pub fn inspect_bundle(
             frame: bundle.provenance.intent.printer.coordinate_frame,
             event_count: report.deposition_segments
                 + report.support_deposition_segments
+                + report.adhesion_deposition_segments
                 + report.travel_segments
                 + process_count
                 + report.lifecycle_motion_count
@@ -280,6 +281,7 @@ pub fn inspect_bundle(
                 + waste_count,
             deposition_count: report.deposition_segments
                 + report.support_deposition_segments
+                + report.adhesion_deposition_segments
                 + waste_count,
             travel_count: report.travel_segments,
             lifecycle_count: report.lifecycle_motion_count,

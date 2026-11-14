@@ -1138,6 +1138,8 @@ mod tests {
             top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
             role_speeds: None,
             first_layer_height_mm: None,
+            skirt: None,
+            brim: None,
         }
     }
 

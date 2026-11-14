@@ -42,6 +42,8 @@ Breakaway support groups proved actual-stroke demand per contact layer. The curr
 
 `exposure.rs` marks a mandatory TopSkin path `exposed` after the layer's paths are final, when the next scheduled layer's section D does not cover every point and edge of it; covered top skin stays TopSkin (role, owner, axis, checks) and only takes the solid speed. Exposure is a speed declaration, never classification.
 
+`adhesion.rs` adds skirt and brim loops to the first layer last, after object volumes; they are non-model (`DepositionKind::is_model` false) everywhere: never anchors, volumes, skins or support evidence. Brims offset only the union of brimmed islands' outer outlines; growing the brimmed set to everything within reach keeps loops off unbrimmed islands. Leave out a loop level that leaves the envelope and record it in `plan.adhesion`; never clip or move it.
+
 Classification reuse binds material/required owners, physical horizons, exact interval height and construction zones—not hatch direction. Path templates additionally bind both hatch axes and phase. Drop templates with stale top direction before phase/path admission; retaining classification must not retain obsolete path buffers.
 
 A successful startup probe may move its first wall plan into full admission only when there is no material construction. Preserve the exact D/C cache key and first interval/sample; release all Arc aliases before handoff. Failed attempts, classifications and anchor results never transfer. The transferred wall becomes the ordinary first cache entry with its existing point, payload and index accounting, and the plan equals the one built after releasing it.
