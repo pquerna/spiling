@@ -5,6 +5,7 @@
 mod adhesion;
 mod arcs;
 pub(crate) mod boolean;
+mod bridge_split;
 use boolean::budget as boolean_budget;
 mod classification;
 mod color;
@@ -2333,6 +2334,7 @@ fn admit_schedule<'model>(
         )?;
         construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
         drop_unprintable_rows(&mut layers)?;
+        bridge_split::split_bridged_rows(&mut layers, recipe, neighborhoods.work_mut(), cancel)?;
         exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
         support::object_volumes(&mut layers, input.intent)?;
         let adhesion = adhesion::plan(&mut layers, &sections, input.intent, cancel)?;

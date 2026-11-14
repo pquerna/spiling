@@ -15,6 +15,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 
 mod adhesion;
+mod bridge_split;
 mod construction;
 mod cost;
 mod expected;
@@ -1628,6 +1629,8 @@ pub(crate) fn verify_actual(
     skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     construction::verify(plan, &mut geometry_work, cancel)?;
     joins::verify(plan, intent, &mut geometry_work, cancel)?;
+    // After row construction, so a missing or shifted row reports as such.
+    bridge_split::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let routing = if let Some(routed) = &mut route {
         travel_segments += routed.travel_segments;
         retraction_count += routed.retraction_count;

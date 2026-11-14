@@ -720,7 +720,17 @@ independent verifier recomputes from the plan and intent:
    print speed. A Bridge owned by a sparse process region (fraction below
    one), sparse infill spanning the rows beneath it, takes the sparse speed
    and ordinary fan (`speeds::speed_role`); its flow and bridge construction
-   checks keep the Bridge role. With `role_speeds` null, the uniform print speed times the
+   checks keep the Bridge role. A straight top/bottom-skin or solid regional
+   row that crosses a genuine two-ended gap of the previous layer's actual
+   strokes is split after the layer's paths are final: the gap plus an
+   anchor of two bead widths on each side is a Bridge piece, the supported
+   remainder keeps its own role, speed and fan, and remainders shorter than
+   that anchor merge into the Bridge piece; a row off its role's authored
+   hatch axis (orthogonal recovery), or whose pieces would not all
+   pass the checks below, or that crosses any other gap, stays whole. Replay
+   checks each Bridge piece joined end to end with a collinear same-owner
+   piece for a genuine anchored gap within `max_bridge_span_mm`, and every
+   such joined piece for direct support throughout. With `role_speeds` null, the uniform print speed times the
    first-layer and bridge speed factors, as before. Never above the printer's
    print feed.
 2. Volumetric flow ceiling. An edge whose bead (`(w-h)h + π(h/2)²` times the

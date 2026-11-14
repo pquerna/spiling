@@ -4806,3 +4806,88 @@ fn block_lines_must_fit_the_firmware_command_buffer() {
     }
     intent.validate().unwrap();
 }
+
+/// A skin row split at its bridged span: the Bridge piece is checked against
+/// its own anchors, its supported neighbours against direct lower support.
+fn split_bridge_fixture(
+    pieces: &[(DepositionKind, [f64; 2])],
+    lower: &[[f64; 2]],
+) -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (intent, mut plan) = minimum_skin_fixture();
+    plan.layers[0].skin_command_fits.clear();
+    let template = plan.layers[0].paths[0].clone();
+    let mut upper = plan.layers[0].clone();
+    upper.index = 1;
+    upper.hatch_course = 1;
+    upper.lower_z_mm = 1.0;
+    upper.z_mm = 2.0;
+    upper.section_z_mm = 1.5;
+    upper.paths = pieces
+        .iter()
+        .map(|&(kind, x)| DepositionPath {
+            kind,
+            physical_z_mm: [1.0, 2.0],
+            points_mm: vec![[x[0], 2.0, 2.0], [x[1], 2.0, 2.0]],
+            ..template.clone()
+        })
+        .collect();
+    plan.layers[0].paths = lower
+        .iter()
+        .map(|&x| DepositionPath {
+            kind: DepositionKind::SolidFill,
+            owner: Some(DepositionOwner::Regional { region_index: 0 }),
+            points_mm: vec![[x[0], 2.0, 1.0], [x[1], 2.0, 1.0]],
+            ..template.clone()
+        })
+        .collect();
+    plan.layers.push(upper);
+    (intent, plan)
+}
+
+#[test]
+fn split_skin_bridge_pieces_need_their_own_anchors_and_supported_neighbours() {
+    use DepositionKind::{BottomSkin, Bridge};
+    let lower = [[1.0, 3.0], [5.0, 8.0]];
+    let (intent, plan) = split_bridge_fixture(
+        &[
+            (BottomSkin, [1.0, 2.5]),
+            (Bridge, [2.5, 5.5]),
+            (BottomSkin, [5.5, 8.0]),
+        ],
+        &lower,
+    );
+    replay_skin_fit(&intent, plan).unwrap();
+    // A supported piece reaching into the gap past the half-bead overhang
+    // allowance is an unsupported skin stroke.
+    let (intent, plan) = split_bridge_fixture(
+        &[
+            (BottomSkin, [1.0, 4.4]),
+            (Bridge, [4.4, 5.5]),
+            (BottomSkin, [5.5, 8.0]),
+        ],
+        &lower,
+    );
+    let error = replay_skin_fit(&intent, plan).unwrap_err();
+    assert!(error.message.contains("split"), "{error:?}");
+    // A Bridge piece over continuous lower strokes is a false Bridge label.
+    let (intent, plan) = split_bridge_fixture(
+        &[
+            (BottomSkin, [1.0, 2.5]),
+            (Bridge, [2.5, 5.5]),
+            (BottomSkin, [5.5, 8.0]),
+        ],
+        &[[1.0, 8.0]],
+    );
+    assert!(replay_skin_fit(&intent, plan).is_err());
+    // A gap past the span limit is never an anchored Bridge piece.
+    let (mut intent, plan) = split_bridge_fixture(
+        &[
+            (BottomSkin, [1.0, 2.5]),
+            (Bridge, [2.5, 5.5]),
+            (BottomSkin, [5.5, 8.0]),
+        ],
+        &lower,
+    );
+    intent.recipe.process.max_bridge_span_mm = 0.5;
+    assert!(replay_skin_fit(&intent, plan).is_err());
+}
