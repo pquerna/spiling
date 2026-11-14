@@ -269,7 +269,7 @@ mod tests {
         for index in 0..10 {
             let mut selected = selection();
             match index {
-                0 => selected.profile.printer_revision = "wrong".into(),
+                0 => selected.profile.nozzle_diameter_mm = 0.8,
                 1 => selected.profile.nozzle_diameter_mm = 0.6,
                 2 => selected.setup.cooling_configuration_id = "wrong".into(),
                 3 => selected.profile.material.requires_abrasion_resistant_nozzle = true,
@@ -345,11 +345,14 @@ mod creation_tests {
             SupportPolicy::Disabled,
             "profile changes cannot re-enable authored Off"
         );
+        // Profiles are keyed by compatibility, not printer identity: another
+        // printer with the same nozzle keeps the profile; another nozzle refuses it.
+        let selection = intent.material_profile.unwrap().selection;
+        let mut renamed = hardware.as_ref().clone();
+        renamed.setup.printer.id.push_str("-other");
+        create_material_intent(Arc::new(renamed), selection.clone()).unwrap();
         let mut wrong = hardware.as_ref().clone();
-        wrong.setup.printer.id.push_str("-other");
-        assert!(
-            create_material_intent(Arc::new(wrong), intent.material_profile.unwrap().selection)
-                .is_err()
-        );
+        wrong.setup.printer.nozzle_diameter_mm = 0.6;
+        assert!(create_material_intent(Arc::new(wrong), selection).is_err());
     }
 }

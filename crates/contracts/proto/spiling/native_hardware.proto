@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 syntax = "proto3";
 package spiling.engine;
+import "google/protobuf/empty.proto";
 import "spiling/native_common.proto";
 import "spiling/native_material.proto";
 import "spiling/native_appearance.proto";
@@ -418,7 +419,51 @@ message OpticalConstructionOrigin {
 
 // Portable inert hardware definitions; never private inventory or credentials.
 message HardwareModelDefinition {string id=1;string vendor=2;string model=3;string source=4;string mounting_interface=5;AabbMm declared_volume_mm=6;}
-message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;}
+// Sourced machine facts; a setup's printer is derived from them.
+enum FirmwareFamily {
+  FIRMWARE_FAMILY_UNSPECIFIED = 0;
+  FIRMWARE_FAMILY_MARLIN2 = 1;
+  FIRMWARE_FAMILY_PRUSA_BUDDY = 2;
+  FIRMWARE_FAMILY_KLIPPER = 3;
+  FIRMWARE_FAMILY_BAMBU_LAB = 4;
+}
+enum MachineKinematics {
+  MACHINE_KINEMATICS_UNSPECIFIED = 0;
+  MACHINE_KINEMATICS_BED_SLINGER = 1;
+  MACHINE_KINEMATICS_CORE_XY = 2;
+}
+enum BedLevelling {
+  BED_LEVELLING_UNSPECIFIED = 0;
+  BED_LEVELLING_MANUAL = 1;
+  BED_LEVELLING_PROBE_MESH = 2;
+}
+// Values follow MachineLimit::ALL order, starting at 1.
+enum MachineLimit {
+  MACHINE_LIMIT_UNSPECIFIED = 0;
+  MACHINE_LIMIT_BED_X_MM = 1;
+  MACHINE_LIMIT_BED_Y_MM = 2;
+  MACHINE_LIMIT_MAX_Z_MM = 3;
+  MACHINE_LIMIT_NOZZLE_DIAMETER_MM = 4;
+  MACHINE_LIMIT_FILAMENT_DIAMETER_MM = 5;
+  MACHINE_LIMIT_MAX_PRINT_FEED_MM_S = 6;
+  MACHINE_LIMIT_MAX_TRAVEL_FEED_MM_S = 7;
+  MACHINE_LIMIT_MAX_ACCELERATION_MM_S2 = 8;
+  MACHINE_LIMIT_MAX_VOLUMETRIC_FLOW_MM3_S = 9;
+  MACHINE_LIMIT_MAX_NOZZLE_TEMPERATURE_C = 10;
+  MACHINE_LIMIT_MIN_EXTRUSION_TEMPERATURE_C = 11;
+  MACHINE_LIMIT_MAX_BED_TEMPERATURE_C = 12;
+  MACHINE_LIMIT_MIN_BEAD_WIDTH_PER_NOZZLE = 13;
+  MACHINE_LIMIT_MAX_BEAD_WIDTH_PER_NOZZLE = 14;
+  MACHINE_LIMIT_MAX_BEAD_HEIGHT_PER_NOZZLE = 15;
+  MACHINE_LIMIT_XY_RESOLUTION_MM = 16;
+  MACHINE_LIMIT_Z_RESOLUTION_MM = 17;
+  MACHINE_LIMIT_TOOLHEAD_RADIUS_MM = 18;
+  MACHINE_LIMIT_TOOLHEAD_HEIGHT_MM = 19;
+}
+message FactSource {oneof kind {string published=1;string family_default=2;google.protobuf.Empty operator_declared=3;}}
+message SourcedLimit {MachineLimit key=1;double value=2;FactSource source=3;}
+message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;}
+message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;MachineDescription machine=5;}
 message PlateFaceDefinition {string key=1;string label=2;string surface=3;AabbMm usable_mm=4;repeated AabbMm keepouts_mm=5;double max_bed_celsius=6;}
 message PlateDefinition {string id=1;string label=2;string mounting_interface=3;double thickness_mm=4;double surface_z_mm=5;repeated PlateFaceDefinition faces=6;string source=7;}
 message HardwareNozzle {double diameter_mm=1;string material=2;}

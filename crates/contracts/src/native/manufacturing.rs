@@ -4149,8 +4149,6 @@ impl TryFrom<rpc::MaterialProcessProfile> for MaterialProcessProfile {
                 id: value.id,
                 revision: value.revision,
                 material: required(value.material, "material")?.try_into()?,
-                printer_id: value.printer_id,
-                printer_revision: value.printer_revision,
                 nozzle_diameter_mm: value.nozzle_diameter_mm,
                 cooling_configuration_id: value.cooling_configuration_id,
                 deposition_limits: required(value.deposition_limits, "deposition_limits")?
@@ -4178,8 +4176,6 @@ impl TryFrom<MaterialProcessProfile> for rpc::MaterialProcessProfile {
             id: value.id,
             revision: value.revision,
             material: Some(value.material.try_into()?),
-            printer_id: value.printer_id,
-            printer_revision: value.printer_revision,
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             cooling_configuration_id: value.cooling_configuration_id,
             deposition_limits: Some(value.deposition_limits.try_into()?),
@@ -4361,7 +4357,6 @@ impl TryFrom<i32> for MaterialCompatibilityCode {
     type Error = String;
     fn try_from(value: i32) -> Result<Self, String> {
         match value {
-            1 => Ok(Self::PrinterMismatch),
             2 => Ok(Self::NozzleMismatch),
             3 => Ok(Self::SetupMismatch),
             4 => Ok(Self::AbrasionRequirement),
@@ -4373,7 +4368,6 @@ impl TryFrom<i32> for MaterialCompatibilityCode {
 impl From<MaterialCompatibilityCode> for i32 {
     fn from(value: MaterialCompatibilityCode) -> Self {
         match value {
-            MaterialCompatibilityCode::PrinterMismatch => 1,
             MaterialCompatibilityCode::NozzleMismatch => 2,
             MaterialCompatibilityCode::SetupMismatch => 3,
             MaterialCompatibilityCode::AbrasionRequirement => 4,

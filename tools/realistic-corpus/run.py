@@ -34,7 +34,8 @@ def intent_file():
     d = json.load(open(INTENT_SRC))
     d["recipe"]["infill_fraction"] = FRACTION
     d["recipe"]["layer_height_mm"] = 0.2
-    d["printer"]["workflow"]["job"]["park_position_mm"][2] = 210
+    # Park above any part: the top of the printer's envelope.
+    d["printer"]["workflow"]["job"]["park_position_mm"][2] = d["printer"]["build_envelope"]["max"][2]
     if SUPPORTS == "disabled":
         d["recipe"]["supports"] = {"kind": "disabled"}
     elif d["recipe"]["supports"].get("kind") != SUPPORTS:

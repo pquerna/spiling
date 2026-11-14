@@ -103,12 +103,6 @@ fn review_candidate(
         })
     };
     let p = &selection.profile;
-    if p.printer_id != current.printer.id || p.printer_revision != current.printer.revision {
-        issue(
-            MaterialCompatibilityCode::PrinterMismatch,
-            "profile requires a different printer ID or revision",
-        );
-    }
     if p.nozzle_diameter_mm != current.printer.nozzle_diameter_mm {
         issue(
             MaterialCompatibilityCode::NozzleMismatch,
@@ -335,7 +329,6 @@ mod tests {
     #[test]
     fn declared_incompatibilities_are_visible_without_proposed_process() {
         let mut wrong = selection().profile;
-        wrong.printer_revision = "other".into();
         wrong.nozzle_diameter_mm *= 2.0;
         wrong.material.requires_abrasion_resistant_nozzle = true;
         let mut req = request(vec![wrong]);
@@ -348,11 +341,6 @@ mod tests {
             .unwrap()
             .candidates
             .remove(0);
-        assert!(
-            c.issues
-                .iter()
-                .any(|i| i.code == MaterialCompatibilityCode::PrinterMismatch)
-        );
         assert!(
             c.issues
                 .iter()

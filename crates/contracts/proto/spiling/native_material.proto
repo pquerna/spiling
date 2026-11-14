@@ -85,8 +85,8 @@ message MaterialProcessProfile {
   string id = 1;
   string revision = 2;
   MaterialDefinition material = 3;
-  string printer_id = 4;
-  string printer_revision = 5;
+  reserved 4, 5;
+  reserved "printer_id", "printer_revision";
   double nozzle_diameter_mm = 6;
   string cooling_configuration_id = 7;
   DepositionLimits deposition_limits = 8;

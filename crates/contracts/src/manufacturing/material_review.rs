@@ -63,7 +63,6 @@ impl MaterialReviewRequest {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialCompatibilityCode {
-    PrinterMismatch,
     NozzleMismatch,
     SetupMismatch,
     AbrasionRequirement,

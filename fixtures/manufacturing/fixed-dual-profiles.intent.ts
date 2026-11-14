@@ -26,8 +26,6 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
       filament_diameter_mm: tool.filament_diameter_mm,
       requires_abrasion_resistant_nozzle: false,
     },
-    printer_id: shared.printer.id,
-    printer_revision: shared.printer.revision,
     nozzle_diameter_mm: tool.nozzle_diameter_mm,
     hotend_id: tool.id,
     nozzle_material: "brass",

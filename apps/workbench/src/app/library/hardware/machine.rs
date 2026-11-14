@@ -120,15 +120,12 @@ impl Workbench {
                                     }
                             })
                         {
+                            // A changed setup is a new custom identity; its printer is
+                            // re-derived from the edited facts. Material profiles are
+                            // keyed by compatibility, so they survive this re-identity.
                             setup.id = format!("custom.{}", uuid::Uuid::new_v4());
                             setup.label = format!("Custom {} setup", setup.model.model);
-                            setup.printer.id = setup.id.clone();
-                            setup.printer.revision =
-                                spiling_contracts::geometry::SourceHash::from_bytes(
-                                    &serde_json::to_vec(&setup.printer).expect("validated printer"),
-                                )
-                                .as_str()
-                                .into();
+                            setup.rederive().expect("validated machine facts");
                         }
                         let mut h = p.hardware.clone();
                         if let Some(old) = h.machines.iter_mut().find(|m| m.id == draft.id) {
@@ -261,23 +258,23 @@ impl Workbench {
         if let MachineConfiguration::Configured { setup } = &mut draft.configuration {
             ui::group(ui, "Installed setup");
             ui.label(&setup.label);
-            number(
-                ui,
-                "Nozzle diameter (mm)",
-                &mut setup.printer.nozzle_diameter_mm,
-            );
-            for (axis, label) in ["Maximum X (mm)", "Maximum Y (mm)", "Maximum Z (mm)"]
-                .iter()
-                .enumerate()
-            {
-                number(ui, label, &mut setup.printer.build_envelope.max[axis]);
+            if let Some(machine) = &mut setup.machine {
+                machine_fact_fields(ui, machine);
+                if let Err(reason) = setup.rederive() {
+                    ui.colored_label(ui.visuals().warn_fg_color, reason);
+                }
+            } else {
+                ui.weak(format!(
+                    "Declared software reference · {} mm nozzle · not editable; choose a machine-description setup to edit facts",
+                    setup.printer.nozzle_diameter_mm
+                ));
             }
             ui.weak(format!("Mount: {}", setup.model.mounting_interface));
             ui::help(
                 ui,
                 "installed-settings",
                 "Installed setup",
-                "These are declared process settings, not physical printer qualification. Existing projects retain their captured setup until Apply.",
+                "Setups are derived from machine facts: prime line, park, envelope and deposition limits follow the bed and nozzle. Each fact records its source. These are declarations, not physical printer qualification. Existing projects retain their captured setup until Apply.",
             );
             return;
         }
@@ -297,32 +294,85 @@ impl Workbench {
         if !c.setups.iter().any(|s| draft.identity.matches_setup(s)) {
             ui.weak("No admitted setup for this model in this build.");
         }
-        if draft.identity.catalog_origin.is_none() {
+        {
             ui.collapsing("Declare a custom setup", |ui| {
-                ui.weak("Start with explicit software settings, then review the installed configuration.");
+                ui.weak("Start from a machine description, then edit the facts that differ.");
                 egui::ComboBox::from_id_salt("custom-machine-template")
-                    .selected_text(c.setups.get(self.library.hardware.setup).map_or("Choose settings", |s| s.label.as_str()))
+                    .selected_text(
+                        c.setups
+                            .get(self.library.hardware.setup)
+                            .map_or("Choose settings", |s| s.label.as_str()),
+                    )
                     .show_ui(ui, |ui| {
-                        for (i,s) in c.setups.iter().enumerate() {
+                        for (i, s) in c
+                            .setups
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.machine.is_some())
+                        {
                             ui.selectable_value(&mut self.library.hardware.setup, i, &s.label);
                         }
                     });
-                field(ui, "Mount interface", &mut self.library.hardware.mounting_interface);
-                let valid = draft.identity.validate().is_ok() && !self.library.hardware.mounting_interface.trim().is_empty();
-                if ui.add_enabled(valid, egui::Button::new("Use declared settings")).clicked() && let Some(template) = c.setups.get(self.library.hardware.setup) {
+                field(
+                    ui,
+                    "Mount interface",
+                    &mut self.library.hardware.mounting_interface,
+                );
+                let valid = draft.identity.validate().is_ok()
+                    && !self.library.hardware.mounting_interface.trim().is_empty();
+                if ui
+                    .add_enabled(valid, egui::Button::new("Use declared settings"))
+                    .clicked()
+                    && let Some(template) = c
+                        .setups
+                        .get(self.library.hardware.setup)
+                        .filter(|s| s.machine.is_some())
+                {
                     let mut setup = template.clone();
                     setup.id = format!("custom.{}", uuid::Uuid::new_v4());
                     setup.label = format!("Declared {} setup", draft.identity.model);
                     setup.model = HardwareModelDefinition {
-                        id: setup.id.clone(), vendor: draft.identity.manufacturer.clone(), model: draft.identity.model.clone(),
-                        source: "Operator-declared software settings; no physical qualification".into(),
-                        mounting_interface: self.library.hardware.mounting_interface.trim().into(), declared_volume_mm: None,
+                        id: setup.id.clone(),
+                        vendor: draft.identity.manufacturer.clone(),
+                        model: draft.identity.model.clone(),
+                        source: "Operator-declared software settings; no physical qualification"
+                            .into(),
+                        mounting_interface: self.library.hardware.mounting_interface.trim().into(),
+                        declared_volume_mm: None,
                     };
-                    setup.printer.id = setup.id.clone();
-                    setup.printer.revision = spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&setup.printer).expect("finite template")).as_str().into();
-                    draft.configuration = MachineConfiguration::Configured { setup: Box::new(setup) };
+                    if setup.machine.is_some() && setup.rederive().is_ok() {
+                        draft.configuration = MachineConfiguration::Configured {
+                            setup: Box::new(setup),
+                        };
+                    }
                 }
             });
         }
     }
+}
+
+/// Edit sourced machine facts; an edited value becomes operator-declared.
+fn machine_fact_fields(ui: &mut egui::Ui, machine: &mut MachineDescription) {
+    ui.weak(format!(
+        "{:?} firmware · {:?} · {:?} levelling · from {}",
+        machine.firmware,
+        machine.kinematics,
+        machine.levelling,
+        machine.lineage.join(" → ")
+    ));
+    egui::Grid::new("machine-facts")
+        .num_columns(2)
+        .show(ui, |ui| {
+            for key in MachineLimit::ALL {
+                let mut value = machine.limit(key);
+                number(ui, key.label(), &mut value);
+                machine.declare(key, value);
+                ui.weak(match machine.source(key) {
+                    Some(FactSource::Published { reference }) => format!("published · {reference}"),
+                    Some(FactSource::FamilyDefault { family }) => format!("default · {family}"),
+                    Some(FactSource::OperatorDeclared) | None => "declared by you".into(),
+                });
+                ui.end_row();
+            }
+        });
 }

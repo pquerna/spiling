@@ -116,7 +116,48 @@ export type HardwareModelDefinition = { id: string, vendor: string, model: strin
  */
 source: string, mounting_interface: string, declared_volume_mm: AabbMm | null, };
 
-export type HardwareSetupDefinition = { id: string, label: string, model: HardwareModelDefinition, printer: PrinterSpecification, };
+export type FirmwareFamily = "marlin2" | "prusa_buddy" | "klipper" | "bambu_lab";
+
+export type MachineKinematics = "bed_slinger" | "core_xy";
+
+export type BedLevelling = "manual" | "probe_mesh";
+
+export type MachineLimit = "bed_x_mm" | "bed_y_mm" | "max_z_mm" | "nozzle_diameter_mm" | "filament_diameter_mm" | "max_print_feed_mm_s" | "max_travel_feed_mm_s" | "max_acceleration_mm_s2" | "max_volumetric_flow_mm3_s" | "max_nozzle_temperature_c" | "min_extrusion_temperature_c" | "max_bed_temperature_c" | "min_bead_width_per_nozzle" | "max_bead_width_per_nozzle" | "max_bead_height_per_nozzle" | "xy_resolution_mm" | "z_resolution_mm" | "toolhead_radius_mm" | "toolhead_height_mm";
+
+export type FactSource = { "kind": "published", reference: string, } | { "kind": "family_default", family: string, } | { "kind": "operator_declared" };
+
+export type SourcedLimit = { key: MachineLimit, value: number, source: FactSource, };
+
+export type MachineLayer = { id: string, parent: string | null, firmware: FirmwareFamily | null, kinematics: MachineKinematics | null, levelling: BedLevelling | null, heated_bed: boolean | null, arc_moves: boolean | null, limits: Array<SourcedLimit>, };
+
+export type MachineDescription = { id: string,
+/**
+ * Inheritance chain, root first, ending with `id`.
+ */
+lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean,
+/**
+ * Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
+ */
+limits: Array<SourcedLimit>, };
+
+export type MachineSetupDeclaration = { id: string, label: string,
+/**
+ * Catalog model identity.
+ */
+model: string,
+/**
+ * Concrete machine layer.
+ */
+machine: string, };
+
+export type MachineCatalog = { layers: Array<MachineLayer>, setups: Array<MachineSetupDeclaration>, };
+
+export type HardwareSetupDefinition = { id: string, label: string, model: HardwareModelDefinition,
+/**
+ * Facts the printer is derived from; null only for the declared software
+ * reference specifications.
+ */
+machine: MachineDescription | null, printer: PrinterSpecification, };
 
 export type PlateFaceDefinition = { key: string, label: string, surface: string, usable_mm: AabbMm, keepouts_mm: Array<AabbMm>, max_bed_celsius: number, };
 
@@ -899,7 +940,14 @@ export type MaterialToolSetup = { hotend_id: string, nozzle_material: string, ab
 
 export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, source_hash: SourceHash, };
 
-export type MaterialProcessProfile = { id: string, revision: string, material: MaterialDefinition, printer_id: string, printer_revision: string, nozzle_diameter_mm: number, hotend_id: string, nozzle_material: string, cooling_configuration_id: string, deposition_limits: DepositionLimits, nozzle_temperature_c: number, bed_temperature_c: number, print_speed_mm_s: number, flow_multiplier: number, max_volumetric_flow_mm3_s: number, process: ProcessPolicy, source: MaterialProfileSource, };
+export type MaterialProcessProfile = { id: string, revision: string, material: MaterialDefinition,
+/**
+ * Compatibility key: nozzle diameter class plus the hotend/nozzle
+ * material/cooling class below and the material's polymer family. A
+ * profile is never bound to one printer identity or revision, so editing
+ * a printer's other facts keeps its profiles.
+ */
+nozzle_diameter_mm: number, hotend_id: string, nozzle_material: string, cooling_configuration_id: string, deposition_limits: DepositionLimits, nozzle_temperature_c: number, bed_temperature_c: number, print_speed_mm_s: number, flow_multiplier: number, max_volumetric_flow_mm3_s: number, process: ProcessPolicy, source: MaterialProfileSource, };
 
 export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, bed_temperature_c: number | null, print_speed_mm_s: number | null, flow_multiplier: number | null, process: ProcessPolicy | null, };
 
@@ -915,7 +963,7 @@ export type MaterialReviewRequest = {
  */
 catalog: MaterialCatalog | null, query: string, offset: number, };
 
-export type MaterialCompatibilityCode = "printer_mismatch" | "nozzle_mismatch" | "setup_mismatch" | "abrasion_requirement" | "process_constraints";
+export type MaterialCompatibilityCode = "nozzle_mismatch" | "setup_mismatch" | "abrasion_requirement" | "process_constraints";
 
 export type MaterialCompatibilityIssue = { code: MaterialCompatibilityCode, message: string, };
 

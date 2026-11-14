@@ -133,8 +133,6 @@
                     "filament_diameter_mm": 1.75,
                     "requires_abrasion_resistant_nozzle": false
                   },
-                  "printer_id": "software-fixed-dual-marlin-reference",
-                  "printer_revision": "1",
                   "nozzle_diameter_mm": 0.4,
                   "hotend_id": "fixed-hotend-0",
                   "nozzle_material": "brass",
@@ -243,8 +241,6 @@
                     "filament_diameter_mm": 1.75,
                     "requires_abrasion_resistant_nozzle": false
                   },
-                  "printer_id": "software-fixed-dual-marlin-reference",
-                  "printer_revision": "1",
                   "nozzle_diameter_mm": 0.6,
                   "hotend_id": "fixed-hotend-1",
                   "nozzle_material": "brass",

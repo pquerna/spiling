@@ -150,9 +150,9 @@ try {
   );
   await save("a.json", a);
   await save("b.json", b);
-  const wrongPrinter = structuredClone(a.profile);
-  wrongPrinter.id = "zz-wrong-printer";
-  wrongPrinter.printer_revision = "incompatible";
+  const wrongHotend = structuredClone(a.profile);
+  wrongHotend.id = "zz-wrong-hotend";
+  wrongHotend.hotend_id = "incompatible-hotend";
   const wrongNozzle = structuredClone(a.profile);
   wrongNozzle.id = "zz-wrong-nozzle";
   wrongNozzle.nozzle_diameter_mm = 0.6;
@@ -161,7 +161,7 @@ try {
   impossibleFlow.max_volumetric_flow_mm3_s = 0.001;
   const catalogA = {
     setup: a.setup,
-    profiles: [wrongPrinter, b.profile, wrongNozzle, a.profile, impossibleFlow],
+    profiles: [wrongHotend, b.profile, wrongNozzle, a.profile, impossibleFlow],
   };
   const catalogB = { setup: b.setup, profiles: [a.profile, b.profile] };
   await save("catalog-a.json", catalogA);
@@ -387,12 +387,12 @@ try {
   assert(Math.abs(pb.volume - pa.volume * 0.95) < 0.0001);
   assert.notEqual(pa.provenance.input_hash, pb.provenance.input_hash);
   const bad = structuredClone(b);
-  bad.profile.printer_revision = "incompatible";
+  bad.profile.nozzle_diameter_mm = 0.8;
   await save("bad.json", bad);
   await run(
     "rejected-context",
     ["edit", project, "--material-profile", join(output, "bad.json")],
-    "printer revision/nozzle",
+    "nozzle diameter differs",
   );
   const low = structuredClone(b);
   low.profile.max_volumetric_flow_mm3_s = 0.01;

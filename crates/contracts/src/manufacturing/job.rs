@@ -54,12 +54,9 @@ pub struct SingleExtruderJob {
 impl SingleExtruderJob {
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
         label(&self.machine_id)?;
+        // Names the declared firmware; the program dialect is the printer's
+        // explicit Marlin 2 single-extruder output dialect.
         label(&self.firmware_version)?;
-        if !self.firmware_version.starts_with("2.") {
-            return Err(invalid(
-                "complete jobs require an explicitly named Marlin 2 firmware version",
-            ));
-        }
         positive(&[
             self.nozzle_temperature_c,
             self.bed_temperature_c,

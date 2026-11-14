@@ -329,8 +329,8 @@ impl Workbench {
         });
         ui.collapsing("Captured setup and provenance", |ui| {
             ui.label(format!(
-                "Printer {} / {} · nozzle {:.3} mm",
-                p.printer_id, p.printer_revision, p.nozzle_diameter_mm
+                "Compatible with nozzle {:.3} mm",
+                p.nozzle_diameter_mm
             ));
             ui.label(format!(
                 "Hotend {} · {} · cooling {}",

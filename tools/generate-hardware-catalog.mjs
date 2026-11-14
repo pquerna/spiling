@@ -6,6 +6,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import catalog from "../crates/contracts/data/hardware-catalog.ts";
 import references from "../crates/contracts/data/printer-references.ts";
+import machines from "../crates/contracts/data/machine-descriptions.ts";
 const args = process.argv.slice(2);
 if (args.length > 1 || (args.length && args[0] !== "--check"))
   throw new Error(
@@ -43,3 +44,12 @@ if (args[0] === "--check") {
   if ((await readFile(referenceOutput, "utf8")) !== referenceText)
     throw new Error("Printer reference drift; run pnpm contracts");
 } else await writeFile(referenceOutput, referenceText);
+
+if (!Array.isArray(machines.layers) || !Array.isArray(machines.setups))
+  throw new Error("Machine author must export layers and setups directly");
+const machineOutput = new URL("../crates/contracts/data/machine-descriptions.json", import.meta.url);
+const machineText = JSON.stringify(machines, null, 2) + "\n";
+if (args[0] === "--check") {
+  if ((await readFile(machineOutput, "utf8")) !== machineText)
+    throw new Error("Machine description drift; run pnpm contracts");
+} else await writeFile(machineOutput, machineText);

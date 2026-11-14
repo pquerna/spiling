@@ -1,0 +1,574 @@
+{
+  "layers": [
+    {
+      "parent": null,
+      "firmware": null,
+      "kinematics": null,
+      "levelling": "probe_mesh",
+      "heated_bed": true,
+      "arc_moves": true,
+      "id": "generic.fff",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 350,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 350,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 350,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "filament_diameter_mm",
+          "value": 1.75,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 600,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_travel_feed_mm_s",
+          "value": 800,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 20000,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_volumetric_flow_mm3_s",
+          "value": 32,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "min_extrusion_temperature_c",
+          "value": 170,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 120,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "min_bead_width_per_nozzle",
+          "value": 0.75,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_bead_width_per_nozzle",
+          "value": 1.875,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "max_bead_height_per_nozzle",
+          "value": 0.75,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "xy_resolution_mm",
+          "value": 0.0125,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "z_resolution_mm",
+          "value": 0.0025,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "toolhead_radius_mm",
+          "value": 10,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        },
+        {
+          "key": "toolhead_height_mm",
+          "value": 25,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.fff"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "generic.fff",
+      "firmware": "klipper",
+      "kinematics": "core_xy",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": false,
+      "id": "generic.klipper-cartesian",
+      "limits": []
+    },
+    {
+      "parent": "generic.fff",
+      "firmware": "marlin2",
+      "kinematics": "bed_slinger",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "id": "generic.marlin-bedslinger",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.marlin-bedslinger"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.marlin-bedslinger"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 300,
+          "source": {
+            "kind": "family_default",
+            "family": "generic.marlin-bedslinger"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "generic.fff",
+      "firmware": "prusa_buddy",
+      "kinematics": "bed_slinger",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "id": "prusa.mk4s",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 250,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 210,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 220,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "filament_diameter_mm",
+          "value": 1.75,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 290,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 120,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.prusa3d.com/product/original-prusa-mk4s-3d-printer-5/"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "generic.fff",
+      "firmware": "bambu_lab",
+      "kinematics": "bed_slinger",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "id": "bambulab.a1",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 256,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 256,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 256,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "filament_diameter_mm",
+          "value": 1.75,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_travel_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 10000,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)"
+          }
+        },
+        {
+          "key": "max_volumetric_flow_mm3_s",
+          "value": 28,
+          "source": {
+            "kind": "published",
+            "reference": "https://wiki.bambulab.com/en/knowledge-sharing/volumetric-speed"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "generic.fff",
+      "firmware": "bambu_lab",
+      "kinematics": "bed_slinger",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "id": "bambulab.a1-mini",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 180,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 180,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 180,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_travel_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 10000,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 80,
+          "source": {
+            "kind": "published",
+            "reference": "https://bambulab.com/en/a1-mini/tech-specs (via crcibernetica.com/bambu-lab-a1-mini)"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "generic.marlin-bedslinger",
+      "firmware": null,
+      "kinematics": null,
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "id": "creality.ender-3-v3-se",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 220,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/products/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 220,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/products/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 250,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/products/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/support/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 250,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/support/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 2500,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/support/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 260,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/support/creality-ender-3-v3-se"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "https://www.creality.com/support/creality-ender-3-v3-se"
+          }
+        }
+      ]
+    }
+  ],
+  "setups": [
+    {
+      "id": "prusa.mk4s.04",
+      "label": "Prusa MK4S · 0.4 mm",
+      "model": "prusa.mk4s",
+      "machine": "prusa.mk4s"
+    },
+    {
+      "id": "bambulab.a1.04",
+      "label": "Bambu Lab A1 · 0.4 mm",
+      "model": "bambulab.a1",
+      "machine": "bambulab.a1"
+    },
+    {
+      "id": "bambulab.a1-mini.04",
+      "label": "Bambu Lab A1 mini · 0.4 mm",
+      "model": "bambulab.a1-mini",
+      "machine": "bambulab.a1-mini"
+    },
+    {
+      "id": "creality.ender-3-v3-se.04",
+      "label": "Creality Ender-3 V3 SE · 0.4 mm",
+      "model": "creality.ender-3-v3-se",
+      "machine": "creality.ender-3-v3-se"
+    },
+    {
+      "id": "generic.klipper-cartesian.04",
+      "label": "Generic Klipper Cartesian · 0.4 mm",
+      "model": "generic.klipper-cartesian",
+      "machine": "generic.klipper-cartesian"
+    },
+    {
+      "id": "generic.marlin-bedslinger.04",
+      "label": "Generic Marlin bed-slinger · 0.4 mm",
+      "model": "generic.marlin-bedslinger",
+      "machine": "generic.marlin-bedslinger"
+    }
+  ]
+}

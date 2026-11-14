@@ -12,6 +12,7 @@ const OPENPRINTTAG: &[u8] =
     include_bytes!("../../../data/material-catalogs/filament-library-openprinttag.json");
 const PRINTERS: &[u8] = include_bytes!("../../../crates/contracts/data/printer-references.json");
 const HARDWARE: &[u8] = include_bytes!("../../../crates/contracts/data/hardware-catalog.json");
+const MACHINES: &[u8] = include_bytes!("../../../crates/contracts/data/machine-descriptions.json");
 const MANIFEST: &[u8] = include_bytes!("../../../data/material-catalogs/manifest.json");
 #[derive(Deserialize)]
 struct Manifest {
@@ -78,6 +79,7 @@ impl CatalogIndex {
                 SourceHash::from_bytes(MANIFEST),
                 SourceHash::from_bytes(PRINTERS),
                 SourceHash::from_bytes(HARDWARE),
+                SourceHash::from_bytes(MACHINES),
             ])
             .map_err(|e| e.to_string())?,
         );
@@ -169,6 +171,10 @@ impl CatalogIndex {
         }
         let revision = SourceHash::from_bytes(HARDWARE);
         for model in spiling_contracts::hardware::builtin_catalog()?.models {
+            // A model with a printer reference is already discoverable there.
+            if rows.iter().any(|r| matches!(&r.record.item, CatalogItem::Printer { manufacturer, model: m, .. } if *manufacturer == model.vendor && *m == model.model)) {
+                continue;
+            }
             let item=CatalogItem::Printer {manufacturer:model.vendor,model:model.model,aliases:vec![],volume_mm:model.declared_volume_mm.map(|b|std::array::from_fn(|a|b.max[a]-b.min[a])),source_url:"https://github.com/pquerna/spiling/blob/main/crates/contracts/data/hardware-catalog.ts".into()};
             rows.push(index_printer(model.id,item,"spiling-setups",revision.as_str(),"https://github.com/pquerna/spiling/blob/main/crates/contracts/data/hardware-catalog.ts",&snapshot)?);
         }

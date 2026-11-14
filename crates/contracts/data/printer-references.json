@@ -8,7 +8,11 @@
       "aliases": [
         "Bambu A1"
       ],
-      "volume_mm": null,
+      "volume_mm": [
+        256,
+        256,
+        256
+      ],
       "source_url": "https://bambulab.com/en/a1/tech-specs"
     }
   },
@@ -21,7 +25,11 @@
       "aliases": [
         "Bambu A1 mini"
       ],
-      "volume_mm": null,
+      "volume_mm": [
+        180,
+        180,
+        180
+      ],
       "source_url": "https://bambulab.com/en/a1-mini/tech-specs"
     }
   },
@@ -51,7 +59,11 @@
       "aliases": [
         "Ender 3 V3 SE"
       ],
-      "volume_mm": null,
+      "volume_mm": [
+        220,
+        220,
+        250
+      ],
       "source_url": "https://www.creality.com/products/creality-ender-3-v3-se"
     }
   }

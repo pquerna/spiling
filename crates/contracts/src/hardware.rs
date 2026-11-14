@@ -10,9 +10,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
+pub mod machine;
+pub use machine::*;
+
 pub const MAX_HARDWARE_BYTES: usize = 48 * 1024;
 pub const MAX_CAPTURE_BYTES: usize = 24 * 1024;
-fn text(v: &str) -> Result<(), String> {
+pub(crate) fn text(v: &str) -> Result<(), String> {
     if v.is_empty() || v.len() > 256 || v.trim() != v || v.chars().any(char::is_control) {
         return Err("hardware text must be nonempty, canonical and bounded".into());
     }
@@ -77,6 +80,10 @@ pub struct HardwareSetupDefinition {
     pub id: String,
     pub label: String,
     pub model: HardwareModelDefinition,
+    /// Facts the printer is derived from; null only for the declared software
+    /// reference specifications.
+    #[serde(deserialize_with = "required_option")]
+    pub machine: Option<MachineDescription>,
     pub printer: PrinterSpecification,
 }
 impl HardwareSetupDefinition {
@@ -84,7 +91,16 @@ impl HardwareSetupDefinition {
         text(&self.id)?;
         text(&self.label)?;
         self.model.validate()?;
-        self.printer.validate().map_err(|e| e.to_string())
+        self.printer.validate().map_err(|e| e.to_string())?;
+        if let Some(machine) = &self.machine
+            && machine.derive_printer(&self.id, &self.label)? != self.printer
+        {
+            return Err(
+                "setup printer differs from the specification derived from its machine description"
+                    .into(),
+            );
+        }
+        Ok(())
     }
     pub fn revision(&self) -> Result<SourceHash, String> {
         self.validate()?;
@@ -734,9 +750,43 @@ impl HardwareCatalog {
         Ok(())
     }
 }
+/// Declared models, plates and software reference setups, plus one derived
+/// setup and stock plate for each machine-description setup.
 pub fn builtin_catalog() -> Result<HardwareCatalog, String> {
-    let c: HardwareCatalog = serde_json::from_str(include_str!("../data/hardware-catalog.json"))
-        .map_err(|e| e.to_string())?;
+    let mut c: HardwareCatalog =
+        serde_json::from_str(include_str!("../data/hardware-catalog.json"))
+            .map_err(|e| e.to_string())?;
+    let machines: MachineCatalog =
+        serde_json::from_str(include_str!("../data/machine-descriptions.json"))
+            .map_err(|e| e.to_string())?;
+    for s in machines.setups {
+        let model = c
+            .models
+            .iter()
+            .find(|m| m.id == s.model)
+            .ok_or_else(|| format!("machine setup {} names a missing model", s.id))?
+            .clone();
+        let machine = MachineDescription::resolve(&machines.layers, &s.machine)?;
+        if model
+            .declared_volume_mm
+            .is_some_and(|v| v != machine.build_envelope())
+        {
+            return Err(format!(
+                "model {} volume differs from its machine bed",
+                model.id
+            ));
+        }
+        if !c
+            .plates
+            .iter()
+            .any(|p| p.mounting_interface == model.mounting_interface)
+        {
+            c.plates.push(machine.derive_plate(&model));
+        }
+        c.setups.push(HardwareSetupDefinition::derived(
+            s.id, s.label, model, machine,
+        )?);
+    }
     c.validate()?;
     Ok(c)
 }

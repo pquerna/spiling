@@ -40,6 +40,7 @@ impl TryFrom<rpc::HardwareSetupDefinition> for HardwareSetupDefinition {
             id: v.id,
             label: v.label,
             model: required(v.model, "HardwareSetupDefinition.model")?.try_into()?,
+            machine: v.machine.map(TryInto::try_into).transpose()?,
             printer: required(v.printer, "HardwareSetupDefinition.printer")?.try_into()?,
         };
         value.validate()?;
@@ -54,6 +55,7 @@ impl TryFrom<HardwareSetupDefinition> for rpc::HardwareSetupDefinition {
             id: v.id,
             label: v.label,
             model: Some(v.model.try_into()?),
+            machine: v.machine.map(TryInto::try_into).transpose()?,
             printer: Some(v.printer.try_into()?),
         };
         Ok(value)
@@ -636,6 +638,88 @@ impl TryFrom<HardwareCatalog> for rpc::HardwareCatalog {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+fn enum_index<T: Copy + PartialEq>(all: &[T], v: T) -> i32 {
+    all.iter().position(|x| *x == v).map_or(0, |i| i as i32 + 1)
+}
+fn enum_value<T: Copy>(all: &[T], v: i32, what: &str) -> Result<T, String> {
+    usize::try_from(v - 1)
+        .ok()
+        .and_then(|i| all.get(i).copied())
+        .ok_or_else(|| format!("unsupported {what}"))
+}
+const FIRMWARE: [FirmwareFamily; 4] = [
+    FirmwareFamily::Marlin2,
+    FirmwareFamily::PrusaBuddy,
+    FirmwareFamily::Klipper,
+    FirmwareFamily::BambuLab,
+];
+const KINEMATICS: [MachineKinematics; 2] =
+    [MachineKinematics::BedSlinger, MachineKinematics::CoreXy];
+const LEVELLING: [BedLevelling; 2] = [BedLevelling::Manual, BedLevelling::ProbeMesh];
+impl TryFrom<rpc::MachineDescription> for MachineDescription {
+    type Error = String;
+    fn try_from(v: rpc::MachineDescription) -> Result<Self, String> {
+        use rpc::fact_source::Kind;
+        let value = Self {
+            id: v.id,
+            lineage: v.lineage,
+            firmware: enum_value(&FIRMWARE, v.firmware, "firmware family")?,
+            kinematics: enum_value(&KINEMATICS, v.kinematics, "machine kinematics")?,
+            levelling: enum_value(&LEVELLING, v.levelling, "bed levelling")?,
+            heated_bed: v.heated_bed,
+            arc_moves: v.arc_moves,
+            limits: v
+                .limits
+                .into_iter()
+                .map(|l| {
+                    Ok(SourcedLimit {
+                        key: enum_value(&MachineLimit::ALL, l.key, "machine limit")?,
+                        value: l.value,
+                        source: match required(l.source.and_then(|s| s.kind), "FactSource.kind")? {
+                            Kind::Published(reference) => FactSource::Published { reference },
+                            Kind::FamilyDefault(family) => FactSource::FamilyDefault { family },
+                            Kind::OperatorDeclared(()) => FactSource::OperatorDeclared,
+                        },
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl TryFrom<MachineDescription> for rpc::MachineDescription {
+    type Error = String;
+    fn try_from(v: MachineDescription) -> Result<Self, String> {
+        use rpc::fact_source::Kind;
+        v.validate()?;
+        Ok(Self {
+            firmware: enum_index(&FIRMWARE, v.firmware),
+            kinematics: enum_index(&KINEMATICS, v.kinematics),
+            levelling: enum_index(&LEVELLING, v.levelling),
+            heated_bed: v.heated_bed,
+            arc_moves: v.arc_moves,
+            limits: v
+                .limits
+                .into_iter()
+                .map(|l| rpc::SourcedLimit {
+                    key: enum_index(&MachineLimit::ALL, l.key),
+                    value: l.value,
+                    source: Some(rpc::FactSource {
+                        kind: Some(match l.source {
+                            FactSource::Published { reference } => Kind::Published(reference),
+                            FactSource::FamilyDefault { family } => Kind::FamilyDefault(family),
+                            FactSource::OperatorDeclared => Kind::OperatorDeclared(()),
+                        }),
+                    }),
+                })
+                .collect(),
+            id: v.id,
+            lineage: v.lineage,
         })
     }
 }

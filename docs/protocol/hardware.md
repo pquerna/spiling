@@ -18,7 +18,7 @@ hardware database or automatic project synchronization.
 | Record                  | Meaning                                                                                                                    | Storage                                                                        |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | Printer reference       | Public manufacturer/model declarations and optional build size; no inferred mount or process settings                      | Built-in reference discovery; exact original row retained by personal identity |
-| Setup                   | Complete existing `PrinterSpecification` and public model, with an inspectable content revision                            | Personal machine record; copied into project                                   |
+| Setup                   | Public model, the machine description it is derived from (null only for software references) and the derived `PrinterSpecification` | Personal machine record; copied into project                                   |
 | Owned machine           | Physical instance UUID, model identity, private nickname/serial/location and explicit unconfigured or complete setup state | Personal library only                                                          |
 | Plate definition / face | Public mounting interface, thickness, installed surface datum, faces, usable bounds, keepouts and temperature limits       | Personal plate; copied into project                                            |
 | Owned plate             | Physical sheet UUID, private nickname/condition and optional installed machine                                             | Personal library only                                                          |
@@ -32,13 +32,61 @@ remain distinct physical records. Portable setup/plate labels are explicitly
 public; private nicknames are never used to synthesize those labels. Custom
 public definitions are operator declarations, not calibrated machine evidence.
 
-`hardware-catalog.ts` is trusted TypeScript authoring data against the generated
-Rust domain view. `pnpm contracts` generates inert `hardware-catalog.json`;
-`pnpm check:tooling` checks drift and TypeScript. Rust validates the embedded catalog.
-`printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The setup catalog supplies the existing diagnostic Cartesian and complete Marlin
-software configurations and a two-face reference sheet. H2C is a catalog-only
+`hardware-catalog.ts` (models, plates, software reference setups) and
+`machine-descriptions.ts` (machine fact layers and the setups built from them)
+are trusted TypeScript authoring data against the generated Rust domain view.
+`pnpm contracts` generates inert `hardware-catalog.json` and
+`machine-descriptions.json`; `pnpm check:tooling` checks drift and TypeScript.
+Rust resolves, derives and validates the embedded catalog.
+`printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The catalog ships derived setups for the Prusa MK4S, Bambu Lab A1 and A1 mini, Creality Ender-3 V3 SE, a generic Klipper Cartesian and a generic Marlin bed-slinger, each with a derived stock sheet, plus the diagnostic Cartesian and complete Marlin
+software reference configurations and their two-face reference sheet. H2C is a catalog-only
 identity with unknown declared volume and no executable setup. Adding a model
 record cannot authorize a dialect, firmware, connector or physical process.
+
+## Machine descriptions and derived setups
+
+A `MachineDescription` is a small set of machine facts: firmware family,
+kinematics, bed levelling, heated bed, arc support and one `SourcedLimit` per
+`MachineLimit` (bed X/Y, maximum Z, nozzle and filament diameter, print and
+travel feed, acceleration, volumetric flow, nozzle/extrusion/bed temperatures,
+bead width/height ratios to the nozzle, XY/Z motion steps and toolhead
+clearance). Each limit records its source: `published` (a manufacturer
+specification reference), `family_default` (the declaring family layer) or
+`operator_declared` (an edit).
+
+Authoring layers inherit: `generic.fff` → family (`generic.klipper-cartesian`,
+`generic.marlin-bedslinger`) → printer, and a child overrides only what it
+knows. Family defaults are sized for modern printers (600 mm/s print feed,
+800 mm/s travel, 20 000 mm/s² acceleration, 32 mm³/s flow, 350 mm generic
+volume) so a default limit is never the reason a job refuses or is throttled
+when the real printer could do it. Unpublished values inherit the default
+instead of an aggregator's figure. Resolution records the lineage.
+
+The setup's `PrinterSpecification` is derived, never authored, and setup
+validation refuses a printer that differs from the derivation:
+
+| Derived value              | Rule                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| Build envelope, bed        | `[0,0,0]..[bed_x, bed_y, max_z]`; bed box below Z0; stock sheet usable over the whole bed   |
+| Deposition widths          | `[min_ratio, max_ratio] × nozzle` (defaults 0.75–1.875, so 0.30–0.75 mm at 0.4 mm)          |
+| Deposition heights         | Z motion step up to `height_ratio × nozzle` (default 0.75)                                 |
+| Prime line                 | Back edge, `margin = min(10, 5% of the smaller bed side)`, `min(20, bed_x − 2·margin)` long, Z = nozzle/2, purging 1.8× nominal bead volume at 10 mm/s |
+| Park                       | `[margin, bed_y − margin, max_z]`: above any admitted part                                 |
+| Feed / flow ceilings       | `max(print feed, travel feed)`; declared volumetric flow                                   |
+| Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile |
+| Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
+
+Acceleration, kinematics and levelling are recorded for time estimation and
+lifecycle work but do not change today's program. Every derived setup emits
+the Marlin 2 single-extruder lifecycle; the recorded firmware family names the
+target but per-family start/end sequences are not yet implemented, so
+programs for Prusa, Bambu and Klipper firmware are not machine ready. Unheated
+beds refuse explicitly because the lifecycle requires a bed temperature.
+
+The workbench edits any fact of a configured setup, re-deriving on every edit
+and showing derivation refusals. A custom setup starts from any
+machine-description setup for any printer, including catalog references.
+Saving a changed setup gives it a new custom identity.
 
 ## Selection, copying and invalidation
 
@@ -49,14 +97,14 @@ configuration. The project view and Prepare's **Choose hardware** action review
 and explicitly apply a machine/plate/face. A captured setup and its accessories
 can also be copied back into My Hardware, including from a read-only project.
 
-An owned machine carries `PrinterIdentity` and tagged `MachineConfiguration`. `Unconfigured` is valid inventory and displays **Setup needed**. It supplies no mount, nozzle, dialect or process limits. Installing a plate/accessory or capturing it for a project requires a complete setup; a configured setup must name the same manufacturer/model. Selecting a reference never silently adopts diagnostic Marlin settings. Exact admitted configurations are deliberately selected; a manually entered model can instead start from explicit software settings with an operator-entered mount. Those declarations do not qualify physical hardware. Core advances installation generation when identity or configuration changes; nickname edits alone retain it.
+An owned machine carries `PrinterIdentity` and tagged `MachineConfiguration`. `Unconfigured` is valid inventory and displays **Setup needed**. It supplies no mount, nozzle, dialect or process limits. Installing a plate/accessory or capturing it for a project requires a complete setup; a configured setup must name the same manufacturer/model. Selecting a reference never silently adopts diagnostic Marlin settings. Exact admitted configurations are deliberately selected; any printer, catalog or manual, can instead start a custom setup from a machine description with an operator-entered mount. Those declarations do not qualify physical hardware. Core advances installation generation when identity or configuration changes; nickname edits alone retain it.
 
 Native acquisition uses the shared search/review page, then a bounded editor with visible Add/Save and discard actions. CLI `library catalog --kind printer --query TEXT` and `library add-reference RECORD.json` save source-only inventory; `library add-machine NAME --manufacturer BRAND --model MODEL` saves manual inventory. `--setup ID` explicitly starts a complete admitted configuration. Rich setup edits continue to use typed `replace-hardware`/receipt requests. Project captures remain complete and contain no private instance identity.
 
 `Projects.SetHardware` works before a manufacturing recipe exists. Core commits
 the complete capture and, when present, the recipe's printer/capture atomically.
 Existing material-profile pins are validated; selecting hardware cannot silently
-discard an incompatible profile. Captured single-tool material profiles own their resolved nozzle/bed operating targets; these may differ from the installed setup's initial thermal values. Every other installed printer field remains exact, and the material resolver validates the complete capture. Reselecting hardware preserves those bound process temperatures. Authoring history restores the exact closure.
+discard an incompatible profile. Material profiles are keyed by compatibility (nozzle diameter, hotend/nozzle material/cooling class and the material's polymer family), never printer identity or revision, so editing a printer's other facts keeps its profiles. Captured single-tool material profiles own their resolved nozzle/bed operating targets; these may differ from the installed setup's initial thermal values. Every other installed printer field remains exact, and the material resolver validates the complete capture. Reselecting hardware preserves those bound process temperatures. Authoring history restores the exact closure.
 An identical capture preserves revision and compiled artifact, allowing another
 identical physical instance to be selected locally. A changed capture invalidates
 the artifact; Undo restores its original coherent inputs/artifact. Removing the

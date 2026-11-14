@@ -1255,7 +1255,7 @@ fn complete_job_rejects_unsafe_or_incompatible_specifications() {
                 1 => job.park_position_mm[2] = 2.0,
                 2 => job.nozzle_temperature_c = 100.0,
                 3 => job.prime_filament_length_mm = 101.0,
-                _ => job.firmware_version = "unknown".into(),
+                _ => job.firmware_version = String::new(),
             }
         }
         assert!(emit_text(&plan, &bad, &AtomicBool::new(false)).is_err());

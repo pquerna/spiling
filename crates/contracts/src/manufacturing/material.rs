@@ -61,8 +61,10 @@ pub struct MaterialProcessProfile {
     pub id: String,
     pub revision: String,
     pub material: MaterialDefinition,
-    pub printer_id: String,
-    pub printer_revision: String,
+    /// Compatibility key: nozzle diameter class plus the hotend/nozzle
+    /// material/cooling class below and the material's polymer family. A
+    /// profile is never bound to one printer identity or revision, so editing
+    /// a printer's other facts keeps its profiles.
     pub nozzle_diameter_mm: f64,
     pub hotend_id: String,
     pub nozzle_material: String,
@@ -159,12 +161,9 @@ impl ResolvedMaterialProfile {
         if self.resolver_version != MATERIAL_RESOLVER_VERSION {
             return Err(invalid("unsupported material resolver version"));
         }
-        if p.printer_id != intent.printer.id
-            || p.printer_revision != intent.printer.revision
-            || p.nozzle_diameter_mm != intent.printer.nozzle_diameter_mm
-        {
+        if p.nozzle_diameter_mm != intent.printer.nozzle_diameter_mm {
             return Err(invalid(
-                "material profile does not match the selected printer revision/nozzle",
+                "material profile nozzle diameter differs from the selected printer nozzle",
             ));
         }
         if r.material_id != p.material.id
@@ -248,8 +247,6 @@ impl MaterialProcessProfile {
         for v in [
             &self.id,
             &self.revision,
-            &self.printer_id,
-            &self.printer_revision,
             &self.cooling_configuration_id,
             &self.hotend_id,
             &self.nozzle_material,

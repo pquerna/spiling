@@ -3178,7 +3178,7 @@ fn captured_material_profiles_preserve_full_intent_and_recover() {
     let redo = send(&host, Action::Redo);
     assert_eq!(redo.manufacturing.intent, s.manufacturing.intent);
     let mut incompatible = selection.clone();
-    incompatible.profile.printer_revision = "different-printer".into();
+    incompatible.profile.nozzle_diameter_mm = 0.8;
     let rejected = manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::ApplyMaterialProfile {
             tool_id: None,
@@ -3297,7 +3297,7 @@ fn catalog_review_is_nonmutating_bound_and_available_read_only() {
                 let mut profile = selection.profile.clone();
                 profile.id = format!("catalog-{i}");
                 if i == 5 {
-                    profile.printer_revision = "incompatible-printer".into();
+                    profile.nozzle_diameter_mm = 0.8;
                 }
                 profile
             })

@@ -810,9 +810,7 @@ impl FixedDualJob {
             if let Some(capture) = &tool.material_profile {
                 let selected = &capture.selection;
                 let profile = &selected.profile;
-                if profile.printer_id != printer.id
-                    || profile.printer_revision != printer.revision
-                    || profile.nozzle_diameter_mm != tool.nozzle_diameter_mm
+                if profile.nozzle_diameter_mm != tool.nozzle_diameter_mm
                     || profile.material.id != tool.material.id
                     || profile.material.revision != tool.material.revision
                     || profile.material.polymer_family != tool.material.polymer_family
