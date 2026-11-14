@@ -321,13 +321,15 @@ mod tests {
             copy: true,
             pose: RigidPoseMm::IDENTITY,
         };
+        // Occurrences have only their u32 width: a batch beyond the former
+        // 256-occurrence cap is admitted (prepared, not committed).
         assert!(
             project
                 .prepare(Edit::ApplyPlacement {
                     additional: vec![],
-                    placements: vec![p.clone(); MAX_OCCURRENCES as usize]
+                    placements: vec![p.clone(); 300]
                 })
-                .is_err()
+                .is_ok()
         );
         assert_eq!(project.snapshot().occurrences.len(), 1);
         commit(

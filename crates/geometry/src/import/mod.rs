@@ -344,7 +344,7 @@ pub(crate) fn import_step(
 ) -> Result<Definition, GeometryError> {
     check_cancel(cancel)?;
     validate_face_limit(face_limit)?;
-    PreparedStepSource::new(bytes, cancel)?.read_solid(
+    PreparedStepSource::new(bytes, query_proof_byte_limit, cancel)?.read_solid(
         selected,
         cancel,
         face_limit,

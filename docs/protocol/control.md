@@ -121,12 +121,15 @@ Input revision is retained provenance only in the synthetic diagnostic, which ne
 `Geometry.PrepareLayout` captures the scene and persistent project revision, current
 printer/recipe, source-bound finishes/process data and explicit quantity/pins/spacing.
 It is a cancellable read-only operation, including on read-only projects. The engine
-searches finite rectangular reservations using native/finish bounds, then requires
+decides every bed, centre and reservation-edge position for rectangular reservations
+using native/finish bounds (an exact sweep per candidate row, counted for
+cancellation, never a candidate budget), then requires
 complete candidate compilation, independent emitted-program replay and whole-bead
 containment in disjoint construction reservations. The checked terminal proposal
 contains every move/copy, requested/placed totals and software verification. A best
 found fill or partial fit is not a maximum-count or physical-clearance claim.
-The result distinguishes build-area, finite-search and manufacturing-work limits.
+The result distinguishes build-area, plate, occurrence-width and manufacturing-work
+limits; copies that are not placed are reported against the requested count.
 At most four complete manufacturing attempts may reduce only newly requested
 copies after a resource refusal; every existing occurrence remains included.
 `Geometry.Execute.ApplyLayout` accepts only the exact retained proposal identity and

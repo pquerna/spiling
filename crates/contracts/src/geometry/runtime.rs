@@ -53,6 +53,13 @@ pub enum GeometryCommand {
         scene_revision: SceneRevision,
         project_revision: crate::project::ProjectRevision,
     },
+    GetLayoutOverviewPage {
+        session_id: SessionId,
+        scene_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+        kind: LayoutOverviewPageKind,
+        offset: u32,
+    },
     GetScene {
         session_id: SessionId,
     },
@@ -115,6 +122,12 @@ pub enum GeometryCommand {
 pub enum ScenePageKind {
     Definitions,
     Occurrences,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutOverviewPageKind {
+    Definitions,
+    Parts,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -299,7 +312,12 @@ pub enum ArtifactChunkMetadata {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryResponse {
     LayoutOverview {
-        overview: PrintLayoutOverview,
+        summary: LayoutOverviewSummary,
+    },
+    LayoutOverviewPage {
+        definitions: Vec<DefinitionRecord>,
+        parts: Vec<LayoutOverviewPart>,
+        next_offset: Option<u32>,
     },
     OperationAccepted {
         operation: crate::NativeOperationView,

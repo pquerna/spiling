@@ -58,7 +58,7 @@ pub(super) struct Reveal {
     pub offset_mm: f64,
     pub camera: CameraState,
     pub dim_context: bool,
-    pub attention: Option<[[u32; 4]; 2]>,
+    pub attention: Option<ParticipantMask>,
     pub previous_camera: Option<CameraState>,
 }
 impl Reveal {
@@ -90,31 +90,40 @@ impl Reveal {
     }
 }
 
+/// One bit per scene occurrence index. It grows with the scene: participant
+/// emphasis has no occurrence ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParticipantMask(Vec<u32>);
+impl ParticipantMask {
+    fn mark(&mut self, index: usize) {
+        let word = index / 32;
+        if word >= self.0.len() {
+            self.0.resize(word + 1, 0);
+        }
+        self.0[word] |= 1 << (index % 32);
+    }
+    pub fn words(&self) -> &[u32] {
+        &self.0
+    }
+}
+
 pub(super) fn participant_mask(
     scene: &Scene,
     participants: &[OccurrenceId],
-) -> Option<[[u32; 4]; 2]> {
-    if participants.is_empty() || scene.occurrences.len() > MAX_OCCURRENCES as usize {
+) -> Option<ParticipantMask> {
+    if participants.is_empty() {
         return None;
     }
-    let mut words = [[0u32; 4]; 2];
-    for id in participants {
-        let index = scene
-            .occurrences
-            .iter()
-            .position(|item| item.occurrence_id == *id)?;
-        if !mark_participant(&mut words, index) {
-            return None;
+    let wanted: std::collections::BTreeSet<_> = participants.iter().copied().collect();
+    let mut mask = ParticipantMask::default();
+    let mut found = 0;
+    for (index, item) in scene.occurrences.iter().enumerate() {
+        if wanted.contains(&item.occurrence_id) {
+            mask.mark(index);
+            found += 1;
         }
     }
-    Some(words)
-}
-fn mark_participant(words: &mut [[u32; 4]; 2], index: usize) -> bool {
-    if index >= 256 {
-        return false;
-    }
-    words[index / 128][(index / 32) % 4] |= 1 << (index % 32);
-    true
+    (found == wanted.len()).then_some(mask)
 }
 
 #[cfg(test)]
@@ -170,26 +179,23 @@ mod tests {
         assert!(!viewport.close_reveal(2.0, false));
     }
     #[test]
-    fn multiple_participants_cover_word_boundaries_without_aliasing() {
-        const {
-            assert!(MAX_OCCURRENCES <= 256);
+    fn multiple_participants_cover_word_boundaries_without_aliasing_or_a_ceiling() {
+        let mut mask = ParticipantMask::default();
+        for index in [0, 31, 32, 127, 128, 255, 256, 70_000] {
+            mask.mark(index);
         }
-        let mut words = [[0u32; 4]; 2];
-        for index in [0, 31, 32, 127, 128, 255] {
-            assert!(mark_participant(&mut words, index));
-        }
+        assert_eq!(mask.words().len(), 70_000 / 32 + 1);
         assert_eq!(
-            words,
-            [[0x80000001, 1, 0, 0x80000000], [1, 0, 0, 0x80000000]]
+            &mask.words()[..9],
+            &[0x80000001, 1, 0, 0x80000000, 1, 0, 0, 0x80000000, 1]
         );
-        assert!(!mark_participant(&mut words, 256));
+        assert_eq!(mask.words()[70_000 / 32], 1 << (70_000 % 32));
         assert_eq!(
-            words
+            mask.words()
                 .iter()
-                .flatten()
                 .map(|word| word.count_ones())
                 .sum::<u32>(),
-            6
+            8
         );
     }
     #[test]
@@ -203,7 +209,7 @@ mod tests {
             normal: Some(DVec3::Z),
         };
         viewport.reveal = Some(Reveal::new(target, viewport.camera(), false));
-        viewport.attention = Some([[1, 0, 0, 0], [0; 4]]);
+        viewport.attention = Some(ParticipantMask(vec![1]));
         viewport.dim_context = true;
         viewport.cancel_area();
         assert!(viewport.reveal.is_none());
@@ -231,12 +237,12 @@ mod tests {
             bounds_mm: summary.bounds_mm.unwrap(),
             normal: Some(DVec3::X),
         };
-        let mask = [[1, 0, 0, 0], [0; 4]];
+        let mask = ParticipantMask(vec![1]);
         viewport.last_selection = Some((None, None));
         viewport.pending_focus = Some(focus::Request {
             summary: summary.clone(),
             target,
-            participants: Some(mask),
+            participants: Some(mask.clone()),
             reveal: true,
             started_reveal: false,
             area_applied: false,

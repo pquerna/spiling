@@ -1239,18 +1239,9 @@ impl Actor {
                 ));
             }
         };
-        let GeometryResponse::LayoutOverview { overview } = rpc
-            .geometry(GeometryCommand::GetLayoutOverview {
-                session_id: session_id.clone(),
-                scene_revision: scene.revision,
-                project_revision: project.revision,
-            })
-            .await?
-        else {
-            return Err(ClientError::Protocol(
-                "Unexpected plate overview reply".into(),
-            ));
-        };
+        let overview = rpc
+            .layout_overview(&session_id, scene.revision, project.revision)
+            .await?;
         if overview.project_id != project.project_id
             || overview.session_id != session_id
             || overview.project_revision != project.revision

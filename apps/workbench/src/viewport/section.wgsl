@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>,context:vec4<f32>,emphasis:vec4<f32>,participants:array<vec4<u32>,2> };
+struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>,context:vec4<f32>,emphasis:vec4<f32> };
 @group(0) @binding(0) var<uniform> camera:Camera;
+// One bit per scene occurrence index; only the source cap binds it.
+@group(1) @binding(0) var<storage,read> participants: array<u32>;
 struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>,@location(1) @interpolate(flat) occurrence:u32 };
 @vertex fn vs(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u32)->Output {
     let n=camera.plane.xyz;
@@ -15,7 +17,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
 }
 @fragment fn source_fs(input:Output)->@location(0) vec4<f32> {
     if camera.emphasis.w>0.0 {
-        let word=camera.participants[input.occurrence/128u][(input.occurrence/32u)%4u];
+        let word=select(0u,participants[input.occurrence/32u],input.occurrence/32u<arrayLength(&participants));
         let participant=(word & (1u << (input.occurrence%32u)))!=0u;
         let pattern=array<u32,16>(0u,8u,2u,10u,12u,4u,14u,6u,3u,11u,1u,9u,15u,7u,13u,5u);
         let pixel=(u32(input.position.x)%4u)+(u32(input.position.y)%4u)*4u;

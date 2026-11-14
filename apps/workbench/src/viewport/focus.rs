@@ -11,7 +11,7 @@ pub(super) const DURATION_SECONDS: f64 = 0.18;
 pub(super) struct Request {
     pub summary: spiling_contracts::geometry::SceneSummary,
     pub target: FocusTarget,
-    pub participants: Option<[[u32; 4]; 2]>,
+    pub participants: Option<super::reveal::ParticipantMask>,
     pub reveal: bool,
     pub started_reveal: bool,
     pub area_applied: bool,

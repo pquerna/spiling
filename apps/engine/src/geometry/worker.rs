@@ -1030,7 +1030,8 @@ fn import(
     }
     let bytes = Arc::new(captured.bytes);
     capacity.charge_source(&bytes)?;
-    let prepared = spiling_geometry::PreparedStepSource::new(&bytes, cancel)?;
+    let prepared =
+        spiling_geometry::PreparedStepSource::new(&bytes, capacity.source_bytes, cancel)?;
     let bodies = prepared.bodies();
     if bodies.is_empty() {
         return Err(error(
@@ -1336,6 +1337,7 @@ fn open(
                         drop(prepared_step.take());
                         prepared_step = Some(spiling_geometry::PreparedStepSource::new(
                             &source.bytes,
+                            capacity.source_bytes,
                             cancel,
                         )?);
                     }

@@ -252,9 +252,11 @@ fn duplicate_import_preserves_original_provenance_and_shared_identity() {
     );
 }
 #[test]
-fn source_history_budget_rejects_without_mutation_and_releases_pruned_pins() {
+fn source_history_retains_beyond_the_former_cap_and_releases_pruned_pins() {
+    // Definitions have only their u32 width; their bytes are admitted by the engine.
+    const SOURCES: u8 = 40;
     let mut project = Project::new();
-    for i in 0..32 {
+    for i in 0..SOURCES {
         edit(
             &mut project,
             Edit::Import {
@@ -262,43 +264,24 @@ fn source_history_budget_rejects_without_mutation_and_releases_pruned_pins() {
                 pose: RigidPoseMm::IDENTITY,
             },
         );
-        edit(
-            &mut project,
-            Edit::Remove {
-                occurrence_id: OccurrenceId::new(i as u32 + 1).unwrap(),
-            },
-        );
     }
-    assert_eq!(project.retained_sources().len(), 32);
+    assert_eq!(project.retained_sources().len(), SOURCES as usize);
     let before = project.info();
-    assert_eq!(
+    assert!(
         project
             .prepare(Edit::Import {
                 source: asset(vec![99], "new.step"),
                 pose: RigidPoseMm::IDENTITY
             })
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
+            .is_ok()
     );
-    assert_eq!(project.info(), before);
-    for _ in 0..64 {
+    assert_eq!(project.info(), before, "prepare never mutates");
+    for _ in 0..SOURCES {
         project.undo().unwrap();
     }
     assert!(project.snapshot().occurrences.is_empty());
-    // Redo still owns 32 distinct sources: admission cannot drop them first.
-    let before = project.info();
-    assert_eq!(
-        project
-            .prepare(Edit::Import {
-                source: asset(vec![99], "new.step"),
-                pose: RigidPoseMm::IDENTITY,
-            })
-            .unwrap_err()
-            .code,
-        ProjectErrorCode::ResourceLimit
-    );
-    assert_eq!(project.info(), before);
+    // Redo still owns every distinct source until a transaction clears it.
+    assert_eq!(project.retained_sources().len(), SOURCES as usize);
     // Reuse an already-owned allocation for a fitting transaction that clears redo.
     let retained = project.retained_sources().pop().unwrap();
     edit(

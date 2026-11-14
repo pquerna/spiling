@@ -35,11 +35,12 @@ pub const MAX_SOURCE_BYTES: u32 = 1024 * 1024 * 1024;
 // [ADR009]: ../../../../docs/adr/009-resource-envelope-policy.md
 pub const MAX_STEP_ENTITIES: u32 = u32::MAX;
 pub const MAX_NATIVE_FACES: u32 = u32::MAX;
-/// Definitions and occurrences are listed whole in one unpaged workspace
-/// overview control frame; these counts are that frame's capacity until the
-/// overview is paged.
-pub const MAX_DEFINITIONS: u32 = 32;
-pub const MAX_OCCURRENCES: u32 = 256;
+// Definitions and occurrences have no fixed count ceiling either: scene and
+// workspace-overview replies are paged, definitions admit their source, proof
+// and display bytes against current headroom, and occurrences are small
+// records. These are the u32 width of their identifiers and counts.
+pub const MAX_DEFINITIONS: u32 = u32::MAX;
+pub const MAX_OCCURRENCES: u32 = u32::MAX;
 pub const MAX_SCENE_MESH_BYTES: u32 = 64 * 1024 * 1024;
 // Counts cannot exceed the checked packed-byte envelope (24 bytes per vertex,
 // 16 per indexed triangle). Do not impose a second arbitrary topology ceiling.
@@ -1672,10 +1673,7 @@ impl<'de> Deserialize<'de> for SceneSummary {
 }
 impl SceneSummary {
     pub fn validate(&self) -> Result<(), GeometryError> {
-        if self.definition_count > MAX_DEFINITIONS
-            || self.occurrence_count > MAX_OCCURRENCES
-            || self.unique_mesh_bytes > MAX_SCENE_MESH_BYTES
-        {
+        if self.unique_mesh_bytes > MAX_SCENE_MESH_BYTES {
             return Err(resource("scene exceeds support limits"));
         }
         if self.definition_count > self.occurrence_count

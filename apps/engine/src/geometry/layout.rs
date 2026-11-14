@@ -71,62 +71,188 @@ fn input<'a>(
         working_set,
     }
 }
+/// Occupied reservations ordered by their lower Y edge, so each candidate row
+/// examines only the reservations that can intersect it.
+struct Occupied {
+    rects: Vec<Rect>,
+    tallest: f64,
+}
+impl Occupied {
+    fn new(rects: &[Rect]) -> Self {
+        let mut occupied = Self {
+            rects: Vec::with_capacity(rects.len()),
+            tallest: 0.0,
+        };
+        for rect in rects {
+            occupied.push(*rect);
+        }
+        occupied
+    }
+    fn push(&mut self, rect: Rect) {
+        let at = self
+            .rects
+            .partition_point(|o| o.min[1].total_cmp(&rect.min[1]).is_le());
+        self.rects.insert(at, rect);
+        self.tallest = self.tallest.max(rect.max[1] - rect.min[1]);
+    }
+    /// Reservations whose Y interval meets the open row `(low, high)`; the
+    /// same predicate as [`Rect::overlaps`], so no other one can overlap it.
+    fn row(&self, low: f64, high: f64) -> impl Iterator<Item = &Rect> {
+        let first = self
+            .rects
+            .partition_point(|o| o.min[1] < low - self.tallest - 1.0);
+        self.rects[first..]
+            .iter()
+            .take_while(move |o| o.min[1] < high)
+            .filter(move |o| low < o.max[1])
+    }
+}
+
+/// Best free position for `shape` among the bed, centre and reservation-edge
+/// coordinates, by the style's score with ties to the lower row, then the
+/// lower X. Every position on the finite edge set is decided: a candidate row
+/// is checked by an exact sweep of the reservations meeting it, so the search
+/// either returns the best placement or proves none fits. `work` counts
+/// examined rows for cancellation and reporting; it never stops the search.
 fn candidate(
     shape: Rect,
     bed: Rect,
-    occupied: &[Rect],
+    occupied: &Occupied,
     style: LayoutStyle,
+    lowest_row: f64,
     work: &mut u32,
-    budget: u32,
     cancel: &AtomicBool,
 ) -> Result<Option<Rect>, JobError> {
     let size: [f64; 2] = std::array::from_fn(|a| shape.max[a] - shape.min[a]);
-    let mut axes: [Vec<f64>; 2] = std::array::from_fn(|a| {
-        vec![
-            bed.min[a],
-            bed.max[a] - size[a],
-            (bed.min[a] + bed.max[a] - size[a]) * 0.5,
-        ]
-    });
-    for b in occupied {
-        for a in 0..2 {
-            axes[a].extend([b.max[a], b.min[a] - size[a]]);
+    let mut rows = vec![
+        bed.min[1],
+        bed.max[1] - size[1],
+        (bed.min[1] + bed.max[1] - size[1]) * 0.5,
+    ];
+    for b in &occupied.rects {
+        rows.extend([b.max[1], b.min[1] - size[1]]);
+    }
+    rows.sort_by(f64::total_cmp);
+    rows.dedup();
+    let score = |b: &Rect| match style {
+        LayoutStyle::Dense => {
+            (b.min[1] - bed.min[1]) * (bed.max[0] - bed.min[0] + 1.0) + b.min[0] - bed.min[0]
+        }
+        LayoutStyle::Balanced => (0..2)
+            .map(|a| ((b.min[a] + b.max[a] - bed.min[a] - bed.max[a]) * 0.5).powi(2))
+            .sum(),
+    };
+    // Dense scores order rows first, so the lowest feasible row is best.
+    // Balanced rows are visited outward from the centre and stop once a row's
+    // own centre distance already exceeds the best score.
+    let row_bound = |y: f64| ((2.0 * y + size[1] - bed.min[1] - bed.max[1]) * 0.5).powi(2);
+    match style {
+        LayoutStyle::Dense => rows.retain(|y| *y >= lowest_row),
+        LayoutStyle::Balanced => {
+            rows.sort_by(|a, b| row_bound(*a).total_cmp(&row_bound(*b)).then(a.total_cmp(b)))
         }
     }
-    for axis in &mut axes {
-        axis.sort_by(f64::total_cmp);
-        axis.dedup();
-    }
     let mut best: Option<(f64, Rect)> = None;
-    for y in &axes[1] {
-        for x in &axes[0] {
-            if *work >= budget {
-                return Ok(None);
-            }
-            *work += 1;
-            super::check_cancel(cancel)?;
-            let b = Rect {
-                min: [*x, *y],
-                max: [x + size[0], y + size[1]],
-            };
-            if !b.inside(bed) || occupied.iter().any(|o| b.overlaps(*o)) {
-                continue;
-            }
-            let score = match style {
-                LayoutStyle::Dense => {
-                    (b.min[1] - bed.min[1]) * (bed.max[0] - bed.min[0] + 1.0) + b.min[0]
-                        - bed.min[0]
-                }
-                LayoutStyle::Balanced => (0..2)
-                    .map(|a| ((b.min[a] + b.max[a] - bed.min[a] - bed.max[a]) * 0.5).powi(2))
-                    .sum(),
-            };
-            if best.as_ref().is_none_or(|(s, _)| score < *s) {
-                best = Some((score, b));
+    for y in rows {
+        if style == LayoutStyle::Balanced && best.as_ref().is_some_and(|(s, _)| row_bound(y) > *s) {
+            break;
+        }
+        *work = work.saturating_add(1);
+        super::check_cancel(cancel)?;
+        if let Some(b) = best_in_row(size, bed, occupied, y, &score)
+            && best.as_ref().is_none_or(|(s, p)| {
+                let candidate = score(&b);
+                candidate < *s || (candidate == *s && b.min[1] < p.min[1])
+            })
+        {
+            best = Some((score(&b), b));
+            if style == LayoutStyle::Dense {
+                break;
             }
         }
     }
     Ok(best.map(|(_, b)| b))
+}
+
+/// The best exactly free X position in one row, or `None` if the row is full.
+fn best_in_row(
+    size: [f64; 2],
+    bed: Rect,
+    occupied: &Occupied,
+    y: f64,
+    score: &dyn Fn(&Rect) -> f64,
+) -> Option<Rect> {
+    let place = |x: f64| Rect {
+        min: [x, y],
+        max: [x + size[0], y + size[1]],
+    };
+    if !place(bed.min[0]).inside(bed) && !place(bed.max[0] - size[0]).inside(bed) {
+        return None;
+    }
+    let row: Vec<Rect> = occupied.row(y, y + size[1]).copied().collect();
+    let mut xs = vec![
+        bed.min[0],
+        bed.max[0] - size[0],
+        (bed.min[0] + bed.max[0] - size[0]) * 0.5,
+    ];
+    for o in &row {
+        xs.extend([o.max[0], o.min[0] - size[0]]);
+    }
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    // Sweep blocked X intervals in order of their left edge; a candidate is
+    // free when no reservation starting at or before it still covers it.
+    let mut blocks: Vec<Rect> = row;
+    blocks.sort_by(|a, b| a.min[0].total_cmp(&b.min[0]));
+    let mut best: Option<(f64, Rect)> = None;
+    let mut next = 0;
+    let mut active: std::collections::BinaryHeap<std::cmp::Reverse<OrderedMax>> =
+        std::collections::BinaryHeap::new();
+    for x in xs {
+        let b = place(x);
+        if !b.inside(bed) {
+            continue;
+        }
+        while next < blocks.len() && blocks[next].min[0] < b.max[0] {
+            active.push(std::cmp::Reverse(OrderedMax(blocks[next])));
+            next += 1;
+        }
+        while active
+            .peek()
+            .is_some_and(|std::cmp::Reverse(o)| o.0.max[0] <= b.min[0])
+        {
+            active.pop();
+        }
+        // Every remaining block starts before b ends, ends after b starts and
+        // meets b's row: exactly the reservations b overlaps.
+        if !active.is_empty() {
+            continue;
+        }
+        let s = score(&b);
+        if best.as_ref().is_none_or(|(best, _)| s < *best) {
+            best = Some((s, b));
+        }
+    }
+    best.map(|(_, b)| b)
+}
+/// Orders blocked intervals by right edge for the row sweep.
+#[derive(Clone, Copy)]
+struct OrderedMax(Rect);
+impl PartialEq for OrderedMax {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for OrderedMax {}
+impl PartialOrd for OrderedMax {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrderedMax {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.max[0].total_cmp(&other.0.max[0])
+    }
 }
 
 fn prepare_single(
@@ -134,7 +260,6 @@ fn prepare_single(
     definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
     cancel: &AtomicBool,
     progress: &dyn Fn(String),
-    budget: u32,
 ) -> Result<LayoutProposal, JobError> {
     r.request.validate()?;
     // Worker residency includes other plates and history. Every independent trial
@@ -310,8 +435,7 @@ fn prepare_single(
     } else {
         (current.occurrences.len() as u32)
             .checked_add(r.request.quantity - 1)
-            .filter(|n| *n <= MAX_OCCURRENCES)
-            .ok_or_else(|| fail("Requested quantity exceeds the project occurrence budget"))?
+            .ok_or_else(|| fail("Requested quantity exceeds the u32 occurrence width"))?
     };
     let mut sources: Vec<_> = current
         .occurrences
@@ -327,20 +451,25 @@ fn prepare_single(
         area(b).total_cmp(&area(a)).then(a.cmp(b))
     });
     let originals = sources.len();
-    if let Some(id) = r.request.template {
-        sources.extend(std::iter::repeat_n(
-            (id, true),
-            (r.request.quantity - 1) as usize,
-        ));
-    }
+    // Copies are generated as they are placed: a fill request names how many
+    // copies may be added, not an allocation.
+    let copies = r
+        .request
+        .template
+        .into_iter()
+        .flat_map(|id| std::iter::repeat_n((id, true), (r.request.quantity - 1) as usize));
     let route_count_limit =
         if matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. }) {
             MAX_FIXED_DUAL_OCCURRENCES
         } else {
-            MAX_OCCURRENCES as usize
+            usize::MAX
         };
     let mut work = 0;
-    for (index, (id, copy)) in sources.into_iter().enumerate() {
+    let mut occupied = Occupied::new(&occupied);
+    // Identical shapes never fit lower than the previous one did: reservations
+    // only grow, so its row bounds the dense search for the next copy.
+    let mut previous: Option<([f64; 2], f64)> = None;
+    for (index, (id, copy)) in sources.into_iter().chain(copies).enumerate() {
         if footprints.len() >= route_count_limit {
             break;
         }
@@ -350,13 +479,17 @@ fn prepare_single(
         ));
         let b = bounds[&id];
         let shape = Rect::from_axis_bounds(b, axis_padding);
+        let size = std::array::from_fn(|a| shape.max[a] - shape.min[a]);
+        let lowest_row = previous
+            .filter(|(s, _)| *s == size)
+            .map_or(f64::NEG_INFINITY, |(_, y)| y);
         let Some(placed) = candidate(
             shape,
             bed,
             &occupied,
             r.request.style,
+            lowest_row,
             &mut work,
-            budget,
             cancel,
         )?
         else {
@@ -377,6 +510,7 @@ fn prepare_single(
             footprint.min[a] += d;
             footprint.max[a] += d;
         }
+        previous = Some((size, placed.min[1]));
         occupied.push(shape.translated(shift));
         footprints.push(footprint);
         placements.push(LayoutPlacement {
@@ -426,9 +560,8 @@ fn prepare_single(
         LayoutLimit::RequestedQuantity
     } else if footprints.len() >= route_count_limit {
         LayoutLimit::OccurrenceBudget
-    } else if work >= budget {
-        LayoutLimit::SearchBudget
     } else {
+        // The search decided every candidate position: the rest do not fit.
         LayoutLimit::BuildArea
     };
     let mut manufacturing_attempts = 0;
@@ -553,8 +686,8 @@ fn prepare_single(
     Ok(proposal)
 }
 
-/// The same bounded search and independent replay for each proposed job, under
-/// one aggregate candidate budget. Nothing here changes the authoritative project.
+/// The same exhaustive edge-position search and independent replay for each
+/// proposed job. Nothing here changes the authoritative project.
 pub(super) fn prepare(
     mut r: Request,
     definitions: &BTreeMap<DefinitionId, Arc<spiling_geometry::source::SourceDefinition>>,
@@ -565,7 +698,7 @@ pub(super) fn prepare(
     let request = r.request.clone();
     let original_count = r.draft.snapshot().occurrences.len() as u32;
     let other_count = r.draft.snapshot().all_occurrences().count() as u32 - original_count;
-    let available = MAX_OCCURRENCES
+    let available = u32::MAX
         .saturating_sub(other_count + original_count)
         .saturating_add(1);
     if original_count == 0 {
@@ -574,16 +707,13 @@ pub(super) fn prepare(
     let wanted = if request.objective == LayoutObjective::Arrange {
         original_count
     } else {
-        original_count + request.quantity - 1
+        original_count
+            .checked_add(request.quantity - 1)
+            .ok_or_else(|| fail("Requested total exceeds the u32 occurrence width"))?
     };
     // The quantity remains explicit in the returned request; this ceiling bounds trials.
     if request.objective != LayoutObjective::Arrange {
         r.request.quantity = request.quantity.min(available);
-    }
-    if wanted > MAX_OCCURRENCES {
-        return Err(fail(
-            "Requested total exceeds the project occurrence budget",
-        ));
     }
     let extra_slots =
         spiling_contracts::project::MAX_PRINT_LAYOUTS - r.draft.snapshot().layouts.len();
@@ -601,14 +731,10 @@ pub(super) fn prepare(
     let capture = r.capture.clone();
     let session = r.session.clone();
     let scene = r.scene;
-    let mut result = prepare_single(r, definitions, cancel, progress, 2_000_000)?;
-    let mut work = result.candidates_examined;
-    let target = wanted.min(MAX_OCCURRENCES - other_count);
+    let mut result = prepare_single(r, definitions, cancel, progress)?;
+    let target = wanted.min(u32::MAX - other_count);
     if let Some(draft) = template_draft {
-        while result.total_placed() < target
-            && result.additional_plates.len() < extra_slots
-            && work < 2_000_000
-        {
+        while result.total_placed() < target && result.additional_plates.len() < extra_slots {
             super::check_cancel(cancel)?;
             progress(format!(
                 "layout_additional_plate_{}",
@@ -648,9 +774,7 @@ pub(super) fn prepare(
                 definitions,
                 cancel,
                 progress,
-                2_000_000 - work,
             )?;
-            work += extra.candidates_examined;
             result.additional_plates.push(AdditionalPlateProposal {
                 placements: extra
                     .placements
@@ -673,8 +797,6 @@ pub(super) fn prepare(
         LayoutLimit::RequestedQuantity
     } else if result.total_placed() == target && wanted > target {
         LayoutLimit::OccurrenceBudget
-    } else if work >= 2_000_000 {
-        LayoutLimit::SearchBudget
     } else if result.request.use_additional_plates && result.additional_plates.len() == extra_slots
     {
         LayoutLimit::PlateBudget

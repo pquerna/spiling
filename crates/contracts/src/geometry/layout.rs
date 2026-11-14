@@ -35,7 +35,6 @@ impl LayoutRequest {
     pub fn validate(&self) -> Result<(), GeometryError> {
         if (self.use_additional_plates && self.objective != LayoutObjective::Copies)
             || self.quantity == 0
-            || self.quantity > MAX_OCCURRENCES
             || !self.spacing_mm.is_finite()
             || !(0.0..=100.0).contains(&self.spacing_mm)
             || self.pinned.len() > MAX_OCCURRENCES as usize
@@ -82,7 +81,6 @@ pub fn validate_layout_placements(placements: &[LayoutPlacement]) -> Result<(), 
 pub enum LayoutLimit {
     RequestedQuantity,
     BuildArea,
-    SearchBudget,
     ManufacturingBudget,
     PlateBudget,
     OccurrenceBudget,
@@ -106,7 +104,6 @@ impl AdditionalPlateProposal {
         if self.placements.iter().any(|p| !p.copy)
             || self.placements.len() != self.footprints_mm.len()
             || !self.verification.verified
-            || self.candidates_examined > 2_000_000
             || !(1..=4).contains(&self.manufacturing_attempts)
         {
             return Err(GeometryError::new(
@@ -135,7 +132,9 @@ pub struct LayoutProposal {
     pub footprints_mm: Vec<AabbMm>,
     pub requested_count: u32,
     pub placed_count: u32,
-    /// Number of finite placement candidates examined. This never proves a global optimum.
+    /// Candidate rows examined by the exhaustive edge-position search; counted
+    /// for reporting and cancellation, never a limit. This never proves a
+    /// global packing optimum.
     pub candidates_examined: u32,
     pub manufacturing_attempts: u32,
     pub limited_by: LayoutLimit,
@@ -174,10 +173,8 @@ impl LayoutProposal {
                 "Additional plate limit exceeded",
             ));
         }
-        let mut candidates = self.candidates_examined as u64;
         for plate in &self.additional_plates {
             plate.validate()?;
-            candidates += plate.candidates_examined as u64;
             if plate
                 .placements
                 .iter()
@@ -202,13 +199,10 @@ impl LayoutProposal {
                 (p.copy && Some(p.source) != self.request.template)
                     || (!p.copy && self.request.pinned.contains(&p.source))
             })
-            || candidates > 2_000_000
             || !self.verification.verified
             || self.placed_count == 0
             || self.total_placed() > self.requested_count
-            || self.requested_count > MAX_OCCURRENCES
             || self.footprints_mm.len() != self.placed_count as usize
-            || self.candidates_examined > 2_000_000
             || !(1..=4).contains(&self.manufacturing_attempts)
         {
             return Err(GeometryError::new(

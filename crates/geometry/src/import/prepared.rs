@@ -16,7 +16,13 @@ pub struct PreparedStepSource<'a> {
 }
 
 impl<'a> PreparedStepSource<'a> {
-    pub fn new(bytes: &'a [u8], cancel: &AtomicBool) -> Result<Self, GeometryError> {
+    /// `placement_bytes` admits the expanded assembly placements; pass the
+    /// caller's remaining source admission.
+    pub fn new(
+        bytes: &'a [u8],
+        placement_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
         check_cancel(cancel)?;
         if bytes.len() > MAX_SOURCE_BYTES as usize {
             return Err(resource("STEP source cap exceeded"));
@@ -33,7 +39,7 @@ impl<'a> PreparedStepSource<'a> {
         units::validate_schema(&exchange.header)?;
         let data = exchange.data.remove(0);
         let entities = Entities::new(&data, cancel)?;
-        let bodies = structure::bodies(&entities, cancel)?;
+        let bodies = structure::bodies(&entities, placement_bytes, cancel)?;
         drop(entities);
         let mut retained_bytes = size_of::<Self>()
             .saturating_add(data.meta.capacity().saturating_mul(size_of::<Parameter>()))

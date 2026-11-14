@@ -1052,14 +1052,14 @@ impl Runtime {
                         artifacts.push((artifact_id, artifact));
                     }
                 }
+                // Staged artifacts are pinned definition meshes; their bytes,
+                // not their count, are admitted.
                 if self.definitions.len() + definitions.len() > MAX_DEFINITIONS as usize
                     || self.definitions.values().map(|d| d.vertices).sum::<u32>() + staged_vertices
                         > MAX_DISPLAY_VERTICES
                     || self.definitions.values().map(|d| d.triangles).sum::<u32>()
                         + staged_triangles
                         > MAX_DISPLAY_TRIANGLES
-                    || self.artifacts.len() + artifacts.len()
-                        > (MAX_DEFINITIONS + MAX_TERMINAL_JOBS) as usize
                 {
                     return Err(resource("import exceeds retained/staged scene budget").into());
                 }
@@ -1102,14 +1102,14 @@ impl Runtime {
                         artifacts.push((artifact_id, artifact));
                     }
                 }
+                // Staged artifacts are pinned definition meshes; their bytes,
+                // not their count, are admitted.
                 if self.definitions.len() + definitions.len() > MAX_DEFINITIONS as usize
                     || self.definitions.values().map(|d| d.vertices).sum::<u32>() + staged_vertices
                         > MAX_DISPLAY_VERTICES
                     || self.definitions.values().map(|d| d.triangles).sum::<u32>()
                         + staged_triangles
                         > MAX_DISPLAY_TRIANGLES
-                    || self.artifacts.len() + artifacts.len()
-                        > (MAX_DEFINITIONS + MAX_TERMINAL_JOBS) as usize
                 {
                     return Err(resource("open exceeds retained/staged scene budget").into());
                 }
@@ -1737,8 +1737,23 @@ impl Runtime {
                     return Err(stale());
                 }
                 Ok(Reply::Geometry(GeometryResponse::LayoutOverview {
-                    overview: self.layout_overview()?,
+                    summary: self.layout_overview()?,
                 }))
+            }
+            GeometryCommand::GetLayoutOverviewPage {
+                session_id,
+                scene_revision,
+                project_revision,
+                kind,
+                offset,
+            } => {
+                self.session(&session_id)?;
+                if scene_revision != self.revision
+                    || project_revision != self.project.info().revision
+                {
+                    return Err(stale());
+                }
+                Ok(Reply::Geometry(self.layout_overview_page(kind, offset)?))
             }
             GeometryCommand::GetScene { session_id } => {
                 self.session(&session_id)?;
@@ -2758,9 +2773,12 @@ impl Runtime {
                 "encoded artifact staging reservation exceeds budget; release unused artifacts",
             ));
         }
-        // Byte limits do not bound empty section handle metadata. Keep a bounded lease table.
+        // Byte limits do not bound empty section handle metadata. Keep a lease
+        // table that scales with the resident scene: each pinned definition
+        // mesh, one superseded lease per definition and the terminal jobs.
+        let pinned = self.artifacts.values().filter(|a| a.pinned).count();
         if matches!(purpose, Purpose::Import { .. } | Purpose::Section)
-            && self.artifacts.len() >= (MAX_DEFINITIONS + MAX_TERMINAL_JOBS) as usize
+            && self.artifacts.len() >= 2 * pinned + MAX_TERMINAL_JOBS as usize
         {
             return Err(resource(
                 "encoded artifact handle cap exceeded; release unused artifacts",

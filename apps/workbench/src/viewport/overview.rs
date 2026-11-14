@@ -218,7 +218,6 @@ pub fn paint(
                 cut: [0.0; 4],
                 context: tint,
                 emphasis: [0.0; 4],
-                participants: [[0; 4]; 2],
             },
             dark: ui.visuals().dark_mode,
         },
@@ -316,6 +315,7 @@ impl egui_wgpu::CallbackTrait for Frame {
             pass.draw(0..card.line_count, 0..1);
         }
         pass.set_pipeline(&r.pipeline);
+        pass.set_bind_group(1, &r.participants_group, &[]);
         for draw in &card.draws {
             pass.set_bind_group(0, &draw.group, &[]);
             pass.draw(0..draw.indices, 0..draw.instances);
@@ -387,7 +387,8 @@ fn stage(
                 }
                 instances.push(Instance {
                     rotation: q.as_quat().to_array(),
-                    translation: [t.x as f32, t.y as f32, t.z as f32, 0.0],
+                    translation: [t.x as f32, t.y as f32, t.z as f32],
+                    occurrence: 0,
                 });
             }
             instance_bytes += instances.len() * std::mem::size_of::<Instance>();

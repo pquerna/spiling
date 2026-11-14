@@ -2830,7 +2830,6 @@ impl NativeGeometryCoverageSummary {
         if !self.achieved_shape_error_mm.is_finite()
             || self.achieved_shape_error_mm < 0.0
             || self.achieved_shape_error_mm > self.requested_shape_error_mm
-            || self.height_analysis_count > MAX_OCCURRENCES
             || self.certified_layer_count == 0
             || (self.geometry_work == 0 && self.evidence == PreflightEvidence::Certified)
             || !matches!(

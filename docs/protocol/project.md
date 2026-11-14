@@ -105,16 +105,15 @@ existing unrelated parts remain. The top-level placements/footprints and
 only new copies of the selected template, source reservation bounds, its independent
 verification, candidates and manufacturing attempts. `requested_count` includes all
 current parts plus requested new copies; total placed is the current count plus all
-additional rows. At most two million candidates are examined across the entire
-proposal, with at most four manufacturing attempts per plate, subject to the global
-16-plate/256-occurrence limits. Plate, occurrence, build-area, search and manufacturing
-limits remain explicit. Apply rechecks complete Core admission before creating all
+additional rows. Candidates are counted, not capped; each plate allows at most four
+manufacturing attempts, subject to the 16-plate limit and the u32 occurrence width.
+Plate, occurrence, build-area and manufacturing limits remain explicit. Apply rechecks complete Core admission before creating all
 jobs as one history entry. No trial artifact becomes a current result. Fixed-dual
 routes do not gain automatic distribution support.
 
 Selected layout is transient; selection checks session and current project revision, does not dirty the project, and is permitted read-only. It advances scene identity and refuses while an engine job runs. ProjectInfo describes the selected layout plus bounded summaries of every layout.
 
-Geometry.GetLayoutOverview supplies session/scene/project-revision-bound build rectangles, source bounds, exact display poses and one shared definition-record table for all layouts, capped by the same global membership limits. Native part references use checked indices into that table to remain inside the control envelope. Meshes still use existing descriptor-bound SPLM/ByteStream retrieval. The native overview renders fixed three-quarter source previews at a common physical scale; it shares immutable CPU/GPU mesh buffers with the focused view. Metadata-only edits retain the display closure; membership changes refresh it even when the active scene epoch is unchanged. The shared display budget admits active geometry first; an unavailable or over-budget inactive preview stays explicit and can be inspected by focusing that plate. Previews exclude construction/support/clearance and cannot authorize packing, picking or geometry queries.
+Geometry.GetLayoutOverview supplies a session/scene/project-revision-bound summary: build rectangles and per-plate part counts plus the shared definition count. GetLayoutOverviewPage then pages the shared definition records and the layout-ordered parts (source bounds, exact display poses, definition IDs) at those same revisions, so each reply stays inside the control envelope and project size has no overview ceiling. Clients assemble and validate the whole overview; a revision change mid-read is a stale refusal. Meshes still use existing descriptor-bound SPLM/ByteStream retrieval. The native overview renders fixed three-quarter source previews at a common physical scale; it shares immutable CPU/GPU mesh buffers with the focused view. Metadata-only edits retain the display closure; membership changes refresh it even when the active scene epoch is unchanged. The shared display budget admits active geometry first; an unavailable or over-budget inactive preview stays explicit and can be inspected by focusing that plate. Previews exclude construction/support/clearance and cannot authorize packing, picking or geometry queries.
 
 Manufacturing/hardware/options commands carry a required layout ID and refuse another focus. A mutation recomputes each retained artifact's complete scoped input fingerprint: unchanged artifacts survive unrelated layout edits, changed artifacts clear atomically. Fresh actual replay remains mandatory. Undo restores coherent records/assets without allocator rewind. History is at most64 transactions with shared independent allocation budgets; save preserves history and revision. See [ADR011](../adr/011-print-layouts.md).
 

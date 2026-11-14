@@ -1106,11 +1106,12 @@ async fn queued_preflight_cancellation_and_revision_staleness_do_not_publish() {
 
 #[tokio::test]
 async fn intent_commit_releases_redo_native_pins_without_advancing_scene_epoch() {
+    const IMPORTS: u32 = 4;
     let work = Workspace::new();
     let source = work.source("box-mm.step");
     let original = std::fs::read_to_string(&source).unwrap();
     let mut client = spawn().await;
-    for index in 0..MAX_DEFINITIONS {
+    for index in 0..IMPORTS {
         let name = format!("box-{index}.step");
         let path = work.0.join(&name);
         let bytes = original.replacen("FILE_NAME('box-mm.step'", &format!("FILE_NAME('{name}'"), 1);
@@ -1118,9 +1119,9 @@ async fn intent_commit_releases_redo_native_pins_without_advancing_scene_epoch()
         import(&mut client, &path).await;
     }
     let full = scene(&mut client).await;
-    assert_eq!(full.definition_count, MAX_DEFINITIONS);
-    assert_eq!(full.occurrence_count, MAX_DEFINITIONS);
-    for remaining in (0..MAX_DEFINITIONS).rev() {
+    assert_eq!(full.definition_count, IMPORTS);
+    assert_eq!(full.occurrence_count, IMPORTS);
+    for remaining in (0..IMPORTS).rev() {
         let current = scene(&mut client).await;
         let ProjectResponse::SceneChanged { summary, .. } = client
             .project(ProjectCommand::Undo {
@@ -1147,8 +1148,8 @@ async fn intent_commit_releases_redo_native_pins_without_advancing_scene_epoch()
     assert!(!after.can_redo);
     assert_eq!(scene(&mut client).await, empty);
 
-    // A new native definition must fit after the intent edit drops all import redo.
-    let name = format!("box-{}.step", MAX_DEFINITIONS);
+    // A new native definition is admitted after the intent edit drops all import redo.
+    let name = format!("box-{IMPORTS}.step");
     let path = work.0.join(&name);
     let bytes = original.replacen("FILE_NAME('box-mm.step'", &format!("FILE_NAME('{name}'"), 1);
     let expected_hash = SourceHash::from_bytes(bytes.as_bytes());
@@ -1198,7 +1199,7 @@ async fn intent_commit_releases_redo_native_pins_without_advancing_scene_epoch()
     assert_eq!(occurrences.len(), 1);
     assert_eq!(
         occurrences[0].occurrence_id,
-        OccurrenceId::new(MAX_DEFINITIONS + 1).unwrap()
+        OccurrenceId::new(IMPORTS + 1).unwrap()
     );
     assert_eq!(occurrences[0].definition_id, definitions[0].definition_id);
     assert_eq!(occurrences[0].pose, RigidPoseMm::IDENTITY);
@@ -2993,6 +2994,8 @@ async fn material_review_is_nonmutating_and_stale_selection_cannot_commit() {
     client.shutdown().await.unwrap();
 }
 
+#[path = "manufacturing/capacity.rs"]
+mod capacity;
 #[path = "manufacturing/layout.rs"]
 mod layout;
 #[path = "manufacturing/plates.rs"]

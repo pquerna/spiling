@@ -249,7 +249,7 @@ async fn quantity_overflow_is_atomic_scoped_and_independently_replayed_per_plate
         match fault {
             0 => invalid.additional_plates[0].placements[0].copy = false,
             1 => invalid.additional_plates[0].verification.verified = false,
-            2 => invalid.additional_plates[0].candidates_examined = 2_000_000,
+            2 => invalid.additional_plates[0].manufacturing_attempts = 5,
             _ => invalid.placed_count += 1,
         }
         assert!(invalid.validate().is_err());

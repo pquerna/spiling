@@ -180,24 +180,34 @@ impl Workbench {
                 ui.label(format!("{} parts arranged", p.placed_count));
             } else {
                 let quantity = 1 + p.copied_count();
-                ui.label(format!("{} of {} requested", quantity, p.request.quantity));
+                if p.request.objective == LayoutObjective::Fill {
+                    ui.label(format!("{quantity} copies placed"));
+                } else {
+                    ui.label(format!("{} of {} requested", quantity, p.request.quantity));
+                }
                 ui.weak(format!(
                     "{} parts · {} plates",
                     p.total_placed(),
                     1 + p.additional_plates.len()
                 ));
             }
-            if p.total_placed() < p.requested_count {
+            let filled = p.request.objective == LayoutObjective::Fill
+                && p.limited_by == LayoutLimit::BuildArea;
+            if filled {
+                ui.label("Plate filled: no further copy fits the build area");
+            } else if p.total_placed() < p.requested_count {
                 ui.colored_label(
                     self.prefs.theme.tokens().warning,
-                    "Some requested copies were not placed",
+                    format!(
+                        "{} requested copies were not placed",
+                        p.requested_count - p.total_placed()
+                    ),
                 );
             }
-            if p.total_placed() < p.requested_count {
+            if !filled && p.total_placed() < p.requested_count {
                 ui.label(match p.limited_by {
-                    LayoutLimit::BuildArea => "Build area limit reached",
+                    LayoutLimit::BuildArea => "No further copy fits the build area",
                     LayoutLimit::ManufacturingBudget => "Manufacturing work limit reached",
-                    LayoutLimit::SearchBudget => "Search limit reached",
                     LayoutLimit::RequestedQuantity => "Quantity limit reached",
                     LayoutLimit::PlateBudget => "Project plate limit reached",
                     LayoutLimit::OccurrenceBudget => "Part limit reached",

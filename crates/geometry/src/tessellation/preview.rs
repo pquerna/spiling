@@ -704,7 +704,7 @@ mod tests {
         let path = std::env::var_os("SPILING_PREVIEW_STEP").expect("set SPILING_PREVIEW_STEP");
         let source = std::fs::read(path).unwrap();
         let cancel = AtomicBool::new(false);
-        let prepared = crate::PreparedStepSource::new(&source, &cancel).unwrap();
+        let prepared = crate::PreparedStepSource::new(&source, usize::MAX, &cancel).unwrap();
         for body in prepared.bodies() {
             let selected = (prepared.bodies().len() > 1).then_some(&body.solid);
             let definition = prepared

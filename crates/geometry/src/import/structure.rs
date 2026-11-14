@@ -7,9 +7,7 @@
 //! own representation frame; this module only supplies the rigid placements.
 
 use super::{ast::*, check_cancel, error, invalid, units, unsupported};
-use spiling_contracts::geometry::{
-    GeometryError, GeometryErrorCode, MAX_OCCURRENCES, RigidPoseMm, SourceSolidId,
-};
+use spiling_contracts::geometry::{GeometryError, GeometryErrorCode, RigidPoseMm, SourceSolidId};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::atomic::AtomicBool,
@@ -43,7 +41,7 @@ pub fn source_bodies(bytes: &[u8], cancel: &AtomicBool) -> Result<Vec<SourceBody
     }
     units::validate_schema(&exchange.header)?;
     let entities = Entities::new(&exchange.data[0], cancel)?;
-    bodies(&entities, cancel)
+    bodies(&entities, usize::MAX, cancel)
 }
 
 /// Rigid map from a representation's frame to its parent's: `p' = R p + t`.
@@ -194,8 +192,11 @@ impl Groups {
     }
 }
 
+/// `placement_bytes` admits the expanded assembly placements before they are
+/// allocated; nested assemblies can multiply placements far beyond the source.
 pub(super) fn bodies(
     entities: &Entities<'_>,
+    placement_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<SourceBody>, GeometryError> {
     // Representations in one frame: plain shape-representation relationships.
@@ -405,18 +406,34 @@ pub(super) fn bodies(
         .into_iter()
         .map(|root| (root, Rigid::IDENTITY, 0))
         .collect();
-    let mut total = 0usize;
+    // Count every placement the expansion below would make before allocating
+    // it: each is a u32-identified occurrence and is admitted by bytes.
+    let mut counts = BTreeMap::new();
+    let mut total = 0u64;
+    for &(root, _, _) in &stack {
+        total = total.saturating_add(placement_count(
+            root,
+            &children,
+            &mut counts,
+            &mut BTreeSet::new(),
+            cancel,
+        )?);
+    }
+    if total > u64::from(u32::MAX)
+        || usize::try_from(total)
+            .ok()
+            .and_then(|n| n.checked_mul(size_of::<Rigid>() + size_of::<RigidPoseMm>()))
+            .is_none_or(|bytes| bytes > placement_bytes)
+    {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "assembly placements exceed current memory admission",
+        ));
+    }
     while let Some((group, world, depth)) = stack.pop() {
         check_cancel(cancel)?;
         if depth > 64 {
             return Err(invalid("assembly placement graph is cyclic or too deep"));
-        }
-        total += 1;
-        if total > 4 * MAX_OCCURRENCES as usize {
-            return Err(error(
-                GeometryErrorCode::ResourceLimit,
-                "assembly places too many components",
-            ));
         }
         placements.entry(group).or_default().push(world);
         for &(child, map) in children.get(&group).map(Vec::as_slice).unwrap_or_default() {
@@ -456,6 +473,31 @@ pub(super) fn bodies(
         });
     }
     Ok(bodies)
+}
+
+/// Placements of `group` and everything below it, saturating; refuses cycles
+/// and the depth the expansion refuses.
+fn placement_count(
+    group: u64,
+    children: &BTreeMap<u64, Vec<(u64, Rigid)>>,
+    counts: &mut BTreeMap<u64, u64>,
+    path: &mut BTreeSet<u64>,
+    cancel: &AtomicBool,
+) -> Result<u64, GeometryError> {
+    check_cancel(cancel)?;
+    if let Some(count) = counts.get(&group) {
+        return Ok(*count);
+    }
+    if path.len() > 64 || !path.insert(group) {
+        return Err(invalid("assembly placement graph is cyclic or too deep"));
+    }
+    let mut count = 1u64;
+    for &(child, _) in children.get(&group).map(Vec::as_slice).unwrap_or_default() {
+        count = count.saturating_add(placement_count(child, children, counts, path, cancel)?);
+    }
+    path.remove(&group);
+    counts.insert(group, count);
+    Ok(count)
 }
 
 /// Every shape representation listing `item` among its items.

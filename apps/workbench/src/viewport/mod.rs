@@ -31,13 +31,14 @@ struct Uniform {
     /// Neutral RGB/alpha for contextual lines; zero alpha keeps normal colors.
     context: [f32; 4],
     emphasis: [f32; 4],
-    participants: [[u32; 4]; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
     rotation: [f32; 4],
-    translation: [f32; 4],
+    translation: [f32; 3],
+    /// Scene occurrence index: selection and the participant bitset key.
+    occurrence: u32,
 }
 struct Draw {
     definition: DefinitionId,
@@ -87,6 +88,10 @@ struct Resources {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
+    /// Occurrence participant bitset (group 1), grown with the scene.
+    participants_layout: wgpu::BindGroupLayout,
+    participants: wgpu::Buffer,
+    participants_group: wgpu::BindGroup,
     scene: Option<Arc<Scene>>,
     draws: Vec<Draw>,
     source_traced: std::sync::atomic::AtomicBool,
@@ -166,7 +171,7 @@ pub struct Viewport {
     dim_context: bool,
     reveal: Option<reveal::Reveal>,
     last_selection: Option<(Option<FaceRef>, Option<OccurrenceId>)>,
-    attention: Option<[[u32; 4]; 2]>,
+    attention: Option<reveal::ParticipantMask>,
 }
 impl Default for Viewport {
     fn default() -> Self {
@@ -247,13 +252,29 @@ impl Viewport {
                 },
             ],
         });
+        let participants_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Spiling occurrence participants"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let (participants, participants_group) =
+            participant_buffer(device, &participants_layout, 1);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Spiling native source"),
             source: wgpu::ShaderSource::Wgsl(include_str!("source.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Spiling source pipeline"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(&participants_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -400,7 +421,12 @@ impl Viewport {
             beads::pipeline(device, &line_pipeline_layout, state.target_format, true);
         let source_stencil =
             section::source_stencil(device, &pipeline_layout, &shader, state.target_format);
-        let source_cap = section::cap(device, &line_pipeline_layout, state.target_format, true);
+        let cap_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("source section cap pipeline"),
+            bind_group_layouts: &[Some(&line_layout), Some(&participants_layout)],
+            immediate_size: 0,
+        });
+        let source_cap = section::cap(device, &cap_pipeline_layout, state.target_format, true);
         let actual_cap = section::cap(device, &line_pipeline_layout, state.target_format, false);
         let clear_stencil = section::clear(device, &line_pipeline_layout, state.target_format);
         let points = |entry, fragment, label| {
@@ -523,6 +549,9 @@ impl Viewport {
             pipeline,
             layout,
             uniform,
+            participants_layout,
+            participants,
+            participants_group,
             scene: None,
             draws: Vec::new(),
             source_traced: std::sync::atomic::AtomicBool::new(false),
@@ -652,11 +681,11 @@ impl Viewport {
             return;
         };
         if !request.area_applied {
-            if let Some(participants) = request.participants {
+            if let Some(participants) = request.participants.clone() {
                 if request.reveal {
                     let mut reveal =
                         reveal::Reveal::new(request.target, self.camera(), self.dim_context);
-                    reveal.attention = self.attention;
+                    reveal.attention = self.attention.clone();
                     reveal.previous_camera = self.previous_camera.clone();
                     if let Some(active) = &mut self.reveal {
                         active.target = request.target;
@@ -1258,12 +1287,13 @@ impl Viewport {
         }
         let participants = self
             .attention
+            .clone()
             .or_else(|| {
                 scene
                     .as_ref()
                     .and_then(|scene| reveal::participant_mask(scene, &[scope?]))
             })
-            .unwrap_or([[0; 4]; 2]);
+            .unwrap_or_default();
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
@@ -1309,7 +1339,6 @@ impl Viewport {
                     } else {
                         [0.0; 4]
                     },
-                    participants,
                     plane: if cut_enabled {
                         projected
                     } else {
@@ -1322,6 +1351,7 @@ impl Viewport {
                         (display_radius * 4.0) as f32,
                     ],
                 },
+                participants,
             },
         ));
         if view.source
@@ -1453,6 +1483,29 @@ struct Callback {
     view: crate::replay::View,
     context_color: [f32; 4],
     uniform: Uniform,
+    participants: reveal::ParticipantMask,
+}
+/// Participant bitset storage sized in whole 32-bit words, at least one.
+fn participant_buffer(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    words: usize,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Spiling occurrence participants"),
+        size: (words.max(1).next_power_of_two() * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Spiling occurrence participants"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    (buffer, group)
 }
 impl egui_wgpu::CallbackTrait for Callback {
     fn prepare(
@@ -1671,6 +1724,14 @@ impl egui_wgpu::CallbackTrait for Callback {
             self.context.request_repaint();
         }
         queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
+        let words = self.participants.words();
+        if words.len() * 4 > r.participants.size() as usize {
+            (r.participants, r.participants_group) =
+                participant_buffer(device, &r.participants_layout, words.len());
+        }
+        let mut padded = vec![0u32; r.participants.size() as usize / 4];
+        padded[..words.len()].copy_from_slice(words);
+        queue.write_buffer(&r.participants, 0, bytemuck::cast_slice(&padded));
         queue.write_buffer(
             &r.context_uniform,
             0,
@@ -1715,6 +1776,7 @@ impl egui_wgpu::CallbackTrait for Callback {
         }
         r.plate.paint(pass, &r.line_group, self.show_height);
         pass.set_pipeline(&r.pipeline);
+        pass.set_bind_group(1, &r.participants_group, &[]);
         for draw in r
             .draws
             .iter()
@@ -1759,12 +1821,14 @@ impl egui_wgpu::CallbackTrait for Callback {
                     pass.set_bind_group(0, &r.line_group, &[]);
                     pass.draw(0..3, 0..1);
                     pass.set_pipeline(&r.source_stencil);
+                    pass.set_bind_group(1, &r.participants_group, &[]);
                     for draw in chunks {
                         pass.set_bind_group(0, &draw.group, &[]);
                         pass.draw(0..draw.indices, instance..instance + 1);
                     }
                     pass.set_pipeline(&r.source_cap);
                     pass.set_bind_group(0, &r.line_group, &[]);
+                    pass.set_bind_group(1, &r.participants_group, &[]);
                     pass.draw(0..6, occurrence as u32..occurrence as u32 + 1);
                 }
             }
@@ -2106,7 +2170,9 @@ impl Resources {
                     }
                     instances.push(Instance {
                         rotation: q.as_quat().to_array(),
-                        translation: [f.x, f.y, f.z, index as f32],
+                        translation: [f.x, f.y, f.z],
+                        occurrence: u32::try_from(index)
+                            .map_err(|_| "Scene occurrence index exceeds its u32 width")?,
                     });
                 }
                 instance_bytes = instance_bytes
@@ -2318,6 +2384,12 @@ mod shader_tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
             for (_, global) in module.global_variables.iter() {
+                if global.name.as_deref() == Some("instances")
+                    && let wgpu::naga::TypeInner::Array { stride, .. } =
+                        module.types[global.ty].inner
+                {
+                    assert_eq!(stride as usize, size_of::<Instance>(), "{name}: instance");
+                }
                 if global.space == wgpu::naga::AddressSpace::Uniform {
                     let wgpu::naga::TypeInner::Struct { span, .. } = module.types[global.ty].inner
                     else {

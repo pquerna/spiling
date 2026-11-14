@@ -185,17 +185,14 @@ async fn independent_plate_jobs_transfer_history_replay_and_reopen_without_sourc
     let info = status(&mut reader).await.0;
     assert_eq!(info.layouts.len(), 2);
     let scene = scene(&mut reader).await;
-    let GeometryResponse::LayoutOverview { overview } = reader
-        .geometry(GeometryCommand::GetLayoutOverview {
-            session_id: reader.hello().session_id.clone(),
-            scene_revision: scene.revision,
-            project_revision: info.revision,
-        })
+    let overview = reader
+        .layout_overview(
+            &reader.hello().session_id.clone(),
+            scene.revision,
+            info.revision,
+        )
         .await
-        .unwrap()
-    else {
-        panic!("overview")
-    };
+        .unwrap();
     assert_eq!(overview.layouts.len(), 2);
     assert_eq!(
         overview

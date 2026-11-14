@@ -211,6 +211,6 @@ message LayoutProposal {
   uint32 manufacturing_attempts = 13; LayoutLimit limited_by = 14; repeated AdditionalPlateProposal additional_plates = 15;
 }
 
-enum LayoutLimit { LAYOUT_LIMIT_UNSPECIFIED = 0; LAYOUT_QUANTITY_LIMIT = 1; LAYOUT_BUILD_AREA_LIMIT = 2; LAYOUT_SEARCH_LIMIT = 3; LAYOUT_MANUFACTURING_LIMIT = 4; LAYOUT_PLATE_LIMIT = 5; LAYOUT_OCCURRENCE_LIMIT = 6; }
+enum LayoutLimit { LAYOUT_LIMIT_UNSPECIFIED = 0; LAYOUT_QUANTITY_LIMIT = 1; LAYOUT_BUILD_AREA_LIMIT = 2; LAYOUT_MANUFACTURING_LIMIT = 4; LAYOUT_PLATE_LIMIT = 5; LAYOUT_OCCURRENCE_LIMIT = 6; }
 
 message AdditionalPlateProposal { repeated LayoutPlacement placements = 1; repeated AabbMm footprints_mm = 2; uint32 candidates_examined = 3; uint32 manufacturing_attempts = 4; VerificationReport verification = 5; }

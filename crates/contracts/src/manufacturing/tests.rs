@@ -1642,10 +1642,6 @@ fn native_geometry_coverage_requires_complete_certified_bounded_policy() {
         ("achieved_shape_error_mm", serde_json::json!(-0.001)),
         ("achieved_shape_error_mm", serde_json::json!(0.021)),
         ("height_analysis_count", serde_json::json!(0)),
-        (
-            "height_analysis_count",
-            serde_json::json!(MAX_OCCURRENCES + 1),
-        ),
         ("slab_count", serde_json::json!(0)),
         ("certified_layer_count", serde_json::json!(0)),
         ("geometry_work", serde_json::json!(0)),

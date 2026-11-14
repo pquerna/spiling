@@ -1710,7 +1710,7 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
         "#9500=MANIFOLD_SOLID_BREP('second',#17);",
     );
     let bodies = structure::source_bodies(source.as_bytes(), &cancelled()).unwrap();
-    let prepared = PreparedStepSource::new(source.as_bytes(), &cancelled()).unwrap();
+    let prepared = PreparedStepSource::new(source.as_bytes(), usize::MAX, &cancelled()).unwrap();
     assert_eq!(prepared.bodies(), bodies);
     assert!(prepared.matches_bytes(source.as_bytes()));
     assert!(!prepared.matches_bytes(&fixture("box-mm.step")));

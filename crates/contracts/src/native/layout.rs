@@ -151,7 +151,6 @@ impl TryFrom<rpc::LayoutProposal> for LayoutProposal {
             limited_by: match rpc::LayoutLimit::try_from(v.limited_by) {
                 Ok(rpc::LayoutLimit::LayoutQuantityLimit) => LayoutLimit::RequestedQuantity,
                 Ok(rpc::LayoutLimit::LayoutBuildAreaLimit) => LayoutLimit::BuildArea,
-                Ok(rpc::LayoutLimit::LayoutSearchLimit) => LayoutLimit::SearchBudget,
                 Ok(rpc::LayoutLimit::LayoutManufacturingLimit) => LayoutLimit::ManufacturingBudget,
                 Ok(rpc::LayoutLimit::LayoutPlateLimit) => LayoutLimit::PlateBudget,
                 Ok(rpc::LayoutLimit::LayoutOccurrenceLimit) => LayoutLimit::OccurrenceBudget,
@@ -196,7 +195,6 @@ impl TryFrom<LayoutProposal> for rpc::LayoutProposal {
             limited_by: match v.limited_by {
                 LayoutLimit::RequestedQuantity => rpc::LayoutLimit::LayoutQuantityLimit,
                 LayoutLimit::BuildArea => rpc::LayoutLimit::LayoutBuildAreaLimit,
-                LayoutLimit::SearchBudget => rpc::LayoutLimit::LayoutSearchLimit,
                 LayoutLimit::ManufacturingBudget => rpc::LayoutLimit::LayoutManufacturingLimit,
                 LayoutLimit::PlateBudget => rpc::LayoutLimit::LayoutPlateLimit,
                 LayoutLimit::OccurrenceBudget => rpc::LayoutLimit::LayoutOccurrenceLimit,
@@ -210,9 +208,6 @@ impl TryFrom<rpc::PrintLayoutInfo> for crate::project::PrintLayoutInfo {
     type Error = String;
     fn try_from(v: rpc::PrintLayoutInfo) -> Result<Self, String> {
         crate::project::validate_layout_name(&v.name).map_err(|e| e.to_string())?;
-        if v.occurrence_count > MAX_OCCURRENCES {
-            return Err("layout occurrence count exceeds limit".into());
-        }
         Ok(Self {
             layout_id: crate::project::PrintLayoutId::parse(v.layout_id)
                 .map_err(|e| e.to_string())?,
@@ -227,9 +222,6 @@ impl TryFrom<crate::project::PrintLayoutInfo> for rpc::PrintLayoutInfo {
     type Error = String;
     fn try_from(v: crate::project::PrintLayoutInfo) -> Result<Self, String> {
         crate::project::validate_layout_name(&v.name).map_err(|e| e.to_string())?;
-        if v.occurrence_count > MAX_OCCURRENCES {
-            return Err("layout occurrence count exceeds limit".into());
-        }
         Ok(Self {
             layout_id: v.layout_id.as_str().into(),
             name: v.name,

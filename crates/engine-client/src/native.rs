@@ -202,6 +202,95 @@ impl EngineRpc {
         self.geometry_with_request_id(command, &Uuid::new_v4().to_string())
             .await
     }
+    /// Read the paged workspace overview at one scene/project revision.
+    ///
+    /// The summary fixes the record counts; every page must advance, stay
+    /// within them and be read at the same revisions, or the engine refuses it
+    /// as stale. The assembled overview is validated whole.
+    pub async fn layout_overview(
+        &self,
+        session_id: &spiling_contracts::geometry::SessionId,
+        scene_revision: spiling_contracts::geometry::SceneRevision,
+        project_revision: spiling_contracts::project::ProjectRevision,
+    ) -> Result<spiling_contracts::geometry::PrintLayoutOverview, ClientError> {
+        use spiling_contracts::geometry::{LayoutOverviewPageKind, PrintLayoutOverview};
+        let unexpected = |response: GeometryResponse| match response {
+            GeometryResponse::Error { error } => ClientError::Geometry(error),
+            _ => ClientError::Protocol("unexpected layout overview reply".into()),
+        };
+        let summary = match self
+            .geometry(GeometryCommand::GetLayoutOverview {
+                session_id: session_id.clone(),
+                scene_revision,
+                project_revision,
+            })
+            .await?
+        {
+            GeometryResponse::LayoutOverview { summary } => summary,
+            other => return Err(unexpected(other)),
+        };
+        if &summary.session_id != session_id
+            || summary.scene_revision != scene_revision
+            || summary.project_revision != project_revision
+        {
+            return Err(ClientError::Protocol(
+                "layout overview summary is for another revision".into(),
+            ));
+        }
+        let mut definitions = Vec::new();
+        let mut parts = Vec::new();
+        for (kind, expected) in [
+            (
+                LayoutOverviewPageKind::Definitions,
+                summary.definition_count as usize,
+            ),
+            (LayoutOverviewPageKind::Parts, summary.part_count() as usize),
+        ] {
+            let mut offset = 0;
+            let mut read = 0;
+            loop {
+                let (page_definitions, page_parts, next_offset) = match self
+                    .geometry(GeometryCommand::GetLayoutOverviewPage {
+                        session_id: session_id.clone(),
+                        scene_revision,
+                        project_revision,
+                        kind,
+                        offset,
+                    })
+                    .await?
+                {
+                    GeometryResponse::LayoutOverviewPage {
+                        definitions,
+                        parts,
+                        next_offset,
+                    } => (definitions, parts, next_offset),
+                    other => return Err(unexpected(other)),
+                };
+                let wrong_kind = match kind {
+                    LayoutOverviewPageKind::Definitions => !page_parts.is_empty(),
+                    LayoutOverviewPageKind::Parts => !page_definitions.is_empty(),
+                };
+                read += page_definitions.len() + page_parts.len();
+                definitions.extend(page_definitions);
+                parts.extend(page_parts);
+                if wrong_kind || read > expected {
+                    return Err(ClientError::Protocol(
+                        "layout overview page exceeds the summary".into(),
+                    ));
+                }
+                match next_offset {
+                    Some(next) if next as usize == read => offset = next,
+                    Some(_) => {
+                        return Err(ClientError::Protocol(
+                            "layout overview page did not advance".into(),
+                        ));
+                    }
+                    None => break,
+                }
+            }
+        }
+        Ok(PrintLayoutOverview::assemble(summary, definitions, parts)?)
+    }
     pub async fn geometry_with_request_id(
         &self,
         command: GeometryCommand,
@@ -1189,6 +1278,16 @@ impl EngineClient {
         command: GeometryCommand,
     ) -> Result<GeometryResponse, ClientError> {
         self.rpc.geometry(command).await
+    }
+    pub async fn layout_overview(
+        &self,
+        session_id: &spiling_contracts::geometry::SessionId,
+        scene_revision: spiling_contracts::geometry::SceneRevision,
+        project_revision: ProjectRevision,
+    ) -> Result<spiling_contracts::geometry::PrintLayoutOverview, ClientError> {
+        self.rpc
+            .layout_overview(session_id, scene_revision, project_revision)
+            .await
     }
     pub async fn prepare_bed_pose(
         &self,

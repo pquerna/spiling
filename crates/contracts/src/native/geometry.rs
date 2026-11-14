@@ -1134,6 +1134,15 @@ impl TryFrom<rpc::GeometryRequest> for GeometryCommand {
                 scene_revision: SceneRevision(v.scene_revision),
                 project_revision: crate::project::ProjectRevision(v.project_revision),
             }),
+            rpc::geometry_request::Command::GetLayoutOverviewPage(v) => {
+                Ok(Self::GetLayoutOverviewPage {
+                    session_id: SessionId::parse(v.session_id).map_err(|e| e.to_string())?,
+                    scene_revision: SceneRevision(v.scene_revision),
+                    project_revision: crate::project::ProjectRevision(v.project_revision),
+                    kind: v.kind.try_into()?,
+                    offset: v.offset,
+                })
+            }
             rpc::geometry_request::Command::GetScene(v) => v.try_into(),
             rpc::geometry_request::Command::GetScenePage(v) => v.try_into(),
             rpc::geometry_request::Command::GetFaceIndexPage(v) => v.try_into(),
@@ -1302,6 +1311,21 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             scene_revision: scene_revision.get(),
             project_revision: project_revision.get(),
         }),
+        GeometryCommand::GetLayoutOverviewPage {
+            session_id,
+            scene_revision,
+            project_revision,
+            kind,
+            offset,
+        } => rpc::geometry_request::Command::GetLayoutOverviewPage(
+            rpc::GetLayoutOverviewPageRequest {
+                session_id: session_id.as_str().into(),
+                scene_revision: scene_revision.get(),
+                project_revision: project_revision.get(),
+                kind: rpc::LayoutOverviewPageKind::from(kind) as i32,
+                offset,
+            },
+        ),
         GeometryCommand::GetScene { session_id } => {
             rpc::geometry_request::Command::GetScene(rpc::GetSceneRequest {
                 session_id: session_id.into(),
@@ -1406,7 +1430,38 @@ fn sequential(ordinals: impl Iterator<Item = u32>, next: Option<u32>) -> Result<
 }
 fn validate_response(value: &GeometryResponse) -> Result<(), String> {
     match value {
-        GeometryResponse::LayoutOverview { overview } => checked(overview.validate())?,
+        GeometryResponse::LayoutOverview { summary } => checked(summary.validate())?,
+        GeometryResponse::LayoutOverviewPage {
+            definitions,
+            parts,
+            next_offset,
+        } => {
+            if !definitions.is_empty() && !parts.is_empty() {
+                return Err("overview page mixes record kinds".into());
+            }
+            page_end(
+                definitions.len() + parts.len(),
+                *next_offset,
+                SCENE_PAGE_SIZE,
+                u32::MAX,
+            )?;
+            let mut ids = std::collections::BTreeSet::new();
+            for definition in definitions {
+                checked(definition.validate())?;
+                if !ids.insert(&definition.definition_id) {
+                    return Err("duplicate definition in overview page".into());
+                }
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            let mut layout = 0;
+            for part in parts {
+                checked(part.validate())?;
+                if part.layout_index < layout || !ids.insert(part.part.occurrence_id) {
+                    return Err("overview part page is unordered or duplicated".into());
+                }
+                layout = part.layout_index;
+            }
+        }
         GeometryResponse::Scene { summary } | GeometryResponse::SceneChanged { summary } => {
             checked(summary.validate())?
         }
@@ -1424,11 +1479,6 @@ fn validate_response(value: &GeometryResponse) -> Result<(), String> {
                 SCENE_PAGE_SIZE,
                 MAX_OCCURRENCES,
             )?;
-            if definitions.len() > MAX_DEFINITIONS as usize
-                || next_offset.is_some_and(|n| !definitions.is_empty() && n > MAX_DEFINITIONS)
-            {
-                return Err("definition page exceeds support envelope".into());
-            }
             let mut ids = std::collections::BTreeSet::new();
             for definition in definitions {
                 checked(definition.validate())?;
@@ -1601,9 +1651,30 @@ impl TryFrom<rpc::GeometryReply> for GeometryResponse {
     fn try_from(value: rpc::GeometryReply) -> Result<Self, String> {
         use rpc::geometry_reply::Response;
         let value = match required(value.response, "geometry reply response")? {
-            Response::LayoutOverview(overview) => Self::LayoutOverview {
-                overview: overview.try_into()?,
+            Response::LayoutOverview(summary) => Self::LayoutOverview {
+                summary: summary.try_into()?,
             },
+            Response::LayoutOverviewPage(v) => {
+                page_end(
+                    v.definitions.len() + v.parts.len(),
+                    v.next_offset,
+                    SCENE_PAGE_SIZE,
+                    u32::MAX,
+                )?;
+                Self::LayoutOverviewPage {
+                    definitions: v
+                        .definitions
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    parts: v
+                        .parts
+                        .into_iter()
+                        .map(TryInto::try_into)
+                        .collect::<Result<_, _>>()?,
+                    next_offset: v.next_offset,
+                }
+            }
             Response::SceneChanged(summary) => Self::SceneChanged {
                 summary: summary.try_into()?,
             },
@@ -1694,9 +1765,24 @@ impl TryFrom<GeometryResponse> for rpc::GeometryReply {
         validate_response(&value)?;
         use rpc::geometry_reply::Response;
         let response = match value {
-            GeometryResponse::LayoutOverview { overview } => {
-                Response::LayoutOverview(overview.try_into()?)
+            GeometryResponse::LayoutOverview { summary } => {
+                Response::LayoutOverview(summary.try_into()?)
             }
+            GeometryResponse::LayoutOverviewPage {
+                definitions,
+                parts,
+                next_offset,
+            } => Response::LayoutOverviewPage(rpc::LayoutOverviewPage {
+                definitions: definitions
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
+                parts: parts
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
+                next_offset,
+            }),
             GeometryResponse::SceneChanged { summary } => {
                 Response::SceneChanged(summary.try_into()?)
             }

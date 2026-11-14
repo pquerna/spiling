@@ -448,6 +448,16 @@ export type PrintLayoutOverview = { session_id: SessionId, scene_revision: Scene
 
 export type LayoutOverview = { layout_id: PrintLayoutId, build_area_mm: AabbMm | null, captured_plate: boolean, parts: Array<LayoutPartBounds>, };
 
+export type LayoutOverviewSummary = { session_id: SessionId, scene_revision: SceneRevision, project_id: ProjectId, project_revision: ProjectRevision, layouts: Array<LayoutOverviewHeader>, definition_count: number, };
+
+export type LayoutOverviewHeader = { layout_id: PrintLayoutId, build_area_mm: AabbMm | null, captured_plate: boolean, part_count: number, };
+
+export type LayoutOverviewPart = {
+/**
+ * Index into [`LayoutOverviewSummary::layouts`].
+ */
+layout_index: number, part: LayoutPartBounds, };
+
 export type LayoutPartBounds = { occurrence_id: OccurrenceId, source_bounds_mm: AabbMm, definition_id: DefinitionId, pose: RigidPoseMm, };
 
 export type DefinitionDisplay = { "kind": "mesh", artifact_id: ArtifactId, } | { "kind": "unavailable", error: GeometryError, };
@@ -464,7 +474,7 @@ export type LayoutObjective = "arrange" | "copies" | "fill";
 
 export type LayoutStyle = "balanced" | "dense";
 
-export type LayoutLimit = "requested_quantity" | "build_area" | "search_budget" | "manufacturing_budget" | "plate_budget" | "occurrence_budget";
+export type LayoutLimit = "requested_quantity" | "build_area" | "manufacturing_budget" | "plate_budget" | "occurrence_budget";
 
 export type LayoutRequest = { objective: LayoutObjective, template: OccurrenceId | null,
 /**
@@ -478,7 +488,9 @@ export type AdditionalPlateProposal = { placements: Array<LayoutPlacement>, foot
 
 export type LayoutProposal = { id: SourceHash, session_id: SessionId, project_id: ProjectId, project_revision: ProjectRevision, scene_revision: SceneRevision, request: LayoutRequest, placements: Array<LayoutPlacement>, additional_plates: Array<AdditionalPlateProposal>, footprints_mm: Array<AabbMm>, requested_count: number, placed_count: number,
 /**
- * Number of finite placement candidates examined. This never proves a global optimum.
+ * Candidate rows examined by the exhaustive edge-position search; counted
+ * for reporting and cancellation, never a limit. This never proves a
+ * global packing optimum.
  */
 candidates_examined: number, manufacturing_attempts: number, limited_by: LayoutLimit, verification: VerificationReport, };
 
@@ -500,11 +512,13 @@ export type GeometryLimits = { source_bytes: number, step_entities: number, nati
 
 export type KernelIdentity = { name: string, version: string, revision: string, };
 
-export type GeometryCommand = { "op": "import_part", session_id: SessionId, base_revision: SceneRevision, source: NativePath, options: ModelImportOptions, initial_pose: RigidPoseMm, } | { "op": "add_instance", session_id: SessionId, base_revision: SceneRevision, definition_id: DefinitionId, pose: RigidPoseMm, } | { "op": "set_instance_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, pose: RigidPoseMm, } | { "op": "remove_instance", session_id: SessionId, base_revision: SceneRevision, occurrence_id: OccurrenceId, } | { "op": "get_layout_overview", session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, } | { "op": "get_scene", session_id: SessionId, } | { "op": "get_scene_page", session_id: SessionId, revision: SceneRevision, kind: ScenePageKind, offset: number, } | { "op": "get_face_index_page", session_id: SessionId, definition_id: DefinitionId, offset: number, } | { "op": "inspect_face", reference: FaceRef, } | { "op": "start_section", session_id: SessionId, base_revision: SceneRevision, plane: PlaneMm, } | { "op": "prepare_layout", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, request: LayoutRequest, } | { "op": "apply_layout", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, proposal_id: SourceHash, } | { "op": "prepare_bed_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, expected_pose: RigidPoseMm, envelope_mm: AabbMm, center_xy: boolean, contact_tolerance_mm: number, } | { "op": "get_artifact_page", session_id: SessionId, artifact_id: ArtifactId, kind: ArtifactPageKind, offset: number, } | { "op": "release_artifact", session_id: SessionId, artifact_id: ArtifactId, };
+export type GeometryCommand = { "op": "import_part", session_id: SessionId, base_revision: SceneRevision, source: NativePath, options: ModelImportOptions, initial_pose: RigidPoseMm, } | { "op": "add_instance", session_id: SessionId, base_revision: SceneRevision, definition_id: DefinitionId, pose: RigidPoseMm, } | { "op": "set_instance_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, pose: RigidPoseMm, } | { "op": "remove_instance", session_id: SessionId, base_revision: SceneRevision, occurrence_id: OccurrenceId, } | { "op": "get_layout_overview", session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, } | { "op": "get_layout_overview_page", session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, kind: LayoutOverviewPageKind, offset: number, } | { "op": "get_scene", session_id: SessionId, } | { "op": "get_scene_page", session_id: SessionId, revision: SceneRevision, kind: ScenePageKind, offset: number, } | { "op": "get_face_index_page", session_id: SessionId, definition_id: DefinitionId, offset: number, } | { "op": "inspect_face", reference: FaceRef, } | { "op": "start_section", session_id: SessionId, base_revision: SceneRevision, plane: PlaneMm, } | { "op": "prepare_layout", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, request: LayoutRequest, } | { "op": "apply_layout", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, proposal_id: SourceHash, } | { "op": "prepare_bed_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, expected_pose: RigidPoseMm, envelope_mm: AabbMm, center_xy: boolean, contact_tolerance_mm: number, } | { "op": "get_artifact_page", session_id: SessionId, artifact_id: ArtifactId, kind: ArtifactPageKind, offset: number, } | { "op": "release_artifact", session_id: SessionId, artifact_id: ArtifactId, };
 
-export type GeometryResponse = { "type": "layout_overview", overview: PrintLayoutOverview, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "scene_changed", summary: SceneSummary, } | { "type": "scene", summary: SceneSummary, } | { "type": "scene_page", definitions: Array<DefinitionRecord>, occurrences: Array<OccurrenceRecord>, next_offset: number | null, } | { "type": "face_index_page", faces: Array<FaceIndexRow>, next_offset: number | null, } | { "type": "face_inspection", inspection: FaceInspection, } | { "type": "artifact_page", summary: ArtifactSummary, chunks: Array<ArtifactChunkMetadata>, loops: Array<SectionLoopMetadata>, resources: Array<ArtifactView>, next_offset: number | null, } | { "type": "released", } | { "type": "error", error: GeometryError, } | { "type": "project_error", error: ProjectError, };
+export type GeometryResponse = { "type": "layout_overview", summary: LayoutOverviewSummary, } | { "type": "layout_overview_page", definitions: Array<DefinitionRecord>, parts: Array<LayoutOverviewPart>, next_offset: number | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "scene_changed", summary: SceneSummary, } | { "type": "scene", summary: SceneSummary, } | { "type": "scene_page", definitions: Array<DefinitionRecord>, occurrences: Array<OccurrenceRecord>, next_offset: number | null, } | { "type": "face_index_page", faces: Array<FaceIndexRow>, next_offset: number | null, } | { "type": "face_inspection", inspection: FaceInspection, } | { "type": "artifact_page", summary: ArtifactSummary, chunks: Array<ArtifactChunkMetadata>, loops: Array<SectionLoopMetadata>, resources: Array<ArtifactView>, next_offset: number | null, } | { "type": "released", } | { "type": "error", error: GeometryError, } | { "type": "project_error", error: ProjectError, };
 
 export type ScenePageKind = "definitions" | "occurrences";
+
+export type LayoutOverviewPageKind = "definitions" | "parts";
 
 export type ArtifactPageKind = "chunks" | "loops";
 
@@ -1210,8 +1224,8 @@ export const SECTION_HEADER_BYTES = 64 as const;
 export const MAX_SOURCE_BYTES = 1073741824 as const;
 export const MAX_STEP_ENTITIES = 4294967295 as const;
 export const MAX_NATIVE_FACES = 4294967295 as const;
-export const MAX_DEFINITIONS = 32 as const;
-export const MAX_OCCURRENCES = 256 as const;
+export const MAX_DEFINITIONS = 4294967295 as const;
+export const MAX_OCCURRENCES = 4294967295 as const;
 export const MAX_DISPLAY_VERTICES = 2796202 as const;
 export const MAX_DISPLAY_TRIANGLES = 4194304 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
