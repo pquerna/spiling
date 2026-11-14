@@ -122,6 +122,32 @@ replace binaries while their window/engine is live. Reuse one disk-backed target
 and honor `CARGO_TARGET_DIR`; development/test profiles disable debug information
 and incremental compilation. Selected numerical crates are optimized separately.
 
+### Feedback cost and coverage
+
+Separate compilation/linking, fixture preparation, test execution and complete
+consumer time. A test-name filter does not select Cargo targets: use `--lib` for
+library checks or `--test TARGET` for one integration binary before the filter.
+For build attribution, add `--no-run --timings` to that selected `cargo test`
+command; retain the Cargo timing report alongside the command, producer,
+toolchain, profile, feature set, target/cache state and resource limits. Compare
+unchanged warm, test-only edit and owning-code edit separately. Do not clean a
+shared target to manufacture a cold measurement.
+
+Keep the owning area's required acceptance profile, including `--profile profiling`
+for manufacturing. Faster semantic-feedback configurations are experiments, not
+waivers of that gate. A proposed profile must reduce edit-to-answer cost without
+losing numerical controls or making real fixture execution impractical. Compare
+production performance with identical compiler settings on both sides; changing
+those settings is not a product algorithm speedup.
+
+Test declarations, passing counts and line coverage are not execution coverage of
+operator workflows. Name the selected actual-child/CLI/host journeys, including
+ignored selections, and distinguish real-file material/replay checks from import
+or nonempty-preview checks. Preserve independent oracles, whole-source completion
+and failure visibility when sharing immutable setup or consolidating scenarios.
+The complete native commands above remain candidate gates; focused selection is
+not a claim that the entire workspace passed.
+
 ## Native egui workbench
 
 [ADR006](../adr/006-native-egui-workbench.md) selects the permanent
