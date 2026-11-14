@@ -86,6 +86,8 @@ impl Actor {
             provenance: evaluation.provenance.clone(),
             resource: evaluation.resource.clone(),
             replay: Some(evaluation.replay_display.clone()),
+            // Alternatives are reviewed, not exported as delivery packages.
+            package: None,
         });
         if let Some(task) = self.alternative_task.take() {
             task.abort();
@@ -263,9 +265,17 @@ impl Actor {
                 resource,
                 provenance,
                 replay_display,
+                delivery_package,
             }) => {
-                self.verified(record, report, resource, provenance, replay_display)
-                    .await
+                self.verified(
+                    record,
+                    report,
+                    resource,
+                    provenance,
+                    replay_display,
+                    delivery_package,
+                )
+                .await
             }
             Ok(ManufacturingResponse::Error { error }) => self.problem(error.to_string()),
             Err(error) => self.failure(error).await,
@@ -409,6 +419,7 @@ impl Actor {
         resource: ArtifactView,
         provenance: ManufacturingInspectionProvenance,
         replay: Option<ReplayDisplayDescriptor>,
+        package: Option<spiling_contracts::manufacturing::DeliveryPackageDescriptor>,
     ) {
         if let Err(error) = self.refresh().await {
             self.failure(error).await;
@@ -439,6 +450,7 @@ impl Actor {
             resource,
             provenance,
             replay,
+            package,
         });
         if let Err(error) = manufacture::check_current(&client.rpc(), &capture).await {
             self.failure(error).await;

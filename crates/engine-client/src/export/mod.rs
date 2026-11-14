@@ -103,6 +103,27 @@ impl OutputDirectory {
         )?;
         Ok(())
     }
+    /// Write the verified firmware delivery package beside the bundle as
+    /// `program` plus the format's extension (`program.gcode.3mf`). The bytes
+    /// must be the descriptor's exact resource, already fetched and checked.
+    pub fn write_delivery_package(
+        &mut self,
+        bundle: &spiling_contracts::manufacturing::ManufacturingBundle,
+        descriptor: &spiling_contracts::manufacturing::DeliveryPackageDescriptor,
+        bytes: &spiling_chunks::ChunkSource,
+    ) -> Result<String, ExportError> {
+        if descriptor.info.program_hash != bundle.program.hash
+            || spiling_contracts::geometry::SourceHash::from_digest(bytes.digest()).as_str()
+                != descriptor.resource.sha256
+        {
+            return Err(ExportError::InvalidInspection(
+                "delivery package does not carry the exported program".into(),
+            ));
+        }
+        let name = format!("program{}", descriptor.info.format.extension());
+        self.write_from(&name, &mut bytes.reader())?;
+        Ok(name)
+    }
     /// Call only after validated output and its completion evidence are written.
     pub fn commit(&mut self) {
         self.committed = true;

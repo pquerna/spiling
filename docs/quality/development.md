@@ -636,8 +636,15 @@ ENGINE="$PWD/target/debug/spiling-engine"
 family or a project filament (capture one first with `--library-use`). The
 engine's `CreateDefaultIntent` creates the intent; the report's `defaults` step
 lists what was chosen and every created value, and `verification.json` carries
-the print-time estimate and filament. Bambu setups plan and verify but refuse
-emission until `.gcode.3mf` delivery.
+the print-time estimate and filament. Bambu setups also export
+`program.gcode.3mf`, the engine's independently re-read `.gcode.3mf` package.
+
+Bambu package import check (optional, needs a local Bambu Studio; its AGPL
+code is only run, never copied): extract the public AppImage with
+`--appimage-extract`, then `xvfb-run -a squashfs-root/AppRun --datadir DIR
+--outputdir DIR --export-settings DIR/s.json program.gcode.3mf` must exit 0 with
+`"error_string": "Success."` in `DIR/result.json`. Bambu Studio 02.09.01.70 opens
+the package as another vendor's 3MF (model and plate program).
 
 The fresh-user journey per shipped setup and the realistic corpus use this path
 with no intent file (corpus details in

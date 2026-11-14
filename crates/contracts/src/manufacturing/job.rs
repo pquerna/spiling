@@ -65,6 +65,73 @@ pub struct SingleExtruderJob {
     /// Declared motion limits for the independent print-time estimate.
     #[serde(deserialize_with = "required_option")]
     pub timing_model: Option<PrintTimeModel>,
+    /// The package the printer's firmware consumes the program in, when it
+    /// takes one instead of a bare G-code file (Bambu Lab `.gcode.3mf`).
+    #[serde(deserialize_with = "required_option")]
+    pub delivery: Option<DeliveryPackage>,
+}
+
+/// A firmware delivery package around the verified program. Its facts are the
+/// identities the printer and its slicer ecosystem read from the package
+/// metadata; they are declarations with a recorded source, not qualification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeliveryPackage {
+    /// Bambu Lab sliced-plate package (`.gcode.3mf`): an OPC/3MF archive with
+    /// `Metadata/plate_1.gcode`, its MD5 and the plate/slice metadata.
+    BambuGcode3mf {
+        /// Bambu printer model identifier (`printer_model_id` in
+        /// `slice_info.config`, `model_id` in Bambu's machine profiles).
+        printer_model_id: String,
+        /// Bambu printer model name (`printer_model` in the project settings).
+        printer_model: String,
+        /// The build plate the job assumes (`bed_type`).
+        plate: BambuPlate,
+    },
+}
+/// Bambu build plates, by the identifiers Bambu's package metadata uses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BambuPlate {
+    CoolPlate,
+    EngineeringPlate,
+    HighTempPlate,
+    TexturedPeiPlate,
+}
+impl BambuPlate {
+    /// The package metadata identifier (`bed_type`).
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::CoolPlate => "cool_plate",
+            Self::EngineeringPlate => "eng_plate",
+            Self::HighTempPlate => "hot_plate",
+            Self::TexturedPeiPlate => "textured_plate",
+        }
+    }
+}
+impl DeliveryPackage {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        match self {
+            Self::BambuGcode3mf {
+                printer_model_id,
+                printer_model,
+                ..
+            } => {
+                let token = |t: &str| {
+                    !t.is_empty()
+                        && t.len() <= 32
+                        && t.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_. ".contains(&b))
+                };
+                if !token(printer_model_id) || !token(printer_model) {
+                    return Err(invalid(
+                        "Bambu package model identity must be short printable identifiers",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 /// Declared motion limits for estimating print time from decoded commands:
 /// one acceleration for every move and Marlin-style junction deviation.
@@ -104,6 +171,9 @@ impl SingleExtruderJob {
         ])?;
         if let Some(model) = &self.timing_model {
             model.validate()?;
+        }
+        if let Some(delivery) = &self.delivery {
+            delivery.validate()?;
         }
         let beds = [
             self.bed_temperature_c,
@@ -202,6 +272,19 @@ impl SingleExtruderJob {
         }
         if printer.build_envelope.max[2] <= self.prime_start_mm[2].max(self.prime_end_mm[2]) {
             return Err(invalid("park needs clearance above the prime line"));
+        }
+        // A dialect whose firmware takes a package declares exactly which.
+        let packaged = matches!(
+            printer.capabilities.output_dialect,
+            OutputDialect::BambuLabGcode3mfV1
+        );
+        match (&self.delivery, packaged) {
+            (Some(DeliveryPackage::BambuGcode3mf { .. }), true) | (None, false) => {}
+            _ => {
+                return Err(invalid(
+                    "a Bambu Lab program requires its .gcode.3mf delivery package and no other dialect declares one",
+                ));
+            }
         }
         self.lifecycle
             .validate(printer.capabilities.output_dialect, self)?;

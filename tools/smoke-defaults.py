@@ -6,13 +6,14 @@
 For every shipped single-tool setup: list printers and materials, then
 `project create --import PART --printer SETUP --material FAMILY --quality Q
 --supports on|off --center-all-on-bed --compile --verify --manufacturing-out`,
-and a source-absent read-only reopen + verify. Bambu setups must create and
-plan, then refuse emission with unsupported_capability. Prints one line per
-journey and exits nonzero on any unexpected outcome.
+and a source-absent read-only reopen + verify. Bambu setups must also export
+program.gcode.3mf (the engine's verified .gcode.3mf package) whose plate
+G-code is the exported program.gcode and whose MD5 member matches. Prints one
+line per journey and exits nonzero on any unexpected outcome.
 
 Usage: smoke-defaults.py BIN_DIR WORK_DIR [PART.step] [--material pla] [--quality standard]
 """
-import json, os, shutil, subprocess, sys
+import hashlib, json, os, shutil, subprocess, sys, zipfile
 
 args = sys.argv[1:]
 def option(name, default):
@@ -63,12 +64,6 @@ def main():
                                "--quality", QUALITY, "--supports", supports,
                                "--center-all-on-bed", "--compile", "--verify",
                                "--manufacturing-out", "out")
-            if bambu:
-                text = json.dumps(err or {})
-                ok = rc != 0 and "unsupported_capability" in text
-                print(name, "refuses emission as designed" if ok else f"UNEXPECTED rc={rc} {text[:300]}")
-                failures += 0 if ok else 1
-                continue
             if rc != 0:
                 print(name, "FAILED", json.dumps(err)[:400])
                 failures += 1
@@ -79,8 +74,23 @@ def main():
             created = next(o for o in out["operations"] if o.get("step") == "defaults")["created"]
             report = json.load(open(os.path.join(cwd, "out", "verification.json")))
             ok = rc2 == 0 and report.get("verified")
+            package = os.path.join(cwd, "out", "program.gcode.3mf")
+            if bambu:
+                program = open(os.path.join(cwd, "out", "program.gcode"), "rb").read()
+                try:
+                    with zipfile.ZipFile(package) as z:
+                        plate = z.read("Metadata/plate_1.gcode")
+                        md5 = z.read("Metadata/plate_1.gcode.md5").decode()
+                        reopened = os.path.exists(os.path.join(cwd, "reopen", "program.gcode.3mf"))
+                    ok = ok and plate == program and md5 == hashlib.md5(program).hexdigest().upper() and reopened
+                except (OSError, KeyError, zipfile.BadZipFile) as e:
+                    print(name, "PACKAGE FAILED", e)
+                    ok = False
+            elif os.path.exists(package):
+                print(name, "UNEXPECTED package for a plain G-code printer")
+                ok = False
             failures += 0 if ok else 1
-            print(name, "ok" if ok else f"REOPEN FAILED {json.dumps(err2)[:300]}",
+            print(name, ("ok + .gcode.3mf" if bambu else "ok") if ok else f"REOPEN/PACKAGE FAILED {json.dumps(err2)[:300]}",
                   "| recipe", created["recipe"], "layer", created["layer_height_mm"],
                   "| supports", created["supports"]["kind"],
                   "| estimate %.0f s" % (report.get("estimated_seconds") or 0),

@@ -87,8 +87,10 @@ validation refuses a printer that differs from the derivation:
 | Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
 
 Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
-Prusa Buddy, `klipper` → Klipper, `bambu_lab` → the Bambu placeholder, which
-plans but refuses emission until `.gcode.3mf` delivery exists. Levelling is
+Prusa Buddy, `klipper` → Klipper, `bambu_lab` → Bambu Lab, whose program is
+delivered in a `.gcode.3mf` package; a Bambu description declares `delivery`
+(`printer_model_id`, `printer_model` and stock `plate`, inherited like other
+facts) and no other family may. Levelling is
 `manual` (no levelling command), `probe_mesh` (probe every print after homing
 and waiting for the bed) or `stored_mesh` (restore a stored mesh; Prusa Buddy
 keeps none and probes). `printer_model` names the model the firmware checks
@@ -97,7 +99,9 @@ keeps none and probes). `printer_model` names the model the firmware checks
 The lifecycle table (`MachineDescription::derive_lifecycle`) is, in order:
 Prusa nozzle/model checks; feed, flow and fan resets (plus `M200 D0` on
 Marlin); the operator start block; bed target and a non-oozing standby nozzle
-(150 °C, Prusa 170 °C and waited, for its loadcell probe); home; wait for the
+(150 °C, Prusa 170 °C and waited, for its loadcell probe, Bambu 140 °C and
+waited after enabling vibration suppression and runout detection; Bambu then
+probes at 140 °C whatever the material standby); home; wait for the
 bed; levelling; wait for the print nozzle; prime. Waits use the first-layer
 targets; a captured material profile supplies the standby temperature
 (PrusaSlicer's MK4S probes PLA/ABS at 170, PET at 175, FLEX at 210 °C).

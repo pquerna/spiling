@@ -15,12 +15,14 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 
 mod adhesion;
+mod bambu;
 mod bridge_split;
 mod construction;
 mod cost;
 mod expected;
 mod joins;
 mod lifecycle;
+pub(crate) mod package;
 mod replay;
 pub(crate) use replay::ReplaySink;
 
@@ -783,6 +785,10 @@ pub(crate) fn verify_actual(
         .map(cost::PrintTimeEstimate::new)
         .transpose()?;
     let max_line = printer.capabilities.output_dialect.max_line_bytes();
+    // Bambu display markers are decoded on their own, outside motion replay.
+    let mut bambu = (job.is_some()
+        && printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1)
+        .then(bambu::Markers::default);
     let mut max_z = f64::NEG_INFINITY;
     let mut priming_filament_length_mm = 0.0;
     let mut volume_layer = 0u32;
@@ -809,6 +815,11 @@ pub(crate) fn verify_actual(
                 "program line {} exceeds the firmware command buffer",
                 line_index + 1
             )));
+        }
+        if let Some(markers) = bambu.as_mut()
+            && markers.accept(line, line_index + 1)?
+        {
+            continue;
         }
         // Declared lifecycle text (dialect commands, opaque block lines) is
         // matched exactly rather than decoded.
@@ -1143,6 +1154,9 @@ pub(crate) fn verify_actual(
                 }
                 None => (decoded, None),
             };
+            if let Some(markers) = &bambu {
+                markers.before_layer_motion(layer_index)?;
+            }
             if layer_index != volume_layer {
                 verify_region_volume(
                     &plan.layers[volume_layer as usize],
@@ -1595,6 +1609,9 @@ pub(crate) fn verify_actual(
     }
     if let Some(lc) = &lifecycle {
         lc.check_shutdown()?;
+    }
+    if let Some(markers) = &bambu {
+        markers.finish(plan.layers.len())?;
     }
     verify_region_volume(
         &plan.layers[volume_layer as usize],

@@ -60,6 +60,8 @@ pub struct Capture {
     pub provenance: ManufacturingInspectionProvenance,
     pub resource: ArtifactView,
     pub replay: Option<ReplayDisplayDescriptor>,
+    /// The verified firmware delivery package, for printers that take one.
+    pub package: Option<spiling_contracts::manufacturing::DeliveryPackageDescriptor>,
 }
 #[derive(Debug, Clone)]
 pub struct Review {
@@ -314,6 +316,15 @@ pub async fn stage_export(
         .fetch_manufacturing_program(&capture.record)
         .await
         .map_err(|e| e.to_string())?;
+    let package = match &capture.package {
+        Some(descriptor) => Some((
+            descriptor.clone(),
+            rpc.fetch_delivery_package(&capture.record, descriptor)
+                .await
+                .map_err(|e| e.to_string())?,
+        )),
+        None => None,
+    };
     let path = PathBuf::from(path.to_os_string().map_err(|e| e.to_string())?);
     let label = spiling_contracts::geometry::bounded_text(
         &path.file_name().unwrap_or_default().to_string_lossy(),
@@ -329,6 +340,11 @@ pub async fn stage_export(
                 &review.capture.provenance,
             )
             .map_err(|e| e.to_string())?;
+        if let Some((descriptor, bytes)) = &package {
+            output
+                .write_delivery_package(&review.bundle, descriptor, bytes)
+                .map_err(|e| e.to_string())?;
+        }
         Ok::<_, String>(output)
     })
     .await

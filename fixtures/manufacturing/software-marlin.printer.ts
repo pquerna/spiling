@@ -44,6 +44,8 @@ const printer = {
       // Marlin's default acceleration and junction deviation, for the
       // print-time estimate only.
       timing_model: { acceleration_mm_s2: 3000, junction_deviation_mm: 0.013 },
+      // A plain G-code file; no delivery package.
+      delivery: null,
       // The generic Marlin 2 table without a firmware mesh.
       lifecycle: {
         start: [

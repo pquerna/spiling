@@ -112,6 +112,9 @@ pub fn native_artifact_limit(media: &str) -> Result<u64, String> {
             Ok(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
+        crate::manufacturing::BAMBU_PACKAGE_MEDIA_TYPE => {
+            Ok(crate::manufacturing::MAX_DELIVERY_PACKAGE_BYTES)
+        }
         super::transfer::NATIVE_RESULT_MEDIA_TYPE => Ok(super::transfer::MAX_STAGED_BLOB_BYTES),
         crate::manufacturing::MANUFACTURING_PROGRAM_MEDIA_TYPE => Ok(u64::from(
             crate::manufacturing::MAX_MANUFACTURING_PROGRAM_BYTES,
@@ -608,6 +611,22 @@ pub fn native_operation_view(
                 return Err("replay result not published in outputs".into());
             }
         }
+        if let JobResult::ManufacturingVerified {
+            delivery_package: Some(package),
+            ..
+        } = result
+        {
+            let size =
+                super::validate_artifact_view(&package.resource, MAX_DELIVERY_PACKAGE_BYTES)?;
+            if !meta.outputs.iter().any(|a| {
+                a.name == package.resource.name
+                    && a.size_bytes == size
+                    && a.sha256 == package.resource.sha256
+                    && a.media_type == package.resource.media_type
+            }) {
+                return Err("delivery package not published in outputs".into());
+            }
+        }
         if matches!(
             &operation.result,
             Some(google::longrunning::operation::Result::Error(_))
@@ -855,11 +874,19 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                 let replay_display: Option<ReplayDisplayDescriptor> =
                     v.replay_display.map(TryInto::try_into).transpose()?;
                 validate_verified(&record, &report, &provenance, replay_display.as_ref())?;
+                let delivery_package: Option<DeliveryPackageDescriptor> =
+                    v.delivery_package.map(TryInto::try_into).transpose()?;
+                if let Some(package) = &delivery_package {
+                    package
+                        .validate_for_record(&record)
+                        .map_err(|e| e.to_string())?;
+                }
                 Self::ManufacturingVerified {
                     record,
                     report,
                     provenance,
                     replay_display,
+                    delivery_package,
                     resource: artifact_to_view(
                         resource,
                         u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
@@ -1084,8 +1111,14 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                 resource,
                 provenance,
                 replay_display,
+                delivery_package,
             } => {
                 validate_verified(&record, &report, &provenance, replay_display.as_ref())?;
+                if let Some(package) = &delivery_package {
+                    package
+                        .validate_for_record(&record)
+                        .map_err(|e| e.to_string())?;
+                }
                 let resource =
                     artifact_from_view(resource, u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))?;
                 super::manufacturing::validate_resource(&record, &resource)?;
@@ -1095,6 +1128,7 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                     resource: Some(resource),
                     provenance: Some(provenance.try_into()?),
                     replay_display: replay_display.map(TryInto::try_into).transpose()?,
+                    delivery_package: delivery_package.map(TryInto::try_into).transpose()?,
                 })
             }
         };

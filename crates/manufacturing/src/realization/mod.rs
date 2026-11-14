@@ -13,6 +13,9 @@ mod schedule;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Event {
+    /// A scheduled layer begins (its index); dialects with layer markers
+    /// write them here, others ignore it.
+    Layer(u32),
     Fan(u8),
     Travel([f64; 3], f64),
     Extrusion(f64, f64), // stationary absolute E, speed
@@ -116,6 +119,7 @@ pub(crate) fn stream(
     };
     for layer in &plan.layers {
         check_cancel(cancel)?;
+        emit(Event::Layer(layer.index))?;
         // The declared speed rule's cooling decision for this layer.
         let cooling = speeds::layer_cooling(intent, layer, layer.index)?;
         let order: &[u8] = if routed.is_some() {

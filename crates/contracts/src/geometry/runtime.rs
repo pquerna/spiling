@@ -251,6 +251,7 @@ pub enum JobResult {
         resource: crate::ArtifactView,
         provenance: crate::manufacturing::ManufacturingInspectionProvenance,
         replay_display: Option<crate::manufacturing::ReplayDisplayDescriptor>,
+        delivery_package: Option<crate::manufacturing::DeliveryPackageDescriptor>,
     },
 }
 

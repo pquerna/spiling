@@ -47,6 +47,8 @@ pub(super) struct Lifecycle<'a> {
     /// Prusa `M555` probe area `[X, Y, W, H]` from the decoded plan's first
     /// layer, computed here independently of the backend.
     mesh_area: [f64; 4],
+    /// Bambu `G29 A1` area `[X, Y, I, J]`, computed here independently.
+    bambu_area: [f64; 4],
     nozzle_mm: f64,
     start: std::slice::Iter<'a, LifecycleStep>,
     end: std::slice::Iter<'a, LifecycleStep>,
@@ -75,6 +77,7 @@ impl<'a> Lifecycle<'a> {
             job,
             dialect: printer.capabilities.output_dialect,
             mesh_area: mesh_area(plan, printer.build_envelope),
+            bambu_area: bambu_area(plan, printer.build_envelope),
             nozzle_mm: printer.nozzle_diameter_mm,
             start: job.lifecycle.start.iter(),
             end: job.lifecycle.end.iter(),
@@ -150,7 +153,8 @@ impl<'a> Lifecycle<'a> {
         use LifecycleStep as S;
         let klipper = self.dialect == OutputDialect::KlipperSingleExtruderGcodeV1;
         let prusa = self.dialect == OutputDialect::PrusaMarlinSingleExtruderGcodeV1;
-        let wait = if klipper { 'S' } else { 'R' };
+        let bambu = self.dialect == OutputDialect::BambuLabGcode3mfV1;
+        let wait = if klipper || bambu { 'S' } else { 'R' };
         // The start sequence heats to the first-layer targets.
         let bed = self.job.first_layer_bed_temperature_c;
         let text: Vec<String> = match step {
@@ -158,6 +162,7 @@ impl<'a> Lifecycle<'a> {
             S::VolumetricOff => vec!["M200 D0".into()],
             S::FeedScaleReset => vec!["M220 S100".into()],
             S::FlowScaleReset => vec!["M221 S100".into()],
+            S::FanOff if bambu => vec!["M106 S0".into()],
             S::FanOff => vec!["M107".into()],
             S::NozzleCheck => vec![format!("M862.1 P{}", self.nozzle_mm)],
             S::ModelCheck { model } => vec![format!("M862.3 P \"{model}\"")],
@@ -168,6 +173,21 @@ impl<'a> Lifecycle<'a> {
             }
             S::NozzleWait { standby_c } => {
                 vec![format!("M109 {wait}{:.0}", self.temperature(standby_c))]
+            }
+            // Homing permit: the latest waited standby (or print) plus 5 °C.
+            S::Home if bambu => {
+                let waited = self
+                    .job
+                    .lifecycle
+                    .start
+                    .iter()
+                    .rev()
+                    .find_map(|step| match step {
+                        S::NozzleWait { standby_c: Some(t) } => Some(self.temperature(&Some(*t))),
+                        _ => None,
+                    })
+                    .unwrap_or(self.job.first_layer_nozzle_temperature_c);
+                vec![format!("G28 T{:.0}", waited + 5.0)]
             }
             S::Home => vec!["G28".into()],
             S::ProbeMesh if klipper => vec!["BED_MESH_CALIBRATE".into()],
@@ -181,10 +201,27 @@ impl<'a> Lifecycle<'a> {
                 "G29 P3.13".into(),
                 "G29 A".into(),
             ],
+            // The probe runs only with the printer's levelling option on;
+            // either way G29.2 S1 leaves a (fresh or stored) mesh active.
+            S::ProbeMesh if bambu => {
+                let [x, y, i, j] = self.bambu_area;
+                vec![
+                    "M104 S140".into(),
+                    "M109 S140".into(),
+                    "G29.2 S1".into(),
+                    "M1002 judge_flag g29_before_print_flag".into(),
+                    "M622 J1".into(),
+                    format!("G29 A1 X{x} Y{y} I{i} J{j}"),
+                    "M400".into(),
+                    "M623".into(),
+                ]
+            }
             S::ProbeMesh => vec!["G29".into()],
             S::RestoreMesh if klipper => vec!["BED_MESH_PROFILE LOAD=default".into()],
+            S::RestoreMesh if bambu => vec!["G29.2 S1".into()],
             S::RestoreMesh => vec!["M420 S1".into()],
             S::LevellingOff if klipper => vec!["BED_MESH_CLEAR".into()],
+            S::LevellingOff if bambu => vec!["G29.2 S0".into()],
             S::LevellingOff => vec!["M420 S0".into()],
             // Every complete single-extruder dialect replays relative E.
             S::RestoreModes => vec!["G21".into(), "G90".into(), "M83".into()],
@@ -193,6 +230,7 @@ impl<'a> Lifecycle<'a> {
             S::NozzleOff => vec!["M104 S0".into()],
             S::BedOff => vec!["M140 S0".into()],
             S::MotorsOff if klipper => vec!["M84".into()],
+            S::MotorsOff if bambu => vec!["M18 X Y Z".into()],
             S::MotorsOff => vec!["M84 X Y E".into()],
             S::Block { block } => block
                 .lines
@@ -231,7 +269,14 @@ impl<'a> Lifecycle<'a> {
                     self.levelling = Levelling::FirmwareDefault;
                 }
             }
-            S::ProbeMesh => self.levelling = Levelling::Probed,
+            S::ProbeMesh => {
+                self.levelling = Levelling::Probed;
+                // Bambu probes with the nozzle cooled to 140 °C.
+                if self.dialect == OutputDialect::BambuLabGcode3mfV1 {
+                    self.nozzle = Heat::Wait;
+                    self.nozzle_print = false;
+                }
+            }
             S::RestoreMesh => self.levelling = Levelling::Restored,
             S::LevellingOff => self.levelling = Levelling::Off,
             S::BedTarget => self.bed = self.bed.max(Heat::Target),
@@ -361,6 +406,9 @@ impl<'a> Lifecycle<'a> {
             Levelling::FirmwareDefault => {
                 "Bed levelling left as the firmware sets it after homing; not commanded"
             }
+            Levelling::Probed if self.dialect == OutputDialect::BambuLabGcode3mfV1 => {
+                "Bed mesh probed each print when the printer's bed-levelling option is on (M1002 judge_flag/M622 J1), else the stored mesh: either way active, firmware corrects commanded Z below command space"
+            }
             Levelling::Probed => {
                 "Bed mesh probed each print and active: firmware corrects commanded Z below command space"
             }
@@ -452,4 +500,33 @@ fn mesh_area(plan: &NormalizedPrintPlan, bed: spiling_contracts::geometry::AabbM
     let w = (lo[0] + 32.0).max(hi[0]).min(size[0]) - x;
     let h = hi[1].min(size[1]) - y;
     [x, y, w, h]
+}
+/// Bambu's first-layer probe area: whole-millimetre floor/ceiling bounds of
+/// the plan's first layer, inside the bed.
+fn bambu_area(plan: &NormalizedPrintPlan, bed: spiling_contracts::geometry::AabbMm) -> [f64; 4] {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for point in plan
+        .layers
+        .first()
+        .into_iter()
+        .flat_map(|layer| &layer.paths)
+        .flat_map(|path| &path.points_mm)
+    {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(point[axis]);
+            hi[axis] = hi[axis].max(point[axis]);
+        }
+    }
+    let size = [bed.max[0] - bed.min[0], bed.max[1] - bed.min[1]];
+    if !(lo[0] <= hi[0] && lo[1] <= hi[1]) {
+        return [0.0, 0.0, size[0], size[1]];
+    }
+    let origin = lo.map(|v| v.floor().max(0.0));
+    [
+        origin[0],
+        origin[1],
+        hi[0].ceil().min(size[0]) - origin[0],
+        hi[1].ceil().min(size[1]) - origin[1],
+    ]
 }

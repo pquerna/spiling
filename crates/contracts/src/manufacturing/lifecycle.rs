@@ -168,6 +168,17 @@ impl LifecycleBlock {
             },
         }
     }
+    /// Bambu Lab printer services the reference start sequences enable:
+    /// vibration suppression (`M975 S1`) and filament runout detection
+    /// (`M412 S1`). Observed in Bambu Studio 02.09.01.70's A1 and A1 mini
+    /// machine start G-code; no position, thermal or mode effect is declared.
+    pub fn bambu_printer_services() -> Self {
+        Self {
+            label: "Bambu vibration suppression and runout detection".into(),
+            lines: vec!["M975 S1".into(), "M412 S1".into()],
+            effects: BlockEffects::NONE,
+        }
+    }
     /// The conventional Klipper end macro: heaters, fan and motors off.
     pub fn klipper_end_print() -> Self {
         Self {
@@ -208,7 +219,7 @@ pub enum LifecycleStep {
     FeedScaleReset,
     /// `M221 S100`.
     FlowScaleReset,
-    /// `M107`.
+    /// `M107` (Bambu `M106 S0`).
     FanOff,
     /// Prusa `M862.1 P<nozzle>`: the firmware checks the installed nozzle.
     NozzleCheck,
@@ -234,14 +245,19 @@ pub enum LifecycleStep {
         standby_c: Option<f64>,
     },
     /// `G28`: all axes; the position becomes the declared home position.
+    /// Bambu `G28 T<t>` permits homing up to `t`: the waited standby plus 5 °C.
     Home,
     /// Probe a bed mesh and leave it active (Marlin `G29`, Prusa `M555`+`G29`
-    /// sequence, Klipper `BED_MESH_CALIBRATE`).
+    /// sequence, Klipper `BED_MESH_CALIBRATE`, Bambu: nozzle to its 140 °C
+    /// probing temperature, `G29.2 S1` then `G29 A1` over the first layer when
+    /// the printer's bed-levelling print option is on, so either a fresh or the
+    /// stored mesh is active; the nozzle is left at 140 °C).
     ProbeMesh,
     /// Activate the stored mesh (Marlin `M420 S1`, Klipper
-    /// `BED_MESH_PROFILE LOAD=default`).
+    /// `BED_MESH_PROFILE LOAD=default`, Bambu `G29.2 S1`).
     RestoreMesh,
-    /// Disable levelling (Marlin `M420 S0`, Klipper `BED_MESH_CLEAR`).
+    /// Disable levelling (Marlin `M420 S0`, Klipper `BED_MESH_CLEAR`, Bambu
+    /// `G29.2 S0`).
     LevellingOff,
     /// `G21`, `G90` and the dialect's extrusion mode (`M83` for every
     /// complete single-extruder dialect): re-establish modes after an opaque block.
@@ -259,7 +275,8 @@ pub enum LifecycleStep {
     NozzleOff,
     /// `M140 S0`.
     BedOff,
-    /// Release steppers (`M84 X Y E` holding Z on Marlin/Prusa, Klipper `M84`).
+    /// Release steppers (`M84 X Y E` holding Z on Marlin/Prusa, Klipper `M84`,
+    /// Bambu `M18 X Y Z`).
     MotorsOff,
     Block {
         block: LifecycleBlock,
@@ -378,7 +395,7 @@ impl FirmwareLifecycle {
                 | LifecycleStep::MotorsOff => {
                     return refuse("start sequence contains a priming, park or shutdown step");
                 }
-                _ => apply(step, &mut s, job)?,
+                _ => apply(step, &mut s, job, dialect)?,
             }
         }
         if !s.homed || !s.position {
@@ -417,7 +434,7 @@ impl FirmwareLifecycle {
                 LifecycleStep::Block { block } if block.effects.homes => {
                     return refuse("end sequence may not home");
                 }
-                _ => apply(step, &mut s, job)?,
+                _ => apply(step, &mut s, job, dialect)?,
             }
         }
         if s.bed != Heat::Off || s.nozzle != Nozzle::Off || !s.fan_off || !s.motors_off {
@@ -445,6 +462,7 @@ fn apply(
     step: &LifecycleStep,
     s: &mut State,
     job: &SingleExtruderJob,
+    dialect: OutputDialect,
 ) -> Result<(), ManufacturingError> {
     let standby = |standby_c: &Option<f64>| -> Result<bool, ManufacturingError> {
         match standby_c {
@@ -469,6 +487,10 @@ fn apply(
         LifecycleStep::ProbeMesh | LifecycleStep::RestoreMesh | LifecycleStep::LevellingOff => {
             if !s.homed {
                 return Err(invalid("bed levelling before homing"));
+            }
+            // Bambu probes with the nozzle cooled to its probing temperature.
+            if dialect == OutputDialect::BambuLabGcode3mfV1 && *step == LifecycleStep::ProbeMesh {
+                s.nozzle = Nozzle::Standby(Heat::Wait);
             }
         }
         LifecycleStep::ModelCheck { model } => {
@@ -616,26 +638,29 @@ impl OutputDialect {
         }
     }
     /// Thermal waits use `R` (wait for heating or cooling) except on Klipper,
-    /// whose `M109`/`M190` read only `S` and always settle at the target.
+    /// whose `M109`/`M190` read only `S` and always settle at the target, and
+    /// Bambu Lab, whose start sequences wait with `S` in both directions
+    /// (Bambu Studio 02.09.01.70 A1/A1 mini machine start G-code).
     pub fn waits_with_r(self) -> bool {
-        self != Self::KlipperSingleExtruderGcodeV1
+        !matches!(
+            self,
+            Self::KlipperSingleExtruderGcodeV1 | Self::BambuLabGcode3mfV1
+        )
     }
     /// The dialect's command set for typed lifecycle steps.
     pub fn admits(self, step: &LifecycleStep) -> bool {
         use LifecycleStep as S;
-        let marlin = matches!(
-            self,
-            Self::Marlin2SingleExtruderGcodeV1 | Self::BambuLabGcode3mfV1
-        );
+        let marlin = self == Self::Marlin2SingleExtruderGcodeV1;
         let prusa = self == Self::PrusaMarlinSingleExtruderGcodeV1;
         let klipper = self == Self::KlipperSingleExtruderGcodeV1;
-        if !(marlin || prusa || klipper) {
+        let bambu = self == Self::BambuLabGcode3mfV1;
+        if !(marlin || prusa || klipper || bambu) {
             return false;
         }
         match step {
             S::CelsiusUnits | S::VolumetricOff => marlin,
             S::NozzleCheck | S::ModelCheck { .. } => prusa,
-            S::RestoreMesh | S::LevellingOff => marlin || klipper,
+            S::RestoreMesh | S::LevellingOff => marlin || klipper || bambu,
             _ => true,
         }
     }

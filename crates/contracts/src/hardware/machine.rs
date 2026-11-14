@@ -23,7 +23,7 @@ use super::{HardwareModelDefinition, HardwareSetupDefinition, PlateDefinition, t
 use crate::{
     geometry::{AabbMm, RigidPoseMm, SourceHash},
     manufacturing::{
-        DepositionLimits, ExtruderDrive, ExtrusionEffect, FirmwareLifecycle,
+        DeliveryPackage, DepositionLimits, ExtruderDrive, ExtrusionEffect, FirmwareLifecycle,
         HomingCoordinateContract, JobWorkflow, LevellingEffect, LifecycleBlock, LifecycleStep,
         MANUFACTURING_SCHEMA_VERSION, MachineComponent, MachineComponentRole,
         MachineComponentShape, ModeEffect, MotionResolution, MotionSpace, OutputDialect,
@@ -251,6 +251,9 @@ pub struct MachineLayer {
     /// Model identifier the firmware checks (Prusa `M862.3`), if any.
     #[serde(deserialize_with = "required_option")]
     pub printer_model: Option<String>,
+    /// The delivery package the firmware consumes (Bambu `.gcode.3mf`).
+    #[serde(deserialize_with = "required_option")]
+    pub delivery: Option<DeliveryPackage>,
     pub limits: Vec<SourcedLimit>,
 }
 
@@ -270,6 +273,10 @@ pub struct MachineDescription {
     pub extruder_drive: ExtruderDrive,
     #[serde(deserialize_with = "required_option")]
     pub printer_model: Option<String>,
+    /// The delivery package the firmware consumes; required exactly for the
+    /// Bambu Lab family.
+    #[serde(deserialize_with = "required_option")]
+    pub delivery: Option<DeliveryPackage>,
     /// Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
     pub limits: Vec<SourcedLimit>,
     /// Operator start/end blocks (for example Klipper `START_PRINT` and
@@ -287,6 +294,19 @@ impl MachineDescription {
         text(&self.id)?;
         if let Some(model) = &self.printer_model {
             text(model)?;
+        }
+        match (&self.delivery, self.firmware) {
+            (Some(d), FirmwareFamily::BambuLab) => d.validate().map_err(|e| e.to_string())?,
+            (
+                None,
+                FirmwareFamily::Marlin2 | FirmwareFamily::PrusaBuddy | FirmwareFamily::Klipper,
+            ) => {}
+            _ => {
+                return Err(
+                    "a Bambu Lab machine declares its .gcode.3mf package and no other family declares one"
+                        .into(),
+                );
+            }
         }
         for block in [&self.start_block, &self.end_block].into_iter().flatten() {
             block.validate(self.dialect()).map_err(|e| e.to_string())?;
@@ -379,6 +399,7 @@ impl MachineDescription {
             (None, None, None, None, None);
         let mut drive = None;
         let mut printer_model = None;
+        let mut delivery = None;
         for layer in &chain {
             text(&layer.id)?;
             let mut declared = std::collections::BTreeSet::new();
@@ -400,6 +421,7 @@ impl MachineDescription {
             arcs = layer.arc_moves.or(arcs);
             drive = layer.extruder_drive.or(drive);
             printer_model = layer.printer_model.clone().or(printer_model);
+            delivery = layer.delivery.clone().or(delivery);
         }
         let missing = |what: &str| format!("machine {leaf} does not declare {what}");
         let limits = MachineLimit::ALL
@@ -416,6 +438,7 @@ impl MachineDescription {
             arc_moves: arcs.ok_or_else(|| missing("arc move support"))?,
             extruder_drive: drive.ok_or_else(|| missing("its extruder drive"))?,
             printer_model,
+            delivery,
             limits,
             start_block: None,
             end_block: None,
@@ -544,6 +567,7 @@ impl MachineDescription {
                     park_xy_mm: [margin, r6(by - margin)],
                     park_clearance_mm: 10.0,
                     lifecycle: self.derive_lifecycle(),
+                    delivery: self.delivery.clone(),
                 },
             },
             nozzle_diameter_mm: nozzle,
@@ -589,7 +613,7 @@ impl MachineDescription {
             FirmwareFamily::Marlin2 => "marlin2",
             FirmwareFamily::PrusaBuddy => "prusa-buddy",
             FirmwareFamily::Klipper => "klipper",
-            FirmwareFamily::BambuLab => "bambu-lab (.gcode.3mf delivery not yet supported)",
+            FirmwareFamily::BambuLab => "bambu-lab (.gcode.3mf)",
         }
     }
     pub fn dialect(&self) -> OutputDialect {
@@ -602,17 +626,21 @@ impl MachineDescription {
     }
 
     /// The firmware family's lifecycle table. Start: feed/flow/fan resets
-    /// (plus `M200 D0` on Marlin, nozzle/model checks on Prusa), the operator
-    /// start block, heat the bed and a non-oozing standby nozzle, home, wait
-    /// for the bed, level per capability, wait for the print nozzle, prime.
-    /// End: barrier, lift and park, barrier, the operator end block, heaters,
-    /// fan and motors off. A typed step the operator block declares it covers
-    /// is omitted. References: Creality `*fastabl*` and Prusa MK4S start
-    /// G-code in PrusaSlicer's bundled profiles; Klipper
-    /// <https://www.klipper3d.org/Slicers.html>.
+    /// (plus `M200 D0` on Marlin, nozzle/model checks on Prusa, vibration
+    /// suppression and runout detection on Bambu), the operator start block,
+    /// heat the bed and a non-oozing standby nozzle, home, wait for the bed,
+    /// level per capability, wait for the print nozzle, prime. End: barrier,
+    /// lift and park, barrier, the operator end block, heaters, fan and
+    /// motors off. A typed step the operator block declares it covers is
+    /// omitted. References: Creality `*fastabl*` and Prusa MK4S start G-code
+    /// in PrusaSlicer's bundled profiles; Klipper
+    /// <https://www.klipper3d.org/Slicers.html>; Bambu Studio 02.09.01.70's
+    /// A1 and A1 mini machine start/end G-code (commands observed, sequence
+    /// re-authored: no waste-chute purge, brush wipe or calibrations).
     pub fn derive_lifecycle(&self) -> FirmwareLifecycle {
         use LifecycleStep as S;
         let prusa = self.firmware == FirmwareFamily::PrusaBuddy;
+        let bambu = self.firmware == FirmwareFamily::BambuLab;
         let mut start = Vec::new();
         if prusa {
             start.push(S::NozzleCheck);
@@ -623,13 +651,15 @@ impl MachineDescription {
             }
         }
         start.extend([S::FeedScaleReset, S::FlowScaleReset]);
-        if matches!(
-            self.firmware,
-            FirmwareFamily::Marlin2 | FirmwareFamily::BambuLab
-        ) {
+        if self.firmware == FirmwareFamily::Marlin2 {
             start.push(S::VolumetricOff);
         }
         start.push(S::FanOff);
+        if bambu {
+            start.push(S::Block {
+                block: LifecycleBlock::bambu_printer_services(),
+            });
+        }
         let none = crate::manufacturing::BlockEffects::NONE;
         let begin = self.start_block.as_ref().map_or(none, |b| b.effects);
         if let Some(block) = &self.start_block {
@@ -637,15 +667,22 @@ impl MachineDescription {
                 block: block.clone(),
             });
         }
-        // Loadcell probing (Prusa) needs a settled, non-oozing nozzle.
-        let standby = Some(if prusa { 170.0 } else { 150.0 });
+        // Loadcell probing (Prusa) needs a settled, non-oozing nozzle; Bambu
+        // homes and probes with the nozzle at 140 °C.
+        let standby = Some(if prusa {
+            170.0
+        } else if bambu {
+            140.0
+        } else {
+            150.0
+        });
         let heated = self.heated_bed;
         if heated && begin.bed == ThermalEffect::Unchanged {
             start.push(S::BedTarget);
         }
         if begin.nozzle == ThermalEffect::Unchanged {
             start.push(S::NozzleTarget { standby_c: standby });
-            if prusa {
+            if prusa || bambu {
                 start.push(S::NozzleWait { standby_c: standby });
             }
         }

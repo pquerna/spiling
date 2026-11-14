@@ -210,6 +210,7 @@ enum PublicationKind {
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
+        package: Option<spiling_manufacturing::delivery::EncodedDeliveryPackage>,
     },
 }
 struct Active {
@@ -249,6 +250,11 @@ pub struct Runtime {
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
     // into the terminal ledger transaction after ACK and released immediately.
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
+    // The verified delivery package, staged and released like the replay.
+    package_publication: Option<(
+        JobId,
+        spiling_manufacturing::delivery::EncodedDeliveryPackage,
+    )>,
     alternative_publication: Option<(JobId, Arc<spiling_core::ManufacturingAsset>)>,
     image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
     appearance_publication: Option<(JobId, Arc<appearance::ReportPublication>)>,
@@ -292,6 +298,7 @@ impl Runtime {
             artifacts: BTreeMap::new(),
             rejected_import_artifact: None,
             replay_publication: None,
+            package_publication: None,
             alternative_publication: None,
             released: VecDeque::new(),
             image_publication: None,
@@ -390,6 +397,23 @@ impl Runtime {
         {
             self.replay_publication = None;
         }
+        if self
+            .package_publication
+            .as_ref()
+            .is_some_and(|(job, _)| *job == id)
+        {
+            self.package_publication = None;
+        }
+    }
+
+    pub fn package_publication(
+        &self,
+        id: JobId,
+    ) -> Option<&spiling_manufacturing::delivery::EncodedDeliveryPackage> {
+        self.package_publication
+            .as_ref()
+            .filter(|(job, _)| *job == id)
+            .map(|(_, package)| package)
     }
 
     pub fn alternative_publication(&self, id: JobId) -> Option<&spiling_core::ManufacturingAsset> {
@@ -857,7 +881,11 @@ impl Runtime {
                         PublicationKind::BedPosePrepared(preparation) => {
                             Some(JobResult::BedPosePrepared { preparation })
                         }
-                        PublicationKind::Verified { record, inspection } => {
+                        PublicationKind::Verified {
+                            record,
+                            inspection,
+                            package,
+                        } => {
                             let replay =
                                 inspection.replay.as_ref().map(|replay| replay.info.clone());
                             if let Some(display) = inspection.replay {
@@ -866,11 +894,19 @@ impl Runtime {
                                 }
                                 self.replay_publication = Some((job, display));
                             }
+                            let package_info = package.as_ref().map(|p| p.info.clone());
+                            if let Some(package) = package {
+                                if self.package_publication.is_some() {
+                                    return Err("unreleased package publication".into());
+                                }
+                                self.package_publication = Some((job, package));
+                            }
                             Some(JobResult::ManufacturingVerified {
                                 record,
                                 report: inspection.report,
                                 provenance: inspection.provenance,
                                 replay,
+                                package: package_info,
                             })
                         }
                         PublicationKind::Section => {
@@ -1215,8 +1251,19 @@ impl Runtime {
                     artifact: None,
                 })
             }
-            (Purpose::Verify, Product::Verified { record, inspection }) => Ok(Publication {
-                kind: PublicationKind::Verified { record, inspection },
+            (
+                Purpose::Verify,
+                Product::Verified {
+                    record,
+                    inspection,
+                    package,
+                },
+            ) => Ok(Publication {
+                kind: PublicationKind::Verified {
+                    record,
+                    inspection,
+                    package,
+                },
                 artifact: None,
             }),
             (Purpose::Section, Product::Section(section)) => {

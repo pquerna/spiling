@@ -129,7 +129,7 @@ pub(super) fn seed_from_intent(
 
 fn setup_label(setup: &HardwareSetupDefinition) -> String {
     match setup.printer.capabilities.output_dialect {
-        OutputDialect::BambuLabGcode3mfV1 => format!("{} (plan only)", setup.label),
+        OutputDialect::BambuLabGcode3mfV1 => format!("{} (.gcode.3mf)", setup.label),
         _ => setup.label.clone(),
     }
 }
@@ -276,9 +276,8 @@ impl Workbench {
                 e.max[2] - e.min[2]
             ));
             if setup.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 {
-                ui.colored_label(
-                    self.prefs.theme.tokens().warning,
-                    "Plans and verifies; program export waits for .gcode.3mf delivery.",
+                ui.weak(
+                    "Export writes a Bambu .gcode.3mf package (program.gcode.3mf) for SD/USB printing.",
                 );
             }
             if let (Some(PrinterKey::Machine { id }), Some(p)) =

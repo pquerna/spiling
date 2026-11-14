@@ -1239,6 +1239,7 @@ struct FreshInspection {
     resource: ArtifactView,
     provenance: ManufacturingInspectionProvenance,
     replay_display: Option<ReplayDisplayDescriptor>,
+    delivery_package: Option<spiling_contracts::manufacturing::DeliveryPackageDescriptor>,
 }
 async fn verify(
     client: &mut EngineClient,
@@ -1263,12 +1264,14 @@ async fn verify(
             resource,
             provenance,
             replay_display,
+            delivery_package,
         } => Ok(FreshInspection {
             record,
             report,
             resource,
             provenance,
             replay_display,
+            delivery_package,
         }),
         ManufacturingResponse::OperationAccepted { operation } => {
             match geometry::wait_operation(client, &session, operation).await? {
@@ -1278,12 +1281,14 @@ async fn verify(
                     resource,
                     provenance,
                     replay_display,
+                    delivery_package,
                 } => Ok(FreshInspection {
                     record,
                     report,
                     resource,
                     provenance,
                     replay_display,
+                    delivery_package,
                 }),
                 _ => Err("unexpected manufacturing verification job result".into()),
             }
@@ -2812,13 +2817,21 @@ async fn execute(
                 } else {
                     "verify"
                 };
-                let inspection = Box::pin(verify(client, VerificationOutput::ReportOnly)).await?;
+                // Export also asks for the printer's delivery package; only
+                // printers whose firmware takes one (Bambu) receive it.
+                let output = if export {
+                    VerificationOutput::ReportAndDeliveryPackage
+                } else {
+                    VerificationOutput::ReportOnly
+                };
+                let inspection = Box::pin(verify(client, output)).await?;
                 let FreshInspection {
                     record,
                     report,
                     resource,
                     provenance,
                     replay_display,
+                    delivery_package,
                 } = inspection;
                 if !report.verified {
                     return Err("manufacturing replay did not verify the emitted program".into());
@@ -2828,12 +2841,22 @@ async fn execute(
                         .fetch_manufacturing_bundle(&record, &resource)
                         .await?;
                     let program = client.fetch_manufacturing_program(&record).await?;
-                    manufacturing_output
+                    let output = manufacturing_output
                         .as_deref_mut()
-                        .ok_or("manufacturing export directory was not admitted")?
-                        .write_manufacturing_bundle(&bundle, &program, &report, &provenance)?;
+                        .ok_or("manufacturing export directory was not admitted")?;
+                    output.write_manufacturing_bundle(&bundle, &program, &report, &provenance)?;
+                    let package = match &delivery_package {
+                        Some(descriptor) => {
+                            let bytes = client.fetch_delivery_package(&record, descriptor).await?;
+                            let name =
+                                output.write_delivery_package(&bundle, descriptor, &bytes)?;
+                            Some(serde_json::json!({ "file": name, "descriptor": descriptor }))
+                        }
+                        None => None,
+                    };
                     export_evidence = Some(serde_json::json!({
                         "artifact": record, "verification": report,
+                        "delivery_package": package,
                         "software_only": true, "not_machine_ready": true
                     }));
                 }
@@ -2843,6 +2866,7 @@ async fn execute(
                     resource,
                     provenance,
                     replay_display,
+                    delivery_package,
                 });
             }
             Operation::ExportReplay => {

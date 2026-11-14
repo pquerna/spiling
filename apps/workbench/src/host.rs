@@ -2188,6 +2188,7 @@ impl Actor {
                     resource,
                     provenance,
                     replay_display,
+                    delivery_package,
                 }),
             ) if completed => {
                 self.verified(
@@ -2196,6 +2197,7 @@ impl Actor {
                     resource.clone(),
                     provenance.clone(),
                     replay_display.clone(),
+                    delivery_package.clone(),
                 )
                 .await;
             }

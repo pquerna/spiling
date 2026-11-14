@@ -49,6 +49,26 @@ pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 pub enum VerificationOutput {
     ReportOnly,
     ReportAndMotion,
+    /// The report plus the firmware delivery package, when the printer's
+    /// firmware takes one (Bambu Lab `.gcode.3mf`); other printers get the
+    /// report only.
+    ReportAndDeliveryPackage,
+    /// Motion display and the delivery package (when the printer takes one).
+    ReportMotionAndDeliveryPackage,
+}
+impl VerificationOutput {
+    pub fn motion(self) -> bool {
+        matches!(
+            self,
+            Self::ReportAndMotion | Self::ReportMotionAndDeliveryPackage
+        )
+    }
+    pub fn delivery_package(self) -> bool {
+        matches!(
+            self,
+            Self::ReportAndDeliveryPackage | Self::ReportMotionAndDeliveryPackage
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

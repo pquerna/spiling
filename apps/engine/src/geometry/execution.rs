@@ -51,10 +51,6 @@ impl JobStatus {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Bounded job observations stay inline without a per-result allocation"
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
     AnalysisFastenerPrepared {
@@ -139,6 +135,7 @@ pub(crate) enum JobResult {
         report: VerificationReport,
         provenance: ManufacturingInspectionProvenance,
         replay: Option<ReplayDisplayInfo>,
+        package: Option<spiling_contracts::manufacturing::DeliveryPackageInfo>,
     },
 }
 

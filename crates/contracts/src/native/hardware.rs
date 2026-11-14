@@ -622,7 +622,7 @@ impl TryFrom<HardwareCatalog> for rpc::HardwareCatalog {
     type Error = String;
     fn try_from(v: HardwareCatalog) -> Result<Self, String> {
         v.validate()?;
-        Ok(Self {
+        let wire = Self {
             models: v
                 .models
                 .into_iter()
@@ -638,7 +638,11 @@ impl TryFrom<HardwareCatalog> for rpc::HardwareCatalog {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<_, _>>()?,
-        })
+        };
+        if prost::Message::encoded_len(&wire) > crate::MAX_CONTROL_BYTES as usize {
+            return Err("hardware catalog exceeds one control frame".into());
+        }
+        Ok(wire)
     }
 }
 
@@ -678,6 +682,10 @@ impl TryFrom<rpc::MachineDescription> for MachineDescription {
             arc_moves: v.arc_moves,
             extruder_drive: super::manufacturing::drive_from_rpc(v.extruder_drive)?,
             printer_model: v.printer_model,
+            delivery: v
+                .delivery
+                .map(super::manufacturing::delivery_from_rpc)
+                .transpose()?,
             start_block: v.start_block.map(block_from_rpc).transpose()?,
             end_block: v.end_block.map(block_from_rpc).transpose()?,
             limits: v
@@ -713,6 +721,7 @@ impl TryFrom<MachineDescription> for rpc::MachineDescription {
             arc_moves: v.arc_moves,
             extruder_drive: super::manufacturing::drive_to_rpc(v.extruder_drive),
             printer_model: v.printer_model,
+            delivery: v.delivery.map(super::manufacturing::delivery_to_rpc),
             start_block: v.start_block.map(block_to_rpc),
             end_block: v.end_block.map(block_to_rpc),
             limits: v

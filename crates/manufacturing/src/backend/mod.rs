@@ -11,6 +11,7 @@ use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
 use std::sync::atomic::AtomicBool;
 
+mod bambu;
 mod lifecycle;
 
 /// Emit the explicit diagnostic, complete single-extruder or fixed-dual
@@ -33,12 +34,13 @@ pub fn emit(
         _ => None,
     };
     let dialect = intent.printer.capabilities.output_dialect;
-    if dialect == OutputDialect::BambuLabGcode3mfV1 {
-        return Err(error(
-            ManufacturingErrorCode::UnsupportedCapability,
-            "Bambu Lab firmware takes a .gcode.3mf delivery package, which is not yet supported; the plan is valid but no program is emitted",
-        ));
-    }
+    // Bambu programs carry header, executable-block and layer markers.
+    let bambu = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } if dialect == OutputDialect::BambuLabGcode3mfV1 => {
+            Some(bambu::Survey::new(plan, intent, job, cancel)?)
+        }
+        _ => None,
+    };
     let reservations = routed.map_or_else(
         || Ok(crate::routing::Reservations::default()),
         crate::routing::Reservations::new,
@@ -61,15 +63,31 @@ pub fn emit(
     // Complete single-extruder dialects take relative E: every E word is the
     // move's exact E8 delta of the tracked absolute target.
     let relative = dialect.relative_extrusion();
+    if let Some(survey) = &bambu {
+        survey.header(&mut program).map_err(limit)?;
+    }
+    program
+        .write_str(
+            "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\n",
+        )
+        .map_err(limit)?;
+    if bambu.is_some() {
+        program
+            .write_str("; EXECUTABLE_BLOCK_START\n")
+            .map_err(limit)?;
+    }
     program
         .write_str(if relative {
-            "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM83\n"
+            "G21\nG90\nM83\n"
         } else {
-            "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n"
+            "G21\nG90\nM82\n"
         })
         .map_err(limit)?;
     if routed.is_none() {
         program.write_str("G92 E0\n").map_err(limit)?;
+    }
+    if let Some(survey) = &bambu {
+        survey.progress(0, &mut program).map_err(limit)?;
     }
     let mut extrusion = 0.0f64;
     let mut emitted_extrusion = 0.0f64;
@@ -102,9 +120,10 @@ pub fn emit(
     // Highest emitted Z of a complete job: the park lifts above it.
     let mut top_z = f64::NEG_INFINITY;
     let mesh_area = lifecycle::first_layer_mesh_area(plan, &intent.printer);
+    let bambu_area = lifecycle::first_layer_bambu_area(plan, &intent.printer);
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         for step in &job.lifecycle.start {
-            match lifecycle::render(step, &intent.printer, job, mesh_area) {
+            match lifecycle::render(step, &intent.printer, job, mesh_area, bambu_area) {
                 lifecycle::Emit::Lines(lines) => {
                     for line in lines {
                         writeln!(program, "{line}").map_err(limit)?;
@@ -166,6 +185,11 @@ pub fn emit(
         |event| {
             use crate::realization::Event;
             match event {
+                Event::Layer(index) => {
+                    if let Some(survey) = &bambu {
+                        survey.layer(index, &mut program).map_err(limit)?;
+                    }
+                }
                 Event::Barrier => program.write_str("M400\n").map_err(limit)?,
                 Event::HotendTarget(tool, temperature) => {
                     writeln!(program, "M104 T{tool} S{temperature:.6}").map_err(limit)?
@@ -420,7 +444,7 @@ pub fn emit(
             )
         })?;
         for step in &job.lifecycle.end {
-            match lifecycle::render(step, &intent.printer, job, mesh_area) {
+            match lifecycle::render(step, &intent.printer, job, mesh_area, bambu_area) {
                 lifecycle::Emit::Lines(lines) => {
                     for line in lines {
                         writeln!(program, "{line}").map_err(limit)?;
@@ -507,6 +531,12 @@ pub fn emit(
         count_event(&mut process_events)?;
         writeln!(program, "M400\nG1 E{rounded:.8} F{:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
+    }
+    if let Some(survey) = &bambu {
+        survey.progress(usize::MAX, &mut program).map_err(limit)?;
+        program
+            .write_str("; EXECUTABLE_BLOCK_END\n")
+            .map_err(limit)?;
     }
     check_cancel(cancel)?;
     if program.long_line {

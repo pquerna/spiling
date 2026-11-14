@@ -29,6 +29,8 @@ pub use replay::*;
 pub use replay_index::*;
 mod job;
 pub use job::*;
+mod delivery;
+pub use delivery::*;
 mod lifecycle;
 pub use lifecycle::*;
 mod defaults;
@@ -5438,6 +5440,7 @@ pub enum ManufacturingResponse {
         resource: crate::ArtifactView,
         provenance: ManufacturingInspectionProvenance,
         replay_display: Option<ReplayDisplayDescriptor>,
+        delivery_package: Option<DeliveryPackageDescriptor>,
     },
     Preflight {
         report: PreflightReport,

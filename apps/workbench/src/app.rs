@@ -437,7 +437,9 @@ impl Workbench {
                         layout_id,
                         session_id,
                         base_revision,
-                        output: VerificationOutput::ReportAndMotion,
+                        // The engine adds the delivery package only for
+                        // printers whose firmware takes one (Bambu).
+                        output: VerificationOutput::ReportMotionAndDeliveryPackage,
                     },
                 })
             }

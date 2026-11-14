@@ -270,6 +270,7 @@ pub enum Product {
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
+        package: Option<spiling_manufacturing::delivery::EncodedDeliveryPackage>,
     },
 }
 pub enum Transition {
@@ -666,9 +667,17 @@ fn run(
                 .map(Product::BedPosePrepared)
                 .map_err(JobError::from),
             Work::Verify { asset, output } => {
-                inspect_asset(&asset, output, &cancel).map(|inspection| Product::Verified {
-                    record: asset.record.clone(),
-                    inspection,
+                inspect_asset(&asset, output, &cancel).and_then(|inspection| {
+                    let package = if output.delivery_package() {
+                        package_asset(&asset, &inspection.report, &definitions, &cancel)?
+                    } else {
+                        None
+                    };
+                    Ok(Product::Verified {
+                        record: asset.record.clone(),
+                        inspection,
+                        package,
+                    })
                 })
             }
             Work::Section {
@@ -1646,6 +1655,164 @@ fn remaining_section_capacity(prepared: usize, other_live: usize) -> Result<usiz
                 "native section coexisting owned capacity exhausted",
             )
         })
+}
+
+/// The delivery package around a freshly verified program, carrying each
+/// plate occurrence's coarse display mesh posed on the bed. `None` when the
+/// printer takes a plain program.
+fn package_asset(
+    asset: &ManufacturingAsset,
+    report: &spiling_contracts::manufacturing::VerificationReport,
+    definitions: &BTreeMap<DefinitionId, Resident>,
+    cancel: &AtomicBool,
+) -> Result<Option<spiling_manufacturing::delivery::EncodedDeliveryPackage>, JobError> {
+    let bundle = asset.decode().map_err(JobError::from)?;
+    if spiling_manufacturing::delivery::package_format(&bundle.provenance.intent).is_none() {
+        return Ok(None);
+    }
+    let mut objects = Vec::new();
+    // A part without any display mesh is left out of the package's 3D model
+    // (the program is the printer's authority) and named in its checks.
+    let mut omitted = Vec::new();
+    for occurrence in &bundle.provenance.occurrences {
+        let resident = definitions.get(&occurrence.definition_id).ok_or_else(|| {
+            JobError::from(GeometryError::new(
+                GeometryErrorCode::StaleRevision,
+                "packaged occurrence definition is not resident",
+            ))
+        })?;
+        match posed_mesh(&resident.definition, occurrence, cancel) {
+            Ok(object) => objects.push(object),
+            Err(JobError::Geometry { error }) if error.code != GeometryErrorCode::Cancelled => {
+                omitted.push((occurrence.occurrence_id.get(), error.message));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())
+        .map_err(JobError::from)?;
+    let working_set = crate::resources::manufacturing_working_set()?;
+    spiling_manufacturing::working_set::scope(working_set, || {
+        spiling_manufacturing::delivery_package(
+            &result,
+            &asset.record.hash,
+            report,
+            &objects,
+            cancel,
+        )
+    })
+    .map_err(JobError::from)
+    .map(|package| {
+        package.map(|mut package| {
+            if let Some((_, reason)) = omitted.first() {
+                let ids: Vec<String> = omitted.iter().map(|(id, _)| id.to_string()).collect();
+                let mut note = format!(
+                    "3D model omits {} occurrence(s) without a display mesh ({}): {reason}",
+                    omitted.len(),
+                    ids.join(", ")
+                );
+                note = note.replace(|c: char| !(' '..='~').contains(&c), "?");
+                note.truncate(256);
+                package.info.checks.push(note);
+            }
+            package
+        })
+    })
+}
+
+/// One occurrence's coarse (0.2 mm) display tessellation in printer
+/// coordinates: the stored pose applied to every reconstructed vertex.
+fn posed_mesh(
+    definition: &Definition,
+    occurrence: &OccurrenceRecord,
+    cancel: &AtomicBool,
+) -> Result<spiling_manufacturing::delivery::PackageObject, JobError> {
+    // Coarse display first (small package); the finest level last, since a
+    // part's tessellation work can fit at one level and not another.
+    let mut failure = None;
+    let mut mesh = None;
+    for profile in [
+        DisplayProfile::MeshTolerantMm02V1,
+        DisplayProfile::MeshTolerantMm1V1,
+    ] {
+        match definition.display(
+            profile,
+            cancel,
+            spiling_contracts::display::MeshBudget::FROZEN,
+            &mut GeometryWorkBudget::query(),
+            &mut |_| {},
+        ) {
+            Ok(m) => {
+                mesh = Some(m);
+                break;
+            }
+            Err(e) if e.code == GeometryErrorCode::Cancelled => return Err(e.into()),
+            Err(e) => failure = Some(e),
+        }
+    }
+    let mesh = mesh.ok_or_else(|| {
+        let e = failure.expect("a display level was attempted");
+        JobError::from(GeometryError::new(
+            e.code,
+            format!("no display mesh for the delivery package: {}", e.message),
+        ))
+    })?;
+    let session = spiling_contracts::geometry::SessionId::new();
+    let artifact = spiling_contracts::geometry::ArtifactId::new(1).expect("nonzero");
+    let pose = occurrence.pose;
+    let [x, y, z, w] = pose.rotation_xyzw;
+    let rotate = |v: [f64; 3]| {
+        // q * v * q^-1 for a unit quaternion.
+        let t = [
+            2.0 * (y * v[2] - z * v[1]),
+            2.0 * (z * v[0] - x * v[2]),
+            2.0 * (x * v[1] - y * v[0]),
+        ];
+        [
+            v[0] + w * t[0] + (y * t[2] - z * t[1]),
+            v[1] + w * t[1] + (z * t[0] - x * t[2]),
+            v[2] + w * t[2] + (x * t[1] - y * t[0]),
+        ]
+    };
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    for (index, chunk) in mesh.chunks.iter().enumerate() {
+        let metadata = chunk
+            .descriptor
+            .clone()
+            .into_metadata(session.clone(), artifact);
+        let view = spiling_contracts::display::validate_mesh_chunk(
+            &chunk.bytes,
+            &metadata,
+            &session,
+            artifact,
+            &occurrence.definition_id,
+            index as u32,
+        )
+        .map_err(JobError::from)?;
+        let base = u32::try_from(vertices.len()).map_err(|_| {
+            JobError::from(GeometryError::new(
+                GeometryErrorCode::ResourceLimit,
+                "packaged mesh exceeds u32 vertices",
+            ))
+        })?;
+        for p in view.positions.iter() {
+            let local = std::array::from_fn(|a| view.local_origin_mm[a] + f64::from(p[a]));
+            let r = rotate(local);
+            vertices.push(std::array::from_fn(|a| {
+                (r[a] + pose.translation_mm[a]) as f32
+            }));
+        }
+        let indices: Vec<u32> = view.indices.iter().collect();
+        for t in indices.as_chunks::<3>().0 {
+            triangles.push([base + t[0], base + t[1], base + t[2]]);
+        }
+    }
+    Ok(spiling_manufacturing::delivery::PackageObject {
+        name: format!("occurrence {}", occurrence.occurrence_id.get()),
+        vertices,
+        triangles,
+    })
 }
 
 fn inspect_asset(

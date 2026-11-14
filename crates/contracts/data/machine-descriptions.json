@@ -9,6 +9,7 @@
       "arc_moves": true,
       "extruder_drive": "direct_drive",
       "printer_model": null,
+      "delivery": null,
       "id": "generic.fff",
       "limits": [
         {
@@ -246,6 +247,7 @@
       "arc_moves": false,
       "extruder_drive": null,
       "printer_model": null,
+      "delivery": null,
       "id": "generic.klipper-cartesian",
       "limits": []
     },
@@ -258,6 +260,7 @@
       "arc_moves": null,
       "extruder_drive": "bowden",
       "printer_model": null,
+      "delivery": null,
       "id": "generic.marlin-bedslinger",
       "limits": [
         {
@@ -295,6 +298,7 @@
       "arc_moves": null,
       "extruder_drive": null,
       "printer_model": "MK4S",
+      "delivery": null,
       "id": "prusa.mk4s",
       "limits": [
         {
@@ -460,6 +464,12 @@
       "arc_moves": null,
       "extruder_drive": null,
       "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "N2S",
+        "printer_model": "Bambu Lab A1",
+        "plate": "textured_pei_plate"
+      },
       "id": "bambulab.a1",
       "limits": [
         {
@@ -561,6 +571,12 @@
       "arc_moves": null,
       "extruder_drive": null,
       "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "N1",
+        "printer_model": "Bambu Lab A1 mini",
+        "plate": "textured_pei_plate"
+      },
       "id": "bambulab.a1-mini",
       "limits": [
         {
@@ -646,6 +662,7 @@
       "arc_moves": null,
       "extruder_drive": "direct_drive",
       "printer_model": null,
+      "delivery": null,
       "id": "creality.ender-3-v3-se",
       "limits": [
         {

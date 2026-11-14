@@ -6961,6 +6961,8 @@ dependencies = [
  "boostvoronoi",
  "geo",
  "i_overlay",
+ "png",
+ "quick-xml",
  "rayon",
  "serde_json",
  "sha2 0.10.9",
@@ -6970,6 +6972,7 @@ dependencies = [
  "spiling-deposition-routing",
  "spiling-geometry",
  "spiling-surface-fields",
+ "zip",
 ]
 
 [[package]]

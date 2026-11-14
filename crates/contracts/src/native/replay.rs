@@ -15,6 +15,10 @@ impl TryFrom<rpc::VerificationOutput> for VerificationOutput {
         match value {
             rpc::VerificationOutput::ReportOnly => Ok(Self::ReportOnly),
             rpc::VerificationOutput::ReportAndMotion => Ok(Self::ReportAndMotion),
+            rpc::VerificationOutput::ReportAndDeliveryPackage => Ok(Self::ReportAndDeliveryPackage),
+            rpc::VerificationOutput::ReportMotionAndDeliveryPackage => {
+                Ok(Self::ReportMotionAndDeliveryPackage)
+            }
             _ => Err("verification output must be explicitly selected".into()),
         }
     }
@@ -25,6 +29,10 @@ impl TryFrom<VerificationOutput> for rpc::VerificationOutput {
         Ok(match value {
             VerificationOutput::ReportOnly => Self::ReportOnly,
             VerificationOutput::ReportAndMotion => Self::ReportAndMotion,
+            VerificationOutput::ReportAndDeliveryPackage => Self::ReportAndDeliveryPackage,
+            VerificationOutput::ReportMotionAndDeliveryPackage => {
+                Self::ReportMotionAndDeliveryPackage
+            }
         })
     }
 }
@@ -170,6 +178,67 @@ impl TryFrom<ReplayDisplayDescriptor> for rpc::ReplayDisplayDescriptor {
     }
 }
 
+impl TryFrom<rpc::DeliveryPackageDescriptor> for DeliveryPackageDescriptor {
+    type Error = String;
+    fn try_from(v: rpc::DeliveryPackageDescriptor) -> Result<Self, String> {
+        let info = required(v.info, "delivery package info")?;
+        let format = match rpc::DeliveryPackageFormat::try_from(info.format)
+            .map_err(|e| e.to_string())?
+        {
+            rpc::DeliveryPackageFormat::BambuGcode3mfV1 => DeliveryPackageFormat::BambuGcode3mfV1,
+            rpc::DeliveryPackageFormat::Unspecified => {
+                return Err("delivery package format must be explicit".into());
+            }
+        };
+        if info.members.len() > 32 || info.checks.len() > 64 {
+            return Err("delivery package lists exceed bound".into());
+        }
+        let value = Self {
+            info: DeliveryPackageInfo {
+                format,
+                bundle_hash: SourceHash::parse(info.bundle_hash).map_err(|e| e.to_string())?,
+                program_hash: SourceHash::parse(info.program_hash).map_err(|e| e.to_string())?,
+                program_md5: info.program_md5,
+                members: info.members,
+                checks: info.checks,
+            },
+            resource: super::artifact_to_view(
+                required(v.resource, "delivery package resource")?,
+                MAX_DELIVERY_PACKAGE_BYTES,
+            )?,
+        };
+        value.info.validate().map_err(|e| e.to_string())?;
+        if value.resource.media_type != value.info.format.media_type() {
+            return Err("delivery package media type mismatch".into());
+        }
+        Ok(value)
+    }
+}
+impl TryFrom<DeliveryPackageDescriptor> for rpc::DeliveryPackageDescriptor {
+    type Error = String;
+    fn try_from(v: DeliveryPackageDescriptor) -> Result<Self, String> {
+        v.info.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            info: Some(rpc::DeliveryPackageInfo {
+                format: match v.info.format {
+                    DeliveryPackageFormat::BambuGcode3mfV1 => {
+                        rpc::DeliveryPackageFormat::BambuGcode3mfV1 as i32
+                    }
+                },
+                bundle_hash: v.info.bundle_hash.as_str().into(),
+                program_hash: v.info.program_hash.as_str().into(),
+                program_md5: v.info.program_md5,
+                members: v.info.members,
+                checks: v.info.checks,
+            }),
+            resource: Some(super::artifact_from_view(
+                v.resource,
+                MAX_DELIVERY_PACKAGE_BYTES,
+            )?),
+        })
+    }
+}
+
 impl TryFrom<rpc::ReplayPage> for ReplayPage {
     type Error = String;
     fn try_from(v: rpc::ReplayPage) -> Result<Self, String> {
@@ -208,6 +277,71 @@ impl TryFrom<ReplayPage> for rpc::ReplayPage {
 mod tests {
     use super::*;
     use crate::geometry::{AabbMm, KernelIdentity};
+
+    #[test]
+    fn delivery_package_descriptor_and_job_delivery_round_trip_checked() {
+        let hash = SourceHash::from_bytes(b"package");
+        let descriptor = DeliveryPackageDescriptor {
+            info: DeliveryPackageInfo {
+                format: DeliveryPackageFormat::BambuGcode3mfV1,
+                bundle_hash: SourceHash::from_bytes(b"bundle"),
+                program_hash: SourceHash::from_bytes(b"program"),
+                program_md5: "D41D8CD98F00B204E9800998ECF8427E".into(),
+                members: vec![BAMBU_PLATE_GCODE.into()],
+                checks: vec!["member set".into()],
+            },
+            resource: crate::ArtifactView {
+                name: format!("artifacts/{}", hash.as_str()),
+                size_bytes: "10".into(),
+                sha256: hash.as_str().into(),
+                media_type: BAMBU_PACKAGE_MEDIA_TYPE.into(),
+            },
+        };
+        let wire = rpc::DeliveryPackageDescriptor::try_from(descriptor.clone()).unwrap();
+        assert_eq!(
+            DeliveryPackageDescriptor::try_from(wire.clone()).unwrap(),
+            descriptor
+        );
+        for change in 0..4 {
+            let mut bad = wire.clone();
+            let info = bad.info.as_mut().unwrap();
+            match change {
+                0 => info.program_md5 = "d41d8cd98f00b204e9800998ecf8427e".into(),
+                1 => info.members.clear(),
+                2 => info.format = 0,
+                _ => bad.resource.as_mut().unwrap().media_type = REPLAY_MEDIA_TYPE.into(),
+            }
+            assert!(
+                DeliveryPackageDescriptor::try_from(bad).is_err(),
+                "{change}"
+            );
+        }
+        for output in [
+            VerificationOutput::ReportOnly,
+            VerificationOutput::ReportAndMotion,
+            VerificationOutput::ReportAndDeliveryPackage,
+            VerificationOutput::ReportMotionAndDeliveryPackage,
+        ] {
+            let wire = rpc::VerificationOutput::try_from(output).unwrap();
+            assert_eq!(VerificationOutput::try_from(wire).unwrap(), output);
+        }
+        let package = DeliveryPackage::BambuGcode3mf {
+            printer_model_id: "N2S".into(),
+            printer_model: "Bambu Lab A1".into(),
+            plate: BambuPlate::TexturedPeiPlate,
+        };
+        let wire = super::super::manufacturing::delivery_to_rpc(package.clone());
+        assert_eq!(
+            super::super::manufacturing::delivery_from_rpc(wire.clone()).unwrap(),
+            package
+        );
+        let mut bad = wire;
+        let Some(rpc::delivery_package::Package::BambuGcode3mf(p)) = bad.package.as_mut() else {
+            unreachable!()
+        };
+        p.plate = 0;
+        assert!(super::super::manufacturing::delivery_from_rpc(bad).is_err());
+    }
 
     fn display() -> ReplayDisplayDescriptor {
         let hash = SourceHash::from_bytes(b"replay");
@@ -390,6 +524,7 @@ mod tests {
             record: record.clone(),
             provenance: provenance.clone(),
             replay_display: Some(descriptor.clone()),
+            delivery_package: None,
             report: VerificationReport {
                 job_time: None,
                 layer_height: crate::manufacturing::LayerHeightAssessment {

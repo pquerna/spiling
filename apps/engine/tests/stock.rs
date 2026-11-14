@@ -445,6 +445,7 @@ async fn compile_export(c: &EngineClient, path: &Path) -> String {
         resource,
         provenance,
         replay_display,
+        ..
     } = done(c, operation).await
     else {
         panic!("fresh actual replay")

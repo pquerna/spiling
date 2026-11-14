@@ -411,6 +411,7 @@
               "acceleration_mm_s2": 3000,
               "junction_deviation_mm": 0.013
             },
+            "delivery": null,
             "lifecycle": {
               "start": [
                 {

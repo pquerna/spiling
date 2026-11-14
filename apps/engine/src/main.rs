@@ -907,20 +907,24 @@ impl manufacturing_server::Manufacturing for Service {
         let command = req.try_into().map_err(|e: String| {
             request_error(spiling_contracts::native::manufacturing_request_status(&e))
         })?;
-        let reservation = match &command {
-            spiling_contracts::manufacturing::ManufacturingCommand::Inspect {
-                output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
-                ..
-            } => {
-                u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
-                    + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
-                    + u64::from(MAX_REPLAY_DISPLAY_BYTES)
+        let output = match &command {
+            spiling_contracts::manufacturing::ManufacturingCommand::Inspect { output, .. } => {
+                Some(*output)
             }
-            _ => {
-                u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
-                    + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
-            }
+            _ => None,
         };
+        let reservation = u64::from(MAX_MANUFACTURING_BUNDLE_BYTES)
+            + u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
+            + if output.is_some_and(|o| o.motion()) {
+                u64::from(MAX_REPLAY_DISPLAY_BYTES)
+            } else {
+                0
+            }
+            + if output.is_some_and(|o| o.delivery_package()) {
+                spiling_contracts::manufacturing::MAX_DELIVERY_PACKAGE_BYTES
+            } else {
+                0
+            };
         let input = jobs::NativeAdmission {
             parent,
             request_id: id,

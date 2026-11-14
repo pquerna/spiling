@@ -758,9 +758,8 @@ impl HardwareCatalog {
         for p in &self.plates {
             p.validate()?
         }
-        if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > MAX_HARDWARE_BYTES {
-            return Err("hardware catalog exceeds bounded control size".into());
-        }
+        // The catalog's only bound is its one-frame wire encoding, checked
+        // where it is encoded (`native::hardware`).
         Ok(())
     }
 }

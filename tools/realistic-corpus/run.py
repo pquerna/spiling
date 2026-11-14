@@ -371,6 +371,10 @@ def part(name, intent, results):
         if reference.get("estimated_seconds") and report.get("estimated_seconds"):
             record["time_ratio"] = round(report["estimated_seconds"] / reference["estimated_seconds"], 4)
         record["adhesion"] = plan["adhesion"]
+        # Printers whose firmware takes a delivery package (Bambu) export it
+        # beside the program.
+        record["delivery_package"] = os.path.exists(
+            os.path.join(cwd, "out", "program.gcode.3mf"))
         layers = plan["layers"]
         spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
         record["layers"] = len(layers)
@@ -386,7 +390,7 @@ def part(name, intent, results):
     print(name, "prusa", record["prusa"]["ok"], "| spiling", c["ok"],
           (c["error"] or {}).get("code"), "| return", (record.get("spiling_return") or {}).get("ok"),
           "| filament", record.get("filament_ratio"), "time", record.get("time_ratio"),
-          flush=True)
+          "| package", record.get("delivery_package"), flush=True)
 
 
 

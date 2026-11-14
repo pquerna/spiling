@@ -1182,6 +1182,7 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             first_layer_nozzle_temperature_c: 200.0,
             first_layer_bed_temperature_c: 60.0,
             timing_model: None,
+            delivery: None,
         },
     };
     crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
@@ -4471,6 +4472,7 @@ fn shipped_dialect(
     intent.printer.capabilities.output_dialect = setup.printer.capabilities.output_dialect;
     if let JobWorkflow::CompleteMarlin { job } = &mut intent.printer.workflow {
         job.lifecycle = derived.lifecycle.clone();
+        job.delivery = derived.delivery.clone();
     }
     intent
 }
@@ -4515,6 +4517,13 @@ fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
         "BED_MESH_PROFILE",
         "BED_MESH_CLEAR",
     ];
+    // Bambu Lab: every command word that Bambu Studio 02.09.01.70's own A1
+    // and A1 mini exports use (no public firmware G-code reference exists).
+    const BAMBU: &[&str] = &[
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G29.2", "G90", "G92", "M18", "M73", "M83",
+        "M104", "M106", "M109", "M140", "M190", "M220", "M221", "M400", "M412", "M622", "M623",
+        "M975", "M991", "M1002",
+    ];
     let code = line.split_once(';').map_or(line, |(code, _)| code).trim();
     let Some(word) = code.split_ascii_whitespace().next() else {
         return Ok(());
@@ -4523,6 +4532,7 @@ fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
         OutputDialect::Marlin2SingleExtruderGcodeV1 => MARLIN,
         OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => PRUSA,
         OutputDialect::KlipperSingleExtruderGcodeV1 => KLIPPER,
+        OutputDialect::BambuLabGcode3mfV1 => BAMBU,
         _ => return Err(format!("{dialect:?} has no documented command set")),
     };
     if !set.contains(&word) {
@@ -4555,12 +4565,6 @@ fn shipped_setups_emit_only_their_dialects_documented_commands() {
     for setup in catalog.setups.iter().filter(|s| s.machine.is_some()) {
         let intent = shipped_dialect(setup);
         let dialect = intent.printer.capabilities.output_dialect;
-        if dialect == OutputDialect::BambuLabGcode3mfV1 {
-            let error = emit_text(&plan, &intent, &cancel).unwrap_err();
-            assert_eq!(error.code, ManufacturingErrorCode::UnsupportedCapability);
-            assert!(error.message.contains(".gcode.3mf"), "{error:?}");
-            continue;
-        }
         let program = emit_text(&plan, &intent, &cancel).unwrap();
         let report = verify(&program, &plan, &intent, &cancel).unwrap();
         assert!(
@@ -4575,6 +4579,9 @@ fn shipped_setups_emit_only_their_dialects_documented_commands() {
         let probe = match dialect {
             OutputDialect::KlipperSingleExtruderGcodeV1 => "\nBED_MESH_CALIBRATE\n",
             OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => "\nG29 A\n",
+            OutputDialect::BambuLabGcode3mfV1 => {
+                "\nM109 S140\nG29.2 S1\nM1002 judge_flag g29_before_print_flag\nM622 J1\nG29 A1 "
+            }
             _ => "\nG28\nM190 R60\nG29\n",
         };
         assert!(program.contains(probe), "{}: {program}", setup.id);
@@ -4585,7 +4592,7 @@ fn shipped_setups_emit_only_their_dialects_documented_commands() {
         );
         dialects.insert(format!("{dialect:?}"));
     }
-    assert_eq!(dialects.len(), 3, "{dialects:?}");
+    assert_eq!(dialects.len(), 4, "{dialects:?}");
 }
 
 #[test]
@@ -4634,6 +4641,95 @@ fn prusa_lifecycle_checks_printer_and_probes_at_standby() {
         let mutated = program.replacen(from, to, 1);
         assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
     }
+}
+
+#[test]
+fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "bambulab.a1.04")
+        .unwrap();
+    let intent = shipped_dialect(setup);
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    let lines: Vec<&str> = program.lines().collect();
+    assert_eq!(lines[0], "; HEADER_BLOCK_START");
+    let layers = format!("; total layer number: {}", plan.layers.len());
+    assert!(lines.contains(&layers.as_str()), "{program}");
+    let exec = lines
+        .iter()
+        .position(|l| *l == "; EXECUTABLE_BLOCK_START")
+        .unwrap();
+    assert_eq!(lines.last(), Some(&"; EXECUTABLE_BLOCK_END"));
+    assert_eq!(
+        lines[exec + 1..exec + 25],
+        [
+            "G21",
+            "G90",
+            "M83",
+            "G92 E0",
+            lines[exec + 5],
+            "M220 S100",
+            "M221 S100",
+            "M106 S0",
+            "M975 S1",
+            "M412 S1",
+            "M140 S60",
+            "M104 S140",
+            "M109 S140",
+            "G28 T145",
+            "M190 S60",
+            "M104 S140",
+            "M109 S140",
+            "G29.2 S1",
+            "M1002 judge_flag g29_before_print_flag",
+            "M622 J1",
+            "G29 A1 X1 Y1 I5 J4",
+            "M400",
+            "M623",
+            "M109 S200",
+        ],
+        "{program}"
+    );
+    assert!(lines[exec + 5].starts_with("M73 P0 R"));
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("M73 L")).count(),
+        plan.layers.len()
+    );
+    assert!(program.ends_with("M18 X Y Z\nM73 P100 R0\n; EXECUTABLE_BLOCK_END\n"));
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.contains("Bambu vibration suppression")),
+        "{:?}",
+        report.limitations
+    );
+    for (from, to) in [
+        ("M991 S0 P0\n", ""),
+        ("M73 L2\n", ""),
+        ("M73 L1\nM991 S0 P0\n", ""),
+        ("M73 P100 R0\n", ""),
+        ("M73 L1\n", "M73 L2\n"),
+        ("G28 T145\n", "G28\n"),
+        ("M622 J1\n", ""),
+        ("M109 S140\n", ""),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert_ne!(mutated, program, "{from}");
+        assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
+    // A marker moved after the layer's first motion fails.
+    let first = program.find("M73 L1\nM991 S0 P0\n").unwrap();
+    let mut moved = program.replacen("M73 L1\nM991 S0 P0\n", "", 1);
+    let after = moved[first..].find("\nG1 ").unwrap() + first + 1;
+    let end = moved[after..].find('\n').unwrap() + after + 1;
+    moved.insert_str(end, "M73 L1\nM991 S0 P0\n");
+    assert!(verify(&moved, &plan, &intent, &cancel).is_err());
 }
 
 fn klipper_macros() -> (LifecycleBlock, LifecycleBlock) {

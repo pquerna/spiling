@@ -41,7 +41,7 @@ pub(super) struct Printer {
 fn emission(capture: &ProjectHardwareCapture) -> &'static str {
     match capture.setup.printer.capabilities.output_dialect {
         OutputDialect::BambuLabGcode3mfV1 => {
-            "plans and verifies; program emission refused until .gcode.3mf delivery exists"
+            "Bambu .gcode.3mf package (program.gcode.3mf) beside plain G-code"
         }
         _ => "plain G-code",
     }

@@ -132,13 +132,22 @@ export type MachineLayer = { id: string, parent: string | null, firmware: Firmwa
 /**
  * Model identifier the firmware checks (Prusa `M862.3`), if any.
  */
-printer_model: string | null, limits: Array<SourcedLimit>, };
+printer_model: string | null,
+/**
+ * The delivery package the firmware consumes (Bambu `.gcode.3mf`).
+ */
+delivery: DeliveryPackage | null, limits: Array<SourcedLimit>, };
 
 export type MachineDescription = { id: string,
 /**
  * Inheritance chain, root first, ending with `id`.
  */
 lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics, levelling: BedLevelling, heated_bed: boolean, arc_moves: boolean, extruder_drive: ExtruderDrive, printer_model: string | null,
+/**
+ * The delivery package the firmware consumes; required exactly for the
+ * Bambu Lab family.
+ */
+delivery: DeliveryPackage | null,
 /**
  * Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
  */
@@ -538,7 +547,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "analysis_fastener_prepared", preparation: AnalysisFastenerPreparation, } | { "kind": "analysis_face_prepared", preparation: AnalysisFacePreparation, } | { "kind": "analysis_result_prepared", project_id: ProjectId, read_revision: ProjectRevision, record: AnalysisResultRecord, resource: ArtifactView, } | { "kind": "analysis_completed", project_id: ProjectId, captured_revision: ProjectRevision, input_hash: SourceHash, resource: ArtifactView, } | { "kind": "project_storage_maintained", action: StorageMaintenanceAction, stats: ProjectStorageStats, } | { "kind": "optical_construction_applied", info: ProjectInfo, construction_index: number, } | { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "layout_prepared", proposal: LayoutProposal, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "project_save_uncertain", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "stock_matched", project_id: ProjectId, captured_revision: ProjectRevision, record: StockMatchRecord, resource: ArtifactView, } | { "kind": "optical_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: OpticalReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_alternative_evaluated", evaluation: ManufacturingAlternativeEvaluation, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
+export type JobResult = { "kind": "analysis_fastener_prepared", preparation: AnalysisFastenerPreparation, } | { "kind": "analysis_face_prepared", preparation: AnalysisFacePreparation, } | { "kind": "analysis_result_prepared", project_id: ProjectId, read_revision: ProjectRevision, record: AnalysisResultRecord, resource: ArtifactView, } | { "kind": "analysis_completed", project_id: ProjectId, captured_revision: ProjectRevision, input_hash: SourceHash, resource: ArtifactView, } | { "kind": "project_storage_maintained", action: StorageMaintenanceAction, stats: ProjectStorageStats, } | { "kind": "optical_construction_applied", info: ProjectInfo, construction_index: number, } | { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "layout_prepared", proposal: LayoutProposal, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "project_save_uncertain", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "stock_matched", project_id: ProjectId, captured_revision: ProjectRevision, record: StockMatchRecord, resource: ArtifactView, } | { "kind": "optical_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: OpticalReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_alternative_evaluated", evaluation: ManufacturingAlternativeEvaluation, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, delivery_package: DeliveryPackageDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, } | { "domain": "library", error: LibraryError, };
 
@@ -751,7 +760,12 @@ first_layer_nozzle_temperature_c: number, first_layer_bed_temperature_c: number,
 /**
  * Declared motion limits for the independent print-time estimate.
  */
-timing_model: PrintTimeModel | null, };
+timing_model: PrintTimeModel | null,
+/**
+ * The package the printer's firmware consumes the program in, when it
+ * takes one instead of a bare G-code file (Bambu Lab `.gcode.3mf`).
+ */
+delivery: DeliveryPackage | null, };
 
 export type DeclaredJobTimeModel = { id: string, revision: string, linear_acceleration_mm_s2: number, filament_acceleration_mm_s2: number, tool_activation_seconds: [number, number], command_overhead_seconds: number, };
 
@@ -1264,7 +1278,7 @@ cooling_slowed_layers: number, minimum_cooling_scale: number,
  */
 estimated_seconds: number | null, };
 
-export type VerificationOutput = "report_only" | "report_and_motion";
+export type VerificationOutput = "report_only" | "report_and_motion" | "report_and_delivery_package" | "report_motion_and_delivery_package";
 
 export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, workflow: JobWorkflow, surface_color: Array<SurfaceColorInspection>, };
 
@@ -1318,7 +1332,7 @@ export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: Source
 
 export type ManufacturingCommand = { "op": "get", layout_id: PrintLayoutId, session_id: SessionId, } | { "op": "set_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "edit_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, edit: InteriorToolPolicyEdit, } | { "op": "review_materials", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: MaterialReviewRequest, } | { "op": "apply_material_profile", tool_id: string | null, layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, selection: MaterialProfileSelection, } | { "op": "create_default_intent", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, request: DefaultIntentRequest, } | { "op": "compile", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "evaluate_interior_policy", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, opportunity: InteriorPolicyOpportunity, } | { "op": "evaluate_alternative", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, expected_context_hash: SourceHash, intent: ManufacturingIntent, } | { "op": "preflight", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", layout_id: PrintLayoutId, session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
-export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", interior_opportunity: InteriorPolicyOpportunity | null, info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
+export type ManufacturingResponse = { "type": "material_review", report: MaterialReviewReport, } | { "type": "status", interior_opportunity: InteriorPolicyOpportunity | null, info: ProjectInfo, context_hash: SourceHash, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, delivery_package: DeliveryPackageDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_MATERIAL_DOMAINS = 24 as const;
 export const MAX_FUNCTIONAL_KEYS = 16 as const;

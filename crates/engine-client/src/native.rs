@@ -14,9 +14,10 @@ use spiling_contracts::{
         MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SceneSummary, SessionId, SourceHash,
     },
     manufacturing::{
-        MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
-        ManufacturingBundle, ManufacturingCommand, ManufacturingError, ManufacturingErrorCode,
-        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle_from, validate_replay_reader,
+        DeliveryPackageDescriptor, MAX_DELIVERY_PACKAGE_BYTES, MAX_MANUFACTURING_BUNDLE_BYTES,
+        MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord, ManufacturingBundle,
+        ManufacturingCommand, ManufacturingError, ManufacturingErrorCode, ManufacturingResponse,
+        ReplayDisplayDescriptor, decode_bundle_from, validate_replay_reader,
     },
     native::{self, GeometryCall, ManufacturingCall, NativeOperationView, ProjectCall},
     project::{ProjectCommand, ProjectResponse, ProjectRevision},
@@ -1270,6 +1271,27 @@ impl EngineRpc {
         validate_replay_reader(source.reader(), descriptor)?;
         Ok(source)
     }
+    /// The verified firmware delivery package (Bambu `.gcode.3mf`), spooled,
+    /// checked against its descriptor and the bundle record it carries.
+    pub async fn fetch_delivery_package(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &DeliveryPackageDescriptor,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        descriptor.validate_for_record(record)?;
+        let size = native::validate_artifact_view(&descriptor.resource, MAX_DELIVERY_PACKAGE_BYTES)
+            .map_err(|e| corrupt_manufacturing(&e))?;
+        let source = self
+            .read_frames_spooled(&descriptor.resource.name, size)
+            .await?;
+        if source.len() != size
+            || spiling_contracts::geometry::SourceHash::from_digest(source.digest()).as_str()
+                != descriptor.resource.sha256
+        {
+            return Err(corrupt_manufacturing("delivery package checksum mismatch"));
+        }
+        Ok(source)
+    }
     /// Explicit contiguous convenience for small offline callers. Native Review
     /// and CLI file export consume the spooled document API instead.
     pub async fn fetch_replay_display(
@@ -1434,5 +1456,12 @@ impl EngineClient {
         descriptor: &ReplayDisplayDescriptor,
     ) -> Result<Vec<u8>, ClientError> {
         self.rpc.fetch_replay_display(record, descriptor).await
+    }
+    pub async fn fetch_delivery_package(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &DeliveryPackageDescriptor,
+    ) -> Result<spiling_chunks::ChunkSource, ClientError> {
+        self.rpc.fetch_delivery_package(record, descriptor).await
     }
 }

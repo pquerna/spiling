@@ -37,6 +37,7 @@ const layer = (l: Partial<MachineLayer> & Pick<MachineLayer, "id" | "limits">): 
   arc_moves: null,
   extruder_drive: null,
   printer_model: null,
+  delivery: null,
   ...l,
 });
 
@@ -142,11 +143,20 @@ const mk4s = layer({
 });
 // bambulab.com tech-spec tables, as reproduced by an authorised reseller.
 const a1Url = "https://bambulab.com/en/a1/tech-specs (via crcibernetica.com/bambu-lab-a1)";
+// Package identities as Bambu Studio 02.09.01.70 declares them: `model_id`
+// and `printer_model` in resources/profiles/BBL/machine/Bambu Lab A1*.json;
+// both machines ship with the Textured PEI plate (bambulab.com tech specs).
 const a1 = layer({
   id: "bambulab.a1",
   parent: fff.id,
   firmware: "bambu_lab",
   kinematics: "bed_slinger",
+  delivery: {
+    kind: "bambu_gcode3mf",
+    printer_model_id: "N2S",
+    printer_model: "Bambu Lab A1",
+    plate: "textured_pei_plate",
+  },
   limits: [
     ...published(a1Url, {
       bed_x_mm: 256,
@@ -172,6 +182,12 @@ const a1Mini = layer({
   parent: fff.id,
   firmware: "bambu_lab",
   kinematics: "bed_slinger",
+  delivery: {
+    kind: "bambu_gcode3mf",
+    printer_model_id: "N1",
+    printer_model: "Bambu Lab A1 mini",
+    plate: "textured_pei_plate",
+  },
   limits: published(a1MiniUrl, {
     bed_x_mm: 180,
     bed_y_mm: 180,

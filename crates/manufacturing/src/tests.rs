@@ -3978,3 +3978,119 @@ fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
     // A printer without arc moves never accepts one.
     assert!(replay(arc_program, &lines).is_err());
 }
+
+#[test]
+fn bambu_inspection_writes_and_independently_rereads_a_deterministic_package() {
+    use spiling_contracts::hardware::builtin_catalog;
+    let catalog = builtin_catalog().unwrap();
+    let setup = catalog.find_setup("bambulab.a1-mini.04").unwrap();
+    let selection = crate::generic_selection(setup, "pla").unwrap();
+    let hardware = std::sync::Arc::new(catalog.stock_capture(setup).unwrap());
+    let requested = crate::create_default_intent(
+        hardware,
+        selection,
+        crate::QualityPreset::Draft,
+        crate::SupportChoice::Off,
+    )
+    .unwrap();
+    let mut pose = RigidPoseMm::IDENTITY;
+    pose.translation_mm = [80.0, 80.0, 0.0];
+    let scene = Scene::new(BOX, &[pose]);
+    let bundle = scene.compile(&requested).unwrap();
+    let bytes = encode(&bundle);
+    let hash = SourceHash::from_bytes(&bytes);
+    let cancel = AtomicBool::new(false);
+    let report = inspect_bundle(&bundle, &hash, VerificationOutput::ReportOnly, &cancel)
+        .unwrap()
+        .report;
+    let cube = delivery::PackageObject {
+        name: "box".into(),
+        vertices: vec![
+            [80.0, 80.0, 0.0],
+            [90.0, 80.0, 0.0],
+            [80.0, 90.0, 0.0],
+            [80.0, 80.0, 8.0],
+        ],
+        triangles: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    };
+    let objects = [cube];
+    let inspect = || {
+        delivery_package(&bundle, &hash, &report, &objects, &cancel)
+            .unwrap()
+            .unwrap()
+    };
+    let first = inspect();
+    let package = &first;
+    assert_eq!(package.info.format, DeliveryPackageFormat::BambuGcode3mfV1);
+    assert_eq!(package.info.bundle_hash, hash);
+    assert_eq!(package.info.members.len(), 13);
+    // Deterministic bytes for one bundle.
+    assert_eq!(inspect().bytes, package.bytes);
+    // Tampering with any member is caught by the independent reader.
+    let original = package.bytes.to_vec().unwrap();
+    let rewrite = |name: &str, edit: &dyn Fn(Vec<u8>) -> Vec<u8>| {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&original)).unwrap();
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).unwrap();
+            let member = file.name().to_string();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut data).unwrap();
+            if member == name {
+                data = edit(data);
+            }
+            out.start_file(member, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut out, &data).unwrap();
+        }
+        let bytes = out.finish().unwrap().into_inner();
+        ChunkSource::from_slice(&bytes, MAX_DELIVERY_PACKAGE_BYTES).unwrap()
+    };
+    let reread = |package: &ChunkSource| {
+        verifier::package::verify_bambu_package(
+            package,
+            &bundle.program,
+            &bundle.bundle,
+            &hash,
+            &report,
+            1,
+            &cancel,
+        )
+    };
+    reread(&rewrite("none", &|d| d)).unwrap();
+    let replace = |from: &'static str, to: &'static str| {
+        move |d: Vec<u8>| {
+            String::from_utf8(d)
+                .unwrap()
+                .replacen(from, to, 1)
+                .into_bytes()
+        }
+    };
+    for (member, edit) in [
+        (
+            "Metadata/plate_1.gcode.md5",
+            &(|_| b"00000000000000000000000000000000".to_vec()) as &dyn Fn(Vec<u8>) -> Vec<u8>,
+        ),
+        ("Metadata/plate_1.gcode", &replace("M73 L1\n", "M73 L1 \n")),
+        (
+            "Metadata/slice_info.config",
+            &replace("value=\"N1\"", "value=\"N2S\""),
+        ),
+        (
+            "Metadata/plate_1.json",
+            &replace("textured_plate", "cool_plate"),
+        ),
+        (
+            "Metadata/project_settings.config",
+            &replace("A1 mini", "A1"),
+        ),
+        (
+            "Metadata/model_settings.config",
+            &replace("plate_1.gcode", "plate_2.gcode"),
+        ),
+        ("3D/3dmodel.model", &replace("v3=\"1\"", "v3=\"9\"")),
+        ("3D/3dmodel.model", &replace("x=\"90\"", "x=\"900\"")),
+    ] {
+        assert!(reread(&rewrite(member, edit)).is_err(), "{member}");
+    }
+}

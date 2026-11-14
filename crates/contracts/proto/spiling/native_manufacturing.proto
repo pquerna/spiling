@@ -217,12 +217,33 @@ message ManufacturingVerifiedResult {
   Artifact resource = 3;
   ManufacturingInspectionProvenance provenance = 4;
   ReplayDisplayDescriptor replay_display = 5;
+  // Present when the request asked for it and the printer's firmware takes a
+  // delivery package (Bambu Lab .gcode.3mf).
+  DeliveryPackageDescriptor delivery_package = 6;
 }
 
 enum VerificationOutput {
   VERIFICATION_OUTPUT_UNSPECIFIED = 0;
   REPORT_ONLY = 1;
   REPORT_AND_MOTION = 2;
+  REPORT_AND_DELIVERY_PACKAGE = 3;
+  REPORT_MOTION_AND_DELIVERY_PACKAGE = 4;
+}
+enum DeliveryPackageFormat {
+  DELIVERY_PACKAGE_FORMAT_UNSPECIFIED = 0;
+  BAMBU_GCODE_3MF_V1 = 1;
+}
+message DeliveryPackageInfo {
+  DeliveryPackageFormat format = 1;
+  string bundle_hash = 2;
+  string program_hash = 3;
+  string program_md5 = 4;
+  repeated string members = 5;
+  repeated string checks = 6;
+}
+message DeliveryPackageDescriptor {
+  DeliveryPackageInfo info = 1;
+  Artifact resource = 2;
 }
 message ManufacturingInspectionProvenance {
   string project_id = 1;

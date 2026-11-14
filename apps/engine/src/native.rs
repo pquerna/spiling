@@ -12,7 +12,7 @@ use spiling_contracts::{
     geometry::{
         ArtifactChunkMetadata, ArtifactId, GeometryResponse, SceneRevision, SessionId, SourceHash,
     },
-    manufacturing::{ManufacturingResponse, ReplayDisplayDescriptor},
+    manufacturing::{DeliveryPackageDescriptor, ManufacturingResponse, ReplayDisplayDescriptor},
     project::ProjectRevision,
     rpc::Artifact,
 };
@@ -574,7 +574,7 @@ fn publish_terminal(
         geometry::JobResult::SurfaceImageImported { .. }
             | geometry::JobResult::AppearancePaletteImported { .. }
     ) {
-        let result = public_result(private, resources, None)?;
+        let result = public_result(private, resources, None, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
     }
@@ -588,7 +588,7 @@ fn publish_terminal(
             | geometry::JobResult::OpticalConstructionApplied { .. }
             | geometry::JobResult::ProjectStorageMaintained { .. }
     ) {
-        let result = public_result(private, resources, None)?;
+        let result = public_result(private, resources, None, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
     }
@@ -670,7 +670,32 @@ fn publish_terminal(
         }
         _ => None,
     };
-    let result = public_result(private, resources, replay_display)?;
+    let delivery_package = match &private {
+        geometry::JobResult::ManufacturingVerified {
+            record,
+            package: Some(info),
+            ..
+        } => {
+            let package = runtime
+                .package_publication(id)
+                .ok_or_else(|| Status::internal("ACK package bytes missing"))?;
+            if &package.info != info {
+                return Err(Status::data_loss("ACK package metadata mismatch"));
+            }
+            let artifact = jobs.describe_package_artifact(&package.bytes, info.format)?;
+            let descriptor = DeliveryPackageDescriptor {
+                info: info.clone(),
+                resource: view(&artifact)?,
+            };
+            descriptor
+                .validate_for_record(record)
+                .map_err(|e| domain_tonic(e.into()))?;
+            outputs.push((artifact, (&package.bytes).into()));
+            Some(descriptor)
+        }
+        _ => None,
+    };
+    let result = public_result(private, resources, replay_display, delivery_package)?;
     jobs.native_finish(name, Ok(result), outputs)?;
     runtime.release_replay_publication(id);
     Ok(true)
@@ -799,6 +824,7 @@ fn public_result(
     result: geometry::JobResult,
     resources: &BTreeMap<String, Artifact>,
     replay_display: Option<ReplayDisplayDescriptor>,
+    delivery_package: Option<DeliveryPackageDescriptor>,
 ) -> Result<spiling_contracts::geometry::JobResult, Status> {
     use spiling_contracts::geometry::JobResult as Public;
     Ok(match result {
@@ -879,9 +905,12 @@ fn public_result(
             report,
             provenance,
             replay,
+            package,
         } => {
-            if replay.is_some() != replay_display.is_some() {
-                return Err(Status::internal("ACK replay descriptor missing"));
+            if replay.is_some() != replay_display.is_some()
+                || package.is_some() != delivery_package.is_some()
+            {
+                return Err(Status::internal("ACK replay or package descriptor missing"));
             }
             let descriptor = resource(record.hash.as_str(), resources)?;
             Public::ManufacturingVerified {
@@ -889,6 +918,7 @@ fn public_result(
                 report,
                 provenance,
                 replay_display,
+                delivery_package,
                 resource: descriptor,
             }
         }

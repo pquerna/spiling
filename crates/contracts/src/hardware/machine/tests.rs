@@ -145,6 +145,7 @@ fn inheritance_refuses_cycles_missing_facts_and_foreign_defaults() {
         heated_bed: None,
         arc_moves: None,
         printer_model: None,
+        delivery: None,
         limits: vec![],
         extruder_drive: None,
     };
@@ -213,13 +214,27 @@ fn firmware_family_selects_dialect_and_lifecycle_table() {
         assert!(!l.start.contains(&S::LevellingOff) && !l.start.contains(&S::CelsiusUnits));
         assert_eq!(
             l.start.contains(&S::VolumetricOff),
-            matches!(
-                dialect,
-                D::Marlin2SingleExtruderGcodeV1 | D::BambuLabGcode3mfV1
-            ),
+            dialect == D::Marlin2SingleExtruderGcodeV1,
+            "{id}"
+        );
+        // Bambu packages its program; no other dialect declares a package.
+        let job = match &s.printer.workflow {
+            JobWorkflow::CompleteMarlin { job } => job,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            job.delivery.is_some(),
+            dialect == D::BambuLabGcode3mfV1,
             "{id}"
         );
     }
+    // Bambu homes and probes at a waited 140 °C standby and enables its
+    // printer services first.
+    let a1 = lifecycle(get("bambulab.a1.04"));
+    let standby = Some(140.0);
+    let at = |step: &S| a1.start.iter().position(|x| x == step).unwrap();
+    assert!(at(&S::NozzleWait { standby_c: standby }) < at(&S::Home));
+    assert!(matches!(&a1.start[3], S::Block { block } if block.lines == ["M975 S1", "M412 S1"]));
     let mk4s = lifecycle(get("prusa.mk4s.04"));
     assert_eq!(
         mk4s.start[..2],

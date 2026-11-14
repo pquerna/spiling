@@ -1082,6 +1082,7 @@ impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
                             acceleration_mm_s2: m.acceleration_mm_s2,
                             junction_deviation_mm: m.junction_deviation_mm,
                         }),
+                        delivery: job.delivery.map(delivery_from_rpc).transpose()?,
                     },
                 }
             }
@@ -1132,10 +1133,55 @@ impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
                             acceleration_mm_s2: m.acceleration_mm_s2,
                             junction_deviation_mm: m.junction_deviation_mm,
                         }),
+                        delivery: job.delivery.map(delivery_to_rpc),
                     })
                 }
             }),
         })
+    }
+}
+const BAMBU_PLATES: [(rpc::BambuPlate, BambuPlate); 4] = [
+    (rpc::BambuPlate::Cool, BambuPlate::CoolPlate),
+    (rpc::BambuPlate::Engineering, BambuPlate::EngineeringPlate),
+    (rpc::BambuPlate::HighTemp, BambuPlate::HighTempPlate),
+    (rpc::BambuPlate::TexturedPei, BambuPlate::TexturedPeiPlate),
+];
+pub(super) fn delivery_from_rpc(value: rpc::DeliveryPackage) -> Result<DeliveryPackage, String> {
+    use rpc::delivery_package::Package;
+    let package = match required(value.package, "delivery package")? {
+        Package::BambuGcode3mf(p) => {
+            let plate = rpc::BambuPlate::try_from(p.plate).map_err(|e| e.to_string())?;
+            DeliveryPackage::BambuGcode3mf {
+                printer_model_id: p.printer_model_id,
+                printer_model: p.printer_model,
+                plate: BAMBU_PLATES
+                    .iter()
+                    .find(|(wire, _)| *wire == plate)
+                    .map(|(_, plate)| *plate)
+                    .ok_or("unspecified Bambu plate")?,
+            }
+        }
+    };
+    package.validate().map_err(|e| e.to_string())?;
+    Ok(package)
+}
+pub(super) fn delivery_to_rpc(value: DeliveryPackage) -> rpc::DeliveryPackage {
+    use rpc::delivery_package::Package;
+    match value {
+        DeliveryPackage::BambuGcode3mf {
+            printer_model_id,
+            printer_model,
+            plate,
+        } => rpc::DeliveryPackage {
+            package: Some(Package::BambuGcode3mf(rpc::BambuGcode3mfPackage {
+                printer_model_id,
+                printer_model,
+                plate: BAMBU_PLATES
+                    .iter()
+                    .find(|(_, p)| *p == plate)
+                    .map_or(0, |(wire, _)| *wire as i32),
+            })),
+        },
     }
 }
 impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
@@ -2658,6 +2704,7 @@ mod job_wire_tests {
                 first_layer_nozzle_temperature_c: 200.0,
                 first_layer_bed_temperature_c: 60.0,
                 timing_model: None,
+                delivery: None,
             },
         };
         let wire = rpc::ManufacturingIntent::try_from(intent.clone()).unwrap();

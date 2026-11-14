@@ -4,6 +4,7 @@
 
 //! Software-only native-section manufacturing, with mandatory independent replay.
 pub mod backend;
+pub mod delivery;
 mod material;
 mod selection;
 pub use material::{
@@ -233,9 +234,9 @@ pub fn inspect_bundle(
 ) -> Result<ManufacturingInspection, ManufacturingError> {
     validate_inspection_bundle(result, cancel)?;
     let bundle = &result.bundle;
-    let mut sink = match output {
-        VerificationOutput::ReportOnly => None,
-        VerificationOutput::ReportAndMotion => Some(verifier::ReplaySink::new(
+    let mut sink = match output.motion() {
+        false => None,
+        true => Some(verifier::ReplaySink::new(
             &bundle.plan,
             &bundle.provenance.intent,
         )?),
@@ -306,6 +307,51 @@ pub fn inspect_bundle(
         provenance,
         replay,
     })
+}
+
+/// Write the firmware delivery package around a freshly verified program
+/// (`report` from [`inspect_bundle`]), then re-read it independently; only a
+/// package that re-reads is returned. `None` when the printer takes a plain
+/// program. `objects` are the plate's posed display meshes the package
+/// carries for slicer viewers; the program alone is the printer's authority.
+pub fn delivery_package(
+    result: &ManufacturingResult,
+    bundle_hash: &spiling_contracts::geometry::SourceHash,
+    report: &VerificationReport,
+    objects: &[delivery::PackageObject],
+    cancel: &AtomicBool,
+) -> Result<Option<delivery::EncodedDeliveryPackage>, ManufacturingError> {
+    let Some(format) = delivery::package_format(&result.bundle.provenance.intent) else {
+        return Ok(None);
+    };
+    match format {
+        DeliveryPackageFormat::BambuGcode3mfV1 => {
+            let (bytes, members, md5) = delivery::write_bambu_package(
+                &result.bundle,
+                &result.program,
+                report,
+                objects,
+                cancel,
+            )?;
+            let info = verifier::package::verify_bambu_package(
+                &bytes,
+                &result.program,
+                &result.bundle,
+                bundle_hash,
+                report,
+                objects.len(),
+                cancel,
+            )?;
+            if info.members != members || info.program_md5 != md5 {
+                return Err(error(
+                    ManufacturingErrorCode::VerificationFailed,
+                    "delivery package re-read disagrees with what was written",
+                ));
+            }
+            info.validate()?;
+            Ok(Some(delivery::EncodedDeliveryPackage { info, bytes }))
+        }
+    }
 }
 
 fn inspect_report(

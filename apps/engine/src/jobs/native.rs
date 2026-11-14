@@ -527,6 +527,24 @@ impl Jobs {
             media_type: spiling_contracts::manufacturing::REPLAY_MEDIA_TYPE.into(),
         })
     }
+    pub(crate) fn describe_package_artifact(
+        &self,
+        bytes: &spiling_chunks::ChunkSource,
+        format: spiling_contracts::manufacturing::DeliveryPackageFormat,
+    ) -> Result<Artifact, Status> {
+        if bytes.len() > spiling_contracts::manufacturing::MAX_DELIVERY_PACKAGE_BYTES {
+            return Err(Status::resource_exhausted(
+                "delivery package exceeds its representation width",
+            ));
+        }
+        let hash = spiling_contracts::geometry::SourceHash::from_digest(bytes.digest());
+        Ok(Artifact {
+            name: format!("artifacts/{}", hash.as_str()),
+            size_bytes: bytes.len(),
+            sha256: hash.as_str().into(),
+            media_type: format.media_type().into(),
+        })
+    }
     pub(crate) fn describe_native_artifact(
         &self,
         bytes: &[u8],
