@@ -22,7 +22,11 @@
 use super::skeleton::{MedialEdge, Skeleton};
 use super::*;
 use geo::{Area, BooleanOps, Coord, LineString};
+use i_overlay::i_float::int::point::IntPoint;
 use std::collections::HashMap;
+
+const CAPSULE_SIDES: usize = 12;
+const CAPSULE_POINTS: usize = 2 * CAPSULE_SIDES + 2;
 
 /// Beads of one local wall: `count` beads across the whole thickness, each
 /// `width` wide. `residual` means the full recipe count fits at the preferred
@@ -843,7 +847,7 @@ fn cover(
         }
     }
     boolean::charge(work, capsules.len().saturating_mul(64))?;
-    let beads = union_capsules(&capsules);
+    let beads = union_capsules(&capsules, work, cancel)?;
     // Narrower than the narrowest bead is not printable by anything: not the
     // material's tips, and not a sliver left between beads.
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
@@ -894,16 +898,23 @@ fn cover(
     Ok(fill)
 }
 
-/// The union of counterclockwise capsules, as `geo::unary_union` forms it
-/// (one positive-winding overlay of every ring) but on the serial solver.
-/// Walls are already planned in parallel per layer; i_overlay's own rayon
-/// fragment split only added scheduling work. The split marks are gathered
-/// in the same group order either way, so the overlay is the same.
-fn union_capsules(capsules: &[Polygon<f64>]) -> MultiPolygon<f64> {
+/// Positive-winding capsule union on the original shared integer frame.
+/// Remove an ear only when its complete triangle lies strictly inside one
+/// current neighbor: the already-clipped predecessor or untouched successor.
+/// Updating the predecessor preserves union coverage inductively; using both
+/// original neighbors would let them discard the same shared material.
+/// The serial overlay avoids nested parallelism inside per-layer planning.
+fn union_capsules(
+    capsules: &[Polygon<f64>],
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay::ShapeType;
     use i_overlay::core::overlay_rule::OverlayRule;
     use i_overlay::core::solver::Solver;
     use i_overlay::float::overlay::{FloatOverlay, OverlayOptions};
+    use i_overlay::i_float::adapter::FloatPointAdapter;
     let subject: Vec<Vec<[f64; 2]>> = capsules
         .iter()
         .map(|capsule| {
@@ -915,9 +926,71 @@ fn union_capsules(capsules: &[Polygon<f64>]) -> MultiPolygon<f64> {
         multithreading: None,
         ..Solver::AUTO
     };
-    let shapes = FloatOverlay::with_subj_custom(&subject, OverlayOptions::default(), serial)
-        .overlay(OverlayRule::Subject, FillRule::Positive);
-    MultiPolygon(
+    let adapter = FloatPointAdapter::with_iter(subject.iter().flatten());
+    let mut overlay = FloatOverlay::new_custom(
+        adapter.clone(),
+        OverlayOptions::default(),
+        serial,
+        subject.iter().map(Vec::len).sum(),
+    );
+    let mut prior = [IntPoint::ZERO; CAPSULE_POINTS];
+    let mut prior_len = 0;
+    for (capsule_index, ring) in subject.iter().enumerate() {
+        check_cancel(cancel)?;
+        let mut points = [IntPoint::ZERO; CAPSULE_POINTS];
+        let mut covered = [0u8; CAPSULE_POINTS];
+        let mut kept = [0usize; CAPSULE_POINTS];
+        for (index, point) in ring.iter().enumerate() {
+            points[index] = adapter.float_to_int(point);
+            kept[index] = index;
+        }
+        let mut following = [IntPoint::ZERO; CAPSULE_POINTS];
+        let following_len = if let Some(next) = subject.get(capsule_index + 1) {
+            for (index, point) in next.iter().enumerate() {
+                following[index] = adapter.float_to_int(point);
+            }
+            next.len()
+        } else {
+            0
+        };
+        for (side, neighbor) in [&prior[..prior_len], &following[..following_len]]
+            .into_iter()
+            .enumerate()
+        {
+            boolean::charge(work, ring.len().saturating_mul(neighbor.len()))?;
+            for (index, point) in points[..ring.len()].iter().enumerate() {
+                if strictly_inside_convex(*point, neighbor) {
+                    covered[index] |= 1 << side;
+                }
+            }
+        }
+        let mut count = ring.len();
+        let mut position = 0;
+        while count > 3 && position < count {
+            if covered[kept[(position + count - 1) % count]]
+                & covered[kept[position]]
+                & covered[kept[(position + 1) % count]]
+                != 0
+            {
+                kept.copy_within(position + 1..count, position);
+                count -= 1;
+                position = position.saturating_sub(1);
+            } else {
+                position += 1;
+            }
+        }
+        let mut clipped = [[0.0; 2]; CAPSULE_POINTS];
+        for (index, &vertex) in kept[..count].iter().enumerate() {
+            clipped[index] = ring[vertex];
+            prior[index] = points[vertex];
+        }
+        prior_len = count;
+        overlay = overlay.unsafe_add_contour(&clipped[..count], ShapeType::Subject);
+    }
+    check_cancel(cancel)?;
+    let shapes = overlay.overlay(OverlayRule::Subject, FillRule::Positive);
+    check_cancel(cancel)?;
+    Ok(MultiPolygon(
         shapes
             .into_iter()
             .map(|shape| {
@@ -929,21 +1002,31 @@ fn union_capsules(capsules: &[Polygon<f64>]) -> MultiPolygon<f64> {
                 Polygon::new(rings.next().unwrap_or(LineString::empty()), rings.collect())
             })
             .collect(),
-    )
+    ))
+}
+
+fn strictly_inside_convex(point: IntPoint, polygon: &[IntPoint]) -> bool {
+    polygon.len() >= 3
+        && (0..polygon.len()).all(|index| {
+            let first = polygon[index];
+            let second = polygon[(index + 1) % polygon.len()];
+            (second.x as i128 - first.x as i128) * (point.y as i128 - first.y as i128)
+                - (second.y as i128 - first.y as i128) * (point.x as i128 - first.x as i128)
+                > 0
+        })
 }
 
 fn capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Polygon<f64> {
-    const SIDES: usize = 12;
     let d = sub(b, a);
     let length = norm(d);
     let angle = if length > 0.0 { d[1].atan2(d[0]) } else { 0.0 };
-    let mut ring = Vec::with_capacity(2 * SIDES + 3);
+    let mut ring = Vec::with_capacity(CAPSULE_POINTS + 1);
     for (centre, start) in [
         (b, angle - std::f64::consts::FRAC_PI_2),
         (a, angle + std::f64::consts::FRAC_PI_2),
     ] {
-        for i in 0..=SIDES {
-            let theta = start + std::f64::consts::PI * i as f64 / SIDES as f64;
+        for i in 0..=CAPSULE_SIDES {
+            let theta = start + std::f64::consts::PI * i as f64 / CAPSULE_SIDES as f64;
             ring.push(Coord {
                 x: centre[0] + radius * theta.cos(),
                 y: centre[1] + radius * theta.sin(),
@@ -952,6 +1035,44 @@ fn capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Polygon<f64> {
     }
     ring.push(ring[0]);
     Polygon::new(LineString(ring), Vec::new())
+}
+
+#[test]
+fn capsule_union_retains_shared_bead_material_and_the_open_center() {
+    use geo::{Contains, Point};
+
+    for translation in [[0.0, 0.0], [100.0, -80.0]] {
+        let mut centers = (0..24)
+            .map(|index| {
+                let angle = index as f64 * std::f64::consts::TAU / 24.0;
+                [translation[0] + angle.cos(), translation[1] + angle.sin()]
+            })
+            .collect::<Vec<_>>();
+        centers.push(centers[0]);
+        let mut capsules = centers
+            .windows(2)
+            .enumerate()
+            .map(|(index, edge)| capsule(edge[0], edge[1], 0.2 + 0.03 * (index % 3) as f64))
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            let union = union_capsules(&capsules, &mut 0, &AtomicBool::new(false)).unwrap();
+            assert!(!union.contains(&Point::new(translation[0], translation[1])));
+            for column in -32..=32 {
+                for row in -32..=32 {
+                    let point = Point::new(
+                        translation[0] + column as f64 * 0.04,
+                        translation[1] + row as f64 * 0.04,
+                    );
+                    assert_eq!(
+                        union.contains(&point),
+                        capsules.iter().any(|capsule| capsule.contains(&point)),
+                        "capsule coverage changed at {point:?}",
+                    );
+                }
+            }
+            capsules.reverse();
+        }
+    }
 }
 
 /// Test-only: write a failing layer's material, fill, beads and uncovered
