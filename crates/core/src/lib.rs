@@ -580,6 +580,14 @@ pub struct Project {
     storage_binding: Option<storage::StorageBinding>,
     recovered_previous: bool,
     save_uncertain: bool,
+    /// Fresh machine allowance for growth of retained manufacturing options.
+    retained_growth: RetainedGrowthObserver,
+}
+/// Returns the bytes retained project state may grow by now, observed fresh
+/// from the host (the engine supplies its memory headroom observation).
+pub type RetainedGrowthObserver = fn() -> usize;
+fn unobserved_retained_growth() -> usize {
+    usize::MAX
 }
 impl Default for Project {
     fn default() -> Self {
@@ -608,7 +616,14 @@ impl Project {
             storage_binding: None,
             recovered_previous: false,
             save_uncertain: false,
+            retained_growth: unobserved_retained_growth,
         }
+    }
+    /// Admit growth of retained option state against a fresh host allowance
+    /// instead of a fixed aggregate ceiling. Without an observer, growth is
+    /// bounded only by checked allocation and the manifest/history bounds.
+    pub fn observe_retained_growth(&mut self, observer: RetainedGrowthObserver) {
+        self.retained_growth = observer;
     }
     pub fn from_loaded(loaded: LoadedProject) -> Result<Self, ProjectError> {
         loaded.manifest.validate()?;
@@ -1803,9 +1818,8 @@ impl Project {
                 "retained/staged analysis exceeds 4 MiB",
             ));
         }
-        if manufacturing_options::retained_bytes(
-            std::iter::once(snapshot.as_ref())
-                .chain(std::iter::once(self.current.as_ref()))
+        manufacturing_options::admit_growth(
+            std::iter::once(self.current.as_ref())
                 .chain(self.undo.iter().map(Arc::as_ref))
                 .chain(self.redo.iter().map(Arc::as_ref))
                 .chain(live.iter().map(Arc::as_ref)),
@@ -1813,13 +1827,9 @@ impl Project {
                 .as_ref()
                 .into_iter()
                 .flat_map(|(_, content)| content.layouts.iter().map(|l| &l.manufacturing_options)),
-        )? > manufacturing_options::MAX_RETAINED_OPTION_BYTES
-        {
-            return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "retained/staged manufacturing options exceed 16 MiB",
-            ));
-        }
+            snapshot.as_ref(),
+            self.retained_growth,
+        )?;
         if hardware::bytes(
             std::iter::once(snapshot.as_ref())
                 .chain(std::iter::once(self.current.as_ref()))
@@ -2336,13 +2346,10 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
             "retained analysis fields exceed 32 MiB",
         ));
     }
-    if manufacturing_options::retained_bytes(snapshots.iter().copied(), None)?
-        > manufacturing_options::MAX_RETAINED_OPTION_BYTES
-    {
-        return Err(error(
-            ProjectErrorCode::ResourceLimit,
-            "retained manufacturing options exceed 16 MiB",
-        ));
+    // Retained options are bounded per snapshot by the manifest; their
+    // growth across history/prepared state is admitted in `prepare`.
+    for snapshot in &snapshots {
+        manufacturing_options::validate_retained(snapshot)?;
     }
     if hardware::bytes(snapshots.iter().copied(), std::iter::empty())?
         > hardware::MAX_RETAINED_BYTES

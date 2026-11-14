@@ -18,8 +18,6 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) const MAX_RETAINED_OPTION_BYTES: usize = 16 * 1024 * 1024;
-
 #[derive(Serialize)]
 struct Context<'a> {
     domain: &'static str,
@@ -204,59 +202,116 @@ pub(crate) fn retain_option(
     validate_manufacturing_options(options)
 }
 
+/// Distinct option allocations and shared intents, each charged once.
+#[derive(Default)]
+struct RetainedOptions {
+    allocations: BTreeMap<*const ManufacturingOption, usize>,
+    intents: BTreeMap<*const ManufacturingIntent, usize>,
+}
+
+impl RetainedOptions {
+    /// Charge one options vector; returns the bytes it adds beyond those
+    /// already charged.
+    fn add(&mut self, options: &Vec<ManufacturingOption>) -> Result<usize, ProjectError> {
+        let std::collections::btree_map::Entry::Vacant(entry) =
+            self.allocations.entry(options.as_ptr())
+        else {
+            return Ok(0);
+        };
+        validate_manufacturing_options(options)?;
+        let mut added = (options.capacity() * std::mem::size_of::<ManufacturingOption>())
+            .saturating_add(
+                options
+                    .iter()
+                    .map(|option| {
+                        option.name.capacity()
+                            + option.id.as_str().len()
+                            + option.context_hash.as_str().len()
+                    })
+                    .sum::<usize>(),
+            );
+        entry.insert(added);
+        for option in options.iter() {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.intents.entry(Arc::as_ptr(&option.intent))
+            {
+                let bytes = serde_json::to_vec(option.intent.as_ref())
+                    .map_err(|_| invalid("manufacturing option intent cannot be encoded"))?;
+                entry.insert(bytes.len());
+                added = added.saturating_add(bytes.len());
+            }
+        }
+        Ok(added)
+    }
+
+    fn add_snapshot(&mut self, snapshot: &Snapshot) -> Result<usize, ProjectError> {
+        let mut added = 0usize;
+        for layout in snapshot.layouts.iter() {
+            added = added.saturating_add(self.add(layout.manufacturing_options.as_ref())?);
+        }
+        Ok(added)
+    }
+
+    fn total(&self) -> Result<usize, ProjectError> {
+        self.allocations
+            .values()
+            .chain(self.intents.values())
+            .try_fold(0usize, |total, bytes| {
+                total.checked_add(*bytes).ok_or_else(|| {
+                    error(
+                        ProjectErrorCode::ResourceLimit,
+                        "retained manufacturing option budget overflow",
+                    )
+                })
+            })
+    }
+}
+
+/// Validate one snapshot's options (each is bounded by the manifest).
+pub(crate) fn validate_retained(snapshot: &Snapshot) -> Result<(), ProjectError> {
+    RetainedOptions::default().add_snapshot(snapshot).map(drop)
+}
+
+/// Admit the option allocations a candidate adds beyond everything already
+/// retained (current, history, live prepared and saved) against a fresh host
+/// allowance. Unchanged options share their allocations and add nothing.
+pub(crate) fn admit_growth<'a>(
+    retained: impl Iterator<Item = &'a Snapshot>,
+    saved: impl IntoIterator<Item = &'a Vec<ManufacturingOption>>,
+    candidate: &Snapshot,
+    allowance: crate::RetainedGrowthObserver,
+) -> Result<(), ProjectError> {
+    let mut census = RetainedOptions::default();
+    for snapshot in retained {
+        census.add_snapshot(snapshot)?;
+    }
+    for options in saved {
+        census.add(options)?;
+    }
+    census.total()?;
+    let growth = census.add_snapshot(candidate)?;
+    if growth > 0 && growth > allowance() {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained manufacturing options exceed available memory",
+        ));
+    }
+    census.total().map(drop)
+}
+
+#[cfg(test)]
 pub(crate) fn retained_bytes<'a>(
     snapshots: impl Iterator<Item = &'a Snapshot>,
     saved: impl IntoIterator<Item = &'a Vec<ManufacturingOption>>,
 ) -> Result<usize, ProjectError> {
-    let mut allocations = BTreeMap::new();
-    let mut intents = BTreeMap::new();
-    for options in snapshots
-        .flat_map(|snapshot| {
-            snapshot
-                .layouts
-                .iter()
-                .map(|l| l.manufacturing_options.as_ref())
-        })
-        .chain(saved)
-    {
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            allocations.entry(options.as_ptr())
-        {
-            validate_manufacturing_options(options)?;
-            entry.insert(
-                (options.capacity() * std::mem::size_of::<ManufacturingOption>()).saturating_add(
-                    options
-                        .iter()
-                        .map(|option| {
-                            option.name.capacity()
-                                + option.id.as_str().len()
-                                + option.context_hash.as_str().len()
-                        })
-                        .sum::<usize>(),
-                ),
-            );
-            for option in options.iter() {
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    intents.entry(Arc::as_ptr(&option.intent))
-                {
-                    let bytes = serde_json::to_vec(option.intent.as_ref())
-                        .map_err(|_| invalid("manufacturing option intent cannot be encoded"))?;
-                    entry.insert(bytes.len());
-                }
-            }
-        }
+    let mut census = RetainedOptions::default();
+    for snapshot in snapshots {
+        census.add_snapshot(snapshot)?;
     }
-    allocations
-        .values()
-        .chain(intents.values())
-        .try_fold(0usize, |total, bytes| {
-            total.checked_add(*bytes).ok_or_else(|| {
-                error(
-                    ProjectErrorCode::ResourceLimit,
-                    "retained manufacturing option budget overflow",
-                )
-            })
-        })
+    for options in saved {
+        census.add(options)?;
+    }
+    census.total()
 }
 
 #[cfg(test)]

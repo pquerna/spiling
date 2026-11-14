@@ -586,52 +586,64 @@ fn retained_option_census_shares_intents_and_charges_live_prepared_name_capacity
     let both = retained_bytes([&first, &second].into_iter(), None).unwrap();
     assert!(both > single);
     assert!(both < single * 2);
+    // Retained options are admitted against the host allowance, not a fixed
+    // aggregate: history beyond the former 16 MiB census is retained.
+    const LARGE: usize = 12 * 1024 * 1024;
     let large_name = |name: &str| {
-        let mut value = String::with_capacity(MAX_RETAINED_OPTION_BYTES / 2);
+        let mut value = String::with_capacity(LARGE);
         value.push_str(name);
         value
     };
     let context = context_hash(&project.snapshot()).unwrap();
-    let first_option = ManufacturingOption::new(
-        large_name("First"),
-        context.clone(),
-        Arc::new(manufacturing_intent()),
-    )
-    .unwrap();
-    let staged = project
-        .prepare(Edit::RetainManufacturingOption {
+    let large = |name: &str| {
+        ManufacturingOption::new(
+            large_name(name),
+            context.clone(),
+            Arc::new(manufacturing_intent()),
+        )
+        .unwrap()
+    };
+    let first_option = large("First");
+    let first_id = first_option.id.clone();
+    commit(
+        &mut project,
+        Edit::RetainManufacturingOption {
             option: first_option,
-        })
-        .unwrap();
+        },
+    );
+    commit(
+        &mut project,
+        Edit::RemoveManufacturingOption { id: first_id },
+    );
+    commit(
+        &mut project,
+        Edit::RetainManufacturingOption {
+            option: large("Second"),
+        },
+    );
+    let history =
+        std::iter::once(project.current.as_ref()).chain(project.undo.iter().map(Arc::as_ref));
+    assert!(retained_bytes(history, None).unwrap() > 2 * LARGE);
+    assert_eq!(project.snapshot().manufacturing_options.len(), 1);
+
+    // Growth beyond the fresh host allowance refuses before mutation; edits
+    // that add no option allocation are unaffected.
+    fn exhausted() -> usize {
+        1024
+    }
+    project.observe_retained_growth(exhausted);
     let before = project.info();
-    let second_option = ManufacturingOption::new(
-        large_name("Second"),
-        context.clone(),
-        Arc::new(manufacturing_intent()),
-    )
-    .unwrap();
     assert_eq!(
         project
             .prepare(Edit::RetainManufacturingOption {
-                option: second_option
+                option: large("Third"),
             })
             .unwrap_err()
             .code,
         ProjectErrorCode::ResourceLimit
     );
     assert_eq!(project.info(), before);
-    drop(staged);
-    let second_option = ManufacturingOption::new(
-        large_name("Second"),
-        context,
-        Arc::new(manufacturing_intent()),
-    )
-    .unwrap();
-    let accepted = project
-        .prepare(Edit::RetainManufacturingOption {
-            option: second_option,
-        })
-        .unwrap();
-    project.commit(accepted).unwrap();
-    assert_eq!(project.snapshot().manufacturing_options.len(), 1);
+    let second = project.snapshot().manufacturing_options[0].id.clone();
+    commit(&mut project, Edit::RemoveManufacturingOption { id: second });
+    assert!(project.snapshot().manufacturing_options.is_empty());
 }

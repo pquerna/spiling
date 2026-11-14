@@ -1370,7 +1370,7 @@ fn open(
         let _replay = crate::performance::span("open_replay");
         inspect_asset(asset, VerificationOutput::ReportOnly, cancel)?;
     }
-    let project = Project::from_loaded(loaded)?;
+    let project = crate::resources::observed_project(Project::from_loaded(loaded)?);
     check_cancel(cancel)?;
     crate::performance::mark("open_prepared");
     Ok(Opened {

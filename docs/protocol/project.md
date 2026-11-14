@@ -51,8 +51,10 @@ Every definition is referenced by an occurrence; definition and occurrence ident
 Current remains the single applied manufacturing intent. An option contains `id`,
 `name`, `context_hash` and complete `intent`; its immutable identity binds all three
 content fields. Names are nonempty, bounded UTF-8 without control characters.
-At most eight options and 256 KiB serialized option content are retained, subject
-also to the complete manifest and history/prepared budgets. Option identities
+At most eight options and 256 KiB serialized option content are retained per
+layout, subject also to the complete manifest. Option allocations added across
+current/history/prepared/saved ownership (shared allocations charged once) are
+admitted against the engine's fresh host memory headroom, not a fixed aggregate. Option identities
 need no allocation counter and do not rewind any existing guard.
 
 The context binds source definitions/provenance, occurrence poses, surface/process

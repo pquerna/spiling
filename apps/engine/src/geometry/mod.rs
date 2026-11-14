@@ -286,7 +286,7 @@ impl Runtime {
             session_id: SessionId::new(),
             revision: SceneRevision::ZERO,
             definitions: BTreeMap::new(),
-            project: Project::new(),
+            project: crate::resources::observed_project(Project::new()),
             uncertain_copy: None,
             status_context: Default::default(),
             artifacts: BTreeMap::new(),
@@ -2608,7 +2608,7 @@ impl Runtime {
                 self.project_base(&session_id, base_revision)?;
                 self.replace_allowed(discard_changes)?;
                 let revision = project_scene_revision(self.revision)?;
-                self.project = Project::new();
+                self.project = crate::resources::observed_project(Project::new());
                 self.revision = revision;
                 self.synchronize_native_pins();
                 Ok(Reply::Project(ProjectResponse::SceneChanged {
@@ -2882,7 +2882,7 @@ impl Runtime {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         self.definitions.clear();
-        self.project = Project::new();
+        self.project = crate::resources::observed_project(Project::new());
         self.artifacts.clear();
         self.synchronize_native_pins();
         self.worker.stop()

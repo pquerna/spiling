@@ -147,6 +147,19 @@ pub fn transfer_growth() -> Result<usize, GeometryError> {
     Ok(Headroom::current()?.growth(0, None))
 }
 
+/// Fresh bytes retained project state (manufacturing options across
+/// current/history/prepared snapshots) may grow by. An unobservable host
+/// admits no growth rather than guessing.
+pub fn retained_growth() -> usize {
+    Headroom::current().map_or(0, |headroom| headroom.growth(0, None))
+}
+
+/// A Core project whose retained-state growth is admitted against this host.
+pub fn observed_project(mut project: spiling_core::Project) -> spiling_core::Project {
+    project.observe_retained_growth(retained_growth);
+    project
+}
+
 /// Live working set one manufacturing operation (compile, alternative,
 /// preflight, inspection) may admit, observed fresh when the job starts.
 /// Inputs, sources and previous artifacts are already resident in the OS
