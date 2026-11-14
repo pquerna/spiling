@@ -624,7 +624,20 @@ ENGINE="$PWD/target/debug/spiling-engine"
   --section 0,0,4:0,0,1 --engine "$ENGINE"
 "$CLI" project create NEW_PROJECT.spil --import fixtures/geometry/box-mm.step --save --engine "$ENGINE"
 "$CLI" project inspect NEW_PROJECT.spil --engine "$ENGINE"
+# Printer + material + quality: no intent JSON.
+"$CLI" project --list-printers --list-materials --engine "$ENGINE"
+"$CLI" project create NEW_JOB.spil --import part.step --printer mk4s --material pla \
+  --quality standard --supports off --center-all-on-bed --compile --verify \
+  --manufacturing-out NEW_EXPORT --engine "$ENGINE"
 ```
+
+`--printer` takes a shipped setup id, label or unique words (`mk4s`, `ender 3`,
+`generic klipper`) or a configured My hardware nickname; `--material` a generic
+family or a project filament (capture one first with `--library-use`). The
+engine's `CreateDefaultIntent` creates the intent; the report's `defaults` step
+lists what was chosen and every created value, and `verification.json` carries
+the print-time estimate and filament. Bambu setups plan and verify but refuse
+emission until `.gcode.3mf` delivery.
 
 Geometry scenes are import/placement recipes, not saved projects. Native face IDs
 come from returned source tables, not guessed STEP ordinals. Project flags execute

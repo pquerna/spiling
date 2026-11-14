@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod analysis;
+mod defaults;
 mod layout;
 mod plates;
 
@@ -142,6 +143,12 @@ enum Operation {
     RemoveOption(SourceHash),
     ApplyOption(SourceHash),
     Hardware(Option<Arc<spiling_contracts::hardware::ProjectHardwareCapture>>),
+    /// A shipped setup or My hardware machine by name.
+    Printer(String),
+    /// Default intent from the project printer; quality/supports are filled after parsing.
+    Defaults(String, QualityPreset, SupportChoice),
+    ListPrinters,
+    ListMaterials,
     LocalHardware(String, String, String),
     MaterialProfile(Option<String>, Box<MaterialProfileSelection>),
     LibraryLocation(NativePath),
@@ -237,6 +244,42 @@ pub fn parse(
     mut store: Option<PathBuf>,
 ) -> Result<Option<Options>, Error> {
     let mode = text(&mut args, "project")?;
+    if mode.starts_with("--list-") {
+        let mut operations = Vec::new();
+        for flag in std::iter::once(OsString::from(&mode)).chain(args) {
+            match flag.to_str() {
+                Some("--list-printers") => operations.push(Operation::ListPrinters),
+                Some("--list-materials") => operations.push(Operation::ListMaterials),
+                Some("--engine") | Some("--store") => {
+                    return Err("give --engine/--store before project".into());
+                }
+                _ => return Err(format!("unrecognized listing argument {flag:?}").into()),
+            }
+        }
+        return Ok(Some(Options {
+            command: Command::Project {
+                workflow: Workflow {
+                    mode: "list".into(),
+                    path: NativePath::from_os_str(std::ffi::OsStr::new("."))?,
+                    read_only: true,
+                    operations,
+                    inspections: Vec::new(),
+                },
+                plane: None,
+                output: None,
+                manufacturing_output: None,
+                replay_output: None,
+                surface_image_output: None,
+                appearance_report_output: None,
+                optical_report_output: None,
+            },
+            engine: engine.unwrap_or(
+                env::current_exe()?
+                    .with_file_name(format!("spiling-engine{}", env::consts::EXE_SUFFIX)),
+            ),
+            store,
+        }));
+    }
     if !matches!(
         mode.as_str(),
         "create" | "edit" | "save" | "open" | "inspect" | "recover"
@@ -255,8 +298,30 @@ pub fn parse(
     let mut appearance_report_output = None;
     let mut optical_report_output = None;
     let mut inspections = Vec::new();
+    let mut quality = None;
+    let mut supports = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--printer") => {
+                operations.push(Operation::Printer(text(&mut args, "--printer SETUP")?))
+            }
+            Some("--material") => operations.push(Operation::Defaults(
+                text(&mut args, "--material FAMILY_OR_FILAMENT")?,
+                QualityPreset::Standard,
+                SupportChoice::Automatic,
+            )),
+            Some("--quality") => set_once(
+                &mut quality,
+                defaults::quality(&text(&mut args, "--quality draft|standard|fine")?)?,
+                "--quality",
+            )?,
+            Some("--supports") => set_once(
+                &mut supports,
+                defaults::supports(&text(&mut args, "--supports on|off")?)?,
+                "--supports",
+            )?,
+            Some("--list-printers") => operations.push(Operation::ListPrinters),
+            Some("--list-materials") => operations.push(Operation::ListMaterials),
             Some("--stock-match") => {
                 let query = appearance_json::<spiling_contracts::stock::StockQuery>(
                     &mut args,
@@ -878,6 +943,17 @@ pub fn parse(
             return Err("project workflow exceeds 256 operations".into());
         }
     }
+    let mut defaults_ops = 0;
+    for operation in &mut operations {
+        if let Operation::Defaults(_, q, s) = operation {
+            defaults_ops += 1;
+            *q = quality.unwrap_or(QualityPreset::Standard);
+            *s = supports.unwrap_or(SupportChoice::Automatic);
+        }
+    }
+    if defaults_ops == 0 && (quality.is_some() || supports.is_some()) {
+        return Err("--quality and --supports apply to --material".into());
+    }
     if read_only
         && (matches!(mode.as_str(), "create" | "edit" | "save")
             || operations.iter().any(|operation| {
@@ -895,6 +971,8 @@ pub fn parse(
                         | Operation::ListOptions
                         | Operation::GetOption(_)
                         | Operation::ProjectMaterials
+                        | Operation::ListPrinters
+                        | Operation::ListMaterials
                         | Operation::ProjectRecipes
                         | Operation::RecipeInspect(_)
                         | Operation::RecipeSave(_)
@@ -1292,6 +1370,17 @@ async fn execute(
         appearance_report: mut appearance_report_output,
         optical_report: mut optical_report_output,
     } = outputs;
+    if workflow.mode == "list" {
+        let mut listings = Vec::new();
+        for operation in workflow.operations {
+            listings.push(match operation {
+                Operation::ListPrinters => defaults::list_printers(client).await?,
+                Operation::ListMaterials => defaults::list_materials(client, false).await?,
+                _ => return Err("listing accepts only --list-printers and --list-materials".into()),
+            });
+        }
+        return Ok(serde_json::json!({"command":"project","mode":"list","listings":listings}));
+    }
     let session = client.hello().session_id.clone();
     let mut attachment = (workflow.mode != "create").then(|| workflow.path.clone());
     let mut hardware_selection: Option<spiling_contracts::hardware::LocalProjectHardwareBinding> =
@@ -2485,6 +2574,31 @@ async fn execute(
                 process_inspections.push(evidence.clone());
                 process_resolution = Some(evidence);
             }
+            Operation::Printer(query) => {
+                label = "printer";
+                let printer = defaults::resolve_printer(client, &query).await?;
+                let project = info(client).await?;
+                hardware_selection = printer
+                    .binding
+                    .map(|b| defaults::binding(&project, &workflow.path, &printer.capture, b))
+                    .transpose()?;
+                defaults::set_printer(client, &current_layout, printer.capture).await?;
+                history.push(serde_json::json!({"step":"printer","resolved":printer.report}));
+            }
+            Operation::Defaults(material, quality, supports) => {
+                label = "defaults";
+                history.push(
+                    defaults::create(client, &current_layout, &material, quality, supports).await?,
+                );
+            }
+            Operation::ListPrinters => {
+                label = "list_printers";
+                history.push(defaults::list_printers(client).await?);
+            }
+            Operation::ListMaterials => {
+                label = "list_materials";
+                history.push(defaults::list_materials(client, true).await?);
+            }
             Operation::Hardware(capture) => {
                 label = "hardware";
                 let base_revision = info(client).await?.revision;
@@ -3189,6 +3303,95 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn one_step_flags_order_printer_then_defaults_and_reject_stray_quality() {
+        let options = parse_args(&[
+            "create",
+            "p.spil",
+            "--import",
+            "part.step",
+            "--printer",
+            "mk4s",
+            "--quality",
+            "fine",
+            "--material",
+            "petg",
+            "--supports",
+            "off",
+            "--compile",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::Import(..),
+                Operation::Printer(p),
+                Operation::Defaults(m, QualityPreset::Fine, SupportChoice::Off),
+                Operation::Compile,
+                Operation::Save(_),
+            ] if p == "mk4s" && m == "petg"
+        ));
+        let options = parse_args(&["create", "p.spil", "--material", "pla"])
+            .unwrap()
+            .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert!(matches!(
+            workflow.operations[0],
+            Operation::Defaults(_, QualityPreset::Standard, SupportChoice::Automatic)
+        ));
+        for bad in [
+            &["create", "p.spil", "--quality", "fine"][..],
+            &[
+                "create",
+                "p.spil",
+                "--material",
+                "pla",
+                "--quality",
+                "ultra",
+            ],
+            &[
+                "create",
+                "p.spil",
+                "--material",
+                "pla",
+                "--supports",
+                "maybe",
+            ],
+            &[
+                "create",
+                "p.spil",
+                "--material",
+                "pla",
+                "--quality",
+                "fine",
+                "--quality",
+                "draft",
+            ],
+            &["inspect", "p.spil", "--material", "pla"],
+            &["inspect", "p.spil", "--printer", "mk4s"],
+            &["--list-printers", "--import"],
+        ] {
+            assert!(parse_args(bad).is_err(), "{bad:?}");
+        }
+        let options = parse_args(&["--list-printers", "--list-materials"])
+            .unwrap()
+            .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert_eq!(workflow.mode, "list");
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [Operation::ListPrinters, Operation::ListMaterials]
+        ));
+        assert!(parse_args(&["inspect", "p.spil", "--list-materials"]).is_ok());
     }
     #[test]
     fn alternative_flags_are_ordered_and_only_evaluation_is_read_only_safe() {
