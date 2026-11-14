@@ -3,16 +3,24 @@
 # SPDX-License-Identifier: OSL-3.0
 """Realistic-corpus journey: each STEP through the real Spiling CLI and PrusaSlicer.
 
-Spiling: create + import + intent + center the whole source on the bed + compile + save, then
-source-absent read-only reopen + verify + export. PrusaSlicer: slice the same
-STEP with matched layer height and infill as the printability reference.
-Usage: run.py CORPUS_DIR BIN_DIR INTENT_JSON [RESULTS] [PART_PREFIX...]
+Spiling: create + import + printer/material/quality (or an explicit intent)
++ center the whole source on the bed + compile + save, then source-absent
+read-only reopen + verify + export. PrusaSlicer: slice the same STEP with
+matched settings as the printability reference.
+Usage: run.py CORPUS_DIR BIN_DIR [--intent INTENT_JSON] [RESULTS] [PART_PREFIX...]
 CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
 Writes one JSON record per part to results.ndjson. Standard library only.
 
-SPILING_CORPUS_DEFAULTS=1 keeps the intent's own defaults (layer heights,
-infill, speeds) and only switches supports; PrusaSlicer then follows the same
-values. SPILING_CORPUS_PRUSA_INI=FILE slices PrusaSlicer with that matched
+Default: no intent file. Each part runs `project create --import ... --printer
+P --material M --quality Q --supports on|off` (SPILING_CORPUS_PRINTER, default
+spiling.reference.marlin.04; SPILING_CORPUS_MATERIAL, default pla;
+SPILING_CORPUS_QUALITY, default standard; SPILING_CORPUS_SUPPORTS disabled ->
+off, breakaway -> on); the engine creates the intent and PrusaSlicer follows
+its values (read from a part-free probe project).
+
+--intent INTENT_JSON keeps the explicit-intent path: layer height 0.2 mm and
+SPILING_CORPUS_FRACTION infill unless SPILING_CORPUS_DEFAULTS=1 keeps the
+intent's own values; supports are switched as above. SPILING_CORPUS_PRUSA_INI=FILE slices PrusaSlicer with that matched
 configuration (`--load`; for example a vendor printer+print+filament preset
 flattened to one file) instead of command-line overrides; `from-intent`
 derives one from the intent's printer, material and recipe. Each record keeps
@@ -21,11 +29,19 @@ both slicers' estimated print time and filament length and their ratio.
 import json, os, re, shutil, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
 
-ROOT = os.path.abspath(sys.argv[1])
-R = os.path.abspath(sys.argv[2])  # directory holding spiling-cli and spiling-engine
-INTENT_SRC = os.path.abspath(sys.argv[3])
-OUT = os.path.join(ROOT, sys.argv[4] if len(sys.argv) > 4 else "results.ndjson")
-ONLY = sys.argv[5:] if len(sys.argv) > 5 else None
+ARGS = sys.argv[1:]
+INTENT_SRC = None
+if "--intent" in ARGS:
+    i = ARGS.index("--intent")
+    INTENT_SRC = os.path.abspath(ARGS[i + 1])
+    del ARGS[i:i + 2]
+ROOT = os.path.abspath(ARGS[0])
+R = os.path.abspath(ARGS[1])  # directory holding spiling-cli and spiling-engine
+OUT = os.path.join(ROOT, ARGS[2] if len(ARGS) > 2 else "results.ndjson")
+ONLY = ARGS[3:] if len(ARGS) > 3 else None
+PRINTER = os.environ.get("SPILING_CORPUS_PRINTER", "spiling.reference.marlin.04")
+MATERIAL = os.environ.get("SPILING_CORPUS_MATERIAL", "pla")
+QUALITY = os.environ.get("SPILING_CORPUS_QUALITY", "standard")
 # Seconds per CLI step before the part is recorded as a timeout.
 TIMEOUT = int(os.environ.get("SPILING_CORPUS_TIMEOUT", "900"))
 # Parts compiled concurrently; each engine is one process (mostly one core).
@@ -35,13 +51,36 @@ CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 # "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
 SUPPORTS = os.environ.get("SPILING_CORPUS_SUPPORTS", "disabled")
-DEFAULTS = os.environ.get("SPILING_CORPUS_DEFAULTS") == "1"
+# Without an explicit intent the engine's defaults are the values.
+DEFAULTS = INTENT_SRC is None or os.environ.get("SPILING_CORPUS_DEFAULTS") == "1"
 PRUSA_INI = os.environ.get("SPILING_CORPUS_PRUSA_INI")
 WORK = os.path.join(ROOT, "work")
-INTENT = json.load(open(INTENT_SRC))
+INTENT = json.load(open(INTENT_SRC)) if INTENT_SRC else None
+if INTENT_SRC is None and CATHEDRAL:
+    raise SystemExit("SPILING_CORPUS_INFILL=cathedral needs --intent")
+
+
+def defaults_args():
+    """The one-step CLI flags replacing an intent file."""
+    return ["--printer", PRINTER, "--material", MATERIAL, "--quality", QUALITY,
+            "--supports", "off" if SUPPORTS == "disabled" else "on"]
+
+
+def probe_intent():
+    """The engine-created intent for the chosen printer/material/quality,
+    from a project without parts; PrusaSlicer's matched settings follow it."""
+    cwd = os.path.join(WORK, "probe")
+    shutil.rmtree(cwd, ignore_errors=True)
+    os.makedirs(cwd)
+    result = run_cli(["create", "probe.spil", *defaults_args()], cwd)
+    if not result["ok"]:
+        raise SystemExit(f"default settings refused: {result['error']}")
+    return json.load(open(os.path.join(cwd, "create.stdout.json")))["manufacturing"]["intent"]
 
 
 def intent_file():
+    if INTENT_SRC is None:
+        return None
     d = json.loads(json.dumps(INTENT))
     if not DEFAULTS:
         d["recipe"]["infill_fraction"] = FRACTION
@@ -266,9 +305,11 @@ def part(name, intent, results):
     record = {"part": name, "bytes": os.path.getsize(src),
               "sha256": hashlib.sha256(open(src, "rb").read()).hexdigest()}
     record["prusa"] = prusa(local, cwd)
-    create = run_cli(["create", "p.spil", "--import", "source.step", "--intent", intent,
+    settings = ["--intent", intent] if intent else defaults_args()
+    create = run_cli(["create", "p.spil", "--import", "source.step", *settings,
                       "--center-all-on-bed", "--compile", "--save"], cwd)
     record["spiling_compile"] = create
+    record["settings"] = settings
     if create["ok"]:
         os.remove(local)
         ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
@@ -307,8 +348,11 @@ def part(name, intent, results):
 
 
 def main():
+    global INTENT
     os.makedirs(WORK, exist_ok=True)
     intent = intent_file()
+    if INTENT is None:
+        INTENT = probe_intent()
     steps = sorted(os.listdir(os.path.join(ROOT, "step")))
     if ONLY:
         steps = [s for s in steps if any(s.startswith(o) for o in ONLY)]

@@ -639,6 +639,23 @@ lists what was chosen and every created value, and `verification.json` carries
 the print-time estimate and filament. Bambu setups plan and verify but refuse
 emission until `.gcode.3mf` delivery.
 
+The fresh-user journey per shipped setup and the realistic corpus use this path
+with no intent file (corpus details in
+[geometry evidence](geometry-evidence.md#realistic-part-corpus)):
+
+```sh
+python3 tools/smoke-defaults.py target/debug NEW_WORK_DIR [PART.step] [--material pla] [--quality standard]
+cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
+# CORPUS holds step/ (a symlink to the fetched STEP files is fine); real disk, not tmpfs.
+SPILING_CORPUS_JOBS=4 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=disabled \
+  python3 tools/realistic-corpus/run.py CORPUS target/profiling off.ndjson
+SPILING_CORPUS_JOBS=4 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=breakaway \
+  python3 tools/realistic-corpus/run.py CORPUS target/profiling brk.ndjson
+```
+
+`SPILING_CORPUS_PRINTER`/`_MATERIAL`/`_QUALITY` choose the defaults (Marlin
+reference, PLA, standard); `--intent FILE` keeps the explicit-intent path.
+
 Geometry scenes are import/placement recipes, not saved projects. Native face IDs
 come from returned source tables, not guessed STEP ordinals. Project flags execute
 left-to-right. Save stores captured source bytes, not dependencies on original

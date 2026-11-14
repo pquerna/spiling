@@ -844,13 +844,21 @@ GPL-3.0 parts, fetched into an ignored cache and never committed.
 ```sh
 python3 tools/realistic-corpus/fetch.py .cache/realistic-corpus
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
+SPILING_CORPUS_PRUSA_INI=from-intent \
+  python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling
+# explicit-intent path (0.2 mm layers, SPILING_CORPUS_FRACTION infill):
 python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling \
-  fixtures/manufacturing/complete-sparse.intent.json
+  --intent fixtures/manufacturing/complete-sparse.intent.json
 ```
 
 Each part goes through the real CLI as an operator would: create, import,
-center on the bed, compile at 0.2 mm layers and 15% infill, save; then remove
-the source, reopen read-only, freshly verify and export. PrusaSlicer slices the
+choose printer + material + quality (`--printer spiling.reference.marlin.04
+--material pla --quality standard`, overridable with `SPILING_CORPUS_PRINTER`,
+`_MATERIAL`, `_QUALITY`; `SPILING_CORPUS_SUPPORTS=breakaway` turns supports on),
+center on the bed, compile, save; then remove the source, reopen read-only,
+freshly verify and export. No intent file is involved by default; PrusaSlicer's
+matched settings follow the engine-created intent read from a part-free probe
+project. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
 
