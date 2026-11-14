@@ -80,7 +80,6 @@ independent expectation and distinct coverage. Default geometry tests retain
 ordinary source/hole identity, material sections, finite source-bound display,
 typed budget refusal and cancellation with source reuse. Do not prescribe mesh
 triangle counts or optimizer order where the contract permits alternatives.
-Wire formats, immutable hashes and same-producer determinism remain exact.
 Source-ID serialization/range rules belong to contracts tests, not repeated
 geometry integrations. Section fidelity checks actual coordinates and segment
 deviation against analytic source dimensions; point density alone is no oracle.
@@ -91,6 +90,24 @@ and machine-aware residency as the owning path changes. Do not require a shape
 to allocate more than another shape or preserve a small quota as a correctness
 oracle. Ordinary native jobs have no automatic elapsed-time ceiling; test-run
 supervision remains an explicit harness constraint.
+
+Exact equality needs a specific consumer obligation, not just a wire format,
+hash field or matching producer. Returning/exporting the same stored artifact
+must preserve its bytes and address; independently generating an equivalent
+artifact need not reproduce that address. Keep original-source integrity in its
+manifest and small independent vectors for specified canonical binary layouts or
+hash preimages. Ordinary JSON/protobuf encodings and archive metadata do not
+become canonical merely because they can be hashed. Do not pin whole generated
+plans/meshes/programs without identifying the consumer defect that semantic checks
+would miss. Reproducibility checks need an explicit artifact/environment scope;
+same-input/same-producer is not a blanket bitwise guarantee. Review inherited
+restrictions rather than grandfathering every old "deterministic" assertion.
+
+Numerical assertions need units and a requirement-derived error allowance,
+including relevant conditioning, quantization and accumulation. A smaller epsilon
+is not inherently a better test. Correct unjustified historical tolerances using
+independent expected/violating cases, not repeated relaxation until green; do not
+change governing accuracy requirements or drop topology/void/ownership checks.
 
 Product acceptance exercises the actually eligible geometry route and checks
 material, voids and complete emitted beads against an independent expectation.
