@@ -25,6 +25,7 @@ use super::region::offset_admitted;
 use super::{SectionSpan, span_at};
 use crate::{check_cancel, error};
 use geo::{Area, BoundingRect, ConvexHull, LineString, MultiPoint, MultiPolygon, Polygon, Rect};
+use spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm;
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -48,12 +49,22 @@ pub(super) fn plan(
     // Centre spacing of adjacent stadium beads of equal area.
     let spacing = (width - (z - lower) * (1.0 - std::f64::consts::FRAC_PI_4)).max(0.5 * width);
     let envelope = &intent.printer.build_envelope;
+    // A loop also stays out of every bed exclusion region below its top,
+    // measured on the emitted XYZ6 coordinates as the final plan check is.
+    let exclusions = &intent.printer.bed_exclusions;
     let fits = |ring: &LineString<f64>| {
         ring.0.iter().all(|c| {
             c.x - 0.5 * width >= envelope.min[0]
                 && c.x + 0.5 * width <= envelope.max[0]
                 && c.y - 0.5 * width >= envelope.min[1]
                 && c.y + 0.5 * width <= envelope.max[1]
+        }) && ring.lines().all(|line| {
+            let p = |c: geo::Coord<f64>| {
+                [c.x, c.y].map(|v| project_xyz6_coordinate_mm(v).unwrap_or(f64::NAN))
+            };
+            exclusions
+                .iter()
+                .all(|x| x.admits_bead(p(line.start), p(line.end), 0.5 * width, z))
         })
     };
     let loop_path = |kind: DepositionKind, ring: &LineString<f64>| DepositionPath {

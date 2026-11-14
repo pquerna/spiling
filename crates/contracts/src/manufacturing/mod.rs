@@ -912,6 +912,108 @@ impl MachineComponent {
         Ok(())
     }
 }
+/// A rectangular bed region where deposited material must stay at or below
+/// `max_material_z_mm`: the bed surface (envelope minimum Z) for a no-print
+/// region, or a lower ceiling than the envelope top. A machine fact (for
+/// example the toolhead's cutter path over the bed's front-left corner on
+/// Bambu Lab P1/X1 printers), not a toolhead collision model: travel may
+/// cross it. A bead is inside when its capsule (half its width around the
+/// commanded segment) overlaps the open rectangle and its top Z exceeds the
+/// ceiling; touching the boundary is outside.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BedExclusion {
+    pub id: String,
+    pub min_xy_mm: [f64; 2],
+    pub max_xy_mm: [f64; 2],
+    pub max_material_z_mm: f64,
+}
+impl BedExclusion {
+    pub fn validate(&self, envelope: &AabbMm) -> Result<(), ManufacturingError> {
+        label(&self.id)?;
+        if (0..2).any(|a| {
+            !self.min_xy_mm[a].is_finite()
+                || !self.max_xy_mm[a].is_finite()
+                || self.min_xy_mm[a] >= self.max_xy_mm[a]
+                || self.max_xy_mm[a] <= envelope.min[a]
+                || self.min_xy_mm[a] >= envelope.max[a]
+        }) || !self.max_material_z_mm.is_finite()
+            || self.max_material_z_mm < envelope.min[2]
+            || self.max_material_z_mm >= envelope.max[2]
+        {
+            return Err(invalid(
+                "bed exclusion must be a positive rectangle on the bed with a ceiling below the envelope top",
+            ));
+        }
+        Ok(())
+    }
+    /// Whether a bead along `a`→`b` (XY) of half-width `radius` whose top is
+    /// at `top_z` stays out of this region (touching is out).
+    pub fn admits_bead(&self, a: [f64; 2], b: [f64; 2], radius: f64, top_z: f64) -> bool {
+        top_z <= self.max_material_z_mm
+            || segment_rectangle_distance(a, b, self.min_xy_mm, self.max_xy_mm) >= radius
+    }
+    /// Whether material with these XY bounds and top stays out of this region.
+    pub fn admits_bounds(&self, min: [f64; 2], max: [f64; 2], top_z: f64) -> bool {
+        top_z <= self.max_material_z_mm
+            || (0..2).any(|a| min[a] >= self.max_xy_mm[a] || max[a] <= self.min_xy_mm[a])
+    }
+}
+/// Euclidean distance between segment `a`→`b` and a closed axis-aligned
+/// rectangle (zero when they meet).
+fn segment_rectangle_distance(a: [f64; 2], b: [f64; 2], min: [f64; 2], max: [f64; 2]) -> f64 {
+    let inside = |p: [f64; 2]| (0..2).all(|i| p[i] >= min[i] && p[i] <= max[i]);
+    if inside(a) || inside(b) {
+        return 0.0;
+    }
+    // Liang-Barsky clip: does the segment cross the rectangle?
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    let mut crosses = true;
+    for i in 0..2 {
+        let d = b[i] - a[i];
+        if d == 0.0 {
+            if a[i] < min[i] || a[i] > max[i] {
+                crosses = false;
+                break;
+            }
+        } else {
+            let (u, v) = ((min[i] - a[i]) / d, (max[i] - a[i]) / d);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+            if t0 > t1 {
+                crosses = false;
+                break;
+            }
+        }
+    }
+    if crosses {
+        return 0.0;
+    }
+    let point_rect = |p: [f64; 2]| {
+        let dx = (min[0] - p[0]).max(0.0).max(p[0] - max[0]);
+        let dy = (min[1] - p[1]).max(0.0).max(p[1] - max[1]);
+        dx.hypot(dy)
+    };
+    let point_segment = |p: [f64; 2]| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (a[0] + t * dx - p[0]).hypot(a[1] + t * dy - p[1])
+    };
+    [a, b]
+        .into_iter()
+        .map(point_rect)
+        .chain(
+            [min, [max[0], min[1]], max, [min[0], max[1]]]
+                .into_iter()
+                .map(point_segment),
+        )
+        .fold(f64::INFINITY, f64::min)
+}
 /// Declared software deposition envelope; not physical process qualification.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -996,6 +1098,9 @@ pub struct PrinterSpecification {
     /// Ceiling for non-extruding motion: travel, lifecycle moves, retraction.
     pub max_travel_feed_mm_s: f64,
     pub max_volumetric_flow_mm3_s: f64,
+    /// Bed regions where material must stay below a lower ceiling (or off
+    /// the bed entirely); layout, planning and verification each enforce them.
+    pub bed_exclusions: Vec<BedExclusion>,
 }
 impl PrinterSpecification {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -1046,6 +1151,39 @@ impl PrinterSpecification {
             component.validate()?;
             if !ids.insert(&component.id) {
                 return Err(invalid("duplicate machine component identity"));
+            }
+        }
+        let mut ids = BTreeSet::new();
+        for exclusion in &self.bed_exclusions {
+            exclusion.validate(&self.build_envelope)?;
+            if !ids.insert(&exclusion.id) {
+                return Err(invalid("duplicate bed exclusion identity"));
+            }
+        }
+        // Fixed-dual waste lanes and carriage reservations do not model them.
+        if matches!(self.workflow, JobWorkflow::FixedDualMarlin { .. })
+            && !self.bed_exclusions.is_empty()
+        {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::UnsupportedCapability,
+                "the fixed-dual workflow does not admit bed exclusion regions",
+            ));
+        }
+        // The prime line is planned machine material: it stays out of every
+        // exclusion at the widest admitted bead.
+        if let JobWorkflow::CompleteMarlin { job } = &self.workflow {
+            let radius = 0.5 * self.deposition_limits.max_bead_width_mm;
+            let top = job.prime_start_mm[2].max(job.prime_end_mm[2]);
+            let (a, b) = (
+                [job.prime_start_mm[0], job.prime_start_mm[1]],
+                [job.prime_end_mm[0], job.prime_end_mm[1]],
+            );
+            if self
+                .bed_exclusions
+                .iter()
+                .any(|x| !x.admits_bead(a, b, radius, top))
+            {
+                return Err(invalid("the prime line enters a bed exclusion region"));
             }
         }
         json_bytes(self, MAX_INTENT_JSON_BYTES as usize)?;

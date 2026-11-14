@@ -52,6 +52,42 @@ const described = [
     declared_volume_mm: box(180, 180, 180),
   },
   {
+    id: "bambulab.p1s",
+    vendor: "Bambu Lab",
+    model: "P1S",
+    source: "https://us.store.bambulab.com/products/p1s",
+    mounting_interface: "bambulab.p1s.plate",
+    // Bambu Studio printable_height 250 (published volume 256 high).
+    declared_volume_mm: box(256, 256, 250),
+  },
+  {
+    id: "bambulab.p1p",
+    vendor: "Bambu Lab",
+    model: "P1P",
+    source: "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf",
+    mounting_interface: "bambulab.p1p.plate",
+    // Bambu Studio printable_height 250 (published volume 256 high).
+    declared_volume_mm: box(256, 256, 250),
+  },
+  {
+    id: "bambulab.x1c",
+    vendor: "Bambu Lab",
+    model: "X1 Carbon",
+    source: "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf",
+    mounting_interface: "bambulab.x1c.plate",
+    // Bambu Studio printable_height 250 (published volume 256 high).
+    declared_volume_mm: box(256, 256, 250),
+  },
+  {
+    id: "bambulab.x1e",
+    vendor: "Bambu Lab",
+    model: "X1E",
+    source: "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf",
+    mounting_interface: "bambulab.x1e.plate",
+    // Bambu Studio printable_height 250 (published volume 256 high).
+    declared_volume_mm: box(256, 256, 250),
+  },
+  {
     id: "creality.ender-3-v3-se",
     vendor: "Creality",
     model: "Ender-3 V3 SE",

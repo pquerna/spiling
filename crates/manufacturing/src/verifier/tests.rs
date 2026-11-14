@@ -170,6 +170,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             max_print_feed_mm_s: 100.0,
             max_travel_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 100.0,
+            bed_exclusions: vec![],
         },
         recipe: PlanarPrintRecipe {
             id: "recipe".into(),
@@ -4517,12 +4518,13 @@ fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
         "BED_MESH_PROFILE",
         "BED_MESH_CLEAR",
     ];
-    // Bambu Lab: every command word that Bambu Studio 02.09.01.70's own A1
-    // and A1 mini exports use (no public firmware G-code reference exists).
+    // Bambu Lab: every command word that Bambu Studio 02.09.01.70's own A1,
+    // A1 mini, P1S and X1C exports use (no public firmware G-code reference
+    // exists).
     const BAMBU: &[&str] = &[
-        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G29.2", "G90", "G92", "M18", "M73", "M83",
-        "M104", "M106", "M109", "M140", "M190", "M220", "M221", "M400", "M412", "M622", "M623",
-        "M975", "M991", "M1002",
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G29.1", "G29.2", "G90", "G92", "M18", "M73",
+        "M83", "M104", "M106", "M109", "M140", "M190", "M220", "M221", "M400", "M412", "M622",
+        "M623", "M975", "M991", "M1002",
     ];
     let code = line.split_once(';').map_or(line, |(code, _)| code).trim();
     let Some(word) = code.split_ascii_whitespace().next() else {
@@ -4580,7 +4582,7 @@ fn shipped_setups_emit_only_their_dialects_documented_commands() {
             OutputDialect::KlipperSingleExtruderGcodeV1 => "\nBED_MESH_CALIBRATE\n",
             OutputDialect::PrusaMarlinSingleExtruderGcodeV1 => "\nG29 A\n",
             OutputDialect::BambuLabGcode3mfV1 => {
-                "\nM109 S140\nG29.2 S1\nM1002 judge_flag g29_before_print_flag\nM622 J1\nG29 A1 "
+                "\nM109 S140\nG29.2 S1\nM1002 judge_flag g29_before_print_flag\nM622 J1\nM1002 gcode_claim_action : 1\nG29 A"
             }
             _ => "\nG28\nM190 R60\nG29\n",
         };
@@ -4665,7 +4667,7 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
         .unwrap();
     assert_eq!(lines.last(), Some(&"; EXECUTABLE_BLOCK_END"));
     assert_eq!(
-        lines[exec + 1..exec + 25],
+        lines[exec + 1..exec + 31],
         [
             "G21",
             "G90",
@@ -4677,9 +4679,12 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
             "M106 S0",
             "M975 S1",
             "M412 S1",
+            "G29.1 Z0",
+            "M1002 gcode_claim_action : 2",
             "M140 S60",
             "M104 S140",
             "M109 S140",
+            "M1002 gcode_claim_action : 13",
             "G28 T145",
             "M190 S60",
             "M104 S140",
@@ -4687,10 +4692,14 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
             "G29.2 S1",
             "M1002 judge_flag g29_before_print_flag",
             "M622 J1",
+            "M1002 gcode_claim_action : 1",
             "G29 A1 X1 Y1 I5 J4",
             "M400",
             "M623",
             "M109 S200",
+            // Textured PEI: the A1 references lower the nozzle 0.02 mm.
+            "G29.1 Z-0.02",
+            "M1002 gcode_claim_action : 0",
         ],
         "{program}"
     );
@@ -4730,6 +4739,63 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
     let end = moved[after..].find('\n').unwrap() + after + 1;
     moved.insert_str(end, "M73 L1\nM991 S0 P0\n");
     assert!(verify(&moved, &plan, &intent, &cancel).is_err());
+}
+
+#[test]
+fn bambu_p1_x1_lifecycle_purges_and_wipes_before_probing_with_its_own_form() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let setup = catalog
+        .setups
+        .iter()
+        .find(|s| s.id == "bambulab.p1s.04")
+        .unwrap();
+    let intent = shipped_dialect(setup);
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    let at = |needle: &str| {
+        program
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {program}"))
+    };
+    // Heat, home, purge over the chute and wipe, restore modes, probe with
+    // the P1/X1 form, wait to print, zero E, trim the textured plate, prime.
+    let order = [
+        "M1002 gcode_claim_action : 54\n",
+        "G28 T145\n",
+        "M1002 gcode_claim_action : 14\n",
+        "G1 Y265 F3000\n",
+        "G1 E40 F200\n",
+        "G1 X128 Y128 F18000\nG21\nG90\nM83\n",
+        "G29 A X1 Y1 I5 J4\n",
+        "M109 S200\nG92 E0\nG29.1 Z-0.04\nM1002 gcode_claim_action : 0\n",
+    ];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{pair:?}");
+    }
+    assert!(!program.contains("G29 A1"));
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert!(
+        report
+            .limitations
+            .iter()
+            .any(|l| l.contains("purge into the waste chute")),
+        "{:?}",
+        report.limitations
+    );
+    for (from, to) in [
+        ("G29 A X1", "G29 A1 X1"),
+        ("G1 E40 F200\n", "G1 E80 F200\n"),
+        ("G29.1 Z-0.04\n", ""),
+        (
+            "G1 X128 Y128 F18000\nG21\nG90\nM83\n",
+            "G1 X128 Y128 F18000\n",
+        ),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert_ne!(mutated, program, "{from}");
+        assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
 }
 
 fn klipper_macros() -> (LifecycleBlock, LifecycleBlock) {

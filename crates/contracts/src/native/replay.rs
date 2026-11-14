@@ -329,6 +329,7 @@ mod tests {
             printer_model_id: "N2S".into(),
             printer_model: "Bambu Lab A1".into(),
             plate: BambuPlate::TexturedPeiPlate,
+            series: BambuSeries::A1,
         };
         let wire = super::super::manufacturing::delivery_to_rpc(package.clone());
         assert_eq!(

@@ -16,6 +16,7 @@ use spiling_contracts::manufacturing::*;
 
 mod adhesion;
 mod bambu;
+mod bed_exclusion;
 mod bridge_split;
 mod construction;
 mod cost;
@@ -638,6 +639,12 @@ fn inspect_lifecycle(
                         "decoded prime crosses conservative object XY ownership envelope",
                     ));
                 }
+                bed_exclusion::check(
+                    &intent.printer.bed_exclusions,
+                    from,
+                    position,
+                    0.5 * intent.printer.deposition_limits.max_bead_width_mm,
+                )?;
                 let length = distance(from, position);
                 let delta = e - state.extrusion;
                 if length <= 0.0
@@ -1317,6 +1324,14 @@ pub(crate) fn verify_actual(
                 ));
             }
 
+            if source.is_some() {
+                let from = state
+                    .position
+                    .ok_or_else(|| failed("deposition before positioning"))?;
+                let half = 0.5 * association.map_or(recipe.bead_width_mm, |a| a.width)
+                    + arc_segment.map_or(0.0, |segment| segment.sagitta);
+                bed_exclusion::check(&printer.bed_exclusions, from, position, half)?;
+            }
             if let Some(source) = source {
                 let from = state
                     .position

@@ -80,6 +80,7 @@ pub fn layout_footprints(
             && !matches!(
                 check.code.as_str(),
                 "outside_envelope"
+                    | "bed_exclusion"
                     | "hardware_placement"
                     | "surface_component_exclusion"
                     | "surface_prime_exclusion"
@@ -553,6 +554,28 @@ pub(super) fn admit<'work>(
                 || placed.max[a] > envelope.max[a] + axis_resolution(input, a)
         }) {
             add("outside_envelope", "Placed native extrema plus admitted surface-finish expansion exceed the build envelope; change placement, finish or printer".into(), Some(occurrence.occurrence_id), None);
+        }
+        if let Some(region) = input.intent.printer.bed_exclusions.iter().find(|x| {
+            !x.admits_bounds(
+                [placed.min[0], placed.min[1]],
+                [placed.max[0], placed.max[1]],
+                placed.max[2],
+            )
+        }) {
+            add(
+                "bed_exclusion",
+                format!(
+                    "Placed part overlaps the printer's bed exclusion region {} ({}..{} × {}..{} mm, material allowed up to Z {} mm); move it off that region",
+                    region.id,
+                    region.min_xy_mm[0],
+                    region.max_xy_mm[0],
+                    region.min_xy_mm[1],
+                    region.max_xy_mm[1],
+                    region.max_material_z_mm
+                ),
+                Some(occurrence.occurrence_id),
+                None,
+            );
         }
         if let Some(bounds) = &mut result.bounds {
             bounds

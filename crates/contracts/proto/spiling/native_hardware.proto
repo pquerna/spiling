@@ -201,6 +201,16 @@ message PrinterSpecification {
   double max_print_feed_mm_s = 15;
   // Non-extruding motion: travel, lifecycle moves and retraction.
   double max_travel_feed_mm_s = 16;
+  // Bed regions where material stays at or below a ceiling (the bed surface
+  // for a no-print region); travel may cross them.
+  repeated BedExclusion bed_exclusions = 17;
+}
+message BedExclusion {
+  string id = 1;
+  // Exactly two values each: the rectangle's XY corners.
+  repeated double min_xy_mm = 2;
+  repeated double max_xy_mm = 3;
+  double max_material_z_mm = 4;
 }
 message MotionResolution { double xy_mm = 1; double z_mm = 2; }
 message DiagnosticBodyOnly {}
@@ -256,6 +266,12 @@ message BambuGcode3mfPackage {
   string printer_model_id = 1;
   string printer_model = 2;
   BambuPlate plate = 3;
+  BambuSeries series = 4;
+}
+enum BambuSeries {
+  BAMBU_SERIES_UNSPECIFIED = 0;
+  BAMBU_SERIES_A1 = 1;
+  BAMBU_SERIES_P1_X1 = 2;
 }
 enum BambuPlate {
   BAMBU_PLATE_UNSPECIFIED = 0;
@@ -281,6 +297,8 @@ enum ThermalEffect {
   THERMAL_EFFECT_TARGET = 2;
   THERMAL_EFFECT_WAIT = 3;
   THERMAL_EFFECT_OFF = 4;
+  // The nozzle only: waits at a non-printing standby or probing temperature.
+  THERMAL_EFFECT_STANDBY = 5;
 }
 enum LevellingEffect {
   LEVELLING_EFFECT_UNSPECIFIED = 0;
@@ -623,7 +641,8 @@ enum MachineLimit {
 }
 message FactSource {oneof kind {string published=1;string family_default=2;google.protobuf.Empty operator_declared=3;}}
 message SourcedLimit {MachineLimit key=1;double value=2;FactSource source=3;}
-message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;optional string printer_model=9;LifecycleBlock start_block=10;LifecycleBlock end_block=11;ExtruderDrive extruder_drive=12;DeliveryPackage delivery=13;}
+message MachineDescription {string id=1;repeated string lineage=2;FirmwareFamily firmware=3;MachineKinematics kinematics=4;BedLevelling levelling=5;bool heated_bed=6;bool arc_moves=7;repeated SourcedLimit limits=8;optional string printer_model=9;LifecycleBlock start_block=10;LifecycleBlock end_block=11;ExtruderDrive extruder_drive=12;DeliveryPackage delivery=13;repeated SourcedBedExclusion bed_exclusions=14;}
+message SourcedBedExclusion {BedExclusion exclusion=1;FactSource source=2;}
 message HardwareSetupDefinition {string id=1;string label=2;HardwareModelDefinition model=3;PrinterSpecification printer=4;MachineDescription machine=5;}
 message PlateFaceDefinition {string key=1;string label=2;string surface=3;AabbMm usable_mm=4;repeated AabbMm keepouts_mm=5;double max_bed_celsius=6;}
 message PlateDefinition {string id=1;string label=2;string mounting_interface=3;double thickness_mm=4;double surface_z_mm=5;repeated PlateFaceDefinition faces=6;string source=7;}

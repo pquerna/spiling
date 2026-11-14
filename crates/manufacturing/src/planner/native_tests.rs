@@ -167,6 +167,7 @@ fn intent(supports: bool) -> ManufacturingIntent {
             max_print_feed_mm_s: 200.0,
             max_travel_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
+            bed_exclusions: vec![],
         },
     }
 }

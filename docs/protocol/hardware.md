@@ -38,7 +38,7 @@ are trusted TypeScript authoring data against the generated Rust domain view.
 `pnpm contracts` generates inert `hardware-catalog.json` and
 `machine-descriptions.json`; `pnpm check:tooling` checks drift and TypeScript.
 Rust resolves, derives and validates the embedded catalog.
-`printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The catalog ships derived setups for the Prusa MK4S, Bambu Lab A1 and A1 mini, Creality Ender-3 V3 SE, a generic Klipper Cartesian and a generic Marlin bed-slinger, each with a derived stock sheet, plus the diagnostic Cartesian and complete Marlin
+`printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The catalog ships derived setups for the Prusa MK4S, Bambu Lab A1, A1 mini, P1S, P1P, X1 Carbon and X1E, Creality Ender-3 V3 SE, a generic Klipper Cartesian and a generic Marlin bed-slinger, each with a derived stock sheet, plus the diagnostic Cartesian and complete Marlin
 software reference configurations and their two-face reference sheet. H2C is a catalog-only
 identity with unknown declared volume and no executable setup. Adding a model
 record cannot authorize a dialect, firmware, connector or physical process.
@@ -89,8 +89,19 @@ validation refuses a printer that differs from the derivation:
 Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
 Prusa Buddy, `klipper` → Klipper, `bambu_lab` → Bambu Lab, whose program is
 delivered in a `.gcode.3mf` package; a Bambu description declares `delivery`
-(`printer_model_id`, `printer_model` and stock `plate`, inherited like other
-facts) and no other family may. Levelling is
+(`printer_model_id`, `printer_model`, stock `plate` and firmware `series`
+`a1`/`p1_x1`, inherited like other facts) and no other family may. A layer may
+declare `bed_exclusions` (sourced rectangles with a material ceiling, 0 for a
+no-print region); null inherits the parent's, a list replaces them, and they
+become the printer's `bed_exclusions` (see
+[manufacturing](manufacturing.md)). The Bambu P1/X1 family layer
+`bambulab.p1-x1` (256 × 256 bed, 250 mm printable height, 500 mm/s, 20 000
+mm/s², the `cutter-corner` 0..18 × 0..28 mm region, all from Bambu Studio
+02.09.01.70's machine profiles) is shared by P1S (`C12`), P1P (`C11`), X1
+Carbon (`BL-P001`) and X1E (`C13`), whose hotend/bed maxima come from Bambu's
+store and spec sheets; unpublished facts (volumetric flow, per-role speeds)
+inherit the modern family defaults. Bed origins are all at 0,0 for the
+shipped machines; no origin offset is declared. Levelling is
 `manual` (no levelling command), `probe_mesh` (probe every print after homing
 and waiting for the bed) or `stored_mesh` (restore a stored mesh; Prusa Buddy
 keeps none and probes). `printer_model` names the model the firmware checks
@@ -102,7 +113,7 @@ Marlin); the operator start block; bed target and a non-oozing standby nozzle
 (150 °C, Prusa 170 °C and waited, for its loadcell probe, Bambu 140 °C and
 waited after enabling vibration suppression and runout detection; Bambu then
 probes at 140 °C whatever the material standby); home; wait for the
-bed; levelling; wait for the print nozzle; prime. Waits use the first-layer
+bed; Bambu P1/X1 purge and wipe; levelling; wait for the print nozzle; prime. Waits use the first-layer
 targets; a captured material profile supplies the standby temperature
 (PrusaSlicer's MK4S probes PLA/ABS at 170, PET at 175, FLEX at 210 °C).
 Prusa's `M555` probe area follows PrusaSlicer's MK4S formula over the first

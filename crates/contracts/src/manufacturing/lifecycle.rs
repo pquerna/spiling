@@ -27,6 +27,9 @@ pub enum ThermalEffect {
     /// Sets the job target and waits for it.
     Wait,
     Off,
+    /// The nozzle only: waits at a non-printing standby or probing
+    /// temperature (for example after a purge and wipe).
+    Standby,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +135,9 @@ impl LifecycleBlock {
                 ));
             }
         }
+        if self.effects.bed == ThermalEffect::Standby {
+            return Err(invalid("only the nozzle has a standby effect"));
+        }
         if self.effects.homes && self.effects.position != PositionEffect::Unknown {
             return Err(invalid("a block that homes leaves the position unknown"));
         }
@@ -177,6 +183,85 @@ impl LifecycleBlock {
             label: "Bambu vibration suppression and runout detection".into(),
             lines: vec!["M975 S1".into(), "M412 S1".into()],
             effects: BlockEffects::NONE,
+        }
+    }
+    /// A Bambu on-screen stage message: `M1002 gcode_claim_action : <action>`
+    /// sets the stage the printer's screen and app show. Action numbers as
+    /// Bambu Studio 02.09.01.70's machine start G-code uses them (0 clears,
+    /// 1 bed levelling, 2 and 54 heatbed preheat, 13 homing, 14 nozzle
+    /// cleaning). Display only: no effect.
+    pub fn bambu_stage(action: u8, stage: &str) -> Self {
+        Self {
+            label: format!("Bambu screen stage: {stage}"),
+            lines: vec![format!("M1002 gcode_claim_action : {action}")],
+            effects: BlockEffects::NONE,
+        }
+    }
+    /// Bambu firmware Z trim (`G29.1 Z<mm>`), a persistent offset below
+    /// command space. The reference start sequences clear it first and, on a
+    /// textured PEI plate, lower the nozzle by the texture the homing probe
+    /// touched (-0.02 mm on A1/A1 mini, -0.04 mm on P1/X1). Command-space
+    /// positions are unchanged; the physical offset is reported.
+    pub fn bambu_z_trim(trim_mm: f64, label: &str) -> Self {
+        Self {
+            label: label.into(),
+            lines: vec![if trim_mm == 0.0 {
+                "G29.1 Z0".into()
+            } else {
+                format!("G29.1 Z{trim_mm}")
+            }],
+            effects: BlockEffects::NONE,
+        }
+    }
+    /// Bambu P1/X1 purge and nozzle wipe, re-authored for this producer from
+    /// the facts the Bambu Studio 02.09.01.70 P1S/X1C start sequences show:
+    /// the waste chute opening behind the bed at Y 265 (outside the 256 mm
+    /// printable square), the silicone wiper along X 60..100 at that Y,
+    /// reachable at Z 5 after homing. Requires a homed printer. Heats to the
+    /// first-layer nozzle temperature, purges 40 mm of filament into the
+    /// chute, retracts 0.5 mm, cools toward the 140 °C probing temperature
+    /// while wiping across the wiper, and waits there with the part fan off.
+    /// Omitted from the reference: AMS loading/flush volumes, the 250 °C
+    /// flush, the exposed-steel scrub with soft endstops disabled.
+    pub fn bambu_p1x1_purge_and_wipe() -> Self {
+        let mut lines: Vec<String> = [
+            "M1002 gcode_claim_action : 14",
+            "G90",
+            "M83",
+            "G1 Z5 F1200",
+            "G1 X54 Y230 F18000",
+            "G1 Y265 F3000",
+            "M109 S{nozzle_temperature_c}",
+            "G1 E40 F200",
+            "M400",
+            "M106 S255",
+            "G1 E-0.5 F300",
+            "M104 S140",
+        ]
+        .map(String::from)
+        .to_vec();
+        for _ in 0..2 {
+            lines.extend(["G1 X100 F5000", "G1 X70 F15000"].map(String::from));
+        }
+        lines.push("M109 S140".into());
+        for _ in 0..2 {
+            lines.extend(["G1 X100 F5000", "G1 X70 F15000"].map(String::from));
+        }
+        lines.extend(["M106 S0", "G1 Z10 F1200", "G1 X128 Y128 F18000"].map(String::from));
+        Self {
+            label: "Bambu P1/X1 purge into the waste chute and nozzle wipe".into(),
+            lines,
+            effects: BlockEffects {
+                homes: false,
+                position: PositionEffect::Unknown,
+                levelling: LevellingEffect::Unchanged,
+                bed: ThermalEffect::Unchanged,
+                nozzle: ThermalEffect::Standby,
+                extrusion: ExtrusionEffect::Unknown,
+                modes: ModeEffect::Unknown,
+                fan_off: true,
+                motors_off: false,
+            },
         }
     }
     /// The conventional Klipper end macro: heaters, fan and motors off.
@@ -560,7 +645,7 @@ fn apply(
             let heat = |effect| match effect {
                 ThermalEffect::Unchanged => None,
                 ThermalEffect::Target => Some(Heat::Target),
-                ThermalEffect::Wait => Some(Heat::Wait),
+                ThermalEffect::Wait | ThermalEffect::Standby => Some(Heat::Wait),
                 ThermalEffect::Off => Some(Heat::Off),
             };
             if let Some(h) = heat(e.bed) {
@@ -569,6 +654,8 @@ fn apply(
             if let Some(h) = heat(e.nozzle) {
                 s.nozzle = if h == Heat::Off {
                     Nozzle::Off
+                } else if e.nozzle == ThermalEffect::Standby {
+                    Nozzle::Standby(h)
                 } else {
                     Nozzle::Print(h)
                 };

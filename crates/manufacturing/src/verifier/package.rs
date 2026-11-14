@@ -140,6 +140,7 @@ pub fn verify_bambu_package(
         printer_model_id,
         printer_model,
         plate,
+        ..
     }) = &job.delivery
     else {
         return Err(bad("the printer declares no Bambu package"));

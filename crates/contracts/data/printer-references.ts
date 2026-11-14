@@ -28,6 +28,50 @@ export default [
     },
   },
   {
+    id: "bambulab.p1s",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "P1S",
+      aliases: ["Bambu P1S"],
+      volume_mm: [256, 256, 256],
+      source_url: "https://us.store.bambulab.com/products/p1s",
+    },
+  },
+  {
+    id: "bambulab.p1p",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "P1P",
+      aliases: ["Bambu P1P"],
+      volume_mm: [256, 256, 256],
+      source_url: "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf",
+    },
+  },
+  {
+    id: "bambulab.x1c",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "X1 Carbon",
+      aliases: ["Bambu X1C", "X1C", "Bambu Lab X1C"],
+      volume_mm: [256, 256, 256],
+      source_url: "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf",
+    },
+  },
+  {
+    id: "bambulab.x1e",
+    item: {
+      kind: "printer",
+      manufacturer: "Bambu Lab",
+      model: "X1E",
+      aliases: ["Bambu X1E"],
+      volume_mm: [256, 256, 256],
+      source_url: "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf",
+    },
+  },
+  {
     id: "prusa.mk4s",
     item: {
       kind: "printer",

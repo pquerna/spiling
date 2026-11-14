@@ -4,6 +4,7 @@
 
 mod adhesion;
 mod arcs;
+mod bed_exclusion;
 pub(crate) mod boolean;
 mod bridge_split;
 use boolean::budget as boolean_budget;
@@ -99,6 +100,7 @@ pub(crate) fn plan(
         })
         .collect();
     arcs::attach(&mut plan, &sources, cancel)?;
+    bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     Ok(plan)
 }
 

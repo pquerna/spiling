@@ -8,7 +8,8 @@
 //! <https://www.klipper3d.org/G-Codes.html>.
 
 use spiling_contracts::manufacturing::{
-    LifecycleStep, NormalizedPrintPlan, OutputDialect, PrinterSpecification, SingleExtruderJob,
+    BambuSeries, DeliveryPackage, LifecycleStep, NormalizedPrintPlan, OutputDialect,
+    PrinterSpecification, SingleExtruderJob,
 };
 
 pub(super) enum Emit {
@@ -145,6 +146,14 @@ pub(super) fn render(
         // area when the printer's bed-levelling print option is on.
         S::ProbeMesh if bambu => {
             let [x, y, w, h] = bambu_area;
+            // A1 firmware probes with `G29 A1`, P1/X1 with `G29 A`.
+            let probe = match &job.delivery {
+                Some(DeliveryPackage::BambuGcode3mf {
+                    series: BambuSeries::P1X1,
+                    ..
+                }) => "G29 A",
+                _ => "G29 A1",
+            };
             Emit::Lines(vec![
                 // Bambu's reference probes at 140 °C on every plate.
                 "M104 S140".into(),
@@ -152,7 +161,8 @@ pub(super) fn render(
                 "G29.2 S1".into(),
                 "M1002 judge_flag g29_before_print_flag".into(),
                 "M622 J1".into(),
-                format!("G29 A1 X{x} Y{y} I{w} J{h}"),
+                "M1002 gcode_claim_action : 1".into(),
+                format!("{probe} X{x} Y{y} I{w} J{h}"),
                 "M400".into(),
                 "M623".into(),
             ])

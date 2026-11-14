@@ -1159,6 +1159,11 @@ pub(super) fn delivery_from_rpc(value: rpc::DeliveryPackage) -> Result<DeliveryP
                     .find(|(wire, _)| *wire == plate)
                     .map(|(_, plate)| *plate)
                     .ok_or("unspecified Bambu plate")?,
+                series: match rpc::BambuSeries::try_from(p.series).map_err(|e| e.to_string())? {
+                    rpc::BambuSeries::A1 => BambuSeries::A1,
+                    rpc::BambuSeries::P1X1 => BambuSeries::P1X1,
+                    rpc::BambuSeries::Unspecified => return Err("unspecified Bambu series".into()),
+                },
             }
         }
     };
@@ -1172,6 +1177,7 @@ pub(super) fn delivery_to_rpc(value: DeliveryPackage) -> rpc::DeliveryPackage {
             printer_model_id,
             printer_model,
             plate,
+            series,
         } => rpc::DeliveryPackage {
             package: Some(Package::BambuGcode3mf(rpc::BambuGcode3mfPackage {
                 printer_model_id,
@@ -1180,6 +1186,10 @@ pub(super) fn delivery_to_rpc(value: DeliveryPackage) -> rpc::DeliveryPackage {
                     .iter()
                     .find(|(_, p)| *p == plate)
                     .map_or(0, |(wire, _)| *wire as i32),
+                series: match series {
+                    BambuSeries::A1 => rpc::BambuSeries::A1,
+                    BambuSeries::P1X1 => rpc::BambuSeries::P1X1,
+                } as i32,
             })),
         },
     }
@@ -1220,6 +1230,11 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                 max_travel_feed_mm_s: value.max_travel_feed_mm_s,
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
                 workflow: required(value.workflow, "job workflow")?.try_into()?,
+                bed_exclusions: value
+                    .bed_exclusions
+                    .into_iter()
+                    .map(bed_exclusion_from_rpc)
+                    .collect::<Result<_, String>>()?,
             },
             Self::validate,
         )
@@ -1252,7 +1267,32 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
             max_travel_feed_mm_s: value.max_travel_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
             workflow: Some(value.workflow.try_into()?),
+            bed_exclusions: value
+                .bed_exclusions
+                .into_iter()
+                .map(bed_exclusion_to_rpc)
+                .collect(),
         })
+    }
+}
+pub(super) fn bed_exclusion_from_rpc(x: rpc::BedExclusion) -> Result<BedExclusion, String> {
+    let pair = |v: Vec<f64>, what: &str| -> Result<[f64; 2], String> {
+        v.try_into()
+            .map_err(|_| format!("bed exclusion {what} needs two values"))
+    };
+    Ok(BedExclusion {
+        id: x.id,
+        min_xy_mm: pair(x.min_xy_mm, "minimum")?,
+        max_xy_mm: pair(x.max_xy_mm, "maximum")?,
+        max_material_z_mm: x.max_material_z_mm,
+    })
+}
+pub(super) fn bed_exclusion_to_rpc(x: BedExclusion) -> rpc::BedExclusion {
+    rpc::BedExclusion {
+        id: x.id,
+        min_xy_mm: x.min_xy_mm.to_vec(),
+        max_xy_mm: x.max_xy_mm.to_vec(),
+        max_material_z_mm: x.max_material_z_mm,
     }
 }
 impl TryFrom<rpc::DepositionLimits> for DepositionLimits {

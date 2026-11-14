@@ -668,10 +668,29 @@ const LEVELLING: [BedLevelling; 3] = [
     BedLevelling::ProbeMesh,
     BedLevelling::StoredMesh,
 ];
+fn fact_source_from_rpc(source: Option<rpc::FactSource>) -> Result<FactSource, String> {
+    use rpc::fact_source::Kind;
+    Ok(
+        match required(source.and_then(|s| s.kind), "FactSource.kind")? {
+            Kind::Published(reference) => FactSource::Published { reference },
+            Kind::FamilyDefault(family) => FactSource::FamilyDefault { family },
+            Kind::OperatorDeclared(()) => FactSource::OperatorDeclared,
+        },
+    )
+}
+fn fact_source_to_rpc(source: FactSource) -> rpc::FactSource {
+    use rpc::fact_source::Kind;
+    rpc::FactSource {
+        kind: Some(match source {
+            FactSource::Published { reference } => Kind::Published(reference),
+            FactSource::FamilyDefault { family } => Kind::FamilyDefault(family),
+            FactSource::OperatorDeclared => Kind::OperatorDeclared(()),
+        }),
+    }
+}
 impl TryFrom<rpc::MachineDescription> for MachineDescription {
     type Error = String;
     fn try_from(v: rpc::MachineDescription) -> Result<Self, String> {
-        use rpc::fact_source::Kind;
         let value = Self {
             id: v.id,
             lineage: v.lineage,
@@ -695,11 +714,20 @@ impl TryFrom<rpc::MachineDescription> for MachineDescription {
                     Ok(SourcedLimit {
                         key: enum_value(&MachineLimit::ALL, l.key, "machine limit")?,
                         value: l.value,
-                        source: match required(l.source.and_then(|s| s.kind), "FactSource.kind")? {
-                            Kind::Published(reference) => FactSource::Published { reference },
-                            Kind::FamilyDefault(family) => FactSource::FamilyDefault { family },
-                            Kind::OperatorDeclared(()) => FactSource::OperatorDeclared,
-                        },
+                        source: fact_source_from_rpc(l.source)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            bed_exclusions: v
+                .bed_exclusions
+                .into_iter()
+                .map(|x| {
+                    Ok(SourcedBedExclusion {
+                        exclusion: super::manufacturing::bed_exclusion_from_rpc(required(
+                            x.exclusion,
+                            "bed exclusion",
+                        )?)?,
+                        source: fact_source_from_rpc(x.source)?,
                     })
                 })
                 .collect::<Result<_, String>>()?,
@@ -711,7 +739,6 @@ impl TryFrom<rpc::MachineDescription> for MachineDescription {
 impl TryFrom<MachineDescription> for rpc::MachineDescription {
     type Error = String;
     fn try_from(v: MachineDescription) -> Result<Self, String> {
-        use rpc::fact_source::Kind;
         v.validate()?;
         Ok(Self {
             firmware: enum_index(&FIRMWARE, v.firmware),
@@ -730,13 +757,15 @@ impl TryFrom<MachineDescription> for rpc::MachineDescription {
                 .map(|l| rpc::SourcedLimit {
                     key: enum_index(&MachineLimit::ALL, l.key),
                     value: l.value,
-                    source: Some(rpc::FactSource {
-                        kind: Some(match l.source {
-                            FactSource::Published { reference } => Kind::Published(reference),
-                            FactSource::FamilyDefault { family } => Kind::FamilyDefault(family),
-                            FactSource::OperatorDeclared => Kind::OperatorDeclared(()),
-                        }),
-                    }),
+                    source: Some(fact_source_to_rpc(l.source)),
+                })
+                .collect(),
+            bed_exclusions: v
+                .bed_exclusions
+                .into_iter()
+                .map(|x| rpc::SourcedBedExclusion {
+                    exclusion: Some(super::manufacturing::bed_exclusion_to_rpc(x.exclusion)),
+                    source: Some(fact_source_to_rpc(x.source)),
                 })
                 .collect(),
             id: v.id,
@@ -750,11 +779,12 @@ use crate::manufacturing::{
     LifecycleStep, ModeEffect, PositionEffect, ThermalEffect,
 };
 const POSITION: [PositionEffect; 2] = [PositionEffect::Preserved, PositionEffect::Unknown];
-const THERMAL: [ThermalEffect; 4] = [
+const THERMAL: [ThermalEffect; 5] = [
     ThermalEffect::Unchanged,
     ThermalEffect::Target,
     ThermalEffect::Wait,
     ThermalEffect::Off,
+    ThermalEffect::Standby,
 ];
 const LEVELLING_EFFECT: [LevellingEffect; 3] = [
     LevellingEffect::Unchanged,

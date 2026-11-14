@@ -129,6 +129,10 @@ export type AssumedPrintedLaws = { name: string, justification: string, compatib
 
 export type BambuPlate = "cool_plate" | "engineering_plate" | "high_temp_plate" | "textured_pei_plate";
 
+export type BambuSeries = "a1" | "p1_x1";
+
+export type BedExclusion = { id: string, min_xy_mm: [number, number], max_xy_mm: [number, number], max_material_z_mm: number, };
+
 export type BedLevelling = "manual" | "probe_mesh" | "stored_mesh";
 
 export type BedPoseBasis = { "kind": "native_bounded" } | { "kind": "tolerant_model", join_mm: number, profile_mm: number, };
@@ -237,7 +241,11 @@ printer_model: string,
 /**
  * The build plate the job assumes (`bed_type`).
  */
-plate: BambuPlate, };
+plate: BambuPlate,
+/**
+ * The firmware generation whose start conventions the program follows.
+ */
+series: BambuSeries, };
 
 export type DeliveryPackageDescriptor = { info: DeliveryPackageInfo, resource: ArtifactView, };
 
@@ -636,6 +644,10 @@ lineage: Array<string>, firmware: FirmwareFamily, kinematics: MachineKinematics,
  */
 delivery: DeliveryPackage | null,
 /**
+ * Bed regions where material must stay below a ceiling (or off the bed).
+ */
+bed_exclusions: Array<SourcedBedExclusion>,
+/**
  * Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
  */
 limits: Array<SourcedLimit>,
@@ -655,7 +667,11 @@ printer_model: string | null,
 /**
  * The delivery package the firmware consumes (Bambu `.gcode.3mf`).
  */
-delivery: DeliveryPackage | null, limits: Array<SourcedLimit>, };
+delivery: DeliveryPackage | null,
+/**
+ * Bed exclusion regions; null inherits the parent's, a list replaces them.
+ */
+bed_exclusions: Array<SourcedBedExclusion> | null, limits: Array<SourcedLimit>, };
 
 export type MachineLimit = "bed_x_mm" | "bed_y_mm" | "max_z_mm" | "nozzle_diameter_mm" | "filament_diameter_mm" | "max_print_feed_mm_s" | "max_travel_feed_mm_s" | "max_acceleration_mm_s2" | "max_volumetric_flow_mm3_s" | "max_nozzle_temperature_c" | "min_extrusion_temperature_c" | "max_bed_temperature_c" | "min_bead_width_per_nozzle" | "max_bead_width_per_nozzle" | "max_bead_height_per_nozzle" | "xy_resolution_mm" | "z_resolution_mm" | "toolhead_radius_mm" | "toolhead_height_mm" | "first_layer_speed_mm_s" | "outer_wall_speed_mm_s" | "inner_wall_speed_mm_s" | "sparse_infill_speed_mm_s" | "solid_infill_speed_mm_s" | "top_skin_speed_mm_s" | "support_speed_mm_s" | "bridge_speed_mm_s" | "first_layer_infill_speed_mm_s";
 
@@ -1054,7 +1070,12 @@ max_print_feed_mm_s: number,
 /**
  * Ceiling for non-extruding motion: travel, lifecycle moves, retraction.
  */
-max_travel_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
+max_travel_feed_mm_s: number, max_volumetric_flow_mm3_s: number,
+/**
+ * Bed regions where material must stay below a lower ceiling (or off
+ * the bed entirely); layout, planning and verification each enforce them.
+ */
+bed_exclusions: Array<BedExclusion>, };
 
 export type ProcessAction = { "kind": "replace", value: ProcessValue, } | { "kind": "erase" };
 
@@ -1316,6 +1337,8 @@ export type SourceSolidId = string;
 
 export type SourceUnit = "micrometre" | "centimetre" | "foot" | "millimetre" | "metre" | "inch";
 
+export type SourcedBedExclusion = { exclusion: BedExclusion, source: FactSource, };
+
 export type SourcedLimit = { key: MachineLimit, value: number, source: FactSource, };
 
 export type SparseBandDecision = { first_layer: number, last_layer: number, owner: DepositionOwner | null, disposition: SparseBandDisposition,
@@ -1404,7 +1427,7 @@ export type SurfaceScope = { "kind": "definition", definition_id: DefinitionId, 
 
 export type SurfaceScopeKind = "definition" | "occurrence";
 
-export type ThermalEffect = "unchanged" | "target" | "wait" | "off";
+export type ThermalEffect = "unchanged" | "target" | "wait" | "off" | "standby";
 
 export type TorusKind = "regular_ring" | "horn" | "spindle";
 

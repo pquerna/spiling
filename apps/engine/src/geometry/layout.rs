@@ -388,6 +388,13 @@ fn prepare_single(
             }
         }
     }
+    // Bed exclusion regions are machine facts: no part is placed over one
+    // (layout is planar, so a region with a raised ceiling is excluded too;
+    // the planner admits a short part an operator places there).
+    obstacles.extend(intent.printer.bed_exclusions.iter().map(|x| Rect {
+        min: x.min_xy_mm,
+        max: x.max_xy_mm,
+    }));
     for c in &intent.printer.components {
         if c.role == MachineComponentRole::Fixture {
             let local = match c.shape {

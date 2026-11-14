@@ -205,13 +205,21 @@ impl<'a> Lifecycle<'a> {
             // either way G29.2 S1 leaves a (fresh or stored) mesh active.
             S::ProbeMesh if bambu => {
                 let [x, y, i, j] = self.bambu_area;
+                let a1 = !matches!(
+                    self.job.delivery,
+                    Some(DeliveryPackage::BambuGcode3mf {
+                        series: BambuSeries::P1X1,
+                        ..
+                    })
+                );
                 vec![
                     "M104 S140".into(),
                     "M109 S140".into(),
                     "G29.2 S1".into(),
                     "M1002 judge_flag g29_before_print_flag".into(),
                     "M622 J1".into(),
-                    format!("G29 A1 X{x} Y{y} I{i} J{j}"),
+                    "M1002 gcode_claim_action : 1".into(),
+                    format!("G29 A{} X{x} Y{y} I{i} J{j}", if a1 { "1" } else { "" }),
                     "M400".into(),
                     "M623".into(),
                 ]
@@ -325,13 +333,15 @@ impl<'a> Lifecycle<'a> {
                     ThermalEffect::Target => Some(Heat::Target),
                     ThermalEffect::Wait => Some(Heat::Wait),
                     ThermalEffect::Off => Some(Heat::Off),
+                    // Waited, but not at the print temperature.
+                    ThermalEffect::Standby => Some(Heat::Wait),
                 };
                 if let Some(h) = heat(e.bed) {
                     self.bed = h;
                 }
                 if let Some(h) = heat(e.nozzle) {
                     self.nozzle = h;
-                    self.nozzle_print = h != Heat::Off;
+                    self.nozzle_print = h != Heat::Off && e.nozzle != ThermalEffect::Standby;
                 }
                 if e.fan_off {
                     self.fan_off = true;

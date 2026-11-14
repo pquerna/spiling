@@ -46,6 +46,7 @@ const printer = {
   max_print_feed_mm_s: 150,
   max_travel_feed_mm_s: 150,
   max_volumetric_flow_mm3_s: 12,
+  bed_exclusions: [],
 } satisfies PrinterSpecification;
 
 export default printer;

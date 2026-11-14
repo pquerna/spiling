@@ -146,6 +146,7 @@ fn inheritance_refuses_cycles_missing_facts_and_foreign_defaults() {
         arc_moves: None,
         printer_model: None,
         delivery: None,
+        bed_exclusions: None,
         limits: vec![],
         extruder_drive: None,
     };
@@ -267,4 +268,107 @@ fn firmware_family_selects_dialect_and_lifecycle_table() {
     block.lines = vec![format!("M117 {}", "x".repeat(96))];
     m.end_block = Some(block);
     assert!(long.rederive().is_err());
+}
+
+#[test]
+fn bambu_p1_x1_setups_carry_the_cutter_corner_and_their_series_start() {
+    use crate::manufacturing::{BambuSeries, DeliveryPackage, LifecycleStep, ThermalEffect};
+    for (id, model_id) in [
+        ("bambulab.p1s.04", "C12"),
+        ("bambulab.p1p.04", "C11"),
+        ("bambulab.x1c.04", "BL-P001"),
+        ("bambulab.x1e.04", "C13"),
+    ] {
+        let setup = described().into_iter().find(|s| s.id == id).unwrap();
+        let p = &setup.printer;
+        assert_eq!(p.build_envelope.max, [256.0, 256.0, 250.0], "{id}");
+        assert_eq!(p.bed_exclusions.len(), 1);
+        assert_eq!(p.bed_exclusions[0].max_xy_mm, [18.0, 28.0]);
+        let JobWorkflow::CompleteMarlin { job } = &p.workflow else {
+            panic!()
+        };
+        let Some(DeliveryPackage::BambuGcode3mf {
+            printer_model_id,
+            series,
+            ..
+        }) = &job.delivery
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (printer_model_id.as_str(), *series),
+            (model_id, BambuSeries::P1X1)
+        );
+        let blocks: Vec<_> = job.lifecycle.blocks().map(|(_, b)| b).collect();
+        let purge = blocks
+            .iter()
+            .find(|b| b.label.contains("purge"))
+            .expect("P1/X1 purge and wipe");
+        assert_eq!(purge.effects.nozzle, ThermalEffect::Standby);
+        assert!(blocks.iter().any(|b| b.lines == ["G29.1 Z-0.04"]));
+        // The purge follows homing; levelling and the print wait follow it.
+        let at =
+            |f: &dyn Fn(&LifecycleStep) -> bool| job.lifecycle.start.iter().position(f).unwrap();
+        let home = at(&|s| *s == LifecycleStep::Home);
+        let wipe =
+            at(&|s| matches!(s, LifecycleStep::Block { block } if block.label.contains("purge")));
+        let probe = at(&|s| *s == LifecycleStep::ProbeMesh);
+        assert!(home < wipe && wipe < probe);
+    }
+    // The A1 keeps its own trim and no chute purge.
+    let a1 = described()
+        .into_iter()
+        .find(|s| s.id == "bambulab.a1.04")
+        .unwrap();
+    let JobWorkflow::CompleteMarlin { job } = &a1.printer.workflow else {
+        panic!()
+    };
+    assert!(
+        job.lifecycle
+            .blocks()
+            .any(|(_, b)| b.lines == ["G29.1 Z-0.02"])
+    );
+    assert!(
+        !job.lifecycle
+            .blocks()
+            .any(|(_, b)| b.label.contains("purge"))
+    );
+}
+
+#[test]
+fn bed_exclusions_admit_touching_beads_and_refuse_the_prime_inside() {
+    use crate::manufacturing::BedExclusion;
+    let x = BedExclusion {
+        id: "corner".into(),
+        min_xy_mm: [0.0, 0.0],
+        max_xy_mm: [18.0, 28.0],
+        max_material_z_mm: 0.0,
+    };
+    // Touching from outside, at the bead's half-width, is admitted.
+    assert!(x.admits_bead([18.25, 0.0], [18.25, 40.0], 0.25, 0.2));
+    assert!(!x.admits_bead([18.125, 0.0], [18.125, 40.0], 0.25, 0.2));
+    // A segment crossing the region with both ends outside.
+    assert!(!x.admits_bead([-5.0, 10.0], [30.0, 10.0], 0.2, 0.2));
+    // Diagonal clearance past the corner.
+    assert!(x.admits_bead([19.0, 29.0], [30.0, 40.0], 1.0, 0.2));
+    assert!(!x.admits_bead([18.5, 28.5], [30.0, 40.0], 1.0, 0.2));
+    // Below a raised ceiling everything is admitted.
+    let mut low = x.clone();
+    low.max_material_z_mm = 5.0;
+    assert!(low.admits_bead([1.0, 1.0], [2.0, 2.0], 0.2, 4.0));
+    assert!(!low.admits_bounds([1.0, 1.0], [2.0, 2.0], 6.0));
+    // A machine whose prime crosses an exclusion does not derive.
+    let mut setup = described()
+        .into_iter()
+        .find(|s| s.id == "bambulab.p1s.04")
+        .unwrap();
+    let machine = setup.machine.as_mut().unwrap();
+    machine.bed_exclusions[0].exclusion.min_xy_mm = [0.0, 200.0];
+    machine.bed_exclusions[0].exclusion.max_xy_mm = [40.0, 256.0];
+    assert!(
+        machine
+            .derive_printer("p", "P")
+            .unwrap_err()
+            .contains("prime line")
+    );
 }

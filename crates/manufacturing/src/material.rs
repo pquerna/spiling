@@ -696,8 +696,8 @@ mod creation_tests {
                 }
             }
         }
-        // MK4S, both Bambu, Ender-3 V3 SE, generic Klipper/Marlin, the Marlin reference.
-        assert_eq!(created, 7 * 5 * 3 * 2);
+        // MK4S, six Bambu, Ender-3 V3 SE, generic Klipper/Marlin, the Marlin reference.
+        assert_eq!(created, 11 * 5 * 3 * 2);
     }
     #[test]
     fn project_filaments_choose_their_nozzle_profile_or_explain_why_not() {

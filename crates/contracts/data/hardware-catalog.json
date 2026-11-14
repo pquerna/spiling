@@ -77,6 +77,82 @@
       }
     },
     {
+      "id": "bambulab.p1s",
+      "vendor": "Bambu Lab",
+      "model": "P1S",
+      "source": "https://us.store.bambulab.com/products/p1s",
+      "mounting_interface": "bambulab.p1s.plate",
+      "declared_volume_mm": {
+        "min": [
+          0,
+          0,
+          0
+        ],
+        "max": [
+          256,
+          256,
+          250
+        ]
+      }
+    },
+    {
+      "id": "bambulab.p1p",
+      "vendor": "Bambu Lab",
+      "model": "P1P",
+      "source": "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf",
+      "mounting_interface": "bambulab.p1p.plate",
+      "declared_volume_mm": {
+        "min": [
+          0,
+          0,
+          0
+        ],
+        "max": [
+          256,
+          256,
+          250
+        ]
+      }
+    },
+    {
+      "id": "bambulab.x1c",
+      "vendor": "Bambu Lab",
+      "model": "X1 Carbon",
+      "source": "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf",
+      "mounting_interface": "bambulab.x1c.plate",
+      "declared_volume_mm": {
+        "min": [
+          0,
+          0,
+          0
+        ],
+        "max": [
+          256,
+          256,
+          250
+        ]
+      }
+    },
+    {
+      "id": "bambulab.x1e",
+      "vendor": "Bambu Lab",
+      "model": "X1E",
+      "source": "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf",
+      "mounting_interface": "bambulab.x1e.plate",
+      "declared_volume_mm": {
+        "min": [
+          0,
+          0,
+          0
+        ],
+        "max": [
+          256,
+          256,
+          250
+        ]
+      }
+    },
+    {
       "id": "creality.ender-3-v3-se",
       "vendor": "Creality",
       "model": "Ender-3 V3 SE",
@@ -263,7 +339,8 @@
         },
         "max_print_feed_mm_s": 150,
         "max_travel_feed_mm_s": 150,
-        "max_volumetric_flow_mm3_s": 12
+        "max_volumetric_flow_mm3_s": 12,
+        "bed_exclusions": []
       }
     },
     {
@@ -486,7 +563,8 @@
         },
         "max_print_feed_mm_s": 150,
         "max_travel_feed_mm_s": 150,
-        "max_volumetric_flow_mm3_s": 12
+        "max_volumetric_flow_mm3_s": 12,
+        "bed_exclusions": []
       }
     }
   ],

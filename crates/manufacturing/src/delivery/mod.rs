@@ -90,6 +90,7 @@ impl PlateFacts {
             printer_model_id,
             printer_model,
             plate,
+            ..
         }) = &job.delivery
         else {
             return Err(unsupported());

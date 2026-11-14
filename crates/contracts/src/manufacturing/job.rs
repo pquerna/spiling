@@ -87,7 +87,20 @@ pub enum DeliveryPackage {
         printer_model: String,
         /// The build plate the job assumes (`bed_type`).
         plate: BambuPlate,
+        /// The firmware generation whose start conventions the program follows.
+        series: BambuSeries,
     },
+}
+/// Bambu firmware generations with distinct start conventions, as Bambu
+/// Studio 02.09.01.70's machine start G-code shows them: the A1 bed-slingers
+/// probe with `G29 A1` and trim a textured PEI plate by -0.02 mm; the P1/X1
+/// CoreXY machines probe with `G29 A`, trim by -0.04 mm and purge and wipe
+/// the nozzle over the rear waste chute and wiper.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BambuSeries {
+    A1,
+    P1X1,
 }
 /// Bambu build plates, by the identifiers Bambu's package metadata uses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]

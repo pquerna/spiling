@@ -476,6 +476,7 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             max_print_feed_mm_s: 100.0,
             max_travel_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 10.0,
+            bed_exclusions: vec![],
         },
         recipe: PlanarPrintRecipe {
             id: "solid".into(),

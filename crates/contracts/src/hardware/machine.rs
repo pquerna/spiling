@@ -23,9 +23,9 @@ use super::{HardwareModelDefinition, HardwareSetupDefinition, PlateDefinition, t
 use crate::{
     geometry::{AabbMm, RigidPoseMm, SourceHash},
     manufacturing::{
-        DeliveryPackage, DepositionLimits, ExtruderDrive, ExtrusionEffect, FirmwareLifecycle,
-        HomingCoordinateContract, JobWorkflow, LevellingEffect, LifecycleBlock, LifecycleStep,
-        MANUFACTURING_SCHEMA_VERSION, MachineComponent, MachineComponentRole,
+        BambuPlate, BambuSeries, DeliveryPackage, DepositionLimits, ExtruderDrive, ExtrusionEffect,
+        FirmwareLifecycle, HomingCoordinateContract, JobWorkflow, LevellingEffect, LifecycleBlock,
+        LifecycleStep, MANUFACTURING_SCHEMA_VERSION, MachineComponent, MachineComponentRole,
         MachineComponentShape, ModeEffect, MotionResolution, MotionSpace, OutputDialect,
         PrinterCapabilities, PrinterCoordinateFrame, PrinterSpecification, SingleExtruderJob,
         ThermalEffect,
@@ -214,6 +214,15 @@ impl FactSource {
         }
     }
 }
+/// A bed exclusion region with its source (see
+/// [`crate::manufacturing::BedExclusion`]); `max_material_z_mm` 0 forbids
+/// material over the region entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcedBedExclusion {
+    pub exclusion: crate::manufacturing::BedExclusion,
+    pub source: FactSource,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SourcedLimit {
@@ -254,6 +263,9 @@ pub struct MachineLayer {
     /// The delivery package the firmware consumes (Bambu `.gcode.3mf`).
     #[serde(deserialize_with = "required_option")]
     pub delivery: Option<DeliveryPackage>,
+    /// Bed exclusion regions; null inherits the parent's, a list replaces them.
+    #[serde(deserialize_with = "required_option")]
+    pub bed_exclusions: Option<Vec<SourcedBedExclusion>>,
     pub limits: Vec<SourcedLimit>,
 }
 
@@ -277,6 +289,8 @@ pub struct MachineDescription {
     /// Bambu Lab family.
     #[serde(deserialize_with = "required_option")]
     pub delivery: Option<DeliveryPackage>,
+    /// Bed regions where material must stay below a ceiling (or off the bed).
+    pub bed_exclusions: Vec<SourcedBedExclusion>,
     /// Exactly one entry per `MachineLimit`, in `MachineLimit::ALL` order.
     pub limits: Vec<SourcedLimit>,
     /// Operator start/end blocks (for example Klipper `START_PRINT` and
@@ -336,6 +350,16 @@ impl MachineDescription {
                     "machine {} is outside its admitted range",
                     l.key.label()
                 ));
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for x in &self.bed_exclusions {
+            x.source.validate()?;
+            x.exclusion
+                .validate(&self.build_envelope())
+                .map_err(|e| e.to_string())?;
+            if !ids.insert(&x.exclusion.id) {
+                return Err("machine bed exclusions must have distinct identities".into());
             }
         }
         let v = |k| self.limit(k);
@@ -400,6 +424,7 @@ impl MachineDescription {
         let mut drive = None;
         let mut printer_model = None;
         let mut delivery = None;
+        let mut exclusions = None;
         for layer in &chain {
             text(&layer.id)?;
             let mut declared = std::collections::BTreeSet::new();
@@ -422,6 +447,7 @@ impl MachineDescription {
             drive = layer.extruder_drive.or(drive);
             printer_model = layer.printer_model.clone().or(printer_model);
             delivery = layer.delivery.clone().or(delivery);
+            exclusions = layer.bed_exclusions.clone().or(exclusions);
         }
         let missing = |what: &str| format!("machine {leaf} does not declare {what}");
         let limits = MachineLimit::ALL
@@ -439,6 +465,7 @@ impl MachineDescription {
             extruder_drive: drive.ok_or_else(|| missing("its extruder drive"))?,
             printer_model,
             delivery,
+            bed_exclusions: exclusions.unwrap_or_default(),
             limits,
             start_block: None,
             end_block: None,
@@ -584,6 +611,11 @@ impl MachineDescription {
             max_print_feed_mm_s: v(MachineLimit::MaxPrintFeedMmS),
             max_travel_feed_mm_s: v(MachineLimit::MaxTravelFeedMmS),
             max_volumetric_flow_mm3_s: v(MachineLimit::MaxVolumetricFlowMm3S),
+            bed_exclusions: self
+                .bed_exclusions
+                .iter()
+                .map(|x| x.exclusion.clone())
+                .collect(),
         };
         printer.validate().map_err(|e| e.to_string())?;
         Ok(printer)
@@ -641,6 +673,14 @@ impl MachineDescription {
         use LifecycleStep as S;
         let prusa = self.firmware == FirmwareFamily::PrusaBuddy;
         let bambu = self.firmware == FirmwareFamily::BambuLab;
+        let bambu_package = self
+            .delivery
+            .as_ref()
+            .map(|DeliveryPackage::BambuGcode3mf { series, plate, .. }| (*series, *plate));
+        let p1x1 = matches!(bambu_package, Some((BambuSeries::P1X1, _)));
+        let stage = |action, label| S::Block {
+            block: LifecycleBlock::bambu_stage(action, label),
+        };
         let mut start = Vec::new();
         if prusa {
             start.push(S::NozzleCheck);
@@ -658,6 +698,9 @@ impl MachineDescription {
         if bambu {
             start.push(S::Block {
                 block: LifecycleBlock::bambu_printer_services(),
+            });
+            start.push(S::Block {
+                block: LifecycleBlock::bambu_z_trim(0.0, "Bambu Z trim cleared"),
             });
         }
         let none = crate::manufacturing::BlockEffects::NONE;
@@ -677,6 +720,13 @@ impl MachineDescription {
             150.0
         });
         let heated = self.heated_bed;
+        if bambu && heated {
+            start.push(if p1x1 {
+                stage(54, "heatbed preheat")
+            } else {
+                stage(2, "heating")
+            });
+        }
         if heated && begin.bed == ThermalEffect::Unchanged {
             start.push(S::BedTarget);
         }
@@ -687,6 +737,9 @@ impl MachineDescription {
             }
         }
         if !begin.homes {
+            if bambu {
+                start.push(stage(13, "homing"));
+            }
             start.push(S::Home);
         }
         if begin.modes == ModeEffect::Unknown {
@@ -694,6 +747,12 @@ impl MachineDescription {
         }
         if heated && begin.bed != ThermalEffect::Wait {
             start.push(S::BedWait);
+        }
+        if p1x1 {
+            start.push(S::Block {
+                block: LifecycleBlock::bambu_p1x1_purge_and_wipe(),
+            });
+            start.push(S::RestoreModes);
         }
         if begin.levelling != LevellingEffect::Active {
             match self.levelling {
@@ -707,8 +766,22 @@ impl MachineDescription {
         if begin.nozzle != ThermalEffect::Wait {
             start.push(S::NozzleWait { standby_c: None });
         }
-        if begin.extrusion == ExtrusionEffect::Unknown {
+        if begin.extrusion == ExtrusionEffect::Unknown || p1x1 {
             start.push(S::ResetExtrusion);
+        }
+        if let Some((series, plate)) = bambu_package {
+            if plate == BambuPlate::TexturedPeiPlate {
+                start.push(S::Block {
+                    block: LifecycleBlock::bambu_z_trim(
+                        match series {
+                            BambuSeries::A1 => -0.02,
+                            BambuSeries::P1X1 => -0.04,
+                        },
+                        "Bambu textured PEI Z trim",
+                    ),
+                });
+            }
+            start.push(stage(0, "printing"));
         }
         start.push(S::Prime);
         let mut end = vec![S::Barrier, S::Park, S::Barrier];

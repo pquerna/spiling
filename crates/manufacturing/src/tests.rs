@@ -67,6 +67,7 @@ fn intent() -> ManufacturingIntent {
             max_print_feed_mm_s: 200.0,
             max_travel_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
+            bed_exclusions: vec![],
         },
         recipe: PlanarPrintRecipe {
             id: "solid".into(),
@@ -4094,4 +4095,63 @@ fn bambu_inspection_writes_and_independently_rereads_a_deterministic_package() {
     ] {
         assert!(reread(&rewrite(member, edit)).is_err(), "{member}");
     }
+}
+
+#[test]
+fn bed_exclusion_keeps_parts_and_adhesion_out_and_the_verifier_checks_it_independently() {
+    use spiling_contracts::hardware::builtin_catalog;
+    let catalog = builtin_catalog().unwrap();
+    let setup = catalog.find_setup("bambulab.p1s.04").unwrap();
+    let corner = &setup.printer.bed_exclusions;
+    assert_eq!(corner.len(), 1);
+    assert_eq!(
+        (
+            corner[0].min_xy_mm,
+            corner[0].max_xy_mm,
+            corner[0].max_material_z_mm
+        ),
+        ([0.0, 0.0], [18.0, 28.0], 0.0)
+    );
+    let selection = crate::generic_selection(setup, "pla").unwrap();
+    let hardware = std::sync::Arc::new(catalog.stock_capture(setup).unwrap());
+    let requested = crate::create_default_intent(
+        hardware,
+        selection,
+        crate::QualityPreset::Draft,
+        crate::SupportChoice::Off,
+    )
+    .unwrap();
+    let at = |x: f64, y: f64| {
+        let mut pose = RigidPoseMm::IDENTITY;
+        pose.translation_mm = [x, y, 0.0];
+        Scene::new(BOX, &[pose])
+    };
+    // A part over the region refuses with the region named.
+    let refused = at(5.0, 5.0).compile(&requested).unwrap_err();
+    assert!(refused.message.contains("cutter-corner"), "{refused:?}");
+    // Beside it the part compiles; skirt loops that would enter it are left
+    // out and reported.
+    let beside = at(19.0, 2.0).compile(&requested).unwrap();
+    assert!(beside.plan.adhesion.skirt_loops_outside_envelope > 0);
+    let cancel = AtomicBool::new(false);
+    verifier::verify(&beside.program, &beside.plan, &requested, &cancel).unwrap();
+    // The verifier decodes the same program against a region it would
+    // violate and refuses on its own.
+    let clear = at(60.0, 60.0).compile(&requested).unwrap();
+    verifier::verify(&clear.program, &clear.plan, &requested, &cancel).unwrap();
+    let mut stricter = requested.clone();
+    let mut printer = stricter.printer.clone();
+    printer.bed_exclusions.push(BedExclusion {
+        id: "test-region".into(),
+        min_xy_mm: [62.0, 62.0],
+        max_xy_mm: [64.0, 64.0],
+        max_material_z_mm: 3.0,
+    });
+    stricter.printer = printer;
+    stricter.hardware = None;
+    let error = verifier::verify(&clear.program, &clear.plan, &stricter, &cancel).unwrap_err();
+    assert!(error.message.contains("bed exclusion"), "{error:?}");
+    // Below the ceiling the same program is admitted.
+    stricter.printer.bed_exclusions[1].max_material_z_mm = 9.0;
+    verifier::verify(&clear.program, &clear.plan, &stricter, &cancel).unwrap();
 }

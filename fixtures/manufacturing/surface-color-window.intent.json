@@ -282,7 +282,8 @@
     },
     "max_print_feed_mm_s": 150,
     "max_travel_feed_mm_s": 150,
-    "max_volumetric_flow_mm3_s": 12
+    "max_volumetric_flow_mm3_s": 12,
+    "bed_exclusions": []
   },
   "recipe": {
     "id": "surface-color-window",

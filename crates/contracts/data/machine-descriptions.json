@@ -10,6 +10,7 @@
       "extruder_drive": "direct_drive",
       "printer_model": null,
       "delivery": null,
+      "bed_exclusions": null,
       "id": "generic.fff",
       "limits": [
         {
@@ -248,6 +249,7 @@
       "extruder_drive": null,
       "printer_model": null,
       "delivery": null,
+      "bed_exclusions": null,
       "id": "generic.klipper-cartesian",
       "limits": []
     },
@@ -261,6 +263,7 @@
       "extruder_drive": "bowden",
       "printer_model": null,
       "delivery": null,
+      "bed_exclusions": null,
       "id": "generic.marlin-bedslinger",
       "limits": [
         {
@@ -299,6 +302,7 @@
       "extruder_drive": null,
       "printer_model": "MK4S",
       "delivery": null,
+      "bed_exclusions": null,
       "id": "prusa.mk4s",
       "limits": [
         {
@@ -468,8 +472,10 @@
         "kind": "bambu_gcode3mf",
         "printer_model_id": "N2S",
         "printer_model": "Bambu Lab A1",
-        "plate": "textured_pei_plate"
+        "plate": "textured_pei_plate",
+        "series": "a1"
       },
+      "bed_exclusions": null,
       "id": "bambulab.a1",
       "limits": [
         {
@@ -575,8 +581,10 @@
         "kind": "bambu_gcode3mf",
         "printer_model_id": "N1",
         "printer_model": "Bambu Lab A1 mini",
-        "plate": "textured_pei_plate"
+        "plate": "textured_pei_plate",
+        "series": "a1"
       },
+      "bed_exclusions": null,
       "id": "bambulab.a1-mini",
       "limits": [
         {
@@ -654,6 +662,252 @@
       ]
     },
     {
+      "parent": "generic.fff",
+      "firmware": "bambu_lab",
+      "kinematics": "core_xy",
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "extruder_drive": null,
+      "printer_model": null,
+      "delivery": null,
+      "bed_exclusions": [
+        {
+          "exclusion": {
+            "id": "cutter-corner",
+            "min_xy_mm": [
+              0,
+              0
+            ],
+            "max_xy_mm": [
+              18,
+              28
+            ],
+            "max_material_z_mm": 0
+          },
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        }
+      ],
+      "id": "bambulab.p1-x1",
+      "limits": [
+        {
+          "key": "bed_x_mm",
+          "value": 256,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "bed_y_mm",
+          "value": 256,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "max_z_mm",
+          "value": 250,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "nozzle_diameter_mm",
+          "value": 0.4,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "filament_diameter_mm",
+          "value": 1.75,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "max_print_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "max_travel_feed_mm_s",
+          "value": 500,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        },
+        {
+          "key": "max_acceleration_mm_s2",
+          "value": 20000,
+          "source": {
+            "kind": "published",
+            "reference": "Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json (flattened)"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "bambulab.p1-x1",
+      "firmware": null,
+      "kinematics": null,
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "extruder_drive": null,
+      "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "C12",
+        "printer_model": "Bambu Lab P1S",
+        "plate": "textured_pei_plate",
+        "series": "p1_x1"
+      },
+      "bed_exclusions": null,
+      "id": "bambulab.p1s",
+      "limits": [
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "https://us.store.bambulab.com/products/p1s (tech specs)"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "https://us.store.bambulab.com/products/p1s (tech specs)"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "bambulab.p1-x1",
+      "firmware": null,
+      "kinematics": null,
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "extruder_drive": null,
+      "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "C11",
+        "printer_model": "Bambu Lab P1P",
+        "plate": "textured_pei_plate",
+        "series": "p1_x1"
+      },
+      "bed_exclusions": null,
+      "id": "bambulab.p1p",
+      "limits": [
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 100,
+          "source": {
+            "kind": "published",
+            "reference": "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "bambulab.p1-x1",
+      "firmware": null,
+      "kinematics": null,
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "extruder_drive": null,
+      "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "BL-P001",
+        "printer_model": "Bambu Lab X1 Carbon",
+        "plate": "textured_pei_plate",
+        "series": "p1_x1"
+      },
+      "bed_exclusions": null,
+      "id": "bambulab.x1c",
+      "limits": [
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 300,
+          "source": {
+            "kind": "published",
+            "reference": "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 110,
+          "source": {
+            "kind": "published",
+            "reference": "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "parent": "bambulab.p1-x1",
+      "firmware": null,
+      "kinematics": null,
+      "levelling": null,
+      "heated_bed": null,
+      "arc_moves": null,
+      "extruder_drive": null,
+      "printer_model": null,
+      "delivery": {
+        "kind": "bambu_gcode3mf",
+        "printer_model_id": "C13",
+        "printer_model": "Bambu Lab X1E",
+        "plate": "textured_pei_plate",
+        "series": "p1_x1"
+      },
+      "bed_exclusions": null,
+      "id": "bambulab.x1e",
+      "limits": [
+        {
+          "key": "max_nozzle_temperature_c",
+          "value": 320,
+          "source": {
+            "kind": "published",
+            "reference": "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf"
+          }
+        },
+        {
+          "key": "max_bed_temperature_c",
+          "value": 110,
+          "source": {
+            "kind": "published",
+            "reference": "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf"
+          }
+        }
+      ]
+    },
+    {
       "parent": "generic.marlin-bedslinger",
       "firmware": null,
       "kinematics": null,
@@ -663,6 +917,7 @@
       "extruder_drive": "direct_drive",
       "printer_model": null,
       "delivery": null,
+      "bed_exclusions": null,
       "id": "creality.ender-3-v3-se",
       "limits": [
         {
@@ -750,6 +1005,30 @@
       "label": "Bambu Lab A1 mini · 0.4 mm",
       "model": "bambulab.a1-mini",
       "machine": "bambulab.a1-mini"
+    },
+    {
+      "id": "bambulab.p1s.04",
+      "label": "Bambu Lab P1S · 0.4 mm",
+      "model": "bambulab.p1s",
+      "machine": "bambulab.p1s"
+    },
+    {
+      "id": "bambulab.p1p.04",
+      "label": "Bambu Lab P1P · 0.4 mm",
+      "model": "bambulab.p1p",
+      "machine": "bambulab.p1p"
+    },
+    {
+      "id": "bambulab.x1c.04",
+      "label": "Bambu Lab X1 Carbon · 0.4 mm",
+      "model": "bambulab.x1c",
+      "machine": "bambulab.x1c"
+    },
+    {
+      "id": "bambulab.x1e.04",
+      "label": "Bambu Lab X1E · 0.4 mm",
+      "model": "bambulab.x1e",
+      "machine": "bambulab.x1e"
     },
     {
       "id": "creality.ender-3-v3-se.04",

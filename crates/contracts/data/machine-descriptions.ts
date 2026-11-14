@@ -38,6 +38,7 @@ const layer = (l: Partial<MachineLayer> & Pick<MachineLayer, "id" | "limits">): 
   extruder_drive: null,
   printer_model: null,
   delivery: null,
+  bed_exclusions: null,
   ...l,
 });
 
@@ -156,6 +157,7 @@ const a1 = layer({
     printer_model_id: "N2S",
     printer_model: "Bambu Lab A1",
     plate: "textured_pei_plate",
+    series: "a1",
   },
   limits: [
     ...published(a1Url, {
@@ -187,6 +189,7 @@ const a1Mini = layer({
     printer_model_id: "N1",
     printer_model: "Bambu Lab A1 mini",
     plate: "textured_pei_plate",
+    series: "a1",
   },
   limits: published(a1MiniUrl, {
     bed_x_mm: 180,
@@ -199,6 +202,80 @@ const a1Mini = layer({
     max_nozzle_temperature_c: 300,
     max_bed_temperature_c: 80,
   }),
+});
+// Bambu Lab P1 and X1 series: one CoreXY family sharing the bed, the
+// front-left no-print region and the slicer's printable height, as Bambu
+// Studio 02.09.01.70 declares them for every P1P/P1S/X1/X1C/X1E 0.4 nozzle
+// machine (`printable_area` 0..256 square, `bed_exclude_area` 0x0..18x28,
+// `printable_height` 250, `machine_max_speed_x` 500,
+// `machine_max_acceleration_extruding` 20000). The excluded corner is where
+// the toolhead reaches the filament cutter, so no material may stand there.
+const bambuProfile = (machine: string) =>
+  `Bambu Studio 02.09.01.70 resources/profiles/BBL/machine/${machine} (flattened)`;
+const bambuP1X1 = layer({
+  id: "bambulab.p1-x1",
+  parent: fff.id,
+  firmware: "bambu_lab",
+  kinematics: "core_xy",
+  bed_exclusions: [
+    {
+      exclusion: {
+        id: "cutter-corner",
+        min_xy_mm: [0, 0],
+        max_xy_mm: [18, 28],
+        max_material_z_mm: 0,
+      },
+      source: { kind: "published", reference: bambuProfile("Bambu Lab X1 Carbon 0.4 nozzle.json") },
+    },
+  ],
+  limits: published(bambuProfile("Bambu Lab X1 Carbon 0.4 nozzle.json"), {
+    bed_x_mm: 256,
+    bed_y_mm: 256,
+    max_z_mm: 250,
+    nozzle_diameter_mm: 0.4,
+    filament_diameter_mm: 1.75,
+    max_print_feed_mm_s: 500,
+    max_travel_feed_mm_s: 500,
+    max_acceleration_mm_s2: 20000,
+  }),
+});
+// Package identities: `model_id` in resources/profiles/BBL/machine/<model>.json.
+const bambuDelivery = (printer_model_id: string, printer_model: string) => ({
+  kind: "bambu_gcode3mf" as const,
+  printer_model_id,
+  printer_model,
+  plate: "textured_pei_plate" as const,
+  series: "p1_x1" as const,
+});
+// Hotend and heatbed maxima from Bambu's store/spec pages; the X1 bed is the
+// 220 V rating (the 110 V machine reaches 120 °C).
+const p1sUrl = "https://us.store.bambulab.com/products/p1s (tech specs)";
+const p1pUrl = "https://public-cdn.bambulab.com/store/bambulab-P1P-tech-specs.pdf";
+const x1cUrl = "https://public-cdn.bambulab.com/store/bambulab-X1-carbon-tech-specs.pdf";
+const x1eUrl = "https://cdn1.bambulab.com/x1e/spec/X1E%20Spec(EN).pdf";
+const p1s = layer({
+  id: "bambulab.p1s",
+  parent: bambuP1X1.id,
+  delivery: bambuDelivery("C12", "Bambu Lab P1S"),
+  limits: published(p1sUrl, { max_nozzle_temperature_c: 300, max_bed_temperature_c: 100 }),
+});
+const p1p = layer({
+  id: "bambulab.p1p",
+  parent: bambuP1X1.id,
+  delivery: bambuDelivery("C11", "Bambu Lab P1P"),
+  limits: published(p1pUrl, { max_nozzle_temperature_c: 300, max_bed_temperature_c: 100 }),
+});
+const x1c = layer({
+  id: "bambulab.x1c",
+  parent: bambuP1X1.id,
+  delivery: bambuDelivery("BL-P001", "Bambu Lab X1 Carbon"),
+  limits: published(x1cUrl, { max_nozzle_temperature_c: 300, max_bed_temperature_c: 110 }),
+});
+const x1e = layer({
+  id: "bambulab.x1e",
+  parent: bambuP1X1.id,
+  delivery: bambuDelivery("C13", "Bambu Lab X1E"),
+  limits: published(x1eUrl, { max_nozzle_temperature_c: 320, max_bed_temperature_c: 110 }),
 });
 const enderUrl = "https://www.creality.com/support/creality-ender-3-v3-se";
 // Direct-drive "Sprite" extruder, unlike the Bowden family it inherits.
@@ -223,7 +300,7 @@ const ender = layer({
 });
 
 export default {
-  layers: [fff, klipper, marlin, mk4s, a1, a1Mini, ender],
+  layers: [fff, klipper, marlin, mk4s, a1, a1Mini, bambuP1X1, p1s, p1p, x1c, x1e, ender],
   setups: [
     { id: "prusa.mk4s.04", label: "Prusa MK4S · 0.4 mm", model: "prusa.mk4s", machine: mk4s.id },
     { id: "bambulab.a1.04", label: "Bambu Lab A1 · 0.4 mm", model: "bambulab.a1", machine: a1.id },
@@ -233,6 +310,15 @@ export default {
       model: "bambulab.a1-mini",
       machine: a1Mini.id,
     },
+    { id: "bambulab.p1s.04", label: "Bambu Lab P1S · 0.4 mm", model: "bambulab.p1s", machine: p1s.id },
+    { id: "bambulab.p1p.04", label: "Bambu Lab P1P · 0.4 mm", model: "bambulab.p1p", machine: p1p.id },
+    {
+      id: "bambulab.x1c.04",
+      label: "Bambu Lab X1 Carbon · 0.4 mm",
+      model: "bambulab.x1c",
+      machine: x1c.id,
+    },
+    { id: "bambulab.x1e.04", label: "Bambu Lab X1E · 0.4 mm", model: "bambulab.x1e", machine: x1e.id },
     {
       id: "creality.ender-3-v3-se.04",
       label: "Creality Ender-3 V3 SE · 0.4 mm",
