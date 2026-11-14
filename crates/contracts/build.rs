@@ -4,7 +4,6 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bind watched inputs to this checkout even when several worktrees share a target directory.
-    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     let manifest = std::path::PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or("missing Cargo manifest directory")?,
     );
