@@ -439,15 +439,17 @@ fn selected_member_limit_and_read_budgets_fail_closed() {
     ));
     drop(capture);
     drop(initial);
-    let connection = Connection::open(&fixture.path).unwrap();
+    let mut connection = Connection::open(&fixture.path).unwrap();
+    let transaction = connection.transaction().unwrap();
     for role in 2..=MAX_MEMBERS + 1 {
-        connection
+        transaction
             .execute(
                 "INSERT INTO snapshot_objects SELECT current_snapshot,?1,?2 FROM container",
                 params![role as i64, &ObjectId::of(OLD_ASSET).as_bytes()[..]],
             )
             .unwrap();
     }
+    transaction.commit().unwrap();
     drop(connection);
     let container = Container::open_existing(&fixture.path, false).unwrap();
     assert!(matches!(

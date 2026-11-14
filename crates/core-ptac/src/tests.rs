@@ -238,21 +238,51 @@ fn retained_capacity_refuses_without_implicit_collection_then_explicit_gc_progre
     let path = temporary.path().join("capacity.spil");
     let cancel = AtomicBool::new(false);
     let receipt = Container::create_new(&path, input(b"initial"), &cancel, |_| true).unwrap();
-    let container = receipt.container;
     let mut heads = receipt.heads;
-    for index in 1..MAX_SNAPSHOTS {
+    drop(receipt.container);
+    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    schema::configure(&connection, false).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 1..MAX_SNAPSHOTS - 1 {
         let root = format!("bounded root {index}");
-        heads = container
-            .publish(
-                heads,
-                Selection::Current,
-                input(root.as_bytes()),
-                &cancel,
-                |_| true,
+        let candidate = model::Candidate::checked(input(root.as_bytes())).unwrap();
+        let object_id = &candidate.root.as_bytes()[..];
+        transaction
+            .execute(
+                "INSERT INTO chunks VALUES(?1,?2,0,?3)",
+                rusqlite::params![object_id, root.len() as i64, root.as_bytes()],
             )
-            .unwrap()
-            .heads;
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO objects VALUES(?1,?2,1)",
+                rusqlite::params![object_id, root.len() as i64],
+            )
+            .unwrap();
+        transaction
+            .execute("INSERT INTO object_chunks VALUES(?1,0,?1)", [object_id])
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO snapshots VALUES(?1,?2)",
+                rusqlite::params![&candidate.id.0[..], object_id],
+            )
+            .unwrap();
     }
+    transaction.commit().unwrap();
+    drop(connection);
+    let container = Container::open_existing(&path, false).unwrap();
+    container.check(&cancel).unwrap();
+    heads = container
+        .publish(
+            heads,
+            Selection::Current,
+            input(b"last available snapshot"),
+            &cancel,
+            |_| true,
+        )
+        .unwrap()
+        .heads;
     let failure = container
         .publish(
             heads,
