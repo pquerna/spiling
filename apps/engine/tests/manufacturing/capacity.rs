@@ -356,5 +356,25 @@ async fn fixed_dual_plate_beyond_former_caps_stages_its_intent_compiles_and_veri
     );
     let (_, report) = inspect(&mut client).await;
     assert!(report.verified);
+    // An alternative receipt carrying this plate's intent exceeds one control
+    // frame; it is published as the staged native result and round-trips.
+    let mut candidate = intent.clone();
+    candidate.recipe.seam_policy = SeamPolicy::Distributed;
+    let name = start_alternative(&mut client, candidate.clone()).await;
+    let job = wait(&mut client, name).await;
+    assert_eq!(job.status, JobStatus::Completed, "{job:?}");
+    let Some(JobResult::ManufacturingAlternativeEvaluated { evaluation }) = job.result else {
+        panic!("alternative receipt")
+    };
+    let receipt = prost::Message::encoded_len(
+        &spiling_contracts::rpc::ManufacturingAlternativeEvaluation::try_from(evaluation.clone())
+            .unwrap(),
+    );
+    assert!(
+        receipt > spiling_contracts::MAX_CONTROL_BYTES as usize,
+        "{receipt}"
+    );
+    assert_eq!(*evaluation.intent, candidate);
+    assert!(evaluation.report.verified);
     client.shutdown().await.unwrap();
 }

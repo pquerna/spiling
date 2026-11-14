@@ -625,17 +625,15 @@ fn run(
                             },
                         },
                     };
-                    let wire =
-                        spiling_contracts::rpc::ManufacturingAlternativeEvaluation::try_from(
-                            evaluation.clone(),
-                        )
-                        .map_err(|message| {
-                            ManufacturingError::new(
-                                ManufacturingErrorCode::CorruptArtifact,
-                                message,
-                            )
-                        })?;
-                    check_alternative_receipt_budget(prost::Message::encoded_len(&wire))?;
+                    // Checked wire conversion before publication. A receipt
+                    // larger than one control frame is published as the
+                    // operation's staged native-result artifact.
+                    spiling_contracts::rpc::ManufacturingAlternativeEvaluation::try_from(
+                        evaluation.clone(),
+                    )
+                    .map_err(|message| {
+                        ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, message)
+                    })?;
                     Ok(Product::AlternativeEvaluated {
                         evaluation,
                         asset,
@@ -1672,16 +1670,6 @@ fn inspect_asset(
     Ok(inspection)
 }
 
-fn check_alternative_receipt_budget(encoded_bytes: usize) -> Result<(), ManufacturingError> {
-    if encoded_bytes > (spiling_contracts::MAX_CONTROL_BYTES as usize).saturating_sub(4096) {
-        return Err(ManufacturingError::new(
-            ManufacturingErrorCode::ResourceLimit,
-            "candidate receipt exceeds bounded control response; reduce captured input or report size",
-        ));
-    }
-    Ok(())
-}
-
 fn preflight(
     request: CompileRequest,
     residents: &BTreeMap<DefinitionId, Resident>,
@@ -1803,15 +1791,6 @@ fn compile(
 #[cfg(test)]
 mod image_import_tests {
     use super::*;
-
-    #[test]
-    fn alternative_receipt_refuses_control_overflow_before_publication() {
-        let maximum = spiling_contracts::MAX_CONTROL_BYTES as usize - 4096;
-        assert!(check_alternative_receipt_budget(maximum).is_ok());
-        let error = check_alternative_receipt_budget(maximum + 1).unwrap_err();
-        assert_eq!(error.code, ManufacturingErrorCode::ResourceLimit);
-        assert!(check_alternative_receipt_budget(usize::MAX).is_err());
-    }
 
     #[test]
     fn captured_canonical_budget_rejects_before_retained_asset_admission() {
