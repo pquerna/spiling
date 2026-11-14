@@ -168,6 +168,7 @@ pub(crate) fn validate_plan(
             "full repeated waste beads must be disjoint from both source reservations and each other",
         ));
     }
+    let router = job.router()?;
     let mut count = 0u32;
     let mut previous = bed;
     for layer in &plan.layers {
@@ -192,7 +193,7 @@ pub(crate) fn validate_plan(
                     "fixed-dual model paths cannot contain supports or separators",
                 ));
             }
-            present[usize::from(job.tool_for_path(path)?)] = true;
+            present[usize::from(router.tool_for_path(path)?)] = true;
             count = count
                 .checked_add((path.points_mm.len() - 1) as u32)
                 .ok_or_else(|| invalid("fixed-dual segment count overflow"))?;

@@ -50,6 +50,7 @@ fn assessment(
     let JobWorkflow::FixedDualMarlin { job } = &bundle.provenance.intent.printer.workflow else {
         unreachable!("qualified route")
     };
+    let job = job.router()?;
     let mut counts = [0u32; 2];
     for path in bundle
         .plan

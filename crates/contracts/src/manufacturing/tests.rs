@@ -4883,3 +4883,73 @@ fn hatch_courses_start_at_zero_advance_by_one_and_span_one_layer() {
         assert!(failure.message.contains("hatch courses"), "{failure}");
     }
 }
+
+#[test]
+fn fixed_dual_router_matches_reservation_scan_exactly() {
+    let captured: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/fixed-dual.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::FixedDualMarlin { mut job } = captured.printer.workflow else {
+        panic!()
+    };
+    let template = job.assignments[0].clone();
+    job.assignments.clear();
+    // A 30 x 30 plate of varied reservations, one wide strip, Z-limited
+    // reservations and one deliberately overlapping pair.
+    for row in 0..30 {
+        for column in 0..30 {
+            let mut assignment = template.clone();
+            let x = column as f64 * 10.0 + (row % 3) as f64;
+            let y = row as f64 * 10.0;
+            let top = if (row + column) % 7 == 0 { 2.0 } else { 20.0 };
+            assignment.work_envelope_mm =
+                AabbMm::new([x, y, 0.0], [x + 6.0 + (column % 3) as f64, y + 7.0, top]).unwrap();
+            job.assignments.push(assignment);
+        }
+    }
+    let mut strip = template.clone();
+    strip.work_envelope_mm = AabbMm::new([-5.0, 305.0, 0.0], [320.0, 320.0, 20.0]).unwrap();
+    job.assignments.push(strip);
+    let mut overlap = template.clone();
+    overlap.work_envelope_mm = AabbMm::new([0.0, 0.0, 0.0], [8.0, 8.0, 20.0]).unwrap();
+    job.assignments.push(overlap);
+    let router = job.router().unwrap();
+    let mut path = plan().layers[0].paths[0].clone();
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |scale: f64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64 * scale
+    };
+    let (mut found, mut refused) = (0, 0);
+    for _ in 0..20_000 {
+        let x = next(330.0) - 10.0;
+        let y = next(330.0) - 10.0;
+        let z = next(24.0) - 1.0;
+        path.physical_z_mm = [z, z + 0.2];
+        path.points_mm = vec![[x, y, z + 0.2], [x + next(4.0), y + next(4.0), z + 0.2]];
+        let scan = job.assignment_for_path(&path);
+        let indexed = router.assignment_for_path(&path);
+        match (&scan, &indexed) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a, b);
+                found += 1;
+            }
+            (Err(a), Err(b)) => {
+                assert_eq!((a.code, &a.message), (b.code, &b.message));
+                refused += 1;
+            }
+            _ => panic!("router disagrees: {scan:?} vs {indexed:?}"),
+        }
+        let scan = job.tool_for_path(&path).map_err(|e| e.message);
+        assert_eq!(scan, router.tool_for_path(&path).map_err(|e| e.message));
+    }
+    assert!(found > 1_000 && refused > 1_000, "{found} {refused}");
+    path.physical_z_mm = [f64::NAN, 0.2];
+    assert_eq!(
+        job.assignment_for_path(&path).unwrap_err().message,
+        router.assignment_for_path(&path).unwrap_err().message
+    );
+}

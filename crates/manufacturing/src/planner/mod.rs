@@ -2423,6 +2423,7 @@ fn admit_schedule<'model>(
             layer_quantization_mm: LAYER_QUANTIZATION_MM,
         };
         if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
+            let job = job.router()?;
             for layer in &mut result.layers {
                 let mut right = layer.paths.len();
                 let mut left = 0;

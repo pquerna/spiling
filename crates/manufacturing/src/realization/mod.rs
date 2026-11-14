@@ -98,6 +98,7 @@ pub(crate) fn stream(
     let safe_z = routed
         .map(|job| crate::routing::safe_z(plan, job))
         .transpose()?;
+    let router = routed.map(|job| job.router()).transpose()?;
     let mut active_tool = 0u8;
     let mut debt = [0.0f64; 2];
     let mut fan = None;
@@ -203,7 +204,7 @@ pub(crate) fn stream(
             }
             for path in &layer.paths {
                 check_cancel(cancel)?;
-                if let Some(job) = routed
+                if let Some(job) = &router
                     && job.tool_for_path(path)? != tool
                 {
                     continue;

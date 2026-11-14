@@ -52,7 +52,9 @@ mod functional;
 pub use construction::*;
 pub use functional::*;
 mod routing;
+mod routing_index;
 pub use routing::*;
+pub use routing_index::*;
 
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
 /// Exact serialized bundle, including plan, provenance and actual program.

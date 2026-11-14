@@ -729,9 +729,17 @@ pub(crate) fn verify_actual(
         JobWorkflow::DiagnosticBodyOnly => None,
         JobWorkflow::FixedDualMarlin { job } => Some(project_xyz6_point_mm(job.home_position_mm)?),
     };
-    expected::validate_wall_seams(plan, recipe, initial_position, route_job, cancel)?;
+    // One reservation index serves every per-path lookup of this replay.
+    let route_router = route_job.map(FixedDualJob::router).transpose()?;
+    expected::validate_wall_seams(
+        plan,
+        recipe,
+        initial_position,
+        route_router.as_ref(),
+        cancel,
+    )?;
     let mut expected =
-        expected::Expected::new(plan, recipe, initial_position, route_job).peekable();
+        expected::Expected::new(plan, recipe, initial_position, route_router.as_ref()).peekable();
     // A complete single-extruder job commands relative E (M83): each decoded
     // E word is a delta, accumulated here on the exact E8 lattice into the
     // absolute position every later check consumes.

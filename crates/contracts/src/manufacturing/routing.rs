@@ -350,6 +350,56 @@ pub struct FixedDualJob {
     pub park_position_mm: [f64; 3],
 }
 
+pub(super) fn outside_reservations() -> ManufacturingError {
+    invalid("a complete routed bead is outside every assigned source reservation")
+}
+
+pub(super) fn admit_reservation(
+    found: &mut Option<usize>,
+    index: usize,
+) -> Result<(), ManufacturingError> {
+    if found.replace(index).is_some() {
+        return Err(invalid(
+            "a complete routed bead has multiple source reservations",
+        ));
+    }
+    Ok(())
+}
+
+/// Z admission of a bead interval by one reservation (NaN admits, as before;
+/// checked edge consumption then refuses it).
+pub(super) fn z_admits(bounds: &AabbMm, path: &DepositionPath) -> bool {
+    !(path.physical_z_mm[0] < bounds.min[2] || path.physical_z_mm[1] > bounds.max[2])
+}
+
+pub(super) fn xy_contains(bounds: &AabbMm, lower: [f64; 2], upper: [f64; 2]) -> bool {
+    (0..2).all(|axis| lower[axis] >= bounds.min[axis] && upper[axis] <= bounds.max[axis])
+}
+
+/// Every reservation tests the same complete projected bead. Enclose it once
+/// using the original per-edge width and outward XYZ6 arithmetic; containment
+/// in an axis-aligned reservation is exactly the conjunction of these endpoint
+/// extrema. Do not repeat projection for every part, or replace the varying
+/// widths with a representative scalar width.
+pub(super) fn bead_xy_enclosure(
+    path: &DepositionPath,
+) -> Result<([f64; 2], [f64; 2]), ManufacturingError> {
+    let mut lower = [f64::INFINITY; 2];
+    let mut upper = [f64::NEG_INFINITY; 2];
+    for edge in path.checked_edges()? {
+        for point in edge.points_mm {
+            for (axis, &value) in point.iter().take(2).enumerate() {
+                let coordinate = program_coordinates::project_xyz6_coordinate_mm(value)?;
+                let error = program_coordinates::xyz6_coordinate_error_mm(value)?;
+                let radius = (edge.width_mm * 0.5 + error).next_up();
+                lower[axis] = lower[axis].min((coordinate - radius).next_down());
+                upper[axis] = upper[axis].max((coordinate + radius).next_up());
+            }
+        }
+    }
+    Ok((lower, upper))
+}
+
 fn finite_box(bounds: &AabbMm) -> Result<(), ManufacturingError> {
     bounds.validate().map_err(|e| invalid(&e.message))?;
     if (0..3).any(|axis| {
@@ -672,62 +722,43 @@ impl FixedDualJob {
 
     /// Bind the complete projected bead to one authored exclusive reservation.
     /// The planner separately proves each reservation's native source binding.
+    /// This scans every reservation; per-path loops over a plan should use
+    /// [`FixedDualJob::router`], which returns the identical result.
     pub fn assignment_for_path(&self, path: &DepositionPath) -> Result<usize, ManufacturingError> {
-        let outside =
-            || invalid("a complete routed bead is outside every assigned source reservation");
         let mut candidates = self
             .assignments
             .iter()
             .enumerate()
-            .filter(|(_, assignment)| {
-                let b = assignment.work_envelope_mm;
-                !(path.physical_z_mm[0] < b.min[2] || path.physical_z_mm[1] > b.max[2])
-            });
+            .filter(|(_, assignment)| z_admits(&assignment.work_envelope_mm, path));
         // Preserve the original Z-admission/diagnostic ordering before XY work.
-        let first = candidates.next().ok_or_else(outside)?;
-        // Every reservation tests the same complete projected bead. Enclose it
-        // once using the original per-edge width and outward XYZ6 arithmetic;
-        // containment in an axis-aligned reservation is exactly the conjunction
-        // of these endpoint extrema. Do not repeat projection for every part,
-        // or replace the varying widths with a representative scalar width.
-        let mut lower = [f64::INFINITY; 2];
-        let mut upper = [f64::NEG_INFINITY; 2];
-        for edge in path.checked_edges()? {
-            for point in edge.points_mm {
-                for (axis, &value) in point.iter().take(2).enumerate() {
-                    let coordinate = program_coordinates::project_xyz6_coordinate_mm(value)?;
-                    let error = program_coordinates::xyz6_coordinate_error_mm(value)?;
-                    let radius = (edge.width_mm * 0.5 + error).next_up();
-                    lower[axis] = lower[axis].min((coordinate - radius).next_down());
-                    upper[axis] = upper[axis].max((coordinate + radius).next_up());
-                }
-            }
-        }
+        let first = candidates.next().ok_or_else(outside_reservations)?;
+        let (lower, upper) = bead_xy_enclosure(path)?;
         let mut found = None;
         for (index, assignment) in std::iter::once(first).chain(candidates) {
-            let bounds = &assignment.work_envelope_mm;
-            let contains = (0..2)
-                .all(|axis| lower[axis] >= bounds.min[axis] && upper[axis] <= bounds.max[axis]);
-            if contains {
-                if found.is_some() {
-                    return Err(invalid(
-                        "a complete routed bead has multiple source reservations",
-                    ));
-                }
-                found = Some(index);
+            if xy_contains(&assignment.work_envelope_mm, lower, upper) {
+                admit_reservation(&mut found, index)?;
             }
         }
-        found.ok_or_else(outside)
+        found.ok_or_else(outside_reservations)
     }
 
     pub fn tool_for_path(&self, path: &DepositionPath) -> Result<u8, ManufacturingError> {
+        self.tool_for_path_with(path, |path| self.assignment_for_path(path))
+    }
+
+    /// One tool rule for both the scanning and the indexed reservation lookup.
+    pub(super) fn tool_for_path_with(
+        &self,
+        path: &DepositionPath,
+        assignment_for_path: impl Fn(&DepositionPath) -> Result<usize, ManufacturingError>,
+    ) -> Result<u8, ManufacturingError> {
         if let Some(construction) = &self.functional_construction {
             construction.validate(self)?;
             let reference = path
                 .material_domain
                 .ok_or_else(|| invalid("functional bead has no material-domain owner"))?;
             if reference.construction_index != 0
-                || self.assignments[self.assignment_for_path(path)?].occurrence_id
+                || self.assignments[assignment_for_path(path)?].occurrence_id
                     != construction.occurrence_id
             {
                 return Err(invalid(
@@ -749,7 +780,7 @@ impl FixedDualJob {
                 .surface_constructions
                 .get(usize::from(reference.construction_index))
                 .ok_or_else(|| invalid("path refers to a missing material construction"))?;
-            let assignment = &self.assignments[self.assignment_for_path(path)?];
+            let assignment = &self.assignments[assignment_for_path(path)?];
             if assignment.occurrence_id != construction.occurrence_id {
                 return Err(invalid(
                     "material domain belongs to a different source occurrence",
@@ -770,7 +801,7 @@ impl FixedDualJob {
                 }
             });
         }
-        let assignment = &self.assignments[self.assignment_for_path(path)?];
+        let assignment = &self.assignments[assignment_for_path(path)?];
         if self
             .surface_constructions
             .iter()

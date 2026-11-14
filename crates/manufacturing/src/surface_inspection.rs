@@ -18,6 +18,7 @@ pub(crate) fn inspect(
     let JobWorkflow::FixedDualMarlin { job } = &bundle.provenance.intent.printer.workflow else {
         return Ok(Vec::new());
     };
+    let job = job.router()?;
     let failed = |message: &str| error(ManufacturingErrorCode::VerificationFailed, message);
     let mut records = Vec::with_capacity(bundle.plan.material_frames.len());
     for frame in &bundle.plan.material_frames {

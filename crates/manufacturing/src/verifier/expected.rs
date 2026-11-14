@@ -13,7 +13,7 @@ pub(super) fn validate_wall_seams(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
     mut previous: Option<[f64; 3]>,
-    routing: Option<&FixedDualJob>,
+    routing: Option<&FixedDualRouter>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let zero = |value: f64| if value == 0.0 { 0.0 } else { value };
@@ -144,7 +144,7 @@ pub(super) struct Expected<'a> {
     position: Option<[f64; 3]>,
     fan: Option<u8>,
     loaded: bool,
-    routing: Option<&'a FixedDualJob>,
+    routing: Option<&'a FixedDualRouter<'a>>,
     previous_group: Option<(u32, u8)>,
     groups_started: u8,
     safe_z: f64,
@@ -154,7 +154,7 @@ impl<'a> Expected<'a> {
         plan: &'a NormalizedPrintPlan,
         recipe: &'a PlanarPrintRecipe,
         position: Option<[f64; 3]>,
-        routing: Option<&'a FixedDualJob>,
+        routing: Option<&'a FixedDualRouter<'a>>,
     ) -> Self {
         Self {
             plan,

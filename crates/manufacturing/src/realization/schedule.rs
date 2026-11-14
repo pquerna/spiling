@@ -91,6 +91,7 @@ pub(super) fn apply(
     order: routing::ToolOrder,
 ) -> Result<(), ManufacturingError> {
     let machine = machine(intent, routed, start)?;
+    let router = routed.map(FixedDualJob::router).transpose()?;
     let count: usize = plan.layers.iter().map(|layer| layer.paths.len()).sum();
     let mut tasks = Vec::new();
     tasks.try_reserve_exact(count).map_err(|_| {
@@ -118,7 +119,10 @@ pub(super) fn apply(
                         reversible: path.owner != Some(DepositionOwner::Wall),
                     }
                 },
-                tool: routed.map_or(Ok(0), |job| job.tool_for_path(path))?.into(),
+                tool: router
+                    .as_ref()
+                    .map_or(Ok(0), |job| job.tool_for_path(path))?
+                    .into(),
                 barrier: barrier as u32,
                 prerequisites: &dependencies[tasks.len()],
                 duration_s: length / intent.process_for_path(path)?.speed_mm_s,
