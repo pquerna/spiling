@@ -449,6 +449,8 @@ fn wall_census() {
         .collect();
     files.sort();
     let (mut total, mut passed) = (0usize, 0usize);
+    let mut incomplete_sources = 0usize;
+    let mut failed_sections = 0usize;
     let mut planning_total = 0.0f64;
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -461,10 +463,19 @@ fn wall_census() {
         // Every placed solid, as the engine imports multi-body sources; each
         // layer's material is the union of their sections.
         let bytes = std::fs::read(&path).unwrap();
-        let Ok(bodies) = spiling_geometry::source_bodies(&bytes, &cancel) else {
-            continue;
+        let bodies = match spiling_geometry::source_bodies(&bytes, &cancel) {
+            Ok(bodies) => bodies,
+            Err(error) => {
+                println!("REFUSE_SOURCE {name}: {error:?}");
+                incomplete_sources += 1;
+                continue;
+            }
         };
         let mut models = Vec::new();
+        let expected_models = bodies
+            .iter()
+            .map(|body| body.placements.len())
+            .sum::<usize>();
         for body in &bodies {
             let Ok(definition) =
                 spiling_geometry::from_step_solid_with_cancel(&bytes, &body.solid, &cancel)
@@ -482,9 +493,20 @@ fn wall_census() {
                 models.push(model.placed(pose));
             }
         }
-        if models.is_empty() {
+        if models.len() != expected_models || models.is_empty() {
+            incomplete_sources += 1;
+            println!(
+                "SKIP {name}: incomplete source preparation, {}/{} placed solids",
+                models.len(),
+                expected_models,
+            );
             continue;
         }
+        println!(
+            "SOURCE {name}: {}/{} placed solids",
+            models.len(),
+            expected_models
+        );
         let bounds = models.iter().map(|m| m.bounds()).fold(
             ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
             |(lo, hi), (a, b)| {
@@ -520,6 +542,9 @@ fn wall_census() {
                 };
             }
             if failed {
+                println!("REFUSE_SECTION {name} z={z:.2}");
+                failed_sections += 1;
+                part_total += 1;
                 z += step;
                 continue;
             }
@@ -619,6 +644,11 @@ fn wall_census() {
             println!("        {example}");
         }
     }
+    assert_eq!(
+        incomplete_sources, 0,
+        "wall census omitted complete sources"
+    );
+    assert_eq!(failed_sections, 0, "wall census omitted requested sections");
 }
 
 #[test]
