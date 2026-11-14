@@ -377,7 +377,7 @@ impl Workbench {
                 .replay
                 .layer_end
                 .or(self.manufacturing.replay.layer)
-                .map(usize::from);
+                .map(|layer| layer as usize);
             ui.collapsing("Construction at selected layer", |ui| {
                 if let Some(layer) = index.and_then(|i| review.bundle.plan.layers.get(i)) {
                     let c = &layer.region_coverage;

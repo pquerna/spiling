@@ -130,7 +130,7 @@ existing supervised engine and displays admitted native sources, shared occurren
 source-face inspection/picking and sections. Prepare loads a complete inert intent,
 commits full policy and whole/boxed source-sparse edits, reviews native bed placement and
 runs engine Preflight/Compile. Review performs fresh independent verification,
-retrieves checked actual SPLR6 motion and exclusively exports four files. `cargo xtask dev`
+retrieves checked actual SPLR7 motion and exclusively exports four files. `cargo xtask dev`
 is native. Finish authors scoped planar/cylindrical ribs, Smooth overrides and
 canonical PNG/PGM relief, layer enable/remove and stored-image reuse. Review retains
 H1 decisions, physical plate/region accounting, native coverage, surface exposure/
@@ -754,7 +754,7 @@ instruction. The first receipt supplies the immutable definition ID for `--add`:
 
 The intent explicitly binds occurrences1/2, both immutable material declarations,
 fixed hotend offsets, exclusive work reservations and separate supported waste
-lanes. Inspect the actual command/report/SPLR6 result for both addressed thermal
+lanes. Inspect the actual command/report/SPLR7 result for both addressed thermal
 states, actual tool epochs, exact E8 recovery and separate per-tool model/waste
 accounting. It is a source-reviewed software reference, not deployable Marlin
 configuration, measured calibration, calibrated color or a physical print claim.

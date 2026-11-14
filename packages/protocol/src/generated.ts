@@ -1173,7 +1173,7 @@ export type ReplayDisplayDescriptor = { pages: Array<ReplayPage>, info: ReplayDi
 
 export type ReplayPage = {
 /**
- * Global ordinal; u64 on the wire even though SPLR6 counts are u32.
+ * Global ordinal; u64 on the wire even though SPLR7 counts are u32.
  */
 first_event: number, event_count: number, hash: SourceHash, first_line: number, last_line: number,
 /**
@@ -1250,7 +1250,7 @@ export const MAX_REPLAY_EVENTS = 13421771 as const;
 export const REPLAY_PAGE_EVENTS = 65536 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 80 as const;
-export const REPLAY_SCHEMA_VERSION = 6 as const;
+export const REPLAY_SCHEMA_VERSION = 7 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;

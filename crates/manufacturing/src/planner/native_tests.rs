@@ -1035,7 +1035,7 @@ fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay()
             support_top = support_top.max(z);
             interface_segments += usize::from(role == 10);
         } else if matches!(role, 1..=5 | 8) {
-            let layer = u16::from_le_bytes(record[44..46].try_into().unwrap()) as usize;
+            let layer = replay_record_layer(record) as usize;
             object_bottom = object_bottom.min(z - bundle.plan.layers[layer].height_mm);
         }
     }
@@ -1102,7 +1102,7 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
             f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
         });
         let role = record[46];
-        let layer = u16::from_le_bytes(record[44..46].try_into().unwrap()) as usize;
+        let layer = replay_record_layer(record) as usize;
         if matches!(role, 9 | 10) {
             let start =
                 previous.expect("actual support deposition has an actual preceding endpoint");

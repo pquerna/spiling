@@ -692,8 +692,8 @@ async fn preflight(client: &mut EngineClient) -> NativeOperationView {
     wait(client, operation.name).await
 }
 
-fn actual_closed_wall_starts(bytes: &[u8]) -> Vec<(u16, u32, [f64; 3])> {
-    let mut strokes: Vec<(u16, u32, Vec<[f64; 3]>)> = Vec::new();
+fn actual_closed_wall_starts(bytes: &[u8]) -> Vec<(u32, u32, [f64; 3])> {
+    let mut strokes: Vec<(u32, u32, Vec<[f64; 3]>)> = Vec::new();
     let mut previous = None;
     let mut active = false;
     for event in bytes[REPLAY_HEADER_BYTES..]
@@ -703,8 +703,8 @@ fn actual_closed_wall_starts(bytes: &[u8]) -> Vec<(u16, u32, [f64; 3])> {
         let position = std::array::from_fn(|axis| {
             f64::from_le_bytes(event[axis * 8..axis * 8 + 8].try_into().unwrap())
         });
-        let layer = u16::from_le_bytes(event[44..46].try_into().unwrap());
-        let tool = u32::from_le_bytes(event[76..80].try_into().unwrap());
+        let layer = replay_record_layer(event);
+        let tool = replay_record_tool(event);
         let wall = matches!(event[46], 1 | 8)
             && event[47] & 2 != 0
             && u32::from_le_bytes(event[72..76].try_into().unwrap()) == u32::MAX - 2;
@@ -1874,7 +1874,7 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     assert!(
         lifecycle
             .iter()
-            .all(|event| { u16::from_le_bytes(event[44..46].try_into().unwrap()) == u16::MAX })
+            .all(|event| replay_record_layer(event) == REPLAY_LIFECYCLE_LAYER)
     );
     assert_eq!(
         lifecycle[1][46], 7,

@@ -4,7 +4,9 @@
 
 use crate::{manufacture::Review, replay::View};
 #[cfg(test)]
-use spiling_contracts::manufacturing::REPLAY_RECORD_BYTES;
+use spiling_contracts::manufacturing::{
+    REPLAY_LAYER_OFFSET, REPLAY_LIFECYCLE_LAYER, REPLAY_RECORD_BYTES,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -32,7 +34,7 @@ pub fn event_window(review: &Review, view: View) -> std::ops::Range<u32> {
     let Some(first) = display.layer_windows.get(lower as usize) else {
         return display.event_count..display.event_count;
     };
-    let last = &display.layer_windows[usize::from(upper).min(display.layer_windows.len() - 1)];
+    let last = &display.layer_windows[(upper as usize).min(display.layer_windows.len() - 1)];
     first.start..last.end.max(first.start)
 }
 #[cfg(test)]
@@ -43,14 +45,14 @@ fn record_window(bytes: &[u8], view: View) -> std::ops::Range<u32> {
     let Some(lo) = view.layer else {
         return 0..records.len() as u32;
     };
-    let layer = |r: &[u8; REPLAY_RECORD_BYTES]| u16::from_le_bytes([r[44], r[45]]);
+    let layer = spiling_contracts::manufacturing::replay_record_layer;
     let first = records
         .iter()
-        .position(|r| layer(r) != u16::MAX)
+        .position(|r| layer(r) != REPLAY_LIFECYCLE_LAYER)
         .unwrap_or(records.len());
     let last = records
         .iter()
-        .rposition(|r| layer(r) != u16::MAX)
+        .rposition(|r| layer(r) != REPLAY_LIFECYCLE_LAYER)
         .map_or(first, |i| i + 1);
     let body = &records[first..last];
     let start = first + body.partition_point(|r| layer(r) < lo);
@@ -67,7 +69,7 @@ impl Browser {
         };
     }
 
-    fn select(&self, view: &mut View, lower: u16, upper: u16) {
+    fn select(&self, view: &mut View, lower: u32, upper: u32) {
         match self.mode {
             Mode::All => {
                 view.layer = None;
@@ -97,7 +99,7 @@ impl Browser {
         let mut upper = view
             .layer_end
             .or(view.layer)
-            .unwrap_or(count.saturating_sub(1) as u16);
+            .unwrap_or(count.saturating_sub(1) as u32);
         let mut lower = if self.mode == Mode::Range {
             view.layer.unwrap_or(0)
         } else {
@@ -115,20 +117,20 @@ impl Browser {
                 ui.selectable_value(&mut self.mode, mode, label);
             }
             if self.mode != Mode::All {
-                let mut hi = u32::from(upper) + 1;
+                let mut hi = upper + 1;
                 if self.mode == Mode::Range {
-                    let mut lo = u32::from(lower) + 1;
+                    let mut lo = lower + 1;
                     ui.label("From");
                     ui.add(egui::DragValue::new(&mut lo).range(1..=hi).prefix("Layer "));
-                    lower = (lo - 1) as u16;
+                    lower = lo - 1;
                     ui.label("through");
                 }
                 ui.add(
                     egui::DragValue::new(&mut hi)
-                        .range(u32::from(lower) + 1..=count as u32)
+                        .range(lower + 1..=count as u32)
                         .prefix("Layer "),
                 );
-                upper = (hi - 1) as u16;
+                upper = hi - 1;
             }
         });
         if previous_controls != (self.mode, lower, upper) {
@@ -141,7 +143,7 @@ impl Browser {
         if (old.layer, old.layer_end) != (view.layer, view.layer_end) {
             view.events = event_window(review, *view).end;
         }
-        if let Some(index) = view.layer_end.or(view.layer).map(usize::from) {
+        if let Some(index) = view.layer_end.or(view.layer).map(|layer| layer as usize) {
             let layer = &review.bundle.plan.layers[index.min(count - 1)];
             ui.weak(format!(
                 "Layer {} of {} · Z {:.4}…{:.4} mm · height {:.4} mm",
@@ -159,7 +161,7 @@ impl Browser {
             return;
         }
         self.synchronize_selection(view);
-        let maximum = count.saturating_sub(1) as u16;
+        let maximum = count.saturating_sub(1) as u32;
         let old = *view;
         let mut upper = view
             .layer_end
@@ -191,7 +193,7 @@ impl Browser {
                         ui.selectable_value(&mut self.mode, mode, label);
                     }
                 });
-            ui.small(format!("{}", u32::from(upper) + 1));
+            ui.small(format!("{}", upper + 1));
             let height = (ui.available_height() - 45.0).max(70.0);
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(42.0, height), egui::Sense::click_and_drag());
@@ -203,10 +205,10 @@ impl Browser {
                 )
             });
             let track = rect.shrink2(egui::vec2(15.0, 9.0));
-            let y = |layer| {
+            let y = |layer: u32| {
                 egui::lerp(
                     track.bottom()..=track.top(),
-                    f32::from(layer) / f32::from(maximum.max(1)),
+                    (f64::from(layer) / f64::from(maximum.max(1))) as f32,
                 )
             };
             if response.drag_started() || response.clicked() {
@@ -219,9 +221,9 @@ impl Browser {
             if (response.dragged() || response.clicked())
                 && let Some(pos) = response.interact_pointer_pos()
             {
-                let value = ((track.bottom() - pos.y) / track.height() * f32::from(maximum))
+                let value = ((track.bottom() - pos.y) / track.height() * maximum as f32)
                     .round()
-                    .clamp(0.0, f32::from(maximum)) as u16;
+                    .clamp(0.0, maximum as f32) as u32;
                 if self.mode == Mode::All {
                     self.mode = Mode::Through;
                 }
@@ -268,10 +270,11 @@ impl Browser {
                     self.mode = Mode::Through;
                 }
                 if shift && self.mode == Mode::Range {
-                    lower = (i32::from(lower) + step).clamp(0, i32::from(upper)) as u16;
+                    lower = (i64::from(lower) + i64::from(step)).clamp(0, i64::from(upper)) as u32;
                 } else {
-                    upper = (i32::from(upper) + step).clamp(i32::from(lower), i32::from(maximum))
-                        as u16;
+                    upper = (i64::from(upper) + i64::from(step))
+                        .clamp(i64::from(lower), i64::from(maximum))
+                        as u32;
                 }
             }
             if previous_controls != (self.mode, lower, upper) {
@@ -304,19 +307,19 @@ impl Browser {
                 if (layer.height_mm - review.capture.report.layer_height.requested_mm).abs()
                     > review.bundle.plan.layer_quantization_mm
                 {
-                    let row = y(index as u16).round() as i32;
+                    let row = y(index as u32).round() as i32;
                     if previous_row == Some(row) {
                         continue;
                     }
                     previous_row = Some(row);
-                    let pos = egui::pos2(track.right() + 7.0, y(index as u16));
+                    let pos = egui::pos2(track.right() + 7.0, y(index as u32));
                     painter.line_segment(
                         [pos, pos + egui::vec2(4.0, 0.0)],
                         egui::Stroke::new(1.0, ui.visuals().warn_fg_color),
                     );
                 }
             }
-            ui.small(format!("{}", u32::from(lo) + 1));
+            ui.small(format!("{}", lo + 1));
         });
         if (old.layer, old.layer_end) != (view.layer, view.layer_end) {
             view.events = event_window(review, *view).end;
@@ -352,11 +355,36 @@ mod tests {
     }
 
     #[test]
+    fn layer_windows_select_layers_beyond_the_former_u16_index() {
+        let mut bytes = Vec::new();
+        let sentinel = REPLAY_LIFECYCLE_LAYER;
+        for layer in [sentinel, 0, 65_534, 65_535, 70_000, 70_000, sentinel] {
+            let mut record = [0; REPLAY_RECORD_BYTES];
+            record[REPLAY_LAYER_OFFSET..REPLAY_LAYER_OFFSET + 4]
+                .copy_from_slice(&layer.to_le_bytes());
+            bytes.extend(record);
+        }
+        let view = View {
+            layer: Some(70_000),
+            ..Default::default()
+        };
+        assert_eq!(record_window(&bytes, view), 4..6);
+        let through = View {
+            layer: Some(65_535),
+            layer_end: Some(70_000),
+            ..Default::default()
+        };
+        assert_eq!(record_window(&bytes, through), 3..6);
+    }
+
+    #[test]
     fn layer_windows_preserve_global_ordinals_and_exclude_lifecycle_sentinels() {
         let mut bytes = Vec::new();
-        for layer in [u16::MAX, u16::MAX, 0, 0, 1, 1, 3, 3, u16::MAX, u16::MAX] {
+        let sentinel = REPLAY_LIFECYCLE_LAYER;
+        for layer in [sentinel, sentinel, 0, 0, 1, 1, 3, 3, sentinel, sentinel] {
             let mut record = [0; REPLAY_RECORD_BYTES];
-            record[44..46].copy_from_slice(&layer.to_le_bytes());
+            record[REPLAY_LAYER_OFFSET..REPLAY_LAYER_OFFSET + 4]
+                .copy_from_slice(&layer.to_le_bytes());
             bytes.extend(record);
         }
         let view = View {

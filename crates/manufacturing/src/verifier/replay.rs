@@ -5,7 +5,7 @@ use spiling_contracts::{geometry::AabbMm, manufacturing::*};
 use std::io::{Read, Write};
 
 /// Layer of the fixed start/end lifecycle moves.
-pub(crate) const LIFECYCLE_LAYER: u32 = u32::MAX;
+pub(crate) const LIFECYCLE_LAYER: u32 = REPLAY_LIFECYCLE_LAYER;
 
 /// Optional bounded byte sink; no per-motion object vector or planner positions.
 pub(crate) struct ReplaySink {
@@ -98,20 +98,9 @@ impl ReplaySink {
         if matches!(kind, 6 | 7) && self.lifecycle >= 4 {
             return Err(super::failed("replay lifecycle exceeds its four moves"));
         }
-        // SPLR records carry a u16 layer with `u16::MAX` reserved for
-        // lifecycle moves. A taller program omits its display, never its
-        // verification.
-        let record_layer = if layer == LIFECYCLE_LAYER {
-            u16::MAX
-        } else {
-            match u16::try_from(layer) {
-                Ok(layer) if layer != u16::MAX => layer,
-                _ => {
-                    self.omitted = true;
-                    return Ok(());
-                }
-            }
-        };
+        // SPLR records carry every u32 layer; `u32::MAX` is the lifecycle
+        // sentinel and is never a scheduled layer.
+        let record_layer = layer;
         if self.events >= self.expected_events {
             // Only an explicitly constrained sink can omit output. Production
             // derives its representation from the admitted command counts.
@@ -142,7 +131,9 @@ impl ReplaySink {
         record[24..32].copy_from_slice(&e.to_le_bytes());
         record[32..40].copy_from_slice(&feed.to_le_bytes());
         record[40..44].copy_from_slice(&line.to_le_bytes());
-        record[44..46].copy_from_slice(&record_layer.to_le_bytes());
+        let tool = u16::try_from(self.active_tool)
+            .map_err(|_| super::failed("replay active tool exceeds its u16 field"))?;
+        record[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2].copy_from_slice(&tool.to_le_bytes());
         record[46] = kind;
         record[47] =
             u8::from(self.events != 0 && kind != 14) | if association.is_some() { 2 } else { 0 };
@@ -150,7 +141,8 @@ impl ReplaySink {
         record[56..64].copy_from_slice(&physical_z[0].to_le_bytes());
         record[64..72].copy_from_slice(&physical_z[1].to_le_bytes());
         record[72..76].copy_from_slice(&owner.to_le_bytes());
-        record[76..80].copy_from_slice(&self.active_tool.to_le_bytes());
+        record[REPLAY_LAYER_OFFSET..REPLAY_LAYER_OFFSET + 4]
+            .copy_from_slice(&record_layer.to_le_bytes());
         self.bytes
             .write_all(&record)
             .map_err(|e| super::failed(format!("replay spool write: {e}")))?;

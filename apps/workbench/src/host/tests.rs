@@ -1090,7 +1090,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     assert_eq!(selection.layer, Some(0));
     assert_eq!(
         selection.layer_end,
-        Some((r.bundle.plan.layers.len() - 2) as u16)
+        Some((r.bundle.plan.layers.len() - 2) as u32)
     );
     let replay = r.display.as_ref().unwrap();
     assert!(!replay.batches.is_empty());

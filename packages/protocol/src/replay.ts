@@ -36,7 +36,7 @@ export const REPLAY_KIND_LABELS = [
   "tool_epoch",
   "waste",
 ] as const;
-export const REPLAY_LIFECYCLE_LAYER = 65535;
+export const REPLAY_LIFECYCLE_LAYER = 0xffffffff;
 
 export interface DecodedReplayDisplay {
   readonly bytes: ArrayBuffer;
@@ -113,7 +113,7 @@ export async function decodeReplayDisplay(
   hash(info.input_hash, fail);
   hash(info.program_hash, fail);
   hash(resource.sha256, fail);
-  if (info.schema_version !== 6 || info.frame !== "right_handed_millimetres")
+  if (info.schema_version !== 7 || info.frame !== "right_handed_millimetres")
     fail("unsupported schema or coordinate frame");
   if (
     typeof info.verifier_version !== "string" ||
@@ -173,7 +173,7 @@ export async function decodeReplayDisplay(
   const data = new DataView(bytes, 0, length);
   if (
     data.getUint32(0, true) !== 0x524c5053 ||
-    data.getUint16(4, true) !== 6 ||
+    data.getUint16(4, true) !== 7 ||
     data.getUint16(6, true) !== REPLAY_HEADER_BYTES ||
     data.getUint32(12, true) !== REPLAY_RECORD_BYTES
   )
@@ -231,7 +231,7 @@ export async function decodeReplayDisplay(
     const e = data.getFloat64(start + 24, true),
       f = data.getFloat64(start + 32, true);
     const line = data.getUint32(start + 40, true),
-      layer = data.getUint16(start + 44, true);
+      layer = data.getUint32(start + 76, true);
     const kind = data.getUint8(start + 46),
       flags = data.getUint8(start + 47);
     if (
@@ -255,7 +255,7 @@ export async function decodeReplayDisplay(
     const lower = data.getFloat64(start + 56, true);
     const upper = data.getFloat64(start + 64, true);
     const owner = data.getUint32(start + 72, true);
-    const tool = data.getUint32(start + 76, true);
+    const tool = data.getUint16(start + 44, true);
     if (tool > 1 || (kind !== 14 && tool !== activeTool)) fail("active tool changes outside epoch");
     if (dual && lifecyclePhase !== 0 && kind !== 6) fail("body after final lifecycle");
     if (dual && (kind === 9 || kind === 10 || kind === 13))
@@ -483,8 +483,8 @@ export async function decodeReplayDisplay(
         pageMin[axis] = Math.min(pageMin[axis]!, v);
         pageMax[axis] = Math.max(pageMax[axis]!, v);
       }
-      const layer = data.getUint16(at + 44, true);
-      if (layer !== 0xffff) {
+      const layer = data.getUint32(at + 76, true);
+      if (layer !== 0xffffffff) {
         firstLayer = Math.min(firstLayer, layer);
         lastLayer = lastLayer === 0xffffffff ? layer : Math.max(lastLayer, layer);
       }
@@ -532,7 +532,7 @@ export async function decodeReplayDisplay(
     processCount: process,
     toolEpochCount: epochs,
     wasteCount: waste,
-    activeTool: (index: number) => data.getUint32(offset(index) + 76, true),
+    activeTool: (index: number) => data.getUint16(offset(index) + 44, true),
     layerCount: info.layer_count,
     boundsMm: { min, max },
     position(index: number): [number, number, number] {
@@ -546,7 +546,7 @@ export async function decodeReplayDisplay(
     extrusion: (index: number) => data.getFloat64(offset(index) + 24, true),
     feed: (index: number) => data.getFloat64(offset(index) + 32, true),
     sourceLine: (index: number) => data.getUint32(offset(index) + 40, true),
-    layer: (index: number) => data.getUint16(offset(index) + 44, true),
+    layer: (index: number) => data.getUint32(offset(index) + 76, true),
     kind: (index: number) => data.getUint8(offset(index) + 46) as ReplayKind,
     knownStart: (index: number) => (data.getUint8(offset(index) + 47) & 1) !== 0,
     association(index: number) {

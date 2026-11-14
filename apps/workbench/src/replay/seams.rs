@@ -10,7 +10,7 @@ use spiling_contracts::geometry::PlaneMm;
 pub struct SeamStart {
     pub position: [f64; 3],
     pub physical_z: [f64; 2],
-    pub layer: u16,
+    pub layer: u32,
     pub tool: u32,
     pub role: u8,
     pub entry_event: u32,
@@ -85,7 +85,10 @@ fn wall(record: &[u8; REPLAY_RECORD_BYTES]) -> bool {
     record[47] & 2 != 0 && integer(record, 72) == u32::MAX - 2
 }
 fn same_path(first: &[u8; REPLAY_RECORD_BYTES], next: &[u8; REPLAY_RECORD_BYTES]) -> bool {
-    wall(next) && first[44..46] == next[44..46] && first[56..80] == next[56..80]
+    wall(next)
+        && first[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2]
+            == next[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2]
+        && first[56..80] == next[56..80]
 }
 
 pub(super) fn scan_records(
@@ -99,8 +102,8 @@ pub(super) fn scan_records(
             let recovery = &records.get(index - 1)?;
             let travel = &records.get(index - 2)?;
             if position(recovery) != position(travel)
-                || recovery[44..46] != travel[44..46]
-                || integer(recovery, 76) != integer(travel, 76)
+                || super::record_layer(recovery) != super::record_layer(travel)
+                || super::record_tool(recovery) != super::record_tool(travel)
             {
                 index += 1;
                 continue;
@@ -112,8 +115,8 @@ pub(super) fn scan_records(
         let entry = &records.get(entry_index)?;
         if !wall(first)
             || entry[46] != 0
-            || entry[44..46] != first[44..46]
-            || integer(entry, 76) != integer(first, 76)
+            || super::record_layer(entry) != super::record_layer(first)
+            || super::record_tool(entry) != super::record_tool(first)
         {
             index += 1;
             continue;
@@ -127,8 +130,8 @@ pub(super) fn scan_records(
             accept(SeamStart {
                 position: position(entry),
                 physical_z: [number(first, 56), number(first, 64)],
-                layer: u16::from_le_bytes(first[44..46].try_into().unwrap()),
-                tool: integer(first, 76),
+                layer: super::record_layer(first),
+                tool: super::record_tool(first),
                 role: first[46],
                 entry_event: entry_index as u32,
                 first_event: index as u32,
@@ -435,7 +438,7 @@ mod tests {
                 assert!(
                     records[start.first_event as usize..=start.closing_event as usize]
                         .iter()
-                        .all(|record| wall(record) && integer(record, 76) == start.tool)
+                        .all(|record| wall(record) && super::record_tool(record) == start.tool)
                 );
             }
         }

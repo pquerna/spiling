@@ -122,7 +122,7 @@ pub fn seam_review(
         "Start {} of {} · layer {} · tool {} · {}",
         index + 1,
         count,
-        u32::from(start.layer) + 1,
+        start.layer + 1,
         start.tool,
         crate::replay::ROLES[start.role as usize]
     ));
@@ -231,7 +231,7 @@ mod tests {
         let starts = [0, 1].map(|tool| SeamStart {
             position: [f64::from(tool), 0.0, 0.2],
             physical_z: [0.0, 0.2],
-            layer: tool as u16,
+            layer: tool,
             tool,
             role: 1,
             entry_event: tool * 4,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Descriptive index over the exact SPLR6 command stream, never new motion.
+//! Descriptive index over the exact SPLR7 command stream, never new motion.
 use super::*;
 use std::io::Read;
 fn corrupt(message: &str) -> ManufacturingError {
@@ -11,7 +11,7 @@ fn corrupt(message: &str) -> ManufacturingError {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayPage {
-    /// Global ordinal; u64 on the wire even though SPLR6 counts are u32.
+    /// Global ordinal; u64 on the wire even though SPLR7 counts are u32.
     #[ts(type = "number")]
     pub first_event: u64,
     pub event_count: u32,
@@ -105,13 +105,13 @@ pub fn index_replay(
                 first_line = line;
             }
             last_line = line;
-            let layer = u16::from_le_bytes(r[44..46].try_into().unwrap());
-            if layer != u16::MAX {
-                first_layer = first_layer.min(u32::from(layer));
+            let layer = super::replay::replay_record_layer(&r);
+            if layer != super::replay::REPLAY_LIFECYCLE_LAYER {
+                first_layer = first_layer.min(layer);
                 last_layer = if last_layer == u32::MAX {
-                    u32::from(layer)
+                    layer
                 } else {
-                    last_layer.max(u32::from(layer))
+                    last_layer.max(layer)
                 };
             }
             let span = if r[47] & 2 != 0 {

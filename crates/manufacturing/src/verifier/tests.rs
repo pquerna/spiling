@@ -1210,7 +1210,7 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     descriptor.pages = index_replay(std::io::Cursor::new(&bytes), &descriptor.info).unwrap();
     validate_replay_display(&bytes, &descriptor).unwrap();
     for offset in [
-        96 + 44,
+        96 + REPLAY_LAYER_OFFSET,
         96 + 46,
         96 + REPLAY_RECORD_BYTES + 46,
         96 + 11 * REPLAY_RECORD_BYTES + 16,
@@ -2306,7 +2306,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     let bytes = bytes.to_vec().unwrap();
     assert_eq!(&bytes[24..28], &3u32.to_le_bytes());
     for record in bytes[96..].as_chunks::<REPLAY_RECORD_BYTES>().0 {
-        assert_ne!(u16::from_le_bytes(record[44..46].try_into().unwrap()), 1);
+        assert_ne!(replay_record_layer(record), 1);
     }
     assert_eq!(report.support_deposition_segments, 2);
     assert_eq!(report.deposition_segments, 1);
@@ -3925,7 +3925,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
             _ => panic!("unexpected actual deposition Z {z}"),
         };
         let occurrence = usize::from(x >= 100.0);
-        let actual_tool = u32::from_le_bytes(record[76..80].try_into().unwrap());
+        let actual_tool = replay_record_tool(record);
         assert_eq!(
             actual_tool,
             [[0, 1], [1, 0]][interval][occurrence],

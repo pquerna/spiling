@@ -166,7 +166,7 @@ pub(super) struct InterfacesUi {
     problem: Option<String>,
 }
 fn selected_layer(view: crate::replay::View) -> Option<usize> {
-    view.layer_end.or(view.layer).map(usize::from)
+    view.layer_end.or(view.layer).map(|layer| layer as usize)
 }
 
 #[derive(Debug, PartialEq, Eq)]

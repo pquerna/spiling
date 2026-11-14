@@ -1288,7 +1288,7 @@ fn actual_motion(bundle: &ManufacturingResult) -> Vec<(u8, u32, [f64; 3])> {
         .map(|record| {
             (
                 record[46],
-                u16::from_le_bytes(record[44..46].try_into().unwrap()) as u32,
+                replay_record_layer(record),
                 std::array::from_fn(|axis| {
                     f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
                 }),

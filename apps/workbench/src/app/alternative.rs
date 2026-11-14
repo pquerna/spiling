@@ -879,7 +879,7 @@ fn settings_changes(current: &ManufacturingIntent, candidate: &ManufacturingInte
 #[derive(Default)]
 struct PhysicalSelection {
     interval: Option<(f64, f64)>,
-    projected: Option<(Option<u16>, Option<u16>)>,
+    projected: Option<(Option<u32>, Option<u32>)>,
 }
 
 impl PhysicalSelection {
@@ -898,10 +898,10 @@ impl PhysicalSelection {
                 let mut lower = None;
                 let mut upper = None;
                 for (index, (bottom, top)) in before.enumerate() {
-                    if index == usize::from(first) {
+                    if index == first as usize {
                         lower = Some(bottom);
                     }
-                    if index == usize::from(last) {
+                    if index == last as usize {
                         upper = Some(top);
                     }
                 }
@@ -912,8 +912,8 @@ impl PhysicalSelection {
             let Some((first, last)) = overlapping_layers(after, lower, upper) else {
                 return false;
             };
-            view.layer = Some(first as u16);
-            view.layer_end = (first != last).then_some(last as u16);
+            view.layer = Some(first as u32);
+            view.layer_end = (first != last).then_some(last as u32);
         } else {
             view.layer = None;
             view.layer_end = None;

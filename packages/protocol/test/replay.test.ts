@@ -46,8 +46,8 @@ async function rehash(bytes: ArrayBuffer, base = descriptor): Promise<ReplayDisp
         min[axis] = Math.min(min[axis]!, v);
         max[axis] = Math.max(max[axis]!, v);
       }
-      const layer = data.getUint16(at + 44, true);
-      if (layer !== 0xffff) {
+      const layer = data.getUint32(at + 76, true);
+      if (layer !== 0xffffffff) {
         firstLayer = Math.min(firstLayer, layer);
         lastLayer = lastLayer === 0xffffffff ? layer : Math.max(lastLayer, layer);
       }
@@ -184,8 +184,8 @@ const corruptions: [string, (data: DataView) => void][] = [
   ["magic", (data) => data.setUint8(0, 0)],
   ["version", (data) => data.setUint16(4, 1, true)],
   ["obsolete version five", (data) => data.setUint16(4, 5, true)],
-  ["unannounced tool jump", (data) => data.setUint32(176 + 76, 1, true)],
-  ["invalid active tool", (data) => data.setUint32(96 + 76, 2, true)],
+  ["unannounced tool jump", (data) => data.setUint16(176 + 44, 1, true)],
+  ["invalid active tool", (data) => data.setUint16(96 + 44, 2, true)],
   ["header stride", (data) => data.setUint16(6, 80, true)],
   ["record stride", (data) => data.setUint32(12, 96, true)],
   ["header count", (data) => data.setUint32(8, 0xffffffff, true)],
@@ -204,8 +204,8 @@ const corruptions: [string, (data: DataView) => void][] = [
     "reordered source line",
     (data) => data.setUint32(176 + 40, data.getUint32(96 + 40, true), true),
   ],
-  ["out of range layer", (data) => data.setUint16(96 + 44, descriptor.info.layer_count, true)],
-  ["nonzero initial layer", (data) => data.setUint16(96 + 44, 1, true)],
+  ["out of range layer", (data) => data.setUint32(96 + 76, descriptor.info.layer_count, true)],
+  ["nonzero initial layer", (data) => data.setUint32(96 + 76, 1, true)],
   ["travel E change", (data) => data.setFloat64(96 + 24, 1, true)],
   ["header bound", (data) => data.setFloat64(32, data.getFloat64(32, true) - 1, true)],
 ];
@@ -317,7 +317,7 @@ test("replay rejects loose bounds and attribution without printed layer endpoint
     layers = new DataView(bytes);
   const replay = await decodeReplayDisplay(golden, descriptor);
   for (let event = 1; event < replay.eventCount; event++)
-    layers.setUint16(96 + event * 80 + 44, 1, true);
+    layers.setUint32(96 + event * 80 + 76, 1, true);
   layers.setUint32(24, 2, true);
   const emptyLayer = await rehash(bytes);
   emptyLayer.info.layer_count = 2;
@@ -328,8 +328,8 @@ test("packed schedule may skip internal contact gaps without inventing events", 
   const bytes = golden.slice(0),
     data = new DataView(bytes);
   data.setUint32(24, 3, true);
-  data.setUint16(96 + 2 * 80 + 44, 2, true);
-  data.setUint16(96 + 3 * 80 + 44, 2, true);
+  data.setUint32(96 + 2 * 80 + 76, 2, true);
+  data.setUint32(96 + 3 * 80 + 76, 2, true);
   const value = structuredClone(descriptor);
   value.info.layer_count = 3;
   const replay = await decodeReplayDisplay(bytes, await rehash(bytes, value));
@@ -429,7 +429,7 @@ async function lifecycleCase(): Promise<{
     data.setFloat64(start + 24, e, true);
     data.setFloat64(start + 32, 600, true);
     data.setUint32(start + 40, line, true);
-    data.setUint16(start + 44, 65535, true);
+    data.setUint32(start + 76, 0xffffffff, true);
     data.setUint8(start + 46, kind);
     data.setUint8(start + 47, event === 0 ? 0 : 1);
     data.setUint32(start + 72, 0xffffffff, true);
@@ -477,7 +477,7 @@ test("complete body admits actual stationary startup retraction after lifecycle 
   // Lifecycle prime supplies the known XYZ for the first body feeder-only event.
   raw.set(new Uint8Array(complete.bytes, 176, 80), 256);
   data.setFloat64(256 + 24, before.extrusion(1) - 0.8, true);
-  data.setUint16(256 + 44, 0, true);
+  data.setUint32(256 + 76, 0, true);
   data.setUint8(256 + 46, 11);
   raw.set(new Uint8Array(complete.bytes, 256, 80), 336);
   data.setFloat64(336 + 24, before.extrusion(1) - 0.8, true);
@@ -540,7 +540,7 @@ test("lifecycle events retain unknown start and no object-layer attribution or o
   );
   assert.deepEqual(
     [0, 1, replay.eventCount - 2, replay.eventCount - 1].map((event) => replay.layer(event)),
-    [65535, 65535, 65535, 65535],
+    [0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff],
   );
   assert.deepEqual(replay.boundsMm, value.descriptor.info.bounds_mm);
 });
@@ -549,8 +549,8 @@ test("lifecycle rejects false layers, misplaced prime, invented homing start, li
   const value = await lifecycleCase();
   const count = value.descriptor.info.event_count;
   const mutations: ((data: DataView) => void)[] = [
-    (data) => data.setUint16(96 + 44, 0, true),
-    (data) => data.setUint16(96 + 2 * 80 + 44, 65535, true),
+    (data) => data.setUint32(96 + 76, 0, true),
+    (data) => data.setUint32(96 + 2 * 80 + 76, 0xffffffff, true),
     (data) => data.setUint8(96 + 47, 1),
     (data) => data.setUint8(96 + 80 + 47, 0),
     (data) => data.setUint8(96 + 80 + 46, 6),
@@ -597,7 +597,7 @@ test("skin and sparse roles preserve protected object layer and deposition seman
     assert.equal(replay.kind(deposition), kind);
     assert.equal(replay.depositionCount, body.depositionCount);
     assert.equal(replay.layer(deposition), body.layer(deposition));
-    data.setUint16(start + 44, 65535, true);
+    data.setUint32(start + 76, 0xffffffff, true);
     await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes)), ReplayDecodeError);
   }
 });
@@ -611,7 +611,7 @@ test("a new object layer must begin with travel after the prior layer deposited"
   deposition++;
   while (body.kind(deposition) === 0) deposition++;
   for (let event = deposition; event < body.eventCount; event++)
-    data.setUint16(96 + event * 80 + 44, 1, true);
+    data.setUint32(96 + event * 80 + 76, 1, true);
   data.setUint32(24, 2, true);
   const value = await rehash(bytes);
   value.info.layer_count = 2;
@@ -638,7 +638,7 @@ async function dualWire(retracted = 1) {
   const bytes = new ArrayBuffer(96 + rows.length * 80),
     data = new DataView(bytes);
   data.setUint32(0, 0x524c5053, true);
-  data.setUint16(4, 6, true);
+  data.setUint16(4, 7, true);
   data.setUint16(6, 96, true);
   for (const [offset, value] of [
     [8, 13],
@@ -664,7 +664,7 @@ async function dualWire(retracted = 1) {
       data.setFloat64(start + axis * 8, value!, true),
     );
     data.setUint32(start + 40, index + 1, true);
-    data.setUint16(start + 44, kind === 6 ? 65535 : 0, true);
+    data.setUint32(start + 76, kind === 6 ? 0xffffffff : 0, true);
     data.setUint8(start + 46, kind!);
     data.setUint8(start + 47, (kind === 14 ? 0 : 1) | (associated ? 2 : 0));
     if (associated) {
@@ -672,11 +672,11 @@ async function dualWire(retracted = 1) {
       data.setFloat64(start + 64, 0.2, true);
     }
     data.setUint32(start + 72, 0xffffffff, true);
-    data.setUint32(start + 76, tool!, true);
+    data.setUint16(start + 44, tool!, true);
   });
   const base = structuredClone(descriptor);
   Object.assign(base.info, {
-    schema_version: 6,
+    schema_version: 7,
     event_count: 13,
     deposition_count: 4,
     travel_count: 3,
@@ -691,7 +691,7 @@ async function dualWire(retracted = 1) {
   return { bytes, descriptor: await rehash(bytes, base) };
 }
 
-test("SPLR6 epochs establish separate tip frames and explicitly account waste", async () => {
+test("SPLR7 epochs establish separate tip frames and explicitly account waste", async () => {
   const wire = await dualWire();
   const replay = await decodeReplayDisplay(wire.bytes, wire.descriptor);
   assert.equal(replay.toolEpochCount, 2);
@@ -702,14 +702,14 @@ test("SPLR6 epochs establish separate tip frames and explicitly account waste", 
   assert.equal(replay.association(8)!.regionalOwner, null);
   for (const mutate of [
     (data: DataView) => data.setUint8(96 + 6 * 80 + 47, 1),
-    (data: DataView) => data.setUint32(96 + 6 * 80 + 76, 0, true),
+    (data: DataView) => data.setUint16(96 + 6 * 80 + 44, 0, true),
     (data: DataView) => data.setFloat64(96 + 6 * 80 + 24, 1, true),
     (data: DataView) => data.setUint32(96 + 8 * 80 + 72, 0, true),
     (data: DataView) => data.setUint8(96 + 8 * 80 + 46, 1),
     (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 9),
     (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 10),
     (data: DataView) => data.setUint8(96 + 3 * 80 + 46, 13),
-    (data: DataView) => data.setUint16(96 + 3 * 80 + 44, 1, true),
+    (data: DataView) => data.setUint32(96 + 3 * 80 + 76, 1, true),
   ]) {
     const bytes = wire.bytes.slice(0);
     mutate(new DataView(bytes));
@@ -720,7 +720,7 @@ test("SPLR6 epochs establish separate tip frames and explicitly account waste", 
   }
 });
 
-test("SPLR6 descriptors require exact epoch/waste fields and bounded counters", async () => {
+test("SPLR7 descriptors require exact epoch/waste fields and bounded counters", async () => {
   for (const mutate of [
     (info: Record<string, unknown>) => {
       delete info.tool_epoch_count;

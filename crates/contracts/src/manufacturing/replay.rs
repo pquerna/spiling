@@ -17,7 +17,31 @@ pub const REPLAY_RECORD_BYTES: usize = 80;
 /// Records that fit [`MAX_REPLAY_DISPLAY_BYTES`].
 pub const MAX_REPLAY_EVENTS: u32 =
     (MAX_REPLAY_DISPLAY_BYTES - REPLAY_HEADER_BYTES as u32) / REPLAY_RECORD_BYTES as u32;
-pub const REPLAY_SCHEMA_VERSION: u32 = 6;
+pub const REPLAY_SCHEMA_VERSION: u32 = 7;
+/// Record offset of the `u16` active tool (0 or 1).
+pub const REPLAY_TOOL_OFFSET: usize = 44;
+/// Record offset of the `u32` scheduled layer index.
+pub const REPLAY_LAYER_OFFSET: usize = 76;
+/// Layer index reserved for lifecycle records; scheduled layers use every
+/// other `u32` value.
+pub const REPLAY_LIFECYCLE_LAYER: u32 = u32::MAX;
+
+/// Scheduled layer of one checked-size SPLR record.
+pub fn replay_record_layer(record: &[u8; REPLAY_RECORD_BYTES]) -> u32 {
+    u32::from_le_bytes(
+        record[REPLAY_LAYER_OFFSET..REPLAY_LAYER_OFFSET + 4]
+            .try_into()
+            .expect("fixed record width"),
+    )
+}
+/// Active tool of one checked-size SPLR record.
+pub fn replay_record_tool(record: &[u8; REPLAY_RECORD_BYTES]) -> u32 {
+    u32::from(u16::from_le_bytes(
+        record[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2]
+            .try_into()
+            .expect("fixed record width"),
+    ))
+}
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -353,10 +377,10 @@ pub fn validate_replay_reader(
         let e = f64_at(record, 24);
         let feed = f64_at(record, 32);
         let line = u32_at(record, 40);
-        let next_layer = u16_at(record, 44) as u32;
+        let next_layer = replay_record_layer(&record_bytes);
         let kind = record[46];
         let flags = record[47];
-        let tool = u32_at(record, 76);
+        let tool = replay_record_tool(&record_bytes);
         if position.iter().any(|v| !v.is_finite())
             || !e.is_finite()
             || (e < 0.0
@@ -447,7 +471,7 @@ pub fn validate_replay_reader(
                 epoch_model = false;
                 layer_deposition = false;
             } else if kind == 6 {
-                if next_layer != u16::MAX as u32
+                if next_layer != REPLAY_LIFECYCLE_LAYER
                     || lifecycle >= 2
                     || depositions != info.deposition_count
                     || travels != info.travel_count
@@ -530,7 +554,7 @@ pub fn validate_replay_reader(
                 }
             }
         } else if kind == 6 || kind == 7 {
-            if info.lifecycle_count != 4 || next_layer != u16::MAX as u32 {
+            if info.lifecycle_count != 4 || next_layer != REPLAY_LIFECYCLE_LAYER {
                 return Err(corrupt("invalid lifecycle replay attribution"));
             }
             let required_kind = if lifecycle_phase == 1 { 7 } else { 6 };
@@ -776,6 +800,9 @@ mod tests {
         assert!(build(&[([0.0; 3], 0.0, 0, 6), ([1.0; 3], 1.0, 1, 6)]).is_err());
     }
     fn append_association(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64) {
+        append_association_on(bytes, index, kind, z, 0);
+    }
+    fn append_association_on(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64, layer: u32) {
         let associated = matches!(kind, 1..=5 | 8..=10 | 13);
         bytes.extend_from_slice(&[kind, u8::from(index != 0) | if associated { 2 } else { 0 }]);
         for value in if associated {
@@ -786,7 +813,7 @@ mod tests {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&layer.to_le_bytes());
     }
     #[test]
     fn fixed_dual_epochs_break_frames_and_keep_waste_explicit() {
@@ -817,8 +844,8 @@ mod tests {
             let feed = if kind == 14 { 0.0f64 } else { 600.0f64 };
             bytes.extend_from_slice(&feed.to_le_bytes());
             bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
-            let layer = if kind == 6 { u16::MAX } else { 0 };
-            bytes.extend_from_slice(&layer.to_le_bytes());
+            let layer = if kind == 6 { REPLAY_LIFECYCLE_LAYER } else { 0 };
+            bytes.extend_from_slice(&(tool as u16).to_le_bytes());
             let associated = matches!(kind, 1 | 2 | 15);
             bytes.extend_from_slice(&[
                 kind,
@@ -832,7 +859,7 @@ mod tests {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
             bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-            bytes.extend_from_slice(&u32::to_le_bytes(tool));
+            bytes.extend_from_slice(&layer.to_le_bytes());
         }
         for (offset, value) in [(8, 15u32), (16, 4), (20, 5), (28, 2), (88, 2), (92, 2)] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -854,9 +881,9 @@ mod tests {
         validate_replay_display(&bytes, &descriptor).unwrap();
         for (record, offset, value) in [
             (0, 47, 1u32),
-            (1, 76, 1),
+            (1, 44, 1),
             (2, 72, 0),
-            (7, 76, 0),
+            (7, 44, 0),
             (7, 47, 1),
             (9, 46, 1),
             (12, 46, 0),
@@ -879,6 +906,78 @@ mod tests {
         old[4..6].copy_from_slice(&5u16.to_le_bytes());
         rebind(&old, &mut descriptor);
         assert!(validate_replay_display(&old, &descriptor).is_err());
+    }
+    #[test]
+    fn layers_beyond_the_former_u16_index_are_admitted_and_indexed() {
+        // 70,000 layers: well past the 65,534 layers the old u16 record held.
+        const LAYERS: u32 = 70_000;
+        let (body, mut descriptor) = encoded();
+        let mut bytes = body[..REPLAY_HEADER_BYTES].to_vec();
+        let mut e = 0.0f64;
+        let height = 0.01f64;
+        for layer in 0..LAYERS {
+            let z = f64::from(layer + 1) * height;
+            for (offset, kind) in [(0usize, 0u8), (1, 1)] {
+                let index = (layer * 2) as usize + offset;
+                let position = [offset as f64, 0.0, z];
+                if kind == 1 {
+                    e += 1.0;
+                }
+                for value in position {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes.extend_from_slice(&e.to_le_bytes());
+                bytes.extend_from_slice(&600.0f64.to_le_bytes());
+                bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
+                bytes.extend_from_slice(&0u16.to_le_bytes());
+                let associated = kind == 1;
+                bytes.extend_from_slice(&[
+                    kind,
+                    u8::from(index != 0) | if associated { 2 } else { 0 },
+                ]);
+                for value in if associated {
+                    [0.45, z - height, z]
+                } else {
+                    [0.0; 3]
+                } {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+                bytes.extend_from_slice(&layer.to_le_bytes());
+            }
+        }
+        let top = f64::from(LAYERS) * height;
+        for (offset, value) in [(8, 2 * LAYERS), (16, LAYERS), (20, LAYERS), (24, LAYERS)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let bounds = AabbMm::new([0.0, 0.0, height], [1.0, 0.0, top]).unwrap();
+        for axis in 0..3 {
+            bytes[32 + axis * 8..40 + axis * 8].copy_from_slice(&bounds.min[axis].to_le_bytes());
+            bytes[56 + axis * 8..64 + axis * 8].copy_from_slice(&bounds.max[axis].to_le_bytes());
+        }
+        descriptor.info.event_count = 2 * LAYERS;
+        descriptor.info.deposition_count = LAYERS;
+        descriptor.info.travel_count = LAYERS;
+        descriptor.info.layer_count = LAYERS;
+        descriptor.info.bounds_mm = bounds;
+        descriptor.resource.size_bytes = bytes.len().to_string();
+        rebind(&bytes, &mut descriptor);
+        validate_replay_display(&bytes, &descriptor).unwrap();
+        let last = descriptor.pages.last().unwrap();
+        assert_eq!(last.last_layer, LAYERS - 1);
+        assert!(descriptor.pages.len() > 1);
+        let records = bytes[REPLAY_HEADER_BYTES..]
+            .as_chunks::<REPLAY_RECORD_BYTES>()
+            .0;
+        assert_eq!(replay_record_layer(&records[records.len() - 1]), LAYERS - 1);
+        // A layer index past the declared count is still refused.
+        let mut beyond = bytes.clone();
+        let start = REPLAY_HEADER_BYTES + (2 * LAYERS as usize - 1) * REPLAY_RECORD_BYTES;
+        beyond[start + REPLAY_LAYER_OFFSET..start + REPLAY_LAYER_OFFSET + 4]
+            .copy_from_slice(&LAYERS.to_le_bytes());
+        let mut rebound = descriptor.clone();
+        rebind(&beyond, &mut rebound);
+        assert!(validate_replay_display(&beyond, &rebound).is_err());
     }
     #[test]
     fn nominal_associations_require_deposition_and_bounded_finite_dimensions() {
@@ -918,16 +1017,16 @@ mod tests {
         let (body, mut descriptor) = encoded();
         let mut bytes = body[..96].to_vec();
         let records = [
-            ([0.0f64; 3], 0.0f64, 6u8, u16::MAX),
-            ([0.0, 1.0, 0.0], 1.0, 7, u16::MAX),
+            ([0.0f64; 3], 0.0f64, 6u8, REPLAY_LIFECYCLE_LAYER),
+            ([0.0, 1.0, 0.0], 1.0, 7, REPLAY_LIFECYCLE_LAYER),
             ([0.0, 1.0, 0.0], 0.2, 11, 0),
             ([0.0; 3], 0.2, 0, 0),
             ([0.0; 3], 1.0, 12, 0),
             ([1.0; 3], 2.0, 1, 0),
             ([1.0; 3], 2.0, 0, 0),
             ([0.0; 3], 3.0, 2, 0),
-            ([0.0, 0.0, 2.0], 3.0, 6, u16::MAX),
-            ([1.0, 0.0, 2.0], 3.0, 6, u16::MAX),
+            ([0.0, 0.0, 2.0], 3.0, 6, REPLAY_LIFECYCLE_LAYER),
+            ([1.0, 0.0, 2.0], 3.0, 6, REPLAY_LIFECYCLE_LAYER),
         ];
         for (index, (position, e, kind, layer)) in records.into_iter().enumerate() {
             for coordinate in position {
@@ -936,8 +1035,8 @@ mod tests {
             bytes.extend_from_slice(&e.to_le_bytes());
             bytes.extend_from_slice(&600.0f64.to_le_bytes());
             bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
-            bytes.extend_from_slice(&layer.to_le_bytes());
-            append_association(&mut bytes, index, kind, position[2]);
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            append_association_on(&mut bytes, index, kind, position[2], layer);
         }
         for (offset, value) in [(8, 10u32), (28, 4), (88, 2)] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -950,7 +1049,7 @@ mod tests {
         descriptor.resource.size_bytes = bytes.len().to_string();
         rebind(&bytes, &mut descriptor);
         validate_replay_display(&bytes, &descriptor).unwrap();
-        for (offset, value) in [(256 + 47, 0u8), (256 + 44, 1), (256 + 46, 12)] {
+        for (offset, value) in [(256 + 47, 0u8), (256 + 76, 1), (256 + 46, 12)] {
             let mut bad = bytes.clone();
             bad[offset] = value;
             let mut rebound = descriptor.clone();
@@ -1016,7 +1115,7 @@ mod tests {
             (96 + 80 + 47, 0),
             (96 + 46, 1),
             (96 + 2 * 80 + 46, 3),
-            (96 + 2 * 80 + 44, 1),
+            (96 + 2 * 80 + 76, 1),
             (96 + 80 + 46, 14),
         ] {
             let mut corrupted = bytes.clone();

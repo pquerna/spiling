@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Projection of validated SPLR6 events, never a machine-program parser.
+//! Projection of validated SPLR7 events, never a machine-program parser.
 pub mod beads;
 mod records;
 pub mod seams;
@@ -12,6 +12,23 @@ const METADATA_BYTES: usize = 16_384;
 use glam::DVec3;
 use spiling_contracts::manufacturing::*;
 use std::{collections::BTreeMap, ops::Range, sync::Arc};
+
+/// Scheduled layer of one checked SPLR record.
+fn record_layer(record: &[u8]) -> u32 {
+    u32::from_le_bytes(
+        record[REPLAY_LAYER_OFFSET..REPLAY_LAYER_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    )
+}
+/// Active tool of one checked SPLR record.
+fn record_tool(record: &[u8]) -> u32 {
+    u32::from(u16::from_le_bytes(
+        record[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2]
+            .try_into()
+            .unwrap(),
+    ))
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -26,7 +43,7 @@ pub struct Batch {
     pub points: bool,
     pub seam: bool,
     pub instances: Arc<table::Table>,
-    pub events: Arc<Vec<(u32, u16)>>,
+    pub events: Arc<Vec<(u32, u32)>>,
 }
 #[derive(Debug)]
 pub struct Replay {
@@ -40,9 +57,9 @@ pub struct Replay {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct View {
-    pub layer: Option<u16>,
+    pub layer: Option<u32>,
     /// Inclusive upper layer; None preserves single-layer selection.
-    pub layer_end: Option<u16>,
+    pub layer_end: Option<u32>,
     /// Dim unselected deposited paths, independent of selected-layer playback.
     pub context: bool,
     pub events: u32,
@@ -96,7 +113,7 @@ pub const ROLES: [&str; 16] = [
     "Waste",
 ];
 fn event_range(
-    events: &[(u32, u16)],
+    events: &[(u32, u32)],
     kind: u8,
     tool: u32,
     view: View,
@@ -116,11 +133,11 @@ fn event_range(
     let (offset, events) = if view.layer.is_some() {
         let first = events
             .iter()
-            .position(|(_, l)| *l != u16::MAX)
+            .position(|(_, l)| *l != REPLAY_LIFECYCLE_LAYER)
             .unwrap_or(events.len());
         let last = events
             .iter()
-            .rposition(|(_, l)| *l != u16::MAX)
+            .rposition(|(_, l)| *l != REPLAY_LIFECYCLE_LAYER)
             .map_or(first, |i| i + 1);
         (first, &events[first..last])
     } else {
@@ -165,10 +182,10 @@ impl Batch {
             } else {
                 0..0
             },
-            if upper < u16::MAX - 1 {
+            if upper < REPLAY_LIFECYCLE_LAYER - 1 {
                 self.range(View {
                     layer: Some(upper + 1),
-                    layer_end: Some(u16::MAX - 1),
+                    layer_end: Some(REPLAY_LIFECYCLE_LAYER - 1),
                     ..other
                 })
             } else {
@@ -270,8 +287,8 @@ impl Replay {
         for i in 0..count {
             let r = record(i)?;
             let kind = r[46];
-            let layer = u16::from_le_bytes(r[44..46].try_into().unwrap());
-            if layer != u16::MAX {
+            let layer = record_layer(&r);
+            if layer != REPLAY_LIFECYCLE_LAYER {
                 let range = &mut layer_windows[layer as usize];
                 if range.start == range.end {
                     range.start = i as u32;
@@ -283,7 +300,7 @@ impl Replay {
             }
             let points = i == 0 || matches!(kind, 11 | 12);
             let tool = if descriptor.info.tool_epoch_count > 0 {
-                u32::from_le_bytes(r[76..80].try_into().unwrap())
+                record_tool(&r)
             } else {
                 0
             };
@@ -321,7 +338,7 @@ impl Replay {
             let marker = i == 0;
             let points = marker || matches!(kind, 11 | 12);
             let tool = if descriptor.info.tool_epoch_count > 0 {
-                u32::from_le_bytes(r[76..80].try_into().unwrap())
+                record_tool(&r)
             } else {
                 0
             };
@@ -348,7 +365,7 @@ impl Replay {
                 });
             Arc::get_mut(&mut batch.events)
                 .unwrap()
-                .push((i as u32, u16::from_le_bytes(r[44..46].try_into().unwrap())));
+                .push((i as u32, record_layer(&r)));
             if !retain && ((i + 1).is_multiple_of(REPLAY_PAGE_EVENTS as usize) || i + 1 == count) {
                 let page = i / REPLAY_PAGE_EVENTS as usize;
                 for (_, batch) in
@@ -567,7 +584,7 @@ mod tests {
                                 <= 0.001
                         );
                     }
-                    if *layer == u16::MAX {
+                    if *layer == REPLAY_LIFECYCLE_LAYER {
                         assert!(
                             batch
                                 .range(View {
@@ -678,8 +695,8 @@ mod bead_tests {
             ] {
                 // Oracle is chronological decoded commands, independent of role-sorted GPU batches.
                 let expected = records.iter().enumerate().find(|(event, record)| {
-                    let layer = u16::from_le_bytes(record[44..46].try_into().unwrap());
-                    let tool = u32::from_le_bytes(record[76..80].try_into().unwrap());
+                    let layer = record_layer(&record[..]);
+                    let tool = record_tool(&record[..]);
                     view.visible
                         && (*event as u32) < view.events
                         && matches!(record[46], 1..=5 | 8..=10 | 13 | 15)
@@ -867,13 +884,13 @@ mod layer_range_tests {
             seam: false,
             instances: Arc::new(table::Table::with_capacity(0)),
             events: Arc::new(vec![
-                (0, u16::MAX),
+                (0, REPLAY_LIFECYCLE_LAYER),
                 (2, 0),
                 (5, 1),
                 (7, 1),
                 (9, 2),
                 (12, 3),
-                (20, u16::MAX),
+                (20, REPLAY_LIFECYCLE_LAYER),
             ]),
         };
         let view = View {
@@ -901,7 +918,7 @@ mod layer_range_tests {
         );
         assert_eq!(
             batch.context_ranges(View {
-                layer: Some(u16::MAX - 1),
+                layer: Some(REPLAY_LIFECYCLE_LAYER - 1),
                 ..view
             }),
             [1..6, 0..0]
@@ -958,19 +975,22 @@ mod layer_range_tests {
         };
         assert_eq!(event_range(&events, 1, 0, view, 2), 4..8);
         let lifecycle = [
-            (0, u16::MAX),
+            (0, REPLAY_LIFECYCLE_LAYER),
             (2, 0),
             (5, 1),
             (7, 1),
             (9, 2),
-            (20, u16::MAX),
+            (20, REPLAY_LIFECYCLE_LAYER),
         ];
         assert_eq!(event_range(&lifecycle, 1, 0, view, 2), 4..8);
         assert_eq!(
             event_range(&lifecycle, 1, 0, View { events: 10, ..view }, 2),
             4..10
         );
-        assert_eq!(event_range(&[(0, u16::MAX)], 1, 0, view, 2), 2..2);
+        assert_eq!(
+            event_range(&[(0, REPLAY_LIFECYCLE_LAYER)], 1, 0, view, 2),
+            2..2
+        );
         assert_eq!(
             event_range(&events, 1, 0, View { events: 10, ..view }, 1),
             2..5

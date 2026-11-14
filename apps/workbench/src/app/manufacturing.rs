@@ -601,7 +601,7 @@ impl Workbench {
                         goal.differing_layer_count, goal.layer_count
                     ));
                     if ui.button("Inspect first adjusted layer").clicked() {
-                        self.manufacturing.replay.layer = Some(index as u16);
+                        self.manufacturing.replay.layer = Some(index);
                         self.manufacturing.replay.layer_end = None;
                         self.analysis.open = true;
                         self.analysis.follow_layer = true;
@@ -616,7 +616,7 @@ impl Workbench {
                                     .batches
                                     .iter()
                                     .flat_map(|batch| batch.events.iter())
-                                    .filter(|event| u32::from(event.1) == index)
+                                    .filter(|event| event.1 == index)
                                     .map(|event| event.0)
                                     .max()
                                     .and_then(|event| event.checked_add(1))
@@ -1009,10 +1009,14 @@ fn event_controls(
             f64::from_le_bytes(
                 r[offset..offset + 8]
                     .try_into()
-                    .expect("checked SPLR6 record"),
+                    .expect("checked SPLR7 record"),
             )
         };
-        let tool = u32::from_le_bytes(r[76..80].try_into().expect("checked active tool"));
+        let tool = u16::from_le_bytes(
+            r[REPLAY_TOOL_OFFSET..REPLAY_TOOL_OFFSET + 2]
+                .try_into()
+                .expect("checked active tool"),
+        );
         ui.add(
             egui::Label::new(format!(
                 "{} · tool {} · XYZ {:.6}, {:.6}, {:.6} mm · E {:.8} mm · F {:.1} mm/min",

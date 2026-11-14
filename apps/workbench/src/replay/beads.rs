@@ -24,7 +24,7 @@ pub struct BeadBatch {
     pub kind: u8,
     pub tool: u32,
     pub instances: std::sync::Arc<super::table::Table>,
-    pub events: std::sync::Arc<Vec<(u32, u16)>>,
+    pub events: std::sync::Arc<Vec<(u32, u32)>>,
 }
 impl BeadBatch {
     pub fn range(&self, view: View) -> Range<u32> {
