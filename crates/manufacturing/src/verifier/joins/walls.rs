@@ -1108,7 +1108,6 @@ mod tests {
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
             layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
-            native_shape_error_mm: 0.1,
             bead_width_mm: 0.45,
             sparse_infill: SparseInfillPolicy::Fine,
             perimeter_count: 1,

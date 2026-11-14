@@ -73,7 +73,16 @@ pub(super) fn render(
         S::RestoreMesh => one("M420 S1"),
         S::LevellingOff if klipper => one("BED_MESH_CLEAR"),
         S::LevellingOff => one("M420 S0"),
-        S::RestoreModes => Emit::Lines(vec!["G21".into(), "G90".into(), "M82".into()]),
+        S::RestoreModes => Emit::Lines(vec![
+            "G21".into(),
+            "G90".into(),
+            if dialect.relative_extrusion() {
+                "M83"
+            } else {
+                "M82"
+            }
+            .into(),
+        ]),
         S::ResetExtrusion => one("G92 E0"),
         S::Barrier => one("M400"),
         S::NozzleOff => one("M104 S0"),

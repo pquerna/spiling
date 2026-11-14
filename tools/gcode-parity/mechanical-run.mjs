@@ -46,7 +46,7 @@ function nativeStatus(result, intent, identity) {
   assert.equal(result.manufacturing.verified_artifact_hash, result.manufacturing.artifact.hash);
   const summary = result.manufacturing.artifact.summary;
   assert.equal(summary.native_geometry.certified_layer_count, summary.layers);
-  assert(summary.native_geometry.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+  assert(summary.native_geometry.achieved_shape_error_mm <= 0.01);
   assert.equal(
     summary.support_deposition_segments,
     0,
@@ -183,7 +183,6 @@ export async function runMechanicalComparisons({
   assert.equal(recipe.bead_width_mm, 0.45);
   assert.equal(recipe.infill_fraction, 0.25);
   assert.equal(recipe.perimeter_count, 2);
-  assert.equal(recipe.native_shape_error_mm, 0.1);
   assert.equal(recipe.flow_multiplier, 1);
   assert.equal(recipe.top_skin_thickness_mm, 0.8);
   assert.equal(recipe.bottom_skin_thickness_mm, 0.8);

@@ -37,7 +37,6 @@ message PlanarPrintRecipe {
   double bottom_skin_thickness_mm = 14;
   ProcessPolicy process = 15;
   SupportPolicy supports = 16;
-  double native_shape_error_mm = 17;
   SeamPolicy seam_policy = 18;
   RectilinearAxisPolicy rectilinear_axis = 19;
   SparseInfillPolicy sparse_infill = 20;

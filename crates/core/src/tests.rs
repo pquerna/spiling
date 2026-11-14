@@ -485,7 +485,6 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
             layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
-            native_shape_error_mm: 0.1,
             bead_width_mm: 0.4,
             sparse_infill: spiling_contracts::manufacturing::SparseInfillPolicy::Fine,
             perimeter_count: 1,
@@ -606,7 +605,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             process_resolution: vec![],
             sparse_bands: vec![],
             native_geometry: NativeGeometryCoverageSummary {
-                requested_shape_error_mm: 0.1,
+                requested_shape_error_mm: 0.01,
                 achieved_shape_error_mm: 0.0,
                 height_merge_mm: 0.0025,
                 height_analysis_count: 1,

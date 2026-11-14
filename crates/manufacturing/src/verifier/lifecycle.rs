@@ -178,7 +178,8 @@ impl<'a> Lifecycle<'a> {
             S::RestoreMesh => vec!["M420 S1".into()],
             S::LevellingOff if klipper => vec!["BED_MESH_CLEAR".into()],
             S::LevellingOff => vec!["M420 S0".into()],
-            S::RestoreModes => vec!["G21".into(), "G90".into(), "M82".into()],
+            // Every complete single-extruder dialect replays relative E.
+            S::RestoreModes => vec!["G21".into(), "G90".into(), "M83".into()],
             S::ResetExtrusion => vec!["G92 E0".into()],
             S::Barrier => vec!["M400".into()],
             S::NozzleOff => vec!["M104 S0".into()],

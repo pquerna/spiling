@@ -1339,7 +1339,6 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 layer_height_policy: rpc::LayerHeightPolicy::try_from(value.layer_height_policy)
                     .map_err(|_| "unknown layer-height policy")?
                     .try_into()?,
-                native_shape_error_mm: value.native_shape_error_mm,
                 bead_width_mm: value.bead_width_mm,
                 perimeter_count: value.perimeter_count,
                 infill_fraction: value.infill_fraction,
@@ -1375,7 +1374,6 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             filament_diameter_mm: value.filament_diameter_mm,
             layer_height_mm: value.layer_height_mm,
             layer_height_policy: rpc::LayerHeightPolicy::from(value.layer_height_policy) as i32,
-            native_shape_error_mm: value.native_shape_error_mm,
             bead_width_mm: value.bead_width_mm,
             perimeter_count: value.perimeter_count,
             infill_fraction: value.infill_fraction,
@@ -2102,10 +2100,10 @@ mod tests {
         assert_eq!(ManufacturingIntent::try_from(wire.clone()).unwrap(), domain);
         for value in [0.0, -0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut invalid = wire.clone();
-            invalid.recipe.as_mut().unwrap().native_shape_error_mm = value;
+            invalid.recipe.as_mut().unwrap().bead_width_mm = value;
             assert!(ManufacturingIntent::try_from(invalid).is_err());
             let mut invalid = domain.clone();
-            invalid.recipe.native_shape_error_mm = value;
+            invalid.recipe.bead_width_mm = value;
             assert!(rpc::ManufacturingIntent::try_from(invalid).is_err());
         }
         let mut missing = wire.clone();

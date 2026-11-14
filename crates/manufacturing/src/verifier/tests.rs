@@ -172,7 +172,6 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
-            native_shape_error_mm: 0.1,
             id: "recipe".into(),
             revision: "1".into(),
             material_id: "nominal-only".into(),
@@ -216,7 +215,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         sparse_bands: vec![],
         process_resolution: Vec::new(),
         native_geometry: NativeGeometryCoverageSummary {
-            requested_shape_error_mm: intent.recipe.native_shape_error_mm,
+            requested_shape_error_mm: intent.recipe.native_shape_error_mm(),
             achieved_shape_error_mm: 0.0,
             height_merge_mm: 0.0025,
             height_analysis_count: 1,
@@ -1244,7 +1243,8 @@ fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations(
         ("M400\n", ""),
         ("M104 S0", "M104 S200"),
         ("M84 X Y E\n", ""),
-        ("M82\n", "M83\n"),
+        ("M83\n", "M82\n"),
+        ("M83\n", ""),
         ("G90\n", "G91\n"),
         ("E1.00000000", "E2.00000000"),
         ("G28", "START_PRINT"),
@@ -1258,6 +1258,70 @@ fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations(
         );
     }
     assert!(verify(&(program + "G0 X0 Y0 Z0 F1200\n"), &plan, &intent, &cancel).is_err());
+}
+
+#[test]
+fn complete_jobs_command_exact_relative_extrusion() {
+    let (intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    assert!(program.contains("\nG21\nG90\nM83\nG92 E0\n"), "{program}");
+    // Every E word is a small per-move delta; their exact E8 sum is the
+    // replayed absolute filament, so no 32-bit absolute E ever accumulates.
+    let mut units = 0i64;
+    let mut largest = 0i64;
+    for line in program.lines() {
+        if line.starts_with("G92 E0") {
+            units = 0;
+            continue;
+        }
+        if !line.starts_with('G') {
+            continue;
+        }
+        let Some(word) = line.split_ascii_whitespace().find(|w| w.starts_with('E')) else {
+            continue;
+        };
+        let (whole, fraction) = word[1..].split_once('.').unwrap();
+        assert_eq!(fraction.len(), 8, "{line}");
+        let negative = whole.starts_with('-');
+        let magnitude = whole.trim_start_matches('-').parse::<i64>().unwrap() * 100_000_000
+            + fraction.parse::<i64>().unwrap();
+        let delta = if negative { -magnitude } else { magnitude };
+        largest = largest.max(delta.abs());
+        units += delta;
+    }
+    assert!(largest < 100 * 100_000_000, "largest delta {largest}");
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    let total = units as f64 / 100_000_000.0;
+    assert!(
+        (total - report.filament_length_mm - report.priming_filament_length_mm).abs() < 1e-6,
+        "{total} vs {} + {}",
+        report.filament_length_mm,
+        report.priming_filament_length_mm
+    );
+    // One E8 step on any delta breaks the exact replayed position.
+    let line = program
+        .lines()
+        .filter(|l| l.starts_with("G1 X"))
+        .nth(3)
+        .unwrap()
+        .to_string();
+    let word = line
+        .split_ascii_whitespace()
+        .find(|w| w.starts_with('E'))
+        .unwrap();
+    let last = word.as_bytes()[word.len() - 1];
+    let bumped = format!(
+        "{}{}",
+        &word[..word.len() - 1],
+        if last == b'9' {
+            '8'
+        } else {
+            (last + 1) as char
+        }
+    );
+    let mutated = program.replacen(&line, &line.replacen(word, &bumped, 1), 1);
+    assert!(verify(&mutated, &plan, &intent, &cancel).is_err());
 }
 
 #[test]
@@ -4162,14 +4226,14 @@ fn shipped_dialect(
 fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
     // Marlin: https://marlinfw.org/docs/gcode/<code>.html for each code.
     const MARLIN: &[&str] = &[
-        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M82", "M84", "M104", "M106",
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M83", "M84", "M104", "M106",
         "M107", "M109", "M140", "M190", "M200", "M220", "M221", "M400", "M420",
     ];
     // Prusa Buddy: Marlin-derived codes, plus M555/M862.x/G29 per
     // https://help.prusa3d.com/article/buddy-firmware-specific-g-code-commands_633112
     // and PrusaSlicer's MK4S start G-code (G29 P1/P3.2/P3.13/A).
     const PRUSA: &[&str] = &[
-        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M82", "M84", "M104", "M106",
+        "G0", "G1", "G2", "G3", "G21", "G28", "G29", "G90", "G92", "M83", "M84", "M104", "M106",
         "M107", "M109", "M140", "M190", "M220", "M221", "M400", "M555", "M862.1", "M862.3",
     ];
     // Klipper: https://www.klipper3d.org/G-Codes.html (G21 is a registered
@@ -4181,7 +4245,7 @@ fn documented(dialect: OutputDialect, line: &str) -> Result<(), String> {
         "G28",
         "G90",
         "G92",
-        "M82",
+        "M83",
         "M84",
         "M104",
         "M106",
@@ -4345,7 +4409,7 @@ fn opaque_blocks_are_checked_by_declared_effects_and_reported_not_refused() {
     // re-establishes modes and E it may have changed.
     assert!(
         program.contains(
-            "M107\nSTART_PRINT BED_TEMP=60 EXTRUDER_TEMP=200\nG21\nG90\nM82\nG92 E0\nG0 X10.000000"
+            "M107\nSTART_PRINT BED_TEMP=60 EXTRUDER_TEMP=200\nG21\nG90\nM83\nG92 E0\nG0 X10.000000"
         ),
         "{program}"
     );
@@ -4371,7 +4435,7 @@ fn opaque_blocks_are_checked_by_declared_effects_and_reported_not_refused() {
     for (from, to) in [
         ("EXTRUDER_TEMP=200", "EXTRUDER_TEMP=260"),
         ("G92 E0\nG0 X10", "G0 X10"),
-        ("G90\nM82\nG92 E0\n", "G92 E0\n"),
+        ("G90\nM83\nG92 E0\n", "G92 E0\n"),
         ("END_PRINT\n", ""),
     ] {
         let mutated = program.replacen(from, to, 1);

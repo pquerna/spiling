@@ -134,7 +134,6 @@ pub fn create_material_intent(
             filament_diameter_mm: material.filament_diameter_mm,
             layer_height_mm: height,
             layer_height_policy: LayerHeightPolicy::Preferred,
-            native_shape_error_mm: 0.01,
             bead_width_mm: width,
             sparse_infill: SparseInfillPolicy::Fine,
             perimeter_count: 3,

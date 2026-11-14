@@ -69,7 +69,6 @@ fn intent() -> ManufacturingIntent {
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
-            native_shape_error_mm: 0.1,
             id: "solid".into(),
             revision: "1".into(),
             material_id: "nominal".into(),

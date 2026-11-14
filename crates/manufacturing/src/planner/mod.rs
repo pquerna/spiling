@@ -2395,10 +2395,10 @@ fn admit_schedule<'model>(
                 })
                 .collect(),
             native_geometry: NativeGeometryCoverageSummary {
-                requested_shape_error_mm: recipe.native_shape_error_mm,
+                requested_shape_error_mm: recipe.native_shape_error_mm(),
                 achieved_shape_error_mm: spiling_geometry::tolerant::TolerantPolicy::default()
                     .profile_mm
-                    .min(recipe.native_shape_error_mm),
+                    .min(recipe.native_shape_error_mm()),
                 height_analysis_count: 0,
                 slab_count: 0,
                 certified_layer_count: count,

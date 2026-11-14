@@ -7,7 +7,6 @@
     "filament_diameter_mm": 1.75,
     "layer_height_mm": 0.25,
     "layer_height_policy": "protected_maximum",
-    "native_shape_error_mm": 0.001,
     "bead_width_mm": 0.5,
     "sparse_infill": {
       "kind": "fine"
@@ -202,7 +201,6 @@
       "filament_diameter_mm": 1.75,
       "layer_height_mm": 0.25,
       "layer_height_policy": "protected_maximum",
-      "native_shape_error_mm": 0.001,
       "bead_width_mm": 0.5,
       "sparse_infill": {
         "kind": "fine"

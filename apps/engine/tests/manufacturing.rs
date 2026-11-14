@@ -40,6 +40,33 @@ impl Drop for Workspace {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+/// Absolute E after each program line, as firmware accumulates it: relative
+/// (`M83`) words add their exact E8 delta, absolute (`M82`) words replace it.
+fn absolute_e_by_line(program: &str) -> Vec<Option<f64>> {
+    let mut relative = false;
+    let mut units = 0i64;
+    program
+        .lines()
+        .map(|line| {
+            let code = line.split(';').next().unwrap_or("").trim();
+            match code {
+                "M83" => relative = true,
+                "M82" => relative = false,
+                "G92 E0" => units = 0,
+                _ => {}
+            }
+            let word = code
+                .split_ascii_whitespace()
+                .skip(1)
+                .find_map(|w| w.strip_prefix('E'))
+                .filter(|_| code.starts_with('G'))?;
+            let value = (word.parse::<f64>().ok()? * 100_000_000.0).round() as i64;
+            units = if relative { units + value } else { value };
+            Some(units as f64 / 100_000_000.0)
+        })
+        .collect()
+}
+
 fn native(path: &Path) -> NativePath {
     NativePath::from_os_str(path.as_os_str()).unwrap()
 }
@@ -58,7 +85,7 @@ fn intent() -> ManufacturingIntent {
             "deposition_limits":{"min_bead_width_mm":0.3,"max_bead_width_mm":0.75,"min_bead_height_mm":0.0025,"max_bead_height_mm":0.3},
             "nozzle_diameter_mm":0.4,"max_print_feed_mm_s":150.0,"max_travel_feed_mm_s":150.0,"max_volumetric_flow_mm3_s":20.0
         },
-        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2, "layer_height_policy": "protected_maximum","native_shape_error_mm":0.1,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
+        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2, "layer_height_policy": "protected_maximum","bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
             "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"}},
             "supports":{"kind":"disabled"},
             "seam_policy":{"kind":"nearest"},"rectilinear_axis":"alternating_xy","top_skin_axis":"alternating_xy","sparse_infill":{"kind":"fine"}}
@@ -1853,6 +1880,7 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         lifecycle[1][46], 7,
         "priming is separate from object deposition"
     );
+    let absolute_e = absolute_e_by_line(&program_text);
     for event in bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
         .0
@@ -1861,10 +1889,15 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         let actual_line = program_text.lines().nth(source_line as usize - 1).unwrap();
         assert!(actual_line.starts_with("G0 ") || actual_line.starts_with("G1 "));
         for (axis, offset) in [('X', 0), ('Y', 8), ('Z', 16), ('E', 24), ('F', 32)] {
-            if let Some(value) = actual_line
+            let word = actual_line
                 .split_ascii_whitespace()
-                .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
-            {
+                .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()));
+            let word = if axis == 'E' {
+                word.and(absolute_e[source_line as usize - 1])
+            } else {
+                word
+            };
+            if let Some(value) = word {
                 assert_eq!(
                     f64::from_le_bytes(event[offset..offset + 8].try_into().unwrap()),
                     value,
@@ -2480,6 +2513,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         let program = fetch_program(&client, &record).await;
         let program_text = String::from_utf8(program.to_vec().unwrap()).unwrap();
         let mut program_lines = program_text.lines();
+        let absolute_e = absolute_e_by_line(&program_text);
         let mut previous_line = 0;
         let mut actual_separators = 0;
         let events: Vec<&[u8; REPLAY_RECORD_BYTES]> = motion[REPLAY_HEADER_BYTES..]
@@ -2507,10 +2541,15 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
                 if !last_of_line && !matches!(axis, 'Z' | 'F') {
                     continue;
                 }
-                if let Some(value) = line
+                let word = line
                     .split_ascii_whitespace()
-                    .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
-                {
+                    .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()));
+                let word = if axis == 'E' {
+                    word.and(absolute_e[source_line as usize - 1])
+                } else {
+                    word
+                };
+                if let Some(value) = word {
                     assert_eq!(
                         f64::from_le_bytes(event[offset..offset + 8].try_into().unwrap()),
                         value

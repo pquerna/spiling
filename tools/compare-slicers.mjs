@@ -368,7 +368,6 @@ try {
       let scheduleProbe = null;
       if (record.spiling.layerCount !== record.reference.layerCount) {
         const diagnostic = structuredClone(intent);
-        diagnostic.recipe.native_shape_error_mm = 0.101;
         await save(`${c.id}/shape-bound-diagnostic.intent.json`, diagnostic);
         const probeStdout = await run(
           cli,

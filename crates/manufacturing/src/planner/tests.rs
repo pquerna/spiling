@@ -110,7 +110,6 @@ fn image_contact_floor_refuses_nonfinite_source_events() {
 
 pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
     PlanarPrintRecipe {
-        native_shape_error_mm: 0.1,
         id: "region-test".into(),
         revision: "1".into(),
         material_id: "nominal".into(),

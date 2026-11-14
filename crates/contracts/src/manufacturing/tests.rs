@@ -1134,7 +1134,6 @@ fn intent() -> ManufacturingIntent {
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
             layer_height_policy: LayerHeightPolicy::ProtectedMaximum,
-            native_shape_error_mm: 0.02,
             bead_width_mm: 0.45,
             sparse_infill: SparseInfillPolicy::Fine,
             perimeter_count: 2,
@@ -1546,7 +1545,7 @@ fn regional_admission_requires_strict_region_and_contribution_shapes() {
 }
 fn native_geometry() -> NativeGeometryCoverageSummary {
     NativeGeometryCoverageSummary {
-        requested_shape_error_mm: 0.02,
+        requested_shape_error_mm: 0.01,
         achieved_shape_error_mm: 0.001,
         height_merge_mm: 0.0025,
         height_analysis_count: 1,
@@ -1968,54 +1967,26 @@ fn routing_is_required_nullable_and_cannot_relabel_old_workflows() {
 }
 
 #[test]
-fn native_shape_error_is_required_positive_and_persisted_as_semantic_intent() {
+fn native_shape_error_follows_the_recorded_profile_tolerance() {
     let intent = intent();
-    let mut missing = serde_json::to_value(&intent).unwrap();
-    missing["recipe"]
-        .as_object_mut()
-        .unwrap()
-        .remove("native_shape_error_mm");
-    assert!(decode_intent(&serde_json::to_vec(&missing).unwrap()).is_err());
-    for value in [0.0, -0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let mut invalid = intent.clone();
-        invalid.recipe.native_shape_error_mm = value;
-        assert!(invalid.validate().is_err(), "{value}");
-    }
+    // ADR012: one recorded profile tolerance, at most bead width / 20; a
+    // recipe cannot request its own.
+    assert_eq!(intent.recipe.native_shape_error_mm(), PROFILE_TOLERANCE_MM);
+    let mut fine = intent.recipe.clone();
+    fine.bead_width_mm = 0.1;
+    assert_eq!(fine.native_shape_error_mm(), 0.005);
+    let mut extra = serde_json::to_value(&intent).unwrap();
+    extra["recipe"]["native_shape_error_mm"] = serde_json::json!(0.1);
+    assert!(decode_intent(&serde_json::to_vec(&extra).unwrap()).is_err());
     let mut old = intent.clone();
     old.printer.schema_version = MANUFACTURING_SCHEMA_VERSION - 1;
     assert!(old.validate().is_err());
     let captured = bundle();
-    let bytes = serde_json::to_vec(&captured).unwrap();
-    let restored = decode_bundle(&bytes).unwrap();
+    let restored = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
     assert_eq!(restored.provenance.intent, intent);
-    assert_eq!(
-        restored.provenance.intent.recipe.native_shape_error_mm,
-        0.02
-    );
-    let mut changed = restored.provenance.clone();
-    changed.intent.recipe.native_shape_error_mm = 0.01;
-    let changed_hash = input_fingerprint(
-        &changed.project_id,
-        &changed.definitions,
-        &changed.occurrences,
-        &changed.intent,
-        &changed.surface_overlays,
-        &changed.process_document,
-    )
-    .unwrap();
-    assert_ne!(changed_hash, restored.provenance.input_hash);
-    assert!(
-        changed.validate().is_err(),
-        "captured hash must bind the native shape policy"
-    );
-    changed.input_hash = changed_hash;
-    changed.validate().unwrap();
-    let mut missing = serde_json::to_value(&captured).unwrap();
-    missing["provenance"]["intent"]["recipe"]
-        .as_object_mut()
-        .unwrap()
-        .remove("native_shape_error_mm");
-    assert!(decode_bundle(&serde_json::to_vec(&missing).unwrap()).is_err());
+    let mut forged = captured.clone();
+    forged.plan.native_geometry.requested_shape_error_mm = 0.1;
+    assert!(forged.validate().is_err());
     let mut old = serde_json::to_value(&captured).unwrap();
     old["schema_version"] = serde_json::json!(MANUFACTURING_SCHEMA_VERSION - 1);
     assert!(decode_bundle(&serde_json::to_vec(&old).unwrap()).is_err());

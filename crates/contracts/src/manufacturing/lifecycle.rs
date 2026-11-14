@@ -240,7 +240,8 @@ pub enum LifecycleStep {
     RestoreMesh,
     /// Disable levelling (Marlin `M420 S0`, Klipper `BED_MESH_CLEAR`).
     LevellingOff,
-    /// `G21`, `G90`, `M82`: re-establish modes after an opaque block.
+    /// `G21`, `G90` and the dialect's extrusion mode (`M83` for every
+    /// complete single-extruder dialect): re-establish modes after an opaque block.
     RestoreModes,
     /// `G92 E0`.
     ResetExtrusion,
@@ -331,7 +332,7 @@ impl FirmwareLifecycle {
         dialect: OutputDialect,
         job: &SingleExtruderJob,
     ) -> Result<(), ManufacturingError> {
-        // The program preamble establishes G21/G90/M82/G92 E0.
+        // The program preamble establishes G21/G90, the extrusion mode and G92 E0.
         let mut s = State {
             homed: false,
             position: false,
@@ -583,6 +584,13 @@ impl OutputDialect {
             | Self::KlipperSingleExtruderGcodeV1
             | Self::BambuLabGcode3mfV1 => None,
         }
+    }
+    /// Complete single-extruder dialects command relative extrusion (`M83`):
+    /// each E word is that move's filament delta, so firmware that keeps
+    /// positions in 32-bit floats never accumulates a long absolute E. The
+    /// diagnostic and fixed-dual dialects keep absolute E (`M82`).
+    pub fn relative_extrusion(self) -> bool {
+        self.single_extruder_lifecycle()
     }
     /// Every current dialect parses XYZ6/E8/F6 decimals; XYZ6 is also the
     /// planner's `program_coordinates` lattice. A dialect whose firmware

@@ -905,12 +905,10 @@ pub(super) fn settings_fields(
 ) {
     super::policies::seam_fields(ui, intent);
     ui::group(ui, "Geometry");
-    ui::number(
-        ui,
-        "Shape approximation limit (mm)",
-        &mut intent.recipe.native_shape_error_mm,
-        0.001,
-    );
+    ui.label(format!(
+        "Shape approximation limit: {:.3} mm (recorded tolerance policy)",
+        intent.recipe.native_shape_error_mm()
+    ));
     ui::help(
         ui,
         "shape-approximation",

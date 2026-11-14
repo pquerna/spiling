@@ -181,6 +181,7 @@ enum Command {
     Millimetres,
     AbsolutePosition,
     AbsoluteExtrusion,
+    RelativeExtrusion,
     ResetExtrusion,
     Travel,
     Deposit,
@@ -394,6 +395,7 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
         Some("G21") => Command::Millimetres,
         Some("G90") => Command::AbsolutePosition,
         Some("M82") => Command::AbsoluteExtrusion,
+        Some("M83") if !routed => Command::RelativeExtrusion,
         Some("G92") => Command::ResetExtrusion,
         Some("G0") => Command::Travel,
         Some("G1") => Command::Deposit,
@@ -458,6 +460,7 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
         Command::Millimetres
         | Command::AbsolutePosition
         | Command::AbsoluteExtrusion
+        | Command::RelativeExtrusion
         | Command::FanOff
         | Command::Home
         | Command::Barrier
@@ -504,6 +507,22 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
         return Err("tool selection requires the no-move S1 contract");
     }
     Ok(Some(Decoded { command, fields }))
+}
+
+/// The absolute E8 position after a relative E word. Both operands are E8
+/// lattice values, so their integer sum is exact; the absolute value is the
+/// same f64 an absolute E word of that decimal would decode to.
+fn relative_e8(position: f64, delta: f64) -> Result<f64, ManufacturingError> {
+    const LIMIT: f64 = (1u64 << 52) as f64;
+    let (from, by) = (position * 100_000_000.0, delta * 100_000_000.0);
+    if !from.is_finite() || !by.is_finite() || from.abs() >= LIMIT || by.abs() >= LIMIT {
+        return Err(failed("relative extrusion exceeds the exact E8 lattice"));
+    }
+    let sum = from.round() as i64 + by.round() as i64;
+    if sum.unsigned_abs() >= 1u64 << 52 {
+        return Err(failed("relative extrusion exceeds the exact E8 lattice"));
+    }
+    Ok(sum as f64 / 100_000_000.0)
 }
 
 fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
@@ -711,10 +730,18 @@ pub(crate) fn verify_actual(
     expected::validate_wall_seams(plan, recipe, initial_position, route_job, cancel)?;
     let mut expected =
         expected::Expected::new(plan, recipe, initial_position, route_job).peekable();
+    // A complete single-extruder job commands relative E (M83): each decoded
+    // E word is a delta, accumulated here on the exact E8 lattice into the
+    // absolute position every later check consumes.
+    let relative = matches!(printer.workflow, JobWorkflow::CompleteMarlin { .. });
     let setup = [
         Command::Millimetres,
         Command::AbsolutePosition,
-        Command::AbsoluteExtrusion,
+        if relative {
+            Command::RelativeExtrusion
+        } else {
+            Command::AbsoluteExtrusion
+        },
         Command::ResetExtrusion,
     ];
     let setup_len = if route.is_some() { 3 } else { setup.len() };
@@ -793,7 +820,16 @@ pub(crate) fn verify_actual(
         }
         let decoded = decode(line, route.is_some())
             .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
-        let Some(decoded) = decoded else { continue };
+        let Some(mut decoded) = decoded else { continue };
+        if relative
+            && matches!(
+                decoded.command,
+                Command::Deposit | Command::Recovery | Command::Arc(_)
+            )
+            && let Some(delta) = decoded.fields[3]
+        {
+            decoded.fields[3] = Some(relative_e8(state.extrusion, delta)?);
+        }
         let top_before = max_z;
         if matches!(
             decoded.command,
@@ -813,7 +849,7 @@ pub(crate) fn verify_actual(
         if setup_index < setup_len {
             if decoded.command != setup[setup_index] {
                 return Err(failed(
-                    "program must establish G21, G90, M82, G92 E0 in order",
+                    "program must establish G21, G90, the extrusion mode and G92 E0 in order",
                 ));
             }
             setup_index += 1;

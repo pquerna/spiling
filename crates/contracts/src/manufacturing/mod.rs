@@ -1154,7 +1154,6 @@ pub struct PlanarPrintRecipe {
     pub filament_diameter_mm: f64,
     pub layer_height_mm: f64,
     pub layer_height_policy: LayerHeightPolicy,
-    pub native_shape_error_mm: f64,
     pub bead_width_mm: f64,
     pub sparse_infill: SparseInfillPolicy,
     pub perimeter_count: u32,
@@ -1170,7 +1169,15 @@ pub struct PlanarPrintRecipe {
     pub rectilinear_axis: RectilinearAxisPolicy,
     pub top_skin_axis: RectilinearAxisPolicy,
 }
+/// ADR012 profile tolerance `ε_xy`: the one recorded bound on section
+/// deviation from the true surface, never a per-recipe choice.
+pub const PROFILE_TOLERANCE_MM: f64 = 0.01;
 impl PlanarPrintRecipe {
+    /// The native shape error this recipe requests: the recorded profile
+    /// tolerance, at most a twentieth of the bead width (ADR012).
+    pub fn native_shape_error_mm(&self) -> f64 {
+        PROFILE_TOLERANCE_MM.min(self.bead_width_mm / 20.0)
+    }
     /// Captured process-derived automatic roof contact spacing, or an explicit
     /// tighter override. This does not establish actual bridge support.
     pub fn automatic_web_roof_spacing_mm(&self) -> f64 {
@@ -1224,7 +1231,6 @@ impl PlanarPrintRecipe {
         positive(&[
             self.filament_diameter_mm,
             self.layer_height_mm,
-            self.native_shape_error_mm,
             self.bead_width_mm,
             self.print_speed_mm_s,
             self.travel_speed_mm_s,
@@ -3169,7 +3175,7 @@ impl NormalizedPrintPlan {
                 ));
             }
         }
-        if self.native_geometry.requested_shape_error_mm != intent.recipe.native_shape_error_mm {
+        if self.native_geometry.requested_shape_error_mm != intent.recipe.native_shape_error_mm() {
             return Err(invalid(
                 "native geometry coverage does not bind recipe shape error",
             ));

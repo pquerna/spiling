@@ -54,7 +54,16 @@ pub fn emit(
         line: 0,
         long_line: false,
     };
-    program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n").map_err(limit)?;
+    // Complete single-extruder dialects take relative E: every E word is the
+    // move's exact E8 delta of the tracked absolute target.
+    let relative = dialect.relative_extrusion();
+    program
+        .write_str(if relative {
+            "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM83\n"
+        } else {
+            "; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\n"
+        })
+        .map_err(limit)?;
     if routed.is_none() {
         program.write_str("G92 E0\n").map_err(limit)?;
     }
@@ -129,11 +138,11 @@ pub fn emit(
                     }
                     writeln!(
                         program,
-                        "G1 X{:.6} Y{:.6} Z{:.6} E{:.8} F{:.6}",
+                        "G1 X{:.6} Y{:.6} Z{:.6} E{} F{:.6}",
                         end[0],
                         end[1],
                         end[2],
-                        extrusion,
+                        e_word(extrusion, emitted_extrusion, 0.0, relative),
                         job.prime_speed_mm_s * 60.0
                     )
                     .map_err(limit)?;
@@ -204,7 +213,12 @@ pub fn emit(
                         ));
                     }
                     let e = if routed.is_some() { rounded } else { e };
-                    writeln!(program, "G1 E{e:.8} F{feed:.6}").map_err(limit)?;
+                    writeln!(
+                        program,
+                        "G1 E{} F{feed:.6}",
+                        e_word(e, rounded, emitted_extrusion, relative)
+                    )
+                    .map_err(limit)?;
                     emitted_extrusion = rounded;
                 }
                 Event::Arc(target, center, clockwise, e, speed) => {
@@ -258,13 +272,14 @@ pub fn emit(
                     }
                     writeln!(
                         program,
-                        "{} X{:.6} Y{:.6} Z{:.6} I{:.6} J{:.6} E{e:.8} F{feed:.6}",
+                        "{} X{:.6} Y{:.6} Z{:.6} I{:.6} J{:.6} E{} F{feed:.6}",
                         if clockwise { "G2" } else { "G3" },
                         to[0],
                         to[1],
                         to[2],
                         center[0] - from[0],
                         center[1] - from[1],
+                        e_word(e, rounded, emitted_extrusion, relative),
                     )
                     .map_err(limit)?;
                     emitted_extrusion = rounded;
@@ -353,8 +368,11 @@ pub fn emit(
                         let e = if routed.is_some() { rounded } else { e };
                         writeln!(
                             program,
-                            "G1 X{:.6} Y{:.6} Z{:.6} E{e:.8} F{feed:.6}",
-                            to[0], to[1], to[2]
+                            "G1 X{:.6} Y{:.6} Z{:.6} E{} F{feed:.6}",
+                            to[0],
+                            to[1],
+                            to[2],
+                            e_word(e, rounded, emitted_extrusion, relative)
                         )
                         .map_err(limit)?;
                         emitted_extrusion = rounded;
@@ -466,6 +484,23 @@ pub fn emit(
             "emitted program byte limit exceeded",
         )
     })
+}
+/// The E word of an extruding command. Absolute dialects write the target;
+/// relative dialects write the exact E8 delta between the rounded target and
+/// the previously emitted rounded position, so the firmware's running sum of
+/// deltas equals the absolute E8 lattice position without float drift.
+fn e_word(target: f64, rounded: f64, emitted: f64, relative: bool) -> String {
+    if !relative {
+        return format!("{target:.8}");
+    }
+    let units = (rounded * 100_000_000.0).round() as i64 - (emitted * 100_000_000.0).round() as i64;
+    let sign = if units < 0 { "-" } else { "" };
+    let magnitude = units.unsigned_abs();
+    format!(
+        "{sign}{}.{:08}",
+        magnitude / 100_000_000,
+        magnitude % 100_000_000
+    )
 }
 fn writable_position(
     point: [f64; 3],

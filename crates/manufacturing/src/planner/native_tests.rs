@@ -356,16 +356,15 @@ fn original_box_binds_every_layer_to_single_lane_evidence_without_native_capture
     let scene = NativeScene::new(BOX, &[translated(100.0, 105.0, 0.0)]);
     let mut intent = intent(true);
     intent.printer.build_envelope = AabbMm::new([0.0, 0.0, 0.0], [220.0, 220.0, 100.0]).unwrap();
-    intent.recipe.native_shape_error_mm = 0.1;
     intent.recipe.layer_height_mm = 0.2;
     intent.recipe.infill_fraction = 0.25;
     let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(metadata.disposition, PreflightDisposition::Admitted);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     let coverage = &bundle.plan.native_geometry;
-    assert_eq!(coverage.requested_shape_error_mm, 0.1);
+    assert_eq!(coverage.requested_shape_error_mm, PROFILE_TOLERANCE_MM);
     assert_single_lane_coverage(&bundle);
-    assert!((0.0..=0.1).contains(&coverage.achieved_shape_error_mm));
+    assert!((0.0..=PROFILE_TOLERANCE_MM).contains(&coverage.achieved_shape_error_mm));
     let layers = &bundle.plan.layers;
     assert_eq!(layers[0].lower_z_mm, 0.0);
     assert!((layers.last().unwrap().z_mm - 8.0).abs() < 1e-6);
@@ -666,12 +665,12 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
                 assert_eq!(features.owned_critical_slab_count, 0);
                 assert_eq!(
                     coverage.achieved_shape_error_mm,
-                    policy.profile_mm.min(intent.recipe.native_shape_error_mm)
+                    policy.profile_mm.min(intent.recipe.native_shape_error_mm())
                 );
             }
             evidence => panic!("unexpected tunnel material evidence: {evidence:?}"),
         }
-        assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+        assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm());
         assert_eq!(
             coverage.certified_layer_count,
             result.plan.layers.len() as u32
@@ -3261,7 +3260,6 @@ fn assert_native_family_compile_and_replay(
     );
     let mut intent = intent(supports);
     intent.recipe.layer_height_mm = 0.2;
-    intent.recipe.native_shape_error_mm = 0.1;
     let metadata = preflight(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(
         metadata.disposition,
@@ -3550,7 +3548,6 @@ fn independent_mechanical_sources_preserve_native_pocket_events_and_replay() {
         let scene = NativeScene::new(&source, &[RigidPoseMm::IDENTITY]);
         let mut intent = intent(false);
         intent.recipe.layer_height_mm = 0.2;
-        intent.recipe.native_shape_error_mm = 0.1;
         let metadata = preflight(&scene.input(&intent), &cancel)
             .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
         assert_eq!(
@@ -3724,7 +3721,6 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
     let dy = 0.234567891;
     let mut intent = intent(false);
     intent.recipe.layer_height_mm = 0.2;
-    intent.recipe.native_shape_error_mm = 0.1;
     let box_union_area = 400.0 - (20.0 - dx) * (10.0 - dy);
     let cone_source = native_test_source("cone-frustum");
     for (cone_first, [cone_x, cone_y]) in [
@@ -3765,7 +3761,7 @@ fn overlapping_native_boxes_and_separated_varying_cone_share_actual_union_and_fr
             // Analytic fixture oracle at the scheduled section heights.
             let radius = 5.0 - layer.section_z_mm * 0.25;
             let expected = std::f64::consts::PI * radius * radius;
-            let xy_error = intent.recipe.native_shape_error_mm * 1.25;
+            let xy_error = intent.recipe.native_shape_error_mm() * 1.25;
             let area_error = 0.01
                 + 2.0 * std::f64::consts::PI * radius * xy_error
                 + std::f64::consts::PI * xy_error * xy_error;

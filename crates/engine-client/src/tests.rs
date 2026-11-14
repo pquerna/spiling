@@ -59,7 +59,7 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             layers: 1,
             process_resolution: Vec::new(),
             native_geometry: NativeGeometryCoverageSummary {
-                requested_shape_error_mm: 0.1,
+                requested_shape_error_mm: 0.01,
                 achieved_shape_error_mm: 0.0,
                 height_merge_mm: 0.0025,
                 height_analysis_count: 1,
