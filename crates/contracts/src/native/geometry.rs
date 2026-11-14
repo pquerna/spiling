@@ -397,9 +397,6 @@ impl TryFrom<rpc::FaceIndexRow> for FaceIndexRow {
             ordinal: value.ordinal,
             face_id: checked(FaceId::parse(value.face_id))?,
         };
-        if value.ordinal >= MAX_NATIVE_FACES {
-            return Err("face ordinal exceeds support limit".into());
-        }
         Ok(value)
     }
 }
@@ -407,9 +404,6 @@ impl TryFrom<rpc::FaceIndexRow> for FaceIndexRow {
 impl TryFrom<FaceIndexRow> for rpc::FaceIndexRow {
     type Error = String;
     fn try_from(value: FaceIndexRow) -> Result<Self, String> {
-        if value.ordinal >= MAX_NATIVE_FACES {
-            return Err("face ordinal exceeds support limit".into());
-        }
         let value = Self {
             ordinal: value.ordinal,
             face_id: value.face_id.into(),
@@ -1455,7 +1449,7 @@ fn validate_response(value: &GeometryResponse) -> Result<(), String> {
             sequential(faces.iter().map(|f| f.ordinal), *next_offset)?;
             let mut ids = std::collections::BTreeSet::new();
             for face in faces {
-                if face.ordinal >= MAX_NATIVE_FACES || !ids.insert(&face.face_id) {
+                if !ids.insert(&face.face_id) {
                     return Err("invalid or duplicate face index".into());
                 }
             }

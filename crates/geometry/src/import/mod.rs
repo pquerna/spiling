@@ -353,10 +353,10 @@ pub(crate) fn import_step(
 }
 
 fn validate_face_limit(face_limit: u32) -> Result<(), GeometryError> {
-    if face_limit == 0 || face_limit > MAX_NATIVE_FACES {
+    if face_limit == 0 {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
-            "remaining native-face capacity exhausted or exceeds support cap",
+            "remaining native-face capacity exhausted",
         ));
     }
     Ok(())

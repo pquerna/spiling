@@ -16,7 +16,7 @@ impl<'a> Entities<'a> {
         if data.entities.len() > MAX_STEP_ENTITIES as usize {
             return Err(error(
                 GeometryErrorCode::ResourceLimit,
-                "STEP entity cap exceeded",
+                "STEP entity count exceeds its u32 representation",
             ));
         }
         let mut map = BTreeMap::new();
@@ -283,13 +283,12 @@ pub(super) fn lexical_bound(bytes: &[u8], cancel: &AtomicBool) -> Result<(), Geo
                     }
                 }
                 if bytes.get(i) == Some(&b'=') {
-                    count += 1;
-                    if count > MAX_STEP_ENTITIES {
-                        return Err(error(
+                    count = u32::checked_add(count, 1).ok_or_else(|| {
+                        error(
                             GeometryErrorCode::ResourceLimit,
-                            "STEP entity cap exceeded",
-                        ));
-                    }
+                            "STEP entity count exceeds its u32 representation",
+                        )
+                    })?;
                     i += 1;
                 }
             }

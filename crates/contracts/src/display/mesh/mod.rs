@@ -163,7 +163,7 @@ impl MeshChunkBuilder {
         budget: MeshBudget,
     ) -> Result<Self, GeometryError> {
         budget.validate()?;
-        if face_count == 0 || face_count > MAX_NATIVE_FACES {
+        if face_count == 0 {
             return Err(resource("mesh face count outside support limits"));
         }
         if !(152..=MAX_GEOMETRY_CHUNK_BYTES).contains(&chunk_limit) {

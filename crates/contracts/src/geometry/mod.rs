@@ -25,8 +25,19 @@ pub const MESH_PREVIEW_PROFILE: &str = "mesh-tolerant-mm-0.05-v1";
 /// This is a storage/representation limit, never a live-memory allowance.
 /// The engine independently admits source/proof growth from current headroom.
 pub const MAX_SOURCE_BYTES: u32 = 1024 * 1024 * 1024;
-pub const MAX_STEP_ENTITIES: u32 = 100_000;
-pub const MAX_NATIVE_FACES: u32 = 50_000;
+// Source entities and native faces have no fixed count ceiling ([ADR009]):
+// each is carried by a u32 identifier, ordinal or count field, and that width
+// is the only count limit. Import admits source bytes and proof growth against
+// current memory headroom, faces are paged and display admits packed mesh
+// bytes, so these values are representation widths, not part-size rules.
+// Never compare a u32 field against them.
+//
+// [ADR009]: ../../../../docs/adr/009-resource-envelope-policy.md
+pub const MAX_STEP_ENTITIES: u32 = u32::MAX;
+pub const MAX_NATIVE_FACES: u32 = u32::MAX;
+/// Definitions and occurrences are listed whole in one unpaged workspace
+/// overview control frame; these counts are that frame's capacity until the
+/// overview is paged.
 pub const MAX_DEFINITIONS: u32 = 32;
 pub const MAX_OCCURRENCES: u32 = 256;
 pub const MAX_SCENE_MESH_BYTES: u32 = 64 * 1024 * 1024;
@@ -1497,9 +1508,6 @@ impl FaceDomainSummary {
         Ok(value)
     }
     pub fn validate(&self) -> Result<(), GeometryError> {
-        if self.trim_loop_count > 2 * MAX_STEP_ENTITIES {
-            return Err(resource("face trim loop count exceeds limit"));
-        }
         if (self.trim_loop_count == 0 && self.inner_loop_count != 0)
             || (self.trim_loop_count != 0 && self.inner_loop_count >= self.trim_loop_count)
         {
@@ -1764,8 +1772,8 @@ impl DefinitionRecord {
         self.provenance.validate()?;
         self.bounds_mm.validate()?;
         self.display.validate()?;
-        if self.face_count == 0 || self.face_count > MAX_NATIVE_FACES {
-            return Err(resource("definition face count exceeds support limits"));
+        if self.face_count == 0 {
+            return Err(invalid("definition has no native faces"));
         }
         Ok(())
     }
@@ -1943,7 +1951,6 @@ impl MeshChunkMetadata {
             || self.chunk_count > MAX_SCENE_MESH_BYTES / crate::display::MESH_HEADER_BYTES as u32
             || self.chunk_index >= self.chunk_count
             || self.face_count == 0
-            || self.face_count > MAX_NATIVE_FACES
             || self.byte_count < crate::display::MESH_HEADER_BYTES as u32
             || self.byte_count > MAX_GEOMETRY_CHUNK_BYTES
         {

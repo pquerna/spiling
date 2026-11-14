@@ -325,9 +325,6 @@ pub(crate) async fn records(
             return Err("duplicate mesh artifact".into());
         }
     }
-    if face_count > MAX_NATIVE_FACES {
-        return Err("scene exceeds unique face cap".into());
-    }
     let mut occurrence_ids = BTreeSet::new();
     let mut live = BTreeSet::new();
     for occurrence in &occurrences {

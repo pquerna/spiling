@@ -433,7 +433,6 @@ fn analytic_metadata_rejects_invalid_frames_conventions_and_trim_counts() {
         .is_ok()
     );
     assert!(FaceDomainSummary::new(2, 2, false, false, false).is_err());
-    assert!(FaceDomainSummary::new(2 * MAX_STEP_ENTITIES + 1, 0, false, false, false).is_err());
     assert!(
         serde_json::from_value::<FaceDomainSummary>(serde_json::json!({
             "trim_loop_count": 1, "inner_loop_count": 1, "periodic_u": false,

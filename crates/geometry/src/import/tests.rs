@@ -73,14 +73,12 @@ fn native_bounds_remain_conservative_at_large_source_origins() {
 #[test]
 fn lexical_caps_ignore_strings_comments_and_binary_strings() {
     lexical_bound(b"/* #1= */ '#2=''#3=' \"#4=\" #5 /*hi*/ =", &cancelled()).unwrap();
+    // More entities than the former 100,000 cap are admitted.
     let mut bytes = Vec::new();
-    for _ in 0..=spiling_contracts::geometry::MAX_STEP_ENTITIES {
+    for _ in 0..=150_000 {
         bytes.extend_from_slice(b"#1 /* whitespace */ =A();");
     }
-    assert_eq!(
-        lexical_bound(&bytes, &cancelled()).unwrap_err().code,
-        GeometryErrorCode::ResourceLimit
-    );
+    lexical_bound(&bytes, &cancelled()).unwrap();
     assert_eq!(
         lexical_bound(b"/* unterminated", &cancelled())
             .unwrap_err()
