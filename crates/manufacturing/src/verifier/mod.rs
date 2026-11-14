@@ -1457,8 +1457,8 @@ pub(crate) fn verify_actual(
         layer_nominal_volume,
         layer_support_volume,
     )?;
-    for skipped in volume_layer as usize + 1..plan.layers.len() {
-        verify_region_volume(&plan.layers[skipped], 0.0, 0.0)?;
+    for layer in plan.layers.iter().skip(volume_layer as usize + 1) {
+        verify_region_volume(layer, 0.0, 0.0)?;
     }
     let mut geometry_work = 0usize;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();

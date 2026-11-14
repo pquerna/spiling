@@ -2041,10 +2041,7 @@ fn curve_continuity_selected(
                 if (i as f64) < range[0] || (i as f64) > range[1] {
                     continue;
                 }
-                #[expect(
-                    clippy::needless_range_loop,
-                    reason = "Compare adjacent polyline control points in the identical native coordinate axis while keeping both neighbor indices visible"
-                )]
+                // Compare adjacent polyline control points in the identical native coordinate axis while keeping both neighbor indices visible.
                 for k in 0..3 {
                     let Some(mut left) =
                         ExactCoefficient::difference(points[i][k], points[i - 1][k])

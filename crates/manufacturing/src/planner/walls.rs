@@ -808,9 +808,9 @@ fn source_mates(
 ) -> Result<SourceMates, ManufacturingError> {
     let mut incidence = BTreeMap::<Key, Vec<(usize, usize)>>::new();
     for (index, edge) in edges.iter().enumerate() {
-        for side in 0..2 {
+        for (side, point) in edge.points.iter().enumerate() {
             incidence
-                .entry(key(edge.points[side])?)
+                .entry(key(*point)?)
                 .or_default()
                 .push((index, side));
         }

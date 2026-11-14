@@ -1495,12 +1495,12 @@ fn original_cross_height_zero(
         return Ok(false);
     }
     let mut sum = ExactCoefficient::point(0.0);
-    for k in 0..3 {
+    for (k, direction) in functional.direction.iter().enumerate() {
         let i = (k + 1) % 3;
         let j = (k + 2) % 3;
         for (left, right, sign) in [(a[i], b[j], 1.0), (a[j], b[i], -1.0)] {
             work.charge(1, cancel)?;
-            for value in [left, right, functional.direction[k].lo] {
+            for value in [left, right, direction.lo] {
                 Interval::new(value, value)?;
             }
             let Some(product) = ExactCoefficient::point(left).product(
@@ -1511,11 +1511,8 @@ fn original_cross_height_zero(
             else {
                 return Ok(false);
             };
-            let Some(term) = product.product(
-                &ExactCoefficient::point(sign * functional.direction[k].lo),
-                work,
-                cancel,
-            )?
+            let Some(term) =
+                product.product(&ExactCoefficient::point(sign * direction.lo), work, cancel)?
             else {
                 return Ok(false);
             };

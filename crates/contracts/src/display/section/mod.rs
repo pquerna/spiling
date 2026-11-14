@@ -377,8 +377,8 @@ impl SectionChunkBuilder {
         bytes[4..6].copy_from_slice(&SECTION_SCHEMA_VERSION.to_le_bytes());
         put_u32(&mut bytes, 8, loop_count as u32);
         put_u32(&mut bytes, 12, self.points.len() as u32);
-        for axis in 0..3 {
-            put_f64(&mut bytes, 16 + axis * 8, self.plane.origin_mm[axis]);
+        for (axis, value) in self.plane.origin_mm.iter().enumerate() {
+            put_f64(&mut bytes, 16 + axis * 8, *value);
         }
         put_u32(&mut bytes, 40, self.chunks.len() as u32);
         put_u32(&mut bytes, 44, self.first_loop);

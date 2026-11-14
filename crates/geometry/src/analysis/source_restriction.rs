@@ -2106,13 +2106,12 @@ mod tests {
         let operator =
             SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
                 .unwrap();
-        for endpoint in 0..2 {
+        for (endpoint, point) in source.vertex_points_mm.iter().enumerate() {
             let position = operator
                 .tensor([endpoint as f64; 2], 0, &mut work, &cancel)
                 .unwrap()[0];
             for (axis, &coordinate) in position.iter().enumerate() {
-                let residual =
-                    coordinate.sub(Interval::point(source.vertex_points_mm[endpoint][axis]));
+                let residual = coordinate.sub(Interval::point(point[axis]));
                 assert!(residual.lo.abs().max(residual.hi.abs()) < 1.0e-7);
             }
         }
@@ -2261,14 +2260,14 @@ mod tests {
                     .unwrap();
             assert!(operator.exact_source_endpoints());
             assert_eq!(operator.source_error_mm(), 0.0);
-            for endpoint in 0..2 {
-                for axis in 0..3 {
+            for (endpoint, point) in source.vertex_points_mm.iter().enumerate() {
+                for (axis, coordinate) in point.iter().enumerate() {
                     assert!(
                         crate::parametric::curve_endpoint_coordinate_equal(
                             &operator,
                             endpoint as f64,
                             axis,
-                            source.vertex_points_mm[endpoint][axis],
+                            *coordinate,
                             &mut work,
                             &cancel
                         )

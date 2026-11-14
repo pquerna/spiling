@@ -126,11 +126,11 @@ impl<'a> RouteState<'a> {
         state.push(Op::Scalar(Command::LevelingOff, 5, 0.0, None));
         state.push(Op::Epoch);
         state.push(Op::Scalar(Command::WaitBed, 6, job.bed_temperature_c, None));
-        for tool in 0..2 {
+        for (tool, profile) in job.tools.iter().enumerate() {
             state.push(Op::Scalar(
                 Command::NozzleOff,
                 5,
-                job.tools[tool].standby_temperature_c,
+                profile.standby_temperature_c,
                 Some(tool as u8),
             ));
         }

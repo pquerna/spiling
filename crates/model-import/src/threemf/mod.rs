@@ -159,8 +159,8 @@ impl Package {
                     };
                     if object.mesh.is_some() || !object.volumes.is_empty() {
                         let mut scale = Affine::IDENTITY;
-                        for a in 0..3 {
-                            scale.0[a][a] = model.scale_to_mm;
+                        for (axis, row) in scale.0.iter_mut().take(3).enumerate() {
+                            row[axis] = model.scale_to_mm;
                         }
                         let volumes = if object.volumes.is_empty() {
                             vec![(

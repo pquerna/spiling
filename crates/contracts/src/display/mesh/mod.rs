@@ -431,8 +431,8 @@ impl MeshChunkBuilder {
         put_u32(&mut bytes, 12, self.indices.len() as u32);
         put_u32(&mut bytes, 16, self.faces.len() as u32);
         put_u32(&mut bytes, 20, self.chunks.len() as u32);
-        for axis in 0..3 {
-            put_f64(&mut bytes, 24 + axis * 8, self.origin[axis]);
+        for (axis, value) in self.origin.iter().enumerate() {
+            put_f64(&mut bytes, 24 + axis * 8, *value);
         }
         for values in [&self.positions, &self.normals] {
             for vector in values {

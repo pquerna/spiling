@@ -4305,8 +4305,8 @@ impl<'d> SourceCylinderPullback<'d> {
             {
                 continue;
             }
-            for end in 0..2 {
-                if !source.vertex_ids.contains(&rim.vertex_ids[end]) {
+            for (end, vertex) in rim.vertex_ids.iter().enumerate() {
+                if !source.vertex_ids.contains(vertex) {
                     continue;
                 }
                 let anchor = other

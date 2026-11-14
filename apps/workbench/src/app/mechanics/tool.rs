@@ -77,10 +77,7 @@ impl Workbench {
             self.force_event(Event::Cancel);
             return true;
         }
-        if self.mechanics.tool.selected.take().is_some() {
-            return true;
-        }
-        false
+        self.mechanics.tool.selected.take().is_some()
     }
     fn force_preparation(&self, face: &FaceId) -> Option<Arc<AnalysisFacePreparation>> {
         let draft = self.mechanics.draft.as_ref()?;

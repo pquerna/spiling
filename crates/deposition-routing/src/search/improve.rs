@@ -539,8 +539,13 @@ impl<'a, 't> Order<'a, 't> {
                     around: usize,
                     queued: &mut Vec<bool>,
                     queue: &mut std::collections::VecDeque<u32>| {
-            for k in around.saturating_sub(2)..(around + 3).min(n) {
-                let l = order.visits[k].0;
+            for visit in order
+                .visits
+                .iter()
+                .take((around + 3).min(n))
+                .skip(around.saturating_sub(2))
+            {
+                let l = visit.0;
                 if !queued[l as usize] {
                     queued[l as usize] = true;
                     queue.push_back(l);

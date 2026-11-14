@@ -202,13 +202,13 @@ impl<'d> SourceAffineRestriction<'d> {
             source_error_mm: 0.0,
             exact_endpoints: true,
         };
-        for endpoint in 0..2 {
+        for (endpoint, point) in source.vertex_points_mm.iter().enumerate() {
             let mut exact = true;
-            for axis in 0..3 {
+            for (axis, coordinate) in point.iter().enumerate() {
                 exact &= operator.normalized.endpoint_coordinate_equal(
                     endpoint as f64,
                     axis,
-                    source.vertex_points_mm[endpoint][axis],
+                    *coordinate,
                     work,
                     cancel,
                 )?;
@@ -219,11 +219,7 @@ impl<'d> SourceAffineRestriction<'d> {
                 let error = finite(
                     (0..3)
                         .fold(Interval::point(0.0), |sum, axis| {
-                            sum.add(
-                                jet[0][axis]
-                                    .sub(Interval::point(source.vertex_points_mm[endpoint][axis]))
-                                    .square(),
-                            )
+                            sum.add(jet[0][axis].sub(Interval::point(point[axis])).square())
                         })
                         .sqrt()?,
                 )?
