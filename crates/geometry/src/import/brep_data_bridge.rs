@@ -253,6 +253,18 @@ pub(crate) fn surface_periods(k: &Kernel, surface: &Surface) -> R<[Option<f64>; 
     ])
 }
 
+/// Samples along each trim when following it across a seam: steps well under
+/// half a period on any trim that turns at most a few times.
+const TRIM_WALK_SAMPLES: usize = 64;
+
+/// `p` moved by whole periods to within half a period of `near`.
+fn nearest_copy(p: [f64; 2], near: [f64; 2], periods: [Option<f64>; 2]) -> [f64; 2] {
+    std::array::from_fn(|d| match periods[d] {
+        Some(period) if period > 0.0 => p[d] - ((p[d] - near[d]) / period).round() * period,
+        _ => p[d],
+    })
+}
+
 /// Fraction of a period within which two trim ends a whole number of periods
 /// apart are one point across the seam (the kernel's own seam-wrap residual).
 const SEAM_WRAP_RESIDUAL: f64 = 0.01;
@@ -308,12 +320,25 @@ fn chain_periodic_trims(k: &Kernel, b: &mut Brep, f: solidcore::FaceId) -> R<()>
                 continue;
             };
             let interval = curve.natural_interval();
-            let a = curve.evaluate_point(k, interval.min())?;
-            let z = curve.evaluate_point(k, interval.max())?;
-            let (start, end) = if eu1::orientation(b, eu)? == OrientType::Opposite {
-                ([z.x, z.y], [a.x, a.y])
-            } else {
-                ([a.x, a.y], [z.x, z.y])
+            let reversed = eu1::orientation(b, eu)? == OrientType::Opposite;
+            // The trim in loop order: its first point as evaluated (where the
+            // mesher starts it), then each sample within half a period of the
+            // one before. A projected closed edge can end back in the base
+            // period; its loop end is where it arrives, not that value.
+            let mut walk = Vec::with_capacity(TRIM_WALK_SAMPLES + 1);
+            for i in 0..=TRIM_WALK_SAMPLES {
+                let w = i as f64 / TRIM_WALK_SAMPLES as f64;
+                let p = curve
+                    .evaluate_point(k, interval.evaluate(if reversed { 1.0 - w } else { w }))?;
+                let mut q = [p.x, p.y];
+                if let Some(before) = walk.last().copied() {
+                    q = nearest_copy(q, before, periods);
+                }
+                walk.push(q);
+            }
+            let (Some(&start), Some(&end)) = (walk.first(), walk.last()) else {
+                previous = None;
+                continue;
             };
             let mut shift = [0.0; 2];
             if let Some(previous) = previous {
@@ -329,11 +354,10 @@ fn chain_periodic_trims(k: &Kernel, b: &mut Brep, f: solidcore::FaceId) -> R<()>
                     shift = [0.0; 2];
                 }
             }
-            for i in 0..=8 {
-                let p = curve.evaluate_point(k, interval.evaluate(f64::from(i) / 8.0))?;
-                for (d, x) in [p.x, p.y].into_iter().enumerate() {
-                    lo[d] = lo[d].min(x + shift[d]);
-                    hi[d] = hi[d].max(x + shift[d]);
+            for p in &walk {
+                for d in 0..2 {
+                    lo[d] = lo[d].min(p[d] + shift[d]);
+                    hi[d] = hi[d].max(p[d] + shift[d]);
                 }
             }
             previous = Some([end[0] + shift[0], end[1] + shift[1]]);

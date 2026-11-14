@@ -1197,16 +1197,15 @@ fn twisted_seam_cylinder(twist: f64) -> String {
     )
 }
 
-/// A face whose boundary winds just past one period of a closed analytic
-/// chart, as a thread flank whose end edges straddle the seam does, tessellates
-/// watertight and slices to the true circle. One winding further than the
-/// mesher's one-turn chart reaches is reported as a failed face, never dropped.
+/// A face whose boundary winds past one period of a closed analytic chart, as a
+/// thread flank whose end edges straddle the seam does, tessellates watertight
+/// and slices to the true circle, however far past the seam its trims run.
 #[test]
 fn periodic_face_winding_past_one_turn_tessellates_and_slices() {
     use crate::tolerant::{TolerantModel, TolerantPolicy};
     let cancel = AtomicBool::new(false);
-    // Past one turn by 0.0025 mm and by 0.01 mm of the 5 mm radius.
-    for twist in [0.0005_f64, 0.002] {
+    // Past one turn by 0.0025 mm, 0.01 mm, 2.5 mm and 10 mm of the 5 mm radius.
+    for twist in [0.0005_f64, 0.002, 0.5, 2.0] {
         let source = twisted_seam_cylinder(twist);
         let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel)
             .unwrap_or_else(|e| panic!("twist {twist}: {}", e.message));
@@ -1230,8 +1229,4 @@ fn periodic_face_winding_past_one_turn_tessellates_and_slices() {
             close(boundary.area, std::f64::consts::PI * 25.0, 0.05);
         }
     }
-    let source = twisted_seam_cylinder(0.5);
-    let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancel).unwrap();
-    let model = TolerantModel::build(&definition, TolerantPolicy::default(), &cancel).unwrap();
-    assert_eq!(model.failed_faces, 1);
 }
