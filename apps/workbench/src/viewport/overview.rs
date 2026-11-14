@@ -352,7 +352,6 @@ fn stage(
         }],
     });
     let mut draws = vec![];
-    let mut instance_bytes = 0;
     for definition in &scene.context_definitions {
         let parts: Vec<_> = plate
             .parts
@@ -391,20 +390,13 @@ fn stage(
                     occurrence: 0,
                 });
             }
-            instance_bytes += instances.len() * std::mem::size_of::<Instance>();
-            // All cards together have at most the global occurrence budget, but
-            // repeated chunks also need a bounded, shared instance allocation.
-            let retained: usize = r
-                .overview
-                .cards
-                .iter()
-                .flatten()
-                .filter_map(|c| c.as_ref().ok())
-                .flat_map(|c| &c.draws)
-                .map(|d| d.instances as usize * std::mem::size_of::<Instance>())
-                .sum();
-            if retained + instance_bytes > crate::scene::MAX_INSTANCE_BUFFER_BYTES {
-                return Err("Plate preview instance budget reached".into());
+            // Every plate's parts are charged in the shared display pool at
+            // scene admission; one buffer must still fit the device binding.
+            let buffer_bytes = instances.len() * std::mem::size_of::<Instance>();
+            if buffer_bytes as u64 > device.limits().max_storage_buffer_binding_size {
+                return Err(
+                    "Plate preview instances exceed this GPU's storage binding size".into(),
+                );
             }
             let raw = r.mesh_buffer(device, chunk);
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -506,6 +498,39 @@ fn stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plates_beyond_the_former_instance_pool_are_charged_in_the_shared_display_budget() {
+        // 40,000 parts: past the ~32k instances the former 1 MiB pool held.
+        let part = |index: u32| LayoutPartBounds {
+            occurrence_id: OccurrenceId::new(index + 1).unwrap(),
+            definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+            pose: RigidPoseMm::IDENTITY,
+            source_bounds_mm: AabbMm {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 1.0, 1.0],
+            },
+        };
+        let plate = |parts: std::ops::Range<u32>| LayoutOverview {
+            layout_id: spiling_contracts::project::PrintLayoutId::new(),
+            captured_plate: false,
+            build_area_mm: None,
+            parts: parts.map(part).collect(),
+        };
+        let overview = PrintLayoutOverview {
+            session_id: SessionId::new(),
+            scene_revision: SceneRevision(1),
+            project_id: spiling_contracts::project::ProjectId::new(),
+            project_revision: spiling_contracts::project::ProjectRevision(1),
+            definitions: vec![],
+            layouts: vec![plate(0..30_000), plate(30_000..40_000)],
+        };
+        let charged = crate::scene::instance_display_bytes(&overview).unwrap();
+        assert_eq!(charged, 40_000 * crate::scene::INSTANCE_DISPLAY_BYTES);
+        assert!(charged > 1024 * 1024);
+        assert!(charged < MAX_DISPLAY_BUFFER_BYTES as usize);
+        assert!(40_000 * std::mem::size_of::<Instance>() > 1024 * 1024);
+    }
+
     #[test]
     fn common_three_quarter_camera_contains_tall_and_off_origin_geometry() {
         let mut overview = PrintLayoutOverview {

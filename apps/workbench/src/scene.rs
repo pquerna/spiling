@@ -108,14 +108,26 @@ fn check(cancel: &AtomicBool) -> Result<(), ClientError> {
     }
 }
 
-/// Hardware primitives, bounded layout previews, source instance matrices and
+/// Hardware primitives, bounded layout previews and
 /// active/staged CPU/GPU construction outlines and mechanical fields. Shared raw meshes are charged
 /// separately. This pool is reserved beside every source/section/replay load.
 pub const CONTEXT_DISPLAY_RESERVE_BYTES: usize = 4 * 1024 * 1024
     + crate::inspection::INSPECTION_RESERVE_BYTES
     + crate::mechanics::DISPLAY_RESERVE_BYTES
     + crate::viewport::fastener::DISPLAY_RESERVE_BYTES;
-pub const MAX_INSTANCE_BUFFER_BYTES: usize = 1024 * 1024;
+/// Display-pool charge per placed part on any plate: CPU/GPU instance
+/// matrices, selection and participant state. Instance buffers are admitted
+/// through this shared byte pool, never a separate instance count ceiling.
+pub const INSTANCE_DISPLAY_BYTES: usize = 128;
+
+/// Shared display-pool bytes charged for every part of every plate.
+pub fn instance_display_bytes(overview: &PrintLayoutOverview) -> Option<usize> {
+    overview
+        .layouts
+        .iter()
+        .try_fold(0usize, |total, plate| total.checked_add(plate.parts.len()))?
+        .checked_mul(INSTANCE_DISPLAY_BYTES)
+}
 
 /// Fetch one checked chunk at a time. Reuse immutable definitions on pose-only revisions.
 /// Capacity includes active/staged raw bytes and their GPU copies, plus instance matrices.
@@ -210,6 +222,8 @@ pub async fn load(
     let mut context_error = None;
     let mut loaded = Vec::new();
     let active_bytes = previous.as_ref().map_or(0, |s| s.raw_bytes);
+    let instance_bytes =
+        instance_display_bytes(&overview).ok_or_else(|| invalid("Display instance overflow"))?;
     let mut newly_retained = 0usize;
     'definitions: for record in definitions {
         check(&cancel)?;
@@ -294,7 +308,7 @@ pub async fn load(
                     let next = newly_retained
                         .checked_add(mesh.byte_count as usize)
                         .ok_or_else(|| invalid("Display capacity overflow"))?;
-                    if (active_bytes + next).saturating_mul(2) + occurrences.len() * 128 + reserved
+                    if (active_bytes + next).saturating_mul(2) + instance_bytes + reserved
                         > MAX_DISPLAY_BUFFER_BYTES as usize
                     {
                         if active_ids.contains(&record.definition_id) {

@@ -2175,10 +2175,18 @@ impl Resources {
                             .map_err(|_| "Scene occurrence index exceeds its u32 width")?,
                     });
                 }
+                // Instance matrices are charged per part in the shared display
+                // pool at scene admission; one buffer must still fit the
+                // device's storage binding.
+                let buffer_bytes = instances.len() * std::mem::size_of::<Instance>();
                 instance_bytes = instance_bytes
-                    .checked_add(instances.len() * std::mem::size_of::<Instance>())
-                    .filter(|n| *n <= crate::scene::MAX_INSTANCE_BUFFER_BYTES)
-                    .ok_or("Source instance buffers exceed the reserved display pool")?;
+                    .checked_add(buffer_bytes)
+                    .ok_or("Source instance buffers overflow")?;
+                if buffer_bytes as u64 > device.limits().max_storage_buffer_binding_size {
+                    return Err(
+                        "One source instance buffer exceeds this GPU's storage binding size".into(),
+                    );
+                }
                 let raw = self.mesh_buffer(device, chunk);
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("native shared occurrences"),
