@@ -5043,3 +5043,101 @@ fn failed_import_preview_preserves_project_and_expires_on_dismissal() {
     let after = send(&host, Action::Undo);
     assert_eq!(after.scene.as_ref().unwrap().occurrence_count, 0);
 }
+
+#[test]
+#[ignore = "actual one-step settings engine services; requires SPILING_TEST_ENGINE"]
+fn one_step_settings_select_a_shipped_printer_and_create_an_editable_intent() {
+    use super::hardware::{DefaultPrinter, HardwareAction};
+    use spiling_contracts::manufacturing::*;
+    fn act(host: &Host, action: LibraryAction) -> Snapshot {
+        let serial = host.snapshot().serial;
+        host.library(action).unwrap();
+        idle_after(host, serial)
+    }
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    assert_eq!(
+        wait(&host, |s| s.phase != Phase::Starting).phase,
+        Phase::Running
+    );
+    let settings = |s: &Snapshot, printer, family: &str, quality, supports| {
+        let project = s.project.as_ref().unwrap();
+        LibraryAction::Hardware(HardwareAction::DefaultSettings {
+            project: project.project_id.clone(),
+            layout_id: project.layout_id.clone(),
+            base: project.revision,
+            printer,
+            request: DefaultIntentRequest {
+                material: DefaultMaterialChoice::Generic {
+                    polymer_family: family.into(),
+                },
+                quality,
+                supports,
+            },
+        })
+    };
+    let s = act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    let s = act(
+        &host,
+        settings(
+            &s,
+            DefaultPrinter::Shipped("generic.marlin-bedslinger.04".into()),
+            "PETG",
+            QualityPreset::Fine,
+            SupportChoice::Off,
+        ),
+    );
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    let intent = s.manufacturing.intent.clone().unwrap();
+    assert_eq!(
+        s.project
+            .as_ref()
+            .unwrap()
+            .hardware
+            .as_ref()
+            .unwrap()
+            .setup
+            .id,
+        "generic.marlin-bedslinger.04"
+    );
+    assert_eq!(intent.recipe.id, "spiling.default.fine");
+    assert_eq!(intent.recipe.supports, SupportPolicy::Disabled);
+    // Keeping the printer recreates only the settings.
+    let s = act(
+        &host,
+        settings(
+            &s,
+            DefaultPrinter::Current,
+            "pla",
+            QualityPreset::Draft,
+            SupportChoice::Automatic,
+        ),
+    );
+    let intent = s.manufacturing.intent.clone().unwrap();
+    assert_eq!(intent.recipe.id, "spiling.default.draft");
+    assert!(matches!(
+        intent.recipe.supports,
+        SupportPolicy::Breakaway { .. }
+    ));
+    // A stale choice changes nothing and says why.
+    let mut stale = settings(
+        &s,
+        DefaultPrinter::Current,
+        "abs",
+        QualityPreset::Standard,
+        SupportChoice::Off,
+    );
+    if let LibraryAction::Hardware(HardwareAction::DefaultSettings { base, .. }) = &mut stale {
+        *base = ProjectRevision(base.0 - 1);
+    }
+    let after = act(&host, stale);
+    assert_eq!(after.manufacturing.intent, s.manufacturing.intent);
+    assert!(!after.problems.is_empty());
+}

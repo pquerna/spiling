@@ -260,6 +260,13 @@ impl LibraryUi {
     }
 }
 impl Workbench {
+    pub(super) fn choose_hardware(&mut self) {
+        self.library.detail = 0;
+        self.library.open = true;
+        self.library.personal = false;
+        self.library.hardware.active = true;
+        self.library.refresh();
+    }
     pub(super) fn choose_filament(&mut self) {
         self.library.open = true;
         self.library.personal = false;

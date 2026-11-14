@@ -37,6 +37,9 @@ struct Preferences {
     analysis_pins: Vec<analysis::Pinned>,
     #[serde(default)]
     dismissed_policy_contexts: Vec<SourceHash>,
+    /// The last one-step print settings choice, a preselection only.
+    #[serde(default)]
+    new_job: Option<print_settings::Remembered>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -48,6 +51,7 @@ impl Default for Preferences {
             library_location: None,
             analysis_pins: Vec::new(),
             dismissed_policy_contexts: Vec::new(),
+            new_job: None,
         }
     }
 }
@@ -104,6 +108,7 @@ pub struct Workbench {
     work_area: WorkArea,
     manufacturing: manufacturing::ManufacturingUi,
     material: material::MaterialUi,
+    print_settings: print_settings::PrintSettingsUi,
     process: process::ProcessUi,
     surface: surface::SurfaceUi,
     study: study::StudyUi,
@@ -190,6 +195,7 @@ impl Workbench {
             work_area: WorkArea::default(),
             manufacturing: manufacturing::ManufacturingUi::default(),
             material: material::MaterialUi::default(),
+            print_settings: Default::default(),
             process: process::ProcessUi::default(),
             surface: surface::SurfaceUi::default(),
             study: study::StudyUi::default(),
@@ -702,6 +708,7 @@ mod mechanics;
 mod navigation;
 mod plates;
 mod policies;
+mod print_settings;
 mod process;
 mod review;
 mod stock;

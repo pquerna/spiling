@@ -42,9 +42,33 @@ pub enum HardwareAction {
         secret: CredentialInput,
     },
     ResolveCredential,
+    /// One step: select the chosen printer when it differs from the project's,
+    /// then create the default intent through the engine.
+    DefaultSettings {
+        project: ProjectId,
+        layout_id: spiling_contracts::project::PrintLayoutId,
+        base: ProjectRevision,
+        printer: DefaultPrinter,
+        request: spiling_contracts::manufacturing::DefaultIntentRequest,
+    },
     ForgetCredential {
         route: String,
         expected: LibraryIdentity,
+    },
+}
+/// The printer a one-step settings request uses.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefaultPrinter {
+    /// The project's current hardware capture.
+    Current,
+    /// A shipped setup by exact id, on its stock plate.
+    Shipped(String),
+    /// A configured My hardware machine on one of its plates.
+    Machine {
+        expected: Option<LibraryIdentity>,
+        machine: String,
+        plate: String,
+        face: String,
     },
 }
 impl Actor {
@@ -54,6 +78,16 @@ impl Actor {
     ) -> Result<(), ClientError> {
         match action {
             HardwareAction::Refresh => self.refresh_hardware().await?,
+            HardwareAction::DefaultSettings {
+                project,
+                layout_id,
+                base,
+                printer,
+                request,
+            } => {
+                self.default_settings(project, layout_id, base, printer, request)
+                    .await?
+            }
             HardwareAction::Select {
                 project,
                 layout_id,
@@ -350,6 +384,99 @@ impl Actor {
                 "Project saved; private hardware association was not saved: {e}"
             )),
         }
+    }
+    async fn default_settings(
+        &mut self,
+        project: ProjectId,
+        layout_id: spiling_contracts::project::PrintLayoutId,
+        base: ProjectRevision,
+        printer: DefaultPrinter,
+        request: spiling_contracts::manufacturing::DefaultIntentRequest,
+    ) -> Result<(), ClientError> {
+        let stale = || {
+            ClientError::InvalidRequest(
+                "The project changed; review the print settings choice again".into(),
+            )
+        };
+        if self.state.project.as_ref().is_none_or(|p| {
+            p.project_id != project || p.layout_id != layout_id || p.revision != base
+        }) {
+            return Err(stale());
+        }
+        let session = self
+            .client
+            .as_ref()
+            .expect("connected client")
+            .hello()
+            .session_id
+            .clone();
+        match printer {
+            DefaultPrinter::Current => {}
+            DefaultPrinter::Shipped(id) => {
+                let catalog = self
+                    .client
+                    .as_ref()
+                    .expect("connected client")
+                    .rpc()
+                    .hardware_catalog()
+                    .await?;
+                let setup =
+                    catalog.setups.iter().find(|s| s.id == id).ok_or_else(|| {
+                        ClientError::InvalidRequest(format!("no shipped setup {id}"))
+                    })?;
+                let capture = catalog
+                    .stock_capture(setup)
+                    .map_err(ClientError::InvalidRequest)?;
+                let current = self.state.project.as_ref().and_then(|p| p.hardware.clone());
+                if current.as_deref() != Some(&capture) {
+                    if self
+                        .project_edit(ProjectCommand::SetHardware {
+                            layout_id: layout_id.clone(),
+                            session_id: session.clone(),
+                            base_revision: base,
+                            capture: Some(Arc::new(capture)),
+                        })
+                        .await
+                        .is_none()
+                    {
+                        return Ok(());
+                    }
+                    Arc::make_mut(&mut self.state.library)
+                        .hardware
+                        .local_selection = None;
+                }
+            }
+            DefaultPrinter::Machine {
+                expected,
+                machine,
+                plate,
+                face,
+            } => {
+                Box::pin(self.hardware_action(HardwareAction::Select {
+                    project: project.clone(),
+                    layout_id: layout_id.clone(),
+                    base,
+                    expected,
+                    machine,
+                    plate,
+                    face,
+                }))
+                .await?;
+            }
+        }
+        let Some(current) = self.state.project.as_ref().filter(|p| {
+            p.project_id == project && p.layout_id == layout_id && p.hardware.is_some()
+        }) else {
+            return Err(stale());
+        };
+        let command = spiling_contracts::manufacturing::ManufacturingCommand::CreateDefaultIntent {
+            layout_id,
+            session_id: session,
+            base_revision: current.revision,
+            request,
+        };
+        self.manufacturing(command).await;
+        Ok(())
     }
     pub(super) async fn refresh_hardware(&mut self) -> Result<(), ClientError> {
         let rpc = self.client.as_ref().expect("connected client").rpc();

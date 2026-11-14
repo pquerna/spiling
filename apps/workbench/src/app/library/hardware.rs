@@ -949,11 +949,7 @@ impl Workbench {
             ));
         }
         if ui.button("Choose hardware").clicked() {
-            self.library.detail = 0;
-            self.library.open = true;
-            self.library.personal = false;
-            self.library.hardware.active = true;
-            self.library.refresh();
+            self.choose_hardware();
         }
     }
 }

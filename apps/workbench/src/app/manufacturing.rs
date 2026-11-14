@@ -408,13 +408,12 @@ impl Workbench {
                 );
             }
             if section == 0 {
+                self.print_settings_ui(ui, writable);
                 ui::group(ui, "Machine and plate");
                 self.hardware_summary(ui);
-                if m.intent.is_none() {
-                    self.primary_button(ui, Action::LoadIntent);
-                } else {
-                    self.button(ui, Action::LoadIntent);
-                }
+                // Print settings above own the primary action; explicit
+                // declarations stay available.
+                self.button(ui, Action::LoadIntent);
                 self.button(ui, Action::Library);
             }
             if section == 1 {
@@ -558,6 +557,7 @@ impl Workbench {
                     "Software verification: {}",
                     if report.verified { "Passed" } else { "Failed" }
                 ));
+                self.job_summary(ui, report);
                 ui.label(format!(
                     "{} deposition · {} travel segments",
                     report.deposition_segments, report.travel_segments
