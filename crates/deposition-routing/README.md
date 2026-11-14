@@ -14,9 +14,9 @@ production scheduling is not enabled.
 
 `Machine` declares known start/tool state, travel and retraction estimates,
 station endpoints, mandatory service cadence, modeled selection time and
-optional prewarm lead. `ToolOrder::Free` minimizes selection count over the
-barriers for up to six tools; larger inventories use a deterministic
-prerequisite-respecting order. `Fixed` retains ascending tool groups. Every
+optional prewarm lead. `ToolOrder::Free` minimizes selection count exactly over
+the barriers for any tool count: per first/last tool pair it builds the smallest
+prerequisite-respecting order, so no inventory falls back to a fixed order. `Fixed` retains ascending tool groups. Every
 required service group remains present even without model paths. The bounded
 fixed-dual manufacturing backend retains both supported waste strokes per fine
 interval while avoiding a redundant selection between adjacent same-tool
@@ -47,8 +47,10 @@ router is removed. Manufacturing retains its existing declared fixed-carriage
 checks and independent actual-program admission. No physical collision freedom,
 printability or machine readiness is established.
 
-`Budget` limits optional improvement work; a spent allowance retains a complete
-checked schedule. Cancellation aborts. Contradictory barriers/prerequisites
+Search effort follows the job: descent runs to a local optimum, the relocated
+segment length grows with the group and kicks spend at least the descent's own
+work. Work is counted for cancellation and reporting, never capped.
+Cancellation aborts. Contradictory barriers/prerequisites
 refuse rather than dropping work. Construction/checking work and retained memory
 must also be bounded by the caller's job supervision. No GPU scheduling kernel
 is enabled; the contracts/compute dependency remains available to experiments.

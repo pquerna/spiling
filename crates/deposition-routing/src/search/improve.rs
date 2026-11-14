@@ -3,11 +3,20 @@
 //! Local search over one tool group's order: segment relocation with optional
 //! flip, in-place flip, loop reseaming and reversal of reversible runs, then
 //! iterated kicks. Every move has an O(1) cost delta on modelled gap seconds
-//! and respects prerequisites. Spent allowance simply stops the search.
+//! and respects prerequisites. Effort follows the group: descent always runs to
+//! a local optimum, longer groups relocate longer segments, and kicks continue
+//! until they have spent at least the descent's own work. Work is counted for
+//! cancellation and reporting only; output stays deterministic.
 use super::*;
 
-const KICKS: usize = 48;
-const SEGMENT: usize = 3;
+/// Kicks every group receives, however small.
+const MIN_KICKS: usize = 48;
+
+/// Longest relocated segment: Or-opt's 3, growing with the group's size so a
+/// large layer is not searched with a small layer's neighbourhood.
+fn segment(n: usize) -> usize {
+    3.max(n.max(1).ilog2() as usize / 2)
+}
 
 /// Per-visit buffers for the insertion scan, indexed by insertion point.
 struct Scratch {
@@ -530,7 +539,7 @@ impl<'a, 't> Order<'a, 't> {
     }
     /// Don't-look-bit descent: only visits near a change are re-examined.
     /// Returns false when the allowance ran out.
-    fn descend(&mut self, context: &mut Context<'_, '_>, seeds: &[usize]) -> Result<bool, Error> {
+    fn descend(&mut self, context: &mut Context<'_, '_>, seeds: &[usize]) -> Result<(), Error> {
         let n = self.visits.len();
         let mut queued = vec![false; n];
         let mut scratch = Scratch::new(n);
@@ -556,13 +565,11 @@ impl<'a, 't> Order<'a, 't> {
             wake(self, k, &mut queued, &mut queue);
         }
         while let Some(l) = queue.pop_front() {
-            if !context.charge(n as u64)? {
-                return Ok(false);
-            }
+            context.charge(n as u64)?;
             let i = self.at[l as usize];
             let mut changed = None;
             scratch.covered = (0, 0);
-            for len in 1..=SEGMENT.min(n - i) {
+            for len in 1..=segment(n).min(n - i) {
                 if let Some(t) = self.try_move(i, len, &mut scratch) {
                     changed = Some([t, t + len]);
                     break;
@@ -583,12 +590,11 @@ impl<'a, 't> Order<'a, 't> {
                 }
             }
         }
-        Ok(true)
+        Ok(())
     }
 }
 
-/// Descent, then iterated kicks keeping the best order. Cancellation aborts;
-/// a spent allowance returns the best order reached.
+/// Descent, then iterated kicks keeping the best order. Cancellation aborts.
 pub(super) fn improve(
     context: &mut Context<'_, '_>,
     order: &mut Order<'_, '_>,
@@ -599,23 +605,25 @@ pub(super) fn improve(
     }
     let all: Vec<usize> = (0..n).collect();
     let mut best = (order.cost(), order.visits.clone());
-    let mut funded = order.descend(context, &all)?;
+    let started = context.work;
+    order.descend(context, &all)?;
+    let descent = context.work - started;
+    let kicking = context.work;
     let mut random = 0x2545_F491_4F6C_DD1D_u64;
-    for _ in 0..KICKS {
+    let mut kicks = 0;
+    while kicks < MIN_KICKS || context.work - kicking < descent {
         if order.cost() < best.0 - 1e-9 {
             best = (order.cost(), order.visits.clone());
         } else {
             order.visits.clone_from(&best.1);
             order.refresh();
         }
-        if !funded {
-            break;
-        }
         let mut seeds = Vec::new();
         for _ in 0..3 {
             seeds.extend(order.kick(&mut random));
         }
-        funded = order.descend(context, &seeds)?;
+        order.descend(context, &seeds)?;
+        kicks += 1;
     }
     if order.cost() >= best.0 - 1e-9 {
         order.visits = best.1;

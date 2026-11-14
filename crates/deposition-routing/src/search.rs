@@ -12,18 +12,15 @@ pub(crate) struct Context<'a, 't> {
     pub machine: &'a Machine,
     pub order: ToolOrder,
     pub cancel: &'a AtomicBool,
+    /// Counted search work: reported and checked for cancellation, never a limit.
     pub work: u64,
-    pub limit: u64,
 }
 impl Context<'_, '_> {
-    /// False once the optional allowance is spent. Cancellation is an error.
-    pub fn charge(&mut self, amount: u64) -> Result<bool, Error> {
+    /// Count work; cancellation is the only way the search stops early.
+    pub fn charge(&mut self, amount: u64) -> Result<(), Error> {
         cancelled(self.cancel)?;
-        if self.work.saturating_add(amount) > self.limit {
-            return Ok(false);
-        }
-        self.work += amount;
-        Ok(true)
+        self.work = self.work.saturating_add(amount);
+        Ok(())
     }
 }
 
@@ -101,7 +98,6 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
     let mut groups = Vec::with_capacity(total);
     let mut position = context.machine.start;
     let mut local = vec![u32::MAX; context.tasks.len()];
-    let mut remaining = total as u64;
     for (b, order) in orders.iter().enumerate() {
         for &tool in order {
             let members = &buckets.members[b][tool as usize];
@@ -118,14 +114,8 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
                 for (l, index) in members.iter().enumerate() {
                     local[*index as usize] = l as u32;
                 }
-                // Spread what is left of the allowance over the groups left.
-                let share = context.limit.saturating_sub(context.work) / remaining.max(1);
-                let ceiling = context.work.saturating_add(share);
                 let mut order = construct::nearest(context, members, &local, start)?;
-                let limit = std::mem::replace(&mut context.limit, ceiling);
-                let improved = improve::improve(context, &mut order);
-                context.limit = limit;
-                improved?;
+                improve::improve(context, &mut order)?;
                 position = order.end().or(start);
                 visits.extend(order.into_visits(members));
                 for index in members {
@@ -136,7 +126,6 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
             {
                 position = Some([xy[0], xy[1], p[2]]);
             }
-            remaining = remaining.saturating_sub(1);
             groups.push((buckets.barriers[b], tool, begin..visits.len()));
         }
     }

@@ -5,23 +5,45 @@
 //! deterministic order so results do not depend on search effort.
 use super::*;
 
-/// Largest tool count whose orders are enumerated; beyond it order is fixed.
-const ENUMERATED_TOOLS: usize = 6;
-
-fn permutations(tools: &[u32], out: &mut Vec<Vec<u32>>, current: &mut Vec<u32>, used: &mut [bool]) {
-    if current.len() == tools.len() {
-        out.push(current.clone());
-        return;
-    }
-    for i in 0..tools.len() {
-        if !used[i] {
-            used[i] = true;
-            current.push(tools[i]);
-            permutations(tools, out, current, used);
-            current.pop();
-            used[i] = false;
+/// Selections depend only on an order's first and last tool, so per pair of
+/// a source `first` and a sink `last` the lexicographically smallest valid
+/// order is the only candidate any tie-break can choose: `first`, then the
+/// greedy smallest-available topological order of the rest, then `last`.
+/// This is exact for every tool count, with no enumeration ceiling.
+fn candidate_orders(present: &[u32], precedes: impl Fn(u32, u32) -> bool) -> Vec<Vec<u32>> {
+    let mut orders = Vec::new();
+    for &first in present {
+        if present.iter().any(|&o| o != first && precedes(o, first)) {
+            continue;
+        }
+        for &last in present {
+            if (last == first) != (present.len() == 1)
+                || present.iter().any(|&o| o != last && precedes(last, o))
+            {
+                continue;
+            }
+            let mut order = vec![first];
+            let mut remaining: Vec<u32> = present
+                .iter()
+                .copied()
+                .filter(|t| *t != first && *t != last)
+                .collect();
+            while let Some(index) = remaining.iter().position(|&candidate| {
+                remaining
+                    .iter()
+                    .all(|&other| other == candidate || !precedes(other, candidate))
+            }) {
+                order.push(remaining.remove(index));
+            }
+            if remaining.is_empty() {
+                if last != first {
+                    order.push(last);
+                }
+                orders.push(order);
+            }
         }
     }
+    orders
 }
 
 pub(super) fn plan(
@@ -51,35 +73,14 @@ pub(super) fn plan(
     for (b, groups) in members.iter().enumerate() {
         cancelled(context.cancel)?;
         let present = present(context, groups);
-        let mut orders = Vec::new();
-        if context.order == ToolOrder::Free && present.len() <= ENUMERATED_TOOLS {
-            permutations(
-                &present,
-                &mut orders,
-                &mut Vec::new(),
-                &mut vec![false; present.len()],
-            );
-        } else if context.order == ToolOrder::Free {
-            // Do not misclassify a valid larger inventory as inconsistent just
-            // because exact enumeration is deliberately bounded.
-            let mut remaining = present.clone();
-            let mut order = Vec::with_capacity(remaining.len());
-            while !remaining.is_empty() {
-                cancelled(context.cancel)?;
-                let index = remaining
-                    .iter()
-                    .position(|candidate| {
-                        remaining
-                            .iter()
-                            .all(|other| !before[b][*other as usize * tools + *candidate as usize])
-                    })
-                    .ok_or(Error::Inconsistent)?;
-                order.push(remaining.remove(index));
-            }
-            orders.push(order);
+        let orders = if context.order == ToolOrder::Free {
+            candidate_orders(&present, |earlier, later| {
+                before[b][earlier as usize * tools + later as usize]
+            })
         } else {
-            orders.push(present.clone());
-        }
+            vec![present.clone()]
+        };
+        let mut orders = orders;
         orders.retain(|order| {
             order.iter().enumerate().all(|(i, later)| {
                 order[..i]
@@ -131,4 +132,80 @@ pub(super) fn plan(
         state = (b > 0).then_some(*previous);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permutations(tools: &[u32]) -> Vec<Vec<u32>> {
+        if tools.len() <= 1 {
+            return vec![tools.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..tools.len() {
+            let mut rest = tools.to_vec();
+            let head = rest.remove(i);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, head);
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// For every (incoming tool, last tool) the construction picks exactly
+    /// what exhaustive enumeration picks, and it still decides larger sets.
+    #[test]
+    fn pair_construction_matches_exhaustive_enumeration_without_a_tool_ceiling() {
+        let mut random = 0x9E37_79B9_7F4A_7C15_u64;
+        for trial in 0..400 {
+            let n = 1 + trial % 6;
+            let present: Vec<u32> = (0..n as u32).collect();
+            let mut edges = vec![false; n * n];
+            for a in 0..n {
+                for b in a + 1..n {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    if random.is_multiple_of(4) {
+                        // A random DAG over a random relabelling.
+                        let (x, y) = if random.is_multiple_of(3) {
+                            (b, a)
+                        } else {
+                            (a, b)
+                        };
+                        edges[x * n + y] = true;
+                    }
+                }
+            }
+            let precedes = |a: u32, b: u32| edges[a as usize * n + b as usize];
+            let valid = |order: &Vec<u32>| {
+                order
+                    .iter()
+                    .enumerate()
+                    .all(|(i, later)| order[..i].iter().all(|earlier| !precedes(*later, *earlier)))
+            };
+            let all: Vec<_> = permutations(&present).into_iter().filter(valid).collect();
+            let built = candidate_orders(&present, precedes);
+            assert!(built.iter().all(valid));
+            for incoming in [None, Some(0), Some(n as u32 - 1)] {
+                let cost = |o: &Vec<u32>| o.len() as u32 - u32::from(incoming == Some(o[0]));
+                for last in &present {
+                    let best = |orders: &[Vec<u32>]| {
+                        orders
+                            .iter()
+                            .filter(|o| o.last() == Some(last))
+                            .map(|o| (cost(o), o.clone()))
+                            .min()
+                    };
+                    assert_eq!(best(&built), best(&all), "{edges:?} {incoming:?} {last}");
+                }
+            }
+        }
+        let nine: Vec<u32> = (0..9).collect();
+        let orders = candidate_orders(&nine, |a, b| a == 2 && b == 7);
+        // Sources exclude 7, sinks exclude 2, and first differs from last.
+        assert_eq!(orders.len(), 8 * 8 - 7);
+    }
 }

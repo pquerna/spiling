@@ -7,11 +7,6 @@ mod judge;
 use spiling_deposition_routing::*;
 use std::{sync::atomic::AtomicBool, time::Instant};
 
-/// Frozen research allowance; production sizes its own.
-const BUDGET: Budget = Budget {
-    work: 2_000_000_000,
-};
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "case\tsplit\talgorithm\tstatus\ttravel_mm\tstarts\tdeposition_mm\tselections\tmotion_lower_bound_s\tmachine_time_s\tstarts_bound\ttravel_bound_mm\twork\tplanning_us"
@@ -45,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = if name == "baseline" {
                 schedule_input_order(&tasks, &case.machine, &cancel)
             } else {
-                schedule(&tasks, &case.machine, case.order, BUDGET, &cancel)
+                schedule(&tasks, &case.machine, case.order, &cancel)
             };
             let us = start.elapsed().as_micros();
             let blank = |status: &str, work: u64| {
@@ -118,7 +113,6 @@ mod tests {
             &case.tasks(),
             &case.machine,
             case.order,
-            BUDGET,
             &AtomicBool::new(false),
         )
     }
@@ -167,7 +161,6 @@ mod tests {
                 &tasks,
                 &case.machine,
                 ToolOrder::Fixed,
-                BUDGET,
                 &AtomicBool::new(false),
             )
             .unwrap();

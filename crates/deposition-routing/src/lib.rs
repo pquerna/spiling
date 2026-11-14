@@ -107,13 +107,6 @@ pub enum ToolOrder {
     Free,
 }
 
-/// Caller-sized optional-improvement allowance. Exhaustion keeps the best
-/// complete schedule found; it is never infeasibility.
-#[derive(Clone, Copy, Debug)]
-pub struct Budget {
-    pub work: u64,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Visit {
     pub task: u32,
@@ -250,7 +243,6 @@ pub fn schedule(
     tasks: &[Task<'_>],
     machine: &Machine,
     order: ToolOrder,
-    budget: Budget,
     cancel: &AtomicBool,
 ) -> Result<Schedule, Error> {
     validate(tasks, machine)?;
@@ -260,7 +252,6 @@ pub fn schedule(
         order,
         cancel,
         work: 0,
-        limit: budget.work,
     };
     let (visits, groups) = search::solve(&mut context)?;
     let work = context.work;
@@ -280,7 +271,6 @@ pub fn schedule_input_order(
         order: ToolOrder::Fixed,
         cancel,
         work: 0,
-        limit: 0,
     };
     let (visits, groups) = search::input_order(&mut context)?;
     finish(tasks, machine, ToolOrder::Fixed, visits, groups, 0, cancel)

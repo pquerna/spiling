@@ -37,9 +37,8 @@ fn machine(tools: u32, service: Service) -> Machine {
         },
     }
 }
-const BUDGET: Budget = Budget { work: 10_000_000 };
 fn run(tasks: &[Task<'_>], machine: &Machine, order: ToolOrder) -> Schedule {
-    schedule(tasks, machine, order, BUDGET, &AtomicBool::new(false)).unwrap()
+    schedule(tasks, machine, order, &AtomicBool::new(false)).unwrap()
 }
 
 #[test]
@@ -62,24 +61,18 @@ fn every_task_is_scheduled_once_and_search_beats_scrambled_input() {
 }
 
 #[test]
-fn spent_allowance_still_returns_a_complete_checked_schedule_and_cancel_aborts() {
+fn search_work_is_counted_without_a_limit_and_cancel_aborts() {
     let tasks: Vec<_> = (0..20)
         .map(|i| line(0., (i * 7 % 20) as f64, 0.2, 0, 0))
         .collect();
     let m = machine(1, Service::WhenUsed);
-    let none = schedule(
-        &tasks,
-        &m,
-        ToolOrder::Free,
-        Budget { work: 0 },
-        &AtomicBool::new(false),
-    )
-    .unwrap();
-    assert_eq!(none.visits.len(), 20);
-    assert_eq!(none.work, 0);
-    assert!(run(&tasks, &m, ToolOrder::Free).cost.total_s <= none.cost.total_s);
+    let routed = run(&tasks, &m, ToolOrder::Free);
+    let control = schedule_input_order(&tasks, &m, &AtomicBool::new(false)).unwrap();
+    assert_eq!(routed.visits.len(), 20);
+    assert!(routed.work > 0);
+    assert!(routed.cost.total_s <= control.cost.total_s);
     assert_eq!(
-        schedule(&tasks, &m, ToolOrder::Free, BUDGET, &AtomicBool::new(true)),
+        schedule(&tasks, &m, ToolOrder::Free, &AtomicBool::new(true)),
         Err(Error::Cancelled)
     );
 }
@@ -191,17 +184,11 @@ fn cross_tool_prerequisites_constrain_tool_order_or_refuse() {
         free.groups.iter().map(|g| g.tool).collect::<Vec<_>>(),
         [1, 0]
     );
-    let fixed = schedule(
-        &tasks,
-        &m,
-        ToolOrder::Fixed,
-        BUDGET,
-        &AtomicBool::new(false),
-    );
+    let fixed = schedule(&tasks, &m, ToolOrder::Fixed, &AtomicBool::new(false));
     assert_eq!(fixed, Err(Error::Inconsistent));
     tasks[0].prerequisites = &needs_second;
     assert_eq!(
-        schedule(&tasks, &m, ToolOrder::Free, BUDGET, &AtomicBool::new(false)),
+        schedule(&tasks, &m, ToolOrder::Free, &AtomicBool::new(false)),
         Err(Error::Inconsistent)
     );
     let later = [1u32];
@@ -213,7 +200,7 @@ fn cross_tool_prerequisites_constrain_tool_order_or_refuse() {
         line(0., 0., 0.4, 0, 1),
     ];
     assert_eq!(
-        schedule(&tasks, &m, ToolOrder::Free, BUDGET, &AtomicBool::new(false)),
+        schedule(&tasks, &m, ToolOrder::Free, &AtomicBool::new(false)),
         Err(Error::Inconsistent)
     );
 }
@@ -292,7 +279,6 @@ fn travel_model_prices_lift_and_thresholded_retraction() {
             &[line(0., 0., 0.2, 0, 0)],
             &m,
             ToolOrder::Free,
-            BUDGET,
             &AtomicBool::new(false)
         ),
         Err(Error::InvalidInput(_))
@@ -323,13 +309,7 @@ fn authored_wall_seams_use_command_coordinates_and_reject_tampering() {
         Err(CheckError::Permission)
     );
     assert_eq!(
-        schedule(
-            &[task],
-            &m,
-            ToolOrder::Fixed,
-            BUDGET,
-            &AtomicBool::new(true)
-        ),
+        schedule(&[task], &m, ToolOrder::Fixed, &AtomicBool::new(true)),
         Err(Error::Cancelled)
     );
 }
@@ -362,7 +342,7 @@ fn physical_intervals_are_independent_of_barriers_and_bad_input_never_panics() {
     let mut bad = tasks;
     bad[1].physical_z_mm = [0., 0.2];
     assert!(matches!(
-        schedule(&bad, &m, ToolOrder::Free, BUDGET, &AtomicBool::new(false)),
+        schedule(&bad, &m, ToolOrder::Free, &AtomicBool::new(false)),
         Err(Error::InvalidInput(_))
     ));
     assert_eq!(

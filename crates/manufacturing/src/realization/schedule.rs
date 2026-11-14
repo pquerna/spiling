@@ -6,10 +6,6 @@
 use super::*;
 use spiling_deposition_routing as routing;
 
-/// Optional-improvement allowance per scheduled path. Spending it all keeps
-/// the best complete order found; it never refuses a job.
-const WORK_PER_PATH: u64 = 200_000;
-
 fn closed(path: &DepositionPath) -> bool {
     path.points_mm.len() > 2 && path.points_mm.first() == path.points_mm.last()
 }
@@ -132,15 +128,7 @@ pub(super) fn apply(
             });
         }
     }
-    let scheduled = routing::schedule(
-        &tasks,
-        &machine,
-        order,
-        routing::Budget {
-            work: (count as u64).saturating_mul(WORK_PER_PATH),
-        },
-        cancel,
-    );
+    let scheduled = routing::schedule(&tasks, &machine, order, cancel);
     drop(tasks);
     let scheduled = match scheduled {
         Ok(scheduled) => scheduled,
