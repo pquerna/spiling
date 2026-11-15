@@ -25,18 +25,25 @@ exact coordinate welding, and independently checked packed reconstruction.
 Its carrier/trim deviation fields report sampled surface and edge estimates,
 not interval certificates or material authority. A finite distance to the
 surface at each selected parameter seed already bounds that sample's distance
-to its carrier. Native Newton polishing is requested only when these direct
-distances do not satisfy the unchanged carrier-plus-trim allowance; the prior
-face candidate is released before that request. Every
+to its carrier. Barycentric UV coordinates are only an initial seed: periodic
+seams can put their average on the opposite side of the carrier. Corner and
+mixed-coordinate seeds, then optional native point minimization, propose other
+finite native points when the initial distance exceeds the remaining
+carrier-plus-trim allowance. Only a freshly evaluated point inside the natural
+domain contributes its physical distance; a solver's success flag is not
+acceptance. Every
 selected triangle sample must evaluate to a finite surface-distance seed;
 failed evaluations cannot silently contribute zero deviation. Failed or
 missing faces, invalid topology, excessive measured deviation, cancellation and
 resource refusal never publish a partial successful mesh.
 
-Faces are generated, checked and packed one at a time. Only the shared edge set,
-complete oriented-incidence inventory and bounded packed output remain live
-between faces; native face candidates and adapter buffers are released before
-the next face query. Display precision is separate from manufacturing's finer
+The native planner generates whole-body face candidates. Each face is checked,
+adapted and packed in source order, releasing its candidate and adapter after
+use. Shared edges, remaining candidates, complete oriented-incidence inventory
+and packed output contribute to residency. Candidate positions/normals use
+native finite evaluation, not per-vertex coefficient certificates; the trimmed
+diagnostic still independently audits native coefficients before publication.
+Display precision is separate from manufacturing's finer
 source-section policy and grants no material authority.
 
 When the fine preview does not fit the remaining live/staged unique scene

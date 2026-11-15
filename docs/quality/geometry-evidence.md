@@ -886,8 +886,10 @@ the inexpensive inventory, refusal, source-identity and export-admission control
 
 ### Focused families, canaries and scaling
 
-Use the narrowest witness that answers the change's question, then retain the
-whole-source gate. The same runner owns every layer:
+Use the narrowest witness that answers the change's question, then an affected
+real-source journey. Keep the whole-source integration gate separately; the
+[development procedure](development.md#build-profiles-and-the-feedback-loop)
+owns when to run it. The same runner owns every layer:
 
 ```sh
 # Native input recipes with analytic material/inventory oracles; real CLI/replay.
@@ -940,6 +942,24 @@ certificate or a timing threshold. Profile poor growth in the engine before
 shrinking its input or deleting the witness. Keep independent variables fixed
 and compare matching producers/settings; family-vs-full runtime is not a product
 speedup.
+
+Case 27 is an assembled endstop design with repeated housing variants, fasteners
+and electronics, not one print-ready plastic part. Retain the full source as an
+import/display/return performance and robustness witness; compiling all its
+hardware under every support setting is not an independent support oracle.
+Use `inspect_corpus --inventory ORIGINAL.step`, then `--solid ENTITY
+--import-only` or `--solid ENTITY --preview --mesh-only` to isolate native
+admission from ordinary display without rewriting original coefficients or
+identity. Display refusal is not source rejection, and Prusa mesh-open-edge
+observations alone do not establish invalid original STEP.
+
+The small existing OCCT through-hole fixture supplies the periodic-chart seam
+regression in `tessellation::preview::tests`: physical carrier-distance acceptance
+must not depend on averaging across a wrapped UV coordinate, and displaced
+geometry must still fail. Complete decoded face/void/closure checks remain
+separate. Keep the original assembly reproduction for costs and defects this
+small witness does not cover; do not assert a fixed triangulation, retry count
+or wall-clock threshold.
 
 ### New-edge reference smoke
 

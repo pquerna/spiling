@@ -399,6 +399,7 @@ fn face_candidate(
         triangles: Vec::new(),
         lenient,
     };
+    let kernel = crate::make_kernel_context();
     let sign = if face_plan.flip { -1.0 } else { 1.0 };
     // The planner's parameters at most four representable steps past the carrier's natural
     // domain are its rounding: evaluated on the domain's end (the rule of
@@ -428,8 +429,16 @@ fn face_candidate(
                 value
             }
         });
-        let jet =
-            parametric::surface_enclosure(surface, [[uv[0], uv[0]], [uv[1], uv[1]]], work, cancel)?;
+        if uv
+            .iter()
+            .enumerate()
+            .any(|(axis, value)| *value < bounds[axis][0] || *value > bounds[axis][1])
+        {
+            return Err(invalid(
+                "native display face node is outside its carrier domain",
+            ));
+        }
+        let parameter = Point2::new(uv[0], uv[1]);
         let (position, shared) = match face_plan.fixed.get(index) {
             Some(&point) => {
                 let id = *ids.get(&node_key(point)).ok_or_else(|| {
@@ -438,24 +447,33 @@ fn face_candidate(
                 (Point3::new(point.x, point.y, point.z), Some(id))
             }
             None => {
-                let p = jet.position.map(parametric::Interval::mid);
-                (Point3::new(p[0], p[1], p[2]), None)
+                let point = surface
+                    .evaluate_point(&kernel, parameter)
+                    .map_err(|cause| invalid(format!("native display point: {cause}")))?;
+                if ![point.x, point.y, point.z]
+                    .iter()
+                    .all(|value| value.is_finite())
+                {
+                    return Err(invalid("native display point is nonfinite"));
+                }
+                (point, None)
             }
         };
-        let du = jet.du.map(parametric::Interval::mid);
-        let dv = jet.dv.map(parametric::Interval::mid);
-        let n = Vec3::new(
-            du[1] * dv[2] - du[2] * dv[1],
-            du[2] * dv[0] - du[0] * dv[2],
-            du[0] * dv[1] - du[1] * dv[0],
-        );
-        let length = n.length();
+        let direction = surface
+            .evaluate_normal(
+                &kernel,
+                parameter,
+                solidcore::nurbs::knots::Side::Left,
+                solidcore::nurbs::knots::Side::Left,
+            )
+            .unwrap_or_default();
+        let length = direction.length();
         let normal = if length.is_finite() && length > 0.0 {
-            n * (sign / length)
+            direction * (sign / length)
         } else {
             Vec3::new(0.0, 0.0, 0.0)
         };
-        candidate.uvs.push(Point2::new(uv[0], uv[1]));
+        candidate.uvs.push(parameter);
         candidate.positions.push(position);
         candidate.normals.push(normal);
         candidate.shared.push(shared);

@@ -92,8 +92,14 @@ pub(super) fn tessellate(
                     "preview omitted or changed an original source face",
                 ));
             }
-            let carrier =
-                validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
+            let carrier = validate_measurement_samples(
+                definition,
+                &kernel,
+                &candidate,
+                (allowance - trim).max(0.0),
+                work,
+                cancel,
+            )?;
             if carrier + trim > allowance {
                 // Measured off the allowance: the whole body is planned finer.
                 exceeded = Some(GeometryError::new(
@@ -182,6 +188,7 @@ fn validate_measurement_samples(
     definition: &Definition,
     kernel: &solidcore::kernel::Kernel,
     candidate: &FaceCandidate,
+    maximum_distance_mm: f64,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
@@ -231,11 +238,67 @@ fn validate_measurement_samples(
             let measured = surface
                 .evaluate_point(kernel, parameter)
                 .map_err(|cause| invalid(cause.to_string()))?;
-            let distance = measured.distance(point);
+            let mut distance = measured.distance(point);
+            let mut best_parameter = parameter;
             if !distance.is_finite() {
                 return Err(invalid("preview sample has no finite surface measurement"));
             }
+            if distance > maximum_distance_mm {
+                'probes: for corner in parameters {
+                    for probe in [
+                        corner,
+                        solidcore::math::Point2::new(corner.x, parameter.y),
+                        solidcore::math::Point2::new(parameter.x, corner.y),
+                    ] {
+                        work.charge(1, cancel)?;
+                        if let Ok(witness) = surface.evaluate_point(kernel, probe) {
+                            let candidate_distance = witness.distance(point);
+                            if candidate_distance.is_finite() && candidate_distance < distance {
+                                distance = candidate_distance;
+                                best_parameter = probe;
+                            }
+                        }
+                        if distance <= maximum_distance_mm {
+                            break 'probes;
+                        }
+                    }
+                }
+            }
+            if distance > maximum_distance_mm {
+                work.charge(1, cancel)?;
+                let domain = surface.natural_uv_domain_if_built();
+                if let Ok(projected) = surface.local_point_solve::<()>(
+                    kernel,
+                    &domain,
+                    solidcore::geom::global_solver::SolverOperation::Minimize,
+                    point,
+                    best_parameter,
+                ) {
+                    check_cancel(cancel)?;
+                    if projected.found {
+                        let values = &projected.solution.start.parameters;
+                        let probe = solidcore::math::Point2::new(values[0], values[1]);
+                        if probe.x.is_finite()
+                            && probe.y.is_finite()
+                            && domain.u_min() <= probe.x
+                            && probe.x <= domain.u_max()
+                            && domain.v_min() <= probe.y
+                            && probe.y <= domain.v_max()
+                            && let Ok(witness) = surface.evaluate_point(kernel, probe)
+                        {
+                            let candidate_distance = witness.distance(point);
+                            if candidate_distance.is_finite() {
+                                distance = distance.min(candidate_distance);
+                            }
+                        }
+                    }
+                }
+                check_cancel(cancel)?;
+            }
             maximum = maximum.max(distance);
+            if maximum > maximum_distance_mm {
+                return Ok(maximum);
+            }
         }
     }
     Ok(maximum)
@@ -682,7 +745,16 @@ mod tests {
         let source = std::fs::read(path).unwrap();
         let cancel = AtomicBool::new(false);
         let prepared = crate::PreparedStepSource::new(&source, usize::MAX, &cancel).unwrap();
+        let solid_filter = std::env::var("SPILING_PREVIEW_SOLID").ok();
+        let mut matched = false;
         for body in prepared.bodies() {
+            if solid_filter
+                .as_ref()
+                .is_some_and(|selected| selected != body.solid.as_str())
+            {
+                continue;
+            }
+            matched = true;
             let selected = (prepared.bodies().len() > 1).then_some(&body.solid);
             let definition = prepared
                 .read_solid(
@@ -692,6 +764,41 @@ mod tests {
                     crate::MAX_QUERY_PROOF_BYTES,
                 )
                 .unwrap();
+            if let Ok(face_filter) = std::env::var("SPILING_PREVIEW_FACE") {
+                let mut work = GeometryWorkBudget::query();
+                let mut plan = candidate::plan(
+                    &definition,
+                    MeshTolerance::display(
+                        DisplayProfile::MeshTolerantMm005V1.carrier_tolerance_mm() * 0.25,
+                    ),
+                    PROOF_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                let ordinal = definition
+                    .faces()
+                    .iter()
+                    .position(|face| face.face_id.as_str() == face_filter)
+                    .expect("selected original face");
+                let face = plan.faces.swap_remove(ordinal);
+                let kernel = crate::make_kernel_context();
+                let measured = validate_measurement_samples(
+                    &definition,
+                    &kernel,
+                    &face,
+                    DisplayProfile::MeshTolerantMm005V1.carrier_tolerance_mm(),
+                    &work,
+                    &cancel,
+                )
+                .unwrap();
+                eprintln!(
+                    "selected face {face_filter} lenient={} triangles={} coarse_candidate_deviation_mm={measured}",
+                    face.lenient,
+                    face.triangles.len()
+                );
+                continue;
+            }
             let artifact = tessellate(
                 &definition,
                 DisplayProfile::MeshTolerantMm005V1,
@@ -711,6 +818,112 @@ mod tests {
                 .unwrap();
             }
         }
+        assert!(matched, "solid selector matched no source body");
+    }
+
+    #[test]
+    fn periodic_chart_seam_uses_physical_carrier_distance_without_accepting_displaced_geometry() {
+        let source = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(&source, &cancel).unwrap();
+        let ordinal = definition
+            .faces()
+            .iter()
+            .position(|face| face.source_surface_entity_kind == "CYLINDRICAL_SURFACE")
+            .unwrap();
+        let face = definition.face_ids()[ordinal];
+        let surface = definition.face_surface(face).unwrap();
+        let domain = surface.natural_uv_domain_if_built();
+        let allowance = DisplayProfile::MeshTolerantMm005V1.carrier_tolerance_mm();
+        let bounds = definition.bounds_mm();
+        let diagonal = (0..3)
+            .map(|axis| (bounds.max[axis] - bounds.min[axis]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let step = (domain.u_max() - domain.u_min()) * allowance / diagonal * 0.25;
+        let lower = domain.v_min() * 0.75 + domain.v_max() * 0.25;
+        let upper = domain.v_min() * 0.25 + domain.v_max() * 0.75;
+        let parameters = vec![
+            solidcore::math::Point2::new(domain.u_min() + step, lower),
+            solidcore::math::Point2::new(domain.u_max() - step, lower),
+            solidcore::math::Point2::new(domain.u_max() - step, upper),
+        ];
+        let kernel = crate::make_kernel_context();
+        let points = parameters
+            .iter()
+            .map(|&parameter| surface.evaluate_point(&kernel, parameter).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            (points[1] - points[0])
+                .cross(points[2] - points[0])
+                .length()
+                > 0.0
+        );
+        let mut candidate = FaceCandidate {
+            face,
+            uvs: parameters,
+            positions: points,
+            normals: vec![solidcore::math::Vec3::new(0.0, 0.0, 0.0); 3],
+            shared: vec![None; 3],
+            triangles: vec![[0, 1, 2]],
+            lenient: false,
+        };
+        let average = solidcore::math::Point2::new(
+            candidate
+                .uvs
+                .iter()
+                .map(|parameter| parameter.x)
+                .sum::<f64>()
+                / 3.0,
+            candidate
+                .uvs
+                .iter()
+                .map(|parameter| parameter.y)
+                .sum::<f64>()
+                / 3.0,
+        );
+        let center =
+            (candidate.positions[0] + candidate.positions[1] + candidate.positions[2]) / 3.0;
+        assert!(
+            surface
+                .evaluate_point(&kernel, average)
+                .unwrap()
+                .distance(center)
+                > allowance
+        );
+        let work = GeometryWorkBudget::query();
+        let measured = validate_measurement_samples(
+            &definition,
+            &kernel,
+            &candidate,
+            allowance,
+            &work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            measured <= allowance,
+            "distance={measured} candidate={candidate:?}"
+        );
+        for point in &mut candidate.positions {
+            *point += solidcore::math::Vec3::new(diagonal * 2.0, diagonal * 2.0, 0.0);
+        }
+        assert!(
+            validate_measurement_samples(
+                &definition,
+                &kernel,
+                &candidate,
+                allowance,
+                &work,
+                &cancel
+            )
+            .unwrap()
+                > allowance
+        );
     }
 
     #[test]
@@ -733,23 +946,49 @@ mod tests {
         .unwrap()
         .faces
         .swap_remove(0);
-        validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap();
+        let allowance = DisplayProfile::MeshTolerantMm005V1.carrier_tolerance_mm();
+        validate_measurement_samples(&definition, &kernel, &candidate, allowance, &work, &cancel)
+            .unwrap();
         for point in &mut candidate.positions {
             *point += solidcore::math::Point3::new(1000.0, 1000.0, 1000.0);
         }
         assert!(
-            validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap()
+            validate_measurement_samples(
+                &definition,
+                &kernel,
+                &candidate,
+                allowance,
+                &work,
+                &cancel
+            )
+            .unwrap()
                 > spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM
         );
         candidate
             .uvs
             .fill(solidcore::math::Point2::new(f64::NAN, 0.0));
         assert!(
-            validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).is_err()
+            validate_measurement_samples(
+                &definition,
+                &kernel,
+                &candidate,
+                allowance,
+                &work,
+                &cancel
+            )
+            .is_err()
         );
         candidate.uvs.clear();
         assert!(
-            validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).is_err()
+            validate_measurement_samples(
+                &definition,
+                &kernel,
+                &candidate,
+                allowance,
+                &work,
+                &cancel
+            )
+            .is_err()
         );
     }
 

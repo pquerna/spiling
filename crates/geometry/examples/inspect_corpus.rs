@@ -6,7 +6,8 @@
 use serde_json::json;
 use spiling_geometry::{
     BoundsPolicy, DisplayProfile, GeometryWorkBudget, NativeSection, PlaneMm,
-    from_step_bytes_with_cancel, inspect_face, projected_bounds, section, tessellate,
+    from_step_bytes_with_cancel, from_step_solid_with_cancel, inspect_face, projected_bounds,
+    section, source_bodies, tessellate_with_work,
 };
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Instant};
 
@@ -33,26 +34,114 @@ fn section_numerics(result: &NativeSection) -> serde_json::Value {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mesh_only = false;
+    let mut inventory_only = false;
+    let mut import_only = false;
+    let mut preview = false;
+    let mut selected_solid = None;
     let mut paths = Vec::<PathBuf>::new();
-    for argument in std::env::args_os().skip(1) {
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
         if argument == "--mesh-only" {
             mesh_only = true;
+        } else if argument == "--inventory" {
+            inventory_only = true;
+        } else if argument == "--import-only" {
+            import_only = true;
+        } else if argument == "--preview" {
+            preview = true;
+        } else if argument == "--solid" {
+            let entity = arguments
+                .next()
+                .ok_or("--solid requires a STEP entity number")?;
+            selected_solid = Some(
+                spiling_contracts::geometry::SourceSolidId::from_step_entity(
+                    entity
+                        .to_str()
+                        .ok_or("solid entity must be UTF-8")?
+                        .parse()?,
+                )?,
+            );
+        } else if argument.to_string_lossy().starts_with("--") {
+            return Err(format!("unknown option: {}", argument.to_string_lossy()).into());
         } else {
             paths.push(argument.into());
         }
     }
     if paths.is_empty() {
-        return Err("usage: inspect_corpus [--mesh-only] <original.step>...".into());
+        return Err("usage: inspect_corpus [--inventory | --solid ENTITY] [--import-only | --mesh-only] [--preview] <original.step>...".into());
     }
     let cancel = AtomicBool::new(false);
     for path in paths {
         let bytes = std::fs::read(&path)?;
         let started = Instant::now();
-        let definition = from_step_bytes_with_cancel(&bytes, &cancel)?;
+        if inventory_only {
+            let bodies = source_bodies(&bytes, &cancel)?;
+            let entries: Vec<_> = bodies
+                .iter()
+                .map(|body| {
+                    json!({
+                        "solid": body.solid, "name": body.name, "placements": body.placements.len(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({"source": path, "source_bytes": bytes.len(),
+                "bodies": entries, "inventory_us": started.elapsed().as_micros()})
+            );
+            continue;
+        }
+        let definition = match &selected_solid {
+            Some(solid) => from_step_solid_with_cancel(&bytes, solid, &cancel)?,
+            None => from_step_bytes_with_cancel(&bytes, &cancel)?,
+        };
         let import_us = started.elapsed().as_micros();
+        eprintln!(
+            "{}",
+            json!({"source": path, "solid": selected_solid,
+            "stage": "import", "elapsed_us": import_us})
+        );
+        if import_only {
+            println!(
+                "{}",
+                json!({"source":path,"source_bytes":bytes.len(),
+                "definition_id":definition.id(),"provenance":definition.provenance(),
+                "bounds_mm":definition.bounds_mm(),"face_count":definition.faces().len(),
+                "timing_us":{"import":import_us}})
+            );
+            continue;
+        }
         let started = Instant::now();
-        let mesh = tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
+        let profile = if preview {
+            DisplayProfile::MeshTolerantMm005V1
+        } else {
+            DisplayProfile::MeshTrimmedMm005V2
+        };
+        let mesh = tessellate_with_work(
+            &definition,
+            profile,
+            &cancel,
+            spiling_contracts::display::MeshBudget::FROZEN,
+            &mut GeometryWorkBudget::query(),
+            &mut |update| {
+                if preview {
+                    eprintln!(
+                        "{}",
+                        json!({"source": path, "solid": selected_solid,
+                        "stage": format!("{:?}", update.stage), "profile": profile,
+                        "attempt": update.attempt, "completed_faces": update.completed_faces,
+                        "total_faces": update.total_faces, "work": update.consumed_work,
+                        "elapsed_us": started.elapsed().as_micros()})
+                    );
+                }
+            },
+        )?;
         let mesh_us = started.elapsed().as_micros();
+        eprintln!(
+            "{}",
+            json!({"source": path, "solid": selected_solid,
+            "stage": "display", "elapsed_us": mesh_us})
+        );
         let chunks: Vec<_> = mesh.chunks.iter().map(|chunk| json!({"bytes":chunk.bytes.len(),"sha256":chunk.descriptor.sha256,"carrier_deviation_mm":chunk.descriptor.carrier_deviation_mm,"trim_deviation_mm":chunk.descriptor.trim_deviation_mm,"quantization_error_mm":chunk.descriptor.quantization_error_mm})).collect();
         let faces: Vec<_> = definition
             .faces()
@@ -60,30 +149,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|face| inspect_face(&definition, &face.face_id))
             .collect::<Result<_, _>>()?;
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let directional_bounds =
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|direction| {
-                projected_bounds(
-                    &definition,
-                    direction,
-                    BoundsPolicy {
-                        maximum_endpoint_uncertainty_mm: 1e-6,
-                    },
-                    &mut work,
-                    &cancel,
-                )
-            });
-        let directional_bounds = directional_bounds
-            .into_iter()
-            .map(|result| {
-                result.map(|bounds| {
-                    json!({
-                        "minimum": bounds.minimum,
-                        "maximum": bounds.maximum,
-                        "achieved_uncertainty_mm": bounds.achieved_uncertainty_mm,
+        let directional_bounds = if mesh_only {
+            Vec::new()
+        } else {
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                .map(|direction| {
+                    projected_bounds(
+                        &definition,
+                        direction,
+                        BoundsPolicy {
+                            maximum_endpoint_uncertainty_mm: 1e-6,
+                        },
+                        &mut work,
+                        &cancel,
+                    )
+                })
+                .into_iter()
+                .map(|result| {
+                    result.map(|bounds| {
+                        json!({
+                            "minimum": bounds.minimum,
+                            "maximum": bounds.maximum,
+                            "achieved_uncertainty_mm": bounds.achieved_uncertainty_mm,
+                        })
                     })
                 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let (native_section, section_us) = if mesh_only {
             (None, None)
         } else {

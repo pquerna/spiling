@@ -170,16 +170,16 @@ cargo test -p spiling-geometry --lib tolerant:: -- --test-threads 4   # module p
 cargo test -p spiling-manufacturing --lib planner::walls:: -- --test-threads 4
 cargo test -p spiling-e2e-tests --test <target> <name>               # one integration binary
 
-# Before commit: each touched crate and its consumers, clippy and fmt.
+# Coherent integration: owning suites and affected consumers, clippy and fmt.
 cargo test --locked -p spiling-geometry -- --test-threads 4
 cargo test --locked -p spiling-manufacturing -- --test-threads 4     # consumers of geometry
 cargo test --locked -p spiling-e2e-tests -- --test-threads 4
 cargo clippy --locked -p spiling-geometry --all-targets -- -D warnings
 cargo fmt -p spiling-geometry                                        # never --all (vendored code)
 cargo xtask contracts --check                                        # contracts/protobuf changes
-cargo xtask test                                                     # shared-crate behaviour, before landing
+cargo xtask test                                                     # whole-workspace integration census
 
-# Before landing slicing-affecting work: real parts on the profiling build.
+# Full integration/release census: real parts on the profiling build.
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
 SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling results.ndjson --profile profiling
 # Iterating on some parts: name their prefixes after the results file.
@@ -189,7 +189,22 @@ SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py NEW_OUT target/profi
 For assertion-led native feature recipes, named real-part canaries, single-axis
 scaling and same-input independent-slicer edge triage, use the existing runner's
 [layered corpus procedure](geometry-evidence.md#focused-families-canaries-and-scaling).
-These focused selections do not replace the full Off/breakaway slicing gates.
+Before landing, state the changed consumer promise and select its semantic
+regressions and real journeys. A disposable display change needs complete
+source-face/void/packing, cancellation and actual import/source-absent reopen
+coverage; it does not need every part sliced under both support settings. A
+support change needs actual rooted deposition, explicit Off, clearance and fresh
+replay, including an affected real part. Contracts/protobuf changes also require
+generated drift checks. Run strict touched-crate Clippy and scoped formatting.
+
+The complete 30-source census remains the broad integration/release gate; run
+both Off/breakaway when manufacturing semantics are affected. Keep every source
+accounted for, including expensive assemblies and failures. Do not repeat that
+cross product for unrelated display/tooling edits or describe a focused run as a
+complete pass. When a real source exposes a defect, keep its full reproduction,
+extract the smallest independent semantic witness, and investigate engine cost.
+Faster tests do not excuse slow product behavior. Historical unrelated failures
+remain explicit; never hide them with ignores or weaken a required positive.
 
 A one-line geometry edit rebuilds its test binary in about 4 s. The crate's first build
 on warm dependencies is about 3 min. The whole geometry lib suite is about 6.5 min, two
