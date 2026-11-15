@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native engine operations and artifacts
 
-The owned schemas under `crates/contracts/proto/spiling/` are the native API authority. Google Operations, Status and ByteStream schemas are vendored unmodified with Apache-2.0 provenance. Pinned tonic/prost and vendored protoc generate native services/clients at build time. Checked Rust domain adapters generate the webview view types; `pnpm contracts --check` rejects drift. Persisted project/intent/bundle JSON is a separate domain schema, not an opaque RPC tunnel. Engine and shell ship together: there is no cross-version negotiation, alternate transport or compatibility shim.
+The owned schemas under `crates/contracts/proto/spiling/` are the native API authority. Google Operations, Status and ByteStream schemas are vendored unmodified with Apache-2.0 provenance. Pinned tonic/prost and vendored protoc generate native services/clients at build time. Checked Rust domain adapters generate the webview view types; `node tools/run.mjs contracts --check` rejects drift. Persisted project/intent/bundle JSON is a separate domain schema, not an opaque RPC tunnel. Engine and shell ship together: there is no cross-version negotiation, alternate transport or compatibility shim.
 
 ## Process ownership and readiness
 

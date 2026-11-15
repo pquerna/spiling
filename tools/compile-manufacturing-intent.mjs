@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { lstat, open, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_PROFILE_JSON_BYTES } from "../packages/protocol/src/generated.ts";
 
 // Trusted authoring code only. Type checking is not a sandbox; the native engine
@@ -16,7 +16,9 @@ import { MAX_PROFILE_JSON_BYTES } from "../packages/protocol/src/generated.ts";
 async function main() {
   const [sourceArgument, outputArgument, ...extra] = process.argv.slice(2);
   if (!sourceArgument || !outputArgument || extra.length)
-    throw new Error("Usage: pnpm manufacturing:intent TRUSTED_SOURCE.ts NEW_INTENT.json");
+    throw new Error(
+      "Usage: node tools/run.mjs manufacturing:intent TRUSTED_SOURCE.ts NEW_INTENT.json",
+    );
   const source = resolve(sourceArgument);
   const output = resolve(outputArgument);
   if (!/\.(?:ts|mts)$/.test(source))
@@ -25,7 +27,7 @@ async function main() {
   if (!sourceStat.isFile() || sourceStat.size > 1_048_576)
     throw new Error("Trusted source must be a regular file of at most 1 MiB");
 
-  const require = createRequire(new URL("../packages/protocol/package.json", import.meta.url));
+  const require = createRequire(import.meta.url);
   const compilerPackage = require.resolve("typescript/package.json");
   const compiler = resolve(
     dirname(compilerPackage),
@@ -47,6 +49,10 @@ async function main() {
         "--allowImportingTsExtensions",
         "--erasableSyntaxOnly",
         "--skipLibCheck",
+        "--types",
+        "node",
+        "--typeRoots",
+        resolve(dirname(fileURLToPath(import.meta.url)), "node_modules/@types"),
         source,
       ],
       {

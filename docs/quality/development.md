@@ -51,29 +51,36 @@ Native window/device and physical-machine acceptance remain separate.
 
 ### Optional authoring, observers and research
 
-Node24.x and pnpm10.32.1 are required only for this tooling:
+Node24.x and pnpm10.32.1 are required only for this tooling. Its manifest,
+lockfile and formatter configuration live under `tools/`; there is no root
+JavaScript workspace. Install its pinned dependencies, then run commands from
+the repository root:
 
 ```sh
 npm install --global pnpm@10.32.1
-pnpm install --frozen-lockfile
-pnpm check:tooling
-pnpm test:tooling
+pnpm --dir tools install --frozen-lockfile
+node tools/run.mjs check:tooling
+node tools/run.mjs test:tooling
 ```
 
 `check:tooling` validates TypeScript authoring/hardware catalog drift, reference
 catalogs and JS/JSON/Markdown formatting. `test:tooling` prepares the native
 binaries through Cargo, then runs independent TypeScript packed decoders, the real
-CLI smoke, G-code observers and tooling tests. Run both native and optional gates
+CLI smoke, G-code observers and tooling tests. `check:protocol` and
+`test:protocol` select only the independent protocol checks. These Node entrypoints
+do not invoke pnpm; pnpm is only needed to install the optional dependencies.
+Formatting explicitly uses `tools/prettier.json` and `tools/prettierignore`;
+generated/frozen fixtures, upstream snapshots and environments remain excluded. Run both native and optional gates
 before merging changes affecting both surfaces. Node's built-in TypeScript
 stripping executes supported authoring/observer code; no `tsx` or esbuild install
 is needed. The Rust engine remains the manufacturing authority.
 
-`pnpm contracts --check` additionally checks TypeScript-authored hardware catalog
+`node tools/run.mjs contracts --check` additionally checks TypeScript-authored hardware catalog
 data; the Rust-only generator is `cargo xtask contracts --check`. Catalog
 maintenance (`materials:sync`, `materials:check`, `test:material-catalogs`),
 `test:geometry-stress`, `smoke:cli`, `test:hardware`, `test:materials`,
 `compare:slicers`, `test:parity`, `bench:open`, `bench:smoke`, `bench:slice` and
-`infill:lab` remain explicit optional tooling commands in `package.json`.
+`infill:lab` remain explicit optional tooling commands in `tools/package.json`.
 
 Select checks by the product failure or supporting invariant they detect, an
 independent expectation and distinct coverage. Default geometry tests retain
@@ -125,7 +132,7 @@ imported source to pass the optional exact support service. Oversized plate
 material/dimension checks belong to the explicit geometry-stress command below,
 not another catch-all baseline import test.
 
-`pnpm test:geometry-stress` separately runs the unchanged 1640 × 840 × 20 mm,
+`node tools/run.mjs test:geometry-stress` separately runs the unchanged 1640 × 840 × 20 mm,
 512-hole source through consolidated source/bounds/material/void/storage checks
 and its native-support diagnostic. It replaces repeated oversized queries in
 the ordinary tiered suite, not required ordinary-part positives. Keep external
@@ -194,7 +201,7 @@ Review is nonmutating; selection uses the reviewed revision and ordinary history
 `--material-page OFFSET` exposes further four-candidate pages. Inspect the typed
 issues and current/proposed settings before selection. Catalog applicability is a
 declared-process check, not geometry or physical qualification. Captured inspection
-needs no original catalog. `pnpm test:materials` exercises the real engine/CLI,
+needs no original catalog. `node tools/run.mjs test:materials` exercises the real engine/CLI,
 independent commands, rejected/stale choices and recovery; it honors
 `CARGO_TARGET_DIR`. See the [material review contract](../protocol/manufacturing.md#material-discovery-and-process-review).
 
@@ -465,7 +472,7 @@ Optical estimates and candidate summaries, selected-candidate inspection, declar
 In the component gallery compare all densities, declared-name precedence, white/black/unknown samples and source labels in Graphite/Paper, including narrow/scaled text and keyboard disclosure. In Study compare all reference naming modes, enter an invalid/alpha sample and verify it remains editable, then inspect a retained candidate through its full details. Reference-mode selection never changes ordinary product labels. Generated names and presentation disclosure do not change saved project state, declared supplier identity, optical ranking or manufacturing authority.
 
 Repeatable production slicing, bundle validation and replay measurements use
-`pnpm bench:slice`. [Performance measurements](performance.md) owns the frozen
+`node tools/run.mjs bench:slice`. [Performance measurements](performance.md) owns the frozen
 workload, profiling profile, phase isolation and comparison procedure; the
 synthetic `bench:smoke` command does not measure slicing.
 
@@ -997,7 +1004,7 @@ on a disposable supported host before claiming system-install or upgrade coverag
 
 Automatic remote CI is disabled for pushes and pull requests. Native platform
 packaging remains available only through explicit workflow dispatch. Run affected
-checks and real-surface smoke locally; native checks are `cargo xtask check` and `cargo xtask test`; optional tooling gates are `pnpm check:tooling` and `pnpm test:tooling`.
+checks and real-surface smoke locally; native checks are `cargo xtask check` and `cargo xtask test`; optional tooling gates are `node tools/run.mjs check:tooling` and `node tools/run.mjs test:tooling`.
 Neither compilation nor a local smoke establishes installed-platform or physical-machine
 qualification. Report actual failures, not a pass inferred from selected filters.
 
@@ -1009,7 +1016,7 @@ notices, assent and release obligations.
 
 ## Material-profile engine smoke
 
-`pnpm test:materials` builds the matching engine and CLI, applies paired explicit
+`node tools/run.mjs test:materials` builds the matching engine and CLI, applies paired explicit
 synthetic material/setup profiles to an admitted native cube, inspects actual
 thermal/fan/feed/extrusion commands, exercises Core Undo/Redo and rejected profile
 edits, then removes external authoring inputs before fresh-process verification
@@ -1050,7 +1057,7 @@ stale project-copy refusal through the native host, separately from GUI renderin
 
 ## Hardware library acceptance
 
-`pnpm test:hardware` builds and runs the separate CLI/engine hardware journey,
+`node tools/run.mjs test:hardware` builds and runs the separate CLI/engine hardware journey,
 including private selection persistence, exact saved export return and standalone
 semantic recompilation. [Hardware contracts](../protocol/hardware.md#reproduction)
 own the native host Save As/restart command and support limits. Run native

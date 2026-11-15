@@ -40,7 +40,7 @@ test("optional tooling continues independent observers after authoring fails", a
     /authoring drift/,
   );
   assert.ok(visits.some(({ args }) => args.includes("tools/smoke-cli.mjs")));
-  assert.ok(visits.some(({ args }) => args.includes("@spiling/protocol")));
+  assert.ok(visits.some(({ args }) => args.includes("packages/protocol/test/*.test.ts")));
   assert.ok(visits.some(({ args }) => args.includes("tools/gcode-parity/test.mjs")));
 });
 

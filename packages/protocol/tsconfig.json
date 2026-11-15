@@ -8,7 +8,9 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "typeRoots": ["../../tools/node_modules/@types"],
+    "types": ["node"]
   },
   "include": ["src", "../../crates/contracts/data/*.ts"]
 }

@@ -24,7 +24,7 @@ const text = JSON.stringify(catalog, null, 2) + "\n";
 if (Buffer.byteLength(text) > 48 * 1024) throw new Error("Hardware catalog exceeds control budget");
 if (args[0] === "--check") {
   if ((await readFile(output, "utf8")) !== text)
-    throw new Error("Hardware catalog drift; run pnpm contracts");
+    throw new Error("Hardware catalog drift; run node tools/run.mjs contracts");
 } else await writeFile(output, text);
 
 if (
@@ -43,16 +43,19 @@ if (Buffer.byteLength(referenceText) > 48 * 1024)
   throw new Error("Printer references exceed source budget");
 if (args[0] === "--check") {
   if ((await readFile(referenceOutput, "utf8")) !== referenceText)
-    throw new Error("Printer reference drift; run pnpm contracts");
+    throw new Error("Printer reference drift; run node tools/run.mjs contracts");
 } else await writeFile(referenceOutput, referenceText);
 
 if (!Array.isArray(machines.layers) || !Array.isArray(machines.setups))
   throw new Error("Machine author must export layers and setups directly");
-const machineOutput = new URL("../crates/contracts/data/machine-descriptions.json", import.meta.url);
+const machineOutput = new URL(
+  "../crates/contracts/data/machine-descriptions.json",
+  import.meta.url,
+);
 const machineText = JSON.stringify(machines, null, 2) + "\n";
 if (args[0] === "--check") {
   if ((await readFile(machineOutput, "utf8")) !== machineText)
-    throw new Error("Machine description drift; run pnpm contracts");
+    throw new Error("Machine description drift; run node tools/run.mjs contracts");
 } else await writeFile(machineOutput, machineText);
 
 if (!Array.isArray(materials) || new Set(materials.map((m) => m.id)).size !== materials.length)
@@ -61,5 +64,5 @@ const materialOutput = new URL("../crates/contracts/data/material-profiles.json"
 const materialText = JSON.stringify(materials, null, 2) + "\n";
 if (args[0] === "--check") {
   if ((await readFile(materialOutput, "utf8")) !== materialText)
-    throw new Error("Material profile drift; run pnpm contracts");
+    throw new Error("Material profile drift; run node tools/run.mjs contracts");
 } else await writeFile(materialOutput, materialText);

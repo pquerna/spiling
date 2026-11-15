@@ -5,9 +5,11 @@
  */
 import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+const require = createRequire(import.meta.url);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binSuffix = process.platform === "win32" ? ".exe" : "";
 const cargoTarget = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
@@ -35,13 +37,10 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 export function run(command, args, options = {}) {
   console.error(`> ${command} ${args.join(" ")}`);
   return new Promise((resolveResult, reject) => {
-    // Windows .cmd launchers require cmd.exe; our arguments are fixed developer
-    // commands, not remotely supplied shell input.
     const child = spawn(command, args, {
       cwd: options.cwd ?? root,
       env: { ...environment, ...options.env },
       stdio: options.capture ? ["ignore", "pipe", "inherit"] : "inherit",
-      shell: process.platform === "win32" && ["pnpm", "npm"].includes(command),
       windowsHide: true,
     });
     children.add(child);
@@ -98,11 +97,35 @@ async function stageEngine(release = false, execute = run) {
   await execute("cargo", ["xtask", "build"]);
   return join(cargoTarget, "debug", `spiling-engine${binSuffix}`);
 }
+async function protocolCheck() {
+  const compiler = join(dirname(require.resolve("typescript/package.json")), "bin", "tsc");
+  await run(process.execPath, [
+    compiler,
+    "--project",
+    "packages/protocol/tsconfig.json",
+    "--noEmit",
+  ]);
+}
+async function protocolTests(execute = run) {
+  await execute(process.execPath, [
+    "--experimental-strip-types",
+    "--test",
+    "packages/protocol/test/*.test.ts",
+  ]);
+}
 async function check() {
   await contracts(true);
   await run("node", ["tools/material-catalogs.mjs", "--check"]);
-  await run("pnpm", ["-r", "--if-present", "check"]);
-  await run("pnpm", ["exec", "prettier", "--check", "."]);
+  await protocolCheck();
+  await run(process.execPath, [
+    require.resolve("prettier/bin/prettier.cjs"),
+    "--config",
+    "tools/prettier.json",
+    "--ignore-path",
+    "tools/prettierignore",
+    "--check",
+    ".",
+  ]);
 }
 async function cliSmoke(execute = run) {
   await execute("node", ["--experimental-strip-types", "tools/smoke-cli.mjs"]);
@@ -118,7 +141,7 @@ export async function toolingTests(execute = run) {
     ["generated authoring data", () => contracts(true, execute)],
     ["tooling", () => execute("node", ["--test", ...tests])],
     ["CLI smoke", () => cliSmoke(execute)],
-    ["TypeScript protocol", () => execute("pnpm", ["--filter", "@spiling/protocol", "test"])],
+    ["TypeScript protocol", () => protocolTests(execute)],
     [
       "G-code parity",
       () =>
@@ -213,6 +236,19 @@ async function main() {
     }
     case "contracts":
       await contracts(process.argv.includes("--check"));
+      break;
+    case "manufacturing:intent":
+      await run(process.execPath, [
+        "--experimental-strip-types",
+        "tools/compile-manufacturing-intent.mjs",
+        ...process.argv.slice(3),
+      ]);
+      break;
+    case "check:protocol":
+      await protocolCheck();
+      break;
+    case "test:protocol":
+      await protocolTests();
       break;
     case "check:tooling":
       await check();

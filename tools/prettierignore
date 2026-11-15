@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+../Cargo.lock
+pnpm-lock.yaml
+../LICENSE.md
+../docs/reserach/
+**/node_modules/
+**/.venv/
+**/.pytest_cache/
+../target/
+../artifacts/
+../.cache/
+**/dist/
+../packages/protocol/src/generated.ts
+../fixtures/protocol/mesh.json
+../fixtures/protocol/section.json
+../fixtures/protocol/section-multichunk.json
+../fixtures/protocol/native-mesh.json
+../fixtures/protocol/native-section.json
+../fixtures/protocol/native-section-multichunk.json
+# Rust-generated corpus metadata is byte-checked by generate_corpus --check.
+../fixtures/geometry/manifest.json
+../fixtures/geometry/recipe.json
+../fixtures/geometry/scenes/two-parts.scene.json
+../fixtures/geometry/scenes/repeated-128.scene.json
+../fixtures/geometry/scenes/large-origin.scene.json
+# Independently exported source metadata is byte-checked by its frozen recipe.
+../fixtures/geometry/independent-exporters/manifest.json
+# Trusted TypeScript authoring output is reproduced byte-for-byte by its tool.
+../fixtures/manufacturing/solid-fill.intent.json
+../fixtures/manufacturing/preferred-layers.intent.json
+
+# Preserve upstream snapshot bytes and attribution; its owner controls formatting.
+../vendor/
+# Frozen source/profile inputs and generator-owned goldens retain exact bytes.
+# Rust generators, trusted intent authors and fixture verifiers own their checks.
+../fixtures/analysis/hook-assumptions.json
+../crates/appearance/tests/fixtures/prusa-v7-synthetic.json
+../fixtures/appearance/optical-layer-cycle.json
+../fixtures/appearance/palette.json
+../fixtures/appearance/reference-vectors.json
+../fixtures/appearance/surface-color.palette.json
+../fixtures/appearance/target-orange.json
+../fixtures/appearance/target-red.json
+../fixtures/manufacturing/bridges/manifest.json
+../fixtures/manufacturing/complete-sparse.intent.json
+../fixtures/manufacturing/fixed-dual-cycle.intent.json
+../fixtures/manufacturing/fixed-dual.intent.json
+../fixtures/manufacturing/fixed-dual-profiles.intent.json
+../fixtures/manufacturing/fixed-dual-shared-material.intent.json
+../fixtures/manufacturing/grid.intent.json
+../fixtures/manufacturing/housing-h1-combined.intent.json
+../fixtures/manufacturing/housing-h1-fine.intent.json
+../fixtures/manufacturing/housing-ordinary.intent.json
+../fixtures/manufacturing/housing-two-zone.intent.json
+../fixtures/manufacturing/material-profile-a.json
+../fixtures/manufacturing/material-profile-b.json
+../fixtures/manufacturing/mixed-width-combined.intent.json
+../fixtures/manufacturing/mixed-width-interior.intent.json
+../fixtures/manufacturing/native/manifest.json
+../fixtures/manufacturing/native/tilted-cap-offset.points.json
+../fixtures/manufacturing/native/tilted-cylinder-complete.intent.json
+../fixtures/manufacturing/rounded-housing-bed-occurrence.json
+../fixtures/manufacturing/software-fixed-dual.calibration.json
+../fixtures/manufacturing/software-fixed-dual.configuration.json
+../fixtures/manufacturing/surface-color-box.intent.json
+../fixtures/manufacturing/surface-color-regional.intent.json
+../fixtures/manufacturing/surface-color-window.intent.json
+../fixtures/manufacturing/web-roof.intent.json
+../fixtures/manufacturing/web-roof/manifest.json
+../fixtures/protocol/replay-fixed-dual.json
+../fixtures/protocol/replay-sparse.json
+../fixtures/protocol/replay-waste-only.json
+../fixtures/protocol/replay.json
+
+# Trusted TypeScript authors own generated catalog/reference bytes.
+../crates/contracts/data/hardware-catalog.json
+../crates/contracts/data/machine-descriptions.json
+../crates/contracts/data/material-profiles.json
+
+# Exact upstream catalog bytes; materials:check owns schema/hash validation.
+../data/material-catalogs/
+
+../crates/contracts/data/printer-references.json

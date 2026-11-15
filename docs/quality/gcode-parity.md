@@ -5,7 +5,7 @@ SPDX-License-Identifier: OSL-3.0
 
 # Engine G-code comparison
 
-`pnpm compare:slicers` builds the matching native CLI/engine and compares actual
+`node tools/run.mjs compare:slicers` builds the matching native CLI/engine and compares actual
 exported commands with an installed PrusaSlicer **2.9.4**. This is a bounded
 software comparison, not a printer qualification or an assertion that another
 slicer's decisions are correct. It exercises native STEP admission, intent,
@@ -14,8 +14,8 @@ involved. Each native case checkpoints and opens in a new read-only engine,
 freshly replays, and exports byte-identical G-code.
 
 ```sh
-pnpm test:parity
-pnpm compare:slicers --reference /usr/bin/prusa-slicer
+node tools/run.mjs test:parity
+node tools/run.mjs compare:slicers --reference /usr/bin/prusa-slicer
 ```
 
 `CARGO_TARGET_DIR` and `CARGO_BUILD_JOBS` follow the root tooling conventions.
@@ -46,7 +46,7 @@ Do not exclude a failing case or turn a promised positive into an expected refus
 ## Ordinary mechanical job and revision
 
 ```sh
-pnpm compare:slicers --mechanical --reference /usr/bin/prusa-slicer
+node tools/run.mjs compare:slicers --mechanical --reference /usr/bin/prusa-slicer
 ```
 
 [`mechanical-run.mjs`](../../tools/gcode-parity/mechanical-run.mjs) consumes the
@@ -94,7 +94,7 @@ sequentially under the external memory/task bounds described in
 ## Native bridge and captured-profile comparison
 
 ```sh
-pnpm compare:slicers --bridges --reference /usr/bin/prusa-slicer
+node tools/run.mjs compare:slicers --bridges --reference /usr/bin/prusa-slicer
 ```
 
 This mode reuses the same bounded process runner and independent command decoder.

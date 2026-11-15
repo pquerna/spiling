@@ -239,7 +239,7 @@ fn execute() -> Result<()> {
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("help");
     if matches!(command, "help" | "--help" | "-h") {
         println!(
-            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust and platform C/C++ tooling. Optional TypeScript/research tools live in package.json."
+            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust and platform C/C++ tooling. Optional TypeScript/research tools live in tools/package.json."
         );
         return Ok(());
     }

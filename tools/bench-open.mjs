@@ -47,7 +47,7 @@ assert.equal(
 assert.ok(process.env.DISPLAY, "An accessible X11 DISPLAY is required");
 assert.ok(
   Boolean(options.project) !== Boolean(options.source) && options["user-data"] && options.output,
-  "usage: pnpm bench:open (--project FILE.spil | --source MODEL) --user-data EXISTING_XDG_DATA --output NEW_DIRECTORY [--bin-dir DIR] [--samples 3] [--warmups 1]",
+  "usage: node tools/run.mjs bench:open (--project FILE.spil | --source MODEL) --user-data EXISTING_XDG_DATA --output NEW_DIRECTORY [--bin-dir DIR] [--samples 3] [--warmups 1]",
 );
 assert.ok(Number.isInteger(options.samples) && options.samples > 0 && options.samples <= 30);
 assert.ok(Number.isInteger(options.warmups) && options.warmups >= 0 && options.warmups <= 10);

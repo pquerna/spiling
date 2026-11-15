@@ -1486,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "oversized geometry stress; run pnpm test:geometry-stress"]
+    #[ignore = "oversized geometry stress; run node tools/run.mjs test:geometry-stress"]
     fn native_plate_support_does_not_require_exact_authoring_chart_closure() {
         let definition = crate::from_step_bytes(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),

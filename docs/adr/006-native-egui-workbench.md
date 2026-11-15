@@ -80,7 +80,7 @@ retired; it is not an alternate product or a supported build path.
 2. N2: source geometry, shared occurrences, native face inspection/picking and
    sections with atomic transfer/cancellation.
 3. N3: one complete recoverable manufacturing journey through fresh actual motion,
-   verification and exclusive export. Switch `pnpm dev` to native here; retain an
+   verification and exclusive export. Use `cargo xtask dev` for the native workbench; retain an
    explicitly named temporary legacy command and enumerate remaining parity gaps.
 4. N4: existing workbench authoring, finish/image, process/replay, recovery and
    diagnostic parity through unchanged supported operator workflows.

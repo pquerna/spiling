@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use std::sync::atomic::AtomicBool;
 
 #[test]
-#[ignore = "oversized geometry stress; run pnpm test:geometry-stress"]
+#[ignore = "oversized geometry stress; run node tools/run.mjs test:geometry-stress"]
 fn oversized_plate_preserves_source_material_voids_and_resource_admission() {
     let definition = import_test_step(&fixture_bytes("perforated-plate.step")).unwrap();
     assert_source_face_identity(&definition, "perforated-plate.step");

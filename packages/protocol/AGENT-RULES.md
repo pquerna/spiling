@@ -6,6 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Protocol package rules
 
+- Optional compiler/types dependencies belong to `tools/package.json`; install once with `pnpm --dir tools install --frozen-lockfile`. From the repository root, use `node tools/run.mjs check:protocol` and `node tools/run.mjs test:protocol`. This package retains ESM/export metadata only, with no separate install.
 - Protobuf owns the native API; Rust checked domain adapters derive the generated data view and packed artifact constants. `src/generated.ts` is generator output, never hand-maintained. This package contains no UI, kernel, renderer, native-shell or gRPC-Web transport dependencies.
 - `decodeTriangle` remains the bounded synthetic SPLT diagnostic decoder; do not broaden it into geometry. `decodeMesh` and `decodeSection` independently validate unchanged SPLM/SPLS bytes, hashes, identities, revisions, exact layout/alignment, finite values, bounds and face/loop ranges before returning borrowed views.
 - Mesh descriptors admit only `mesh-trimmed-mm-0.05-v2`: finite nonnegative achieved carrier and trim errors share the 0.025 mm native allowance; independent f32 quantization is at most 0.025 mm, and all three sum to at most 0.05 mm. These bounds describe disposable display accuracy, not manufacturing authority or a transferred proof tree.

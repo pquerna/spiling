@@ -713,7 +713,7 @@ The separate paired `housing-h1-fine.intent.ts` and `housing-h1-combined.intent.
 controls keep the explicitly fixed-X axis required by their XY separator. They
 share physical process/schedule/phase and differ only in sparse combination intent.
 Do not use that axis-constrained control as the ordinary default or infer coarse
-success from selecting CombineEligible. Generate inert data with `pnpm manufacturing:intent
+success from selecting CombineEligible. Generate inert data with `node tools/run.mjs manufacturing:intent
 fixtures/manufacturing/housing-h1-combined.intent.ts NEW_INTENT.json`. Use an owned
 byte-identical source copy and exclusive output paths for that control:
 

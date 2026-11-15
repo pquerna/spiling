@@ -15,17 +15,17 @@ hardware database or automatic project synchronization.
 
 ## Identity and ownership
 
-| Record                  | Meaning                                                                                                                    | Storage                                                                        |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Printer reference       | Public manufacturer/model declarations and optional build size; no inferred mount or process settings                      | Built-in reference discovery; exact original row retained by personal identity |
+| Record                  | Meaning                                                                                                                             | Storage                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Printer reference       | Public manufacturer/model declarations and optional build size; no inferred mount or process settings                               | Built-in reference discovery; exact original row retained by personal identity |
 | Setup                   | Public model, the machine description it is derived from (null only for software references) and the derived `PrinterSpecification` | Personal machine record; copied into project                                   |
-| Owned machine           | Physical instance UUID, model identity, private nickname/serial/location and explicit unconfigured or complete setup state | Personal library only                                                          |
-| Plate definition / face | Public mounting interface, thickness, installed surface datum, faces, usable bounds, keepouts and temperature limits       | Personal plate; copied into project                                            |
-| Owned plate             | Physical sheet UUID, private nickname/condition and optional installed machine                                             | Personal library only                                                          |
-| Accessory               | Public nozzle declaration or rectangular fixture; owned instance can be installed on a machine                             | Personal library; installed definitions copied into project                    |
-| Route                   | Physical machine UUID, closed connection family, endpoint, expected peer, generation and optional credential reference     | Personal library only                                                          |
-| Project capture         | Complete setup, plate, selected face and installed accessory definitions                                                   | Project snapshot, history, manifest and manufacturing intent/provenance        |
-| Remembered selection    | Project UUID plus exact local attachment, capture hash and owned machine/plate/generation                                  | Personal library only                                                          |
+| Owned machine           | Physical instance UUID, model identity, private nickname/serial/location and explicit unconfigured or complete setup state          | Personal library only                                                          |
+| Plate definition / face | Public mounting interface, thickness, installed surface datum, faces, usable bounds, keepouts and temperature limits                | Personal plate; copied into project                                            |
+| Owned plate             | Physical sheet UUID, private nickname/condition and optional installed machine                                                      | Personal library only                                                          |
+| Accessory               | Public nozzle declaration or rectangular fixture; owned instance can be installed on a machine                                      | Personal library; installed definitions copied into project                    |
+| Route                   | Physical machine UUID, closed connection family, endpoint, expected peer, generation and optional credential reference              | Personal library only                                                          |
+| Project capture         | Complete setup, plate, selected face and installed accessory definitions                                                            | Project snapshot, history, manifest and manufacturing intent/provenance        |
+| Remembered selection    | Project UUID plus exact local attachment, capture hash and owned machine/plate/generation                                           | Personal library only                                                          |
 
 Names are display values, never identity keys. Two identical machines or sheets
 remain distinct physical records. Portable setup/plate labels are explicitly
@@ -35,8 +35,8 @@ public definitions are operator declarations, not calibrated machine evidence.
 `hardware-catalog.ts` (models, plates, software reference setups) and
 `machine-descriptions.ts` (machine fact layers and the setups built from them)
 are trusted TypeScript authoring data against the generated Rust domain view.
-`pnpm contracts` generates inert `hardware-catalog.json` and
-`machine-descriptions.json`; `pnpm check:tooling` checks drift and TypeScript.
+`node tools/run.mjs contracts` generates inert `hardware-catalog.json` and
+`machine-descriptions.json`; `node tools/run.mjs check:tooling` checks drift and TypeScript.
 Rust resolves, derives and validates the embedded catalog.
 `printer-references.ts` separately authors small manufacturer-cited identity declarations; its generated inert JSON shares offline `SearchCatalog` with filament discovery. It imports no external slicer scripts or compilation. Unknown build size remains unknown. The catalog ships derived setups for the Prusa MK4S, Bambu Lab A1, A1 mini, P1S, P1P, X1 Carbon and X1E, Creality Ender-3 V3 SE, a generic Klipper Cartesian and a generic Marlin bed-slinger, each with a derived stock sheet, plus the diagnostic Cartesian and complete Marlin
 software reference configurations and their two-face reference sheet. H2C is a catalog-only
@@ -73,18 +73,18 @@ instead of an aggregator's figure. Resolution records the lineage.
 The setup's `PrinterSpecification` is derived, never authored, and setup
 validation refuses a printer that differs from the derivation:
 
-| Derived value              | Rule                                                                                       |
-| -------------------------- | ------------------------------------------------------------------------------------------ |
-| Build envelope, bed        | `[0,0,0]..[bed_x, bed_y, max_z]`; bed box below Z0; stock sheet usable over the whole bed   |
-| Deposition widths          | `[min_ratio, max_ratio] × nozzle` (defaults 0.75–1.875, so 0.30–0.75 mm at 0.4 mm)          |
-| Deposition heights         | Z motion step up to `height_ratio × nozzle` (default 0.75)                                 |
-| Prime line                 | Back edge, `margin = min(10, 5% of the smaller bed side)`, `min(20, bed_x − 2·margin)` long, Z = nozzle/2, purging 1.8× nominal bead volume at 10 mm/s |
-| Park                       | XY `[margin, bed_y − margin]` after a vertical lift 10 mm above the highest emitted Z, capped at `max_z` (no long Z move on tall machines) |
-| Dialect and lifecycle      | Firmware family selects the output dialect and its lifecycle table; levelling capability selects the levelling step; operator blocks replace the typed steps they declare |
-| Feed / flow ceilings       | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow |
-| Thermal limits             | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile. A machine without a heated bed declares maximum bed 0 °C: its bed is off and its lifecycle has no bed steps |
-| Print-time model           | `timing_model` from the declared acceleration and Marlin's 0.013 mm junction deviation, for the verifier's estimate only |
-| Identity                   | Printer revision and configuration hash are the description hash; no calibration record    |
+| Derived value         | Rule                                                                                                                                                                                                                                                |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Build envelope, bed   | `[0,0,0]..[bed_x, bed_y, max_z]`; bed box below Z0; stock sheet usable over the whole bed                                                                                                                                                           |
+| Deposition widths     | `[min_ratio, max_ratio] × nozzle` (defaults 0.75–1.875, so 0.30–0.75 mm at 0.4 mm)                                                                                                                                                                  |
+| Deposition heights    | Z motion step up to `height_ratio × nozzle` (default 0.75)                                                                                                                                                                                          |
+| Prime line            | Back edge, `margin = min(10, 5% of the smaller bed side)`, `min(20, bed_x − 2·margin)` long, Z = nozzle/2, purging 1.8× nominal bead volume at 10 mm/s                                                                                              |
+| Park                  | XY `[margin, bed_y − margin]` after a vertical lift 10 mm above the highest emitted Z, capped at `max_z` (no long Z move on tall machines)                                                                                                          |
+| Dialect and lifecycle | Firmware family selects the output dialect and its lifecycle table; levelling capability selects the levelling step; operator blocks replace the typed steps they declare                                                                           |
+| Feed / flow ceilings  | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow                                                                                        |
+| Thermal limits        | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile. A machine without a heated bed declares maximum bed 0 °C: its bed is off and its lifecycle has no bed steps |
+| Print-time model      | `timing_model` from the declared acceleration and Marlin's 0.013 mm junction deviation, for the verifier's estimate only                                                                                                                            |
+| Identity              | Printer revision and configuration hash are the description hash; no calibration record                                                                                                                                                             |
 
 Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
 Prusa Buddy, `klipper` → Klipper, `bambu_lab` → Bambu Lab, whose program is
@@ -250,7 +250,7 @@ established by an inert route or by software program verification.
 
 ## Reproduction
 
-Run `pnpm test:hardware` for actual separate CLI/engine processes: create three
+Run `node tools/run.mjs test:hardware` for actual separate CLI/engine processes: create three
 same-name machines and two plates, capture a 10 mm cube job, compile/replay/export,
 remember private selection, remove source/intent/personal-library availability,
 and reopen/replay/export the standalone project with exact equality for all four

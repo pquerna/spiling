@@ -1,0 +1,36 @@
+{
+  "name": "@spiling/tooling",
+  "version": "0.1.0",
+  "private": true,
+  "license": "OSL-3.0",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "bench:smoke": "node run.mjs bench:smoke",
+    "bench:slice": "node run.mjs bench:slice",
+    "bench:open": "node run.mjs bench:open",
+    "contracts": "node run.mjs contracts",
+    "smoke:cli": "node run.mjs smoke:cli",
+    "manufacturing:intent": "node run.mjs manufacturing:intent",
+    "test:geometry-stress": "node run.mjs test:geometry-stress",
+    "compare:slicers": "node run.mjs compare:slicers",
+    "test:hardware": "node run.mjs test:hardware",
+    "materials:sync": "node run.mjs materials:sync",
+    "materials:check": "node run.mjs materials:check",
+    "test:material-catalogs": "node run.mjs test:material-catalogs",
+    "test:materials": "node run.mjs test:materials",
+    "test:parity": "node run.mjs test:parity",
+    "infill:lab": "node run.mjs infill:lab",
+    "check:tooling": "node run.mjs check:tooling",
+    "test:tooling": "node run.mjs test:tooling",
+    "check:protocol": "node run.mjs check:protocol",
+    "test:protocol": "node run.mjs test:protocol"
+  },
+  "devDependencies": {
+    "prettier": "3.8.3",
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
+  }
+}

@@ -9,7 +9,7 @@ The host needs existing SSH, Python 3, Docker and, for GPU runs, working NVIDIA 
 
 ## Prepare
 
-Run `pnpm infill:lab campaign context --output NEW_CONTEXT` and copy only that context's explicit source files to a versioned directory under `~/src/spiling-eval/tooling/`. Do not send the whole development checkout, SSH configuration, credentials, Docker socket or private brain as a build context. Build through SSH:
+Run `node tools/run.mjs infill:lab campaign context --output NEW_CONTEXT` and copy only that context's explicit source files to a versioned directory under `~/src/spiling-eval/tooling/`. Do not send the whole development checkout, SSH configuration, credentials, Docker socket or private brain as a build context. Build through SSH:
 
 ```sh
 python3 ~/src/spiling-eval/tooling/RECIPE/launch.py \

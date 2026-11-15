@@ -11,13 +11,13 @@ Licensed under the Open Software License version 3.0
 ## Refresh and integrity
 
 ```sh
-pnpm materials:sync                       # resolve upstream main once, then fetch at its exact commit
-pnpm materials:sync --revision COMMIT     # reproduce a reviewed exact 40-character commit
-pnpm materials:check                      # offline schema, bytes, hashes, counts and notices
-pnpm test:material-catalogs               # failure, identity, bounds and publication regressions
+node tools/run.mjs materials:sync                       # resolve upstream main once, then fetch at its exact commit
+node tools/run.mjs materials:sync --revision COMMIT     # reproduce a reviewed exact 40-character commit
+node tools/run.mjs materials:check                      # offline schema, bytes, hashes, counts and notices
+node tools/run.mjs test:material-catalogs               # failure, identity, bounds and publication regressions
 ```
 
-[`tools/material-catalogs.mjs`](../../tools/material-catalogs.mjs) owns admission and publication. Both catalogs and Prusa's MIT notice come from one exact commit. The separate OpenPrintTag MIT notice retains its own notice-owner pin; this is **not** the original data revision consumed by Prusa, which its aggregate does not record. `manifest.json` records these distinctions, exact hashes, byte sizes, counts and source URLs. Preserve raw files; do not hand-edit or reformat them. `pnpm check:tooling` includes the offline check; ordinary checks need no network.
+[`tools/material-catalogs.mjs`](../../tools/material-catalogs.mjs) owns admission and publication. Both catalogs and Prusa's MIT notice come from one exact commit. The separate OpenPrintTag MIT notice retains its own notice-owner pin; this is **not** the original data revision consumed by Prusa, which its aggregate does not record. `manifest.json` records these distinctions, exact hashes, byte sizes, counts and source URLs. Preserve raw files; do not hand-edit or reformat them. `node tools/run.mjs check:tooling` includes the offline check; ordinary checks need no network.
 
 A refresh downloads and validates the complete candidate before changing the accepted directory. Files are bounded to 8 MiB, catalogs to 32,768 rows each, notices to 16 KiB and each network request to 30 seconds. Unknown fields, duplicate source IDs, invalid RGB/TD, count mismatch and missing notices refuse. Disappearing IDs or brands refuse unless an operator has reviewed the diff and deliberately uses `--allow-removals`; scheduled updates must never use that override. Value changes are reported separately. A timestamp-only refresh keeps the prior accepted bytes and revision.
 

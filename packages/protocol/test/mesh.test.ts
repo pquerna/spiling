@@ -50,10 +50,12 @@ test("coarser tolerant profiles admit only their own recorded allowance", async 
     trim_deviation_mm: 0.02,
   };
   await decodeMesh(golden, coarse, expected);
-  await assert.rejects(
-    decodeMesh(golden, { ...coarse, carrier_deviation_mm: 0.16 }, expected),
-  );
-  const coarsest = { ...coarse, mesh_profile: "mesh-tolerant-mm-1-v1" as const, carrier_deviation_mm: 0.9 };
+  await assert.rejects(decodeMesh(golden, { ...coarse, carrier_deviation_mm: 0.16 }, expected));
+  const coarsest = {
+    ...coarse,
+    mesh_profile: "mesh-tolerant-mm-1-v1" as const,
+    carrier_deviation_mm: 0.9,
+  };
   await decodeMesh(golden, coarsest, expected);
   await assert.rejects(
     decodeMesh(golden, { ...coarsest, mesh_profile: MESH_PREVIEW_PROFILE }, expected),

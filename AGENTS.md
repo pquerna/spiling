@@ -55,11 +55,11 @@ Dependencies point inward: contracts depend on nothing project-specific; geometr
 ## 3. How to work
 
 1. Read this file, then the brain's `AGENTS.md` and the live card for your task, then any `AGENT-RULES.md` along the directories you will touch.
-2. Change the owning area; reuse its patterns. Update every affected caller, contract and generated file together (`cargo xtask contracts`; optional TypeScript authoring checks use `pnpm check:tooling`).
+2. Change the owning area; reuse its patterns. Update every affected caller, contract and generated file together (`cargo xtask contracts`; optional TypeScript authoring checks use `node tools/run.mjs check:tooling`).
 3. Verify through the real surface, not unit tests alone:
    - `cargo test --locked -p <crate>` for touched crates (set `RUST_MIN_STACK=8388608`; use `--profile profiling` for manufacturing).
    - Real parts: `tools/realistic-corpus/run.py` against PrusaSlicer, with and without supports (`SPILING_CORPUS_SUPPORTS`); the wall generator census is `wall_census` in `crates/manufacturing/src/planner/walls/tests.rs`.
-   - `cargo xtask contracts --check`; optional TypeScript/observer checks use `pnpm check:tooling` and `pnpm test:tooling`. Clippy with warnings denied on touched crates.
+   - `cargo xtask contracts --check`; optional TypeScript/observer checks use `node tools/run.mjs check:tooling` and `node tools/run.mjs test:tooling`. Clippy with warnings denied on touched crates.
 4. Commit with a message that states what changed, why, and what was verified, including known failures. Push to `main` after rebasing; never force-push. Brain changes are committed and pushed to the brain's `main` the same way.
 
 There is no remote CI. Report only commands you actually ran.

@@ -310,15 +310,30 @@ export default {
       model: "bambulab.a1-mini",
       machine: a1Mini.id,
     },
-    { id: "bambulab.p1s.04", label: "Bambu Lab P1S · 0.4 mm", model: "bambulab.p1s", machine: p1s.id },
-    { id: "bambulab.p1p.04", label: "Bambu Lab P1P · 0.4 mm", model: "bambulab.p1p", machine: p1p.id },
+    {
+      id: "bambulab.p1s.04",
+      label: "Bambu Lab P1S · 0.4 mm",
+      model: "bambulab.p1s",
+      machine: p1s.id,
+    },
+    {
+      id: "bambulab.p1p.04",
+      label: "Bambu Lab P1P · 0.4 mm",
+      model: "bambulab.p1p",
+      machine: p1p.id,
+    },
     {
       id: "bambulab.x1c.04",
       label: "Bambu Lab X1 Carbon · 0.4 mm",
       model: "bambulab.x1c",
       machine: x1c.id,
     },
-    { id: "bambulab.x1e.04", label: "Bambu Lab X1E · 0.4 mm", model: "bambulab.x1e", machine: x1e.id },
+    {
+      id: "bambulab.x1e.04",
+      label: "Bambu Lab X1E · 0.4 mm",
+      model: "bambulab.x1e",
+      machine: x1e.id,
+    },
     {
       id: "creality.ender-3-v3-se.04",
       label: "Creality Ender-3 V3 SE · 0.4 mm",

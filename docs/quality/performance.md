@@ -4,7 +4,7 @@
 # Native opening and manufacturing performance
 
 `crates/manufacturing/benches/pipeline.rs` exercises the production compiler
-and inspection facades. `pnpm bench:slice` builds the `profiling` Cargo
+and inspection facades. `node tools/run.mjs bench:slice` builds the `profiling` Cargo
 profile: release-derived optimization/LTO with symbols retained. It selects the
 engine/CLI/workbench packages too, keeping the native application's unified
 dependency feature set. Build time is outside reported samples. Keep that
@@ -56,12 +56,12 @@ limits. On Linux, for example:
 mkdir -p .cache/performance
 systemd-run --user --scope -p MemoryMax=8G -p TasksMax=256 \
   env CARGO_BUILD_JOBS=2 RAYON_NUM_THREADS=1 \
-  pnpm --silent bench:slice --parts 32 --samples 3 --warmup 0 --phase compile \
+  node tools/run.mjs bench:slice --parts 32 --samples 3 --warmup 0 --phase compile \
   --write-bundle .cache/performance/before.bundle.json \
   > .cache/performance/before.ndjson
 ```
 
-The benchmark emits one JSON record per measured sample. The pnpm command
+The benchmark emits one JSON record per measured sample. The tooling command
 resolves bundle paths against the repository root; a direct executable uses its
 current working directory. `--write-bundle PATH` creates
 the bundle document at `PATH` and its raw program at `PATH.program`, each
@@ -87,9 +87,9 @@ reported as setup. Other phases consume a captured checked bundle without source
 preparation or slicing inside their sample timer:
 
 ```sh
-pnpm bench:slice --phase validate --bundle .cache/performance/before.bundle.json --samples 5
-pnpm bench:slice --phase route --bundle .cache/performance/before.bundle.json --samples 5
-pnpm bench:slice --phase verify --bundle .cache/performance/before.bundle.json --samples 5
+node tools/run.mjs bench:slice --phase validate --bundle .cache/performance/before.bundle.json --samples 5
+node tools/run.mjs bench:slice --phase route --bundle .cache/performance/before.bundle.json --samples 5
+node tools/run.mjs bench:slice --phase verify --bundle .cache/performance/before.bundle.json --samples 5
 ```
 
 `parse` measures typed deserialization and validates the result outside its timer;
@@ -159,7 +159,7 @@ exercised ownership boundary, not a thread-count setting or an unsafe assertion.
 
 ## Actual native opening
 
-`pnpm bench:open` builds matching optimized engine/CLI/workbench binaries and
+`node tools/run.mjs bench:open` builds matching optimized engine/CLI/workbench binaries and
 measures fresh-process, read-only opening of a saved `.spil` with at least one
 renderable source. The automation
 adapter currently requires Linux X11, Python 3 and an accessible `DISPLAY`.
@@ -170,7 +170,7 @@ accepts the license on the operator’s behalf.
 Run inside the same external memory/task/CPU envelope for both revisions.
 
 ```sh
-pnpm --silent bench:open --project SAVED.spil --user-data ISOLATED_XDG_DATA \
+node tools/run.mjs bench:open --project SAVED.spil --user-data ISOLATED_XDG_DATA \
   --output .cache/open-before --samples 3 --warmups 1 > .cache/open-before.ndjson
 # Repeat after the change, using a new output directory/file.
 node tools/compare-open-bench.mjs .cache/open-before.ndjson .cache/open-after.ndjson
