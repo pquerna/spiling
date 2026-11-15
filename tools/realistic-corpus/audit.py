@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import features
 
 
 def digest(path):
@@ -111,6 +112,10 @@ def assess(case, record, intent):
                     "fresh_verified", "actual_deposition", "nonempty_layers")
         checks = record.get("export_checks", {})
         failures.extend(f"export:{name}" for name in required if checks.get(name) is not True)
+        if "oracle" in case:
+            observations = record.get("oracle_checks", {})
+            failures.extend(f"feature:{name}" for name in sorted(features.required_checks(case, intent))
+                            if observations.get(name) is not True)
         status = "complete"
     else:
         raise ValueError(f"unknown expectation: {expectation['kind']}")
@@ -135,3 +140,26 @@ def verdict(cases, records, intent):
             "expected_cases": len(expected), "recorded_cases": len(records),
             "missing": missing, "unexpected": unexpected, "duplicates": duplicates,
             "outcomes": outcomes}
+
+
+def scaling_observations(cases, records, outcomes):
+    indexed = {record["part"]: record for record in records}
+    groups = {}
+    for case in cases:
+        parameters = case.get("parameters", {})
+        axis = parameters.get("scale_axis")
+        if axis is None:
+            continue
+        record = indexed.get(case["file"], {})
+        compiled = record.get("spiling_compile", {})
+        returned = record.get("spiling_return", {})
+        groups.setdefault(axis, []).append({
+            "part": case["file"], "input_scale": parameters["scale"],
+            "source_bodies": case.get("oracle", {}).get("occurrences"),
+            "compile_seconds": compiled.get("seconds"), "compile_cpu_seconds": compiled.get("cpu_seconds"),
+            "return_seconds": returned.get("seconds"), "return_cpu_seconds": returned.get("cpu_seconds"),
+            "engine_mib": compiled.get("engine_mib"), "layers": record.get("layers"),
+            "deposition_segments": record.get("deposition_segments"),
+            "complete": outcomes.get(case["file"], {}).get("status") == "complete",
+        })
+    return {axis: sorted(rows, key=lambda row: row["input_scale"]) for axis, rows in groups.items()}

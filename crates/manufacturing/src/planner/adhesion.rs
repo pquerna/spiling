@@ -146,7 +146,12 @@ pub(super) fn plan(
                 path.checked_edges()
                     .map(|edges| edges.fold(widest, |w, edge| w.max(edge.width_mm)))
             })?;
-        let hull = points.convex_hull();
+        let mut hull = points.convex_hull();
+        let mut center_radius = 0.5 * widest;
+        if hull.unsigned_area() == 0.0 {
+            hull = collinear_bead_outline(&hull, center_radius)?;
+            center_radius = 0.0;
+        }
         let perimeter: f64 = hull
             .exterior()
             .lines()
@@ -154,7 +159,7 @@ pub(super) fn plan(
             .sum();
         // Dropping vertices for printable edges may cut a chord inward by up
         // to one minimum loop edge; start that much further out.
-        let first_distance = skirt.distance_mm + 0.5 * widest + 0.5 * width + MIN_LOOP_EDGE_MM;
+        let first_distance = skirt.distance_mm + center_radius + 0.5 * width + MIN_LOOP_EDGE_MM;
         // Loops of a convex outline offset by r are its perimeter plus 2 pi r.
         let mut requested = 0u32;
         let mut length = 0.0;
@@ -193,6 +198,54 @@ pub(super) fn plan(
         .map_err(|_| error(ManufacturingErrorCode::ResourceLimit, "adhesion paths"))?;
     paths.splice(0..0, added);
     Ok(summary)
+}
+
+fn collinear_bead_outline(
+    hull: &Polygon<f64>,
+    radius: f64,
+) -> Result<Polygon<f64>, ManufacturingError> {
+    let points = &hull.exterior().0;
+    let start = points.first().ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "empty skirt centerline",
+        )
+    })?;
+    let end = points
+        .iter()
+        .max_by(|left, right| {
+            (left.x - start.x)
+                .hypot(left.y - start.y)
+                .total_cmp(&(right.x - start.x).hypot(right.y - start.y))
+        })
+        .unwrap();
+    let length = (end.x - start.x).hypot(end.y - start.y);
+    if !length.is_finite() || length <= 0.0 || !radius.is_finite() || radius <= 0.0 {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "skirt has no printable centerline span",
+        ));
+    }
+    let along = [
+        (end.x - start.x) * radius / length,
+        (end.y - start.y) * radius / length,
+    ];
+    let normal = [-along[1], along[0]];
+    let corner = |point: &geo::Coord<f64>, direction: f64, side: f64| {
+        geo::coord! { x: point.x + direction * along[0] + side * normal[0],
+        y: point.y + direction * along[1] + side * normal[1] }
+    };
+    let first = corner(start, -1.0, -1.0);
+    Ok(Polygon::new(
+        LineString(vec![
+            first,
+            corner(end, 1.0, -1.0),
+            corner(end, 1.0, 1.0),
+            corner(start, -1.0, 1.0),
+            first,
+        ]),
+        Vec::new(),
+    ))
 }
 
 /// Closed rings of the exact outward offset of `outline` (outer boundaries

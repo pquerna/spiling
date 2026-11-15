@@ -884,6 +884,75 @@ import, planning or replay CPU; unmeasured stages remain named in the receipt.
 Run `python3 -m unittest discover -s tools/realistic-corpus -p 'test_*.py'` for
 the inexpensive inventory, refusal, source-identity and export-admission controls.
 
+### Focused families, canaries and scaling
+
+Use the narrowest witness that answers the change's question, then retain the
+whole-source gate. The same runner owns every layer:
+
+```sh
+# Native input recipes with analytic material/inventory oracles; real CLI/replay.
+python3 tools/realistic-corpus/generate.py NEW_FEATURES
+SPILING_CORPUS_PRUSA_INI=from-intent python3 tools/realistic-corpus/run.py \
+  NEW_FEATURES target/debug --manifest NEW_FEATURES/manifest.json --profile dev
+python3 tools/realistic-corpus/generate.py NEW_ROOTS_ON --family roots
+SPILING_CORPUS_SUPPORTS=breakaway SPILING_CORPUS_PRUSA_INI=from-intent \
+  python3 tools/realistic-corpus/run.py NEW_ROOTS_ON target/debug \
+  --manifest NEW_ROOTS_ON/manifest.json --profile dev
+# NEW_REAL has a step/ symlink to the shared fetched corpus.
+python3 tools/realistic-corpus/run.py NEW_REAL target/profiling \
+  --profile profiling --cohort canary
+# Separate body-count and physical-height axes, with unchanged bead settings.
+python3 tools/realistic-corpus/generate.py NEW_SCALE --family bodies --family height --scales 1 4 16
+python3 tools/realistic-corpus/run.py NEW_SCALE target/profiling \
+  --manifest NEW_SCALE/manifest.json --profile profiling --reference none
+```
+
+`generate.py` derives planar native STEP solids from the original box input,
+scaling its points and matching edge vectors, applying optional quarter turns
+and composing disjoint entity namespaces. It records the template identity,
+parameters and analytic boxes; it is neither another runtime kernel nor a mesh
+fallback. Thin-strip positives vary width, length and orientation. Root cases
+require an actual on-part landing under a roof, with a disconnected island
+variant changing placement/phase. Independent section-union areas, model-only
+bead probes, full height and complete imported inventory supplement fresh replay.
+Off must deposit no support and report unresolved demand; On must deposit rooted
+support above the real floor/contact gap and resolve these deliberately feasible
+roofs. Missing oracle checks fail. These boxes do not qualify curved trims,
+protected holes or general support routing; retain the existing native tests and
+real-part witnesses for those obligations.
+
+The manifest's `canary` and `supports` cohorts name representative integration
+selections, not replacements for `full` (the default). Prefix selection intersects
+the named cohort and refuses empty matches. Scaling summaries report elapsed/CPU,
+sampled engine RSS, layers and commanded segments alongside the varied input
+axis; absent measurements remain unknown. They are observations, not a complexity
+certificate or a timing threshold. Profile poor growth in the engine before
+shrinking its input or deleting the witness. Keep independent variables fixed
+and compare matching producers/settings; family-vs-full runtime is not a product
+speedup.
+
+### New-edge reference smoke
+
+When a new family discovers an edge, run **the exact same STEP bytes** through an
+existing slicer's import and actual slicing before blaming the fixture or changing
+its positive expectation. The Prusa path records separate import/slice commands,
+stdout/stderr, binary identity and the matched INI. Inspect dimensions, positive
+volume and reported manifold status against the input's independent oracle.
+Absent manifold/open-edge information is unknown, never invented closure.
+Reference slicing counts as nonempty only with annotated model extrusion,
+physical layers and positive filament use; travel, priming or a skirt alone
+cannot satisfy it. Import evidence survives a reference slicing refusal.
+
+Retain the deciding input hash, settings, outcomes and limitations in ignored run
+evidence and commit notes. A reference disagreement prompts investigation of
+both import and process settings; it does not authorize dropping the feature,
+loosening tolerances, requiring identical paths or treating that slicer as
+geometry authority. The reference observer recognizes Prusa's annotated output,
+not arbitrary firmware semantics, and does not replace Spiling's independent
+actual-program verifier or establish physical printability.
+
+### Whole-source coverage
+
 Current support: 28 of the 30 parts compile and complete the source-absent
 reopen, fresh verify and export; PrusaSlicer slices 25, and its five refusals
 are all "outside the print volume" on its default bed. Every pass takes the

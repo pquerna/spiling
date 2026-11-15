@@ -28,11 +28,13 @@ flattened to one file) instead of command-line overrides; `from-intent`
 derives one from the intent's printer, material and recipe. Each record keeps
 both slicers' estimated print time and filament length and their ratio.
 """
-import argparse, json, os, re, shutil, subprocess, sys, time, hashlib, threading
+import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 import audit
+import features
+import reference
 
 PARSER = argparse.ArgumentParser(description=__doc__)
 PARSER.add_argument("corpus")
@@ -113,9 +115,13 @@ def intent_file():
 
 def engine_peak(proc):
     peak = 0
-    deadline = time.time() + TIMEOUT
-    while proc.poll() is None:
-        if time.time() > deadline:
+    deadline = time.monotonic() + TIMEOUT
+    while True:
+        waited, status, usage = os.wait4(proc.pid, os.WNOHANG)
+        if waited:
+            proc.returncode = os.waitstatus_to_exitcode(status)
+            return peak // 1024, round(usage.ru_utime + usage.ru_stime, 6)
+        if time.monotonic() > deadline:
             raise subprocess.TimeoutExpired(proc.args, TIMEOUT)
         for pid in os.listdir("/proc"):
             if not pid.isdigit():
@@ -132,21 +138,23 @@ def engine_peak(proc):
             except OSError:
                 pass
         time.sleep(0.2)
-    return peak // 1024
 
 
 def run_cli(args, cwd):
-    started = time.time()
+    started = time.monotonic()
     err_path = os.path.join(cwd, f"{args[0]}.stderr.txt")
     with open(os.path.join(cwd, f"{args[0]}.stdout.json"), "w") as out, open(err_path, "w") as err:
         proc = subprocess.Popen(
             [os.path.join(R, "spiling-cli"), "project", *args, "--engine", os.path.join(R, "spiling-engine")],
-            cwd=cwd, stdout=out, stderr=err)
+            cwd=cwd, stdout=out, stderr=err, start_new_session=True)
         try:
-            peak = engine_peak(proc)
+            peak, cpu = engine_peak(proc)
             proc.wait(timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             proc.wait()
             return {"ok": False, "seconds": TIMEOUT, "error": {"code": "timeout"}}
     failure = None
@@ -160,14 +168,8 @@ def run_cli(args, cwd):
                        "domain": record.get("domain"),
                        "message": (record.get("error") or {}).get("message") or record.get("message"),
                        "details": record.get("error") or {}}
-    return {"ok": proc.returncode == 0, "seconds": round(time.time() - started, 2),
-            "engine_mib": peak, "error": failure}
-
-
-def duration_seconds(text):
-    """PrusaSlicer's '1d 2h 3m 4s' estimate in seconds."""
-    units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
-    return sum(int(n) * units[u] for n, u in re.findall(r"(\d+)([dhms])", text))
+    return {"ok": proc.returncode == 0, "seconds": round(time.monotonic() - started, 2),
+            "cpu_seconds": cpu, "engine_mib": peak or None, "error": failure}
 
 
 def bed_center():
@@ -292,7 +294,7 @@ def prusa_pattern(recipe):
 
 
 def prusa(step, cwd, brimmed=False):
-    started = time.time()
+    started = time.monotonic()
     gcode = os.path.join(cwd, "prusa.gcode")
     recipe = INTENT["recipe"]
     layer = recipe["layer_height_mm"] if DEFAULTS else 0.2
@@ -307,37 +309,28 @@ def prusa(step, cwd, brimmed=False):
                 "--fill-pattern", prusa_pattern(recipe)]
     args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
-    try:
-        proc = subprocess.run(["prusa-slicer", "--export-gcode", *args, "--center", center, "-o", gcode, step],
-                              cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "seconds": TIMEOUT}
-    ok = proc.returncode == 0 and os.path.exists(gcode)
-    info = {"ok": ok, "seconds": round(time.time() - started, 2), "fill_pattern": prusa_pattern(recipe)}
-    if ok:
-        info["g1_lines"] = 0
-        # PrusaSlicer slices its own tessellation of the STEP: record whether
-        # it is closed and any layer it skipped, so a reference with phantom
-        # tops/bottoms from a broken slice is visible in the comparison.
-        layers = []
-        for line in open(gcode, errors="replace"):
-            if line.startswith(";Z:"):
-                layers.append(float(line[3:]))
-            elif line.startswith("G1 "):
-                info["g1_lines"] += 1
-            elif line.startswith("; estimated printing time (normal mode) ="):
-                info["estimated_seconds"] = duration_seconds(line.split("=", 1)[1])
-            elif line.startswith("; filament used [mm] ="):
-                info["filament_mm"] = float(line.split("=", 1)[1])
-        step_layer = recipe["layer_height_mm"] if DEFAULTS else 0.2
-        info["skipped_layers"] = sum(
-            max(0, round((b - a) / step_layer) - 1) for a, b in zip(layers, layers[1:]))
-        mesh = subprocess.run(["prusa-slicer", "--info", step], cwd=cwd, capture_output=True,
-                              text=True, timeout=TIMEOUT).stdout
-        m = re.search(r"open_edges = (\d+)", mesh)
-        info["open_edges"] = int(m.group(1)) if m else 0
-    else:
-        info["message"] = (proc.stderr or proc.stdout)[-300:]
+    info = {"fill_pattern": prusa_pattern(recipe), "threads": 1}
+    for stage, command in (("import", ["prusa-slicer", "--threads", "1", "--info", step]),
+                           ("slice", ["prusa-slicer", "--threads", "1", "--export-gcode", *args,
+                                      "--center", center, "-o", gcode, step])):
+        info[stage] = {"command": command}
+        try:
+            proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
+            info[stage]["ok"] = proc.returncode == 0
+            info[stage]["returncode"] = proc.returncode
+            for stream in ("stdout", "stderr"):
+                Path(cwd, f"prusa-{stage}.{stream}.txt").write_text(getattr(proc, stream))
+            if stage == "import":
+                info[stage].update(reference.mesh_info(proc.stdout))
+            if proc.returncode:
+                info[stage]["message"] = (proc.stderr or proc.stdout)[-300:]
+        except subprocess.TimeoutExpired:
+            info[stage].update({"ok": False, "message": "timeout"})
+    info["seconds"] = round(time.monotonic() - started, 2)
+    if info["slice"]["ok"] and os.path.exists(gcode):
+        with open(gcode, errors="replace") as program:
+            info.update(reference.program_info(program, layer))
+    info["ok"] = bool(info["slice"]["ok"] and info.get("nonempty_model"))
     return info
 
 
@@ -355,7 +348,8 @@ def spiling_report(stdout):
     return report
 
 
-def part(name, intent, results):
+def part(case, intent, results):
+    name = case["file"]
     src = os.path.join(ROOT, "step", name)
     cwd = os.path.join(WORK, name)
     shutil.rmtree(cwd, ignore_errors=True)
@@ -381,6 +375,10 @@ def part(name, intent, results):
         if ret["ok"]:
             record["export_checks"] = audit.export_checks(os.path.join(returned, "out"))
             plan = json.load(open(os.path.join(returned, "out", "plan.json")))
+            if "oracle" in case:
+                record["oracle_checks"] = features.check(
+                    case, plan, json.load(open(os.path.join(returned, "out", "verification.json"))),
+                    INTENT, json.load(open(os.path.join(cwd, "create.stdout.json"))))
     # PrusaSlicer slices the original source after Spiling, so its brim can
     # follow the brim Spiling planned.
     record["prusa"] = (prusa(src, cwd, brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
@@ -430,6 +428,8 @@ def main():
     if ARGS.list:
         print(json.dumps(cases, indent=2))
         return 0
+    if not hasattr(os, "wait4") or not os.path.isdir("/proc"):
+        raise ValueError("native corpus resource monitoring currently requires Linux /proc and wait4")
     audit.check_inputs(cases, os.path.join(ROOT, "step"))
     for path in (OUT, OUT + ".run.json", OUT + ".summary.json", WORK):
         if os.path.exists(path):
@@ -442,6 +442,8 @@ def main():
         "binaries": {name: {"path": str(Path(R, name).resolve()), "sha256": audit.digest(Path(R, name))}
                      for name in ("spiling-cli", "spiling-engine")},
         "runner_sha256": audit.digest(__file__), "audit_sha256": audit.digest(audit.__file__),
+        "features_sha256": audit.digest(features.__file__),
+        "reference_sha256": audit.digest(reference.__file__),
         "manifest_sha256": audit.digest(ARGS.manifest),
         "cohort": ARGS.cohort, "cases": cases,
         "settings": {"supports": SUPPORTS, "infill": INFILL, "fraction": FRACTION,
@@ -450,14 +452,15 @@ def main():
         "jobs": JOBS, "per_cli_timeout_seconds": TIMEOUT,
         "timing_scope": {"spiling_compile": "create/import/place/compile/save",
                          "spiling_return": "fresh process reopen/verify/export",
+                         "cpu_seconds": "CLI and waited descendants, per-process wait4; not global concurrent-child deltas",
                          "prusa": "reference slice and mesh info",
                          "not_separately_measured": ["build", "import", "placement", "construction", "emission", "save"]},
     }
     if ARGS.reference == "prusa":
-        reference = shutil.which("prusa-slicer")
-        if reference is None:
+        reference_binary = shutil.which("prusa-slicer")
+        if reference_binary is None:
             raise ValueError("requested Prusa reference is not installed; use --reference none for a labeled Spiling-only run")
-        receipt["reference_binary"] = {"path": reference, "sha256": audit.digest(reference)}
+        receipt["reference_binary"] = {"path": reference_binary, "sha256": audit.digest(reference_binary)}
     diagnose = subprocess.run([os.path.join(R, "spiling-cli"), "diagnose", "--engine", os.path.join(R, "spiling-engine")],
                               cwd=WORK, capture_output=True, text=True, timeout=TIMEOUT)
     if diagnose.returncode:
@@ -477,7 +480,7 @@ def main():
     failure = None
     with open(OUT, "x") as results, ThreadPoolExecutor(JOBS) as pool:
         try:
-            records = list(pool.map(lambda case: part(case["file"], intent, results), cases))
+            records = list(pool.map(lambda case: part(case, intent, results), cases))
         except Exception as error:
             failure = str(error)
     if failure is not None:
@@ -489,6 +492,7 @@ def main():
     summary["reference"] = {"requested": ARGS.reference,
                             "sliced": sum(row.get("prusa", {}).get("ok") is True for row in records),
                             "refused": sum(row.get("prusa", {}).get("ok") is False for row in records)}
+    summary["scaling"] = audit.scaling_observations(cases, records, summary["outcomes"])
     with open(OUT + ".summary.json", "x") as output:
         json.dump(summary, output, indent=2)
     print(json.dumps(summary, indent=2))

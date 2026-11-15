@@ -186,6 +186,11 @@ SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling
 SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py NEW_OUT target/profiling results.ndjson 18 28 --profile profiling
 ```
 
+For assertion-led native feature recipes, named real-part canaries, single-axis
+scaling and same-input independent-slicer edge triage, use the existing runner's
+[layered corpus procedure](geometry-evidence.md#focused-families-canaries-and-scaling).
+These focused selections do not replace the full Off/breakaway slicing gates.
+
 A one-line geometry edit rebuilds its test binary in about 4 s. The crate's first build
 on warm dependencies is about 3 min. The whole geometry lib suite is about 6.5 min, two
 rational-torus tests (`imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence`,

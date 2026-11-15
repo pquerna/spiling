@@ -3,6 +3,18 @@
   "commit": "8e5067f4f6457da8a552983dd210ec48c40be2ca",
   "license": "GPL-3.0 (third-party; fetched, never committed)",
   "selection": "STEP/STP files under 6 MB sorted by size, every 18th, first 30",
+  "cohorts": {
+    "canary": [
+      "02-Rear_Cover_120+.step",
+      "03-HOYMK_SSR_Mount_B.step",
+      "17-cable_routing_z_belt_cover_b_mod_rail_notch_v2.2.step",
+      "28-RunoutUnKlicky.step"
+    ],
+    "supports": [
+      "03-HOYMK_SSR_Mount_B.step",
+      "20-Voron_SwitchWire_Connector_cover_LDO-42STH20-1004AS2.stp"
+    ]
+  },
   "parts": [
     {
       "file": "00-canable_pro_clip.step",
