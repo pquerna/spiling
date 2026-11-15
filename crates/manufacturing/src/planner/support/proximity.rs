@@ -200,7 +200,7 @@ fn polygon_contains(polygon: &Polygon<f64>, p: [f64; 2]) -> bool {
     inside
 }
 
-fn point_segment_distance_squared(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(super) fn point_segment_distance_squared(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let d = [b[0] - a[0], b[1] - a[1]];
     let len2 = d[0] * d[0] + d[1] * d[1];
     let t = if len2 > 0.0 {

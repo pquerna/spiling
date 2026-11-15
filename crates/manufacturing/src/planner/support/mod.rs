@@ -719,7 +719,13 @@ pub(super) struct SupportWork {
     /// the unanchored span that requested each split, in request order. Each
     /// record added a layer, so the schedule's layer budget bounds them.
     pub(super) anchor_refinements: Vec<AnchorRefinement>,
+    wall_refinements: Vec<WallRefinement>,
     pub(super) replay: SupportReplay,
+}
+
+struct WallRefinement {
+    interval_mm: [f64; 2],
+    offset_mm: f64,
 }
 
 /// One actual-anchor split: the `[lower_z, z]` extent of the refined pair
@@ -870,7 +876,9 @@ pub(super) fn realize(
         } else {
             0
         };
-        native_owned_bytes = native_owned_bytes.saturating_add(replay_old.bytes);
+        native_owned_bytes = native_owned_bytes
+            .saturating_add(replay_old.bytes)
+            .saturating_add(vec_bytes(&work_bank.wall_refinements));
         let mut replay_entries = std::mem::take(&mut replay_old.entries)
             .into_iter()
             .map(Some)
@@ -1338,6 +1346,40 @@ pub(super) fn realize(
             }
             if let Some(failure) = admission.failure.take() {
                 let exhausted = work_bank.exhausted.contains(&layer.z_mm.to_bits());
+                if !exhausted
+                    && !matches!(recipe.supports, SupportPolicy::Disabled)
+                    && let Some(offset_mm) = wall_refinement_offset(
+                        &layer.paths[failure.path],
+                        &failure,
+                        previous.clone(),
+                        &mut anchor_work,
+                        cancel,
+                    )?
+                    && wall_refinement_progress(
+                        &work_bank.wall_refinements,
+                        layer.z_mm,
+                        offset_mm,
+                        &mut anchor_work,
+                        cancel,
+                    )?
+                {
+                    reserve_owned(
+                        &mut work_bank.wall_refinements,
+                        1,
+                        owned_bytes
+                            .saturating_add(anchors.retained_bytes())
+                            .saturating_add(vec_bytes(&admission.bridges)),
+                    )?;
+                    work_bank.wall_refinements.push(WallRefinement {
+                        interval_mm: [schedule[index - 1].lower_z, layer.z_mm],
+                        offset_mm,
+                    });
+                    return Ok(SupportAdmission::RefineUnreachableLayer {
+                        index,
+                        failure: admission_error(index, layer.z_mm, &layer.paths, &failure, recipe),
+                        span_mm: None,
+                    });
+                }
                 if matches!(recipe.supports, SupportPolicy::Disabled) || exhausted {
                     if tentative && index > 0 && !exhausted {
                         let failure =
@@ -4160,6 +4202,64 @@ struct NearestStroke {
     endpoints_mm: [[f64; 3]; 2],
 }
 
+fn wall_refinement_progress(
+    refinements: &[WallRefinement],
+    z_mm: f64,
+    offset_mm: f64,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    for split in refinements.iter().rev() {
+        super::native::charge_support_clearance(work, cancel)?;
+        if split.interval_mm[0] < z_mm && z_mm <= split.interval_mm[1] {
+            return Ok(offset_mm <= split.offset_mm - super::ANCHOR_REFINEMENT_PROGRESS_MM);
+        }
+    }
+    Ok(true)
+}
+
+fn wall_refinement_offset<'a>(
+    path: &DepositionPath,
+    failure: &strokes::Failure,
+    previous: impl Iterator<Item = &'a DepositionPath>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<f64>, ManufacturingError> {
+    if path.kind != DepositionKind::Perimeter {
+        return Ok(None);
+    }
+    let start = path.points_mm[failure.first];
+    let end = path.points_mm[failure.last];
+    let endpoints = [failure.start, failure.end].map(|fraction| {
+        [
+            start[0] + fraction * (end[0] - start[0]),
+            start[1] + fraction * (end[1] - start[1]),
+        ]
+    });
+    let midpoint = std::array::from_fn(|axis| (endpoints[0][axis] + endpoints[1][axis]) * 0.5);
+    let Some(nearest) = nearest_stroke(
+        midpoint,
+        previous.filter(|lower| {
+            lower.kind.is_model() && lower.physical_z_mm[1] == path.physical_z_mm[0]
+        }),
+        work,
+        0,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    let lower = nearest.endpoints_mm.map(|point| [point[0], point[1]]);
+    let offset = endpoints
+        .map(|point| proximity::point_segment_distance_squared(point, lower[0], lower[1]).sqrt())
+        .into_iter()
+        .fold(0.0_f64, f64::max);
+    Ok(
+        (offset > nearest.width_mm * 0.5 && offset < (nearest.width_mm + failure.width_mm) * 0.5)
+            .then_some(offset),
+    )
+}
+
 impl std::fmt::Debug for NearestStroke {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -5188,6 +5288,86 @@ mod tests {
             arcs: Vec::new(),
             exposed: false,
         }
+    }
+
+    #[test]
+    fn wall_refinement_candidate_requires_actual_model_capsule_proximity() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let cancel = AtomicBool::new(false);
+        let lower = row(DepositionKind::Perimeter, 0.0, 20.0, 0.4);
+        let mut upper = row(DepositionKind::Perimeter, 0.0, 20.0, 0.8);
+        for point in &mut upper.points_mm {
+            point[1] = 0.4;
+        }
+        let mut anchors = AnchorWorkspace::default();
+        anchors.set_budget(100_000);
+        let mut work = 0;
+        let failure = strokes::analyze(
+            std::slice::from_ref(&upper),
+            std::iter::once(&lower),
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .failure
+        .unwrap();
+        assert!(
+            wall_refinement_offset(
+                &upper,
+                &failure,
+                std::iter::once(&lower),
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            strokes::analyze(
+                std::slice::from_ref(&upper),
+                std::iter::once(&lower),
+                std::iter::empty(),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .failure
+            .is_some()
+        );
+        for point in &mut upper.points_mm {
+            point[1] = 2.0;
+        }
+        assert!(
+            wall_refinement_offset(
+                &upper,
+                &failure,
+                std::iter::once(&lower),
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            wall_refinement_offset(&upper, &failure, std::iter::empty(), &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            wall_refinement_offset(
+                &upper,
+                &failure,
+                std::iter::once(&lower),
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
     }
 
     #[test]

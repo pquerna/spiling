@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 use super::*;
 use crate::{ChunkSource, CompilerInput, ManufacturingResult, compile, decode_bundle};
-use geo::BooleanOps;
+use geo::{BooleanOps, polygon};
 use spiling_contracts::geometry::{AabbMm, DefinitionId, OccurrenceId, OccurrenceRecord, PlaneMm};
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
 use std::collections::BTreeMap;
@@ -5102,6 +5102,195 @@ fn tolerant_structured_interiors_keep_automatic_external_supports() {
             "{policy:?}"
         );
     }
+}
+
+#[test]
+fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(true);
+    let input = scene.input(&intent);
+    let template = compile(scene.input(&intent), &cancel).unwrap().plan.layers[0].clone();
+    let make_schedule = || {
+        (0..2)
+            .map(|index| LayerElevation {
+                lower_z: index as f64 * 0.4,
+                z: (index + 1) as f64 * 0.4,
+                sample: (index as f64 + 0.5) * 0.4,
+                height: 0.4,
+                course: index,
+            })
+            .collect::<Vec<_>>()
+    };
+    let initial = make_schedule();
+    let run = |schedule: &[LayerElevation],
+               step: bool,
+               recipe: &PlanarPrintRecipe,
+               bank: &mut support::SupportWork| {
+        let mut layers = schedule
+            .iter()
+            .enumerate()
+            .map(|(index, elevation)| {
+                let offset = if step {
+                    if elevation.lower_z >= 0.4 { 0.4 } else { 0.0 }
+                } else {
+                    0.9 * elevation.sample
+                };
+                let mut layer = template.clone();
+                layer.index = index as u32;
+                layer.hatch_course = elevation.course;
+                layer.lower_z_mm = elevation.lower_z;
+                layer.z_mm = elevation.z;
+                layer.height_mm = elevation.height;
+                layer.section_z_mm = elevation.sample;
+                layer.paths = vec![DepositionPath {
+                    material_domain: None,
+                    kind: DepositionKind::Perimeter,
+                    width: WidthProfile::Constant { width_mm: 0.6 },
+                    physical_z_mm: [elevation.lower_z, elevation.z],
+                    owner: None,
+                    points_mm: vec![[0.0, offset, elevation.z], [20.0, offset, elevation.z]],
+                    arcs: Vec::new(),
+                    exposed: false,
+                }];
+                layer
+            })
+            .collect::<Vec<_>>();
+        let candidates = layers
+            .iter()
+            .map(|layer| layer.paths.clone())
+            .collect::<Vec<_>>();
+        let sections = [SectionSpan {
+            start: 0,
+            end: schedule.len() as u32,
+            material: Arc::new(geo::MultiPolygon(vec![polygon![
+                (x: -1.0, y: -1.0), (x: 21.0, y: -1.0),
+                (x: 21.0, y: 2.0), (x: -1.0, y: 2.0),
+            ]])),
+            process_domains: Vec::new(),
+            occupied: None,
+            source_area_mm2: 66.0,
+        }];
+        let result = support::realize(
+            &mut layers,
+            &support::SupportInput {
+                sections: &sections,
+                schedule,
+                native_points: 0,
+                native_owned_bytes: 0,
+                recipe,
+                source_z_allowance_mm: 0.0,
+                replay: false,
+                phases: &[],
+            },
+            &mut schedule.len(),
+            &cancel,
+            &mut spiling_geometry::GeometryWorkBudget::compile(),
+            false,
+            false,
+            bank,
+            |index, _, _, _, _, _, _, _| {
+                Ok(support::RasterCandidate {
+                    paths: candidates[index].clone(),
+                    whole_rows: Vec::new(),
+                    process_interfaces: Vec::new(),
+                    skin_command_fits: Vec::new(),
+                    skin_bridge_domains: Vec::new(),
+                })
+            },
+            |_, _, _, _, _, _, _| {
+                Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "ordinary scaffold projection reached",
+                ))
+            },
+            |_, _, _, _, _| Ok(true),
+        );
+        (result, layers)
+    };
+
+    let mut slope_work = support::SupportWork::default();
+    let mut schedule = make_schedule();
+    let (outcome, _) = run(&schedule, false, &intent.recipe, &mut slope_work);
+    let support::SupportAdmission::RefineUnreachableLayer {
+        index,
+        failure,
+        span_mm,
+    } = outcome.unwrap()
+    else {
+        panic!("an unanchored nearby slope should propose a schedule split");
+    };
+    exhaust_or_refine(
+        &mut schedule,
+        index,
+        &input,
+        failure,
+        span_mm,
+        &mut slope_work,
+    )
+    .unwrap();
+    for elevation in &initial {
+        assert!(schedule.iter().any(|layer| layer.z == elevation.z));
+    }
+    assert!(matches!(
+        run(&schedule, false, &intent.recipe, &mut slope_work)
+            .0
+            .unwrap(),
+        support::SupportAdmission::Complete
+    ));
+
+    let mut step_work = support::SupportWork::default();
+    let mut schedule = make_schedule();
+    let (outcome, _) = run(&schedule, true, &intent.recipe, &mut step_work);
+    let support::SupportAdmission::RefineUnreachableLayer {
+        index,
+        failure,
+        span_mm,
+    } = outcome.unwrap()
+    else {
+        panic!("a new nearby step may propose one split");
+    };
+    exhaust_or_refine(
+        &mut schedule,
+        index,
+        &input,
+        failure,
+        span_mm,
+        &mut step_work,
+    )
+    .unwrap();
+    let failure = run(&schedule, true, &intent.recipe, &mut step_work)
+        .0
+        .err()
+        .unwrap();
+    assert!(
+        failure
+            .message
+            .contains("ordinary scaffold projection reached")
+    );
+
+    let mut disabled = intent.recipe.clone();
+    disabled.supports = SupportPolicy::Disabled;
+    let (outcome, layers) = run(
+        &initial,
+        true,
+        &disabled,
+        &mut support::SupportWork::default(),
+    );
+    assert!(matches!(
+        outcome.unwrap(),
+        support::SupportAdmission::Complete
+    ));
+    assert!(layers[1].region_coverage.unsupported_overhang_mm > 0.0);
+
+    let mut exhausted = support::SupportWork::default();
+    exhausted.exhausted.insert(initial[1].z.to_bits());
+    let (outcome, layers) = run(&initial, true, &intent.recipe, &mut exhausted);
+    assert!(matches!(
+        outcome.unwrap(),
+        support::SupportAdmission::Complete
+    ));
+    assert!(layers[1].region_coverage.unsupported_overhang_mm > 0.0);
 }
 
 #[test]
