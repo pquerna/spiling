@@ -982,7 +982,6 @@ impl Workbench {
                 ui.label(&origin.origin.url);
                 ui.label(format!("Captured revision {}", origin.origin.revision));
             }
-            ui.weak("Catalog declarations are not physical calibration or a process profile.");
         });
         self.library_selection_actions(ui, state, selected, personal, writable, personal_write);
         if personal {

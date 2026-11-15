@@ -34,8 +34,10 @@ meaning, units and localization take priority over word counts. Optional short
 hints explain one control. Labels identify subjects, choices, state or consequences;
 do not narrate an obvious camera angle, layout or other visible presentation.
 Longer explanations use a deliberately opened help or
-named details surface. Essential scope, errors, save uncertainty, incompleteness,
-current verification and consequential qualification remain visible.
+named details surface. Essential scope, errors, save uncertainty, incompleteness
+and current verification remain visible. The workbench carries no disclaimers about
+physical, machine or calibration qualification: Spiling is not yet for end users,
+and that status is tracked in the private planning brain, not in product copy.
 
 When several read-only rows share one evidence source, disclose that source once at the group level. Do not repeat identical provenance beneath every value. Timing uses **Modeled work** and a separate **Startup · Unknown** row; detailed terms and model assumptions belong in Job estimate. A declared estimate is not a measured total duration.
 
@@ -226,17 +228,15 @@ widget identities stable when errors or optional rows appear.
 
 Problem summaries remain short; exact diagnostic text stays selectable in Details.
 Preserve bounds, codes and witnesses instead of truncating the underlying evidence.
-Never invent a native cause or remedy. Software verification remains distinct from
-physical qualification; Review states it beside Export (software-verified, not
-machine-qualified).
+Never invent a native cause or remedy.
 
 Prepare separates setup, material, settings, placement and infill into named tasks.
 Applying a settings draft still commits the complete intent. Infill edits display
 percentages while retaining the engine fraction contract. Slice describes committed
 inputs; unapplied drafts stay labelled. Review leads with the numbers a person
 decides on (time, filament, layers, printed size) and located issues, then Export;
-verification statistics and evidence stay under Details. Qualification and stale
-state remain visible beside the action.
+verification statistics and evidence stay under Details. Stale state remains
+visible beside the action.
 
 Copy is terse: one primary action per pane named by its effect, labels on the left
 and values with units, no explanatory paragraphs where a number or tooltip will do.

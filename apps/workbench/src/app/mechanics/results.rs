@@ -245,7 +245,7 @@ impl Workbench {
             egui::Window::new("Analysis evidence").open(&mut open).default_width(500.0)
                 .max_height(540.0).vscroll(true).show(ui.ctx(), |ui| {
                     ui.strong("Assumed directional wall / skin / effective core");
-                    ui.label("Tied interfaces. Not calibrated strength, resolved roads or qualified Basic/Enhanced. Algebraic checks do not establish discretization or material accuracy.");
+                    ui.label("Tied interfaces. Algebraic checks do not establish discretization or material accuracy.");
                     connection_evidence(ui);
                     ui.label(match &summary.mesh_geometry {
                         spiling_contracts::analysis::fastener::AnalysisMeshGeometry::AffineHex27 {} => "Affine Hex27 · native orthogonal construction",
@@ -337,5 +337,5 @@ impl Workbench {
 pub(super) fn connection_evidence(ui: &mut egui::Ui) {
     ui.strong("Ideal connection");
     ui.label("Connections couple finite native regions to a fixed reference. Fastener failure is excluded; the printed material retains its stress and stiffness response. No reinforcement is added.");
-    ui.label("Clamp assumes an ideal annular seat without preload or friction qualification. Threaded attachment declares bonded engagement; thread geometry, pull-out strength and thread failure are not qualified. Pin slide/spin freedoms may require another support.");
+    ui.label("Clamp assumes an ideal annular seat without preload or friction. Pin slide/spin freedoms may require another support.");
 }

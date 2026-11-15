@@ -621,7 +621,7 @@ impl Workbench {
                             if p.plate { ui::number(ui, "Plate thickness (mm)", &mut p.thickness, 0.01); }
                             ui.weak("Permanent deposited material");
                         }
-                        ui::help(ui, "process-interface", "Permanent interfaces", "An explicit construction permission, not removable support or a strength qualification. Without permission the engine can refuse a nonempty density join. Separator width follows the captured bead width; a source-Z plate has its own physical thickness.");
+                        ui::help(ui, "process-interface", "Permanent interfaces", "An explicit construction permission, not removable support. Without permission the engine can refuse a nonempty density join. Separator width follows the captured bead width; a source-Z plate has its own physical thickness.");
                     }
                 }
             });

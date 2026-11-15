@@ -296,7 +296,6 @@ impl Workbench {
                             "{} deposition segments",
                             p.verification.deposition_segments
                         ));
-                        ui.weak("Software verification · physical printing unqualified");
                     });
                 }
             });

@@ -69,12 +69,11 @@ impl Workbench {
             "Reference study",
             "Project · estimates, not calibrated color",
         );
-        ui.label("Physical color is unqualified");
         ui::help(
             ui,
             "reference-scope",
             "Reference estimates",
-            "Backing optics and calibration are unmodelled. Manufacturing independently admits every construction; accepting a reference estimate does not qualify physical color.",
+            "Backing optics and calibration are unmodelled.",
         );
         let Some(study) = &project.appearance_study.optical else {
             ui::pane_header(

@@ -774,9 +774,7 @@ pub(crate) fn gallery(ui: &mut egui::Ui, tokens: ui::Tokens) {
             ui.label("Shared camera, visibility filters and physical-height navigation");
             ui.label("Illustrative actual replay: 31 layers · 0.2–0.24 mm physical heights");
             ui.label("Exact changed settings · recipe.infill_fraction: 0.2 → 0.31");
-            ui.weak(
-                "Actual seam markers are decoded emitted starts, not physical-print guarantees.",
-            );
+            ui.weak("Seam markers are decoded emitted starts.");
             let draft_id = ui.make_persistent_id("alternative-gallery-draft");
             let mut draft = ui
                 .data_mut(|data| data.get_temp::<ManufacturingIntent>(draft_id))
@@ -793,7 +791,6 @@ pub(crate) fn gallery(ui: &mut egui::Ui, tokens: ui::Tokens) {
                 super::manufacturing::settings_fields(ui, &mut draft, tokens)
             });
             ui.data_mut(|data| data.insert_temp(draft_id, draft));
-            ui.weak("NOT MACHINE READY · only illustrative software evidence");
         });
 }
 

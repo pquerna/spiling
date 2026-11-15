@@ -9,7 +9,7 @@ use spiling_contracts::{
 };
 use std::sync::Arc;
 
-const BEAD_MODEL: &str = "Nominal width and physical height over decoded straight strokes. Stadium sections; bridges use elliptical envelopes without sag prediction. Flat ends preserve breaks; intersecting strokes overlap. Displayed surface and overlap are not deposited mass or measured physical shape. Numerical projection ≤ 0.001 mm; section chord error ≤ 0.001 mm. Large reviews retain centerlines when the bead view reaches display limits.";
+const BEAD_MODEL: &str = "Nominal width and physical height over decoded straight strokes. Stadium sections; bridges use elliptical envelopes without sag prediction. Flat ends preserve breaks; intersecting strokes overlap. Numerical projection ≤ 0.001 mm; section chord error ≤ 0.001 mm. Large reviews retain centerlines when the bead view reaches display limits.";
 
 pub(super) struct IntentDraft {
     pub(super) project: ProjectId,
@@ -201,21 +201,6 @@ impl Workbench {
         }
         // Keep the primary action above optional comparison controls and outside scrolling.
         self.manufacturing_actions(ui);
-        if !prepare {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Software-verified · not machine-qualified")
-                        .small()
-                        .color(self.prefs.theme.tokens().muted),
-                );
-                ui::help(
-                    ui,
-                    "verification-scope",
-                    "Software verification",
-                    "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
-                );
-            });
-        }
         if !prepare || self.manufacturing.prepare_section == 2 {
             ui.collapsing("Compare settings", |ui| self.try_alternative_entry(ui));
         }
@@ -869,7 +854,7 @@ impl Workbench {
                                     dimension(stats.height),
                                     stats.count
                                 ))
-                                .on_hover_text(format!("Visible nominal widths and physical stroke heights, distinct from the layer schedule. Section chord bound {:.6} mm; numerical expansion ≤ 0.001 mm. No physical bead-shape or mass measurement.", beads.chord_error_mm));
+                                .on_hover_text(format!("Visible nominal widths and physical stroke heights, distinct from the layer schedule. Section chord bound {:.6} mm; numerical expansion ≤ 0.001 mm.", beads.chord_error_mm));
                             }
                             ui.collapsing("Bead display model", |ui| {
                                 ui.label(BEAD_MODEL);
@@ -971,7 +956,7 @@ pub(super) fn settings_fields(
         ui,
         "shape-approximation",
         "Geometry approximation",
-        "The geometry approximation bound protects source material and holes. It does not specify physical print accuracy.",
+        "The geometry approximation bound protects source material and holes.",
     );
     ui.separator();
     ui::group(ui, "Construction goals");

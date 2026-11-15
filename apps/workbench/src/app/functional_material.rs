@@ -238,14 +238,12 @@ impl Workbench {
 
     pub(super) fn functional_material_ui(&mut self, ui: &mut egui::Ui, writable: bool) {
         ui::group(ui, "Material region");
-        ui.weak(
-            "One full face or localized pad/band on native rectangular stock. Physical retention remains unqualified.",
-        );
+        ui.weak("One full face or localized pad/band on native rectangular stock.");
         ui::help(
             ui,
             "functional-region-scope",
-            "Scope and qualification",
-            "Requires one upright rectangular native part, a full-height axis-aligned source wall and no optical construction. A localized patch selects source face U and source Z intervals within that wall; full face remains the default. The engine independently admits the geometry, complete keys and end collars. The functional region and required base root, landing and cover zones remain solid; other base interior inherits the recipe density. Software replay does not establish adhesion, physical strength or printability.",
+            "Scope",
+            "Requires one upright rectangular native part, a full-height axis-aligned source wall and no optical construction. A localized patch selects source face U and source Z intervals within that wall; full face remains the default. The engine independently admits the geometry, complete keys and end collars. The functional region and required base root, landing and cover zones remain solid; other base interior inherits the recipe density.",
         );
         let face = self.functional_face();
         let extent = face.as_ref().ok().and_then(|face| {

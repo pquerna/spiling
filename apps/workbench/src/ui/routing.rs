@@ -52,7 +52,6 @@ pub fn routed_material_fields(
                         "Cooling · {}",
                         selected.setup.cooling_configuration_id
                     ));
-                    ui.weak("Declared process · not physical calibration");
                 });
             }
         });

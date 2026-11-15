@@ -68,7 +68,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; process regions and finishes are currently excluded.");
                     ui.selectable_value(&mut pattern, 2, "Cathedral")
-                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes or process modifiers. Strength and physical printability are unqualified.");
+                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes or process modifiers.");
                 });
             if pattern != original {
                 select_infill(&mut intent.recipe, match pattern {

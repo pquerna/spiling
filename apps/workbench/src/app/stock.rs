@@ -104,7 +104,7 @@ impl StockUi {
             ui,
             "stock-estimates",
             "Reference estimates",
-            "Single colors use declared D65 color differences. Layered recipes use the existing Prusa v7 RGB reference model over this finite patch. HueForge TD is retained but not modelled here. Backing optics, physical calibration and machine readiness are unqualified. Missing process profiles do not block comparison; manufacturing independently admits actual use. Outside-goal results remain selectable.",
+            "Single colors use declared D65 color differences. Layered recipes use the existing Prusa v7 RGB reference model over this finite patch. HueForge TD is retained but not modelled here. Missing process profiles do not block comparison; manufacturing independently admits actual use. Outside-goal results remain selectable.",
         );
     }
     fn details(&mut self, ui: &mut egui::Ui, report: &StockMatchReport, editable: bool) {

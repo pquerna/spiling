@@ -161,7 +161,7 @@ pub fn seam_review(
         ui,
         "seam-review-help",
         "Decoded wall starts",
-        "Read-only markers come only from fresh validated actual-program replay: a path-entry travel, optionally followed by stationary unretraction at the same layer/tool/position, then a contiguous Wall-associated deposited run that closes at exactly the same command XYZ. Variable widths and Wall-owned Bridge strokes can belong to that run. Travel, pressure within a run, tool epochs and association changes break it. A marker appears when playback reaches its first deposit; closure is established from the complete decoded run. Event ordinals are zero-based, program lines are one-based. Dim context layers never contribute markers or counts. Replay does not identify source faces, occurrences, wall depth or adjacency. These are not physical seam or sealing measurements.",
+        "Read-only markers come only from fresh validated actual-program replay: a path-entry travel, optionally followed by stationary unretraction at the same layer/tool/position, then a contiguous Wall-associated deposited run that closes at exactly the same command XYZ. Variable widths and Wall-owned Bridge strokes can belong to that run. Travel, pressure within a run, tool epochs and association changes break it. A marker appears when playback reaches its first deposit; closure is established from the complete decoded run. Event ordinals are zero-based, program lines are one-based. Dim context layers never contribute markers or counts. Replay does not identify source faces, occurrences, wall depth or adjacency.",
     );
 }
 

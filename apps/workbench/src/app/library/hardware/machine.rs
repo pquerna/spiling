@@ -274,7 +274,7 @@ impl Workbench {
                 ui,
                 "installed-settings",
                 "Installed setup",
-                "Setups are derived from machine facts: prime line, park, envelope and deposition limits follow the bed and nozzle. Each fact records its source. These are declarations, not physical printer qualification. Existing projects retain their captured setup until Apply.",
+                "Setups are derived from machine facts: prime line, park, envelope and deposition limits follow the bed and nozzle. Each fact records its source. Existing projects retain their captured setup until Apply.",
             );
             return;
         }
@@ -335,8 +335,7 @@ impl Workbench {
                         id: setup.id.clone(),
                         vendor: draft.identity.manufacturer.clone(),
                         model: draft.identity.model.clone(),
-                        source: "Operator-declared software settings; no physical qualification"
-                            .into(),
+                        source: "Operator-declared settings".into(),
                         mounting_interface: self.library.hardware.mounting_interface.trim().into(),
                         declared_volume_mm: None,
                     };

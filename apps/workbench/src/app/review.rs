@@ -82,18 +82,26 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     }
     if let Some(time) = &report.job_time {
         ui.collapsing("Job estimate", |ui| {
-            crate::ui::resolved_value(ui, "Modeled work", &format!("{:.1} min", time.modeled_seconds() / 60.0), "Declared model");
+            crate::ui::resolved_value(
+                ui,
+                "Modeled work",
+                &format!("{:.1} min", time.modeled_seconds() / 60.0),
+                "Declared model",
+            );
             crate::ui::resolved_value(ui, "Startup", "Unknown", "Homing and heating");
             ui.collapsing("Timing details", |ui| {
                 for (label, seconds) in [
                     ("Model deposition", time.model_deposition_seconds),
                     ("Auxiliary deposition", time.auxiliary_deposition_seconds),
-                    ("Travel", time.travel_seconds), ("Feeder", time.feeder_seconds),
+                    ("Travel", time.travel_seconds),
+                    ("Feeder", time.feeder_seconds),
                     ("Tool activation", time.activation_seconds),
                     ("Command overhead", time.command_overhead_seconds),
-                ] { crate::ui::resolved_value(ui, label, &format!("{seconds:.1} s"), ""); }
+                ] {
+                    crate::ui::resolved_value(ui, label, &format!("{seconds:.1} s"), "");
+                }
                 ui.label(format!("Model {} · {}", time.model.id, time.model.revision));
-                ui.weak("Rest at each command · declared acceleration and activation delays · physical timing unqualified");
+                ui.weak("Rest at each command · declared acceleration and activation delays");
             });
         });
     } else if report.routing.is_some() {
@@ -121,7 +129,7 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
         if n.evidence == PreflightEvidence::Certified {
             ui.label(format!("Disjoint-source layers {}; invariant source-union layers {}; native interface-complex layers {}; original-occurrence critical slabs {}",c.disjoint_source_layer_count,c.invariant_source_union_layer_count,c.native_interface_complex_layer_count,c.owned_critical_slab_count));
         }
-        ui.weak("Sampled geometry is not a native certificate. Actual strokes establish deposition anchors; no swept-tool or physical collision qualification.");
+        ui.weak("Sampled geometry is not a native certificate. Actual strokes establish deposition anchors.");
     });
     ui.collapsing("Surface resolution advisories",|ui|{
         let r=&summary.surface_resolution;
@@ -130,21 +138,45 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
         ui.weak("Sampled nominal-bead advice is separate from independent emitted-program verification and physical image fidelity.");
     });
     if !review.capture.provenance.surface_color.is_empty() {
-        ui.collapsing("Constructed surface exposure",|ui|{
-        for face in &review.capture.provenance.surface_color{
-            ui.label(format!("Construction {} · {} · {:.3} × {:.3} mm · {} replay-qualified intervals",face.construction_index,face.face_id.as_str(),face.realized_patch.width_mm,face.realized_patch.height_mm,face.interval_count));
-            ui.label(format!("Nominal side exposure: tool 0 {:.2}% / tool 1 {:.2}%",face.fractions_by_tool[0]*100.0,face.fractions_by_tool[1]*100.0));
-            if let Some(reference)=&face.reference{
-                ui.weak("Captured reference estimate; backing optics are unmodelled. No calibrated or physical color qualification.");
-                ui.label(if reference.patch_matches_request{"Requested patch matches"}else{"Realized patch differs from requested study"});
-                if !reference.pose_matches_application{ui.label("Occurrence pose changed since application");}
-                ui.push_id(("surface-reference",face.construction_index,face.face_id.as_str()), |ui| {
-                    assessment(ui,"Requested cycle",&reference.requested);
-                    assessment(ui,"Realized exposure",&reference.realized);
-                });
+        ui.collapsing("Constructed surface exposure", |ui| {
+            for face in &review.capture.provenance.surface_color {
+                ui.label(format!(
+                    "Construction {} · {} · {:.3} × {:.3} mm · {} replay-qualified intervals",
+                    face.construction_index,
+                    face.face_id.as_str(),
+                    face.realized_patch.width_mm,
+                    face.realized_patch.height_mm,
+                    face.interval_count
+                ));
+                ui.label(format!(
+                    "Nominal side exposure: tool 0 {:.2}% / tool 1 {:.2}%",
+                    face.fractions_by_tool[0] * 100.0,
+                    face.fractions_by_tool[1] * 100.0
+                ));
+                if let Some(reference) = &face.reference {
+                    ui.weak("Captured reference estimate; backing optics are unmodelled.");
+                    ui.label(if reference.patch_matches_request {
+                        "Requested patch matches"
+                    } else {
+                        "Realized patch differs from requested study"
+                    });
+                    if !reference.pose_matches_application {
+                        ui.label("Occurrence pose changed since application");
+                    }
+                    ui.push_id(
+                        (
+                            "surface-reference",
+                            face.construction_index,
+                            face.face_id.as_str(),
+                        ),
+                        |ui| {
+                            assessment(ui, "Requested cycle", &reference.requested);
+                            assessment(ui, "Realized exposure", &reference.realized);
+                        },
+                    );
+                }
             }
-        }
-    });
+        });
     }
 }
 

@@ -418,7 +418,7 @@ impl Workbench {
                         ui.label(format!("Retraction: {:.3} mm at {:.3} mm/s · minimum travel {:.3} mm · Z hop {:.3} mm", distance_mm, speed_mm_s, minimum_travel_mm, z_hop_mm));
                     }
                 }
-                ui.weak("These are applied engine values. Draft overrides take effect only after Apply succeeds. Declarations and replay are not physical calibration.");
+                ui.weak("These are applied engine values. Draft overrides take effect only after Apply succeeds.");
             });
         }
     }

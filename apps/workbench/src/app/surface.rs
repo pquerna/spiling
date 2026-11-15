@@ -361,7 +361,7 @@ impl Workbench {
             ui.spinner();
         }
         if let Some((_, texture)) = &s.texture {
-            ui.label("Canonical height nodes · display only; no physical fidelity claim");
+            ui.label("Canonical height nodes · display only");
             let size = texture.size_vec2();
             ui.image((texture.id(), size * (220.0 / size.max_elem())));
         }
