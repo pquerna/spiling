@@ -11,7 +11,7 @@ use solidcore::{
 };
 use spiling_contracts::geometry::GeometryErrorCode;
 
-fn fan_source(height: f64) -> (Surface, FaceMesh, Inventory) {
+fn fan_source(height: f64) -> (Surface, FaceCandidate, Inventory) {
     let controls = [0.0, 1.0]
         .into_iter()
         .map(|horizontal| {
@@ -34,7 +34,7 @@ fn fan_source(height: f64) -> (Surface, FaceMesh, Inventory) {
     let mut brep = Brep::new();
     let shell = brep.add_shell_record(Shell::default()).unwrap();
     let face = brep.add_face_record(Face::new(shell)).unwrap();
-    let mesh = FaceMesh {
+    let mesh = FaceCandidate {
         face,
         uvs: vec![Point2::new(0.0, 0.0), Point2::new(0.5, height)],
         positions: vec![
@@ -44,16 +44,7 @@ fn fan_source(height: f64) -> (Surface, FaceMesh, Inventory) {
         normals: vec![Vec3::new(1.0, 0.0, 0.0); 2],
         shared: vec![Some(7), None],
         triangles: Vec::new(),
-        gaps: vec![0.0; 2],
-        inverted_edgeuses: Vec::new(),
-        unconverged: false,
-        split_boundary: false,
-        ear_clipped: false,
-        deviation: None,
-        triangles_over: 0,
-        backend: None,
-        backend_failed: false,
-        backend_deviation: None,
+        lenient: false,
     };
     let inventory = Inventory {
         junctions: vec![Junction {

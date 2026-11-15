@@ -554,10 +554,9 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
         .native_face;
     let original = definition.original_source().face(face_id).unwrap();
     assert_eq!(original.carrier_id.0, 822);
-    let exchange =
-        brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
+    let exchange = solidcore_step::p21::parse(std::str::from_utf8(&source).unwrap()).unwrap();
     let expected =
-        solidcraft_step::read::Reader::new(&exchange, solidcraft_step::read::Units::default())
+        solidcore_step::read::Reader::new(&exchange, solidcore_step::read::Units::default())
             .surface(822)
             .unwrap();
     assert_eq!(
@@ -565,7 +564,7 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
         expected.as_ref(),
         "literal original coefficients and closure declaration"
     );
-    let solidcraft_step::geom::Surface::BSpline(spline) = expected.as_ref() else {
+    let solidcore_step::geom::Surface::BSpline(spline) = expected.as_ref() else {
         panic!("original rational spline carrier")
     };
     let native = definition
@@ -585,14 +584,39 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
             .flat_map(|(&k, &m)| std::iter::repeat_n(k, m))
             .collect()
     };
-    assert_eq!(
-        native_spline.u_knots(),
-        expand(&spline.u_knots, &spline.u_multiplicities)
-    );
-    assert_eq!(
-        native_spline.v_knots(),
-        expand(&spline.v_knots, &spline.v_multiplicities)
-    );
+    // The reader clamps the original's inactive end slots; every active basis function, and so
+    // the surface on its whole active domain, is the original's (the exact theorem the old
+    // decoder used for the same closure).
+    for (native, original, multiplicities, degree, count) in [
+        (
+            native_spline.u_knots(),
+            &spline.u_knots,
+            &spline.u_multiplicities,
+            native_spline.p(),
+            native_spline.n() + 1,
+        ),
+        (
+            native_spline.v_knots(),
+            &spline.v_knots,
+            &spline.v_multiplicities,
+            native_spline.q(),
+            native_spline.m() + 1,
+        ),
+    ] {
+        let original = expand(original, multiplicities);
+        // Only the outermost slots differ, and the active ends have multiplicity `degree`.
+        let last = original.len() - 1;
+        let clamped = native.len() == original.len()
+            && native[1..last] == original[1..last]
+            && native[0] == native[degree]
+            && native[last] == native[count]
+            && original[1..=degree].iter().all(|k| *k == original[degree])
+            && original[count..last].iter().all(|k| *k == original[count]);
+        assert!(
+            native == original.as_slice() || clamped,
+            "{native:?} vs {original:?}"
+        );
+    }
     let association = crate::analysis::source_restriction::carrier::SourceCarrierAssociation::new(
         &original.carrier,
         native,
@@ -621,8 +645,8 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
         assert_eq!(use_.curve_id.0, 1309);
         assert!(matches!(
             use_.spatial_curve.as_ref(),
-            solidcraft_step::geom::Curve::SurfaceCurve {
-                kind: solidcraft_step::geom::SurfaceCurveKind::Seam,
+            solidcore_step::geom::Curve::SurfaceCurve {
+                kind: solidcore_step::geom::SurfaceCurveKind::Seam,
                 ..
             }
         ));
@@ -634,197 +658,6 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
             [1313, 1320]
         );
         assert!(use_.pcurves.iter().all(|p| p.carrier_id.0 == 822));
-    }
-}
-
-#[test]
-fn closed_spline_decoder_preserves_active_domain_and_distinct_physical_seam_branches() {
-    use solidcraft_geom::brep::{Loop, Surface};
-    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
-    let mut exchange =
-        brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
-    let carrier = exchange.get(822).unwrap().clone();
-    let root = *exchange
-        .entities
-        .iter()
-        .find(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP")
-        .unwrap()
-        .0;
-    let mut solid = closed_spline_decode::read_solid(
-        &mut exchange,
-        root,
-        solidcraft_step::units::Context::default(),
-        MAX_QUERY_PROOF_BYTES,
-        &cancelled(),
-    )
-    .unwrap();
-    assert_eq!(
-        exchange.get(822),
-        Some(&carrier),
-        "source exchange restored before capture"
-    );
-    let reader =
-        solidcraft_step::read::Reader::new(&exchange, solidcraft_step::read::Units::default());
-    let source_edge = exchange.get(1306).unwrap().params();
-    let seam_vertices = [1, 2].map(|i| {
-        let vertex = exchange.get(source_edge[i].as_ref_id().unwrap()).unwrap();
-        reader
-            .point(vertex.params()[1].as_ref_id().unwrap())
-            .unwrap()
-    });
-    let slot = solid.face_origin.iter().position(|&id| id == 1301).unwrap();
-    let face = &solid.brep.faces[slot];
-    let Surface::RationalSpline {
-        u_knots,
-        v_knots,
-        homogeneous,
-    } = &face.surface
-    else {
-        panic!("original rational carrier type")
-    };
-    assert_eq!(
-        face.domain,
-        [
-            [u_knots[2], u_knots[homogeneous.len()]],
-            [v_knots[1], v_knots[homogeneous[0].len()]]
-        ]
-    );
-    assert!(
-        u_knots[0] < face.domain[0][0] && *u_knots.last().unwrap() > face.domain[0][1],
-        "native retains exterior ghost support, not decoder clamping"
-    );
-    let mut physical_seam = None;
-    for (edge, record) in solid.brep.edges.iter().enumerate() {
-        let [a, z] = record.uses.as_slice() else {
-            continue;
-        };
-        if a.face as usize != slot || z.face as usize != slot || a.r#loop != z.r#loop {
-            continue;
-        }
-        let Loop::Edges { edges } = &face.loops[a.r#loop as usize] else {
-            continue;
-        };
-        let (a, z) = (&edges[a.position as usize], &edges[z.position as usize]);
-        if a.forward != z.forward && a.pcurve != z.pcurve {
-            assert_ne!(
-                record.vertices[0], record.vertices[1],
-                "positive-length seam, not a closed rim"
-            );
-            let endpoints = record
-                .vertices
-                .map(|v| solid.brep.vertices[v as usize].point);
-            assert!(
-                endpoints == seam_vertices || endpoints == [seam_vertices[1], seam_vertices[0]],
-                "the native seam retains the original shared physical vertices"
-            );
-            assert!(
-                physical_seam.replace(edge).is_none(),
-                "no fabricated additional seam on the original face"
-            );
-        }
-    }
-    let seam = physical_seam.expect("real opposite seam uses retain distinct parameter branches");
-    brep_data_bridge::strip_lamina_spurs(&mut solid.brep, MAX_QUERY_PROOF_BYTES, &cancelled())
-        .unwrap();
-    assert_eq!(
-        solid.brep.edges[seam].uses.len(),
-        2,
-        "real seam must not be stripped as a null spur"
-    );
-    solid.brep.validate().unwrap();
-    solid.brep.check_geometry().unwrap();
-}
-
-#[test]
-fn invalid_closed_spline_declarations_cannot_supply_decoder_periodicity() {
-    use solidcraft_step::p21::Param;
-    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
-    for defect in [
-        "not declared closed",
-        "unequal endpoint position",
-        "unequal endpoint weight",
-        "lesser endpoint multiplicity",
-    ] {
-        let mut exchange =
-            brep_data_bridge::parse_step_exchange(std::str::from_utf8(&source).unwrap()).unwrap();
-        match defect {
-            "not declared closed" => {
-                let record = exchange
-                    .entities
-                    .get_mut(&822)
-                    .unwrap()
-                    .records
-                    .iter_mut()
-                    .find(|r| r.name == "B_SPLINE_SURFACE")
-                    .unwrap();
-                record.params[4] = Param::Enum("F".into());
-            }
-            "unequal endpoint position" => {
-                let record = &mut exchange.entities.get_mut(&835).unwrap().records[0];
-                let Param::List(p) = &mut record.params[1] else {
-                    panic!("original point")
-                };
-                p[0] = Param::Real(16.0);
-            }
-            "unequal endpoint weight" => {
-                let record = exchange
-                    .entities
-                    .get_mut(&822)
-                    .unwrap()
-                    .records
-                    .iter_mut()
-                    .find(|r| r.name == "RATIONAL_B_SPLINE_SURFACE")
-                    .unwrap();
-                let Param::List(rows) = &mut record.params[0] else {
-                    panic!("original weights")
-                };
-                let Param::List(last) = rows.last_mut().unwrap() else {
-                    panic!("original weight row")
-                };
-                last[0] = Param::Real(0.5);
-            }
-            "lesser endpoint multiplicity" => {
-                let record = exchange
-                    .entities
-                    .get_mut(&822)
-                    .unwrap()
-                    .records
-                    .iter_mut()
-                    .find(|r| r.name == "B_SPLINE_SURFACE_WITH_KNOTS")
-                    .unwrap();
-                let Param::List(m) = &mut record.params[0] else {
-                    panic!("original multiplicities")
-                };
-                // Same vector length/degree/control net, but clamping the
-                // ghost now changes active basis functions: outside the theorem.
-                m[1] = Param::Int(1);
-                m[2] = Param::Int(3);
-            }
-            _ => unreachable!(),
-        }
-        let root = *exchange
-            .entities
-            .iter()
-            .find(|(_, e)| e.name() == "MANIFOLD_SOLID_BREP")
-            .unwrap()
-            .0;
-        let original = exchange.get(822).unwrap().clone();
-        assert!(
-            closed_spline_decode::read_solid(
-                &mut exchange,
-                root,
-                solidcraft_step::units::Context::default(),
-                MAX_QUERY_PROOF_BYTES,
-                &cancelled(),
-            )
-            .is_err(),
-            "{defect}: no periodic authority from an unqualified declaration"
-        );
-        assert_eq!(
-            exchange.get(822),
-            Some(&original),
-            "{defect}: original carrier must survive even refusal"
-        );
     }
 }
 
@@ -881,17 +714,33 @@ fn frozen_original_pockets_preserve_source_identity_and_mixed_floor_carriers() {
 
 #[test]
 fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() {
+    // A LINE moved 123 mm off its edge's vertices is a different edge: refused, never read as the
+    // chord between the vertices.
     let original = fixture("box-mm.step");
-    let source = corpus::wrong_spatial_line(
-        std::str::from_utf8(&original).unwrap(),
-        "wrong-spatial-line.step",
-    );
+    let text = std::str::from_utf8(&original).unwrap();
+    let source = corpus::wrong_spatial_line(text, "wrong-spatial-line.step");
     let failure = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
     assert_eq!(
         failure.code,
         GeometryErrorCode::InvalidGeometry,
         "{failure:?}"
     );
+    assert!(failure.message.contains("off its LINE"), "{failure:?}");
+    // Within the import tolerance (the box declares 1e-6 mm; 5e-8 mm off) the LINE
+    // is the edge's: accepted, and whatever the reader read another way is reported.
+    let near = text.replace(
+        "#112 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));",
+        "#112 = CARTESIAN_POINT('', (0.0, 5.0E-8, 0.0));",
+    );
+    assert_ne!(near, text, "the fixture's first LINE point");
+    let definition = from_step_bytes_with_cancel(near.as_bytes(), &cancelled()).unwrap();
+    for finding in &definition.provenance.findings {
+        assert_eq!(
+            finding.code,
+            spiling_contracts::geometry::ImportFindingCode::SourceReading
+        );
+        assert!(!finding.detail.is_empty());
+    }
 }
 
 #[test]
@@ -1210,71 +1059,6 @@ fn housing_null_spur_normalization_preserves_original_edges_and_native_ownership
 }
 
 #[test]
-fn exact_normalization_retains_the_original_periodic_cylinder_seam_without_scratch() {
-    use solidcraft_geom::brep::Loop;
-    let text =
-        include_str!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step");
-    let exchange = brep_data_bridge::parse_step_exchange(text).unwrap();
-    let mut solids = solidcraft_step::topology::read_solids(&exchange);
-    assert!(solids.failures.is_empty());
-    let mut solid = solids.solids.pop().unwrap();
-    let mut seam = None;
-    for (edge_id, edge) in solid.brep.edges.iter().enumerate() {
-        let [a, z] = edge.uses.as_slice() else {
-            continue;
-        };
-        if a.face != z.face || a.r#loop != z.r#loop {
-            continue;
-        }
-        let Loop::Edges { edges } = &solid.brep.faces[a.face as usize].loops[a.r#loop as usize]
-        else {
-            panic!("seam must have edge-loop owners")
-        };
-        let (a, z) = (&edges[a.position as usize], &edges[z.position as usize]);
-        if a.forward != z.forward && a.pcurve != z.pcurve {
-            seam = Some(edge_id);
-        }
-    }
-    let seam = seam.expect("independent cylinder has a real two-branch periodic seam");
-    let before = solid.brep.clone();
-    let buffers = (
-        solid.brep.faces.as_ptr(),
-        solid.brep.edges.as_ptr(),
-        solid.brep.vertices.as_ptr(),
-    );
-    // Zero scratch is enough only because this is not a null-spur candidate.
-    brep_data_bridge::strip_lamina_spurs(&mut solid.brep, 0, &cancelled()).unwrap();
-    assert_eq!(solid.brep, before);
-    assert_eq!(
-        buffers,
-        (
-            solid.brep.faces.as_ptr(),
-            solid.brep.edges.as_ptr(),
-            solid.brep.vertices.as_ptr(),
-        )
-    );
-    solid.brep.validate().unwrap();
-    let cancel = cancelled();
-    let ast = step_p21::parser::parse(text).unwrap();
-    let entities = Entities::new(&ast.data[0], &cancel).unwrap();
-    let mut reader = source::reader(&exchange, 1.0, 1.0);
-    let carriers =
-        source::face_carriers(&entities, &mut reader, &solid.face_origin, &cancel).unwrap();
-    let mut kernel = crate::kernel::make_kernel_context();
-    let native =
-        brep_data_bridge::from_schema4_brep(&mut kernel, &solid.brep, &carriers, false).unwrap();
-    assert!(solidcore::topology::brep::p2::is_manifold_solid(&native).unwrap());
-    let source = &solid.brep.edges[seam];
-    assert_ne!(
-        source.vertices[0], source.vertices[1],
-        "physical seam has positive height"
-    );
-    let a = solid.brep.vertices[source.vertices[0] as usize].point;
-    let z = solid.brep.vertices[source.vertices[1] as usize].point;
-    assert!((z[2] - a[2]).abs() > 7.0);
-}
-
-#[test]
 fn original_implicit_carrier_edges_import_display_bound_and_section_without_branch_reselection() {
     use crate::{AnalysisPolicy, BoundsPolicy, PlaneFrameMm, SlabRequest};
     use spiling_contracts::geometry::RigidPoseMm;
@@ -1446,7 +1230,7 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
     use crate::analysis::test_source;
     use crate::kernel::source_operand::original_circular_extrusion;
     use solidcore::topology::edgeuse::p1 as edgeuse;
-    use solidcraft_step::geom::Surface as OriginalSurface;
+    use solidcore_step::geom::Surface as OriginalSurface;
 
     for rotated in [false, true] {
         let mut bore_axial_domains = None;
@@ -1469,6 +1253,7 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
             let mut work = GeometryWorkBudget::new(1_000_000);
             let mut circular_faces = 0;
             let mut axial_domains = Vec::new();
+            let mut bore_turn = 0.0;
             for original in &definition.original_source().faces {
                 let Some(extrusion) = original_circular_extrusion(&original.carrier) else {
                     continue;
@@ -1480,32 +1265,74 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
                     definition.faces()[ordinal].geometry.family,
                     SurfaceFamily::LinearExtrusion
                 );
-                let map = definition.face_surface_maps()[ordinal];
-                let native_uv = map.step_to_core([0.37, 4.0 / magnitude]);
-                assert!((native_uv[0] - 0.37_f64.to_degrees()).abs() < 1e-12);
-                assert_eq!(native_uv[1], 4.0);
+                // In the record chart: the native face lies on the source extrusion (every point at
+                // its radius from its axis), turns a whole turn about it over its form, spans the
+                // eight-mm height, and its trims land on their spatial edges.
                 let face = native.face(original.native_face).unwrap();
-                let lo = face.uv_domain.min();
-                let hi = face.uv_domain.max();
-                assert_eq!([lo.x, hi.x], [0.0, 360.0]);
-                assert!(lo.y <= 0.0 && hi.y >= 8.0);
-                axial_domains.push([lo.y, hi.y]);
-                let position = crate::parametric::surface_position_enclosure(
-                    face.surface.as_ref().unwrap(),
-                    [[native_uv[0]; 2], [native_uv[1]; 2]],
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap();
-                let expected = extrusion.position.at(
-                    extrusion.radius_mm * 0.37_f64.cos(),
-                    extrusion.radius_mm * 0.37_f64.sin(),
-                    4.0,
-                );
-                for axis in 0..3 {
-                    assert!(position[axis].lo <= expected[axis]);
-                    assert!(position[axis].hi >= expected[axis]);
+                let surface = face.surface.as_ref().unwrap();
+                let frame = extrusion.position;
+                let unit = |v: [f64; 3]| {
+                    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    v.map(|c| c / l)
+                };
+                let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let z = unit(frame.axis);
+                let r = frame.ref_direction;
+                let x = unit([
+                    r[0] - dot(r, z) * z[0],
+                    r[1] - dot(r, z) * z[1],
+                    r[2] - dot(r, z) * z[2],
+                ]);
+                let y = [
+                    z[1] * x[2] - z[2] * x[1],
+                    z[2] * x[0] - z[0] * x[2],
+                    z[0] * x[1] - z[1] * x[0],
+                ];
+                let local = |p: [f64; 3]| {
+                    let d = [
+                        p[0] - frame.origin[0],
+                        p[1] - frame.origin[1],
+                        p[2] - frame.origin[2],
+                    ];
+                    [dot(d, x), dot(d, y), dot(d, z)]
+                };
+                let natural = surface.natural_uv_domain_if_built();
+                let (lo, hi) = (natural.min(), natural.max());
+                let mut heights = [f64::INFINITY, f64::NEG_INFINITY];
+                for a in 0..=8 {
+                    for b in 0..=4 {
+                        let uv = [
+                            lo.x + (hi.x - lo.x) * a as f64 / 8.0,
+                            lo.y + (hi.y - lo.y) * b as f64 / 4.0,
+                        ];
+                        let position = crate::parametric::surface_position_enclosure(
+                            surface,
+                            [[uv[0]; 2], [uv[1]; 2]],
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap();
+                        let q = local(position.map(|i| i.mid()));
+                        assert!(
+                            (q[0].hypot(q[1]) - extrusion.radius_mm).abs() <= 1e-9,
+                            "{q:?}"
+                        );
+                        heights = [heights[0].min(q[2]), heights[1].max(q[2])];
+                    }
                 }
+                assert!(
+                    heights[0] <= 1e-9 && heights[1] >= 8.0 - 1e-9,
+                    "{heights:?}"
+                );
+                axial_domains.push(heights.map(|h| (h * 1e9).round() / 1e9));
+                let chart = crate::parametric::form_chart::FormChart::of(surface)
+                    .expect("the bore's cylinder chart");
+                let turned = chart.sweep_turn().abs();
+                assert!(
+                    turned > 0.0 && turned <= std::f64::consts::TAU + 1e-9,
+                    "{turned}"
+                );
+                bore_turn += turned;
                 let mut checked_uv = 0;
                 for (id, eu) in native.edgeuses().iter() {
                     if edgeuse::face(native, id).unwrap() != Some(original.native_face) {
@@ -1517,14 +1344,16 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
                         edge.interval.min() + 0.37 * (edge.interval.max() - edge.interval.min());
                     let uv = uv.evaluate_point(&k, t).unwrap();
                     let spatial = edge.curve.as_ref().unwrap().evaluate_point(&k, t).unwrap();
-                    let angle = uv.x.to_radians();
-                    let projected = extrusion.position.at(
-                        extrusion.radius_mm * angle.cos(),
-                        extrusion.radius_mm * angle.sin(),
-                        uv.y,
-                    );
-                    let residual = (projected[0] - spatial.x)
-                        .hypot((projected[1] - spatial.y).hypot(projected[2] - spatial.z));
+                    let on = crate::parametric::surface_position_enclosure(
+                        surface,
+                        [[uv.x; 2], [uv.y; 2]],
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap()
+                    .map(|i| i.mid());
+                    let residual =
+                        (on[0] - spatial.x).hypot((on[1] - spatial.y).hypot(on[2] - spatial.z));
                     assert!(residual <= native.tolerance());
                     checked_uv += 1;
                 }
@@ -1534,6 +1363,10 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
                 );
             }
             assert!(circular_faces > 0, "the actual original bore must survive");
+            assert!(
+                (bore_turn - std::f64::consts::TAU).abs() <= 1e-9,
+                "the bore's faces turn {bore_turn}"
+            );
             if let Some(expected) = &bore_axial_domains {
                 assert_eq!(
                     &axial_domains, expected,
@@ -1549,7 +1382,7 @@ fn original_circular_extrusion_preserves_angular_law_axial_mm_and_native_uv() {
 #[test]
 fn negative_axis_circular_extrusion_does_not_acquire_positive_gauge_authority() {
     use crate::analysis::test_source;
-    use solidcraft_step::geom::{Curve, Surface};
+    use solidcore_step::geom::{Curve, Surface};
 
     let mut source = test_source::bezier_extrusion(true, false);
     let mut changed = 0;
@@ -2102,4 +1935,34 @@ fn a_spindle_torus_inner_sheet_is_refused_by_name() {
     let source = torus_cusp_step(5.0, 10.0, Some(false), false);
     let error = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
     assert!(error.message.contains("lemon"), "{error:?}");
+}
+/// Every reading the reader makes is reported: an edge written against its `same_sense` is read
+/// by its vertices, and the definition carries that as a source-reading finding with its count.
+#[test]
+fn a_reader_reading_of_the_source_is_reported_as_a_finding() {
+    let original = fixture("box-mm.step");
+    let text = std::str::from_utf8(&original).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.contains("EDGE_CURVE(") && l.trim_end().ends_with(".T.);"))
+        .unwrap();
+    let flipped = text.replacen(line, &line.replace(".T.);", ".F.);"), 1);
+    assert_ne!(flipped, text);
+    let definition = from_step_bytes_with_cancel(flipped.as_bytes(), &cancelled()).unwrap();
+    let findings = &definition.provenance.findings;
+    assert!(
+        findings.iter().any(|f| f.code
+            == spiling_contracts::geometry::ImportFindingCode::SourceReading
+            && f.count == 1
+            && f.detail.contains("same_sense")),
+        "{findings:?}"
+    );
+    assert!(definition.provenance.validate().is_ok());
+    assert!(
+        from_step_bytes_with_cancel(&original, &cancelled())
+            .unwrap()
+            .provenance
+            .findings
+            .is_empty()
+    );
 }

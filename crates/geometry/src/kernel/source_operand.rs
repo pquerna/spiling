@@ -17,7 +17,7 @@ use crate::parametric::{
     CurveEnclosure, CurveThirdEnclosure, Interval, PreparedValidatedCurve, sin_cos_interval,
 };
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::{
+use solidcore_step::geom::{
     self as source, Associated, Curve, PreferredRep, Surface, Trim, TrimPreference,
 };
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -454,9 +454,9 @@ impl<'a> Inventory<'a> {
                     self.collect_curve(curve_3d, depth + 1, work, cancel)?;
                 }
             }
-            Curve::Hyperbola { .. } | Curve::OffsetCurve3d { .. } => {
+            Curve::Hyperbola { .. } | Curve::OffsetCurve3d { .. } | Curve::Replica { .. } => {
                 return Err(unsupported(
-                    "original hyperbolic/offset curve proof operand is not implemented",
+                    "original hyperbolic/offset/replica curve proof operand is not implemented",
                 ));
             }
             Curve::Polyline(points) => {

@@ -1114,6 +1114,11 @@ pub struct SourceProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub source_solid: Option<SourceSolidId>,
+    /// Every reading the source's reader made of it (a STEP construct read another way, with
+    /// its count), reported, never silent. Empty for a source read as written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ImportFinding>>", optional)]
+    pub findings: Vec<ImportFinding>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1126,6 +1131,8 @@ struct RawProvenance {
     uncertainty_mm: Option<f64>,
     #[serde(default)]
     source_solid: Option<SourceSolidId>,
+    #[serde(default)]
+    findings: Vec<ImportFinding>,
 }
 impl TryFrom<RawProvenance> for SourceProvenance {
     type Error = GeometryError;
@@ -1137,6 +1144,7 @@ impl TryFrom<RawProvenance> for SourceProvenance {
             source_unit: raw.source_unit,
             uncertainty_mm: raw.uncertainty_mm,
             source_solid: raw.source_solid,
+            findings: raw.findings,
         };
         value.validate()?;
         Ok(value)
@@ -1193,6 +1201,8 @@ pub enum ImportFindingCode {
     AnalyticRecovery,
     Appearance,
     NonPrintable,
+    /// A source construct its reader read another way (the reader's own note).
+    SourceReading,
 }
 impl ImportFinding {
     pub fn validate(&self) -> Result<(), GeometryError> {
@@ -1247,6 +1257,13 @@ impl SourceProvenance {
     }
 
     pub fn validate(&self) -> Result<(), GeometryError> {
+        if self
+            .findings
+            .iter()
+            .any(|finding| finding.validate().is_err())
+        {
+            return Err(invalid("invalid source reading finding"));
+        }
         if self.normalized.as_ref().is_some_and(|n| {
             n.selector.is_empty()
                 || n.object_name.is_empty()

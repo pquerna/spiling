@@ -1782,6 +1782,38 @@ pub(crate) fn analyze_placed_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
+    // Every shape proof charges the sample reference's chord error (the critical cover three
+    // times over). A slab refused on its shape bound is re-proved on a reference sampled
+    // `REFERENCE_REFINEMENT` times finer, while that reserve is still a visible share of the
+    // policy; any other outcome, or a refusal the finer reference does not resolve, stands.
+    let mut chord = super::slab::FIRST_SAMPLE_CHORD_MM;
+    loop {
+        match analyze_placed_slab_at(source, request, query_byte_limit, chord, work, cancel) {
+            Err(failure)
+                if failure.code == GeometryErrorCode::ShapeErrorExceeded
+                    && chord * VISIBLE_RESERVE_SHARE >= request.native_shape_error_mm =>
+            {
+                chord /= REFERENCE_REFINEMENT;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// How much finer each retried sample reference is sampled.
+const REFERENCE_REFINEMENT: f64 = 16.0;
+/// A chord error times this is a visible share (about 1%, after the threefold reserve) of the
+/// shape policy; a finer reference below it cannot change a shape refusal.
+const VISIBLE_RESERVE_SHARE: f64 = 300.0;
+
+fn analyze_placed_slab_at(
+    source: &super::material_source::PreparedSolid<'_>,
+    request: &PlacedSlabRequest,
+    query_byte_limit: usize,
+    sampling_chord_error_mm: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SlabAnalysis, GeometryError> {
     (|| -> Result<_, crate::GeometryError> {
         work.charge(1, cancel)?;
         let query_byte_limit =
@@ -1847,6 +1879,7 @@ pub(crate) fn analyze_placed_slab(
             source,
             source_request,
             query_byte_limit,
+            sampling_chord_error_mm,
             work,
             cancel,
         )?;
@@ -2413,6 +2446,7 @@ pub(crate) fn section_placed_with_work(
         plane: local_plane,
         maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
         maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+        end_refinement: 0,
     };
     let mut section = source.section_for_query(&query, cancel, query_byte_limit, work)?;
     let declared_plane = plane.normalized()?;

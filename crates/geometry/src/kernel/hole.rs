@@ -133,7 +133,7 @@ impl Definition {
             }
             let id = self.face_ids()[index];
             let original = self.original_source().face(id)?;
-            let solidcraft_step::geom::Surface::Plane { position: source } =
+            let solidcore_step::geom::Surface::Plane { position: source } =
                 original.carrier.as_ref()
             else {
                 return Err(unsupported(

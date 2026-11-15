@@ -10,7 +10,7 @@ use crate::kernel::source_operand::{
 };
 use crate::parametric::{AxisSpans, CurveEvaluator, ExactAffineCurve, Interval};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::Pcurve;
+use solidcore_step::geom::Pcurve;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 

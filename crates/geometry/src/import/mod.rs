@@ -5,8 +5,6 @@
 mod source;
 
 mod ast;
-pub(crate) mod brep_data_bridge;
-mod closed_spline_decode;
 mod prepared;
 pub mod structure;
 #[cfg(test)]
@@ -56,6 +54,147 @@ fn unit_vector(v: [f64; 3]) -> Result<Vec3, GeometryError> {
     let scaled = Vec3::new(v[0] / scale, v[1] / scale, v[2] / scale);
     Ok(scaled / scaled.length())
 }
+/// Every original LINE edge curve passes through its edge's vertices within the import
+/// tolerance. The reader reads a straight edge whose vertices lie off its LINE as the segment
+/// between them, however far; that is a different edge from the one the file declares, so past
+/// the tolerance the import refuses rather than invent it.
+fn lines_through_their_vertices(
+    original: &crate::kernel::source::OriginalSourceTopology,
+    tolerance: f64,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    use solidcore_step::geom::Curve;
+    for coedge in &original.coedges {
+        check_cancel(cancel)?;
+        let mut curve = coedge.spatial_curve.as_ref();
+        for _ in 0..32 {
+            curve = match curve {
+                Curve::SurfaceCurve { curve_3d, .. } => curve_3d,
+                Curve::Trimmed { basis, .. } => basis,
+                _ => break,
+            };
+        }
+        let Curve::Line {
+            origin, direction, ..
+        } = curve
+        else {
+            continue;
+        };
+        let length = direction.iter().map(|d| d * d).sum::<f64>().sqrt();
+        if !(length.is_finite() && length > 0.0) {
+            return Err(invalid("STEP LINE without a direction"));
+        }
+        let d = direction.map(|c| c / length);
+        for p in coedge.vertex_points_mm {
+            let w = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+            let along = w[0] * d[0] + w[1] * d[1] + w[2] * d[2];
+            let off = [
+                w[0] - along * d[0],
+                w[1] - along * d[1],
+                w[2] - along * d[2],
+            ];
+            let gap = off.iter().map(|c| c * c).sum::<f64>().sqrt();
+            if gap.is_nan() || gap > tolerance {
+                return Err(invalid(&format!(
+                    "STEP edge #{}: a vertex lies {gap:.6} mm off its LINE, past the {tolerance} mm import tolerance",
+                    coedge.edge_curve_id.0
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Each note of the STEP reader (a construct it read another way: a twin edge made one, a seam
+/// added, a cut laid again, ...) as a reported finding with its count, never silent.
+fn reader_findings(notes: &[String]) -> Vec<spiling_contracts::geometry::ImportFinding> {
+    use spiling_contracts::geometry::{
+        ImportFinding, ImportFindingCode, ImportFindingKind, MAX_DISPLAY_LABEL_BYTES,
+    };
+    let limit = MAX_DISPLAY_LABEL_BYTES as usize;
+    notes
+        .iter()
+        .map(|note| {
+            let count = note
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(1);
+            let mut end = note.len().min(limit);
+            while !note.is_char_boundary(end) {
+                end -= 1;
+            }
+            ImportFinding {
+                kind: ImportFindingKind::Changed,
+                code: ImportFindingCode::SourceReading,
+                count,
+                label: "STEP reading".into(),
+                detail: note[..end].to_string(),
+                bounds_mm: None,
+                displacement_mm: None,
+            }
+        })
+        .collect()
+}
+
+/// The periods of a native face surface that closes on itself across a direction (its two
+/// boundary lines one, sampled): the direction's natural width; `None` where it does not close.
+fn surface_periods(
+    k: &solidcore::kernel::Kernel,
+    surface: &solidcore::surface::surface::Surface,
+) -> Result<[Option<f64>; 2], solidcore::SolidError> {
+    let natural = surface.natural_uv_domain_with_nurb(k)?;
+    let closes = |along_u: bool| -> bool {
+        let (length, other) = if along_u {
+            (
+                natural.u_max() - natural.u_min(),
+                [natural.v_min(), natural.v_max()],
+            )
+        } else {
+            (
+                natural.v_max() - natural.v_min(),
+                [natural.u_min(), natural.u_max()],
+            )
+        };
+        if !(length.is_finite() && length > 0.0 && other[0].is_finite() && other[1].is_finite()) {
+            return false;
+        }
+        (0..=4).all(|i| {
+            let w = other[0] + (other[1] - other[0]) * f64::from(i) / 4.0;
+            let (a, z) = if along_u {
+                (
+                    solidcore::math::Point2::new(natural.u_min(), w),
+                    solidcore::math::Point2::new(natural.u_max(), w),
+                )
+            } else {
+                (
+                    solidcore::math::Point2::new(w, natural.v_min()),
+                    solidcore::math::Point2::new(w, natural.v_max()),
+                )
+            };
+            match (surface.evaluate_point(k, a), surface.evaluate_point(k, z)) {
+                (Ok(p), Ok(q)) => (p - q).length() <= 1e-9 * (1.0 + p.length().max(q.length())),
+                _ => false,
+            }
+        })
+    };
+    Ok([
+        closes(true).then(|| natural.u_max() - natural.u_min()),
+        closes(false).then(|| natural.v_max() - natural.v_min()),
+    ])
+}
+
+/// The reader's refusal: a construct it does not read yet is unsupported, anything else is
+/// an invalid source.
+fn read_refusal(message: &str) -> GeometryError {
+    if message.contains("not supported yet") {
+        unsupported(message)
+    } else {
+        invalid(message)
+    }
+}
+
 fn placement(
     entities: &Entities<'_>,
     id: u64,
@@ -438,43 +577,36 @@ fn import_prepared(
         });
     }
     check_cancel(cancel)?;
-    let mut ex = brep_data_bridge::parse_step_exchange(text)
+    let ex = solidcore_step::p21::parse(text)
         .map_err(|e| invalid(&format!("invalid ISO-10303-21 exchange: {e}")))?;
     check_cancel(cancel)?;
-    // The exact single root was validated above. Decode it once, directly in
+    // The exact single root was validated above. Read it once, directly in
     // authoritative mm units, rather than building an unscaled BREP first.
-    let mut context = solidcraft_step::units::Context::default();
+    let mut context = solidcore_step::units::Context::default();
     context.units.len = scale;
     context.units.ang = radians_per_angle_unit;
     context.uncertainty = uncertainty_mm;
-    let solid = closed_spline_decode::read_solid(
-        &mut ex,
+    let import_tolerance = solidcore_step::topology::tolerance(&context);
+    let solid = solidcore_step::topology::read_solid_with(
+        &ex,
         solid_id,
         context,
-        query_proof_byte_limit,
-        cancel,
-    )?;
+        &solidcore_ops::trims::KernelTrims,
+    )
+    .map_err(|e| read_refusal(&e))?;
     check_cancel(cancel)?;
     if solid.sheet {
         return Err(invalid(
             "open shell / surface model not supported, solid required",
         ));
     }
-
-    // Normalize only the decoder's exact null out-and-back topology, before
-    // either consumer observes its domains. Original STEP and face_origin are
-    // untouched; source/native correspondence still requires every source use.
-    let mut normalized = solid.brep;
-    brep_data_bridge::strip_lamina_spurs(&mut normalized, query_proof_byte_limit, cancel)?;
     let mut source_reader = source::reader(&ex, scale, radians_per_angle_unit);
-    let original_carriers =
-        source::face_carriers(&entities, &mut source_reader, &solid.face_origin, cancel)?;
-    let native_surface_maps = compute_face_surface_maps(&normalized, &original_carriers);
 
     let mut k = crate::kernel::make_kernel_context();
-    let mut brep =
-        brep_data_bridge::from_schema4_brep(&mut k, &normalized, &original_carriers, false)
-            .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
+    // Trusted: the reader's record goes to the kernel as it is, never healed (no silent repair);
+    // the record order then always stands.
+    let (mut brep, order) = solidcore_convert::brep::to_kernel(&mut k, &solid.brep, true)
+        .map_err(|e| kernel(&format!("B-rep conversion failure: {e}")))?;
 
     if !solidcore::topology::brep::p2::is_manifold_solid(&brep).unwrap_or(false) {
         return Err(invalid("solid B-rep is not a valid 2-manifold solid"));
@@ -482,35 +614,30 @@ fn import_prepared(
 
     let bounds = native_enclosure_bounds(&brep, cancel)?;
 
-    let native_faces = brep.faces().ids().collect::<Vec<_>>();
+    // Record face `i` is kernel face `order.faces[i]`, the reader's `face_origin[i]`.
+    let native_faces = order.faces.clone();
     if native_faces.len() != solid.face_origin.len() || native_faces.len() != faces.len() {
         return Err(invalid(
             "native face inventory changed the original face-use census",
         ));
     }
     let mut source_faces = std::collections::BTreeMap::new();
-    for ((native, source), map) in native_faces
-        .into_iter()
-        .zip(&solid.face_origin)
-        .zip(native_surface_maps)
-    {
-        if source_faces.insert(*source, (native, map)).is_some() {
+    for (native, source) in native_faces.into_iter().zip(&solid.face_origin) {
+        if source_faces.insert(*source, native).is_some() {
             return Err(invalid("native face provenance is ambiguous"));
         }
     }
     let mut face_ids = Vec::with_capacity(faces.len());
     let mut face_step_ids = Vec::with_capacity(faces.len());
-    let mut face_surface_maps = Vec::with_capacity(faces.len());
     for info in &faces {
         let source = info
             .surface_face_entity
             .parse::<u64>()
             .map_err(|_| invalid("original face provenance is not a STEP entity"))?;
-        let (native, map) = source_faces
+        let native = source_faces
             .remove(&source)
             .ok_or_else(|| invalid("native face lost its original source identity"))?;
         face_ids.push(native);
-        face_surface_maps.push(map);
         face_step_ids.push(StepEntityId(info.face_id.step_entity()));
     }
     if !source_faces.is_empty() {
@@ -527,6 +654,7 @@ fn import_prepared(
         .ok_or_else(|| invalid("native solid has no shell"))?;
     let original_source =
         source::capture(&entities, &mut source_reader, &faces, &face_ids, cancel)?;
+    lines_through_their_vertices(&original_source, import_tolerance, cancel)?;
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
@@ -538,6 +666,7 @@ fn import_prepared(
             source_unit,
             uncertainty_mm,
             source_solid: selected.cloned(),
+            findings: reader_findings(&solid.notes),
         },
         faces,
         bounds,
@@ -546,9 +675,11 @@ fn import_prepared(
         shell_id,
         face_ids,
         face_step_ids,
-        face_surface_maps,
         original_source,
         source_units_scale_to_mm: scale,
+        record_bytes: crate::kernel::record_bytes::of(&solid.brep),
+        record: std::sync::Arc::new(solid.brep),
+        record_order: order,
     };
 
     if definition.retained_query_proof_bytes() > query_proof_byte_limit {
@@ -694,63 +825,6 @@ fn prepare_loop_edge_cache(
         }
     }
     Ok(())
-}
-
-fn compute_face_surface_maps(
-    brep: &solidcraft_geom::brep::Brep,
-    original_carriers: &[std::sync::Arc<solidcraft_step::geom::Surface>],
-) -> Vec<crate::kernel::SurfaceParameterMap> {
-    brep.faces
-        .iter()
-        .zip(original_carriers)
-        .map(|(face, original)| {
-            if let Some(extrusion) =
-                crate::kernel::source_operand::original_circular_extrusion(original)
-            {
-                // This maps literal source UV, not the decoder's domain:
-                // canonical circular extrusion domains are already axial mm.
-                // Only source-v still needs the original magnitude factor.
-                return crate::kernel::SurfaceParameterMap::ScaleOffset {
-                    u_scale: 180.0 / std::f64::consts::PI,
-                    u_offset: 0.0,
-                    v_scale: extrusion.axial_scale_mm,
-                    v_offset: 0.0,
-                };
-            }
-            let u0 = face.domain[0][0];
-            let v0 = face.domain[1][0];
-            match &face.surface {
-                solidcraft_geom::brep::Surface::Cylinder { .. }
-                | solidcraft_geom::brep::Surface::Cone { .. } => {
-                    crate::kernel::SurfaceParameterMap::ScaleOffset {
-                        u_scale: 180.0 / std::f64::consts::PI,
-                        u_offset: u0,
-                        v_scale: 1.0,
-                        v_offset: 0.0,
-                    }
-                }
-                solidcraft_geom::brep::Surface::Sphere { .. } => {
-                    crate::kernel::SurfaceParameterMap::ScaleOffset {
-                        u_scale: 180.0 / std::f64::consts::PI,
-                        u_offset: u0,
-                        v_scale: 180.0 / std::f64::consts::PI,
-                        v_offset: 0.0,
-                    }
-                }
-                solidcraft_geom::brep::Surface::Torus { .. } => {
-                    let v_shift =
-                        brep_data_bridge::analytic::first_turn([v0, face.domain[1][1]])[0] - v0;
-                    crate::kernel::SurfaceParameterMap::ScaleOffset {
-                        u_scale: 180.0 / std::f64::consts::PI,
-                        u_offset: u0,
-                        v_scale: 180.0 / std::f64::consts::PI,
-                        v_offset: v_shift,
-                    }
-                }
-                _ => crate::kernel::SurfaceParameterMap::Identity,
-            }
-        })
-        .collect()
 }
 
 /// Read captured STEP bytes under the caller's remaining face and source-proof limits.
@@ -924,7 +998,7 @@ fn native_enclosure_bounds(
         ];
         let beyond = [0, 1].map(|d| chart[d][0] < natural[d][0] || chart[d][1] > natural[d][1]);
         if beyond.contains(&true) {
-            let periods = brep_data_bridge::surface_periods(&kernel, surface)
+            let periods = surface_periods(&kernel, surface)
                 .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
             for d in 0..2 {
                 if beyond[d] && periods[d].is_some() {

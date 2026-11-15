@@ -10,7 +10,7 @@
 use crate::exact_coefficient::ExactCoefficient;
 use crate::parametric::{CurveEnclosure, CurveThirdEnclosure, Interval};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::Curve;
+use solidcore_step::geom::Curve;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn finite_carrier_line_proposal_cannot_become_closed_endpoint_authority() {
-        use solidcraft_step::geom as s;
+        use solidcore_step::geom as s;
         use spiling_contracts::geometry::StepEntityId;
         use std::sync::Arc;
 
@@ -1811,7 +1811,7 @@ mod tests {
 
     #[test]
     fn original_bracket_preferred_pcurve_closed_fence_endpoint_witness() {
-        use solidcraft_step::geom::{PreferredRep, Surface};
+        use solidcore_step::geom::{PreferredRep, Surface};
         use spiling_contracts::geometry::StepEntityId;
 
         const BYTES: usize = 2 * 1024 * 1024;
@@ -1990,7 +1990,7 @@ mod tests {
     }
     #[test]
     fn closed_fence_does_not_replace_stationary_or_ambiguous_source_endpoints() {
-        use solidcraft_step::geom::Placement;
+        use solidcore_step::geom::Placement;
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(10_000_000);
         let bytes = 2 * 1024 * 1024;
@@ -2061,7 +2061,7 @@ mod tests {
                 };
                 matches!(
                     pcurve.surface.as_ref(),
-                    solidcraft_step::geom::Surface::Cylinder { .. }
+                    solidcore_step::geom::Surface::Cylinder { .. }
                 ) && matches!(pcurve.curve.as_ref(), Curve::Line { direction, .. }
                     if direction[0] == 0.0 && direction[1] != 0.0)
             })
@@ -2170,7 +2170,7 @@ mod tests {
     }
     #[test]
     fn preferred_opposite_pcurve_gauge_keeps_the_declared_3d_half_circle() {
-        use solidcraft_step::geom as s;
+        use solidcore_step::geom as s;
         use std::sync::Arc;
         let record = crate::analysis::test_source::circular_prism([0.0, 0.0], 4.0, 3.0);
         let placement = |z| s::Placement {
@@ -2186,7 +2186,7 @@ mod tests {
             .edges
             .iter()
             .map(|edge| {
-                let solidcraft_geom::brep::Curve::Circle { .. } = &edge.curve else {
+                let solidcore_record::brep::Curve::Circle { .. } = &edge.curve else {
                     return None;
                 };
                 let z = record.vertices[edge.vertices[0] as usize].point[2];
@@ -2309,7 +2309,7 @@ mod tests {
                 .map(|index| record.vertices[index as usize].point),
             forward: true,
             same_sense: true,
-            spatial_curve: Arc::new(solidcraft_step::write::topology::curve(&edge.curve).unwrap()),
+            spatial_curve: Arc::new(solidcore_step::write::topology::curve(&edge.curve).unwrap()),
             pcurves: Vec::new(),
         };
         let cancel = AtomicBool::new(false);

@@ -9,7 +9,7 @@ use crate::kernel::source::{OriginalCoedgeSource, OriginalFaceSource, OriginalPc
 use crate::kernel::source_operand::{PreparedOriginalCurve, PreparedOriginalSurface};
 use crate::parametric::{Interval, down, up};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::{Curve, Surface};
+use solidcore_step::geom::{Curve, Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -212,7 +212,7 @@ pub(super) fn select(
 /// face-specific PCurve ownership remains checked by `select`.
 pub(super) fn select_operand(
     coedge: &OriginalCoedgeSource,
-    pcurve: &solidcraft_step::geom::Pcurve,
+    pcurve: &solidcore_step::geom::Pcurve,
     allowance: f64,
     remaining: usize,
     work: &mut GeometryWorkBudget,

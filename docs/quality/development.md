@@ -528,17 +528,12 @@ and custom original-source reconstruction are not alternative material paths.
 Work, live-byte admission and cancellation remain bounded. Exact pins and builds
 are provenance/prerequisites, not complete operator acceptance.
 
-SolidCore and solidcore-mesh retain exact published fork pins. Only the
-SolidCraft geometry/STEP companion libraries are vendored: relative Cargo paths
-under `vendor/solidcraft/` include the exact homogeneous-boundary closure patch,
-upstream licenses and bounded conformance inputs. `UPSTREAM.toml` records their
-source and modifications. No SolidCraft application fork or machine-local Cargo
-override is needed. Update this snapshot as a coherent two-crate unit and rerun
-its semantic regressions plus affected import/manufacturing operators.
+SolidCore, solidcore-tess and the SolidCore record, STEP, conversion and ops
+crates retain one exact published fork pin. Display and tolerant-section meshes
+come from `solidcore-tess` planning the reader's record under Spiling's work,
+cancellation and byte control (`plan_with`). Nothing of SolidCraft is vendored:
+STEP reading is `solidcore-step`.
 
-Run the excluded libraries' tests with
-`cargo test --offline --manifest-path vendor/solidcraft/crates/geom/Cargo.toml`
-and the corresponding `step/Cargo.toml` path, not workspace `-p` selection.
 The retained placed-revolution failure is documented in
 [geometry limits](geometry-evidence.md#refusals-and-support-boundary); do not
 hide it by skipping the test or weaken its PCurve assertion.

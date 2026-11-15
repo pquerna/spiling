@@ -676,7 +676,7 @@ pub(super) fn isolate_endpoint(
 mod tests {
     use super::*;
     use crate::kernel::source_operand::PreparedOriginalCurve;
-    use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical, Placement};
+    use solidcore_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical, Placement};
     use std::f64::consts::TAU;
 
     const BYTES: usize = 16 * 1024 * 1024;
@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn affine_root_at_natural_fence_requires_exact_closed_domain_existence() {
-        use solidcraft_step::geom::{Associated, Pcurve, PreferredRep, Surface, SurfaceCurveKind};
+        use solidcore_step::geom::{Associated, Pcurve, PreferredRep, Surface, SurfaceCurveKind};
         use std::sync::Arc;
 
         let chart = Arc::new(Curve::BSpline(Box::new(BSplineCurve {

@@ -38,7 +38,7 @@ pub(crate) trait SurfaceEvaluator {
     fn native_surface(&self) -> Option<&Surface> {
         None
     }
-    fn original_surface(&self) -> Option<&solidcraft_step::geom::Surface> {
+    fn original_surface(&self) -> Option<&solidcore_step::geom::Surface> {
         None
     }
 }
@@ -105,7 +105,7 @@ pub(crate) trait CurveEvaluator {
     fn native_chart_curve(&self) -> Option<curve_prepared::NativeChartCurve<'_>> {
         None
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         None
     }
 }
@@ -192,7 +192,7 @@ impl SurfaceEvaluator for PreparedOriginalSurface<'_> {
         }
         PreparedOriginalSurface::parameter_axes(self, work, cancel)
     }
-    fn original_surface(&self) -> Option<&solidcraft_step::geom::Surface> {
+    fn original_surface(&self) -> Option<&solidcore_step::geom::Surface> {
         Some(self.source())
     }
 }
@@ -342,7 +342,7 @@ impl CurveEvaluator for PreparedOriginalCurve<'_> {
         let (values, degree) = self.parameter_axis(work, cancel)?;
         Ok(AxisSpans::new(KnotAxis { values, degree }, range))
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         Some(self.source())
     }
 }
@@ -755,7 +755,7 @@ impl CurveEvaluator for crate::analysis::source_restriction::SourceLineRestricti
         self.jet(range, work, cancel)?;
         AxisSpans::single(range)
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         Some(self.source_curve())
     }
 }
@@ -805,14 +805,14 @@ pub(crate) fn curve_endpoint_coordinate_equal<C: CurveEvaluator + ?Sized>(
     for _ in 0..16 {
         work.charge(1, cancel)?;
         match original {
-            solidcraft_step::geom::Curve::Trimmed { basis, .. } => original = basis,
-            solidcraft_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
+            solidcore_step::geom::Curve::Trimmed { basis, .. } => original = basis,
+            solidcore_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
                 if crate::kernel::source_operand::preferred_source_pcurve(original)?.is_some() {
                     return Ok(false);
                 }
                 original = curve_3d;
             }
-            solidcraft_step::geom::Curve::BSpline(s) => {
+            solidcore_step::geom::Curve::BSpline(s) => {
                 let spans = curve.parameter_spans([parameter; 2], work, cancel)?;
                 let k = spans.knots;
                 let degree = s.degree;
@@ -830,7 +830,7 @@ pub(crate) fn curve_endpoint_coordinate_equal<C: CurveEvaluator + ?Sized>(
                 }
                 return Ok(s.points.iter().all(|p| p[axis] == expected));
             }
-            solidcraft_step::geom::Curve::Polyline(points) => {
+            solidcore_step::geom::Curve::Polyline(points) => {
                 let at = parameter as usize;
                 if at < points.len() && at as f64 == parameter {
                     return Ok(points[at][axis] == expected);
@@ -846,6 +846,67 @@ pub(crate) fn curve_endpoint_coordinate_equal<C: CurveEvaluator + ?Sized>(
         GeometryErrorCode::ResourceLimit,
         "original endpoint wrapper depth exceeded",
     ))
+}
+/// A chart-clamped (u, v) box and how far past the chart, per axis, the image it stands for
+/// may lie.
+pub(crate) type RoundedImage = ([[f64; 2]; 2], [f64; 2]);
+
+/// A (u, v) curve's image over `range` against a carrier chart `domain`, when its coefficients
+/// cannot prove containment: enclosed over adaptively bisected subranges (only those still past
+/// the chart are split; at a tangency the excess shrinks with the square of the subrange), an
+/// image past the chart by no more than rounding (64 representable steps of the chart's
+/// magnitude) is the chart-clamped box with that overrun per axis, which a caller evaluating the
+/// carrier there widens by the carrier's speed. `None` when the image passes the chart by more.
+pub(crate) fn curve2d_rounded_image<C: CurveEvaluator + ?Sized>(
+    curve: &C,
+    range: [f64; 2],
+    domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<RoundedImage>, GeometryError> {
+    const MAX_DEPTH: u8 = 52;
+    let rounding =
+        |a: usize| 64.0 * f64::EPSILON * domain[a][0].abs().max(domain[a][1].abs()).max(1.0);
+    let excess = |p: &[Interval; 3], a: usize| (domain[a][0] - p[a].lo).max(p[a].hi - domain[a][1]);
+    let mut image = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+    let mut overrun = [0.0_f64; 2];
+    let mut stack = vec![(range, 0_u8)];
+    while let Some((part, depth)) = stack.pop() {
+        work.charge(1, cancel)?;
+        // The mean-value form about the piece's middle, intersected with the plain enclosure:
+        // where the curve runs along a chart side its derivative is small, so the excess there
+        // shrinks with the square of the piece.
+        let jet = curve.tensor(part, 1, work, cancel)?;
+        let middle = part[0] * 0.5 + part[1] * 0.5;
+        let centre = curve.tensor([middle, middle], 0, work, cancel)?[0];
+        let half = Interval::new(part[0], part[1])?.sub(Interval::point(middle));
+        let p: [Interval; 3] = std::array::from_fn(|a| {
+            let form = centre[a].add(jet[1][a].mul(half));
+            form.intersection(jet[0][a]).unwrap_or(jet[0][a])
+        });
+        if (0..2).any(|a| excess(&p, a) > rounding(a)) {
+            if depth >= MAX_DEPTH || middle <= part[0] || middle >= part[1] {
+                return Ok(None);
+            }
+            // A point of the curve itself past the chart by more than rounding: it leaves.
+            if (0..2).any(|a| excess(&centre, a) > rounding(a)) {
+                return Ok(None);
+            }
+            stack.push(([middle, part[1]], depth + 1));
+            stack.push(([part[0], middle], depth + 1));
+            continue;
+        }
+        for a in 0..2 {
+            image[a] = [image[a][0].min(p[a].lo), image[a][1].max(p[a].hi)];
+            overrun[a] = overrun[a].max(excess(&p, a).max(0.0));
+        }
+    }
+    let clamped: [[f64; 2]; 2] =
+        std::array::from_fn(|a| [image[a][0].max(domain[a][0]), image[a][1].min(domain[a][1])]);
+    if (0..2).any(|a| clamped[a][0] > clamped[a][1]) {
+        return Ok(None);
+    }
+    Ok(Some((clamped, overrun)))
 }
 pub(crate) fn curve2d_image_within_box<C: CurveEvaluator + ?Sized>(
     curve: &C,
@@ -873,14 +934,14 @@ pub(crate) fn curve2d_image_within_box<C: CurveEvaluator + ?Sized>(
     for _ in 0..16 {
         work.charge(1, cancel)?;
         match original {
-            solidcraft_step::geom::Curve::Trimmed { basis, .. } => original = basis,
-            solidcraft_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
+            solidcore_step::geom::Curve::Trimmed { basis, .. } => original = basis,
+            solidcore_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
                 if crate::kernel::source_operand::preferred_source_pcurve(original)?.is_some() {
                     return Ok(false);
                 }
                 original = curve_3d;
             }
-            solidcraft_step::geom::Curve::BSpline(s) => {
+            solidcore_step::geom::Curve::BSpline(s) => {
                 let mut sign = 0i8;
                 for (i, p) in s.points.iter().enumerate() {
                     work.charge(1, cancel)?;
@@ -964,6 +1025,17 @@ pub(crate) fn same_surface_coefficients<
     let (a, a_step) = operand(first, work, cancel)?;
     let (b, b_step) = operand(second, work, cancel)?;
     use solidcore::surface::surface::p2::SurfaceKind;
+    // The kernel's analytic kinds in their form charts: one law when one support and one
+    // equal-span law of (u, v), whichever quarters each face's form covers.
+    if !a_step
+        && !b_step
+        && let (Some(x), Some(y)) = (
+            super::form_chart::FormChart::of(a),
+            super::form_chart::FormChart::of(b),
+        )
+    {
+        return Ok(x.same_law(&y));
+    }
     // STEP analytic charts use degrees; stored NURBS charts do not. Plane and
     // literal BSpline evaluation are unchanged by a STEP wrapper.
     if a_step != b_step

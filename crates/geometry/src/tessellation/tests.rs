@@ -19,16 +19,26 @@ fn fixture(name: &str) -> Definition {
     crate::from_step_bytes_with_cancel(&bytes, &AtomicBool::new(false)).unwrap()
 }
 
+/// The definition's planned candidates at `chord`.
+fn planned(definition: &Definition, chord: f64) -> candidate::Candidates {
+    candidate::plan(
+        definition,
+        MeshTolerance::display(chord),
+        PROOF_BYTES,
+        &mut GeometryWorkBudget::query(),
+        &AtomicBool::new(false),
+    )
+    .unwrap()
+}
+
 #[test]
 fn candidate_parameter_roundoff_never_changes_source_or_physical_vertices() {
     let definition = fixture("independent-exporters/occt-spline-housing-mm.step");
-    let kernel = crate::make_kernel_context();
-    let options = TessellateOptions::default();
-    let edges = solidcore_mesh::tessellate_edge_set(&kernel, definition.brep(), &options).unwrap();
+    let candidate::Candidates {
+        edges, mut faces, ..
+    } = planned(&definition, MESH_CARRIER_TOLERANCE_MM * 0.25);
     let face = definition.face_ids()[1];
-    let mut candidate =
-        solidcore_mesh::tessellate_face(&kernel, definition.brep(), face, &edges, &options)
-            .unwrap();
+    let mut candidate = faces.swap_remove(1);
     let domain = definition
         .face_surface(face)
         .unwrap()
@@ -62,96 +72,8 @@ fn candidate_parameter_roundoff_never_changes_source_or_physical_vertices() {
 }
 
 #[test]
-fn refinement_is_scoped_to_failing_faces_without_tightening_unrelated_carriers() {
-    let definition = fixture("box-mm.step");
-    let faces = definition.face_ids();
-    let mut options = TessellateOptions::default();
-    let work = GeometryWorkBudget::query();
-    let cancel = AtomicBool::new(false);
-    let mut refinements = FaceRefinements::new(faces.len(), &work, &cancel).unwrap();
-    let global = options.chord_tolerance;
-    refinements.refine(0, &work, &cancel).unwrap();
-    refinements.refine(1, &work, &cancel).unwrap();
-    refinements.refine(0, &work, &cancel).unwrap();
-    refinements
-        .install(&mut options, faces, &work, &cancel)
-        .unwrap();
-    assert_eq!(options.chord_tolerance, global);
-    let override_for = options.face_hook.as_ref().unwrap();
-    assert_eq!(
-        override_for(faces[0]).unwrap().chord_tolerance,
-        Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(3))
-    );
-    assert_eq!(
-        override_for(faces[1]).unwrap().chord_tolerance,
-        Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(2))
-    );
-    assert!(override_for(faces[2]).is_none());
-}
-
-#[test]
-fn refinement_round_admits_every_failing_face_and_preserves_narrow_refusals() {
-    let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
-    let faces = definition.face_ids();
-    assert!(faces.len() > 8);
-    let work = GeometryWorkBudget::query();
-    let cancel = AtomicBool::new(false);
-    let mut refinements = FaceRefinements::new(faces.len(), &work, &cancel).unwrap();
-    let mut options = TessellateOptions::default();
-    for ordinal in 0..faces.len() - 1 {
-        refinements.refine(ordinal, &work, &cancel).unwrap();
-    }
-    for round in 0..2 {
-        let bytes = refinements
-            .install(&mut options, faces, &work, &cancel)
-            .unwrap();
-        assert!(bytes > refinements.retained_bytes());
-        let override_for = options.face_hook.as_ref().unwrap();
-        for (ordinal, &face) in faces.iter().enumerate().take(faces.len() - 1) {
-            let power = if ordinal == 0 { round + 2 } else { 2 };
-            assert_eq!(
-                override_for(face).unwrap().chord_tolerance,
-                Some(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(power))
-            );
-        }
-        assert!(override_for(*faces.last().unwrap()).is_none());
-        refinements.refine(0, &work, &cancel).unwrap();
-    }
-    for (count, work, cancel, expected) in [
-        (
-            usize::MAX,
-            GeometryWorkBudget::query(),
-            false,
-            GeometryErrorCode::ResourceLimit,
-        ),
-        (
-            1,
-            GeometryWorkBudget::new(0),
-            false,
-            GeometryErrorCode::ResourceLimit,
-        ),
-        (
-            1,
-            GeometryWorkBudget::query(),
-            true,
-            GeometryErrorCode::Cancelled,
-        ),
-    ] {
-        assert_eq!(
-            FaceRefinements::new(count, &work, &AtomicBool::new(cancel))
-                .err()
-                .unwrap()
-                .code,
-            expected
-        );
-    }
-}
-
-#[test]
 fn refinement_round_batches_audits_and_requires_a_fresh_complete_pass() {
-    let work = GeometryWorkBudget::query();
-    let cancel = AtomicBool::new(false);
-    let mut refinements = FaceRefinements::new(16, &work, &cancel).unwrap();
+    let mut requested = Vec::new();
     let mut round = RefinementRound::new(0);
     let mut packed = Vec::new();
     for ordinal in 0..16 {
@@ -161,7 +83,10 @@ fn refinement_round_batches_audits_and_requires_a_fresh_complete_pass() {
             Ok(ordinal)
         };
         if let Some(data) = round
-            .audit(result, |_| refinements.refine(ordinal, &work, &cancel))
+            .audit(result, |_| {
+                requested.push(ordinal);
+                Ok(())
+            })
             .unwrap()
         {
             packed.push(data);
@@ -172,16 +97,8 @@ fn refinement_round_batches_audits_and_requires_a_fresh_complete_pass() {
         round.finish().unwrap_err(),
         shape("independent audit face 1")
     );
-    assert_eq!(
-        refinements
-            .tolerances
-            .iter()
-            .filter(|value| value.is_some())
-            .count(),
-        2
-    );
-    assert!(refinements.tolerances[1].is_some());
-    assert!(refinements.tolerances[12].is_some());
+    // Every failing audit of the round is collected; the next round plans the body finer.
+    assert_eq!(requested, [1, 12]);
     let mut fresh = RefinementRound::new(1);
     let complete: Vec<_> = (0..16)
         .map(|ordinal| {
@@ -240,20 +157,17 @@ fn refinement_round_preserves_retry_priority_and_terminal_operational_failures()
 #[test]
 fn refinement_exhaustion_retains_source_attempt_and_original_audit_context() {
     let definition = fixture("box-mm.step");
-    let work = GeometryWorkBudget::query();
     let cancel = AtomicBool::new(false);
-    let mut refinements =
-        FaceRefinements::new(definition.face_ids().len(), &work, &cancel).unwrap();
-    refinements.refine(0, &work, &cancel).unwrap();
-    let exhausted = GeometryWorkBudget::new(0);
-    let failure = refinements
-        .install(
-            &mut TessellateOptions::default(),
-            definition.face_ids(),
-            &exhausted,
-            &cancel,
-        )
-        .unwrap_err();
+    let mut exhausted = GeometryWorkBudget::new(0);
+    let failure = candidate::plan(
+        &definition,
+        MeshTolerance::display(MESH_CARRIER_TOLERANCE_MM * 0.25 * 0.25),
+        PROOF_BYTES,
+        &mut exhausted,
+        &cancel,
+    )
+    .err()
+    .unwrap();
     let scoped = display_context(
         failure,
         &definition,
@@ -275,7 +189,7 @@ fn refinement_exhaustion_retains_source_attempt_and_original_audit_context() {
     let failure = RefinementRound::new(0)
         .audit::<()>(Err(shape("original independent audit")), |cause| {
             first_refinement.get_or_insert_with(|| cause.message.clone());
-            refinements.refine(0, &exhausted, &cancel)
+            exhausted.charge(1, &cancel)
         })
         .unwrap_err();
     assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
@@ -384,7 +298,9 @@ fn caller_work_and_progress_cover_the_complete_display_without_resetting() {
     )
     .unwrap();
     assert_eq!(updates[0].stage, DisplayStage::PreparingEdges);
-    assert!(updates[0].consumed_work > 11);
+    // The caller's work carries on: never reset, and the plan's own work adds to it.
+    assert!(updates[0].consumed_work >= 11);
+    assert!(updates[1].consumed_work > 11);
     assert!(updates.windows(2).all(|pair| {
         pair[0].consumed_work <= pair[1].consumed_work
             && pair[0].completed_faces <= pair[1].completed_faces
@@ -538,34 +454,26 @@ fn unchanged_independent_fitting_display_preserves_physical_taper_and_bore() {
 #[test]
 fn complete_native_trim_proof_rejects_missing_and_duplicate_on_carrier_triangles() {
     let definition = fixture("box-mm.step");
-    let kernel = crate::make_kernel_context();
-    let options = TessellateOptions::default().with_chord(MESH_CARRIER_TOLERANCE_MM * 0.25);
-    let edges = solidcore_mesh::tessellate_edge_set(&kernel, definition.brep(), &options).unwrap();
-    let face = definition.face_ids()[0];
-    let original =
-        solidcore_mesh::tessellate_face(&kernel, definition.brep(), face, &edges, &options)
-            .unwrap();
+    let candidate::Candidates {
+        edges, mut faces, ..
+    } = planned(&definition, MESH_CARRIER_TOLERANCE_MM * 0.25);
+    let original = faces.swap_remove(0);
     let outside = edges.retained_bytes() + original.retained_bytes();
     {
-        let mut advisory = original.clone();
-        advisory.unconverged = true;
         audit::face(
             &definition,
             0,
-            &advisory,
+            &original,
             &edges,
             MeshBudget::FROZEN,
             outside,
             &mut GeometryWorkBudget::new(20_000_000),
             &AtomicBool::new(false),
         )
-        .expect(
-            "a complete independently qualified candidate does not need a mesher confidence flag",
-        );
+        .expect("a complete independently qualified candidate is published on its own audit");
     }
     for duplicate in [false, true] {
         let mut candidate = original.clone();
-        candidate.unconverged = true;
         if duplicate {
             candidate.triangles.push(candidate.triangles[0]);
         } else {
@@ -595,9 +503,15 @@ fn housing_pole_lune_uses_coefficient_normals_and_refuses_unproved_aliases() {
         .iter()
         .position(|f| f.face_id.as_str() == "step:461")
         .unwrap();
-    let kernel = crate::make_kernel_context();
-    let mut options = TessellateOptions::default().with_chord(MESH_CARRIER_TOLERANCE_MM * 0.25);
-    options.measure_deviation = false;
+    // The sphere's form chart puts its south pole on a whole domain row (the old degree chart's
+    // v = -90); rows a ninth of the span above it are regular (the old v > -80).
+    let domain = definition
+        .brep()
+        .face(definition.face_ids()[ordinal])
+        .unwrap()
+        .uv_domain;
+    let pole_v = domain.min().y;
+    let regular_v = pole_v + (domain.max().y - domain.min().y) / 9.0;
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(20_000_000);
     let mut attempt = 0;
@@ -605,28 +519,19 @@ fn housing_pole_lune_uses_coefficient_normals_and_refuses_unproved_aliases() {
     // than treating an incidental first grid as a required approximation.
     // Failed native generation and proof work share the same allowance.
     let (edges, candidate, audited, pole, shared) = loop {
-        let edges = candidate_query(0, &mut work, &cancel, |native| {
-            solidcore_mesh::tessellate_edge_set_with_budget(
-                &kernel,
-                definition.brep(),
-                &options,
-                native,
-            )
-        })
+        let candidate::Candidates {
+            edges, mut faces, ..
+        } = candidate::plan(
+            &definition,
+            MeshTolerance::display(MESH_CARRIER_TOLERANCE_MM * 0.25 * 0.25_f64.powi(attempt)),
+            PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         let outside = edges.retained_bytes();
-        let mut candidate = candidate_query(outside, &mut work, &cancel, |native| {
-            solidcore_mesh::tessellate_face_with_budget(
-                &kernel,
-                definition.brep(),
-                definition.face_ids()[ordinal],
-                &edges,
-                &options,
-                native,
-            )
-        })
-        .unwrap();
-        let pole = candidate.uvs.iter().position(|q| q.y == -90.0).unwrap();
+        let mut candidate = faces.swap_remove(ordinal);
+        let pole = candidate.uvs.iter().position(|q| q.y == pole_v).unwrap();
         let shared = candidate.shared[pole].unwrap();
         // Candidate fallback normals are neither required nor published at a
         // proved singularity. Publish the same-law outward field instead.
@@ -647,8 +552,6 @@ fn housing_pole_lune_uses_coefficient_normals_and_refuses_unproved_aliases() {
         ) {
             Ok(audited) => break (edges, candidate, audited, pole, shared),
             Err(cause) if cause.code == GeometryErrorCode::ShapeErrorExceeded && attempt < 8 => {
-                options.chord_tolerance =
-                    Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(attempt + 2));
                 attempt += 1;
             }
             Err(cause) => panic!("bounded housing pole display audit: {cause:?}"),
@@ -669,9 +572,9 @@ fn housing_pole_lune_uses_coefficient_normals_and_refuses_unproved_aliases() {
     for mutation in 0..3 {
         let mut altered = candidate.clone();
         match mutation {
-            0 => altered.uvs[pole].y = crate::parametric::up(-90.0),
+            0 => altered.uvs[pole].y = crate::parametric::up(pole_v),
             1 => {
-                let regular = altered.uvs.iter().position(|q| q.y > -80.0).unwrap();
+                let regular = altered.uvs.iter().position(|q| q.y > regular_v).unwrap();
                 altered.shared[regular] = Some(shared);
             }
             _ => {
@@ -750,37 +653,55 @@ fn native_ruled_triangle_retains_full_height_under_display_carrier_bound() {
         .iter()
         .position(|f| f.face_id.as_str() == "step:137")
         .unwrap();
-    let kernel = crate::make_kernel_context();
-    let mut options = TessellateOptions::default().with_chord(MESH_CARRIER_TOLERANCE_MM * 0.25);
-    options.measure_deviation = false;
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(20_000_000);
-    let edges = candidate_query(0, &mut work, &cancel, |native| {
-        solidcore_mesh::tessellate_edge_set_with_budget(
-            &kernel,
-            definition.brep(),
-            &options,
-            native,
-        )
-    })
-    .unwrap();
-    let candidate = candidate_query(edges.retained_bytes(), &mut work, &cancel, |native| {
-        solidcore_mesh::tessellate_face_with_budget(
-            &kernel,
-            definition.brep(),
-            definition.face_ids()[ordinal],
-            &edges,
-            &options,
-            native,
-        )
-    })
-    .unwrap();
-    let triangle = candidate.triangles[0];
-    let uv = audit::triangle_uv(&candidate, triangle).unwrap();
-    let points = triangle.map(|i| {
-        let p = candidate.positions[i as usize];
-        [p.x, p.y, p.z]
-    });
+    let candidate::Candidates {
+        edges, mut faces, ..
+    } = planned(&definition, MESH_CARRIER_TOLERANCE_MM * 0.25);
+    let candidate = faces.swap_remove(ordinal);
+    drop(edges);
+    // A whole-height triangle on the ruled face's own chart: two neighbouring rulings, from one
+    // end of the face to the other. The planner may split it; the proof must bound it whole.
+    let surface = definition.face_surface(candidate.face).unwrap();
+    let natural = surface.natural_uv_domain_if_built();
+    let bounds = [
+        [natural.u_min(), natural.u_max()],
+        [natural.v_min(), natural.v_max()],
+    ];
+    let at = |q: [f64; 2], work: &mut GeometryWorkBudget| {
+        crate::parametric::surface_enclosure(surface, [[q[0], q[0]], [q[1], q[1]]], work, &cancel)
+            .unwrap()
+            .position
+            .map(crate::parametric::Interval::mid)
+    };
+    let corner_z = |q: [f64; 2], work: &mut GeometryWorkBudget| at(q, work)[2];
+    let rise = [
+        (corner_z([bounds[0][1], bounds[1][0]], &mut work)
+            - corner_z([bounds[0][0], bounds[1][0]], &mut work))
+        .abs(),
+        (corner_z([bounds[0][0], bounds[1][1]], &mut work)
+            - corner_z([bounds[0][0], bounds[1][0]], &mut work))
+        .abs(),
+    ];
+    let height_axis = usize::from(rise[1] > rise[0]);
+    let across = 1 - height_axis;
+    let first = audit::triangle_uv(&candidate, candidate.triangles[0]).unwrap();
+    let mut rulings: Vec<f64> = first.iter().map(|q| q[across]).collect();
+    rulings.sort_by(f64::total_cmp);
+    rulings.dedup();
+    let corner = |ruling: f64, end: usize| {
+        let mut q = [0.0; 2];
+        q[across] = ruling;
+        q[height_axis] = bounds[height_axis][end];
+        q
+    };
+    let uv = [
+        corner(rulings[0], 0),
+        corner(rulings[1], 0),
+        corner(rulings[1], 1),
+    ];
+    let points = uv.map(|q| at(q, &mut work));
+    let triangle = [0_u32, 1, 2];
     let height = points
         .iter()
         .map(|p| p[2])
@@ -788,7 +709,7 @@ fn native_ruled_triangle_retains_full_height_under_display_carrier_bound() {
         - points.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
     assert!(
         (height - 6.0).abs() < 1e-12,
-        "the original full-height triangle must remain: {points:?}"
+        "the ruled triangle spans the face's full height: {points:?}"
     );
     let domain = std::array::from_fn(|axis| {
         [
@@ -796,15 +717,18 @@ fn native_ruled_triangle_retains_full_height_under_display_carrier_bound() {
             uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
         ]
     });
-    let surface = definition.face_surface(candidate.face).unwrap();
+    let uvs: Vec<_> = uv
+        .iter()
+        .map(|q| solidcore::Point2::new(q[0], q[1]))
+        .collect();
     let mut proof = crate::parametric::DisplayTriangleProof::with_mesh_inventory(
         surface,
-        &candidate.uvs,
+        &uvs,
         vec![0],
         vec![crate::parametric::DisplayMeshBox::new(
             crate::parametric::DisplayMeshBox::key_for(domain),
         )],
-        PROOF_BYTES - edges.retained_bytes() - candidate.retained_bytes(),
+        PROOF_BYTES - candidate.retained_bytes(),
         &mut work,
         &cancel,
     )

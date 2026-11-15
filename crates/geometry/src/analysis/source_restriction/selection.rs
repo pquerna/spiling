@@ -5,7 +5,7 @@
 use crate::kernel::source::OriginalCoedgeSource;
 use crate::parametric::{Interval, down, up};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::{BSplineCurve, Curve, PreferredRep, Trim, TrimPreference};
+use solidcore_step::geom::{BSplineCurve, Curve, PreferredRep, Trim, TrimPreference};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -314,7 +314,7 @@ pub(super) fn select_curve(
                             1
                         };
                         match associated.get(index) {
-                            Some(solidcraft_step::geom::Associated::Pcurve(pcurve)) => {
+                            Some(solidcore_step::geom::Associated::Pcurve(pcurve)) => {
                                 if selected_pcurve {
                                     return Err(unavailable(
                                         "nested preferred PCURVE compositions require a composed domain inventory",

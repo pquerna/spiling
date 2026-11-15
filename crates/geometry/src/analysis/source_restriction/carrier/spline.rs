@@ -7,7 +7,7 @@ use crate::exact_coefficient::ExactCoefficient as Exact;
 use crate::parametric::{Interval, analytic_eval::native_surface_nurbs};
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcore::surface::surface::Surface as NativeSurface;
-use solidcraft_step::geom::Surface;
+use solidcore_step::geom::Surface;
 use std::sync::atomic::AtomicBool;
 
 const ZERO: Interval = Interval::point(0.0);
@@ -80,10 +80,21 @@ fn axis(
     )?;
     let sd = available!(Exact::difference(domain[1], domain[0]));
     let nd = available!(Exact::difference(native[count], native[degree]));
+    // The outermost slots are inactive when the active ends have multiplicity `degree`
+    // (slots 1..=degree and count..len-1 on them): no degree-`degree` basis function on the
+    // active domain depends on them, so a reader that clamps them keeps the surface.
+    let last = native.len() - 1;
+    let inactive_ends = degree >= 1
+        && native[1..=degree].iter().all(|k| *k == native[degree])
+        && native[count..last].iter().all(|k| *k == native[count]);
     let mut index = 0;
     for (&source, &multiplicity) in values.iter().zip(multiplicities) {
         for _ in 0..multiplicity {
             work.charge(1, cancel)?;
+            if inactive_ends && (index == 0 || index == last) {
+                index += 1;
+                continue;
+            }
             let a = available!(Exact::difference(source, domain[0]));
             let b = available!(Exact::difference(native[index], native[degree]));
             let mut identity = available!(a.product(&nd, work, cancel)?);
@@ -269,7 +280,7 @@ fn extrusion(
     else {
         return Ok(None);
     };
-    let solidcraft_step::geom::Curve::BSpline(profile) = profile.as_ref() else {
+    let solidcore_step::geom::Curve::BSpline(profile) = profile.as_ref() else {
         return Ok(None);
     };
     let Some(native) = native_surface_nurbs(native)? else {

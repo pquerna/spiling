@@ -978,8 +978,8 @@ mod tests {
             PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
         };
         use crate::kernel::trim::PreparedTrimSurface;
-        let source = solidcraft_step::geom::Surface::Cylinder {
-            position: solidcraft_step::geom::Placement {
+        let source = solidcore_step::geom::Surface::Cylinder {
+            position: solidcore_step::geom::Placement {
                 origin: [0.0; 3],
                 axis: [0.0, 0.0, 1.0],
                 ref_direction: [1.0, 0.0, 0.0],
@@ -1058,7 +1058,7 @@ mod tests {
         use crate::kernel::source_operand::{
             PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
         };
-        use solidcraft_step::geom::{
+        use solidcore_step::geom::{
             BSplineSurface, KnotSpec, Logical, Surface as OriginalSurface, SurfaceForm,
         };
         // The actual bilinear source is F(u,v)=(u*(1+1000*v),v,0).

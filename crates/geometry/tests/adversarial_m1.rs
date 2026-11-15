@@ -11,7 +11,7 @@ use std::thread;
 use spiling_contracts::geometry::{
     GeometryErrorCode, SectionCurve2d, SectionSpan2d, SourceEdgeId, SourceFaceId,
 };
-use spiling_geometry::{SurfaceParameterMap, from_step_bytes, from_step_bytes_with_limits};
+use spiling_geometry::{from_step_bytes, from_step_bytes_with_limits};
 
 fn fixture_path(rel_path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -362,49 +362,5 @@ fn challenge5_adversarial_step_corpus_rejection() {
             "error message too long: {}",
             err.message.len()
         );
-    }
-}
-
-// =========================================================================
-// Challenge 6: SurfaceParameterMap Invertibility & Normalization
-// =========================================================================
-
-#[test]
-fn challenge6_surface_parameter_map_roundtrip() {
-    let maps = vec![
-        SurfaceParameterMap::Identity,
-        SurfaceParameterMap::ScaleOffset {
-            u_scale: 180.0 / std::f64::consts::PI,
-            u_offset: 0.5,
-            v_scale: 1.0,
-            v_offset: 0.0,
-        },
-        SurfaceParameterMap::ScaleOffset {
-            u_scale: 180.0 / std::f64::consts::PI,
-            u_offset: -std::f64::consts::PI,
-            v_scale: 180.0 / std::f64::consts::PI,
-            v_offset: 0.25,
-        },
-    ];
-
-    let test_points = vec![
-        [0.0, 0.0],
-        [1.0, 2.5],
-        [-std::f64::consts::PI, std::f64::consts::FRAC_PI_2],
-    ];
-
-    for map in &maps {
-        for &pt in &test_points {
-            let core = map.step_to_core(pt);
-            let back = map.core_to_step(core);
-            assert!(
-                (back[0] - pt[0]).abs() < 1e-12,
-                "u coordinate roundtrip failed: orig={pt:?} core={core:?} back={back:?}"
-            );
-            assert!(
-                (back[1] - pt[1]).abs() < 1e-12,
-                "v coordinate roundtrip failed: orig={pt:?} core={core:?} back={back:?}"
-            );
-        }
     }
 }

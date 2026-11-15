@@ -5,6 +5,7 @@
 //! Display-only quotient authority. Shared indices propose ownership; original
 //! native endpoints, an exactly collapsed law and a one-sided normal prove it.
 
+use super::candidate::{DisplayEdges, FaceCandidate};
 use super::{audit::norm_upper, invalid, native_error, resource, shape};
 use crate::{
     GeometryWorkBudget,
@@ -13,7 +14,6 @@ use crate::{
 };
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::{curve::curve::Curve, surface::surface::Surface, topology::edgeuse::p1 as eu};
-use solidcore_mesh::{EdgeSet, FaceMesh};
 use spiling_contracts::geometry::{
     GeometryError, MESH_CARRIER_TOLERANCE_MM, NORMAL_NORM_TOLERANCE,
 };
@@ -53,10 +53,10 @@ impl Inventory {
             .flatten()
             .map(|j| &self.junctions[j])
     }
-    pub fn node_count(&self, mesh: &FaceMesh) -> usize {
+    pub fn node_count(&self, mesh: &FaceCandidate) -> usize {
         mesh.positions.len() + 2 * self.junctions.len()
     }
-    pub fn uv(&self, mesh: &FaceMesh, node: u32) -> [f64; 2] {
+    pub fn uv(&self, mesh: &FaceCandidate, node: u32) -> [f64; 2] {
         if (node as usize) < mesh.uvs.len() {
             let q = mesh.uvs[node as usize];
             [q.x, q.y]
@@ -65,7 +65,7 @@ impl Inventory {
             self.junctions[offset / 2].uv[offset % 2]
         }
     }
-    pub fn position(&self, mesh: &FaceMesh, node: u32) -> [f64; 3] {
+    pub fn position(&self, mesh: &FaceCandidate, node: u32) -> [f64; 3] {
         if (node as usize) < mesh.positions.len() {
             let p = mesh.positions[node as usize];
             [p.x, p.y, p.z]
@@ -73,7 +73,7 @@ impl Inventory {
             self.junctions[(node as usize - mesh.positions.len()) / 2].position
         }
     }
-    pub fn shared(&self, mesh: &FaceMesh, node: u32) -> Option<u32> {
+    pub fn shared(&self, mesh: &FaceCandidate, node: u32) -> Option<u32> {
         if (node as usize) < mesh.shared.len() {
             mesh.shared[node as usize]
         } else {
@@ -83,7 +83,7 @@ impl Inventory {
     /// Proof-only source chart endpoint. No mesh vertex is moved or published.
     pub fn source_endpoint(
         &self,
-        mesh: &FaceMesh,
+        mesh: &FaceCandidate,
         local: u32,
         curve: &Curve,
         upper: bool,
@@ -131,8 +131,8 @@ fn endpoint_uv(
 
 pub(super) fn inventory(
     definition: &Definition,
-    mesh: &FaceMesh,
-    edges: &EdgeSet,
+    mesh: &FaceCandidate,
+    edges: &DisplayEdges,
     maximum: usize,
     outside: usize,
     work: &mut GeometryWorkBudget,
@@ -364,7 +364,7 @@ pub(super) fn inventory(
 /// by maximum; the owning audit still adds the independently proved source trim.
 pub(super) fn fan(
     surface: &Surface,
-    mesh: &FaceMesh,
+    mesh: &FaceCandidate,
     inventory: &Inventory,
     triangle: [u32; 3],
     sense: f64,

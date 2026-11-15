@@ -4,11 +4,12 @@
 
 //! Test operands authored as real SolidCraft source geometry and topology.
 use crate::Definition;
-use solidcraft_geom::brep as b;
+use solidcore_record::brep as b;
 use std::sync::atomic::AtomicBool;
 
 mod analytic;
 mod rational;
+mod rigid;
 
 pub(crate) fn nurbs_cylinder() -> b::Brep {
     rational::nurbs_cylinder()
@@ -32,8 +33,8 @@ pub(crate) fn sphere_belt() -> SourceBrep {
 
 pub(crate) struct SourceBrep {
     pub record: b::Brep,
-    pub edge_curves: Vec<Option<solidcraft_step::geom::Curve>>,
-    pub face_surfaces: Vec<Option<solidcraft_step::geom::Surface>>,
+    pub edge_curves: Vec<Option<solidcore_step::geom::Curve>>,
+    pub face_surfaces: Vec<Option<solidcore_step::geom::Surface>>,
 }
 
 impl From<b::Brep> for SourceBrep {
@@ -53,19 +54,24 @@ pub(crate) fn original_definition(source: impl Into<SourceBrep>) -> Definition {
 
 /// The identical authored STEP operands for direct import-boundary regressions.
 pub(crate) fn original_step_bytes(source: impl Into<SourceBrep>) -> Vec<u8> {
-    use solidcraft_step::p21::Param as P;
-    use solidcraft_step::write::{GeomWriter, Writer, topology};
+    use solidcore_step::p21::Param as P;
+    use solidcore_step::write::{GeomWriter, Writer, topology};
     let mut source = source.into();
     if source.edge_curves.is_empty()
         && source.face_surfaces.is_empty()
-        && source
+        && (source
             .record
             .edges
             .iter()
             .any(|edge| edge.nurbs.is_some() && matches!(edge.curve, b::Curve::Circle { .. }))
+            // An authored spline carrier is written as authored: the writer would otherwise
+            // promote a spline that proves analytic to its analytic label.
+            || source.record.faces.iter().any(|face| {
+                matches!(face.surface, b::Surface::Spline { .. } | b::Surface::RationalSpline { .. })
+            }))
     {
-        // Analytic source circles keep their angular law. The portable
-        // record's rational native charts are not authored analytic PCURVEs.
+        // Analytic source circles keep their angular law, and spline carriers their net. The
+        // portable record's rational native charts are not authored analytic PCURVEs.
         let carriers = source
             .record
             .faces
@@ -152,10 +158,10 @@ pub(crate) fn original_step_bytes(source: impl Into<SourceBrep>) -> Vec<u8> {
 /// a different parameter law. This branch writes those authored STEP operands
 /// directly, with the same topology/sense convention as SolidCraft's writer.
 fn write_authored_source(
-    writer: &mut solidcraft_step::write::Writer,
+    writer: &mut solidcore_step::write::Writer,
     source: &SourceBrep,
 ) -> Vec<u64> {
-    use solidcraft_step::{
+    use solidcore_step::{
         geom as s,
         p21::Param as P,
         write::{GeomWriter, topology},
@@ -689,10 +695,13 @@ pub(crate) fn circular_prism(center: [f64; 2], radius: f64, height: f64) -> b::B
 }
 
 pub(crate) fn translated(source: b::Brep, translation: [f64; 3]) -> b::Brep {
-    source.moved(&b::placement::Rigid {
-        rotation: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
-        translation,
-    })
+    rigid::moved(
+        &source,
+        &rigid::Rigid {
+            rotation: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+            translation,
+        },
+    )
 }
 
 fn horizontal_face(source: &b::Brep, face: usize, height: f64) -> bool {
@@ -1023,8 +1032,8 @@ pub(crate) fn cone_frustum() -> b::Brep {
     source
 }
 
-fn source_carriers(record: b::Brep, carriers: Vec<solidcraft_step::geom::Surface>) -> SourceBrep {
-    use solidcraft_step::{geom as s, write::topology};
+fn source_carriers(record: b::Brep, carriers: Vec<solidcore_step::geom::Surface>) -> SourceBrep {
+    use solidcore_step::{geom as s, write::topology};
     use std::sync::Arc;
     let carriers: Vec<_> = carriers.into_iter().map(Arc::new).collect();
     let edge_curves = record
@@ -1057,7 +1066,7 @@ fn source_carriers(record: b::Brep, carriers: Vec<solidcraft_step::geom::Surface
 }
 
 pub(crate) fn bezier_extrusion(hole: bool, rotated: bool) -> SourceBrep {
-    use solidcraft_step::{geom as s, write::topology};
+    use solidcore_step::{geom as s, write::topology};
     use std::sync::Arc;
     let mut source = box_source(20., 10., 8.);
     let controls = [[0., 0.], [5., -2.], [15., -2.], [20., 0.]];
@@ -1089,10 +1098,13 @@ pub(crate) fn bezier_extrusion(hole: bool, rotated: bool) -> SourceBrep {
         subtract_open_prism(&mut source, circular_prism([10., 5.], 2., 8.), &[0., 8.]);
     }
     if rotated {
-        source = source.moved(&b::placement::Rigid {
-            rotation: [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
-            translation: [0.; 3],
-        });
+        source = rigid::moved(
+            &source,
+            &rigid::Rigid {
+                rotation: [[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+                translation: [0.; 3],
+            },
+        );
     }
     let carriers = source
         .faces
@@ -1123,7 +1135,7 @@ pub(crate) fn bezier_extrusion(hole: bool, rotated: bool) -> SourceBrep {
 }
 
 pub(crate) fn revolution() -> SourceBrep {
-    use solidcraft_step::{geom as s, write::topology};
+    use solidcore_step::{geom as s, write::topology};
     use std::sync::Arc;
     let mut source = cone_frustum();
     subtract_open_prism(&mut source, circular_prism([0., 0.], 2., 8.), &[0., 8.]);

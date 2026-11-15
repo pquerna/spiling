@@ -2056,7 +2056,7 @@ mod tests {
             }
             // A finite spatial spline ends inside NativeV tolerance, while
             // topology and cap PCURVEs retain the actual closed native domain.
-            edge.curve = solidcraft_geom::brep::Curve::Spline {
+            edge.curve = solidcore_record::brep::Curve::Spline {
                 knots: vec![0.0, 0.0, 1.0, 1.0],
                 points: points.to_vec(),
             };

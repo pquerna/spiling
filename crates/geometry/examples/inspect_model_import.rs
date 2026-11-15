@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let display = if include_display {
                 let provenance = SourceProvenance {
+                    findings: Vec::new(),
                     source_hash: SourceHash::from_bytes(&bytes),
                     source_name: path.clone(),
                     source_unit: source.source_unit,

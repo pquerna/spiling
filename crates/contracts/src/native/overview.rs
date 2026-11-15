@@ -129,6 +129,7 @@ mod tests {
                 source_unit: SourceUnit::Millimetre,
                 uncertainty_mm: Some(0.001),
                 source_solid: None,
+                findings: Vec::new(),
             },
             face_count: MAX_NATIVE_FACES,
             bounds_mm: AabbMm::new([1.0, 2.0, 3.0], [100.0, 200.0, 300.0]).unwrap(),

@@ -13,6 +13,22 @@ use solidcore::surface::{surface::Surface, surface::p2::SurfaceKind};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
+/// Whether a native face surface is the kernel's analytic cylinder, cone, sphere or torus: the
+/// kernel builds that kind only on a form it proved lies on the analytic surface of the record's
+/// label (`face_surface`), so the face's image is that smooth analytic surface whatever its form's
+/// knots. Not a chart: its parameters are the form's, evaluated through its NURB.
+pub(crate) fn native_analytic_support(surface: &Surface) -> bool {
+    let mut source = surface;
+    for _ in 0..32 {
+        match source.kind() {
+            SurfaceKind::CurveBounded(b) => source = b.basis(),
+            SurfaceKind::Cone(_) | SurfaceKind::Sphere(_) | SurfaceKind::Torus(_) => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 pub(crate) fn native_surface_nurbs(
     surface: &Surface,
 ) -> Result<Option<&srf_basic::Surface>, GeometryError> {
@@ -116,6 +132,53 @@ pub(super) fn surface_tensor(
     let domain = surface.natural_uv_domain_if_built();
     let min = domain.min();
     let max = domain.max();
+    // A box past the chart by rounding only (a trim's enclosure on the chart's own boundary):
+    // evaluated on the box clamped to the chart, its position widened by the first derivatives
+    // over the overrun, so it still encloses.
+    let bounds = [[min.x, max.x], [min.y, max.y]];
+    // Past the form, inside the chart's reach: the analytic law alone (the NURB has none there).
+    if (0..2).any(|axis| uv[axis][0] < bounds[axis][0] || uv[axis][1] > bounds[axis][1])
+        && let Some(chart) = super::form_chart::FormChart::of(surface)
+    {
+        let reach = chart.reach();
+        if (0..2).all(|axis| reach[axis][0] <= uv[axis][0] && uv[axis][1] <= reach[axis][1])
+            && let Some(tensor) = chart.tensor(uv, order, work, cancel)?
+        {
+            return Ok(tensor);
+        }
+    }
+    let overrun: [f64; 2] = std::array::from_fn(|axis| {
+        let [lo, hi] = bounds[axis];
+        (lo - uv[axis][0]).max(uv[axis][1] - hi).max(0.0)
+    });
+    let rounding = |axis: usize| {
+        64.0 * f64::EPSILON * bounds[axis][0].abs().max(bounds[axis][1].abs()).max(1.0)
+    };
+    if overrun.iter().any(|o| *o > 0.0)
+        && (0..2).all(|axis| overrun[axis] <= rounding(axis))
+        && (0..2).all(|axis| uv[axis][0] <= bounds[axis][1] && uv[axis][1] >= bounds[axis][0])
+    {
+        let clamped: [[f64; 2]; 2] = std::array::from_fn(|axis| {
+            [
+                uv[axis][0].max(bounds[axis][0]),
+                uv[axis][1].min(bounds[axis][1]),
+            ]
+        });
+        let mut tensor = surface_tensor(surface, clamped, order.max(1), work, cancel)?;
+        let du = tensor[1][0];
+        let dv = tensor[0][1];
+        for k in 0..3 {
+            let reach = |d: Interval, o: f64| d.lo.abs().max(d.hi.abs()) * o;
+            let widen = reach(du[k], overrun[0]) + reach(dv[k], overrun[1]);
+            let p = tensor[0][0][k];
+            tensor[0][0][k] = Interval::new(p.lo - widen, p.hi + widen)?;
+        }
+        if order == 0 {
+            tensor[1][0] = [Interval::point(0.0); 3];
+            tensor[0][1] = [Interval::point(0.0); 3];
+        }
+        return Ok(tensor);
+    }
     if uv[0][0] < min.x || uv[0][1] > max.x || uv[1][0] < min.y || uv[1][1] > max.y {
         let nurb_active = native_surface_nurbs(surface).ok().flatten().map(|n| {
             [
@@ -148,6 +211,25 @@ pub(super) fn surface_tensor(
                 std::panic::Location::caller(),
             ),
         ));
+    }
+    // The kernel's analytic kinds: their analytic law in the form's own parameters.
+    // Both enclose the kernel's surface: the NURB's own evaluation (exact where its net is, a
+    // carrier level on a form row) and the analytic law with its agreement term (tight over a
+    // box). Each entry is their intersection.
+    if let Some(chart) = super::form_chart::FormChart::of(surface)
+        && let Some(mut tensor) = chart.tensor(uv, order, work, cancel)?
+    {
+        if let Some(nurb) = native_surface_nurbs(surface)? {
+            let form = evaluate_nurbs_surface_tensor(nurb, uv, order, work, cancel)?;
+            for (row, frow) in tensor.iter_mut().zip(form) {
+                for (entry, fentry) in row.iter_mut().zip(frow) {
+                    for (v, f) in entry.iter_mut().zip(fentry) {
+                        *v = v.intersection(f).unwrap_or(f);
+                    }
+                }
+            }
+        }
+        return Ok(tensor);
     }
     if let Some(nurb) = native_surface_nurbs(surface)? {
         return evaluate_nurbs_surface_tensor(nurb, uv, order, work, cancel);
@@ -259,6 +341,9 @@ fn step_sphere_normal(
                 step_chart = true;
             }
             SurfaceKind::CurveBounded(s) => source = s.basis(),
+            SurfaceKind::Sphere(_) if !step_chart => {
+                return form_sphere_normal(source, uv);
+            }
             SurfaceKind::Sphere(s) if step_chart => {
                 if uv[1][0] < -90.0
                     || uv[1][1] > 90.0
@@ -327,6 +412,38 @@ fn step_sphere_normal(
     ))
 }
 
+/// A native kernel sphere's normal in its form chart: the algebraic field `(P - O) / r`, the unit
+/// `q` of its latitude and longitude, which a pole does not lose (the chart's `du x dv` does).
+fn form_sphere_normal(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+) -> Result<Option<[Interval; 3]>, GeometryError> {
+    let Some(chart) = super::form_chart::FormChart::of(surface) else {
+        return Ok(None);
+    };
+    let Some((_, axes, radius)) = chart.sphere() else {
+        return Ok(None);
+    };
+    if !(radius.is_finite() && radius != 0.0) {
+        return Ok(None);
+    }
+    let Some([theta, phi]) = chart.angles(uv)? else {
+        return Ok(None);
+    };
+    let (st, ct) = super::sin_cos_interval(theta);
+    let (sp, cp) = super::sin_cos_interval(phi);
+    let q = [cp.mul(ct), cp.mul(st), sp];
+    let sign = Interval::point(chart.orientation() * radius.signum());
+    let mut normal = [Interval::point(0.0); 3];
+    for (k, n) in normal.iter_mut().enumerate() {
+        let v = (0..3).fold(Interval::point(0.0), |v, a| {
+            v.add(Interval::point(axes[a][k]).mul(q[a]))
+        });
+        *n = v.mul(sign).intersect(Interval { lo: -1.0, hi: 1.0 })?;
+    }
+    Ok(Some(normal))
+}
+
 /// Whole-carrier exclusion for the literal STEP law P=O+r*A*q, |q|=1.
 /// Project A before taking its row norm; stored placements need not be
 /// orthonormal. This supplies no feasible point on a trimmed face, and must
@@ -349,7 +466,9 @@ pub(super) fn step_sphere_functional_bounds<const N: usize>(
                 step = true;
             }
             SurfaceKind::CurveBounded(s) => source = s.basis(),
-            SurfaceKind::Sphere(s) if step => {
+            SurfaceKind::Sphere(s)
+                if step || super::form_chart::FormChart::of(source).is_some() =>
+            {
                 let placement = s.base().position();
                 let o = placement.origin();
                 let x = placement.x_axis();
@@ -420,6 +539,29 @@ pub(crate) fn collapsed_step_sphere_position(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<[Interval; 3]>, GeometryError> {
+    // A native kernel sphere in its form chart: `latitude` is the chart's row parameter, a pole
+    // where the form's meridian reaches ±π/2 there.
+    if let Some(chart) = super::form_chart::FormChart::of(surface)
+        && let Some((centre, axes, radius)) = chart.sphere()
+        && let Some(phi) = chart.row_latitude(latitude)
+    {
+        let half = std::f64::consts::FRAC_PI_2;
+        let pole = if (phi - half).abs() <= 1e-12 {
+            1.0
+        } else if (phi + half).abs() <= 1e-12 {
+            -1.0
+        } else {
+            return Ok(None);
+        };
+        work.charge(1, cancel)?;
+        let reach = 1e-12 * (radius.abs() + centre.iter().fold(0.0_f64, |a, v| a.max(v.abs())));
+        let mut position = [Interval::point(0.0); 3];
+        for (k, p) in position.iter_mut().enumerate() {
+            let v = centre[k] + pole * radius * axes[2][k];
+            *p = Interval::new(super::down(v - reach), super::up(v + reach))?;
+        }
+        return Ok(Some(position));
+    }
     if latitude != -90.0 && latitude != 90.0 {
         return Ok(None);
     }
@@ -741,11 +883,13 @@ mod support_tests {
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        assert!(
-            step_sphere_functional_bounds(&native, &[f], &mut work, &cancel)
-                .unwrap()
-                .is_none()
-        );
+        // A native kernel sphere on its canonical (certified) form has the analytic law in its
+        // form chart: the same whole-carrier bound as the STEP law's.
+        assert!(super::super::form_chart::FormChart::of(&native).is_some());
+        let [own] = step_sphere_functional_bounds(&native, &[f], &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own, Interval::new(0.0, 4.0).unwrap());
         let step = Surface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()));
         let [bound] = step_sphere_functional_bounds(&step, &[f], &mut work, &cancel)
             .unwrap()

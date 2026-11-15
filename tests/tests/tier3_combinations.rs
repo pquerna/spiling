@@ -857,14 +857,6 @@ fn test_comb_47_waterline_pocket_transition_refinement() {
 }
 
 #[test]
-fn test_comb_48_surface_parameter_map_evaluation() {
-    let bytes = fixture_bytes("box-mm.step");
-    let def = import_test_step(&bytes).expect("box");
-    let maps = def.face_surface_maps();
-    assert_eq!(maps.len(), def.faces().len());
-}
-
-#[test]
 fn test_comb_49_brep_topology_integrity() {
     let bytes = fixture_bytes("cylinder.step");
     let def = import_test_step(&bytes).expect("cyl");

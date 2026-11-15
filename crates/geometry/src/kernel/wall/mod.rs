@@ -236,7 +236,7 @@ impl Definition {
             .get(index)
             .ok_or_else(|| malformed("native source face-use mapping is inconsistent"))?;
         let original = self.original_source().face(native_id)?;
-        let solidcraft_step::geom::Surface::Plane {
+        let solidcore_step::geom::Surface::Plane {
             position: source_position,
         } = original.carrier.as_ref()
         else {

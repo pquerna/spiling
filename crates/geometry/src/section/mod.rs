@@ -178,10 +178,15 @@ pub fn prepare_section_source<'a>(
         native_correspondence,
     })
 }
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct SectionQuery {
     pub(crate) plane: PlaneMm,
     pub(crate) maximum_chord_error_mm: f64,
     pub(crate) maximum_plane_error_mm: f64,
+    /// How many times each graph span's end segments are halved beyond their chord bound
+    /// (0 ordinarily): raised only to re-section a loop whose corner the end tangents of
+    /// coarsely sampled adjacent spans could not separate.
+    pub(crate) end_refinement: u8,
 }
 impl SectionQuery {
     pub(crate) fn normalized(&self) -> Result<Self, GeometryError> {
@@ -201,6 +206,7 @@ impl SectionQuery {
             plane: self.plane.normalized()?,
             maximum_chord_error_mm: self.maximum_chord_error_mm,
             maximum_plane_error_mm: self.maximum_plane_error_mm,
+            end_refinement: self.end_refinement,
         })
     }
     fn standard(plane: PlaneMm) -> Self {
@@ -208,6 +214,7 @@ impl SectionQuery {
             plane,
             maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
             maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+            end_refinement: 0,
         }
     }
 }

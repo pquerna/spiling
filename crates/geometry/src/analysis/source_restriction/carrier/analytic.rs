@@ -13,7 +13,7 @@ use crate::exact_coefficient::ExactCoefficient as E;
 use crate::parametric::{Interval, down, sin_cos_interval, up};
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcore::surface::surface::{Surface as NativeSurface, p2::SurfaceKind};
-use solidcraft_step::geom::{Placement, Surface};
+use solidcore_step::geom::{Placement, Surface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -476,17 +476,15 @@ fn native_analytic(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeAnalytic>, GeometryError> {
+    // The native analytic carrier is the record's, as the STEP reader read it from the original
+    // (`to_kernel`). Its coefficients are no authority here: the angular gauge below is proved
+    // against the original's by complete coefficient enclosures, not by its label.
     let mut surface = surface;
-    let mut step = false;
     for _ in 0..32 {
         work.charge(1, cancel)?;
         match surface.kind() {
             SurfaceKind::CurveBounded(b) => surface = b.basis(),
-            SurfaceKind::Step(s) => {
-                surface = s.surface().ok_or_else(unavailable)?;
-                step = true;
-            }
-            _ if !step => return Ok(None),
+            SurfaceKind::Step(s) => surface = s.surface().ok_or_else(unavailable)?,
             _ => {
                 let (placement, radius, minor, angle_degrees, kind) = match surface.kind() {
                     SurfaceKind::Cone(c) => {
@@ -954,7 +952,7 @@ pub(super) fn try_associate(
                     record.original_domain = domain.map_or([None; 2], |d| d.map(Some));
                     return Ok(Some(record));
                 }
-                if let solidcraft_step::geom::Curve::Line {
+                if let solidcore_step::geom::Curve::Line {
                     origin,
                     direction: profile_direction,
                     magnitude: profile_scale,
@@ -1011,7 +1009,7 @@ mod tests {
     fn circular_extrusion_requires_literal_positive_axis_and_consumes_axial_scale() {
         let cancel = AtomicBool::new(false);
         let source = Surface::Extrusion {
-            profile: std::sync::Arc::new(solidcraft_step::geom::Curve::Circle {
+            profile: std::sync::Arc::new(solidcore_step::geom::Curve::Circle {
                 position: source_placement(),
                 radius: 2.0,
             }),
@@ -1053,7 +1051,7 @@ mod tests {
     #[test]
     fn line_extrusion_proves_nonunit_source_parameter_coefficients() {
         let source = Surface::Extrusion {
-            profile: std::sync::Arc::new(solidcraft_step::geom::Curve::Line {
+            profile: std::sync::Arc::new(solidcore_step::geom::Curve::Line {
                 origin: [1.0, 2.0, 3.0],
                 direction: [0.0, 1.0, 0.0],
                 magnitude: 2.0,
@@ -1080,7 +1078,7 @@ mod tests {
 
     #[test]
     fn spline_extrusion_preserves_knots_and_bounds_changed_coefficients() {
-        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        use solidcore_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
         let mut source = Surface::Extrusion {
             profile: std::sync::Arc::new(Curve::BSpline(Box::new(BSplineCurve {
                 degree: 1,
@@ -1309,7 +1307,7 @@ mod tests {
         );
     }
     #[test]
-    fn analytic_label_without_step_does_not_authorize_angular_gauge() {
+    fn a_record_analytic_label_gets_the_angular_gauge_by_its_coefficient_proof() {
         let original = Surface::Cylinder {
             position: source_placement(),
             radius: 2.0,
@@ -1317,10 +1315,25 @@ mod tests {
         let native = cylinder([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
+        let record = try_associate(&original, &native, &mut work, &cancel)
+            .unwrap()
+            .expect("the record's cylinder has a proved gauge");
         assert!(
-            try_associate(&original, &native, &mut work, &cancel)
-                .unwrap()
-                .is_none()
+            record
+                .error_coefficients
+                .into_iter()
+                .all(|e| e.is_finite() && e >= 0.0)
+        );
+        assert!(record.error_coefficients.iter().sum::<f64>() < 1e-9);
+        // A different radius is bounded, not hidden: its gauge's error covers the 0.5 mm.
+        let other = cylinder([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.5, false);
+        let far = try_associate(&original, &other, &mut work, &cancel)
+            .unwrap()
+            .expect("a gauge with its error");
+        assert!(
+            far.error_coefficients[0] >= 0.5,
+            "{:?}",
+            far.error_coefficients
         );
     }
     #[test]

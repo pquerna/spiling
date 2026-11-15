@@ -6,6 +6,7 @@
 //! world-space trim transport. Inversion may propose display UVs; it never
 //! supplies original chart or manufacturing authority.
 
+use super::candidate::{DisplayEdges, FaceCandidate};
 use super::{
     audit::{norm_upper, triangle_uv},
     check_memory, invalid, native_error, resource, shape,
@@ -16,7 +17,6 @@ use crate::{
     parametric::{self, Interval, PreparedValidatedCurve},
 };
 use solidcore::{curve::curve::Curve, surface::surface::Surface, topology::edgeuse::p1 as eu};
-use solidcore_mesh::{EdgeSet, FaceMesh};
 use spiling_contracts::geometry::{GeometryError, GeometryErrorCode, MESH_CARRIER_TOLERANCE_MM};
 use std::{mem::size_of, sync::atomic::AtomicBool};
 
@@ -46,8 +46,8 @@ fn key(a: u32, b: u32) -> [u32; 2] {
 
 pub(super) fn certify(
     definition: &Definition,
-    mesh: &FaceMesh,
-    edges: &EdgeSet,
+    mesh: &FaceCandidate,
+    edges: &DisplayEdges,
     sense: f64,
     outside: usize,
     work: &mut GeometryWorkBudget,
@@ -501,7 +501,7 @@ pub(super) fn certify(
     Ok((trim_error, inventory))
 }
 
-fn edge_count_for_boundary(mesh: &FaceMesh, uses: usize) -> Result<usize, GeometryError> {
+fn edge_count_for_boundary(mesh: &FaceCandidate, uses: usize) -> Result<usize, GeometryError> {
     mesh.triangles
         .len()
         .checked_mul(3)
@@ -517,7 +517,7 @@ fn quotient_key(edge: &Boundary, inventory: &super::singular::Inventory) -> [(u8
 }
 
 fn complete_fans(
-    mesh: &FaceMesh,
+    mesh: &FaceCandidate,
     surface: &Surface,
     inventory: &super::singular::Inventory,
     boundary: &mut Vec<Boundary>,
@@ -653,7 +653,23 @@ fn curve_chord(
         let mut second = jet.second_derivative;
         let mut smooth = curve.is_smooth_on(part, work, cancel)?;
         if let Some(surface) = surface {
-            let domain = bounded_uv(native, part, surface, position, work, cancel)?;
+            let (domain, overrun) = match bounded_uv(native, part, surface, position, work, cancel)
+            {
+                Ok(lifted) => lifted,
+                // A leaf whose enclosure passes the chart past rounding is bisected: its halves'
+                // images contract onto the curve. At the depth limit it refuses.
+                Err(cause) if passes_chart(&cause) && depth < 32 => {
+                    let middle = part[0] * 0.5 + part[1] * 0.5;
+                    if middle <= part[0] || middle >= part[1] {
+                        return Err(cause);
+                    }
+                    stack[len] = ([middle, part[1]], depth + 1);
+                    stack[len + 1] = ([part[0], middle], depth + 1);
+                    len += 2;
+                    continue;
+                }
+                Err(cause) => return Err(cause),
+            };
             let s = parametric::surface_piecewise_enclosure(surface, domain, work, cancel)?;
             smooth &= parametric::surface_parameter_span_smooth(surface, domain, work, cancel)?;
             derivative = std::array::from_fn(|i| {
@@ -674,7 +690,7 @@ fn curve_chord(
                     .add(s.du[i].mul(jet.second_derivative[0]))
                     .add(s.dv[i].mul(jet.second_derivative[1]))
             });
-            position = s.position;
+            position = widen_overrun(s.position, s.du, s.dv, overrun)?;
         }
         let chord_at = |t: Interval| -> Result<[Interval; 3], GeometryError> {
             let fraction = t
@@ -692,8 +708,8 @@ fn curve_chord(
             for (endpoint, t) in part.into_iter().enumerate() {
                 let p = curve.position_bounds([t, t], work, cancel)?;
                 let p = if let Some(s) = surface {
-                    let domain = bounded_uv(native, [t, t], s, p, work, cancel)?;
-                    parametric::surface_position_enclosure(s, domain, work, cancel)?
+                    let lifted = bounded_uv(native, [t, t], s, p, work, cancel)?;
+                    lifted_position(s, lifted, work, cancel)?
                 } else {
                     p
                 };
@@ -726,9 +742,9 @@ fn curve_chord(
                     for endpoint in 0..2 {
                         let p = curve.position_bounds([range[endpoint]; 2], work, cancel)?;
                         let p = if let Some(s) = surface {
-                            let domain =
+                            let lifted =
                                 bounded_uv(native, [range[endpoint]; 2], s, p, work, cancel)?;
-                            parametric::surface_position_enclosure(s, domain, work, cancel)?
+                            lifted_position(s, lifted, work, cancel)?
                         } else {
                             p
                         };
@@ -875,7 +891,7 @@ fn position_chord_error(
     reason = "Circuit ownership, orientation and coexisting proof storage remain independent audit inputs"
 )]
 fn circuits(
-    mesh: &FaceMesh,
+    mesh: &FaceCandidate,
     inventory: &super::singular::Inventory,
     boundary: &[Boundary],
     loop_count: usize,
@@ -1002,6 +1018,12 @@ pub(super) fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Interval {
     x(b, 0).mul(x(c, 1)).sub(x(b, 1).mul(x(c, 0)))
 }
 
+/// The (u, v) box a trim leaf's lifted positions are evaluated on, with how far past the
+/// carrier's chart its image may lie on each axis. Within the chart it is the leaf's own image;
+/// past it, the complete expression must be contained by its native coefficients, or its image
+/// (enclosed over subdivided parameters) may pass the chart by rounding only: then it is
+/// evaluated on the chart, and the caller widens what it evaluates by the carrier's speed over
+/// that overrun ([`widen_overrun`]). Any larger excursion refuses.
 fn bounded_uv(
     curve: &Curve,
     range: [f64; 2],
@@ -1009,27 +1031,81 @@ fn bounded_uv(
     position: [Interval; 3],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<[[f64; 2]; 2], GeometryError> {
+) -> Result<([[f64; 2]; 2], [f64; 2]), GeometryError> {
     let domain = parametric::surface_active_domain(surface)?;
     let proposed = [
         [position[0].lo, position[0].hi],
         [position[1].lo, position[1].hi],
     ];
     if (0..2).all(|a| proposed[a][0] >= domain[a][0] && proposed[a][1] <= domain[a][1]) {
-        return Ok(proposed);
+        return Ok((proposed, [0.0; 2]));
     }
-    if !parametric::curve2d_image_within_box(curve, range, domain, work, cancel)? {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ConditioningFailure,
-            "native trim UV enclosure leaves the natural carrier chart without coefficient containment authority",
+    if parametric::curve2d_image_within_box(curve, range, domain, work, cancel)? {
+        return Ok((
+            std::array::from_fn(|a| {
+                [
+                    proposed[a][0].max(domain[a][0]),
+                    proposed[a][1].min(domain[a][1]),
+                ]
+            }),
+            [0.0; 2],
         ));
     }
-    Ok(std::array::from_fn(|a| {
-        [
-            proposed[a][0].max(domain[a][0]),
-            proposed[a][1].min(domain[a][1]),
-        ]
-    }))
+    match parametric::curve2d_rounded_image(curve, range, domain, work, cancel)? {
+        Some(lifted) => Ok(lifted),
+        None => Err(beyond_chart()),
+    }
+}
+
+fn beyond_chart() -> GeometryError {
+    GeometryError::new(
+        GeometryErrorCode::ConditioningFailure,
+        "native trim UV enclosure leaves the natural carrier chart without coefficient containment authority",
+    )
+}
+
+/// Whether a leaf's refusal is its image passing the chart, which a finer leaf may resolve.
+fn passes_chart(cause: &GeometryError) -> bool {
+    cause.code == GeometryErrorCode::ConditioningFailure
+        && cause
+            .message
+            .starts_with("native trim UV enclosure leaves the natural carrier chart")
+}
+
+/// `position` widened by the carrier's speed over a rounding-level overrun of its chart.
+fn widen_overrun(
+    position: [Interval; 3],
+    du: [Interval; 3],
+    dv: [Interval; 3],
+    overrun: [f64; 2],
+) -> Result<[Interval; 3], GeometryError> {
+    if overrun == [0.0; 2] {
+        return Ok(position);
+    }
+    let mut widened = position;
+    for i in 0..3 {
+        let reach = Interval::point(du[i].abs_upper())
+            .mul(Interval::point(overrun[0]))
+            .add(Interval::point(dv[i].abs_upper()).mul(Interval::point(overrun[1])))
+            .hi;
+        widened[i] = Interval::new(position[i].lo - reach, position[i].hi + reach)?;
+    }
+    Ok(widened)
+}
+
+/// The carrier's position over `domain` (with its first derivatives when the trim image passes
+/// the chart by rounding), widened by that overrun.
+fn lifted_position(
+    surface: &Surface,
+    (domain, overrun): ([[f64; 2]; 2], [f64; 2]),
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 3], GeometryError> {
+    if overrun == [0.0; 2] {
+        return parametric::surface_position_enclosure(surface, domain, work, cancel);
+    }
+    let s = parametric::surface_piecewise_enclosure(surface, domain, work, cancel)?;
+    widen_overrun(s.position, s.du, s.dv, overrun)
 }
 
 #[cfg(test)]
@@ -1089,7 +1165,7 @@ mod tests {
                 &cancel,
             );
             if end == 1.0 {
-                assert_eq!(result.unwrap(), [[0.0, 1.0], [0.5, 0.5]]);
+                assert_eq!(result.unwrap(), ([[0.0, 1.0], [0.5, 0.5]], [0.0; 2]));
             } else {
                 assert_eq!(
                     result.unwrap_err().code,

@@ -716,6 +716,7 @@ fn plates(ui: &mut Ui) {
                 source_unit: spiling_contracts::geometry::SourceUnit::Millimetre,
                 uncertainty_mm: None,
                 source_solid: None,
+                findings: Vec::new(),
             },
             face_count: 6,
             bounds_mm: spiling_contracts::geometry::AabbMm {

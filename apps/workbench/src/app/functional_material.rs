@@ -459,6 +459,7 @@ mod tests {
                 source_unit: SourceUnit::Millimetre,
                 uncertainty_mm: None,
                 source_solid: None,
+                findings: Vec::new(),
             },
         }
     }

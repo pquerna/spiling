@@ -70,6 +70,12 @@ pub(crate) fn has_candidate(
     Ok(false)
 }
 
+/// A coefficient law that is exactly polynomial: unrational, or rational with every weight
+/// exactly one (the kernel writes its lines that way), where the quotient is the numerator.
+fn polynomial(native: &solidcore::nurbs::crv_basic::Curve) -> bool {
+    !native.is_rational() || native.cpts().iter().all(|point| point.w == 1.0)
+}
+
 #[derive(Clone, Copy)]
 struct Chart {
     ends: [[f64; 2]; 2],
@@ -85,7 +91,7 @@ fn chart(
     let native = p::curve_prepared::native_curve_nurbs(curve)?
         .ok_or_else(|| unresolved("boundary chart needs explicit native coefficients"))?;
     require(
-        !native.is_rational(),
+        polynomial(native),
         "rational boundary chart is outside this supporting-coordinate cut",
     )?;
     let points = native.cpts();
@@ -140,7 +146,7 @@ fn supporting_sign(
         let native = p::curve_prepared::native_curve_nurbs(coedge.curve())?
             .ok_or_else(|| unresolved("missing supporting-coordinate coefficients"))?;
         require(
-            !native.is_rational(),
+            polynomial(native),
             "rational supporting-coordinate law is unqualified",
         )?;
         for point in native.cpts() {
@@ -225,7 +231,9 @@ struct Plan {
     uses: [CoedgeUse; 2],
     witness: usize,
     axis: usize,
-    level: f64,
+    /// Each use's own constant chart coordinate on `axis`: a periodic carrier's two faces may
+    /// meet one line a whole period apart. Each face's exact carrier zero proves its own.
+    levels: [f64; 2],
     vertices: [VertexId; 2],
     representatives: [[f64; 3]; 2],
     zone_errors: [f64; 2],
@@ -234,7 +242,7 @@ struct Plan {
 fn cover_face(
     source: MaterialSourceView<'_, '_>,
     domain: &PreparedFaceTrimDomain<'_>,
-    selected: usize,
+    slot: usize,
     plan: &mut Plan,
     plane: PlaneMm,
     work: &mut GeometryWorkBudget,
@@ -244,9 +252,10 @@ fn cover_face(
         domain.loops().len() == 1,
         "multiple chart circuits need a separate level census",
     )?;
+    let level = plan.levels[slot];
+    let selected = plan.uses[slot].coedge;
     require(
-        domain.uv_domain()[plan.axis][0] <= plan.level
-            && plan.level <= domain.uv_domain()[plan.axis][1],
+        domain.uv_domain()[plan.axis][0] <= level && level <= domain.uv_domain()[plan.axis][1],
         "boundary level leaves the original carrier restriction",
     )?;
     let selected_coedge = &domain.coedges()[selected];
@@ -261,8 +270,8 @@ fn cover_face(
             && selected_coedge.native_range == [edge.interval.min(), edge.interval.max()],
         "selected boundary changed its native range or endpoint owners",
     )?;
-    let support = supporting_sign(domain, plan.axis, plan.level, work, cancel)?;
-    zero_cover(domain, plan.axis, plan.level, plane, work, cancel)?;
+    let support = supporting_sign(domain, plan.axis, level, work, cancel)?;
+    zero_cover(domain, plan.axis, level, plane, work, cancel)?;
     for (index, coedge) in domain.coedges().iter().enumerate() {
         chart(coedge, work, cancel)?;
         if index != selected {
@@ -270,7 +279,7 @@ fn cover_face(
             let mut zeros = 0;
             for (control, point) in native.cpts().iter().enumerate() {
                 work.charge(1, cancel)?;
-                if [point.x, point.y][plan.axis] == plan.level {
+                if [point.x, point.y][plan.axis] == level {
                     zeros += 1;
                     require(
                         control == 0 || control + 1 == native.cpts().len(),
@@ -293,7 +302,7 @@ fn cover_face(
         work.charge(1, cancel)?;
         let next = (index + 1) % domain.coedges().len();
         let (vertex, cover) = domain.native_joint_cover(index, next, work, cancel)?;
-        if !cover[plan.axis].contains(plan.level) {
+        if !cover[plan.axis].contains(level) {
             continue;
         }
         let slot = plan
@@ -302,7 +311,7 @@ fn cover_face(
             .position(|value| *value == vertex)
             .ok_or_else(|| unresolved("unaccounted local zero component at a foreign joint"))?;
         let mut cell = cover.map(|value| [value.lo, value.hi]);
-        cell[plan.axis] = [plan.level; 2];
+        cell[plan.axis] = [level; 2];
         let image = domain.surface_evaluator().tensor(cell, 0, work, cancel)?[0][0];
         let error = norm(std::array::from_fn(|axis| {
             image[axis].sub(Interval::point(plan.representatives[slot][axis]))
@@ -634,6 +643,20 @@ fn attempt(
         let (witness, axis, level) = witness.ok_or_else(|| {
             unresolved("paired boundary has no exhaustive exact retained level witness")
         })?;
+        let mut levels = [level; 2];
+        levels[1 - witness] = charts[1 - witness].ends[0][axis];
+        let partner = p::curve_prepared::native_curve_nurbs(
+            domains[1 - witness].coedges()[uses[1 - witness].coedge].curve(),
+        )?
+        .unwrap();
+        work.charge(partner.cpts().len() as u64, cancel)?;
+        require(
+            partner
+                .cpts()
+                .iter()
+                .all(|point| [point.x, point.y][axis] == levels[1 - witness]),
+            "paired boundary partner is not on one retained chart level",
+        )?;
         let representative = |vertex| {
             definition
                 .brep()
@@ -656,29 +679,13 @@ fn attempt(
             uses,
             witness,
             axis,
-            level,
+            levels,
             vertices: pair.vertices,
             representatives,
             zone_errors: [0.0; 2],
         };
-        let first = cover_face(
-            source,
-            domains[0],
-            uses[0].coedge,
-            &mut plan,
-            plane,
-            work,
-            cancel,
-        )?;
-        let second = cover_face(
-            source,
-            domains[1],
-            uses[1].coedge,
-            &mut plan,
-            plane,
-            work,
-            cancel,
-        )?;
+        let first = cover_face(source, domains[0], 0, &mut plan, plane, work, cancel)?;
+        let second = cover_face(source, domains[1], 1, &mut plan, plane, work, cancel)?;
         require(
             first == -second,
             "paired retained faces do not cross the level in opposite directions",
@@ -811,6 +818,7 @@ mod tests {
             },
             maximum_chord_error_mm: 0.001,
             maximum_plane_error_mm: 1e-7,
+            end_refinement: 0,
         };
         let section = attempt(
             source,
@@ -952,12 +960,16 @@ mod tests {
         let uses = [pair.first, pair.second.unwrap()];
         let domain = source.face_domain(3, 0, &mut work, &cancel).unwrap();
         let witness = uses.iter().position(|owner| owner.face == 3).unwrap();
+        // The witness face's own retained level: its pcurve's constant chart coordinate.
+        let level = chart(&domain.coedges()[uses[witness].coedge], &mut work, &cancel)
+            .unwrap()
+            .ends[0][1];
         let mut plan = Plan {
             edge: domain.coedges()[uses[witness].coedge].edge,
             uses,
             witness,
             axis: 1,
-            level: 360.0,
+            levels: [level; 2],
             vertices: pair.vertices,
             representatives: pair.vertices.map(|vertex| {
                 let point = definition.brep().vertex(vertex).unwrap().point;
@@ -971,34 +983,30 @@ mod tests {
         };
         assert_eq!(
             cover_face(
-                source,
-                domain,
-                uses[witness].coedge,
-                &mut plan,
-                plane,
-                &mut work,
-                &cancel
+                source, domain, witness, &mut plan, plane, &mut work, &cancel
             )
             .unwrap(),
             1
         );
-        let mut non_singleton_cover = false;
+        // The record's pcurves meet at exact joints, so a level joint's cover may be a point;
+        // every one the level reaches is still checked against its owned zone error.
+        let mut level_joints = 0;
         for incoming in 0..domain.coedges().len() {
             let outgoing = (incoming + 1) % domain.coedges().len();
             let (vertex, cover) = domain
                 .native_joint_cover(incoming, outgoing, &mut work, &cancel)
                 .unwrap();
-            if !cover[1].contains(plan.level) {
+            if !cover[1].contains(level) {
                 continue;
             }
-            non_singleton_cover |= cover.iter().any(|coordinate| !coordinate.is_point());
+            level_joints += 1;
             let slot = plan
                 .vertices
                 .iter()
                 .position(|owner| *owner == vertex)
                 .unwrap();
             let mut cell = cover.map(|coordinate| [coordinate.lo, coordinate.hi]);
-            cell[1] = [plan.level; 2];
+            cell[1] = [level; 2];
             let image = domain
                 .surface_evaluator()
                 .tensor(cell, 0, &mut work, &cancel)
@@ -1009,18 +1017,12 @@ mod tests {
             .unwrap();
             assert!(required <= plan.zone_errors[slot]);
         }
-        assert!(non_singleton_cover);
+        assert!(level_joints > 0);
         assert!(domain.native_joint_cover(0, 2, &mut work, &cancel).is_err());
         plan.vertices.swap(0, 1);
         assert!(
             cover_face(
-                source,
-                domain,
-                uses[witness].coedge,
-                &mut plan,
-                plane,
-                &mut work,
-                &cancel
+                source, domain, witness, &mut plan, plane, &mut work, &cancel
             )
             .is_err()
         );
@@ -1028,9 +1030,11 @@ mod tests {
             origin_mm: [0.0, 0.0, 1e-12],
             ..plane
         };
-        assert!(zero_cover(domain, 1, 360.0, displaced, &mut work, &cancel).is_err());
+        assert!(zero_cover(domain, 1, level, displaced, &mut work, &cancel).is_err());
         let opposite = source.face_domain(0, 0, &mut work, &cancel).unwrap();
-        assert!(supporting_sign(opposite, 1, 315.0, &mut work, &cancel).is_err());
+        // A level through the opposite face's interior: its boundary crosses it.
+        let [low, high] = opposite.uv_domain()[1];
+        assert!(supporting_sign(opposite, 1, low * 0.5 + high * 0.5, &mut work, &cancel).is_err());
     }
 
     #[test]
@@ -1056,6 +1060,7 @@ mod tests {
             plane,
             maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
             maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+            end_refinement: 0,
         };
         let raw = crate::section::section(
             &definition,

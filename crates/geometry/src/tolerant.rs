@@ -28,7 +28,7 @@ pub use exact::SectionCircle;
 pub use support::{TolerantSupportPiece, TolerantSupportProjection, TolerantVoidProjection};
 
 use crate::{GeometryError, GeometryErrorCode, kernel::Definition};
-use solidcore_mesh::{EdgeOptions, OutputOptions, TessellateOptions, Tolerance};
+use solidcore_tess::MeshTolerance;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -133,6 +133,21 @@ fn weld(positions: &mut Vec<[f64; 3]>, triangles: &mut [[u32; 3]]) {
     }
 }
 
+/// The tolerant model's control of its plan: cancellation only (its work is not budgeted).
+struct Cancellable<'a>(&'a AtomicBool);
+impl solidcore_tess::Control for Cancellable<'_> {
+    fn charge(&self, _work: u64) -> Result<(), solidcore_tess::Stop> {
+        if self.0.load(Ordering::Relaxed) {
+            Err(solidcore_tess::Stop::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+    fn admit(&self, _bytes: usize) -> Result<(), solidcore_tess::Stop> {
+        Ok(())
+    }
+}
+
 fn unavailable(message: impl Into<String>) -> GeometryError {
     GeometryError::new(GeometryErrorCode::UnsupportedGeometry, message.into())
 }
@@ -147,65 +162,76 @@ impl TolerantModel {
         if !(policy.join_mm > 0.0 && policy.profile_mm > 0.0) {
             return Err(unavailable("tolerant section tolerances must be positive"));
         }
-        let kernel = crate::make_kernel_context();
-        let options = TessellateOptions {
-            chord_tolerance: Tolerance::Absolute(policy.profile_mm * 0.5),
-            edge: EdgeOptions::default(),
-            output: OutputOptions {
-                normals: false,
-                uvs: false,
-                face_ids: true,
-                edge_polylines: false,
-            },
-            measure_deviation: false,
-            ..TessellateOptions::default()
+        // The chord alone (no facet angle): the profile, not the look, decides the mesh.
+        let size = {
+            let b = &definition.bounds;
+            let d: [f64; 3] = std::array::from_fn(|i| b.max[i] - b.min[i]);
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
         };
-        let mut mesh = solidcore_mesh::tessellate(&kernel, definition.brep(), &options)
-            .map_err(|e| unavailable(format!("tolerant tessellation failed: {e}")))?;
-        let analytic = |face: &solidcore::FaceId| {
+        let cancelled = || {
+            GeometryError::new(
+                GeometryErrorCode::Cancelled,
+                "tolerant tessellation cancelled",
+            )
+        };
+        let control = Cancellable(cancel);
+        let (plan, stats) = solidcore_tess::plan_with(
+            definition.record(),
+            &MeshTolerance::chord(policy.profile_mm * 0.5),
+            size,
+            &control,
+        )
+        .map_err(|e| match e {
+            solidcore_tess::TessError::Stopped(_) => cancelled(),
+            e => unavailable(format!("tolerant tessellation failed: {e}")),
+        })?;
+        let (mesh, refused) = plan.evaluate_with(&control).map_err(|_| cancelled())?;
+        // Faces left out of the mesh (unplanned, or refused where their carrier would not
+        // evaluate): their area is missing, reported as failed faces.
+        let analytic = |record_face: usize| {
             definition
-                .face_ordinal(*face)
+                .record_order()
+                .faces
+                .get(record_face)
+                .and_then(|face| definition.face_ordinal(*face))
                 .and_then(|o| definition.faces()[o].geometry.analytic.as_ref())
                 .and_then(exact::Implicit::from_analytic)
                 .is_some()
         };
         let mut reach = policy.profile_mm;
-        let mut failed_faces = mesh.failures.len() + mesh.unconverged_faces.len();
-        // The mesher can stop refining a face with work left. Measure how far
-        // it strays. On analytic faces only the mesh's topology is used: admit
-        // it if projection can bring every crossing back. Any face whose mesh
-        // is measured within the profile tolerance needs no projection.
-        if mesh.failures.is_empty() && !mesh.unconverged_faces.is_empty() {
-            let all_analytic = mesh.unconverged_faces.iter().all(analytic);
-            let measured = solidcore_mesh::tessellate(
-                &kernel,
-                definition.brep(),
-                &TessellateOptions {
-                    measure_deviation: true,
-                    ..options
-                },
-            )
-            .map_err(|e| unavailable(format!("tolerant tessellation failed: {e}")))?;
-            let deviation = measured.stats.face_deviation.unwrap_or(f64::INFINITY);
+        let unplanned = stats.unmeshed.len() + refused.len();
+        let mut failed_faces = unplanned + stats.over_tolerance.len();
+        // A memory bound of the planner can leave a face's sag above its tolerance; the
+        // planner measures it. On analytic faces only the mesh's topology is used: admit it if
+        // projection can bring every crossing back. A face measured within the profile
+        // tolerance needs no projection.
+        if unplanned == 0 && !stats.over_tolerance.is_empty() {
+            let all_analytic = stats.over_tolerance.iter().all(|over| analytic(over.face));
+            let measured = stats.over_tolerance.iter().all(|over| over.unmeasured == 0);
+            let deviation = if measured {
+                stats
+                    .over_tolerance
+                    .iter()
+                    .map(|over| over.sag)
+                    .fold(0.0_f64, f64::max)
+            } else {
+                f64::INFINITY
+            };
             if (all_analytic || deviation <= policy.profile_mm)
                 && let Some(admitted) = unconverged_reach(deviation, policy)
             {
                 reach = admitted;
                 failed_faces = 0;
-                mesh = measured;
             }
         }
-        if cancel.load(Ordering::Relaxed) {
-            return Err(GeometryError::new(
-                GeometryErrorCode::Cancelled,
-                "tolerant tessellation cancelled",
-            ));
-        }
         let mut positions: Vec<[f64; 3]> = mesh.positions.iter().map(|p| [p.x, p.y, p.z]).collect();
-        let mut faces = Vec::with_capacity(mesh.triangle_faces.len());
-        for face in &mesh.triangle_faces {
+        let mut faces = Vec::with_capacity(mesh.tri_face.len());
+        for &record_face in &mesh.tri_face {
             let ordinal = definition
-                .face_ordinal(*face)
+                .record_order()
+                .faces
+                .get(record_face as usize)
+                .and_then(|face| definition.face_ordinal(*face))
                 .ok_or_else(|| unavailable("tessellated triangle has no source face"))?;
             faces.push(ordinal as u32);
         }

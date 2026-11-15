@@ -7,6 +7,7 @@ pub(crate) mod source_operand;
 
 mod cylinder;
 mod hole;
+pub(crate) mod record_bytes;
 pub(crate) mod trim;
 mod wall;
 pub(crate) use trim::{
@@ -14,48 +15,9 @@ pub(crate) use trim::{
     certified_curve2d_is_straight_regular,
 };
 
-use serde::{Deserialize, Serialize};
 use spiling_contracts::geometry::{AabbMm, DefinitionId, FaceInfo, SourceProvenance, StepEntityId};
 
 pub type BBox3Mm = AabbMm;
-
-/// Surface parameter mapping between STEP UV and solidcore analytic surface parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum SurfaceParameterMap {
-    Identity,
-    ScaleOffset {
-        u_scale: f64,
-        u_offset: f64,
-        v_scale: f64,
-        v_offset: f64,
-    },
-}
-
-impl SurfaceParameterMap {
-    pub fn step_to_core(&self, uv: [f64; 2]) -> [f64; 2] {
-        match self {
-            Self::Identity => uv,
-            Self::ScaleOffset {
-                u_scale,
-                u_offset,
-                v_scale,
-                v_offset,
-            } => [(uv[0] - u_offset) * u_scale, (uv[1] - v_offset) * v_scale],
-        }
-    }
-
-    pub fn core_to_step(&self, uv: [f64; 2]) -> [f64; 2] {
-        match self {
-            Self::Identity => uv,
-            Self::ScaleOffset {
-                u_scale,
-                u_offset,
-                v_scale,
-                v_offset,
-            } => [uv[0] / u_scale + u_offset, uv[1] / v_scale + v_offset],
-        }
-    }
-}
 
 fn prepare_finish_source<'d>(
     definition: &'d Definition,
@@ -85,7 +47,7 @@ fn finish_support_extent(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<[f64; 2], crate::GeometryError> {
     use crate::{exact_coefficient::ExactCoefficient, parametric::Interval};
-    use solidcraft_step::geom::{Curve, Surface};
+    use solidcore_step::geom::{Curve, Surface};
     use spiling_contracts::geometry::GeometryErrorCode;
     let unavailable = || {
         crate::GeometryError::new(
@@ -316,9 +278,15 @@ pub struct Definition {
     pub(crate) shell_id: solidcore::topology::ShellId,
     pub(crate) face_ids: Vec<solidcore::FaceId>,
     pub(crate) face_step_ids: Vec<StepEntityId>,
-    pub(crate) face_surface_maps: Vec<SurfaceParameterMap>,
     pub(crate) source_units_scale_to_mm: f64,
     pub(crate) original_source: source::OriginalSourceTopology,
+    /// The reader's record the kernel B-rep was converted from, untouched: the display
+    /// planner's input. Shared, never copied; its bytes are part of the retained proof bytes.
+    pub(crate) record: std::sync::Arc<solidcore_record::brep::Brep>,
+    /// Record face/edge/vertex `i` is kernel entity `record_order.*[i]`.
+    pub(crate) record_order: solidcore_convert::brep::Order,
+    /// The record's logical owned bytes, counted once when it was read.
+    pub(crate) record_bytes: usize,
 }
 
 /// Captured native-material producer identity. Original STEP uncertainty remains
@@ -420,6 +388,16 @@ impl Definition {
         &self.brep
     }
 
+    /// The reader's record this definition's kernel B-rep was converted from.
+    pub(crate) fn record(&self) -> &solidcore_record::brep::Brep {
+        &self.record
+    }
+
+    /// Which kernel entity each record index names.
+    pub(crate) fn record_order(&self) -> &solidcore_convert::brep::Order {
+        &self.record_order
+    }
+
     /// Primary shell ID of this solid.
     #[inline]
     pub fn shell_id(&self) -> solidcore::topology::ShellId {
@@ -430,12 +408,6 @@ impl Definition {
     #[inline]
     pub fn face_step_ids(&self) -> &[StepEntityId] {
         &self.face_step_ids
-    }
-
-    /// Surface parameter maps corresponding to each face ordinal.
-    #[inline]
-    pub fn face_surface_maps(&self) -> &[SurfaceParameterMap] {
-        &self.face_surface_maps
     }
 
     /// Source representation scale to mm.
@@ -495,7 +467,19 @@ impl Definition {
         // 5. Metadata and Provenance
         total += self.faces.len() * std::mem::size_of::<FaceInfo>();
         total += self.face_step_ids.len() * std::mem::size_of::<StepEntityId>();
-        total += self.face_surface_maps.len() * std::mem::size_of::<SurfaceParameterMap>();
+
+        // 6. The reader's record and its kernel order
+        total = total
+            .saturating_add(self.record_bytes)
+            .saturating_add(
+                self.record_order.faces.capacity() * std::mem::size_of::<solidcore::FaceId>(),
+            )
+            .saturating_add(
+                self.record_order.edges.capacity() * std::mem::size_of::<solidcore::EdgeId>(),
+            )
+            .saturating_add(
+                self.record_order.vertices.capacity() * std::mem::size_of::<solidcore::VertexId>(),
+            );
 
         total
     }
@@ -719,7 +703,7 @@ mod storage_tests {
 #[cfg(test)]
 mod finish_support_tests {
     use super::*;
-    use solidcraft_step::geom::{Associated, Curve, PreferredRep, Surface};
+    use solidcore_step::geom::{Associated, Curve, PreferredRep, Surface};
     use std::{
         fmt::Write,
         sync::{Arc, atomic::AtomicBool},

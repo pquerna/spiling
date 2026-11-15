@@ -9,7 +9,7 @@ use crate::parametric::SurfaceEvaluator;
 /// weights are separate; native NURBS points already store homogeneous xyz.
 enum TensorControls<'a> {
     Native(&'a solidcore::nurbs::srf_basic::Surface),
-    Original(&'a solidcraft_step::geom::BSplineSurface),
+    Original(&'a solidcore_step::geom::BSplineSurface),
 }
 struct TensorCoefficients<'a> {
     controls: TensorControls<'a>,
@@ -85,7 +85,7 @@ fn tensor_coefficients<'a>(
         )
     } else if let Some(mut original) = surface.original_surface() {
         let mut depth = 0;
-        while let solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } = original {
+        while let solidcore_step::geom::Surface::RectangularTrimmed { basis, .. } = original {
             work.charge(1, cancel)?;
             depth += 1;
             if depth >= 16 {
@@ -96,7 +96,7 @@ fn tensor_coefficients<'a>(
             }
             original = basis;
         }
-        let solidcraft_step::geom::Surface::BSpline(original) = original else {
+        let solidcore_step::geom::Surface::BSpline(original) = original else {
             return Ok(None);
         };
         let counts = [
@@ -156,6 +156,15 @@ pub(in crate::analysis) fn interface_regular_join(
         // A nonrepresentable reflected knot is an actual interval band, not
         // either endpoint masquerading as the original exact source knot.
         return Ok(false);
+    }
+    // A kernel analytic kind is certified on its smooth analytic surface: its form's knots are
+    // parameter joins of one regular image, not creases. (Its rational quarter form, with an
+    // irrational weight, cannot meet the exact homogeneous identity below in floating point.)
+    if surface
+        .native_surface()
+        .is_some_and(crate::parametric::analytic_eval::native_analytic_support)
+    {
+        return Ok(true);
     }
     let axis = usize::from(interface[1][0] == interface[1][1]);
     let parameter = interface[axis][0];
@@ -459,7 +468,7 @@ type TensorKnotAxes<'a> = [(&'a [f64], usize, usize); 2];
 mod tests {
     use super::*;
     use crate::kernel::source_operand::PreparedOriginalSurface;
-    use solidcraft_step::geom::{
+    use solidcore_step::geom::{
         BSplineSurface, KnotSpec, Logical, Surface as OriginalSurface, SurfaceForm,
     };
     use std::sync::Arc;
@@ -636,7 +645,7 @@ mod tests {
             .unwrap();
         assert_eq!(axes[0], (&[0.0, 0.0, 0.0, 1.0, 1.0, 1.0][..], 2, 3));
         let swept = OriginalSurface::Extrusion {
-            profile: Arc::new(solidcraft_step::geom::Curve::Line {
+            profile: Arc::new(solidcore_step::geom::Curve::Line {
                 origin: [0.0; 3],
                 direction: [1.0, 0.0, 0.0],
                 magnitude: 1.0,

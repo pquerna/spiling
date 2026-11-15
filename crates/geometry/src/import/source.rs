@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use solidcore::FaceId;
-use solidcraft_step::geom::{Associated, Curve, Pcurve, Surface};
-use solidcraft_step::p21::Exchange;
-use solidcraft_step::read::{Reader, Units};
+use solidcore_step::geom::{Associated, Curve, Pcurve};
+use solidcore_step::p21::Exchange;
+use solidcore_step::read::{Reader, Units};
 use spiling_contracts::geometry::{FaceInfo, GeometryError, StepEntityId};
 use std::sync::atomic::AtomicBool;
 
@@ -30,33 +30,6 @@ pub(super) fn reader(
         ang: radians_per_angle_unit,
     };
     Reader::new(exchange, units)
-}
-
-/// Read the decoder's exact face origins, not its portable fitted carriers.
-pub(super) fn face_carriers(
-    entities: &Entities<'_>,
-    reader: &mut Reader<'_>,
-    face_origin: &[u64],
-    cancel: &AtomicBool,
-) -> Result<Vec<Arc<Surface>>, GeometryError> {
-    let mut carriers = Vec::with_capacity(face_origin.len());
-    for &origin in face_origin {
-        check_cancel(cancel)?;
-        let (resolved, _) = resolve_face(entities, origin)?;
-        let face = entities
-            .records(resolved)?
-            .iter()
-            .copied()
-            .find(|record| matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE"))
-            .ok_or_else(|| invalid("original face has no surface-use record"))?;
-        let carrier_id = reference(at(face, 2)?)?;
-        carriers.push(
-            reader
-                .surface(carrier_id)
-                .map_err(|cause| invalid(&format!("original surface #{carrier_id}: {cause}")))?,
-        );
-    }
-    Ok(carriers)
 }
 
 pub(super) fn capture(

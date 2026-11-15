@@ -130,7 +130,7 @@ message ArtifactPage {
 }
 enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; MICROMETRE = 4; CENTIMETRE = 5; FOOT = 6; }
 enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; MESH_TOLERANT_MM_005_V1 = 3; MESH_TOLERANT_MM_02_V1 = 4; MESH_TOLERANT_MM_1_V1 = 5; }
-message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; }
+message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; repeated ImportFinding findings = 7; }
 message NormalizedSource { string hash = 1; MeshSourceFormat format = 2; string selector = 3; repeated ImportFinding findings = 4; string object_name = 5; }
 enum MeshSourceFormat { MESH_SOURCE_FORMAT_UNSPECIFIED = 0; STL = 1; THREE_MF = 2; }
 message DefinitionDisplay {
@@ -212,5 +212,5 @@ message ApplyLayoutRequest { string session_id = 1; uint32 base_revision = 2; ui
 message ModelImportOptions { optional SourceUnit stl_unit = 1; optional uint32 source_plate = 2; }
 
 enum ImportFindingKind { IMPORT_FINDING_KIND_UNSPECIFIED = 0; IMPORT_FINDING_KIND_INFORMATION = 1; IMPORT_FINDING_KIND_CHANGED = 2; IMPORT_FINDING_KIND_NOT_APPLIED = 3; }
-enum ImportFindingCode { IMPORT_FINDING_CODE_UNSPECIFIED = 0; IMPORT_FINDING_CODE_INTERPRETED_UNITS = 1; IMPORT_FINDING_CODE_DEGENERATE_FACETS = 2; IMPORT_FINDING_CODE_DUPLICATE_FACETS = 3; IMPORT_FINDING_CODE_BOUNDARY_WELD = 4; IMPORT_FINDING_CODE_CORRECTED_WINDING = 5; IMPORT_FINDING_CODE_COMPONENT_UNION = 6; IMPORT_FINDING_CODE_NEGATIVE_VOLUMES = 7; IMPORT_FINDING_CODE_FOREIGN_SETTINGS = 8; IMPORT_FINDING_CODE_PROCESS_CONTROL = 9; IMPORT_FINDING_CODE_SOURCE_PLATE = 10; IMPORT_FINDING_CODE_ANALYTIC_RECOVERY = 11; IMPORT_FINDING_CODE_APPEARANCE = 12; IMPORT_FINDING_CODE_NON_PRINTABLE = 13; }
+enum ImportFindingCode { IMPORT_FINDING_CODE_UNSPECIFIED = 0; IMPORT_FINDING_CODE_INTERPRETED_UNITS = 1; IMPORT_FINDING_CODE_DEGENERATE_FACETS = 2; IMPORT_FINDING_CODE_DUPLICATE_FACETS = 3; IMPORT_FINDING_CODE_BOUNDARY_WELD = 4; IMPORT_FINDING_CODE_CORRECTED_WINDING = 5; IMPORT_FINDING_CODE_COMPONENT_UNION = 6; IMPORT_FINDING_CODE_NEGATIVE_VOLUMES = 7; IMPORT_FINDING_CODE_FOREIGN_SETTINGS = 8; IMPORT_FINDING_CODE_PROCESS_CONTROL = 9; IMPORT_FINDING_CODE_SOURCE_PLATE = 10; IMPORT_FINDING_CODE_ANALYTIC_RECOVERY = 11; IMPORT_FINDING_CODE_APPEARANCE = 12; IMPORT_FINDING_CODE_NON_PRINTABLE = 13; IMPORT_FINDING_CODE_SOURCE_READING = 14; }
 message ImportFinding { ImportFindingKind kind = 1; ImportFindingCode code = 2; uint32 count = 3; string label = 4; string detail = 5; AabbMm bounds_mm = 6; optional double displacement_mm = 7; }

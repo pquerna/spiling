@@ -193,7 +193,7 @@ pub fn assert_source_face_identity(definition: &Definition, fixture: &str) {
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
     let bytes = crate::fixtures::fixture_bytes(fixture);
-    let source = solidcraft_step::p21::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let source = solidcore_step::p21::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
     let expected: BTreeSet<_> = source
         .entities
         .iter()

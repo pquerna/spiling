@@ -9,8 +9,8 @@
 //! explicit STEP source operands, separately from the portable record's own-t
 //! pcurves.
 
-use solidcraft_geom::brep as b;
-use solidcraft_step::{geom as s, write::topology};
+use solidcore_record::brep as b;
+use solidcore_step::{geom as s, write::topology};
 use std::sync::Arc;
 
 // A quarter has Bernstein controls (1,0,1), (1,1,1), (0,2,2), hence

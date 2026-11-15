@@ -104,7 +104,10 @@ pub(super) fn cover(
     let active = surface.natural_uv_domain_if_built();
     let lo = active.min();
     let hi = active.max();
-    let native_domain = [[lo.x, hi.x], [lo.y, hi.y]];
+    // A kernel analytic face's law runs on past its form (the analytic surface, as the old
+    // analytic chart did): graphs may take their margins there.
+    let native_domain = crate::parametric::form_chart::FormChart::of(surface)
+        .map_or([[lo.x, hi.x], [lo.y, hi.y]], |chart| chart.reach());
     for axis in 0..2 {
         let range = Interval::new(domain[axis][0], domain[axis][1])?;
         let native = native_domain[axis];

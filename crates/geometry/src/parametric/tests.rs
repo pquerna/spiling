@@ -1476,18 +1476,18 @@ fn explicit_step_sphere_has_a_coefficient_proved_pole_normal_not_a_nearby_sample
     let cancel = AtomicBool::new(false);
     let domain = native.natural_uv_domain_if_built();
     let corner = domain.min();
-    assert_eq!(
-        surface_geometric_normal_enclosure(
-            &native,
-            [[corner.x; 2], [corner.y; 2]],
-            &mut work,
-            &cancel
-        )
-        .unwrap_err()
-        .code,
-        GeometryErrorCode::SingularGeometry,
-        "stored NURBS sphere must not borrow an analytic implicit normal"
-    );
+    // The kernel's sphere on its canonical form is the analytic law in its form chart: at its
+    // pole the normal is the algebraic field's, along the axis, not a nearby sample.
+    assert!(crate::parametric::form_chart::FormChart::of(&native).is_some());
+    let pole = surface_geometric_normal_enclosure(
+        &native,
+        [[corner.x; 2], [corner.y; 2]],
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    assert!(pole[0].contains(0.0) && pole[1].contains(0.0), "{pole:?}");
+    assert!(pole[2].abs_lower() > 0.99, "{pole:?}");
     let wrapped = Surface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()));
     let north =
         surface_geometric_normal_enclosure(&wrapped, [[0.0, 360.0], [90.0; 2]], &mut work, &cancel)

@@ -132,7 +132,7 @@ impl parametric::SurfaceEvaluator for PreparedTrimSurface<'_, '_> {
             Self::Original(_) => None,
         }
     }
-    fn original_surface(&self) -> Option<&solidcraft_step::geom::Surface> {
+    fn original_surface(&self) -> Option<&solidcore_step::geom::Surface> {
         match self {
             Self::Native(_) => None,
             Self::Original(surface) => Some(surface.source()),
@@ -2795,11 +2795,11 @@ fn exact_affine_pair_in_joint(
 fn exact_affine_literal_circle_disjoint(
     line: &parametric::ExactAffineCurve,
     range: [f64; 2],
-    curve: &solidcraft_step::geom::Curve,
+    curve: &solidcore_step::geom::Curve,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    let solidcraft_step::geom::Curve::Circle { position, radius } = curve else {
+    let solidcore_step::geom::Curve::Circle { position, radius } = curve else {
         return Ok(false);
     };
     Interval::new(range[0], range[1])?;
@@ -3194,7 +3194,7 @@ pub(crate) fn certified_curve2d_is_straight_regular(
         };
         for _ in 0..16 {
             match original {
-                solidcraft_step::geom::Curve::Trimmed { basis, .. } => original = basis,
+                solidcore_step::geom::Curve::Trimmed { basis, .. } => original = basis,
                 _ => break,
             }
         }
@@ -3204,8 +3204,8 @@ pub(crate) fn certified_curve2d_is_straight_regular(
             // affine coefficients in the query gauge. The complete strict
             // first-jet proof below is still required; this proves no endpoint
             // coordinate identity or literal port-span inclusion.
-            solidcraft_step::geom::Curve::Line { .. } => {}
-            solidcraft_step::geom::Curve::BSpline(spline) => {
+            solidcore_step::geom::Curve::Line { .. } => {}
+            solidcore_step::geom::Curve::BSpline(spline) => {
                 let Some(first) = spline.points.first() else {
                     return Ok(false);
                 };
@@ -3570,8 +3570,8 @@ fn qualify_original_correspondence(
 /// original endpoint expressions onto its actual plane lift. No rounded
 /// parameter quotient, native UV endpoint, or synthetic line is retained.
 struct SourcePlaneLineProjection<'d> {
-    surface: &'d solidcraft_step::geom::Surface,
-    curve: &'d solidcraft_step::geom::Curve,
+    surface: &'d solidcore_step::geom::Surface,
+    curve: &'d solidcore_step::geom::Curve,
     vertices: &'d [[f64; 3]; 2],
     parameter_origin: Interval,
     parameter_slope: Interval,
@@ -3579,8 +3579,8 @@ struct SourcePlaneLineProjection<'d> {
 }
 impl<'d> SourcePlaneLineProjection<'d> {
     fn new(
-        surface: &'d solidcraft_step::geom::Surface,
-        curve: &'d solidcraft_step::geom::Curve,
+        surface: &'d solidcore_step::geom::Surface,
+        curve: &'d solidcore_step::geom::Curve,
         vertices: &'d [[f64; 3]; 2],
         maximum_error_mm: f64,
         work: &mut GeometryWorkBudget,
@@ -3742,7 +3742,7 @@ impl parametric::CurveEvaluator for SourcePlaneLineProjection<'_> {
                 "source PCurve projection query exceeds its captured endpoint restriction",
             ));
         }
-        let solidcraft_step::geom::Curve::Line {
+        let solidcore_step::geom::Curve::Line {
             origin,
             direction,
             magnitude,
@@ -3790,7 +3790,7 @@ impl parametric::CurveEvaluator for SourcePlaneLineProjection<'_> {
         self.tensor(range, 0, work, cancel)?;
         parametric::AxisSpans::single(range)
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         Some(self.curve)
     }
 }
@@ -3798,21 +3798,21 @@ impl parametric::CurveEvaluator for SourcePlaneLineProjection<'_> {
 /// selected spatial expression. This is derived source evidence, not a
 /// declared PCurve and not an inverse of a generated native chart.
 struct SourcePlanePullback<'d> {
-    surface: &'d solidcraft_step::geom::Surface,
+    surface: &'d solidcore_step::geom::Surface,
     spatial: Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
     origin: [f64; 3],
     inverse: [[Interval; 3]; 2],
 }
 fn original_plane_placement<'a>(
-    mut surface: &'a solidcraft_step::geom::Surface,
+    mut surface: &'a solidcore_step::geom::Surface,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<&'a solidcraft_step::geom::Placement>, GeometryError> {
+) -> Result<Option<&'a solidcore_step::geom::Placement>, GeometryError> {
     for _ in 0..MAX_DEPTH {
         work.charge(1, cancel)?;
         match surface {
-            solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
-            solidcraft_step::geom::Surface::Plane { position } => return Ok(Some(position)),
+            solidcore_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
+            solidcore_step::geom::Surface::Plane { position } => return Ok(Some(position)),
             _ => return Ok(None),
         }
     }
@@ -3821,7 +3821,7 @@ fn original_plane_placement<'a>(
     ))
 }
 fn original_plane_basis(
-    position: &solidcraft_step::geom::Placement,
+    position: &solidcore_step::geom::Placement,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[ExactCoefficient; 3]; 2], GeometryError> {
@@ -3856,7 +3856,7 @@ fn original_plane_basis(
     Ok([x, y])
 }
 fn original_plane_inverse_coefficients(
-    position: &solidcraft_step::geom::Placement,
+    position: &solidcore_step::geom::Placement,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<([[ExactCoefficient; 3]; 2], ExactCoefficient), GeometryError> {
@@ -3888,7 +3888,7 @@ fn original_plane_inverse_coefficients(
 }
 impl<'d> SourcePlanePullback<'d> {
     fn new(
-        surface: &'d solidcraft_step::geom::Surface,
+        surface: &'d solidcore_step::geom::Surface,
         spatial: &Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -4075,15 +4075,15 @@ struct SourceCylinderPullback<'d> {
     exact_lift: bool,
 }
 fn original_cylinder<'a>(
-    mut surface: &'a solidcraft_step::geom::Surface,
+    mut surface: &'a solidcore_step::geom::Surface,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<(&'a solidcraft_step::geom::Placement, f64)>, GeometryError> {
+) -> Result<Option<(&'a solidcore_step::geom::Placement, f64)>, GeometryError> {
     for _ in 0..MAX_DEPTH {
         work.charge(1, cancel)?;
         match surface {
-            solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
-            solidcraft_step::geom::Surface::Cylinder { position, radius } => {
+            solidcore_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
+            solidcore_step::geom::Surface::Cylinder { position, radius } => {
                 Interval::new(*radius, *radius)?;
                 if *radius <= 0.0 {
                     return Err(unavailable(
@@ -4100,15 +4100,15 @@ fn original_cylinder<'a>(
     ))
 }
 fn original_cylinder_curve<'a>(
-    mut curve: &'a solidcraft_step::geom::Curve,
+    mut curve: &'a solidcore_step::geom::Curve,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<&'a solidcraft_step::geom::Curve, GeometryError> {
+) -> Result<&'a solidcore_step::geom::Curve, GeometryError> {
     for _ in 0..MAX_DEPTH {
         work.charge(1, cancel)?;
         match curve {
-            solidcraft_step::geom::Curve::Trimmed { basis, .. } => curve = basis,
-            solidcraft_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
+            solidcore_step::geom::Curve::Trimmed { basis, .. } => curve = basis,
+            solidcore_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
                 if super::source_operand::preferred_source_pcurve(curve)?.is_some() {
                     return Err(unavailable(
                         "cylindrical pullback cannot replace a declared PCurve master",
@@ -4146,7 +4146,7 @@ struct OriginalCylinderFrame {
 }
 impl OriginalCylinderFrame {
     fn new(
-        position: &solidcraft_step::geom::Placement,
+        position: &solidcore_step::geom::Placement,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
@@ -4197,13 +4197,13 @@ impl OriginalCylinderFrame {
     }
     fn circle_height(
         &self,
-        position: &solidcraft_step::geom::Placement,
+        position: &solidcore_step::geom::Placement,
         radius: f64,
-        curve: &solidcraft_step::geom::Curve,
+        curve: &solidcore_step::geom::Curve,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<Interval>, GeometryError> {
-        let solidcraft_step::geom::Curve::Circle {
+        let solidcore_step::geom::Curve::Circle {
             position: circle,
             radius: r,
         } = original_cylinder_curve(curve, work, cancel)?
@@ -4233,7 +4233,7 @@ impl OriginalCylinderFrame {
 impl<'d> SourceCylinderPullback<'d> {
     fn new(
         definition: &'d Definition,
-        surface: &'d solidcraft_step::geom::Surface,
+        surface: &'d solidcore_step::geom::Surface,
         selected: &SelectedSourceUse<'d>,
         wire: &SelectedSourceWire<'d>,
         work: &mut GeometryWorkBudget,
@@ -4258,7 +4258,7 @@ impl<'d> SourceCylinderPullback<'d> {
                 exact_lift: true,
             }));
         }
-        let solidcraft_step::geom::Curve::Line {
+        let solidcore_step::geom::Curve::Line {
             origin,
             direction,
             magnitude,
@@ -4464,16 +4464,16 @@ fn exact_dot(
     Ok(value)
 }
 fn original_plane_line_coefficients(
-    surface: &solidcraft_step::geom::Surface,
-    curve: &solidcraft_step::geom::Curve,
+    surface: &solidcore_step::geom::Surface,
+    curve: &solidcore_step::geom::Curve,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<PlaneLineCoefficients>, GeometryError> {
     work.charge(1, cancel)?;
-    let solidcraft_step::geom::Surface::Plane { position } = surface else {
+    let solidcore_step::geom::Surface::Plane { position } = surface else {
         return Ok(None);
     };
-    let solidcraft_step::geom::Curve::Line {
+    let solidcore_step::geom::Curve::Line {
         origin,
         direction,
         magnitude,
@@ -5706,7 +5706,7 @@ impl parametric::CurveEvaluator for PreparedOriginalUvCurve<'_> {
     ) -> Result<parametric::AxisSpans<'_>, GeometryError> {
         self.evaluator().parameter_spans(range, work, cancel)
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         self.evaluator().original_curve()
     }
 }
@@ -5787,7 +5787,7 @@ impl parametric::CurveEvaluator for PreparedTrimCurve<'_, '_> {
     fn native_curve(&self) -> Option<&Curve> {
         self.evaluator().native_curve()
     }
-    fn original_curve(&self) -> Option<&solidcraft_step::geom::Curve> {
+    fn original_curve(&self) -> Option<&solidcore_step::geom::Curve> {
         self.evaluator().original_curve()
     }
 }
@@ -6303,13 +6303,13 @@ fn affine_endpoint_identity(
 }
 
 fn same_source_curve(
-    a: &solidcraft_step::geom::Curve,
-    b: &solidcraft_step::geom::Curve,
+    a: &solidcore_step::geom::Curve,
+    b: &solidcore_step::geom::Curve,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    use solidcraft_step::geom::{Associated, Curve as C};
+    use solidcore_step::geom::{Associated, Curve as C};
     work.charge(1, cancel)?;
     if std::ptr::eq(a, b) {
         return Ok(true);
@@ -6423,13 +6423,13 @@ fn same_source_curve(
     })
 }
 fn same_source_surface(
-    a: &solidcraft_step::geom::Surface,
-    b: &solidcraft_step::geom::Surface,
+    a: &solidcore_step::geom::Surface,
+    b: &solidcore_step::geom::Surface,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    use solidcraft_step::geom::Surface as S;
+    use solidcore_step::geom::Surface as S;
     work.charge(1, cancel)?;
     if std::ptr::eq(a, b) {
         return Ok(true);
@@ -6543,7 +6543,7 @@ fn copied_source_spline_identity(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    use solidcraft_step::geom::Curve as C;
+    use solidcore_step::geom::Curve as C;
     let Some(mut original) = reference.original_curve() else {
         return Ok(false);
     };
@@ -7222,8 +7222,8 @@ fn source_uv_image(
         for _ in 0..MAX_DEPTH {
             work.charge(1, cancel)?;
             match raw {
-                solidcraft_step::geom::Curve::Trimmed { basis, .. } => raw = basis,
-                solidcraft_step::geom::Curve::Line {
+                solidcore_step::geom::Curve::Trimmed { basis, .. } => raw = basis,
+                solidcore_step::geom::Curve::Line {
                     origin, direction, ..
                 } => {
                     for axis in 0..2 {
@@ -7238,7 +7238,7 @@ fn source_uv_image(
                     }
                     break;
                 }
-                solidcraft_step::geom::Curve::BSpline(spline) => {
+                solidcore_step::geom::Curve::BSpline(spline) => {
                     work.charge(spline.points.len() as u64 + 1, cancel)?;
                     let contained = spline.points.iter().enumerate().all(|(i, p)| {
                         spline
@@ -7841,12 +7841,12 @@ impl<'d> PreparedNativeTrimSource<'d> {
 }
 
 fn literal_source_pole(
-    surface: &solidcraft_step::geom::Surface,
+    surface: &solidcore_step::geom::Surface,
     point: [f64; 3],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SphericalPole>, GeometryError> {
-    let solidcraft_step::geom::Surface::Sphere { position, radius } = surface else {
+    let solidcore_step::geom::Surface::Sphere { position, radius } = surface else {
         return Ok(None);
     };
     for (pole, sign) in [(SphericalPole::North, 1.0), (SphericalPole::South, -1.0)] {
@@ -7894,7 +7894,7 @@ fn pole_coordinate(pole: SphericalPole) -> Interval {
     }
 }
 fn augment_literal_pole_domain(
-    surface: &solidcraft_step::geom::Surface,
+    surface: &solidcore_step::geom::Surface,
     mut bounds: [Interval; 2],
     proposals: &[Vec<OriginalCoedgeProposal<'_>>],
     work: &mut GeometryWorkBudget,
@@ -8607,7 +8607,7 @@ mod tests {
         let definition = crate::from_step_bytes(HOUSING).unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let mut source = PreparedNativeTrimSource::prepare_material(
+        let source = PreparedNativeTrimSource::prepare_material(
             &definition,
             32 * 1024 * 1024,
             &mut work,
@@ -8639,158 +8639,32 @@ mod tests {
             .unwrap();
         let retained = source.retained_bytes();
         assert_eq!(retained, initial + growth);
-        let (face, index) = source
-            .faces
-            .iter()
-            .enumerate()
-            .find_map(|(face, domain)| {
+        // On the record path every housing native trace is its record pcurve on its face, with no
+        // positional counterexample: each coedge qualifies over its whole physical restriction,
+        // and the queries grow no source-owned heap.
+        let mut coedges = 0;
+        for domain in &source.faces {
+            let tolerance = domain.effective_tolerance_mm();
+            for (index, coedge) in domain.coedges().iter().enumerate() {
                 domain
-                    .coedges()
-                    .iter()
-                    .position(|coedge| coedge.edgeuse == EdgeuseId::from_index(196))
-                    .map(|index| (face, index))
-            })
-            .expect("observed housing native coedge must retain its source identity");
-        let domain = &source.faces[face];
-        let range = [0.00011238767719667916, 0.00011238767719667919];
-        let tolerance = domain.effective_tolerance_mm();
-        let coedge = &domain.coedges[index];
-        let spatial = definition.edge_curve(coedge.edge).unwrap();
-        let surface = definition.face_surface(domain.face).unwrap();
-        let chart = parametric::curve_prepared::NativeChartCurve {
-            surface,
-            chart: coedge.curve,
-        };
-        let binding = coedge.native_trace_correspondence.as_ref().unwrap();
-        assert!(binding.accepted_range_allowance.get().is_none());
-        domain
-            .qualify_native_coedge_trace(
-                index,
-                range,
-                tolerance,
-                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-        let parameter =
-            coedge.native_range[0] + (coedge.native_range[1] - coedge.native_range[0]) / 16384.0;
-        let native = spatial
-            .tensor([parameter; 2], 0, &mut work, &cancel)
-            .unwrap()[0];
-        let (uv, scale) = coedge
-            .native_parameter_image([parameter; 2], &mut work, &cancel)
-            .unwrap();
-        let carrier = native_trace_tensor(&chart, uv, scale, 0, &mut work, &cancel).unwrap()[0];
-        let distance = norm(std::array::from_fn(|axis| native[axis].sub(carrier[axis]))).unwrap();
-        assert!(distance.lo > tolerance);
-        let approved = binding.accepted_range_allowance.get().unwrap();
-        assert_eq!(approved.0, range);
-        let fixed_failure = domain
-            .qualify_native_coedge_trace(
-                index,
-                [parameter; 2],
-                tolerance,
-                NATIVE_TRACE_QUERY_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap_err();
-        assert_eq!(
-            fixed_failure.code,
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "the fixed normalized gauge is not promoted merely because a derived map exists",
-        );
-        assert!(fixed_failure.message.contains("positional counterexample"));
-        assert_eq!(binding.accepted_range_allowance.get(), Some(approved));
-        let map = binding
-            .derived_position
-            .get()
-            .and_then(Option::as_ref)
-            .expect("the actual mismatched native trace needs a complete derived positional map");
-        assert!(map.maximum_position_error_mm() <= tolerance);
-        assert_eq!(map.reference_range(), domain.coedges[index].uv_range);
-        assert_eq!(map.target_range(), domain.coedges[index].native_range);
-        let achieved = domain
-            .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
-            .unwrap()
-            .expect("the complete unchanged native boundary owns its achieved bound");
-        assert_eq!(achieved, map.maximum_position_error_mm());
-        assert!(achieved > 0.0);
-        assert!(
-            domain
-                .complete_native_position_bound_mm(index, achieved * 0.5, &mut work, &cancel)
-                .unwrap()
-                .is_none(),
-            "a positional map grants no stricter error than it proved"
-        );
-        let uv = domain
-            .derived_native_coedge_uv_image(index, range, tolerance, &mut work, &cancel)
-            .unwrap()
-            .expect("native C3D restrictions have a bounded UV-image preimage");
-        assert_eq!(
-            domain
-                .derived_native_coedge_uv_image(
-                    index,
-                    range,
-                    tolerance,
-                    &mut GeometryWorkBudget::new(1),
-                    &cancel
-                )
-                .unwrap(),
-            Some(uv),
-            "the identical swept/normal query reuses only its nonborrowed image",
-        );
+                    .qualify_native_coedge_trace(
+                        index,
+                        coedge.native_range,
+                        tolerance,
+                        NATIVE_TRACE_QUERY_SCRATCH_BYTES,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
+                coedges += 1;
+            }
+        }
+        assert!(coedges > 0);
         assert_eq!(
             source.retained_bytes(),
             retained,
-            "nested map queries may not grow source-owned heap"
+            "trace queries may not grow source-owned heap"
         );
-        let old_owner = source.faces[face].coedges[index].uv_owner;
-        source.faces[face].coedges[index].uv_owner = EdgeuseId::from_index(0);
-        assert!(
-            source.faces[face]
-                .derived_native_coedge_uv_image(index, range, tolerance, &mut work, &cancel)
-                .unwrap()
-                .is_none(),
-            "a stale native owner cannot reuse either the map or its image cache"
-        );
-        assert!(
-            source.faces[face]
-                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
-                .unwrap()
-                .is_none(),
-            "the section consumer cannot borrow a foreign UV owner"
-        );
-        source.faces[face].coedges[index].uv_owner = old_owner;
-        let old_range = source.faces[face].coedges[index].native_range;
-        source.faces[face].coedges[index].native_range[1] = old_range[0] * 0.5 + old_range[1] * 0.5;
-        assert!(
-            source.faces[face]
-                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
-                .unwrap()
-                .is_none(),
-            "a full-edge receipt cannot be relabelled with another physical range"
-        );
-        source.faces[face].coedges[index].native_range = old_range;
-        let old_uv_range = source.faces[face].coedges[index].uv_range;
-        source.faces[face].coedges[index].uv_range[1] =
-            old_uv_range[0] * 0.5 + old_uv_range[1] * 0.5;
-        assert!(
-            source.faces[face]
-                .complete_native_position_bound_mm(index, tolerance, &mut work, &cancel)
-                .unwrap()
-                .is_none(),
-            "a partial UV branch is not the complete actual native curve"
-        );
-        source.faces[face].coedges[index].uv_range = old_uv_range;
-        assert_eq!(
-            source
-                .prepare_native_position_maps(0, &mut work, &cancel)
-                .unwrap(),
-            0
-        );
-        assert_eq!(source.retained_bytes(), retained);
     }
 
     #[test]
@@ -8875,9 +8749,8 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        // Actual housing pair 9/16 reaches an unqualified endpoint outside its
-        // layer-one closed cut. Census bounded native restrictions to retain a
-        // real admitted interval without presuming a different parameter map.
+        // Census bounded native restrictions to retain a real admitted interval without
+        // presuming a different parameter map.
         let domain = &source.faces[9];
         let index = 1;
         let full = domain.coedges[index].native_range;
@@ -8920,16 +8793,17 @@ mod tests {
             .unwrap()
             .accepted_range_allowance;
         assert_eq!(approval.get(), Some((accepted, tolerance)));
+        // A broader query past the coedge's physical restriction is refused.
         let failure = domain
             .qualify_native_coedge_trace(
                 index,
-                full,
+                [full[0], full[1] + width],
                 tolerance,
                 NATIVE_TRACE_QUERY_SCRATCH_BYTES,
                 &mut work,
                 &cancel,
             )
-            .expect_err("an admitted interior cannot certify the observed unqualified endpoint");
+            .expect_err("an admitted interior cannot certify a range past its edge");
         assert!(!matches!(
             failure.code,
             GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
@@ -9390,7 +9264,7 @@ mod tests {
 
     #[test]
     fn literal_circle_exclusion_requires_strict_whole_affine_coefficient_signs() {
-        use solidcraft_step::geom::{Curve as C, Placement};
+        use solidcore_step::geom::{Curve as C, Placement};
         let frame = Placement {
             origin: [0.0; 3],
             axis: [0.0, 0.0, 1.0],

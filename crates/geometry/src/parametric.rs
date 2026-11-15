@@ -12,6 +12,7 @@ mod continuity;
 pub mod coplane;
 pub mod curve_prepared;
 pub(crate) mod display_collapse;
+pub(crate) mod form_chart;
 mod green;
 pub mod interval;
 pub mod nurbs_eval;
@@ -150,6 +151,70 @@ fn native_surface_functional_enclosures<const N: usize>(
             GeometryErrorCode::AnalysisIndeterminate,
             "surface functional crosses an unproved source discontinuity",
         ));
+    }
+    // A kernel analytic face: its analytic law in the form chart, the functional by its mean value
+    // about the box's middle (correlated), and inside the form also the NURB's own, intersected.
+    if let Some(chart) = form_chart::FormChart::of(surface)
+        && let Some(tensor) = chart.tensor(uv, 1, work, cancel)?
+    {
+        let mid = [
+            uv[0][0] * 0.5 + uv[0][1] * 0.5,
+            uv[1][0] * 0.5 + uv[1][1] * 0.5,
+        ];
+        let centre = chart
+            .tensor([[mid[0]; 2], [mid[1]; 2]], 0, work, cancel)?
+            .map(|t| t[0][0]);
+        let natural = surface.natural_uv_domain_if_built();
+        let inside = uv[0][0] >= natural.u_min()
+            && uv[0][1] <= natural.u_max()
+            && uv[1][0] >= natural.v_min()
+            && uv[1][1] <= natural.v_max();
+        let form = match (inside, analytic_eval::native_surface_nurbs(surface)?) {
+            (true, Some(n)) => Some(nurbs_eval::evaluate_nurbs_surface_functionals(
+                n,
+                uv,
+                functionals,
+                work,
+                cancel,
+            )?),
+            _ => None,
+        };
+        let du_range = Interval::new(uv[0][0], uv[0][1])?.sub(Interval::point(mid[0]));
+        let dv_range = Interval::new(uv[1][0], uv[1][1])?.sub(Interval::point(mid[1]));
+        let mut result = [SurfaceFunctionalEnclosure {
+            position: Interval::point(0.0),
+            du: Interval::point(0.0),
+            dv: Interval::point(0.0),
+        }; N];
+        for (k, (slot, f)) in result.iter_mut().zip(functionals).enumerate() {
+            let project = |row: [Interval; 3]| {
+                (0..3).fold(Interval::point(0.0), |s, i| {
+                    s.add(f.direction[i].mul(row[i]))
+                })
+            };
+            let at = |p: [Interval; 3]| {
+                project(std::array::from_fn(|i| p[i].sub(f.origin[i]))).add(f.offset)
+            };
+            let du = project(tensor[1][0]);
+            let dv = project(tensor[0][1]);
+            let whole = at(tensor[0][0]);
+            let mean = at(centre.unwrap_or(tensor[0][0]))
+                .add(du.mul(du_range))
+                .add(dv.mul(dv_range));
+            let mut e = SurfaceFunctionalEnclosure {
+                position: whole.intersection(mean).unwrap_or(whole),
+                du,
+                dv,
+            };
+            if let Some(form) = &form {
+                let g = form[k];
+                e.position = e.position.intersection(g.position).unwrap_or(g.position);
+                e.du = e.du.intersection(g.du).unwrap_or(g.du);
+                e.dv = e.dv.intersection(g.dv).unwrap_or(g.dv);
+            }
+            *slot = e;
+        }
+        return Ok(result);
     }
     if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
         return nurbs_eval::evaluate_nurbs_surface_functionals(n, uv, functionals, work, cancel);
@@ -661,6 +726,12 @@ fn native_surface_parameter_span_smooth(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     analytic_eval::surface_order(surface, uv, 0, work, cancel)?;
+    // The kernel's analytic kinds evaluate as their analytic parametrization, certified against
+    // their form (`AnalyticSupport::build`): equal rational arcs, Euclidean C1 across every arc
+    // knot although never homogeneous C1, so the net identity below cannot grant it.
+    if analytic_eval::native_analytic_support(surface) {
+        return Ok(true);
+    }
     let axes = surface_knots(surface, work, cancel)?;
     if axis_continuity(axes[0], uv[0], 1, work, cancel)?
         && axis_continuity(axes[1], uv[1], 1, work, cancel)?
@@ -680,6 +751,9 @@ fn native_surface_parameter_span_continuous(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     analytic_eval::surface_order(surface, uv, 0, work, cancel)?;
+    if analytic_eval::native_analytic_support(surface) {
+        return Ok(true);
+    }
     surface_coefficients_continuous(surface, uv, work, cancel)
 }
 fn surface_coefficients_continuous(
@@ -785,6 +859,12 @@ fn curve_span_smooth_at(
         );
     }
     curve_prepared::curve_jet_order(curve, range, 0, depth, work, cancel)?;
+    // The kernel's conic is built on a form it proved lies on the conic and turns once round
+    // (`conic_on_form`): equal rational arcs, Euclidean C1 across every arc knot although never
+    // homogeneous C1, so the net identity below cannot grant it.
+    if let solidcore::curve::curve::p2::CurveKind::Ellipse(_) = curve.kind() {
+        return Ok(true);
+    }
     if let Some(n) = curve_prepared::native_curve_nurbs(curve)? {
         continuity::curve_is_c1(n, curve.dim(), range, work, cancel)
     } else {
@@ -1083,7 +1163,18 @@ fn validate_surface_partition(
     let active = surface.natural_uv_domain_if_built();
     let lo = active.min();
     let hi = active.max();
-    if uv[0][0] < lo.x || uv[0][1] > hi.x || uv[1][0] < lo.y || uv[1][1] > hi.y {
+    let outside = uv[0][0] < lo.x || uv[0][1] > hi.x || uv[1][0] < lo.y || uv[1][1] > hi.y;
+    // A kernel analytic face's law reaches past its form: its knots partition the form part.
+    if outside
+        && let Some(chart) = form_chart::FormChart::of(surface)
+        && (0..2).all(|axis| {
+            let reach = chart.reach()[axis];
+            reach[0] <= uv[axis][0] && uv[axis][1] <= reach[1]
+        })
+    {
+        return Ok(());
+    }
+    if outside {
         return Err(GeometryError::new(
             GeometryErrorCode::ConditioningFailure,
             format!(
@@ -1855,6 +1946,25 @@ impl<'a> DisplayTriangleProof<'a> {
                 (&mut *work, cancel),
             )?);
         }
+        let crosses_knots = self
+            .box_proof(box_index)
+            .and_then(|proof| proof.full.as_ref())
+            .is_some_and(|full| !full.smooth);
+        if crosses_knots
+            && error > maximum_error
+            && let Some(split) = split_display_triangle_at_knots(
+                self.surface,
+                uv,
+                points,
+                domain,
+                &positions,
+                work,
+                cancel,
+            )
+            .map_err(|cause| display_proof_failure(cause, "knot-line split", box_index, domain))?
+        {
+            error = error.min(split);
+        }
         if !allow_auxiliary || error <= maximum_error {
             return Ok(error);
         }
@@ -2536,6 +2646,230 @@ fn rectangle_triangle_remainder([du, dv]: [f64; 2], hessian: [&[Interval; 3]; 3]
             .add(Interval::point(hessian[2][axis].abs_upper()).mul(Interval::point(dv).square()))
             .mul(Interval::point(0.125))
     })
+}
+
+/// One vertex of a knot-split piece: its (u, v) and the parent's affine physical point there,
+/// both enclosed outward around the exact point the split names.
+#[derive(Clone, Copy)]
+struct SplitVertex {
+    uv: [Interval; 2],
+    point: [Interval; 3],
+}
+
+/// A triangle whose box crosses interior knot lines of its carrier (where the carrier need not
+/// be C1, as at a rational arc's segment joint) is cut along them into convex pieces, each in
+/// one knot span, and fanned into children. The same affine physical triangle, restricted, is
+/// compared with the carrier on each child: its own span's Hessian bounds the carrier against
+/// the child's interpolant, and that interpolant differs from the affine triangle by at most
+/// their difference at the child's vertices (both are affine there). Not a replacement mesh;
+/// `None` where a vertex is ambiguous against a line, or a child is not one smooth span.
+fn split_display_triangle_at_knots(
+    surface: &Surface,
+    uv: &[[f64; 2]; 3],
+    points: &[[f64; 3]; 3],
+    domain: [[f64; 2]; 2],
+    positions: &[[Interval; 3]; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    let axes = surface_knots(surface, work, cancel)?;
+    let mut cuts: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for (axis, lines) in cuts.iter_mut().enumerate() {
+        work.charge(axes[axis].values.len() as u64 + 1, cancel)?;
+        for span in AxisSpans::new(axes[axis], domain[axis]) {
+            work.charge(1, cancel)?;
+            for end in span {
+                if domain[axis][0] < end && end < domain[axis][1] && !lines.contains(&end) {
+                    lines.push(end);
+                }
+            }
+        }
+        lines.sort_by(f64::total_cmp);
+    }
+    if cuts.iter().all(Vec::is_empty) {
+        return Ok(None);
+    }
+    let mut pieces: Vec<Vec<SplitVertex>> = vec![
+        (0..3)
+            .map(|vertex| SplitVertex {
+                uv: uv[vertex].map(Interval::point),
+                point: points[vertex].map(Interval::point),
+            })
+            .collect(),
+    ];
+    for (axis, lines) in cuts.iter().enumerate() {
+        for &cut in lines {
+            let mut next = Vec::new();
+            for piece in pieces {
+                work.charge(piece.len() as u64, cancel)?;
+                let Some([low, high]) = clip_piece(&piece, axis, cut) else {
+                    return Ok(None);
+                };
+                next.extend([low, high].into_iter().filter(|side| side.len() >= 3));
+            }
+            pieces = next;
+        }
+    }
+    // Each piece's span on each axis: between the cuts either side of it.
+    let span_of = |axis: usize, piece: &[SplitVertex]| {
+        let middle = piece.iter().map(|v| v.uv[axis].mid()).sum::<f64>() / piece.len() as f64;
+        let low = cuts[axis]
+            .iter()
+            .copied()
+            .filter(|&c| c <= middle)
+            .fold(domain[axis][0], f64::max);
+        let high = cuts[axis]
+            .iter()
+            .copied()
+            .filter(|&c| c >= middle)
+            .fold(domain[axis][1], f64::min);
+        [low, high]
+    };
+    let mut bound = 0.0_f64;
+    for piece in &pieces {
+        let span = [span_of(0, piece), span_of(1, piece)];
+        // Each vertex's carrier position over its own (u, v) enclosure, kept in the span.
+        let mut carrier = Vec::with_capacity(piece.len());
+        for vertex in piece {
+            work.charge(1, cancel)?;
+            let original = (0..3).find(|&k| {
+                vertex.uv[0] == Interval::point(uv[k][0])
+                    && vertex.uv[1] == Interval::point(uv[k][1])
+            });
+            carrier.push(match original {
+                Some(k) => positions[k],
+                None => {
+                    let at = std::array::from_fn(|axis| {
+                        [
+                            vertex.uv[axis].lo.max(span[axis][0]),
+                            vertex.uv[axis].hi.min(span[axis][1]),
+                        ]
+                    });
+                    if (0..2).any(|axis: usize| at[axis][0] > at[axis][1]) {
+                        return Ok(None);
+                    }
+                    surface_position_enclosure(surface, at, work, cancel)?
+                }
+            });
+        }
+        for child in 1..piece.len() - 1 {
+            work.charge(1, cancel)?;
+            let corners = [0, child, child + 1];
+            let child_domain: [[f64; 2]; 2] = std::array::from_fn(|axis| {
+                [
+                    corners
+                        .iter()
+                        .map(|&k| piece[k].uv[axis].lo)
+                        .fold(f64::INFINITY, f64::min)
+                        .max(span[axis][0]),
+                    corners
+                        .iter()
+                        .map(|&k| piece[k].uv[axis].hi)
+                        .fold(f64::NEG_INFINITY, f64::max)
+                        .min(span[axis][1]),
+                ]
+            });
+            if (0..2).any(|axis| child_domain[axis][0] > child_domain[axis][1]) {
+                return Ok(None);
+            }
+            // The child's closed box ends on its knot lines, where only one-sided derivatives
+            // exist. They are continuous up to the line, so the Hessian enclosed over the box
+            // pulled in from each cut by one representable step also bounds the closed child.
+            let open: [[f64; 2]; 2] = std::array::from_fn(|axis| {
+                let [low, high] = child_domain[axis];
+                [
+                    if cuts[axis].contains(&low) {
+                        low.next_up()
+                    } else {
+                        low
+                    },
+                    if cuts[axis].contains(&high) {
+                        high.next_down()
+                    } else {
+                        high
+                    },
+                ]
+            });
+            if (0..2).any(|axis| open[axis][0] > open[axis][1])
+                || !surface_parameter_span_smooth(surface, open, work, cancel)?
+            {
+                return Ok(None);
+            }
+            let hessian = display_surface_enclosure(surface, open, work, cancel)?;
+            let spans = child_domain.map(|range| {
+                Interval::point(range[1])
+                    .sub(Interval::point(range[0]))
+                    .abs_upper()
+            });
+            let remainder =
+                rectangle_triangle_remainder(spans, [&hessian.duu, &hessian.duv, &hessian.dvv]);
+            let Ok(remainder) = norm_upper(remainder) else {
+                return Ok(None);
+            };
+            let mut vertex_error = 0.0_f64;
+            for &k in &corners {
+                let residual =
+                    std::array::from_fn(|axis| carrier[k][axis].sub(piece[k].point[axis]));
+                let Ok(error) = norm_upper(residual) else {
+                    return Ok(None);
+                };
+                vertex_error = vertex_error.max(error);
+            }
+            let child_bound = up(remainder + vertex_error);
+            if !child_bound.is_finite() {
+                return Ok(None);
+            }
+            bound = bound.max(child_bound);
+        }
+    }
+    Ok(Some(bound))
+}
+
+/// `piece` cut by the line `axis = cut` into its two sides, each convex, in order; `None` where a
+/// vertex's enclosure meets the line without being exactly on it.
+fn clip_piece(piece: &[SplitVertex], axis: usize, cut: f64) -> Option<[Vec<SplitVertex>; 2]> {
+    // -1 below the line, 0 on it exactly, 1 above.
+    let side = |v: &SplitVertex| {
+        let c = v.uv[axis];
+        if c.hi < cut {
+            Some(-1)
+        } else if c.lo > cut {
+            Some(1)
+        } else if c.lo == cut && c.hi == cut {
+            Some(0)
+        } else {
+            None
+        }
+    };
+    let sides: Vec<i8> = piece.iter().map(side).collect::<Option<_>>()?;
+    let mut below = Vec::new();
+    let mut above = Vec::new();
+    for k in 0..piece.len() {
+        let (a, b) = (piece[k], piece[(k + 1) % piece.len()]);
+        let (sa, sb) = (sides[k], sides[(k + 1) % piece.len()]);
+        if sa <= 0 {
+            below.push(a);
+        }
+        if sa >= 0 {
+            above.push(a);
+        }
+        if sa * sb < 0 {
+            // The exact crossing at t = (cut - a) / (b - a) of the parent's affine map, enclosed.
+            let t = Interval::point(cut)
+                .sub(a.uv[axis])
+                .div(b.uv[axis].sub(a.uv[axis]))
+                .ok()?;
+            let t = Interval::new(t.lo.max(0.0), t.hi.min(1.0)).ok()?;
+            let mut uv: [Interval; 2] =
+                std::array::from_fn(|i| a.uv[i].add(t.mul(b.uv[i].sub(a.uv[i]))));
+            uv[axis] = Interval::point(cut);
+            let point = std::array::from_fn(|i| a.point[i].add(t.mul(b.point[i].sub(a.point[i]))));
+            let crossing = SplitVertex { uv, point };
+            below.push(crossing);
+            above.push(crossing);
+        }
+    }
+    Some([below, above])
 }
 
 /// Exactly one proof subdivision, not a rounded replacement mesh. The caller

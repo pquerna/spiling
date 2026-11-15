@@ -1526,7 +1526,7 @@ fn original_cross_height_zero(
 
 #[cfg(test)]
 fn original_placement_height_constant(
-    placement: &solidcraft_step::geom::Placement,
+    placement: &solidcore_step::geom::Placement,
     functional: HeightFunctional,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -1543,13 +1543,13 @@ fn original_placement_height_constant(
 
 #[cfg(test)]
 fn constant_original_curve_height(
-    curve: &solidcraft_step::geom::Curve,
+    curve: &solidcore_step::geom::Curve,
     functional: HeightFunctional,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
-    use solidcraft_step::geom::Curve;
+    use solidcore_step::geom::Curve;
     work.charge(1, cancel)?;
     if depth >= MAX_DEPTH {
         return Err(indeterminate(
@@ -1627,13 +1627,13 @@ fn constant_original_curve_height(
 
 #[cfg(test)]
 fn constant_original_surface_height(
-    surface: &solidcraft_step::geom::Surface,
+    surface: &solidcore_step::geom::Surface,
     functional: HeightFunctional,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
-    use solidcraft_step::geom::Surface;
+    use solidcore_step::geom::Surface;
     work.charge(1, cancel)?;
     if depth >= MAX_DEPTH {
         return Err(indeterminate(
@@ -4856,15 +4856,28 @@ pub(crate) fn analyze_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
-    let sample = prepare_slab_sample(source, request, query_byte_limit, work, cancel)?;
+    let sample = prepare_slab_sample(
+        source,
+        request,
+        query_byte_limit,
+        FIRST_SAMPLE_CHORD_MM,
+        work,
+        cancel,
+    )?;
     let proof = analyze_slab_sample(source, &sample, work, cancel)?;
     Ok(proof.into_analysis(sample.section))
 }
+
+/// The first sample reference's chord target. A placed slab refused on its shape bound retries
+/// with a finer reference (see `placed::analyze_placed_slab`).
+pub(super) const FIRST_SAMPLE_CHORD_MM: f64 =
+    spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
 
 pub(super) fn prepare_slab_sample<'s, 'd>(
     source: &'s super::material_source::PreparedSolid<'d>,
     request: SlabRequest,
     query_byte_limit: usize,
+    sampling_chord_error_mm: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<PreparedSlabSample<'s, 'd>, GeometryError> {
@@ -4933,17 +4946,17 @@ pub(super) fn prepare_slab_sample<'s, 'd>(
             })?,
     );
     let source_retained_bytes = crate::MAX_PREPARED_SECTION_BYTES - section_bytes;
-    // Keep the established first uniform sampling proposal. Its actual native
-    // chord bound, not this proposal, is charged with complete 3D reference
-    // displacement in the same NativeSection. Normalization may use the
-    // declared sampling ledger; actual placed/world and native material gates
-    // remain independent and may still refuse the resulting candidate.
-    let sampling_chord_error_mm = spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
+    // The sampling proposal's actual native chord bound, not the proposal, is
+    // charged with complete 3D reference displacement in the same
+    // NativeSection. Normalization may use the declared sampling ledger; actual
+    // placed/world and native material gates remain independent and may still
+    // refuse the resulting candidate.
     let section = source.section_for_query(
         &crate::section::SectionQuery {
             plane,
             maximum_chord_error_mm: sampling_chord_error_mm,
             maximum_plane_error_mm,
+            end_refinement: 0,
         },
         cancel,
         section_bytes as u32,
@@ -6488,6 +6501,7 @@ mod tests {
                 native_shape_error_mm: 0.1,
             },
             MAX_SLAB_SCRATCH_BYTES - first.retained_bytes(),
+            FIRST_SAMPLE_CHORD_MM,
             &mut work,
             &cancel,
         )
@@ -7021,7 +7035,7 @@ mod tests {
 
     #[test]
     fn uncertain_mapped_original_c0_knot_band_is_not_rounded_into_incidence() {
-        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        use solidcore_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
         let original = Curve::BSpline(Box::new(BSplineCurve {
             degree: 1,
             points: vec![[0., 0., 0.], [1., 0., 1.], [2., 0., 0.]],
@@ -7228,44 +7242,45 @@ mod tests {
 
     #[test]
     fn zero_torus_carrier_levels_are_exact_but_neighboring_native_levels_are_not() {
+        // The torus's zero level is its equator: in the record chart, the form rows whose
+        // meridian angle is 0 or π. The kernel's form row is the equator to rounding (its control
+        // points are the form's, not exact zeros), so there the height encloses zero within
+        // rounding of the torus's size and the surface crosses it transversely (dv not zero).
         let definition = parity_definition("native-parity-ring-torus.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::query();
-        for (ordinal, level, below, above) in [
-            (0, 360.0, true, false),
-            (3, 360.0, false, true),
-            (1, 180.0, false, true),
-            (2, 180.0, true, false),
-        ] {
-            let face = definition.face_ids()[ordinal];
+        let mut levels = 0;
+        for &face in definition.face_ids() {
             let surface = definition.face_surface(face).unwrap();
-            let uv = [[0.01, 89.99], [level; 2]];
-            let exact =
-                crate::parametric::evaluate_analytic_surface_jet(surface, uv, &mut work, &cancel)
-                    .unwrap();
-            assert_eq!(exact.position[2], Interval::point(0.0));
-            assert!(!exact.dv[2].contains_zero());
-            for neighbor in [
-                below.then(|| crate::parametric::down(level)),
-                above.then(|| crate::parametric::up(level)),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            let chart =
+                crate::parametric::form_chart::FormChart::of(surface).expect("a torus chart");
+            let (sweep_axis, ends) = chart.generator_ends();
+            assert_eq!(sweep_axis, 0);
+            let natural = surface.natural_uv_domain_if_built();
+            let (u0, u1) = (natural.u_min(), natural.u_max());
+            let u = [u0 + 0.01 * (u1 - u0), u1 - 0.01 * (u1 - u0)];
+            for (level, angle) in ends {
+                let turns = angle / std::f64::consts::PI;
+                if (turns - turns.round()).abs() > 1e-12 {
+                    continue;
+                }
+                levels += 1;
                 let jet = crate::parametric::evaluate_analytic_surface_jet(
                     surface,
-                    [uv[0], [neighbor; 2]],
+                    [u, [level; 2]],
                     &mut work,
                     &cancel,
                 )
                 .unwrap();
                 assert!(
-                    !jet.position[2].contains_zero(),
-                    "literal neighboring level must not become a coplanar trace: face={ordinal}, v={neighbor:.17e}, height={:?}",
-                    jet.position[2],
+                    jet.position[2].abs_upper() <= 1e-10,
+                    "{:?}",
+                    jet.position[2]
                 );
+                assert!(!jet.dv[2].contains_zero());
             }
         }
+        assert!(levels >= 4, "{levels} equator rows");
     }
 
     #[test]
@@ -8648,6 +8663,7 @@ mod tests {
                 },
                 maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
                 maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                end_refinement: 0,
             },
             &cancel,
             MAX_SECTION_BYTES,
@@ -8755,7 +8771,7 @@ mod tests {
     }
     #[test]
     fn original_coefficient_identity_keeps_large_origin_relative_height_exact() {
-        let curve = solidcraft_step::geom::Curve::Line {
+        let curve = solidcore_step::geom::Curve::Line {
             origin: [3.0, -4.0, 1.0e12],
             direction: [1.0, 0.0, 0.0],
             magnitude: 17.0,
@@ -8785,7 +8801,7 @@ mod tests {
     }
     #[test]
     fn selected_cylindrical_ruling_is_constant_but_a_small_angular_drift_is_not() {
-        use solidcraft_step::geom::{
+        use solidcore_step::geom::{
             Associated, Curve, Pcurve, Placement, PreferredRep, Surface, SurfaceCurveKind,
         };
         use std::sync::Arc;
@@ -8844,7 +8860,7 @@ mod tests {
 
     #[test]
     fn piecewise_horizontal_height_jump_is_not_a_constant_curve() {
-        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        use solidcore_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
         let source = Curve::BSpline(Box::new(BSplineCurve {
             degree: 1,
             points: vec![
@@ -8886,7 +8902,7 @@ mod tests {
 
     #[test]
     fn source_constancy_follows_selected_pcurve_not_unselected_spatial_line() {
-        use solidcraft_step::geom::{
+        use solidcore_step::geom::{
             Associated, Curve, Pcurve, Placement, PreferredRep, Surface, SurfaceCurveKind,
         };
         use std::sync::Arc;
@@ -9253,7 +9269,7 @@ mod tests {
 
     #[test]
     fn closed_original_endpoint_uses_exact_projection_not_rounded_raw_parameter() {
-        let curve = solidcraft_step::geom::Curve::Line {
+        let curve = solidcore_step::geom::Curve::Line {
             origin: [0.0, 0.0, 1.0e12],
             direction: [0.0, 0.0, 1.0],
             magnitude: 0.1,
@@ -9290,7 +9306,7 @@ mod tests {
     }
     #[test]
     fn original_rational_endpoint_identity_does_not_snap_an_interior_parameter() {
-        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        use solidcore_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
         let curve = Curve::BSpline(Box::new(BSplineCurve {
             degree: 1,
             points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]],

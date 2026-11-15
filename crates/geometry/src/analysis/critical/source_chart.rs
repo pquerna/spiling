@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! A normal identity for an explicitly selected native STEP sphere carrier.
+//! A normal identity for a native sphere carrier. Imported spheres are kernel
+//! spheres built on their record form, so every evaluated position lies on the
+//! placed sphere within the form's agreement and its normal is the radial
+//! direction, regular at the poles where the form's partials collapse.
 //! This grants no endpoint attachment, pole fan or material degree. Those are
 //! independently proved from native edgeuses and the complete boundary atlas.
-//! A bare native sphere keeps its actual rational NURBS evaluation law.
 
 use super::*;
 use solidcore::surface::surface::{Surface, p2::SurfaceKind};
@@ -17,17 +19,12 @@ pub(super) struct SphereChart {
     reversed: bool,
     outward: bool,
 }
-fn explicit_step_sphere(surface: &Surface) -> Option<&solidcore::surface::sphere::Sphere> {
+fn native_sphere(surface: &Surface) -> Option<&solidcore::surface::sphere::Sphere> {
     let mut carrier = surface;
-    let mut explicit = false;
     for _ in 0..32 {
         match carrier.kind() {
             SurfaceKind::CurveBounded(bound) => carrier = bound.basis(),
-            SurfaceKind::Step(step) => {
-                carrier = step.surface()?;
-                explicit = true;
-            }
-            SurfaceKind::Sphere(sphere) if explicit => return Some(sphere),
+            SurfaceKind::Sphere(sphere) => return Some(sphere),
             _ => return None,
         }
     }
@@ -52,7 +49,7 @@ impl SphereChart {
                 "native normal identity is not bound to its borrowed material carrier",
             ));
         }
-        let Some(sphere) = explicit_step_sphere(candidate) else {
+        let Some(sphere) = native_sphere(candidate) else {
             return Ok(None);
         };
         let placement = sphere.base().position();

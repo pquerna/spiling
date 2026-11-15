@@ -32,7 +32,7 @@ use crate::parametric::{
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, SectionLoopMm};
 use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::surface::surface::SurfaceKind;
-use solidcraft_step::geom::{Curve as SourceCurve, Surface as SourceSurface};
+use solidcore_step::geom::{Curve as SourceCurve, Surface as SourceSurface};
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -1203,6 +1203,14 @@ pub(super) fn critical_face_gluing(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     if surface_parameter_span_smooth(surface, uv, work, cancel)? {
+        return Ok(true);
+    }
+    // The kernel's analytic kinds are certified on their smooth analytic surface: their form's
+    // knots are parameter joins of one smooth image, not creases.
+    if surface
+        .native_surface()
+        .is_some_and(crate::parametric::analytic_eval::native_analytic_support)
+    {
         return Ok(true);
     }
     if tensor_g1::direct_tensor_axes(surface, uv, work, cancel)?.is_none() {

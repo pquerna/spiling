@@ -199,6 +199,7 @@ fn prepared_position_receipts_reject_foreign_native_owner_and_stricter_reuse() {
         },
         maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM * 0.5,
         maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+        end_refinement: 0,
     };
     let section = prepared
         .section_for_query(&query, &cancel, MAX_SECTION_BYTES, &mut work)
@@ -782,6 +783,7 @@ fn local_chord_receipts_preserve_a_regular_native_torus_section() {
                 },
                 maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
                 maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                end_refinement: 0,
             },
             &cancel,
             (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,

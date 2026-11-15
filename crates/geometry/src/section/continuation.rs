@@ -221,7 +221,15 @@ pub(super) fn intersect_face(
         let mut fixed_cut = false;
         for (cut_index, cut) in cuts.cuts().iter().enumerate() {
             work.charge(1, cancel)?;
-            if !event.uv[cut.axis].is_point() || event.uv[cut.axis].lo != cut.coordinate {
+            // On the cut line: exactly there, or a trim along it within its rounding (the
+            // record's face domain is its boundary's box to rounding, so a boundary trim may lie
+            // an ulp off the domain line it is).
+            let along = event.uv[cut.axis];
+            let rounding = 64.0 * f64::EPSILON * cut.coordinate.abs().max(1.0);
+            if !(along.lo <= cut.coordinate
+                && cut.coordinate <= along.hi
+                && along.hi - along.lo <= rounding)
+            {
                 continue;
             }
             fixed_cut = true;
@@ -731,6 +739,7 @@ fn sample_segment(
         errors[1],
         query,
         0,
+        [true, true],
         points,
         tangents,
         chord_errors,

@@ -99,6 +99,16 @@ pub(super) fn curve_jet_order(
     }
     let domain = curve.natural_interval();
     if range[0] < domain.min() || range[1] > domain.max() {
+        // A kernel conic's law runs on past its form (the conic itself), half an end span.
+        if let Some(chart) = super::form_chart::ConicChart::of(curve) {
+            let [a, b] = chart.reach();
+            if a <= range[0]
+                && range[1] <= b
+                && let Some(jet) = chart.jet(range, order)?
+            {
+                return Ok(jet);
+            }
+        }
         return Err(conditioning(
             "query extends outside native curve active domain",
         ));
@@ -160,12 +170,27 @@ pub(super) fn curve_jet_order(
         work,
         cancel,
     )?;
-    validated_nurbs_jet(curve, nurb, range, order, work, cancel)
+    let form = validated_nurbs_jet(curve, nurb, range, order, work, cancel)?;
+    // The kernel's conic: its analytic law in its form's parameter, intersected with the NURB's
+    // own jet (each encloses the edge; the law is tight over a range, the NURB exact on its net).
+    if let Some(chart) = super::form_chart::ConicChart::of(curve)
+        && let Some(law) = chart.jet(range, order)?
+    {
+        let mut out = form;
+        for (row, lrow) in out.iter_mut().zip(law) {
+            for (v, l) in row.iter_mut().zip(lrow) {
+                *v = v.intersection(l).unwrap_or(*v);
+            }
+        }
+        work.charge(1, cancel)?;
+        return Ok(out);
+    }
+    Ok(form)
 }
 
 /// Same coefficient arithmetic as the standalone evaluator. The private caller
 /// holds completed original-knot validation for this immutable native curve.
-fn validated_nurbs_jet(
+pub(super) fn validated_nurbs_jet(
     curve: &Curve,
     nurb: &crv_basic::Curve,
     range: [f64; 2],
@@ -507,6 +532,11 @@ impl<'a> PreparedValidatedCurve<'a> {
     ) -> Result<bool, GeometryError> {
         self.enclosed(range, 0, work, cancel)?;
         if let Some((curve, nurb)) = self.native {
+            // The kernel's conic: equal canonical arcs on its certified form, Euclidean C1 (see
+            // `curve_span_smooth_at`), which the homogeneous net identity cannot grant.
+            if matches!(curve.kind(), CurveKind::Ellipse(_)) {
+                return Ok(true);
+            }
             return super::continuity::curve_is_c1(
                 nurb,
                 curve.dim(),
@@ -591,12 +621,10 @@ impl<'a> PreparedValidatedCurve<'a> {
             for _ in 0..16 {
                 work.charge(1, cancel)?;
                 match original {
-                    Some(solidcraft_step::geom::Curve::Trimmed { basis, .. }) => {
+                    Some(solidcore_step::geom::Curve::Trimmed { basis, .. }) => {
                         original = Some(basis)
                     }
-                    Some(
-                        selected @ solidcraft_step::geom::Curve::SurfaceCurve { curve_3d, .. },
-                    ) => {
+                    Some(selected @ solidcore_step::geom::Curve::SurfaceCurve { curve_3d, .. }) => {
                         if crate::kernel::source_operand::preferred_source_pcurve(selected)?
                             .is_some()
                         {
@@ -605,17 +633,17 @@ impl<'a> PreparedValidatedCurve<'a> {
                         original = Some(curve_3d);
                     }
                     Some(
-                        solidcraft_step::geom::Curve::BSpline(_)
-                        | solidcraft_step::geom::Curve::Polyline(_),
+                        solidcore_step::geom::Curve::BSpline(_)
+                        | solidcore_step::geom::Curve::Polyline(_),
                     ) => {
                         literal_inventory = true;
                         break;
                     }
                     Some(
-                        solidcraft_step::geom::Curve::Line { .. }
-                        | solidcraft_step::geom::Curve::Circle { .. }
-                        | solidcraft_step::geom::Curve::Ellipse { .. }
-                        | solidcraft_step::geom::Curve::Parabola { .. },
+                        solidcore_step::geom::Curve::Line { .. }
+                        | solidcore_step::geom::Curve::Circle { .. }
+                        | solidcore_step::geom::Curve::Ellipse { .. }
+                        | solidcore_step::geom::Curve::Parabola { .. },
                     ) => return Ok(true),
                     _ => return Ok(false),
                 }
@@ -757,7 +785,7 @@ impl NativeChartCurve<'_> {
             return Ok(true);
         };
         let uv = curve_jet_order(self.chart, range, 0, 0, work, cancel)?[0];
-        let bounds = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
+        let (bounds, _) = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
         for (axis, knots) in [surface.u_knots(), surface.v_knots()]
             .into_iter()
             .enumerate()
@@ -993,7 +1021,7 @@ impl super::CurveEvaluator for NativeChartCurve<'_> {
             return Ok(false);
         }
         let uv = curve_jet_order(self.chart, range, 0, 0, work, cancel)?[0];
-        let bounds = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
+        let (bounds, _) = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
         super::surface_parameter_span_continuous(self.surface, bounds, work, cancel)
     }
     fn smooth(
@@ -1014,6 +1042,9 @@ impl super::CurveEvaluator for NativeChartCurve<'_> {
     }
 }
 
+/// The (u, v) box a chart curve's image is evaluated on, and how far past the carrier's chart
+/// it may lie (see [`super::curve2d_rounded_image`]); an image past the chart by more stays
+/// unclamped, and the carrier refuses it.
 fn chart_image_box(
     surface: &solidcore::surface::surface::Surface,
     chart: &Curve,
@@ -1021,20 +1052,25 @@ fn chart_image_box(
     uv: [Interval; 3],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<[[f64; 2]; 2], GeometryError> {
+) -> Result<([[f64; 2]; 2], [f64; 2]), GeometryError> {
     let mut bounds = [[uv[0].lo, uv[0].hi], [uv[1].lo, uv[1].hi]];
     let domain = super::surface_active_domain(surface)?;
-    if (0..2).any(|i| bounds[i][0] < domain[i][0] || bounds[i][1] > domain[i][1])
-        && super::curve2d_image_within_box(chart, range, domain, work, cancel)?
-    {
+    if (0..2).all(|i| bounds[i][0] >= domain[i][0] && bounds[i][1] <= domain[i][1]) {
+        return Ok((bounds, [0.0; 2]));
+    }
+    if super::curve2d_image_within_box(chart, range, domain, work, cancel)? {
         for i in 0..2 {
             bounds[i] = [
                 bounds[i][0].max(domain[i][0]),
                 bounds[i][1].min(domain[i][1]),
             ];
         }
+        return Ok((bounds, [0.0; 2]));
     }
-    Ok(bounds)
+    Ok(
+        super::curve2d_rounded_image(chart, range, domain, work, cancel)?
+            .unwrap_or((bounds, [0.0; 2])),
+    )
 }
 
 fn lift_surface_jet(
@@ -1046,10 +1082,20 @@ fn lift_surface_jet(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
-    let box_uv = chart_image_box(surface, chart, chart_range, uv[0], work, cancel)?;
-    let s = super::analytic_eval::surface_tensor(surface, box_uv, order, work, cancel)?;
+    let (box_uv, overrun) = chart_image_box(surface, chart, chart_range, uv[0], work, cancel)?;
+    let s = super::analytic_eval::surface_tensor(surface, box_uv, order.max(1), work, cancel)?;
     let mut out = [[ZERO; 3]; 4];
     out[0] = s[0][0];
+    // An image past the chart by rounding: the position widened by the carrier's speed over it.
+    if overrun != [0.0; 2] {
+        for k in 0..3 {
+            let reach = Interval::point(s[1][0][k].abs_upper())
+                .mul(Interval::point(overrun[0]))
+                .add(Interval::point(s[0][1][k].abs_upper()).mul(Interval::point(overrun[1])))
+                .hi;
+            out[0][k] = Interval::new(out[0][k].lo - reach, out[0][k].hi + reach)?;
+        }
+    }
     for k in 0..3 {
         if order >= 1 {
             out[1][k] = s[1][0][k].mul(uv[1][0]).add(s[0][1][k].mul(uv[1][1]));
@@ -1191,7 +1237,7 @@ pub fn curve_on_surface_span_smooth(
         return Ok(false);
     }
     let uv = curve_jet_order(chart, mapped, 0, 0, work, cancel)?[0];
-    let bounds = chart_image_box(surface, chart, mapped, uv, work, cancel)?;
+    let (bounds, _) = chart_image_box(surface, chart, mapped, uv, work, cancel)?;
     super::surface_parameter_span_smooth(surface, bounds, work, cancel)
 }
 

@@ -184,41 +184,41 @@ fn test_f05_reproducible_retained_bytes() {
 }
 
 // =========================================================================
-// Feature 6: STEP parser via solidcraft-step
+// Feature 6: STEP parser via solidcore-step
 // =========================================================================
 
 #[test]
 fn test_f06_p21_parse_header_and_entities() {
     let text = fixture_str("box-mm.step");
-    let exchange = solidcraft_step::p21::parse(&text).unwrap();
+    let exchange = solidcore_step::p21::parse(&text).unwrap();
     assert!(!exchange.entities.is_empty(), "entities must not be empty");
 }
 
 #[test]
 fn test_f06_p21_parse_cylinder() {
     let text = fixture_str("cylinder.step");
-    let exchange = solidcraft_step::p21::parse(&text).unwrap();
+    let exchange = solidcore_step::p21::parse(&text).unwrap();
     assert!(!exchange.entities.is_empty());
 }
 
 #[test]
 fn test_f06_p21_parse_occt_box() {
     let text = fixture_str("independent-exporters/occt-box-mm.step");
-    let exchange = solidcraft_step::p21::parse(&text).unwrap();
+    let exchange = solidcore_step::p21::parse(&text).unwrap();
     assert!(!exchange.entities.is_empty());
 }
 
 #[test]
 fn test_f06_p21_parse_entity_count() {
     let text = fixture_str("box-mm.step");
-    let exchange = solidcraft_step::p21::parse(&text).unwrap();
+    let exchange = solidcore_step::p21::parse(&text).unwrap();
     assert!(exchange.entities.len() > 10);
 }
 
 #[test]
 fn test_f06_p21_syntax_resilience() {
     let text = fixture_str("box-inch.step");
-    let exchange = solidcraft_step::p21::parse(&text);
+    let exchange = solidcore_step::p21::parse(&text);
     assert!(exchange.is_ok());
 }
 
@@ -229,25 +229,25 @@ fn test_f06_p21_syntax_resilience() {
 #[test]
 fn test_f07_read_solids_from_box() {
     let text = fixture_str("box-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert_eq!(solids.solids.len(), 1);
     assert!(!solids.solids[0].sheet);
 }
 
 #[test]
-fn test_f07_solidcraft_face_origin_extraction() {
+fn test_f07_step_reader_face_origin_extraction() {
     let text = fixture_str("box-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert_eq!(solids.solids[0].face_origin.len(), 6);
 }
 
 #[test]
 fn test_f07_read_solids_occt_cylinder() {
     let text = fixture_str("independent-exporters/occt-cylinder-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert_eq!(solids.solids.len(), 1);
     assert_eq!(solids.solids[0].brep.faces.len(), 3);
 }
@@ -255,8 +255,8 @@ fn test_f07_read_solids_occt_cylinder() {
 #[test]
 fn test_f07_closed_solid_verification() {
     let text = fixture_str("through-hole.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert_eq!(solids.solids.len(), 1);
     assert!(!solids.solids[0].sheet);
 }
@@ -264,8 +264,8 @@ fn test_f07_closed_solid_verification() {
 #[test]
 fn test_f07_vertex_count_consistency() {
     let text = fixture_str("box-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert_eq!(solids.solids[0].brep.vertices.len(), 8);
 }
 
@@ -2290,24 +2290,30 @@ fn test_f48_solidcore_dependency_presence() {
 }
 
 #[test]
-fn test_f48_solidcraft_step_presence() {
+fn test_f48_solidcore_step_parse_presence() {
     let text = fixture_str("box-mm.step");
-    let ex = solidcraft_step::p21::parse(&text);
+    let ex = solidcore_step::p21::parse(&text);
     assert!(ex.is_ok());
 }
 
 #[test]
-fn test_f48_solidcraft_geom_presence() {
+fn test_f48_solidcore_step_read_presence() {
     let text = fixture_str("box-mm.step");
-    let ex = solidcraft_step::p21::parse(&text).unwrap();
-    let solids = solidcraft_step::topology::read_solids(&ex);
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
     assert!(!solids.solids.is_empty());
 }
 
 #[test]
-fn test_f48_solidcore_mesh_presence() {
-    let opts = solidcore_mesh::TessellateOptions::default();
-    assert!(opts.chord_tolerance.resolve(10.0) > 0.0);
+fn test_f48_solidcore_tess_presence() {
+    let text = fixture_str("box-mm.step");
+    let ex = solidcore_step::p21::parse(&text).unwrap();
+    let solids = solidcore_step::topology::read_solids(&ex);
+    let brep = &solids.solids[0].brep;
+    let (plan, stats) =
+        solidcore_tess::plan(brep, &solidcore_tess::MeshTolerance::display(0.05), 20.0).unwrap();
+    assert!(stats.unmeshed.is_empty());
+    assert_eq!(plan.faces.len(), brep.faces.len());
 }
 
 #[test]

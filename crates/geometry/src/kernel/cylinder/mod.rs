@@ -220,7 +220,7 @@ impl Definition {
                     "cylinder material sense must agree with its original source carrier",
                 ));
             }
-            let solidcraft_step::geom::Surface::Cylinder { position, radius } =
+            let solidcore_step::geom::Surface::Cylinder { position, radius } =
                 source.carrier.as_ref()
             else {
                 return Err(unsupported("original source carrier is not a cylinder"));
@@ -260,7 +260,6 @@ impl Definition {
             let mut carrier = self
                 .face_surface(native_id)
                 .ok_or_else(|| malformed("missing cylinder surface"))?;
-            let mut step = false;
             for depth in 0..=32 {
                 work.charge(1, cancel)?;
                 match carrier.kind() {
@@ -268,7 +267,6 @@ impl Definition {
                         carrier = s
                             .surface()
                             .ok_or_else(|| malformed("empty STEP cylinder"))?;
-                        step = true;
                     }
                     SurfaceKind::CurveBounded(s) => carrier = s.basis(),
                     _ => break,
@@ -289,8 +287,7 @@ impl Definition {
             let x = vector([x.x, x.y, x.z]);
             let y = vector([y.x, y.y, y.z]);
             let axis = vector([a.x, a.y, a.z]);
-            if !step
-                || c.semi_angle_deg != 0.0
+            if c.semi_angle_deg != 0.0
                 || !c.radius.is_finite()
                 || (c.radius - *radius_mm).abs() > RESIDUAL_MM
                 || !finite(origin)
@@ -413,8 +410,18 @@ impl Definition {
                             let center_mm = [o.x, o.y, o.z];
                             let u_mm = [x.x * c.radius_x, x.y * c.radius_x, x.z * c.radius_x];
                             let v_mm = [y.x * c.radius_y, y.y * c.radius_y, y.z * c.radius_y];
-                            let start_angle = c.domain.min().to_radians();
-                            let end_angle = c.domain.max().to_radians();
+                            // The edge's own angles: its interval is in the conic's (form)
+                            // parameters, which may run past the edge (a rim split in arcs).
+                            let k = crate::kernel::make_kernel_context();
+                            let interval = native(brep.edge(edge_id))?.interval;
+                            let angle = |t: f64| {
+                                ellipse
+                                    .convert_t_from_nurbs_to_step(&k, t)
+                                    .map(f64::to_radians)
+                                    .map_err(|_| malformed("cylinder rim parameter has no angle"))
+                            };
+                            let start_angle = angle(interval.min())?;
+                            let end_angle = angle(interval.max())?;
                             let point = |t: f64| {
                                 std::array::from_fn(|i| {
                                     center_mm[i] + u_mm[i] * t.cos() + v_mm[i] * t.sin()

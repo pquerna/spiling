@@ -672,6 +672,7 @@ mod tests {
             SurfaceComplex::normalize(cube(0., 10.), 1., Affine::IDENTITY, &cancel).unwrap();
         let bytes = complex.encode().unwrap();
         let provenance = SourceProvenance {
+            findings: Vec::new(),
             source_hash: SourceHash::from_bytes(b"original box"),
             source_name: "box.stl".into(),
             source_unit: SourceUnit::Millimetre,

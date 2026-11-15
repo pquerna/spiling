@@ -468,7 +468,7 @@ export type ImportFailureKind = "open_boundary" | "non_manifold" | "collapsed_fa
 
 export type ImportFinding = { kind: ImportFindingKind, code: ImportFindingCode, count: number, label: string, detail: string, bounds_mm: AabbMm | null, displacement_mm: number | null, };
 
-export type ImportFindingCode = "interpreted_units" | "degenerate_facets" | "duplicate_facets" | "boundary_weld" | "corrected_winding" | "component_union" | "negative_volumes" | "foreign_settings" | "process_control" | "source_plate" | "analytic_recovery" | "appearance" | "non_printable";
+export type ImportFindingCode = "interpreted_units" | "degenerate_facets" | "duplicate_facets" | "boundary_weld" | "corrected_winding" | "component_union" | "negative_volumes" | "foreign_settings" | "process_control" | "source_plate" | "analytic_recovery" | "appearance" | "non_printable" | "source_reading";
 
 export type ImportFindingKind = "information" | "changed" | "not_applied";
 
@@ -1333,7 +1333,12 @@ uncertainty_mm: number | null,
  * The selected solid when the source places more than one. Absent for a
  * source that is one solid, so its encoding and identity are unchanged.
  */
-source_solid?: SourceSolidId, };
+source_solid?: SourceSolidId,
+/**
+ * Every reading the source's reader made of it (a STEP construct read another way, with
+ * its count), reported, never silent. Empty for a source read as written.
+ */
+findings?: Array<ImportFinding>, };
 
 export type SourceSolidId = string;
 

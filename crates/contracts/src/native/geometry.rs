@@ -140,6 +140,11 @@ impl TryFrom<rpc::SourceProvenance> for SourceProvenance {
                 .map(SourceSolidId::parse)
                 .transpose()
                 .map_err(|e| e.message)?,
+            findings: value
+                .findings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         };
         checked(value.validate())?;
         Ok(value)
@@ -175,6 +180,11 @@ impl TryFrom<SourceProvenance> for rpc::SourceProvenance {
             source_unit: rpc::SourceUnit::try_from(value.source_unit)? as i32,
             uncertainty_mm: value.uncertainty_mm,
             source_solid: value.source_solid.map(String::from),
+            findings: value
+                .findings
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         };
         Ok(value)
     }
@@ -1879,6 +1889,7 @@ impl TryFrom<rpc::ImportFinding> for ImportFinding {
                 Ok(rpc::ImportFindingCode::AnalyticRecovery) => ImportFindingCode::AnalyticRecovery,
                 Ok(rpc::ImportFindingCode::Appearance) => ImportFindingCode::Appearance,
                 Ok(rpc::ImportFindingCode::NonPrintable) => ImportFindingCode::NonPrintable,
+                Ok(rpc::ImportFindingCode::SourceReading) => ImportFindingCode::SourceReading,
                 _ => return Err("invalid import finding code".into()),
             },
             count: v.count,
@@ -1915,6 +1926,7 @@ impl TryFrom<ImportFinding> for rpc::ImportFinding {
                 ImportFindingCode::AnalyticRecovery => rpc::ImportFindingCode::AnalyticRecovery,
                 ImportFindingCode::Appearance => rpc::ImportFindingCode::Appearance,
                 ImportFindingCode::NonPrintable => rpc::ImportFindingCode::NonPrintable,
+                ImportFindingCode::SourceReading => rpc::ImportFindingCode::SourceReading,
             } as i32,
             count: v.count,
             label: v.label,
@@ -2112,6 +2124,7 @@ mod tests {
                     source_unit: rpc::SourceUnit::Millimetre as i32,
                     uncertainty_mm: None,
                     source_solid: None,
+                    findings: Vec::new(),
                 }),
                 face_count: 1,
                 bounds_mm: Some(AabbMm::new([0.0; 3], [1.0; 3]).unwrap().try_into().unwrap()),

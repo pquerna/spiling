@@ -7,8 +7,8 @@
 //! retained. Curves and PCURVEs are actual source operands; none is a polygonal
 //! proxy or a substitute used only to obtain an analytic certificate.
 
-use solidcraft_geom::brep as b;
-use solidcraft_step::{geom as s, write::topology};
+use solidcore_record::brep as b;
+use solidcore_step::{geom as s, write::topology};
 use std::f64::consts::FRAC_PI_2;
 use std::sync::Arc;
 
@@ -477,6 +477,7 @@ pub(super) fn ring_torus() -> b::Brep {
         frame: frame([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
         major_radius: 5.0,
         minor_radius: 2.0,
+        tube_start: 0.0,
     };
     let mut faces = Vec::with_capacity(16);
     for i in 0..4 {

@@ -14183,7 +14183,7 @@ mod tests {
                 // normalization may retain the equivalent polynomial carrier;
                 // the original STEP operand and its actual floor stay distinct.
                 assert!(definition.original_source().faces.iter().any(|face| {
-                    let solidcraft_step::geom::Surface::BSpline(spline) = face.carrier.as_ref()
+                    let solidcore_step::geom::Surface::BSpline(spline) = face.carrier.as_ref()
                     else {
                         return false;
                     };

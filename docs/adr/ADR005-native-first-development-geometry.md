@@ -27,7 +27,7 @@ The imported SolidCore BREP is the single material geometry authority for
 DEVELOPMENT builds. Import, bounds, placement, sections, material classification,
 slab/occupancy queries and manufacturing consume that same immutable native
 material through the geometry facade. SolidCraft decodes STEP operands; it is
-not a second material kernel. Pin SolidCore and solidcore-mesh to one exact
+not a second material kernel. Pin SolidCore and solidcore-tess to one exact
 published revision, with matching lockfile sources and `geometry::KERNEL_REVISION`.
 Bind material results to that producer, source identity, units, tolerance policy,
 occurrence pose, query scope and approximation bounds.

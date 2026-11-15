@@ -8,7 +8,7 @@ use crate::kernel::source::OriginalCoedgeSource;
 use crate::kernel::source_operand::{PreparedOriginalCurve, preferred_source_pcurve};
 use crate::parametric::{AxisSpans, CurveEvaluator, ExactAffineCurve, Interval};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::{Curve, Surface};
+use solidcore_step::geom::{Curve, Surface};
 use std::sync::atomic::AtomicBool;
 
 const SCRATCH_BYTES: usize = 32 * std::mem::size_of::<E>();

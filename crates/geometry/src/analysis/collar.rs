@@ -7283,7 +7283,7 @@ mod tests {
     }
 
     #[test]
-    fn native_terminal_strip_covers_exterior_root_without_an_interior_witness() {
+    fn native_terminal_strip_covers_port_root_without_an_interior_witness() {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(
             include_bytes!(
@@ -7302,13 +7302,11 @@ mod tests {
             .unwrap();
         let surface = domain.surface_evaluator();
         let functional = HeightFunctional::from_frame(frame());
-        // Actual first-slab terminal cell: its native stationary root is
-        // strictly OUTSIDE the literal native UV port, not an interval overlap
-        // or a point that can be made Inside by a coordinate clamp.
-        let cell = [
-            [0.0001476557795333482, 0.00014769888595937315],
-            [15.999999998370189, 16.000000000000004],
-        ];
+        // A first-slab terminal cell at the fillet's lowest line. The source
+        // pcurve (u = -1.570796326795) lies on that stationary line within the
+        // reader's tolerance, so the record puts the port exactly on it (form
+        // u = 0): the root has no witness inside the face beyond rounding.
+        let cell = [[0.0, 1.220703125e-4], [16.0 - 1.6e-9, 16.0]];
         let mut strip = cell;
         strip[1] = super::super::slab::trim_parameter_box(domain).unwrap()[1];
         let jet = surface_enclosure(surface, cell, &mut work, &cancel).unwrap();
@@ -7320,13 +7318,7 @@ mod tests {
         .unwrap();
         let port_index = 2;
         let port_uv = native_port_uv(domain, port_index, &mut work, &cancel).unwrap();
-        assert!(root[0][1] < port_uv[0][0]);
-        let mut anchor = root;
-        anchor[1] = [9.0; 2];
-        assert!(matches!(
-            domain.classify(anchor, &mut work, &cancel).unwrap(),
-            TrimClassification::Outside,
-        ));
+        assert!(root[0][0] <= port_uv[0][0] && root[0][1] <= port_uv[0][1] + f64::EPSILON);
         let trace_error = native_port_trace_error(domain, port_index, &mut work, &cancel)
             .unwrap()
             .expect("the complete normalized native C3D/UV trace has a finite bound");
@@ -7399,13 +7391,6 @@ mod tests {
             "a fabricated interior endpoint cannot own the omitted native tail"
         );
         assert!(band.height[1] < request.sample_height_mm);
-        assert!(
-            matches!(
-                domain.classify(anchor, &mut work, &cancel).unwrap(),
-                TrimClassification::Outside,
-            ),
-            "the uncertainty cover never changes native trim membership"
-        );
         let endcap_index = port_index - 1;
         let endcap = native_port_uv(domain, endcap_index, &mut work, &cancel).unwrap();
         assert!(

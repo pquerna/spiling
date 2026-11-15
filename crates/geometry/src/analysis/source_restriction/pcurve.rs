@@ -14,7 +14,7 @@ use crate::kernel::source_operand::{PreparedOriginalCurve, preferred_source_pcur
 use crate::kernel::trim::{SourceCurveCalibration, calibrate_source_curves};
 use crate::parametric::{AxisSpans, CurveEvaluator, Interval};
 use crate::{GeometryError, GeometryWorkBudget};
-use solidcraft_step::geom::Curve;
+use solidcore_step::geom::Curve;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -42,7 +42,7 @@ fn available(limit: usize, live: usize) -> Result<usize, GeometryError> {
 /// or permission to reuse the spatial reference's parameter values.
 pub(super) fn selected_master_window(
     source: &OriginalCoedgeSource,
-    pcurve: &solidcraft_step::geom::Pcurve,
+    pcurve: &solidcore_step::geom::Pcurve,
     same_sense: bool,
     allowance: f64,
     remaining: usize,

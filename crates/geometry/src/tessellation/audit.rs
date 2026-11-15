@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+use super::candidate::{DisplayEdges, FaceCandidate};
 use super::{check_memory, invalid, resource, shape, trim};
 use crate::{
     GeometryWorkBudget,
@@ -10,7 +11,6 @@ use crate::{
 };
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::{Brep, FaceId};
-use solidcore_mesh::{EdgeSet, FaceMesh};
 use spiling_contracts::{
     display::MeshBudget,
     geometry::{
@@ -33,8 +33,8 @@ pub(super) struct AuditedFace {
 pub(super) fn face(
     definition: &Definition,
     ordinal: usize,
-    mesh: &FaceMesh,
-    edges: &EdgeSet,
+    mesh: &FaceCandidate,
+    edges: &DisplayEdges,
     budget: MeshBudget,
     outside: usize,
     work: &mut GeometryWorkBudget,
@@ -46,7 +46,6 @@ pub(super) fn face(
         || mesh.uvs.len() != count
         || mesh.normals.len() != count
         || mesh.shared.len() != count
-        || mesh.gaps.len() != count
     {
         return Err(invalid(
             "native candidate has empty or inconsistent face attributes",
@@ -57,10 +56,11 @@ pub(super) fn face(
             "native face candidate exceeds remaining display counts",
         ));
     }
-    // A returned candidate's convergence flag is advisory. Publication still
-    // requires the complete independent coverage, trim, normal and coefficient
-    // audits below; only their shape bound can request refinement.
-    if mesh.split_boundary || mesh.ear_clipped {
+    // The planner's statistics are advisory. Publication still requires the
+    // complete independent coverage, trim, normal and coefficient audits below;
+    // only their shape bound can request refinement. A face the planner filled
+    // leniently has boundary sides that are no triangle sides.
+    if mesh.lenient {
         return Err(invalid(
             "native candidate has no independently auditable regular UV triangle chain",
         ));
@@ -238,7 +238,7 @@ pub(super) fn face(
 }
 
 pub(super) fn triangle_uv(
-    mesh: &FaceMesh,
+    mesh: &FaceCandidate,
     triangle: [u32; 3],
 ) -> Result<[[f64; 2]; 3], GeometryError> {
     let mut uv = [[0.0; 2]; 3];
@@ -315,7 +315,7 @@ fn length(a: [f64; 3]) -> f64 {
 }
 
 fn box_inventory(
-    mesh: &FaceMesh,
+    mesh: &FaceCandidate,
     outside: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,

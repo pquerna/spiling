@@ -93,6 +93,46 @@ pub(crate) fn intersect(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeSection, GeometryError> {
+    // A loop corner whose adjacent spans' coarse end tangents cannot be separated (a lens tip a
+    // few µm thick) is re-sectioned with only those spans' end segments refined; any other
+    // failure, or one that refinement does not resolve, stands.
+    let mut refined = *query;
+    loop {
+        match intersect_once(
+            definition,
+            prepared,
+            &refined,
+            byte_limit,
+            packed_byte_limit,
+            work,
+            cancel,
+        ) {
+            Err(error)
+                if error.code == GeometryErrorCode::AnalysisIndeterminate
+                    && error.message.contains(UNSEPARATED_CORNER)
+                    && refined.end_refinement < MAX_END_REFINEMENT =>
+            {
+                refined.end_refinement += 4;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Graph-span end halvings tried for an unseparated loop corner, in steps of four.
+const MAX_END_REFINEMENT: u8 = 16;
+const UNSEPARATED_CORNER: &str =
+    "adjacent native graph spans lack a common strictly monotone separating direction";
+
+fn intersect_once(
+    definition: &Definition,
+    prepared: Option<&PreparedSectionSource<'_>>,
+    query: &SectionQuery,
+    byte_limit: usize,
+    packed_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
     if prepared.is_some_and(|source| !std::ptr::eq(source.definition(), definition)) {
         return Err(indeterminate(
@@ -449,6 +489,7 @@ pub(crate) fn intersect(
                 b_error?,
                 query,
                 0,
+                [true, true],
                 &mut points,
                 &mut tangents,
                 &mut chord_errors,
@@ -1315,7 +1356,22 @@ impl Graph<'_> {
         cancel: &AtomicBool,
     ) -> Result<([f64; 3], f64), GeometryError> {
         let (_, jet) = self.enclose([x; 2], work, cancel)?;
-        let point = jet.position.map(Interval::mid);
+        let mut point = jet.position.map(Interval::mid);
+        // The root's position enclosure straddles the plane; represent it by the midpoint's
+        // projection onto the plane while that stays inside the same enclosure (exact for an
+        // axis-aligned plane), so the bound below is unchanged.
+        let n = self.plane.normal;
+        let n2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if n2 > 0.0 {
+            let offset = (0..3)
+                .map(|i| n[i] * (point[i] - self.plane.origin_mm[i]))
+                .sum::<f64>()
+                / n2;
+            let projected: [f64; 3] = std::array::from_fn(|i| point[i] - n[i] * offset);
+            if (0..3).all(|i| jet.position[i].contains(projected[i])) {
+                point = projected;
+            }
+        }
         let error = norm(std::array::from_fn(|i| {
             jet.position[i].sub(Interval::point(point[i]))
         }));
@@ -1393,6 +1449,7 @@ impl Graph<'_> {
         b_error: f64,
         query: &SectionQuery,
         depth: u8,
+        ends: [bool; 2],
         output: &mut Vec<[f64; 3]>,
         tangents: &mut Vec<[Interval; 3]>,
         chord_errors: &mut Vec<f64>,
@@ -1457,7 +1514,11 @@ impl Graph<'_> {
             .fold(0.0_f64, f64::max);
         let monotone =
             velocity.is_some_and(|v| dot(v, std::array::from_fn(|i| b[i] - a[i])).lo > 0.0);
+        // A span's end segments are halved `end_refinement` times more, so their tangents
+        // approach the span's own end tangents (a corner the coarse ones could not separate).
+        let refine_end = (ends[0] || ends[1]) && depth < query.end_refinement;
         if monotone
+            && !refine_end
             && chord <= query.maximum_chord_error_mm
             && plane_error <= query.maximum_plane_error_mm
         {
@@ -1486,6 +1547,7 @@ impl Graph<'_> {
             error,
             query,
             depth + 1,
+            [ends[0], false],
             output,
             tangents,
             chord_errors,
@@ -1502,6 +1564,7 @@ impl Graph<'_> {
             b_error,
             query,
             depth + 1,
+            [false, ends[1]],
             output,
             tangents,
             chord_errors,
@@ -1680,7 +1743,7 @@ fn certify_adjacent(
         let direction = std::array::from_fn(|k| first[k] / a + second[k] / b);
         if dot(tangents[i], direction).lo <= 0.0 || dot(tangents[next], direction).lo <= 0.0 {
             return Err(indeterminate(format!(
-                "adjacent native graph spans lack a common strictly monotone separating direction: first={first:?} second={second:?} tangents={:?}",
+                "{UNSEPARATED_CORNER}: first={first:?} second={second:?} tangents={:?}",
                 [tangents[i], tangents[next]],
             )));
         }
@@ -2752,6 +2815,7 @@ mod correspondence_tests {
 
     #[test]
     fn rounded_housing_near_cap_retains_native_monotonicity_across_short_chords() {
+        const CHORD: f64 = 1e-5;
         let definition = crate::from_step_bytes(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
@@ -2760,11 +2824,18 @@ mod correspondence_tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
         let z = 9.00000006325437;
-        let mut result = section(
+        // A fine chord target near the corner cap gives the short chords whose ordering their
+        // independent error tubes cannot settle without the native tangents.
+        let mut result = super::section_for_query(
             &definition,
-            PlaneMm {
-                origin_mm: [0.0, 0.0, z],
-                normal: [0.0, 0.0, 1.0],
+            &SectionQuery {
+                plane: PlaneMm {
+                    origin_mm: [0.0, 0.0, z],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                maximum_chord_error_mm: CHORD,
+                maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                end_refinement: 0,
             },
             &cancel,
             MAX_SECTION_BYTES,

@@ -32,6 +32,7 @@ fn manifest() -> ProjectManifest {
                 source_unit: SourceUnit::Millimetre,
                 uncertainty_mm: Some(1e-6),
                 source_solid: None,
+                findings: Vec::new(),
             },
         }],
         layouts: vec![PrintLayoutRecord {

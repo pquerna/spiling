@@ -277,7 +277,6 @@ pub fn provenance(context: &Context) -> Result<PathBuf> {
         &source.join("egui-0.37.0"),
     )?;
     for (path, name) in [
-        ("solidcraft", "solidcraft-geometry-step"),
         ("cpp_map", "cpp_map-0.2.0"),
         ("tracel-llvm-bundler", "tracel-llvm-bundler"),
         ("boolmesh", "boolmesh"),

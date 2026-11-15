@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{DisplayProgress, DisplayStage, candidate_query, check_memory, invalid, resource};
+use super::candidate::{self, DisplayEdges, FaceCandidate};
+use super::{
+    DisplayProgress, DisplayStage, MAX_REFINEMENTS, PROOF_BYTES, check_memory, invalid, resource,
+};
 use crate::{GeometryWorkBudget, MeshArtifact, check_cancel, kernel::Definition};
-use solidcore_mesh::{EdgeOptions, EdgeSet, FaceMesh, OutputOptions, TessellateOptions, Tolerance};
+use solidcore_tess::MeshTolerance;
 use spiling_contracts::{
     display::{MeshBudget, MeshChunkBuilder},
     geometry::{DisplayProfile, GeometryError, GeometryErrorCode},
@@ -33,97 +36,55 @@ pub(super) fn tessellate(
     if !profile.is_tolerant_preview() {
         return Err(invalid("preview requires a tolerant display profile"));
     }
-    // One source-mapped path for every level; only the allowance differs.
+    // One source-mapped path for every level; only the allowance differs. Coarser levels
+    // also relax the planner's facet angle so the recorded distance allowance, still measured
+    // below, decides the triangle count.
     let allowance = profile.carrier_tolerance_mm();
+    let angle = match profile {
+        DisplayProfile::MeshTolerantMm02V1 => 30.0_f64.to_radians(),
+        DisplayProfile::MeshTolerantMm1V1 => 60.0_f64.to_radians(),
+        _ => solidcore_tess::DISPLAY_ANGLE,
+    };
     let kernel = crate::make_kernel_context();
-    let options = TessellateOptions {
-        chord_tolerance: Tolerance::Absolute(allowance * 0.25),
-        max_triangles_per_face: budget.triangles as usize,
-        edge: EdgeOptions {
-            max_segments: budget.vertices,
-            ..EdgeOptions::default()
-        },
-        output: OutputOptions {
-            normals: true,
-            uvs: false,
-            face_ids: true,
-            edge_polylines: true,
-        },
-        measure_deviation: false,
-        ..TessellateOptions::default()
-    };
-    // Coarser levels also relax the mesher's shading angle so the recorded
-    // distance allowance, still audited below, decides the triangle count.
-    let options = TessellateOptions {
-        angle_tolerance: match profile {
-            DisplayProfile::MeshTolerantMm02V1 => 30.0_f64.to_radians(),
-            DisplayProfile::MeshTolerantMm1V1 => 60.0_f64.to_radians(),
-            _ => options.angle_tolerance,
-        },
-        ..options
-    };
-    let mut update = DisplayProgress {
-        stage: DisplayStage::PreparingEdges,
-        attempt: 0,
-        completed_faces: 0,
-        total_faces: faces.len() as u32,
-        consumed_work: work.consumed(),
-    };
-    progress(update);
-    let edges = candidate_query(0, work, cancel, |native| {
-        solidcore_mesh::tessellate_edge_set_with_budget(
-            &kernel,
-            definition.brep(),
-            &options,
-            native,
-        )
-    })?;
-    if !edges.failures().is_empty() {
-        return Err(invalid("preview omitted a native boundary edge"));
-    }
-    let trim = edge_deviation(definition, &kernel, &edges, work, cancel)?;
-    let mut topology = Topology::default();
-    #[cfg(test)]
-    let mut measurements = (0usize, 0usize, 0.0_f64, 0.0_f64);
-    let mut builder = MeshChunkBuilder::with_budget(
-        definition.id().clone(),
-        faces.len() as u32,
-        profile,
-        budget,
-    )?;
-    for (ordinal, &face) in faces.iter().enumerate() {
-        update.stage = DisplayStage::TessellatingFace;
-        update.completed_faces = ordinal as u32;
-        update.consumed_work = work.consumed();
+    let mut first_refinement: Option<GeometryError> = None;
+    for attempt in 0..=MAX_REFINEMENTS {
+        let tolerance = MeshTolerance {
+            chord: allowance * 0.25 * 0.25_f64.powi(attempt),
+            angle: Some(angle),
+        };
+        let mut update = DisplayProgress {
+            stage: DisplayStage::PreparingEdges,
+            attempt: attempt as u32,
+            completed_faces: 0,
+            total_faces: faces.len() as u32,
+            consumed_work: work.consumed(),
+        };
         progress(update);
-        let outside = edges
-            .retained_bytes()
-            .saturating_add(topology.retained_bytes())
-            .saturating_add(builder.retained_bytes());
-        let mesh_face = |polish: bool, work: &mut GeometryWorkBudget| {
-            let mut options = options.clone();
-            options.measure_deviation = polish;
-            let candidate = candidate_query(outside, work, cancel, |native| {
-                solidcore_mesh::tessellate_face_with_budget(
-                    &kernel,
-                    definition.brep(),
-                    face,
-                    &edges,
-                    &options,
-                    native,
-                )
-            })
-            .map_err(|failure| {
-                GeometryError::new(
-                    failure.code,
-                    format!(
-                        "preview face {ordinal}/{}: {}",
-                        faces.len(),
-                        failure.message
-                    ),
-                )
-            })?;
-            if candidate.face != face
+        let candidate::Candidates {
+            edges,
+            faces: candidates,
+            stats,
+        } = candidate::plan(definition, tolerance, PROOF_BYTES, work, cancel)?;
+        let trim = edge_deviation(definition, &kernel, &edges, work, cancel)?;
+        if !trim.is_finite() || trim < 0.0 {
+            return Err(invalid("preview edge has no finite measured deviation"));
+        }
+        let mut topology = Topology::default();
+        #[cfg(test)]
+        let mut measured = 0.0_f64;
+        let mut builder = MeshChunkBuilder::with_budget(
+            definition.id().clone(),
+            faces.len() as u32,
+            profile,
+            budget,
+        )?;
+        let mut exceeded = None;
+        for (ordinal, candidate) in candidates.into_iter().enumerate() {
+            update.stage = DisplayStage::TessellatingFace;
+            update.completed_faces = ordinal as u32;
+            update.consumed_work = work.consumed();
+            progress(update);
+            if definition.face_ordinal(candidate.face) != Some(ordinal)
                 || candidate.positions.is_empty()
                 || candidate.triangles.is_empty()
             {
@@ -131,96 +92,96 @@ pub(super) fn tessellate(
                     "preview omitted or changed an original source face",
                 ));
             }
-            Ok(candidate)
-        };
-        let candidate = mesh_face(false, work)?;
-        let carrier = validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
-        let (candidate, carrier) = if carrier + trim <= allowance {
+            let carrier =
+                validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
+            if carrier + trim > allowance {
+                // Measured off the allowance: the whole body is planned finer.
+                exceeded = Some(GeometryError::new(
+                    GeometryErrorCode::ShapeErrorExceeded,
+                    format!(
+                        "measured preview deviation exceeds display profile: face {ordinal}/{} carrier={carrier} trim={trim} allowance={allowance}",
+                        faces.len()
+                    ),
+                ));
+                break;
+            }
             #[cfg(test)]
             {
-                measurements.0 += 1;
-                measurements.3 = measurements.3.max(carrier);
+                measured = measured.max(carrier);
             }
-            (candidate, carrier)
-        } else {
-            #[cfg(test)]
-            {
-                measurements.1 += 1;
-            }
-            drop(candidate);
-            let candidate = mesh_face(true, work)?;
-            validate_measurement_samples(definition, &kernel, &candidate, work, cancel)?;
-            let carrier = candidate
-                .deviation
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .ok_or_else(|| invalid("preview face has no finite measured deviation"))?;
-            (candidate, carrier)
-        };
-        if !trim.is_finite() || trim < 0.0 || carrier + trim > allowance {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ShapeErrorExceeded,
-                "measured preview deviation exceeds display profile",
-            ));
-        }
-        #[cfg(test)]
-        {
-            measurements.2 = measurements.2.max(carrier);
-        }
-        update.stage = DisplayStage::AuditingFace;
-        update.consumed_work = work.consumed();
-        progress(update);
-        let adapter = adapt_face(&candidate, outside, work, cancel)?;
-        drop(candidate);
-        let outside = edges
-            .retained_bytes()
-            .saturating_add(builder.retained_bytes())
-            .saturating_add(adapter.retained_bytes());
-        topology.include(&adapter, outside, work, cancel)?;
-        let growth = packing_growth(adapter.positions.len(), adapter.indices.len())
-            .ok_or_else(|| resource("preview packing growth overflow"))?;
-        check_memory(
-            outside
+            update.stage = DisplayStage::AuditingFace;
+            update.consumed_work = work.consumed();
+            progress(update);
+            let outside = edges
+                .retained_bytes()
                 .saturating_add(topology.retained_bytes())
-                .saturating_add(growth),
-        )?;
-        builder.push_face(
-            ordinal as u32,
-            &adapter.positions,
-            &adapter.normals,
-            &adapter.indices,
-            carrier,
-            trim,
-        )?;
-        update.stage = DisplayStage::FaceComplete;
-        update.completed_faces = ordinal as u32 + 1;
+                .saturating_add(builder.retained_bytes());
+            let adapter = adapt_face(&candidate, outside, work, cancel)?;
+            drop(candidate);
+            let outside = edges
+                .retained_bytes()
+                .saturating_add(builder.retained_bytes())
+                .saturating_add(adapter.retained_bytes());
+            topology.include(&adapter, outside, work, cancel)?;
+            let growth = packing_growth(adapter.positions.len(), adapter.indices.len())
+                .ok_or_else(|| resource("preview packing growth overflow"))?;
+            check_memory(
+                outside
+                    .saturating_add(topology.retained_bytes())
+                    .saturating_add(growth),
+            )?;
+            builder.push_face(
+                ordinal as u32,
+                &adapter.positions,
+                &adapter.normals,
+                &adapter.indices,
+                carrier,
+                trim,
+            )?;
+            update.stage = DisplayStage::FaceComplete;
+            update.completed_faces = ordinal as u32 + 1;
+            update.consumed_work = work.consumed();
+            progress(update);
+        }
+        if let Some(cause) = exceeded {
+            if attempt < MAX_REFINEMENTS {
+                first_refinement.get_or_insert(cause);
+                continue;
+            }
+            let notes = candidate::plan_notes(definition, &stats);
+            return Err(match first_refinement {
+                Some(first) => GeometryError::new(
+                    cause.code,
+                    format!(
+                        "{}; first refinement: {}{notes}",
+                        cause.message, first.message
+                    ),
+                ),
+                None => GeometryError::new(cause.code, format!("{}{notes}", cause.message)),
+            });
+        }
+        drop(edges);
+        topology.finish(builder.retained_bytes(), work, cancel)?;
+        check_cancel(cancel)?;
+        let result = builder.finish()?;
+        #[cfg(test)]
+        eprintln!(
+            "preview_measurements definition={:?} attempt={attempt} max_carrier_mm={measured} trim_mm={trim}",
+            definition.id(),
+        );
+        update.stage = DisplayStage::Complete;
         update.consumed_work = work.consumed();
         progress(update);
+        check_cancel(cancel)?;
+        return Ok(result);
     }
-    drop(edges);
-    topology.finish(builder.retained_bytes(), work, cancel)?;
-    check_cancel(cancel)?;
-    let result = builder.finish()?;
-    #[cfg(test)]
-    eprintln!(
-        "preview_measurements definition={:?} direct_faces={} polished_faces={} max_carrier_mm={} max_direct_mm={} trim_mm={}",
-        definition.id(),
-        measurements.0,
-        measurements.1,
-        measurements.2,
-        measurements.3,
-        trim
-    );
-    update.stage = DisplayStage::Complete;
-    update.consumed_work = work.consumed();
-    progress(update);
-    check_cancel(cancel)?;
-    Ok(result)
+    unreachable!("the last attempt returns its measured result")
 }
 
 fn validate_measurement_samples(
     definition: &Definition,
     kernel: &solidcore::kernel::Kernel,
-    candidate: &FaceMesh,
+    candidate: &FaceCandidate,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
@@ -309,7 +270,7 @@ impl AdaptedFace {
 type TriangleCorners = ([solidcore::math::Vec3; 3], [solidcore::math::Vec3; 3]);
 
 fn corners(
-    candidate: &FaceMesh,
+    candidate: &FaceCandidate,
     triangle: [u32; 3],
 ) -> Result<Option<TriangleCorners>, GeometryError> {
     if triangle.iter().any(|&index| {
@@ -338,7 +299,7 @@ fn corners(
 }
 
 fn adapt_face(
-    candidate: &FaceMesh,
+    candidate: &FaceCandidate,
     outside: usize,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -649,7 +610,7 @@ fn packing_growth(vertices: usize, triangles: usize) -> Option<usize> {
 fn edge_deviation(
     definition: &Definition,
     kernel: &solidcore::kernel::Kernel,
-    edges: &EdgeSet,
+    edges: &DisplayEdges,
     work: &GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
@@ -761,30 +722,18 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(&source, &cancel).unwrap();
         let kernel = crate::make_kernel_context();
-        let options = TessellateOptions::default();
         let mut work = GeometryWorkBudget::query();
-        let edges = candidate_query(0, &mut work, &cancel, |native| {
-            solidcore_mesh::tessellate_edge_set_with_budget(
-                &kernel,
-                definition.brep(),
-                &options,
-                native,
-            )
-        })
-        .unwrap();
-        let mut candidate = candidate_query(edges.retained_bytes(), &mut work, &cancel, |native| {
-            solidcore_mesh::tessellate_face_with_budget(
-                &kernel,
-                definition.brep(),
-                definition.face_ids()[0],
-                &edges,
-                &options,
-                native,
-            )
-        })
-        .unwrap();
+        let mut candidate = candidate::plan(
+            &definition,
+            MeshTolerance::display(0.05),
+            PROOF_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .faces
+        .swap_remove(0);
         validate_measurement_samples(&definition, &kernel, &candidate, &work, &cancel).unwrap();
-        candidate.deviation = Some(0.0);
         for point in &mut candidate.positions {
             *point += solidcore::math::Point3::new(1000.0, 1000.0, 1000.0);
         }

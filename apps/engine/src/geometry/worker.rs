@@ -1169,6 +1169,7 @@ fn import_mesh(
         drop(encode_span);
         capacity.charge_source(&normalized)?;
         let provenance = SourceProvenance {
+            findings: Vec::new(),
             source_hash: source_hash.clone(),
             source_name: captured.label.clone(),
             source_unit: decoded.source_unit,

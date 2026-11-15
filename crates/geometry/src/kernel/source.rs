@@ -6,7 +6,7 @@
 //! Candidate associations are not correspondence or material certificates.
 
 use solidcore::FaceId;
-use solidcraft_step::geom::{Curve, Pcurve, Surface};
+use solidcore_step::geom::{Curve, Pcurve, Surface};
 use spiling_contracts::geometry::{GeometryError, GeometryErrorCode, StepEntityId};
 use std::sync::Arc;
 

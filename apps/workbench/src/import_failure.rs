@@ -54,6 +54,7 @@ pub async fn load(
         uncertainty_mm: None,
         source_solid: None,
         normalized: None,
+        findings: Vec::new(),
     };
     if provenance.definition_id() != definition_id {
         return Err(invalid("Preview does not bind original source"));

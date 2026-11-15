@@ -46,10 +46,9 @@ Reproduce the original box, bore, supported cantilever and external-part/mirrore
   refuse. Original STEP operands and in-envelope native representations remain
   unchanged. This representation admission does not qualify sections, display,
   critical topology or manufacturing for the newly admitted source.
-  Both SolidCraft libraries are checked-in third-party source under
-  `vendor/solidcraft/`; its `UPSTREAM.toml` identifies the exact snapshot,
-  homogeneous-boundary closure correction, native spline-chart construction and retained licensing. They are
-  exchange/evaluation libraries, not another material kernel.
+  STEP reading is upstream SolidCore's `solidcore-step` (with `KernelTrims` and
+  `to_kernel`) at the exact fork pin; there is no vendored reader. Its readings
+  are reported as `SourceReading` findings.
 - [`import/source.rs`](../../crates/geometry/src/import/source.rs) captures
   literal original face, loop, coedge, vertex and selected-curve identities in
   [`kernel/source.rs`](../../crates/geometry/src/kernel/source.rs). These facts

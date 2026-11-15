@@ -545,6 +545,21 @@ fn closed_span_range(
         .max(degree)..knots.partition_point(|value| *value <= range[1]).min(count))
 }
 
+/// The single active coefficient of a zero-order basis that is exactly one-hot (point values,
+/// one exactly one and the rest exactly zero), as on a full-multiplicity knot.
+fn one_hot(basis: &[[Interval; 4]]) -> Option<usize> {
+    let mut hot = None;
+    for (index, jet) in basis.iter().enumerate() {
+        let value = jet[0];
+        if value == Interval::point(1.0) && hot.is_none() {
+            hot = Some(index);
+        } else if value != Interval::point(0.0) {
+            return None;
+        }
+    }
+    hot
+}
+
 pub(super) fn evaluate_nurbs_surface_tensor(
     surface: &Surface,
     uv: [[f64; 2]; 2],
@@ -572,7 +587,7 @@ pub(super) fn evaluate_nurbs_surface_tensor_about(
     let indices = surface.indices();
     let nu = indices.n + 1;
     let nv = indices.m + 1;
-    let rational = surface.is_rational();
+    let stored_rational = surface.is_rational();
     validate_knots(uk, p, nu, uv[0], work, cancel)?;
     validate_knots(vk, q, nv, uv[1], work, cancel)?;
     let u_spans = closed_span_range(uk, p, nu, uv[0], work, cancel)?;
@@ -593,19 +608,50 @@ pub(super) fn evaluate_nurbs_surface_tensor_about(
             }
             let vr = [uv[1][0].max(vk[vs]), uv[1][1].min(vk[vs + 1])];
             let vb = basis_jet(vk, q, vs, vr, order, work, cancel)?;
+            // Unit weights on every coefficient active on this knot rectangle make its
+            // denominator the basis partition of unity: the span is exactly polynomial (the
+            // kernel stores even an unweighted record spline this way).
+            let rational = stored_rational && {
+                let mut weighted = false;
+                'net: for i in 0..=p {
+                    for j in 0..=q {
+                        work.charge(1, cancel)?;
+                        let c = surface
+                            .cpt(us - p + i, vs - q + j)
+                            .map_err(|_| conditioning("missing native control point"))?;
+                        if c.w != 1.0 {
+                            weighted = true;
+                            break 'net;
+                        }
+                    }
+                }
+                weighted
+            };
             let mut h = [[[ZERO; 4]; 4]; 4];
             let anchor = surface
                 .cpt(us - p, vs - q)
                 .map_err(|_| conditioning("missing native anchor coefficient"))?;
-            let anchor_w = if rational { anchor.w } else { 1.0 };
+            // On a full-multiplicity knot line the basis is exactly one-hot: recentre on that
+            // active coefficient so the line reproduces its own row exactly (a row on a carrier
+            // level stays on it), instead of carrying the span's first row through the quotient.
+            let hot_u = one_hot(&ub[..=p]);
+            let hot_v = one_hot(&vb[..=q]);
+            let center = if hot_u.is_some() || hot_v.is_some() {
+                surface
+                    .cpt(us - p + hot_u.unwrap_or(0), vs - q + hot_v.unwrap_or(0))
+                    .map_err(|_| conditioning("missing native anchor coefficient"))?
+            } else {
+                anchor
+            };
+            let center_w = if rational { center.w } else { 1.0 };
             // Any finite binary64 constant is a valid recentering origin.
             // A zero anchor weight does not imply a zero curve denominator.
             let origin = origin.unwrap_or_else(|| {
-                if anchor_w != 0.0 {
+                if center_w != 0.0 {
                     [
-                        anchor.x / anchor_w,
-                        anchor.y / anchor_w,
-                        anchor.z / anchor_w,
+                        center.x / center_w,
+                        center.y / center_w,
+                        center.z / center_w,
                     ]
                 } else {
                     [0.0; 3]
@@ -634,7 +680,7 @@ pub(super) fn evaluate_nurbs_surface_tensor_about(
                             .cpt(us - p + i, vs - q + j)
                             .map_err(|_| conditioning("missing native control point"))?
                     };
-                    if (c.w != solidcore::nurbs::math::NOW) != rational
+                    if (c.w != solidcore::nurbs::math::NOW) != stored_rational
                         || c.z == solidcore::nurbs::math::NOZ
                     {
                         return Err(conditioning(

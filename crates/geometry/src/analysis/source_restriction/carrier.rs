@@ -8,7 +8,7 @@
 use crate::parametric::Interval;
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcore::surface::surface::Surface;
-use solidcraft_step::geom::Surface as OriginalSurface;
+use solidcore_step::geom::Surface as OriginalSurface;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 

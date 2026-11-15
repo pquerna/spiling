@@ -402,6 +402,7 @@ mod tests {
                     maximum_chord_error_mm:
                         spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
                     maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                    end_refinement: 0,
                 },
                 &cancel,
                 (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,

@@ -455,6 +455,7 @@ mod tests {
                 .lo,
             },
             remaining,
+            super::super::super::slab::FIRST_SAMPLE_CHORD_MM,
             &mut work,
             &cancel,
         )

@@ -60,7 +60,7 @@ pub use import::{
 };
 pub use kernel::{
     BBox3Mm, Definition, KERNEL_APPROXIMATION_TOLERANCE_MM, KERNEL_INTERSECTION_TOLERANCE_MM,
-    KERNEL_ZONE_TOLERANCE_MM, SurfaceParameterMap, make_kernel_context,
+    KERNEL_ZONE_TOLERANCE_MM, make_kernel_context,
 };
 pub use parametric::{Interval, IntervalVec2, IntervalVec3};
 #[cfg(test)]
@@ -168,7 +168,7 @@ fn intersect_native_section(
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "1.0.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "09ab22f7990c36c0e5120e1841aaae88ea062fe7";
+pub const KERNEL_REVISION: &str = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward

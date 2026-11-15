@@ -1326,7 +1326,6 @@ mod tests {
             assert!(bounds.maximum[0] <= 8.0 && 8.0 <= bounds.maximum[1]);
             definition.face_ids.reverse();
             definition.face_step_ids.reverse();
-            definition.face_surface_maps.reverse();
             definition.faces.reverse();
         }
     }
@@ -1443,7 +1442,7 @@ mod tests {
 
     #[test]
     fn native_boundary_shortcut_falls_back_when_spatial_seed_cannot_bound_carrier() {
-        use solidcraft_geom::brep;
+        use solidcore_record::brep;
         let mut source = super::super::test_source::box_source(20.0, 10.0, 8.0);
         let mut changed = false;
         let displacement = 2.0_f64.powi(-30);

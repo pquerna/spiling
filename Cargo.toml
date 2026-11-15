@@ -6,7 +6,7 @@
 resolver = "3"
 members = ["xtask", "crates/model-import", "crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench", "tests"]
 default-members = ["crates/deposition-routing", "crates/analysis", "crates/chunks", "crates/contracts", "crates/compute", "crates/core", "crates/core-ptac", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/workbench"]
-exclude = ["vendor/solidcraft/crates/geom", "vendor/solidcraft/crates/step", "vendor/cpp_map", "vendor/boostvoronoi", "vendor/boolmesh", "vendor/tracel-llvm-bundler"]
+exclude = ["vendor/cpp_map", "vendor/boostvoronoi", "vendor/boolmesh", "vendor/tracel-llvm-bundler"]
 
 [workspace.package]
 version = "0.1.0"
@@ -47,11 +47,12 @@ i_overlay = "=4.0.7"
 boolmesh = "=0.2.2"
 boostvoronoi = { version = "=0.12.1", default-features = false }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
-solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "09ab22f7990c36c0e5120e1841aaae88ea062fe7" }
-solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "09ab22f7990c36c0e5120e1841aaae88ea062fe7", features = ["nurbs-grid-mesh"] }
-# Checked-in upstream snapshot and closure patch: vendor/solidcraft/UPSTREAM.toml.
-solidcraft-geom = { version = "=0.18.1", path = "vendor/solidcraft/crates/geom" }
-solidcraft-step = { version = "=0.18.1", path = "vendor/solidcraft/crates/step" }
+solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore-tess = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore-step = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore-record = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore-convert = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore-ops = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-model-import = { path = "crates/model-import" }

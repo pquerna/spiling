@@ -258,6 +258,7 @@ fn analysis_document_binds_revision_source_hash_and_layout_membership() {
             source_unit: SourceUnit::Millimetre,
             uncertainty_mm: None,
             source_solid: None,
+            findings: Vec::new(),
         },
     }];
     let mut layouts = vec![PrintLayoutRecord {
