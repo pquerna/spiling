@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{check_cancel, error};
 use geo::line_intersection::{LineIntersection, line_intersection};
-use geo::{BooleanOps, BoundingRect, Coord, Intersects, Line, MultiPolygon, Point};
+use geo::{BooleanOps, Coord, Intersects, Line, MultiPolygon, Point};
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -24,6 +24,12 @@ pub(super) struct Domains {
     retained: usize,
     owned_bytes: usize,
     anchor_owned_bytes: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct WallReceipt {
+    pub(super) paths: usize,
+    pub(super) omitted_mm: f64,
 }
 
 impl Domains {
@@ -160,7 +166,7 @@ impl Domains {
         work: &mut usize,
         foreign_work: usize,
         cancel: &AtomicBool,
-    ) -> Result<(Vec<DepositionPath>, f64), ManufacturingError> {
+    ) -> Result<(Vec<DepositionPath>, WallReceipt), ManufacturingError> {
         check_cancel(cancel)?;
         let empty = MultiPolygon(Vec::new());
         let ordinary = self.ordinary.as_ref().unwrap_or(if self.all_interface {
@@ -245,12 +251,13 @@ impl Domains {
             foreign_work,
             cancel,
         )?;
+        let wall_paths = paths.len();
         for (domain, kind, fraction) in [
             (ordinary, DepositionKind::Support, density),
             (interface_centers, DepositionKind::SupportInterface, 1.0),
         ] {
             charge_hatch(domain, fraction, layer, work, foreign_work, cancel)?;
-            region::hatch(
+            region::hatch_support(
                 domain,
                 kind,
                 fraction,
@@ -261,7 +268,13 @@ impl Domains {
             )?;
         }
         candidate_budget(&paths, self.admit()?, self.owned_bytes)?;
-        Ok((paths, omitted_wall_mm))
+        Ok((
+            paths,
+            WallReceipt {
+                paths: wall_paths,
+                omitted_mm: omitted_wall_mm,
+            },
+        ))
     }
 
     pub(super) fn anchor_budget(
@@ -299,40 +312,10 @@ fn charge_hatch(
     foreign_work: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let width = layer.width_mm;
-    let h = layer.height;
-    let spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
     for polygon in &domain.0 {
         check_cancel(cancel)?;
-        let bounds = polygon.bounding_rect().ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "support hatch has no finite bounds",
-            )
-        })?;
-        let extent = if layer.axis == region::HatchAxis::X {
-            bounds.max().y - bounds.min().y
-        } else {
-            bounds.max().x - bounds.min().x
-        };
-        let rows = ((extent / spacing) * fraction).ceil().max(1.0);
-        if !rows.is_finite() || rows > crate::working_set::units() as f64 {
-            return Err(resource("support hatch row budget exceeded"));
-        }
-        let edges = polygon.exterior().0.len()
-            + polygon
-                .interiors()
-                .iter()
-                .map(|ring| ring.0.len())
-                .sum::<usize>();
-        charge(
-            work,
-            (rows as usize)
-                .checked_mul(edges)
-                .ok_or_else(|| resource("support hatch work overflow"))?,
-            foreign_work,
-            cancel,
-        )?;
+        let rows = region::HatchRows::support(polygon, fraction, layer)?;
+        charge(work, rows.point_bound()?, foreign_work, cancel)?;
     }
     Ok(())
 }
@@ -658,7 +641,9 @@ pub(super) fn scan<'a>(
                 previous
                     .clone()
                     .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                contacts.clone(),
+                contacts
+                    .clone()
+                    .filter(|_| path.kind != DepositionKind::Support),
                 work,
                 cancel,
             )? {
@@ -690,10 +675,460 @@ pub(super) fn scan<'a>(
     Ok(worst)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Retention binds original wall accounting, immutable lower/contact authority and caller-owned proof resources"
+)]
+pub(super) fn retain_anchored<'a>(
+    paths: &mut Vec<DepositionPath>,
+    wall_paths: usize,
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+    recipe: &PlanarPrintRecipe,
+    retained: usize,
+    owned_bytes: usize,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<WallReceipt, ManufacturingError> {
+    check_cancel(cancel)?;
+    let mut receipt = WallReceipt::default();
+    let original_units = paths.iter().fold(retained, |total, path| {
+        total.saturating_add(path.points_mm.capacity())
+    });
+    let original_bytes = owned_bytes.saturating_add(super::super::bonds::path_bytes(paths));
+    let original = std::mem::take(paths);
+    for (path_index, path) in original.into_iter().enumerate() {
+        anchors.set_budget(candidate_budget(paths, original_units, original_bytes)?);
+        if !super::support_role(path.kind)
+            || scan(
+                std::slice::from_ref(&path),
+                previous.clone(),
+                contacts.clone(),
+                recipe,
+                anchors,
+                work,
+                cancel,
+                true,
+            )?
+            .is_none()
+        {
+            let live_bytes = original_bytes
+                .saturating_add(super::super::bonds::path_bytes(paths))
+                .saturating_add(anchors.retained_bytes());
+            super::reserve_owned(paths, 1, live_bytes)?;
+            receipt.paths += usize::from(path_index < wall_paths);
+            paths.push(path);
+            continue;
+        }
+        if path_index >= wall_paths {
+            continue;
+        }
+        for (first, last, width_mm) in StrokeRuns::for_path(&path)? {
+            let count = if last >= first {
+                last - first + 1
+            } else {
+                path.points_mm.len() - first + last
+            };
+            let live_bytes = original_bytes
+                .saturating_add(super::super::bonds::path_bytes(paths))
+                .saturating_add(anchors.retained_bytes());
+            super::super::remaining_geometry_units(
+                original_units
+                    .saturating_add(
+                        paths
+                            .iter()
+                            .map(|path| path.points_mm.capacity())
+                            .sum::<usize>(),
+                    )
+                    .saturating_add(count),
+                live_bytes.saturating_add(count.saturating_mul(std::mem::size_of::<[f64; 3]>())),
+            )?;
+            let fragment = DepositionPath {
+                material_domain: path.material_domain,
+                kind: path.kind,
+                width: WidthProfile::Constant { width_mm },
+                physical_z_mm: path.physical_z_mm,
+                owner: path.owner,
+                points_mm: if last >= first {
+                    path.points_mm[first..=last].to_vec()
+                } else {
+                    path.points_mm[first..path.points_mm.len() - 1]
+                        .iter()
+                        .chain(&path.points_mm[..=last])
+                        .copied()
+                        .collect()
+                },
+                arcs: Vec::new(),
+                exposed: path.exposed,
+            };
+            anchors.set_budget(candidate_budget(
+                paths,
+                original_units.saturating_add(fragment.points_mm.capacity()),
+                original_bytes.saturating_add(
+                    fragment
+                        .points_mm
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<[f64; 3]>()),
+                ),
+            )?);
+            if scan(
+                std::slice::from_ref(&fragment),
+                previous.clone(),
+                contacts.clone(),
+                recipe,
+                anchors,
+                work,
+                cancel,
+                true,
+            )?
+            .is_none()
+            {
+                super::reserve_owned(
+                    paths,
+                    1,
+                    live_bytes.saturating_add(
+                        fragment
+                            .points_mm
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<[f64; 3]>()),
+                    ),
+                )?;
+                paths.push(fragment);
+                receipt.paths += 1;
+            } else {
+                for edge in fragment.checked_edges()? {
+                    super::super::native::charge_support_clearance(work, cancel)?;
+                    let start = edge.points_mm[0];
+                    let end = edge.points_mm[1];
+                    receipt.omitted_mm += (end[0] - start[0]).hypot(end[1] - start[1]);
+                }
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+pub(super) fn nominal_volume(
+    paths: &[DepositionPath],
+    layer_index: u32,
+    recipe: &PlanarPrintRecipe,
+) -> Result<f64, ManufacturingError> {
+    paths.iter().try_fold(0.0, |sum, path| {
+        Ok(sum + region::nominal_volume(path, layer_index, recipe)?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use geo::{LineString, Polygon};
+
+    #[test]
+    fn unrooted_islands_cannot_erase_an_independent_deposited_dependency_chain() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let cancel = AtomicBool::new(false);
+        for shift in [0.0, 0.37] {
+            let row = |start: [f64; 2], end: [f64; 2], bottom, top| DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::Support,
+                width: WidthProfile::Constant { width_mm: 0.6 },
+                physical_z_mm: [bottom, top],
+                owner: None,
+                points_mm: vec![
+                    [start[0] + shift, start[1] + shift, top],
+                    [end[0] + shift, end[1] + shift, top],
+                ],
+                arcs: Vec::new(),
+                exposed: false,
+            };
+            let lower =
+                [0.0, 2.0, 4.0, 6.0].map(|offset| row([0.0, offset], [10.0, offset], 0.0, 0.2));
+            let rooted = row([5.0, 0.0], [5.0, 6.0], 0.2, 0.4);
+            let mut floating = row([20.0, 0.0], [21.0, 0.0], 0.2, 0.4);
+            floating.points_mm = [
+                [20.0, 0.0],
+                [21.0, 0.0],
+                [21.0, 1.0],
+                [20.0, 1.0],
+                [20.0, 0.0],
+            ]
+            .map(|point| [point[0] + shift, point[1] + shift, 0.4])
+            .to_vec();
+            let overextended = row([7.0, 0.0], [7.0, 8.0], 0.2, 0.4);
+            let mut candidate = vec![floating, rooted.clone(), overextended];
+            let mut anchors = AnchorWorkspace::default();
+            let mut work = 0;
+            let omitted = retain_anchored(
+                &mut candidate,
+                1,
+                lower.iter(),
+                std::iter::empty(),
+                &recipe,
+                0,
+                0,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(candidate, [rooted]);
+            assert!((omitted.omitted_mm - 4.0).abs() <= crate::planner::OFFSET_TOLERANCE_MM);
+            let upper = [row([5.0, 1.0], [5.0, 5.0], 0.4, 0.6)];
+            assert!(
+                scan(
+                    &upper,
+                    candidate.iter(),
+                    std::iter::empty(),
+                    &recipe,
+                    &mut anchors,
+                    &mut work,
+                    &cancel,
+                    true
+                )
+                .unwrap()
+                .is_none()
+            );
+            let cancelled = retain_anchored(
+                &mut candidate,
+                0,
+                lower.iter(),
+                std::iter::empty(),
+                &recipe,
+                0,
+                0,
+                &mut anchors,
+                &mut work,
+                &AtomicBool::new(true),
+            )
+            .unwrap_err();
+            assert_eq!(cancelled.code, ManufacturingErrorCode::Cancelled);
+        }
+    }
+
+    #[test]
+    fn a_partially_rooted_closed_wall_keeps_roads_on_both_sides_of_its_seam() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let cancel = AtomicBool::new(false);
+        for shift in [0.0, 0.37] {
+            let make_path = |points: &[[f64; 2]], bottom, top| DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::Support,
+                width: WidthProfile::Constant { width_mm: 0.6 },
+                physical_z_mm: [bottom, top],
+                owner: None,
+                points_mm: points
+                    .iter()
+                    .map(|point| [point[0] + shift, point[1] + shift, top])
+                    .collect(),
+                arcs: Vec::new(),
+                exposed: false,
+            };
+            let lower = make_path(&[[0.0, 0.0], [10.0, 0.0]], 0.0, 0.2);
+            let mut candidate = vec![make_path(
+                &[
+                    [5.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 6.0],
+                    [0.0, 6.0],
+                    [0.0, 0.0],
+                    [5.0, 0.0],
+                ],
+                0.2,
+                0.4,
+            )];
+            let mut anchors = AnchorWorkspace::default();
+            let mut work = 0;
+            let omitted = retain_anchored(
+                &mut candidate,
+                1,
+                std::iter::once(&lower),
+                std::iter::empty(),
+                &recipe,
+                0,
+                0,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!((omitted.omitted_mm - 22.0).abs() <= crate::planner::OFFSET_TOLERANCE_MM);
+            let retained_length: f64 = candidate
+                .iter()
+                .flat_map(|path| path.points_mm.windows(2))
+                .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]))
+                .sum();
+            assert!((retained_length - 10.0).abs() <= crate::planner::OFFSET_TOLERANCE_MM);
+            let upper = make_path(&[[1.0, 0.0], [9.0, 0.0]], 0.4, 0.6);
+            assert!(
+                scan(
+                    std::slice::from_ref(&upper),
+                    candidate.iter(),
+                    std::iter::empty(),
+                    &recipe,
+                    &mut anchors,
+                    &mut work,
+                    &cancel,
+                    true
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn a_floating_island_does_not_choose_an_axis_that_loses_rooted_contact() {
+        let mut recipe = crate::planner::tests::recipe(1.0);
+        recipe.process.max_bridge_span_mm = 0.5;
+        let cancel = AtomicBool::new(false);
+        let width = recipe.bead_width_mm;
+        let pitch = (width - recipe.layer_height_mm
+            + std::f64::consts::PI * recipe.layer_height_mm * 0.25)
+            / 0.3;
+        let lower: Vec<_> = (0..6)
+            .map(|index| DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::Support,
+                width: WidthProfile::Constant { width_mm: width },
+                physical_z_mm: [0.0, 0.2],
+                owner: None,
+                points_mm: vec![
+                    [f64::from(index) * pitch, 0.0, 0.2],
+                    [f64::from(index) * pitch, 10.0, 0.2],
+                ],
+                arcs: Vec::new(),
+                exposed: false,
+            })
+            .collect();
+        let mut support = rectangle(
+            -width * 0.5,
+            -width * 0.5,
+            10.0 + width * 0.5,
+            10.0 + width * 0.5,
+        );
+        support.0.extend(rectangle(30.0, 0.0, 31.0, 100.0).0);
+        let interface = MultiPolygon(Vec::new());
+        let mut anchors = AnchorWorkspace::default();
+        let mut work = 0;
+        let domains = Domains::new(
+            &support, &interface, false, width, 0, 0, 0, &mut work, 0, &cancel,
+        )
+        .unwrap();
+        let candidates = [region::HatchAxis::X, region::HatchAxis::Y].map(|axis| {
+            let hatch = region::HatchLayer {
+                roof: None,
+                width_mm: width,
+                z: 0.4,
+                lower_z: 0.2,
+                height: 0.2,
+                axis,
+                top_axis: axis,
+                recipe: &recipe,
+            };
+            let (mut paths, receipt) = domains
+                .paths(&interface, 0.3, &hatch, 0, &mut work, 0, &cancel)
+                .unwrap();
+            retain_anchored(
+                &mut paths,
+                receipt.paths,
+                lower.iter(),
+                std::iter::empty(),
+                &recipe,
+                0,
+                domains.owned_bytes(),
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            paths
+        });
+        assert!(
+            nominal_volume(&candidates[1], 1, &recipe).unwrap()
+                > nominal_volume(&candidates[0], 1, &recipe).unwrap()
+        );
+        let mut upper = lower[2].clone();
+        upper.physical_z_mm = [0.4, 0.6];
+        for point in &mut upper.points_mm {
+            point[2] = 0.6;
+        }
+        assert!(
+            scan(
+                std::slice::from_ref(&upper),
+                candidates[0].iter(),
+                std::iter::empty(),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel,
+                true
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            scan(
+                std::slice::from_ref(&upper),
+                candidates[1].iter(),
+                std::iter::empty(),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel,
+                true
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn support_rows_keep_their_physical_lattice_across_clipping_and_thinner_layers() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let cancel = AtomicBool::new(false);
+        for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
+            for density in [0.3, 1.0] {
+                let generate = |domain: &MultiPolygon<f64>, height| {
+                    let mut paths = Vec::new();
+                    region::hatch_support(
+                        domain,
+                        DepositionKind::Support,
+                        density,
+                        &region::HatchLayer {
+                            roof: None,
+                            width_mm: 0.6,
+                            z: 0.8,
+                            lower_z: 0.8 - height,
+                            height,
+                            axis,
+                            top_axis: axis,
+                            recipe: &recipe,
+                        },
+                        &mut paths,
+                        &mut 0,
+                        &cancel,
+                    )
+                    .unwrap();
+                    paths
+                };
+                let full = rectangle(0.0, 0.0, 20.0, 20.0);
+                let clipped = rectangle(1.13, 0.27, 17.2, 18.0);
+                let original = generate(&full, 0.4);
+                let thinner = generate(&clipped, 0.2);
+                assert!(!thinner.is_empty());
+                let perpendicular = usize::from(axis == region::HatchAxis::X);
+                for path in thinner {
+                    assert_eq!(path.physical_z_mm, [0.8 - 0.2, 0.8]);
+                    let coordinate = path.points_mm[0][perpendicular];
+                    assert!(original.iter().any(|reference| {
+                        (reference.points_mm[0][perpendicular] - coordinate).abs()
+                            <= crate::planner::OFFSET_TOLERANCE_MM
+                    }));
+                }
+            }
+        }
+    }
 
     #[test]
     fn optional_role_fragments_reach_command_fitting_and_report_omission() {

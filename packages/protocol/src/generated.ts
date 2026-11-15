@@ -970,19 +970,21 @@ skirt: SkirtPolicy | null,
  */
 brim: BrimPolicy | null, };
 
-export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number,
+export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number,
 /**
- * The unanchored span of a stroke printed over nothing on this layer:
- * with supports disabled, with supports on where the part itself
- * blocks every column from the build plate, or a support stroke whose
- * own lower support rows cannot anchor it on either raster axis. Zero
- * otherwise.
+ * Area-equivalent of actual nominal support volume divided by true layer
+ * height. Includes flow and overlap; not the proposed domain or its union.
+ */
+support_area_mm2: number, support_nominal_deposition_volume_mm3: number,
+/**
+ * Largest unresolved actual object-deposition span after final support
+ * and bridge construction. Zero when all actual spans pass the declared
+ * anchor/bridge rules; not a physical printability or collision claim.
  */
 unsupported_overhang_mm: number,
 /**
- * Support wall length omitted on this layer because no minimum-length
- * command fits inside the support center domain within the wall error
- * bound there; the wall is split around it. Zero otherwise.
+ * Optional support-wall length omitted for minimum-command fitting or
+ * missing actual lower/contact roots. Zero otherwise.
  */
 support_omitted_wall_mm: number,
 /**

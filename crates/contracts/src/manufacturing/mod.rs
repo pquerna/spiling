@@ -2829,17 +2829,16 @@ pub struct PlanarRegionCoverage {
     pub intentional_void_area_mm2: f64,
     pub protected_hole_area_mm2: f64,
     pub nominal_deposition_volume_mm3: f64,
+    /// Area-equivalent of actual nominal support volume divided by true layer
+    /// height. Includes flow and overlap; not the proposed domain or its union.
     pub support_area_mm2: f64,
     pub support_nominal_deposition_volume_mm3: f64,
-    /// The unanchored span of a stroke printed over nothing on this layer:
-    /// with supports disabled, with supports on where the part itself
-    /// blocks every column from the build plate, or a support stroke whose
-    /// own lower support rows cannot anchor it on either raster axis. Zero
-    /// otherwise.
+    /// Largest unresolved actual object-deposition span after final support
+    /// and bridge construction. Zero when all actual spans pass the declared
+    /// anchor/bridge rules; not a physical printability or collision claim.
     pub unsupported_overhang_mm: f64,
-    /// Support wall length omitted on this layer because no minimum-length
-    /// command fits inside the support center domain within the wall error
-    /// bound there; the wall is split around it. Zero otherwise.
+    /// Optional support-wall length omitted for minimum-command fitting or
+    /// missing actual lower/contact roots. Zero otherwise.
     pub support_omitted_wall_mm: f64,
     /// Wall bead length widened to the narrowest admitted bead over a feature
     /// thinner than it but at least the minimum feature (a quarter nozzle).

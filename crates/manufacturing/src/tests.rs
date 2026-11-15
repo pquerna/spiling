@@ -3399,7 +3399,7 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
 }
 
 #[test]
-fn fresh_report_retains_overhang_warnings_without_claiming_a_worst_span_inventory() {
+fn fresh_report_retains_recorded_overhangs_without_inventing_locations() {
     let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
     let mut requested = intent();
     requested.recipe.infill_fraction = 1.0;
@@ -3423,7 +3423,7 @@ fn fresh_report_retains_overhang_warnings_without_claiming_a_worst_span_inventor
     assert_eq!(report.limitations.len(), original.limitations.len() + 1);
     assert!(report.limitations[0].contains("2 layers"));
     assert!(report.limitations[0].contains("2.500 mm"));
-    assert!(report.limitations[0].contains("not a worst-span inventory"));
+    assert!(report.limitations[0].contains("not an exact-location inventory"));
 }
 
 #[test]

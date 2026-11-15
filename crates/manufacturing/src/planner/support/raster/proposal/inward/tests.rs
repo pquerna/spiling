@@ -182,7 +182,7 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
             recipe: &recipe,
         };
         let mut expected = Vec::new();
-        region::hatch(
+        region::hatch_support(
             &centers,
             DepositionKind::Support,
             1.0,

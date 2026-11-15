@@ -60,6 +60,7 @@ pub(in crate::planner) struct Failure {
 pub(in crate::planner) struct Admission {
     pub(in crate::planner) bridges: Vec<usize>,
     pub(in crate::planner) failure: Option<Failure>,
+    pub(in crate::planner) worst_unanchored_mm: f64,
 }
 
 pub(in crate::planner) fn analyze<'a>(
@@ -202,6 +203,7 @@ where
         let mut result = Admission {
             bridges: Vec::new(),
             failure: None,
+            worst_unanchored_mm: 0.0,
         };
         if paths.is_empty() {
             return Ok(result);
@@ -285,6 +287,7 @@ where
                                 end,
                                 span: curved_gap,
                             });
+                            result.worst_unanchored_mm = result.worst_unanchored_mm.max(curved_gap);
                         }
                         cursor = end;
                         continue;
@@ -309,6 +312,7 @@ where
                         GapKind::Bridge => bridge = true,
                         GapKind::Demand => {
                             demand = true;
+                            result.worst_unanchored_mm = result.worst_unanchored_mm.max(span);
                             if result.failure.is_none() {
                                 result.failure = Some(Failure {
                                     path: path_index,
@@ -425,6 +429,36 @@ fn straight(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_unanchored_extent_is_independent_of_the_first_construction_failure() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let path = |length| DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::Perimeter,
+            width: WidthProfile::Constant { width_mm: 0.6 },
+            physical_z_mm: [0.4, 0.8],
+            owner: Some(spiling_contracts::manufacturing::DepositionOwner::Wall),
+            points_mm: vec![[0.0, 0.0, 0.8], [length, 0.0, 0.8]],
+            arcs: Vec::new(),
+            exposed: false,
+        };
+        for lengths in [[1.0, 20.0], [20.0, 1.0]] {
+            let paths = lengths.map(path);
+            let admission = analyze(
+                &paths,
+                std::iter::empty(),
+                std::iter::empty(),
+                &recipe,
+                &mut AnchorWorkspace::default(),
+                &mut 0,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(admission.failure.unwrap().span, lengths[0]);
+            assert_eq!(admission.worst_unanchored_mm, 20.0);
+        }
+    }
 
     #[test]
     fn sampled_closed_straight_strokes_cross_the_original_seam_without_mutation() {

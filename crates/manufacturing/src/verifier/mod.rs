@@ -1799,7 +1799,7 @@ pub(crate) fn verify_actual(
         report.limitations.insert(0, format!("Wall beads widened to the narrowest admitted bead over thinner features on {widened_layers} layers; {widened_mm:.3} mm in total, depositing beyond the source boundary there."));
     }
     if omitted_wall_layers > 0 {
-        report.limitations.insert(0, format!("Support wall omitted on {omitted_wall_layers} layers where no minimum-length command fits the support domain; {omitted_wall_mm:.4} mm in total."));
+        report.limitations.insert(0, format!("Optional support wall omitted on {omitted_wall_layers} layers for command fitting or missing deposited roots; {omitted_wall_mm:.4} mm in total."));
     }
     if report.flow_limited_segments > 0 || report.cooling_slowed_layers > 0 {
         report.limitations.insert(0, format!("Speeds lowered to meet declared limits: {} deposition segments slowed to the volumetric flow ceiling; {} layers slowed to the minimum layer time {:.1} s (slowest at {:.0}% of its speed).", report.flow_limited_segments, report.cooling_slowed_layers, recipe.process.minimum_layer_time_s, report.minimum_cooling_scale * 100.0));
@@ -1812,7 +1812,7 @@ pub(crate) fn verify_actual(
         report.coverage.push(format!("Skirt {} / brim {} loops ({} islands) checked as non-model: clear of part/support beads, skirt at its distance, brim attached; no adhesion claim", adhesion.skirt_paths, adhesion.brim_paths, adhesion.brim_islands));
     }
     if unsupported_layers > 0 {
-        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no verified support or bounded bridge covered the deposition; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
+        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no verified support or bounded bridge covered the deposition; largest recorded span {largest_recorded_span:.3} mm. This is not an exact-location inventory or physical printability certification."));
     }
     if let (Some(job), Some(lc)) = (job, &lifecycle) {
         report.limitations.insert(0, lc.levelling_report().into());

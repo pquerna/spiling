@@ -711,7 +711,8 @@ mod tests {
                     DepositionKind::Support
                 };
                 let mut expected = Vec::new();
-                region::hatch(&centers, kind, 1.0, &layer, &mut expected, &mut 0, &cancel).unwrap();
+                region::hatch_support(&centers, kind, 1.0, &layer, &mut expected, &mut 0, &cancel)
+                    .unwrap();
                 let actual = domains
                     .paths(
                         &MultiPolygon(Vec::new()),

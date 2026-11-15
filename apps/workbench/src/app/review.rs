@@ -342,7 +342,7 @@ pub(super) fn unsupported_layers(
         ui.weak("Actual-program layer preview unavailable.");
     }
     ui.collapsing("Support details", |ui| {
-        ui.label("Each affected layer records one unsupported span, not its exact location or necessarily its longest span.");
+        ui.label("Each affected layer records its largest unsupported span, without an exact location.");
         ui.label("Show layer reveals all actual paths on that layer, not an individual span.");
         ui.weak(format!(
             "Largest recorded span {:.3} mm · layer {}",
@@ -478,7 +478,7 @@ pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!(
-                "Unsupported deposition · first recorded span {:.3} mm",
+                "Unsupported deposition · largest span {:.3} mm",
                 r.unsupported_overhang_mm
             ),
         );
@@ -505,7 +505,7 @@ pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!(
-                "Support wall omitted · {:.4} mm with no admissible command",
+                "Support wall omitted · {:.4} mm",
                 r.support_omitted_wall_mm
             ),
         );

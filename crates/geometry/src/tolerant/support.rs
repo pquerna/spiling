@@ -17,6 +17,7 @@ pub struct TolerantSupportProjection {
 
 pub struct TolerantSupportPiece {
     pub points: Vec<[f64; 2]>,
+    pub holes: Vec<Vec<[f64; 2]>>,
     pub height_mm: [f64; 2],
 }
 
@@ -219,6 +220,7 @@ impl TolerantModel {
                 .points
                 .iter()
                 .flatten()
+                .chain(piece.holes.iter().flatten().flatten())
                 .chain(piece.height_mm.iter())
                 .any(|v| !v.is_finite())
             {
@@ -235,10 +237,35 @@ impl TolerantModel {
 
         // An interior section covers vertical lines with no boundary inside
         // this slab. Each boundary edge retains the same complete slab scope.
-        for l in self
-            .section_with((interval[0] + interval[1]) * 0.5, false)?
+        let section = self.section_with((interval[0] + interval[1]) * 0.5, false)?;
+        let mut owners = vec![None; section.loops.len()];
+        for (index, hole) in section
             .loops
+            .iter()
+            .enumerate()
+            .filter(|(_, ring)| ring.area < 0.0)
         {
+            for (outer_index, outer) in section
+                .loops
+                .iter()
+                .enumerate()
+                .filter(|(_, ring)| ring.area > 0.0)
+            {
+                cancelled(cancel)?;
+                if super::contains(&outer.points, hole.points[0])
+                    && owners[index]
+                        .is_none_or(|owner: usize| outer.area < section.loops[owner].area)
+                {
+                    owners[index] = Some(outer_index);
+                }
+            }
+            if owners[index].is_none() {
+                return Err(unavailable(
+                    "support projection hole has no containing material boundary",
+                ));
+            }
+        }
+        for (index, l) in section.loops.iter().enumerate() {
             cancelled(cancel)?;
             if l.area > 0.0 {
                 // Try the coarse interior exclusion first. One contour copy lets
@@ -250,27 +277,34 @@ impl TolerantModel {
                     ControlFlow::Continue(true) => {
                         if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
                             points: l.points.clone(),
+                            holes: section
+                                .loops
+                                .iter()
+                                .zip(&owners)
+                                .filter(|(_, owner)| **owner == Some(index))
+                                .map(|(ring, _)| ring.points.clone())
+                                .collect(),
                             height_mm: interval,
                         })? {
                             return Ok(ControlFlow::Break(result));
                         }
                     }
                 }
-
-                for i in 0..l.points.len() {
-                    cancelled(cancel)?;
-                    let edge = [l.points[i], l.points[(i + 1) % l.points.len()]];
-                    match screen(padded_bounds(&edge, margin), interval) {
-                        ControlFlow::Break(result) => return Ok(ControlFlow::Break(result)),
-                        ControlFlow::Continue(false) => continue,
-                        ControlFlow::Continue(true) => {}
-                    }
-                    if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
-                        points: padded(edge.to_vec(), margin),
-                        height_mm: interval,
-                    })? {
-                        return Ok(ControlFlow::Break(result));
-                    }
+            }
+            for i in 0..l.points.len() {
+                cancelled(cancel)?;
+                let edge = [l.points[i], l.points[(i + 1) % l.points.len()]];
+                match screen(padded_bounds(&edge, margin), interval) {
+                    ControlFlow::Break(result) => return Ok(ControlFlow::Break(result)),
+                    ControlFlow::Continue(false) => continue,
+                    ControlFlow::Continue(true) => {}
+                }
+                if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
+                    points: padded(edge.to_vec(), margin),
+                    holes: Vec::new(),
+                    height_mm: interval,
+                })? {
+                    return Ok(ControlFlow::Break(result));
                 }
             }
         }
@@ -315,6 +349,7 @@ impl TolerantModel {
                         }
                         if let ControlFlow::Break(result) = checked_visit(TolerantSupportPiece {
                             points: padded(xy, margin),
+                            holes: Vec::new(),
                             height_mm: scope,
                         })? {
                             return Ok(ControlFlow::Break(result));
@@ -1128,6 +1163,45 @@ mod tests {
         for v in &voids {
             let a = area(&v.polygon);
             assert!(a < 9.0, "a pocket void spans {a} mm2");
+        }
+    }
+
+    #[test]
+    fn occupied_projection_preserves_cavities_and_covers_the_complete_material_slab() {
+        let original = stepped_tube(24, 4);
+        let cancel = AtomicBool::new(false);
+        for shift in [0.0, 0.37] {
+            let model = original.placed(&spiling_contracts::geometry::RigidPoseMm {
+                translation_mm: [shift, 0.0, 0.0],
+                ..spiling_contracts::geometry::RigidPoseMm::IDENTITY
+            });
+            let projection = model.support_projection([2.1, 2.9], &cancel).unwrap();
+            let covered = |point| {
+                projection.pieces.iter().any(|piece| {
+                    contains(&piece.points, point)
+                        && !piece.holes.iter().any(|hole| contains(hole, point))
+                })
+            };
+            assert!(!covered([shift, 0.0]));
+            for height_mm in [2.1, 2.5, 2.9] {
+                let section = model.section(height_mm).unwrap();
+                for radial in [4.5, 6.0, 8.5] {
+                    for step in 0..12 {
+                        let angle = f64::from(step) * std::f64::consts::TAU / 12.0;
+                        let point = [shift + radial * angle.cos(), radial * angle.sin()];
+                        assert!(
+                            section
+                                .loops
+                                .iter()
+                                .filter(|ring| contains(&ring.points, point))
+                                .map(|ring| if ring.area > 0.0 { 1 } else { -1 })
+                                .sum::<i32>()
+                                > 0
+                        );
+                        assert!(covered(point), "lost material at {point:?}, Z={height_mm}");
+                    }
+                }
+            }
         }
     }
 

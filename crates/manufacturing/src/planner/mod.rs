@@ -1920,11 +1920,13 @@ fn admit_schedule<'model>(
                 native_points: support_native_points,
                 native_owned_bytes: support_native_owned_bytes,
                 recipe,
+                nominal_height_mm: input.intent.select_layer_height()?.height_mm,
                 source_z_allowance_mm: admission
                     .models
                     .values()
                     .map(|model| model.support_margin())
                     .fold(0.0, f64::max),
+                deposition_limits: input.intent.effective_deposition_limits(),
                 replay: web_roof.is_none() && construction.domains.is_empty(),
                 phases: &phase_by_layer,
             },
@@ -2657,11 +2659,20 @@ impl SectionSpan {
                             Ok(keep) => ControlFlow::Continue(keep),
                             Err(error) => ControlFlow::Break(Err(error)),
                         },
-                        |piece| match visit(&tolerant::polygon(piece.points), Some(piece.height_mm))
-                        {
-                            Ok(true) => ControlFlow::Continue(()),
-                            Ok(false) => ControlFlow::Break(Ok(())),
-                            Err(error) => ControlFlow::Break(Err(error)),
+                        |piece| {
+                            let polygon = geo::Polygon::new(
+                                tolerant::polygon(piece.points).into_inner().0,
+                                piece
+                                    .holes
+                                    .into_iter()
+                                    .map(|points| tolerant::polygon(points).into_inner().0)
+                                    .collect(),
+                            );
+                            match visit(&polygon, Some(piece.height_mm)) {
+                                Ok(true) => ControlFlow::Continue(()),
+                                Ok(false) => ControlFlow::Break(Ok(())),
+                                Err(error) => ControlFlow::Break(Err(error)),
+                            }
                         },
                     )
                     .map_err(|e| native_error(e, "tolerant continuous support enclosure"))?;

@@ -3,8 +3,10 @@
 
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
+#[cfg(test)]
+use geo::Area;
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
-use geo::{Area, BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
+use geo::{BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::{
     rc::{Rc, Weak},
@@ -274,13 +276,11 @@ fn same_layer(a: &PrintLayer, b: &PrintLayer) -> bool {
 /// admitted layer below and its whole skin horizon are bit-identical.
 #[derive(Default)]
 pub(super) struct SupportReplay {
-    /// The last pass's schedule; clipped columns are valid below its first change.
+    /// The last pass's schedule, bounding replay of unchanged layer admission.
     schedule: Vec<[u64; 4]>,
     /// Ascending schedule identity. A truncated pass keeps earlier entries
     /// above its last layer.
     entries: Vec<ReplayEntry>,
-    /// Demand corridor after occupied-section clipping, by target layer:
-    /// demanded path, contact top and the clipped column.
     columns: std::collections::BTreeMap<usize, (usize, usize, MultiPolygon<f64>)>,
     bytes: usize,
 }
@@ -696,6 +696,8 @@ pub(super) struct SupportInput<'a> {
     /// projection callback refreshes the native proof component after compaction.
     pub(super) native_owned_bytes: usize,
     pub(super) recipe: &'a PlanarPrintRecipe,
+    pub(super) nominal_height_mm: f64,
+    pub(super) deposition_limits: DepositionLimits,
     pub(super) source_z_allowance_mm: f64,
     /// Sections are a function of the schedule entry alone and each layer of
     /// its skin horizon, so per-layer admission may replay across retries.
@@ -861,12 +863,17 @@ pub(super) fn realize(
             mut native_points,
             mut native_owned_bytes,
             recipe,
+            nominal_height_mm,
+            deposition_limits: _,
             source_z_allowance_mm,
             replay: _,
             phases,
         } = *input;
-        // Clipped columns cross every lower layer: valid only below the first
-        // schedule change since the last pass and below every live layer.
+        let resolved_recipe = PlanarPrintRecipe {
+            layer_height_mm: nominal_height_mm,
+            ..recipe.clone()
+        };
+        let recipe = &resolved_recipe;
         let mut replay_limit = if replaying {
             schedule
                 .iter()
@@ -1078,6 +1085,7 @@ pub(super) fn realize(
             let (prior, remaining) = layers.split_at_mut(index);
             let (layer, following) = remaining.split_first_mut().expect("current support layer");
             check_cancel(cancel)?;
+            layer.region_coverage.unsupported_overhang_mm = 0.0;
             let mut interface_bound = finalize_layer_interface(
                 index,
                 layer,
@@ -1344,21 +1352,22 @@ pub(super) fn realize(
                     }
                 }
             }
+            anchors.set_budget(workspace_budget(
+                retained,
+                owned_bytes
+                    .saturating_add(vec_bytes(&admission.bridges))
+                    .saturating_add(stroke_proof_reservation(layer.paths.len())),
+            )?);
             if let Some(failure) = admission.failure.take() {
                 let exhausted = work_bank.exhausted.contains(&layer.z_mm.to_bits());
                 if !exhausted
                     && !matches!(recipe.supports, SupportPolicy::Disabled)
-                    && let Some(offset_mm) = wall_refinement_offset(
-                        &layer.paths[failure.path],
-                        &failure,
+                    && let Some((wall_failure, offset_mm)) = wall_refinement_proposal(
+                        &layer.paths,
                         previous.clone(),
-                        &mut anchor_work,
-                        cancel,
-                    )?
-                    && wall_refinement_progress(
+                        input,
                         &work_bank.wall_refinements,
-                        layer.z_mm,
-                        offset_mm,
+                        &mut anchors,
                         &mut anchor_work,
                         cancel,
                     )?
@@ -1376,7 +1385,13 @@ pub(super) fn realize(
                     });
                     return Ok(SupportAdmission::RefineUnreachableLayer {
                         index,
-                        failure: admission_error(index, layer.z_mm, &layer.paths, &failure, recipe),
+                        failure: admission_error(
+                            index,
+                            layer.z_mm,
+                            &layer.paths,
+                            &wall_failure,
+                            recipe,
+                        ),
                         span_mm: None,
                     });
                 }
@@ -1393,10 +1408,7 @@ pub(super) fn realize(
                     // Supports are off, or no finer schedule can anchor or
                     // support this layer: print the overhang as PrusaSlicer
                     // does and report it, rather than refuse the part.
-                    layer.region_coverage.unsupported_overhang_mm = layer
-                        .region_coverage
-                        .unsupported_overhang_mm
-                        .max(failure.span);
+                    layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
                 } else {
                     let live = native_owned_bytes
                         + layer_payload_bytes(
@@ -1478,7 +1490,6 @@ pub(super) fn realize(
                 }
             }
         }
-        // Layers below this index equal the recorded pass's after admission.
         let column_valid = replay_limit.min(layers.len());
         let mut recording_columns = recording;
         if recording {
@@ -1498,9 +1509,9 @@ pub(super) fn realize(
                 .map(ReplayEntry::bytes)
                 .fold(0usize, usize::saturating_add);
             replay_new = Some(SupportReplay {
+                columns: Default::default(),
                 schedule: schedule.iter().map(elevation_bits).collect(),
                 entries: recorded,
-                columns: Default::default(),
                 bytes,
             });
         }
@@ -1541,6 +1552,10 @@ pub(super) fn realize(
                     });
                 }
             }
+            return Ok(SupportAdmission::Complete);
+        }
+        if truncated {
+            return Ok(SupportAdmission::Undecided);
         }
         // Native all-Z void branches are projected only after actual strokes prove
         // demand. Scheduled hole samples cannot certify a protected projection.
@@ -1646,7 +1661,7 @@ pub(super) fn realize(
         region::check_size(&protected)?;
         let layer_metadata_bytes = layers.len().saturating_mul(
             2 * std::mem::size_of::<Rc<OwnedMaterial>>()
-                + std::mem::size_of::<usize>()
+                + 2 * std::mem::size_of::<usize>()
                 + std::mem::size_of::<Option<usize>>(),
         );
         super::remaining_geometry_units(
@@ -1663,6 +1678,7 @@ pub(super) fn realize(
         let mut support_regions = vec![Rc::clone(&empty); layers.len()];
         let mut interfaces = vec![empty; layers.len()];
         let mut object_start = vec![0; layers.len()];
+        let mut support_wall_paths = vec![0; layers.len()];
         let mut contact_tops = vec![None; layers.len()];
         let mut roots = Vec::new();
         let mut root_landings = Vec::new();
@@ -1741,6 +1757,7 @@ pub(super) fn realize(
             + vec_bytes(&support_regions)
             + vec_bytes(&interfaces)
             + vec_bytes(&object_start)
+            + vec_bytes(&support_wall_paths)
             + vec_bytes(&contact_tops)
             + vec_bytes(&roots)
             + vec_bytes(&root_landings)
@@ -2580,7 +2597,7 @@ pub(super) fn realize(
                                     top_axis: axis,
                                     recipe,
                                 };
-                                let (paths, _) = domains.paths(
+                                let (mut paths, receipt) = domains.paths(
                                     &candidate,
                                     1.0,
                                     &hatch,
@@ -2590,22 +2607,28 @@ pub(super) fn realize(
                                     cancel,
                                 )?;
                                 anchors.set_budget(domains.anchor_budget(&paths)?);
-                                if !paths.is_empty()
-                                    && raster::scan(
-                                        &paths,
-                                        std::iter::empty(),
-                                        layers[object_layer]
-                                            .paths
-                                            .iter()
-                                            .filter(|path| path.kind.is_model()),
-                                        recipe,
-                                        &mut anchors,
-                                        &mut anchor_work,
-                                        cancel,
-                                        true,
-                                    )?
-                                    .is_none()
-                                {
+                                raster::retain_anchored(
+                                    &mut paths,
+                                    receipt.paths,
+                                    std::iter::empty(),
+                                    layers[object_layer]
+                                        .paths
+                                        .iter()
+                                        .filter(|path| path.kind.is_model()),
+                                    recipe,
+                                    retained
+                                        + geometry_receipt(
+                                            &support_regions,
+                                            &interfaces,
+                                            &[&protected, &column, &candidate, &accepted],
+                                        )
+                                        .0,
+                                    domains.owned_bytes(),
+                                    &mut anchors,
+                                    &mut anchor_work,
+                                    cancel,
+                                )?;
+                                if !paths.is_empty() {
                                     accepted.material.0.push(polygon.clone());
                                     accepted.bytes =
                                         super::native::material_bytes(&mut accepted.material);
@@ -2726,11 +2749,8 @@ pub(super) fn realize(
                 super::hatch_key(schedule, i),
             );
             let mut paths = Vec::new();
-            let mut omitted_wall_mm = 0.0;
-            // Worst unanchored span of the preferred raster, kept only when
-            // the orthogonal one must be compared against it.
-            let mut preferred_span = None;
-            let mut unanchored_mm = 0.0;
+            let mut wall_receipt = raster::WallReceipt::default();
+            let mut preferred_volume = None;
             for axis in [preferred, preferred.orthogonal()] {
                 let hatch = region::HatchLayer {
                     roof: None,
@@ -2744,7 +2764,7 @@ pub(super) fn realize(
                 };
                 anchors.set_budget(0);
                 domains.set_anchor_owned_bytes(anchors.retained_bytes());
-                (paths, omitted_wall_mm) = domains.paths(
+                (paths, wall_receipt) = domains.paths(
                     interface,
                     density,
                     &hatch,
@@ -2757,9 +2777,6 @@ pub(super) fn realize(
                 // without carrying any final demand. Omit that proposal, then
                 // require actual lower anchors and complete final object/contact
                 // admission below; a nonempty polygon is not required material.
-                if paths.is_empty() {
-                    break;
-                }
                 if i == 0 {
                     break;
                 }
@@ -2770,17 +2787,18 @@ pub(super) fn realize(
                         .filter(|path| support_role(path.kind))
                 };
                 anchors.set_budget(domains.anchor_budget(&paths)?);
-                if raster::scan(
-                    &paths,
-                    lower(),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                    true,
-                )?
-                .is_none()
+                if !paths.is_empty()
+                    && raster::scan(
+                        &paths,
+                        lower(),
+                        std::iter::empty(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                        true,
+                    )?
+                    .is_none()
                 {
                     break;
                 }
@@ -2803,48 +2821,50 @@ pub(super) fn realize(
                 }
                 let contacts = || part_contacts(prior, &roots, &established, i);
                 anchors.set_budget(domains.anchor_budget(&paths)?);
-                if raster::scan(
-                    &paths,
-                    lower(),
-                    contacts(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                    true,
-                )?
-                .is_none()
+                if !paths.is_empty()
+                    && raster::scan(
+                        &paths,
+                        lower(),
+                        contacts(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                        true,
+                    )?
+                    .is_none()
                 {
                     break;
                 }
-                let span = raster::scan(
-                    &paths,
+                let kept = raster::retain_anchored(
+                    &mut paths,
+                    wall_receipt.paths,
                     lower(),
                     contacts(),
                     recipe,
+                    retained_domains,
+                    domains.owned_bytes(),
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
-                    false,
-                )?
-                .expect("a failing raster has a worst failure")
-                .span;
-                let Some(preferred_span) = preferred_span else {
-                    preferred_span = Some(span);
+                )?;
+                wall_receipt.paths = kept.paths;
+                wall_receipt.omitted_mm += kept.omitted_mm;
+                let volume = raster::nominal_volume(&paths, layer.index, recipe)?;
+                let Some(preferred_volume) = preferred_volume else {
+                    preferred_volume = Some(volume);
                     // Release failed paths and anchor records before staging the
                     // other axis. Neither attempt changes object or support ownership.
                     paths = Vec::new();
                     continue;
                 };
-                if span < preferred_span {
-                    unanchored_mm = span;
-                } else {
+                if volume <= preferred_volume {
                     // Rebuild the preferred raster rather than retain both
                     // candidates: construction is deterministic.
                     drop(std::mem::take(&mut paths));
                     anchors.set_budget(0);
                     domains.set_anchor_owned_bytes(anchors.retained_bytes());
-                    (paths, omitted_wall_mm) = domains.paths(
+                    (paths, wall_receipt) = domains.paths(
                         interface,
                         density,
                         &region::HatchLayer {
@@ -2857,7 +2877,6 @@ pub(super) fn realize(
                         foreign_work,
                         cancel,
                     )?;
-                    unanchored_mm = preferred_span;
                 }
             }
             if i > 0 {
@@ -2878,15 +2897,27 @@ pub(super) fn realize(
                 )?
                 .is_some()
                 {
-                    paths.clear();
-                    omitted_wall_mm = 0.0;
+                    let kept = raster::retain_anchored(
+                        &mut paths,
+                        wall_receipt.paths,
+                        prior[i - 1]
+                            .paths
+                            .iter()
+                            .filter(|path| support_role(path.kind)),
+                        part_contacts(prior, &roots, &established, i),
+                        recipe,
+                        retained_domains,
+                        domains.owned_bytes(),
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )?;
+                    wall_receipt.paths = kept.paths;
+                    wall_receipt.omitted_mm += kept.omitted_mm;
                 }
             }
-            layer.region_coverage.unsupported_overhang_mm = layer
-                .region_coverage
-                .unsupported_overhang_mm
-                .max(unanchored_mm);
-            layer.region_coverage.support_omitted_wall_mm = omitted_wall_mm;
+            layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
+            support_wall_paths[i] = wall_receipt.paths;
             *segments += path_segments(&paths);
             anchors.set_budget(0);
             domains.set_anchor_owned_bytes(anchors.retained_bytes());
@@ -2896,14 +2927,9 @@ pub(super) fn realize(
                         sum + region::nominal_volume(path, layer.index, recipe)?,
                     )
                 })?;
-            // Support area describes support actually deposited: a region the
-            // raster could not stroke deposits nothing and claims no area.
             layer.region_coverage.support_area_mm2 =
-                if layer.region_coverage.support_nominal_deposition_volume_mm3 == 0.0 {
-                    0.0
-                } else {
-                    support_regions[i].unsigned_area()
-                };
+                layer.region_coverage.support_nominal_deposition_volume_mm3
+                    / (layer.z_mm - layer.lower_z_mm);
             object_start[i] = paths.len();
             let live_bytes = domains
                 .owned_bytes()
@@ -2940,7 +2966,34 @@ pub(super) fn realize(
                 "support retained point accounting underflow",
             )
         })?;
+        support_metadata_bytes =
+            support_metadata_bytes.saturating_sub(established.iter().map(vec_bytes).sum::<usize>());
+        established.clear();
         for index in 1..layers.len() {
+            support_metadata_bytes += reconcile_layer_roots(
+                layers,
+                FinalSupportInput {
+                    index,
+                    contact_tops: &contact_tops,
+                    roots: &roots,
+                    wall_paths: &mut support_wall_paths,
+                    recipe,
+                    retained_units: retained_regions,
+                    owned_bytes: native_owned_bytes
+                        + support_metadata_bytes
+                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
+                },
+                &mut established,
+                segments,
+                &mut anchors,
+                &mut anchor_work,
+                cancel,
+            )?;
+            object_start[index] = layers[index]
+                .paths
+                .iter()
+                .take_while(|path| support_role(path.kind))
+                .count();
             let (prior, remaining) = layers.split_at_mut(index);
             let (layer, following) = remaining.split_first_mut().expect("current support layer");
             let extra_owned_bytes = layer_payload_bytes(
@@ -3249,95 +3302,12 @@ pub(super) fn realize(
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
-            if let Some(failure) = admission.failure {
-                layer.region_coverage.unsupported_overhang_mm = layer
-                    .region_coverage
-                    .unsupported_overhang_mm
-                    .max(failure.span);
-            }
+            layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
             for path in admission.bridges {
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
             }
         }
-        support_metadata_bytes =
-            support_metadata_bytes.saturating_sub(established.iter().map(vec_bytes).sum::<usize>());
-        established.clear();
-        for (index, layer) in layers.iter().enumerate() {
-            let support = layer.paths.iter().filter(|path| support_role(path.kind));
-            anchors.set_budget(workspace_budget(
-                retained_regions,
-                native_owned_bytes
-                    + support_metadata_bytes
-                    + layer_payload_bytes(layers.iter())
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
-            )?);
-            for path in support {
-                if index == 0 {
-                    continue;
-                }
-                if raster::scan(
-                    std::slice::from_ref(path),
-                    layers[index - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind)),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                    true,
-                )?
-                .is_none()
-                {
-                    continue;
-                }
-                let owned_bytes = native_owned_bytes
-                    + support_metadata_bytes
-                    + layer_payload_bytes(layers.iter())
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
-                support_metadata_bytes += establish_until(
-                    &layers[..index],
-                    &contact_tops,
-                    &mut established,
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    retained_regions,
-                    owned_bytes,
-                    cancel,
-                )?;
-                anchors.set_budget(workspace_budget(
-                    retained_regions,
-                    native_owned_bytes
-                        + support_metadata_bytes
-                        + layer_payload_bytes(layers.iter())
-                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
-                )?);
-                if raster::scan(
-                    std::slice::from_ref(path),
-                    layers[index - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind)),
-                    part_contacts(&layers[..index], &roots, &established, index),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                    true,
-                )?
-                .is_some()
-                {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        format!(
-                            "support layer {index}: final object regeneration invalidated deposited support roots"
-                        ),
-                    ));
-                }
-            }
-        }
+        drop(established);
         // Contact selection is only a proposal until actual final paths exist.
         // Check the same closed, physical-decimal bead enclosure used by the XY
         // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
@@ -3419,6 +3389,129 @@ pub(super) fn realize(
     }
     work_bank.finish(work, foreign_work, anchor_work)?;
     outcome
+}
+
+struct FinalSupportInput<'a> {
+    index: usize,
+    contact_tops: &'a [Option<usize>],
+    roots: &'a [Root],
+    wall_paths: &'a mut [usize],
+    recipe: &'a PlanarPrintRecipe,
+    retained_units: usize,
+    owned_bytes: usize,
+}
+
+fn reconcile_layer_roots(
+    layers: &mut [PrintLayer],
+    input: FinalSupportInput<'_>,
+    established: &mut Vec<Vec<bool>>,
+    segments: &mut usize,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<usize, ManufacturingError> {
+    check_cancel(cancel)?;
+    let FinalSupportInput {
+        index,
+        contact_tops,
+        roots,
+        wall_paths,
+        recipe,
+        retained_units,
+        owned_bytes,
+    } = input;
+    let mut added_bytes = 0usize;
+    {
+        check_cancel(cancel)?;
+        let payload_bytes = layer_payload_bytes(layers.iter());
+        anchors.set_budget(workspace_budget(
+            retained_units,
+            owned_bytes
+                .saturating_add(added_bytes)
+                .saturating_add(payload_bytes),
+        )?);
+        let (prior, remaining) = layers.split_at_mut(index);
+        let (layer, following) = remaining.split_first_mut().expect("final support layer");
+        let mut continuing = true;
+        if index > 0 {
+            for path in layer.paths.iter().filter(|path| support_role(path.kind)) {
+                if raster::scan(
+                    std::slice::from_ref(path),
+                    prior[index - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support_role(path.kind)),
+                    std::iter::empty(),
+                    recipe,
+                    anchors,
+                    work,
+                    cancel,
+                    true,
+                )?
+                .is_some()
+                {
+                    continuing = false;
+                    break;
+                }
+            }
+        }
+        if !continuing {
+            added_bytes = added_bytes.saturating_add(establish_until(
+                prior,
+                contact_tops,
+                established,
+                recipe,
+                anchors,
+                work,
+                retained_units,
+                owned_bytes
+                    .saturating_add(added_bytes)
+                    .saturating_add(payload_bytes),
+                cancel,
+            )?);
+            let outside = owned_bytes
+                .saturating_add(added_bytes)
+                .saturating_add(layer_payload_bytes(prior.iter().chain(following.iter())));
+            let old_segments = path_segments(&layer.paths);
+            let kept = raster::retain_anchored(
+                &mut layer.paths,
+                wall_paths[index],
+                prior[index - 1]
+                    .paths
+                    .iter()
+                    .filter(|path| support_role(path.kind)),
+                part_contacts(prior, roots, established, index),
+                recipe,
+                retained_units,
+                outside,
+                anchors,
+                work,
+                cancel,
+            )?;
+            wall_paths[index] = kept.paths;
+            layer.region_coverage.support_omitted_wall_mm += kept.omitted_mm;
+            *segments = segments
+                .checked_sub(old_segments)
+                .and_then(|count| count.checked_add(path_segments(&layer.paths)))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "final support segment accounting overflow",
+                    )
+                })?;
+        }
+        let support_count = layer
+            .paths
+            .iter()
+            .take_while(|path| support_role(path.kind))
+            .count();
+        layer.region_coverage.support_nominal_deposition_volume_mm3 =
+            raster::nominal_volume(&layer.paths[..support_count], layer.index, recipe)?;
+        layer.region_coverage.support_area_mm2 =
+            layer.region_coverage.support_nominal_deposition_volume_mm3
+                / (layer.z_mm - layer.lower_z_mm);
+    }
+    Ok(added_bytes)
 }
 
 fn contact_layer(
@@ -4218,14 +4311,93 @@ fn wall_refinement_progress(
     Ok(true)
 }
 
+fn wall_refinement_proposal<'a>(
+    paths: &[DepositionPath],
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    input: &SupportInput<'_>,
+    refinements: &[WallRefinement],
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<(strokes::Failure, f64)>, ManufacturingError> {
+    let mut lower = strokes::LowerStrokes::new(previous.clone(), std::iter::empty());
+    let mut proposal: Option<(strokes::Failure, f64)> = None;
+    for (path_index, path) in paths.iter().enumerate() {
+        check_cancel(cancel)?;
+        if path.owner != Some(DepositionOwner::Wall) {
+            continue;
+        }
+        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
+            let endpoints_mm = [path.points_mm[first], path.points_mm[last]];
+            let length = (endpoints_mm[1][0] - endpoints_mm[0][0])
+                .hypot(endpoints_mm[1][1] - endpoints_mm[0][1]);
+            let gaps = lower.gaps(
+                AnchorCandidate {
+                    endpoints_mm,
+                    bead_width_mm: width_mm,
+                },
+                path.physical_z_mm[0],
+                false,
+                anchors,
+                work,
+                cancel,
+            )?;
+            for gap in gaps {
+                let span = (gap.end - gap.start) * length;
+                if !matches!(
+                    gap_kind(gap, span, width_mm, input.recipe.process.max_bridge_span_mm),
+                    GapKind::Demand
+                ) {
+                    continue;
+                }
+                let failure = strokes::Failure {
+                    path: path_index,
+                    first,
+                    last,
+                    width_mm,
+                    start: gap.start,
+                    end: gap.end,
+                    span,
+                };
+                if let Some(offset_mm) = wall_refinement_offset(
+                    path,
+                    &failure,
+                    previous.clone(),
+                    input.deposition_limits.min_bead_height_mm,
+                    work,
+                    cancel,
+                )? && proposal
+                    .as_ref()
+                    .is_none_or(|(_, worst)| offset_mm > *worst)
+                {
+                    proposal = Some((failure, offset_mm));
+                }
+            }
+        }
+    }
+    if let Some((failure, offset_mm)) = proposal
+        && wall_refinement_progress(
+            refinements,
+            paths[failure.path].physical_z_mm[1],
+            offset_mm,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(Some((failure, offset_mm)));
+    }
+    Ok(None)
+}
+
 fn wall_refinement_offset<'a>(
     path: &DepositionPath,
     failure: &strokes::Failure,
     previous: impl Iterator<Item = &'a DepositionPath>,
+    minimum_height_mm: f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, ManufacturingError> {
-    if path.kind != DepositionKind::Perimeter {
+    if path.owner != Some(DepositionOwner::Wall) {
         return Ok(None);
     }
     let start = path.points_mm[failure.first];
@@ -4250,14 +4422,17 @@ fn wall_refinement_offset<'a>(
         return Ok(None);
     };
     let lower = nearest.endpoints_mm.map(|point| [point[0], point[1]]);
+    let lower_height = nearest.physical_z_mm[1] - nearest.physical_z_mm[0];
+    if path.height_mm() * 0.5 < minimum_height_mm && lower_height * 0.5 < minimum_height_mm {
+        return Ok(None);
+    }
+    let reach =
+        nearest.width_mm * 0.5 * (path.height_mm() + lower_height) * 0.5 / minimum_height_mm;
     let offset = endpoints
         .map(|point| proximity::point_segment_distance_squared(point, lower[0], lower[1]).sqrt())
         .into_iter()
         .fold(0.0_f64, f64::max);
-    Ok(
-        (offset > nearest.width_mm * 0.5 && offset < (nearest.width_mm + failure.width_mm) * 0.5)
-            .then_some(offset),
-    )
+    Ok((offset > nearest.width_mm * 0.5 && offset <= reach).then_some(offset))
 }
 
 impl std::fmt::Debug for NearestStroke {
@@ -5219,6 +5394,186 @@ mod tests {
     use geo::{line_string, polygon};
 
     #[test]
+    fn regenerated_part_roots_prune_only_their_dependent_support_and_report_real_demand() {
+        let mut recipe = crate::planner::tests::recipe(1.0);
+        recipe.process.max_bridge_span_mm = 20.0;
+        let cancel = AtomicBool::new(false);
+        for shift in [0.0, 0.37] {
+            let path = |kind, start: f64, end: f64, index: usize| DepositionPath {
+                material_domain: None,
+                kind,
+                width: WidthProfile::Constant { width_mm: 0.6 },
+                physical_z_mm: [index as f64 * 0.2, (index + 1) as f64 * 0.2],
+                owner: (kind == DepositionKind::Perimeter).then_some(DepositionOwner::Wall),
+                points_mm: vec![
+                    [start + shift, shift, (index + 1) as f64 * 0.2],
+                    [end + shift, shift, (index + 1) as f64 * 0.2],
+                ],
+                arcs: Vec::new(),
+                exposed: false,
+            };
+            let mut layers: Vec<_> = (0..5)
+                .map(|index| {
+                    let mut paths = if index < 4 {
+                        vec![path(DepositionKind::Support, 20.0, 30.0, index)]
+                    } else {
+                        Vec::new()
+                    };
+                    if index < 2 {
+                        paths.push(path(DepositionKind::Perimeter, 10.0, 15.0, index));
+                    }
+                    if index == 2 {
+                        paths.push(path(DepositionKind::SupportInterface, 0.0, 5.0, index));
+                    }
+                    if index == 3 {
+                        paths.push(path(DepositionKind::Support, 0.0, 5.0, index));
+                    }
+                    if index == 4 {
+                        paths.extend([
+                            path(DepositionKind::Perimeter, 0.0, 5.0, index),
+                            path(DepositionKind::Perimeter, 20.0, 30.0, index),
+                            path(DepositionKind::Perimeter, 4.0, 21.0, index),
+                        ]);
+                    }
+                    PrintLayer {
+                        index: index as u32,
+                        hatch_course: index as u32,
+                        z_mm: (index + 1) as f64 * 0.2,
+                        lower_z_mm: index as f64 * 0.2,
+                        height_mm: 0.2,
+                        section_z_mm: (index as f64 + 0.5) * 0.2,
+                        paths,
+                        region_coverage: super::super::empty_coverage(1.0),
+                        skin_command_fits: Vec::new(),
+                    }
+                })
+                .collect();
+            let required: Vec<_> = layers
+                .iter()
+                .flat_map(|layer| {
+                    layer
+                        .paths
+                        .iter()
+                        .filter(|path| path.kind.is_model())
+                        .cloned()
+                })
+                .collect();
+            let mut wall_paths = [1, 1, 2, 2, 0];
+            let roots = [Root::Part {
+                object_layer: 0,
+                first_support_layer: 2,
+                landing: 0,
+            }];
+            let contacts = [None, None, None, None, Some(2)];
+            let mut established = Vec::new();
+            let mut segments = layers.iter().map(|layer| path_segments(&layer.paths)).sum();
+            let mut anchors = AnchorWorkspace::default();
+            anchors.set_budget(usize::MAX);
+            let before = strokes::analyze(
+                &layers[4].paths[2..],
+                layers[3].paths.iter(),
+                std::iter::empty(),
+                &recipe,
+                &mut anchors,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+            assert!(before.failure.is_none() && !before.bridges.is_empty());
+            for index in 1..layers.len() {
+                reconcile_layer_roots(
+                    &mut layers,
+                    FinalSupportInput {
+                        index,
+                        contact_tops: &contacts,
+                        roots: &roots,
+                        wall_paths: &mut wall_paths,
+                        recipe: &recipe,
+                        retained_units: 0,
+                        owned_bytes: 0,
+                    },
+                    &mut established,
+                    &mut segments,
+                    &mut anchors,
+                    &mut 0,
+                    &cancel,
+                )
+                .unwrap();
+            }
+            anchors.set_budget(usize::MAX);
+            let final_admission = strokes::analyze(
+                &layers[4].paths,
+                layers[3].paths.iter(),
+                layers[2]
+                    .paths
+                    .iter()
+                    .filter(|path| support_role(path.kind)),
+                &recipe,
+                &mut anchors,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+            assert!(final_admission.failure.is_some());
+            assert!(final_admission.bridges.is_empty());
+            assert!(final_admission.worst_unanchored_mm > 0.0);
+            let retained: Vec<_> = layers
+                .iter()
+                .flat_map(|layer| {
+                    layer
+                        .paths
+                        .iter()
+                        .filter(|path| path.kind.is_model())
+                        .cloned()
+                })
+                .collect();
+            assert_eq!(required, retained);
+            assert!(layers[2..4].iter().all(|layer| {
+                layer
+                    .paths
+                    .iter()
+                    .filter(|path| support_role(path.kind))
+                    .all(|path| path.points_mm[0][0] >= 20.0 + shift)
+            }));
+            assert!(layers[2..4].iter().all(|layer| {
+                layer.region_coverage.support_nominal_deposition_volume_mm3 > 0.0
+                    && layer.region_coverage.support_omitted_wall_mm > 0.0
+            }));
+            assert_eq!(
+                segments,
+                layers
+                    .iter()
+                    .map(|layer| path_segments(&layer.paths))
+                    .sum::<usize>()
+            );
+            let captured = layers.clone();
+            assert_eq!(
+                reconcile_layer_roots(
+                    &mut layers,
+                    FinalSupportInput {
+                        index: 1,
+                        contact_tops: &contacts,
+                        roots: &roots,
+                        wall_paths: &mut wall_paths,
+                        recipe: &recipe,
+                        retained_units: 0,
+                        owned_bytes: 0
+                    },
+                    &mut Vec::new(),
+                    &mut segments,
+                    &mut anchors,
+                    &mut 0,
+                    &AtomicBool::new(true)
+                )
+                .unwrap_err()
+                .code,
+                ManufacturingErrorCode::Cancelled
+            );
+            assert_eq!(layers, captured);
+        }
+    }
+
+    #[test]
     fn support_owned_work_refuses_global_planar_counter_overflow() {
         let material = MultiPolygon(vec![polygon![
             (x: 0.0, y: 0.0), (x: 3.0, y: 0.0),
@@ -5296,6 +5651,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let lower = row(DepositionKind::Perimeter, 0.0, 20.0, 0.4);
         let mut upper = row(DepositionKind::Perimeter, 0.0, 20.0, 0.8);
+        upper.owner = Some(DepositionOwner::Wall);
         for point in &mut upper.points_mm {
             point[1] = 0.4;
         }
@@ -5319,6 +5675,7 @@ mod tests {
                 &upper,
                 &failure,
                 std::iter::once(&lower),
+                0.1,
                 &mut work,
                 &cancel
             )
@@ -5347,6 +5704,7 @@ mod tests {
                 &upper,
                 &failure,
                 std::iter::once(&lower),
+                0.1,
                 &mut work,
                 &cancel
             )
@@ -5354,19 +5712,173 @@ mod tests {
             .is_none()
         );
         assert!(
-            wall_refinement_offset(&upper, &failure, std::iter::empty(), &mut work, &cancel)
-                .unwrap()
-                .is_none()
+            wall_refinement_offset(
+                &upper,
+                &failure,
+                std::iter::empty(),
+                0.1,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(
             wall_refinement_offset(
                 &upper,
                 &failure,
                 std::iter::once(&lower),
+                0.1,
                 &mut work,
                 &AtomicBool::new(true)
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn bridge_process_and_an_unrelated_failure_do_not_hide_refinable_wall_ownership() {
+        let recipe = crate::planner::tests::recipe(1.0);
+        let cancel = AtomicBool::new(false);
+        let lower = row(DepositionKind::Perimeter, 0.0, 20.0, 0.4);
+        let mut wall = row(DepositionKind::Bridge, 0.0, 20.0, 0.8);
+        wall.owner = Some(DepositionOwner::Wall);
+        for point in &mut wall.points_mm {
+            point[1] = 0.8;
+        }
+        let mut unrelated = row(DepositionKind::BottomSkin, 0.0, 20.0, 0.8);
+        for point in &mut unrelated.points_mm {
+            point[1] = 8.0;
+        }
+        let paths = [unrelated, wall];
+        let input = SupportInput {
+            sections: &[],
+            schedule: &[],
+            native_points: 0,
+            native_owned_bytes: 0,
+            recipe: &recipe,
+            nominal_height_mm: recipe.layer_height_mm,
+            deposition_limits: DepositionLimits {
+                min_bead_width_mm: 0.1,
+                max_bead_width_mm: 1.0,
+                min_bead_height_mm: 0.1,
+                max_bead_height_mm: 0.6,
+            },
+            source_z_allowance_mm: 0.0,
+            replay: false,
+            phases: &[],
+        };
+        let mut anchors = AnchorWorkspace::default();
+        let mut work = 0;
+        let initial = strokes::analyze(
+            &paths,
+            std::iter::once(&lower),
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(initial.failure.unwrap().path, 0);
+        let (failure, offset) = wall_refinement_proposal(
+            &paths,
+            std::iter::once(&lower),
+            &input,
+            &[],
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(failure.path, 1);
+        assert!(offset > recipe.bead_width_mm);
+        let history = [WallRefinement {
+            interval_mm: [0.0, 0.8],
+            offset_mm: offset,
+        }];
+        assert!(
+            wall_refinement_proposal(
+                &paths,
+                std::iter::once(&lower),
+                &input,
+                &history,
+                &mut anchors,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut near_wall = paths[1].clone();
+        for point in &mut near_wall.points_mm {
+            point[1] = 0.36;
+        }
+        let mut far_wall = near_wall.clone();
+        for point in &mut far_wall.points_mm {
+            point[1] = 0.9;
+        }
+        for walls in [
+            [near_wall.clone(), far_wall.clone()],
+            [far_wall.clone(), near_wall.clone()],
+        ] {
+            let (_, worst) = wall_refinement_proposal(
+                &walls,
+                std::iter::once(&lower),
+                &input,
+                &[],
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((worst - 0.9).abs() <= super::super::OFFSET_TOLERANCE_MM);
+            let prior = [WallRefinement {
+                interval_mm: [0.0, 0.8],
+                offset_mm: worst,
+            }];
+            let refined = walls.map(|mut wall| {
+                wall.physical_z_mm = [0.4, 0.6];
+                for point in &mut wall.points_mm {
+                    point[1] *= 0.75;
+                    point[2] = 0.6;
+                }
+                wall
+            });
+            let (_, next) = wall_refinement_proposal(
+                &refined,
+                std::iter::once(&lower),
+                &input,
+                &prior,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .unwrap();
+            assert!((next - 0.675).abs() <= super::super::OFFSET_TOLERANCE_MM);
+        }
+        let minimum_input = SupportInput {
+            deposition_limits: DepositionLimits {
+                min_bead_height_mm: 0.4,
+                ..input.deposition_limits
+            },
+            ..input
+        };
+        assert!(
+            wall_refinement_proposal(
+                &paths,
+                std::iter::once(&lower),
+                &minimum_input,
+                &[],
+                &mut anchors,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
         );
     }
 

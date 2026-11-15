@@ -822,6 +822,37 @@ fn sparse_native_roof_is_a_bounded_bridge_not_full_material_support() {
 }
 
 #[test]
+fn preferred_height_outside_process_limits_keeps_resolved_support_hatches() {
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
+    let mut intent = intent(true);
+    intent.recipe.bead_width_mm = 0.4;
+    intent.recipe.layer_height_mm = 2.0;
+    intent.recipe.layer_height_policy = LayerHeightPolicy::Preferred;
+    intent.printer.deposition_limits.max_bead_height_mm = 0.3;
+    let selected = intent.select_layer_height().unwrap().height_mm;
+    assert_eq!(selected, 0.3);
+    let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
+    assert!(bundle.verification.verified);
+    assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| path.kind == DepositionKind::Support && path.points_mm.len() == 2)
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .all(|layer| layer.height_mm <= selected)
+    );
+    assert!(actual_fixture_contact_gap(&bundle, 8.0) >= 0.2);
+}
+
+#[test]
 fn native_cantilever_emits_bed_anchored_support_and_separate_volume() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
     let intent = intent(true);
@@ -3068,6 +3099,7 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
         install_image(&mut scene, false, 2, 16, &pixels, parameters.clone());
         let mut disabled = intent(false);
         disabled.recipe.layer_height_mm = 0.6;
+        disabled.printer.deposition_limits.min_bead_height_mm = 0.15;
         if sparse {
             disabled.recipe.infill_fraction = 0.2;
         }
@@ -5148,7 +5180,7 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                     kind: DepositionKind::Perimeter,
                     width: WidthProfile::Constant { width_mm: 0.6 },
                     physical_z_mm: [elevation.lower_z, elevation.z],
-                    owner: None,
+                    owner: Some(DepositionOwner::Wall),
                     points_mm: vec![[0.0, offset, elevation.z], [20.0, offset, elevation.z]],
                     arcs: Vec::new(),
                     exposed: false,
@@ -5179,7 +5211,9 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                 native_points: 0,
                 native_owned_bytes: 0,
                 recipe,
+                nominal_height_mm: intent.select_layer_height().unwrap().height_mm,
                 source_z_allowance_mm: 0.0,
+                deposition_limits: intent.effective_deposition_limits(),
                 replay: false,
                 phases: &[],
             },
