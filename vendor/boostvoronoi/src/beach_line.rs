@@ -17,12 +17,14 @@ use crate::InputType;
 use crate::circle_event::CircleEventIndex;
 use crate::prelude::*;
 use crate::site_event as vse;
-use cpp_map::skiplist::{Index, SkipList};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 mod beach_line_impl;
+pub(crate) mod rbtree;
 mod trait_impl;
+
+use rbtree::{Index, RbMap};
 
 /// Type-checked placeholder for usize
 /// Hopefully rust zero cost abstractions will flatten this out.
@@ -36,7 +38,7 @@ pub type BeachLineNodeDataType = Rc<Cell<Option<BeachLineNodeData>>>;
 /// The ordering of beach_line_vec_ is intentionally reversed, pop() will return the last element.
 /// Before this change the beach-line ordering was unpredictable.
 pub struct BeachLine<I: InputType> {
-    pub(crate) beach_line_: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+    pub(crate) beach_line_: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
 }
 
 /// Represents a bisector node made by two arcs that correspond to the left
@@ -65,13 +67,13 @@ pub struct BeachLineNodeData {
     edge_: EdgeIndex,
 }
 
-/// An effort to emulate a C++ std::map iterator in Rust.
+/// A C++ std::map iterator over the beach line: `current` is a node, or None for `end()`.
 /// It will have functionality like:
 /// prev(), next(), get(), erase(), lower_bound(), replace_key()
 #[derive(Clone)]
 pub(crate) struct BeachlineCursor<I: InputType> {
     pub(crate) current: Option<Index>,
-    pub(crate) list: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+    pub(crate) list: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
 }
 
 #[cfg(test)]

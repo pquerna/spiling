@@ -9,8 +9,8 @@ fn point_point_segment_event(
     second: [i32; 2],
     segment: [[i32; 2]; 2],
 ) -> Option<crate::circle_event::CircleEvent> {
-    let mut slots = cpp_map::skiplist::SkipList::<i32, ()>::new();
-    let index = slots.insert(0, ()).unwrap();
+    let mut slots = crate::beach_line::rbtree::RbMap::<i32, ()>::default();
+    let index = slots.insert_with_hint(None, 0, ());
     let point = |coordinates: [i32; 2]| Point {
         x: coordinates[0],
         y: coordinates[1],
@@ -57,8 +57,8 @@ fn point_segment_segment_event(
     point: [i32; 2],
     segments: [[[i32; 2]; 2]; 2],
 ) -> Option<crate::circle_event::CircleEvent> {
-    let mut slots = cpp_map::skiplist::SkipList::<i32, ()>::new();
-    let index = slots.insert(0, ()).unwrap();
+    let mut slots = crate::beach_line::rbtree::RbMap::<i32, ()>::default();
+    let index = slots.insert_with_hint(None, 0, ());
     let site = |segment: [[i32; 2]; 2], index| {
         vse::SiteEvent::new(
             vse::Site::Segment(

@@ -248,78 +248,9 @@ pub(crate) fn pps<I: InputType>(
             recompute_lower_x,
         );
     }
-    // All sites must be unique, or the dot calculation will be invalid
-    let unique_endpoints = !(
-        point1 == point2
-            || site3.point0() == point1
-            || site3.point0() == point2
-            || site3.point1() == point1
-            || site3.point1() == point2
-        //|| site3.point0() == site3.point1() this can never happen
-    );
-    tln!("pps unique_endpoints:{}", unique_endpoints);
-
-    if unique_endpoints {
-        // site3.point0 -> c
-        let v_3_c = (
-            c_event.x() - cast::<I, f64>(site3.point0().x),
-            c_event.y() - cast::<I, f64>(site3.point0().y),
-        );
-        // site3.point0 -> site3.point1
-        let v_3 = (
-            cast::<I, f64>(site3.point1().x) - cast::<I, f64>(site3.point0().x),
-            cast::<I, f64>(site3.point1().y) - cast::<I, f64>(site3.point0().y),
-        );
-        #[allow(clippy::suspicious_operation_groupings)]
-        let dot = (v_3_c.0 * v_3.0 + v_3_c.1 * v_3.1) / (v_3.0 * v_3.0 + v_3.1 * v_3.1);
-        tln!("pps dot:{:.12}", dot);
-
-        // allow the dot to be [0..1] + some ULP fuzz
-        let rv =
-            (-0.0..=1.0).contains(&dot) || approx::ulps_eq!(0.0, dot) || approx::ulps_eq!(1.0, dot);
-
-        #[cfg(all(feature = "ce_corruption_check", feature = "geo"))]
-        if !rv {
-            println!(
-                "\n->LazyCircleFormationFunctor::pps(site1:{:?}, site2:{:?}, site3:{:?}, segment_index:{:?})",
-                point1, point2, site3, segment_index
-            );
-
-            println!("let site1=[{},{}];", point1.x, point1.y);
-            println!("let site2=[{},{}];", point2.x, point2.y);
-            println!(
-                "let site3=[{},{},{},{}];",
-                site3.point0().x,
-                site3.point0().y,
-                site3.point1().x,
-                site3.point1().y
-            );
-            println!(
-                "let c1=[{:.12},{:.12}];//lx={:.12}",
-                c_x.dif().fpv(),
-                c_y.dif().fpv(),
-                lower_x.dif().fpv()
-            );
-
-            println!(
-                "site1->c distance:{:-12}",
-                point1.distance_to_point(c_event.x(), c_event.y())
-            );
-            println!(
-                "site2->c distance:{:-12}",
-                point2.distance_to_point(c_event.x(), c_event.y())
-            );
-            println!(
-                "site3->c distance:{:-12}",
-                site3.distance_to_point(c_event.x(), c_event.y())
-            );
-
-            println!("v_a_c:{:?}, v3:{:?}", v_3_c, v_3);
-            println!("dot:{:?}", dot);
-            println!("ignoring this CE\n");
-        }
-        return rv.then_some(c_event);
-    };
+    // C++ Boost.Polygon keeps every circle its existence predicate admits. The port also
+    // refused one whose tangent point projects off the segment (a "dot" test); that changes
+    // which circle events the queue holds, so the diagram no longer matches the reference.
     Some(c_event)
 }
 
@@ -344,21 +275,15 @@ pub(crate) fn pss<I: InputType>(
         point_index
     );
 
-    // This is a case that does not exists in C++ boost voronoi.
-    // If site1 is a point shared by both site2 and site3 there can only be one CE solution.
-    // The CE must be the site1 point with zero radius.
-    // It seems better to use the pristine int coordinate instead of spending cycles
-    // re-calculating it again with lossy floats.
+    // A point shared by both segments is the circle's only point (zero radius). The port
+    // marked it a site point and returned the integer point itself; C++ Boost.Polygon computes
+    // it like any other, and the queue orders it by those computed coordinates, so the
+    // coordinates are computed below as C++ does and only the mark is kept.
     #[allow(clippy::suspicious_operation_groupings)]
     if (point1 == site2.point0() || point1 == site2.point1())
         && (point1 == site3.point0() || point1 == site3.point1())
     {
         c_event.set_is_site_point();
-        let x = cast::<I, f64>(point1.x);
-        let y = cast::<I, f64>(point1.y);
-        c_event.set_3(x, y, x);
-        tln!("<-LazyCircleFormationFunctor::pss shortcut");
-        return Some(c_event);
     }
 
     let a1 = cast::<I, f64>(segm_end1.x) - cast::<I, f64>(segm_start1.x);

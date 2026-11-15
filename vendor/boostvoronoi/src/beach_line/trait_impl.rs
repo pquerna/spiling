@@ -13,7 +13,7 @@
 
 use crate::InputType;
 use crate::beach_line::{BeachLine, BeachLineNodeData, BeachLineNodeKey, BeachlineCursor};
-use cpp_map::prelude::*;
+use super::rbtree::{KeyLess, RbMap};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
@@ -35,7 +35,7 @@ impl fmt::Debug for BeachLineNodeData {
 impl<I: InputType> Default for BeachLine<I> {
     fn default() -> Self {
         Self {
-            beach_line_: Rc::from(RefCell::from(SkipList::default())),
+            beach_line_: Rc::from(RefCell::from(RbMap::default())),
         }
     }
 }
@@ -85,10 +85,10 @@ impl<I: InputType> PartialEq for BeachLineNodeKey<I> {
     }
 }
 
-impl<I: InputType> IsLessThan for BeachLineNodeKey<I> {
-    // todo: move the content of node_comparison_predicate to here
+impl<I: InputType> KeyLess for BeachLineNodeKey<I> {
+    /// Boost's `node_comparison_predicate`, the beach line map's `key_compare`.
     #[inline(always)]
-    fn is_less_than(&self, other: &Self) -> bool {
+    fn key_less(&self, other: &Self) -> bool {
         crate::predicate::node_comparison_predicate::node_comparison::<I>(self, other)
     }
 }

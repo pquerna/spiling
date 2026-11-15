@@ -18,7 +18,7 @@ use crate::tln;
 use crate::{BvError, GrowingVob, VobU32};
 use ordered_float::OrderedFloat;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use crate::cpp_heap::CppPriorityQueue;
 use std::fmt;
 use std::rc::Rc;
 
@@ -277,9 +277,10 @@ impl CircleEvent {
 /// events ordering.
 // todo: this comment text is from c++, convert to rust
 pub(crate) struct CircleEventQueue {
-    /// circle events sorted by order
+    /// The circle events, active and inactive, in the heap C++ Boost.Polygon's
+    /// `std::priority_queue` keeps (so equal events surface in its order).
     /// Note that the `CircleEvent`s must be identical clones of the ones in `ce_by_id_`
-    ce_by_order_: BTreeSet<Rc<CircleEvent>>,
+    ce_by_order_: CircleEventHeap,
     /// circle events sorted by id
     /// Note that the `CircleEvent`s must be identical clones of the ones in `ce_by_order_`
     ce_by_id_: rustc_hash::FxHashMap<u32, Rc<CircleEvent>>,
@@ -287,10 +288,26 @@ pub(crate) struct CircleEventQueue {
     inactive_circle_ids_: VobU32, // Circle events turned inactive
 }
 
+/// The circle event heap, with Boost's queue comparison.
+type CircleEventHeap =
+    CppPriorityQueue<Rc<CircleEvent>, fn(&Rc<CircleEvent>, &Rc<CircleEvent>) -> bool>;
+
+/// Boost's circle event queue comparison: `event_comparison_type(lhs, rhs)` is
+/// `event_comparison_predicate(rhs, lhs)`, which orders circles by lower x, then by y,
+/// exactly (no ulp tolerance between two circles).
+fn circle_event_lower_priority(lhs: &Rc<CircleEvent>, rhs: &Rc<CircleEvent>) -> bool {
+    #[allow(clippy::float_cmp)]
+    if rhs.lower_x_ != lhs.lower_x_ {
+        rhs.lower_x_ < lhs.lower_x_
+    } else {
+        rhs.center_y_ < lhs.center_y_
+    }
+}
+
 impl Default for CircleEventQueue {
     fn default() -> CircleEventQueue {
         Self {
-            ce_by_order_: BTreeSet::new(),
+            ce_by_order_: CppPriorityQueue::new(circle_event_lower_priority),
             ce_by_id_: rustc_hash::FxHashMap::default(),
             c_list_next_free_index_: CircleEventIndex(0),
             inactive_circle_ids_: VobU32::fill(128),
@@ -306,28 +323,17 @@ impl CircleEventQueue {
 
     #[inline(always)]
     pub(crate) fn peek(&self) -> Option<&Rc<CircleEvent>> {
-        self.ce_by_order_.first()
+        self.ce_by_order_.top()
     }
 
     #[cfg(feature = "ce_corruption_check")]
     pub(crate) fn ce_corruption_check(&self) {
-        if self.ce_by_order_.len() >= 2 {
-            let mut iter = self.ce_by_order_.iter();
-            let first_ce = iter.next().unwrap();
-            let second_ce = iter.next().unwrap();
-
-            if first_ce.cmp(second_ce) != Ordering::Less {
-                println!("*************************************************");
-                println!("topmost CE could just as well been the second CE.");
-                println!("topmost CE :{:?}", first_ce);
-                println!("second CE :{:?}", second_ce);
-            }
-        }
+        // The queue is libstdc++'s heap, not a sorted set: there is no second element to check.
     }
 
     #[inline(always)]
     fn pop_first(&mut self) -> Option<Rc<CircleEvent>> {
-        self.ce_by_order_.pop_first()
+        self.ce_by_order_.pop()
     }
 
     pub(crate) fn pop_inactive_at_top(&mut self) -> Result<(), BvError> {
@@ -413,7 +419,7 @@ impl CircleEventQueue {
         let rc_ce = Rc::new(ce);
         let _ = self.ce_by_id_.insert(circle_event_id.0, Rc::clone(&rc_ce));
 
-        let _ = self.ce_by_order_.insert(rc_ce);
+        self.ce_by_order_.push(rc_ce);
         self.c_list_next_free_index_.increment();
         circle_event_id
     }

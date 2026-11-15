@@ -47,6 +47,14 @@ impl<I: InputType> EndPointPair<I> {
     }
 }
 
+impl<I: InputType> EndPointPair<I> {
+    /// Boost's `end_point_comparison(end1, end2)`, `point_comparison(end2.first, end1.first)`:
+    /// the queue's top is the least end point, as C++ Boost.Polygon's priority queue.
+    pub(crate) fn lower_priority(end1: &Self, end2: &Self) -> bool {
+        vp::point_comparison::point_comparison(end2.site_, end1.site_)
+    }
+}
+
 impl<I: InputType> PartialOrd for EndPointPair<I> {
     #[inline(always)]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

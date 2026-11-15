@@ -28,11 +28,15 @@ use crate::{
 };
 
 use crate::beach_line::BeachlineCursor;
-use std::collections::BinaryHeap;
+use crate::cpp_heap::CppPriorityQueue;
 use std::rc::Rc;
 
 #[cfg(test)]
 mod tests;
+
+/// The segment end points heap, with Boost's `end_point_comparison`.
+type EndPointHeap<I> =
+    CppPriorityQueue<vep::EndPointPair<I>, fn(&vep::EndPointPair<I>, &vep::EndPointPair<I>) -> bool>;
 
 /// The sweepline algorithm implementation to compute Voronoi diagram of
 /// points and non-intersecting segments (excluding endpoints).
@@ -80,7 +84,7 @@ mod tests;
 pub struct Builder<I: InputType> {
     pub(crate) site_events_: Vec<vse::SiteEvent<I>>,
     circle_events_: vc::CircleEventQueue,
-    end_points_: BinaryHeap<vep::EndPointPair<I>>,
+    end_points_: EndPointHeap<I>,
     pub(crate) beach_line_: vb::BeachLine<I>,
     // The number of input sites if points and segments are counted as one.
     // (segments generates two site events so we can't use the length of the list)
@@ -98,7 +102,7 @@ impl<I: InputType> Default for Builder<I> {
             site_events_: Vec::new(),
             beach_line_: vb::BeachLine::default(),
             index_: 0,
-            end_points_: BinaryHeap::new(),
+            end_points_: CppPriorityQueue::new(vep::EndPointPair::<I>::lower_priority),
             circle_events_: vc::CircleEventQueue::default(),
             #[cfg(feature = "console_debug")]
             debug_circle_counter_: 0,
@@ -214,15 +218,17 @@ impl<I: InputType> Builder<I> {
                 }
                 i += 1;
             }
-            if self.circle_events_.is_empty() {
-                self.process_site_event(&mut site_event_iterator_, &mut output)?;
+            let site = if self.circle_events_.is_empty() {
+                true
             } else if site_event_iterator_ as usize == self.site_events_.len() {
-                self.process_circle_event(&mut output)?;
-            } else if vp::event_comparison_predicate::event_comparison_bif::<I>(
-                &self.site_events_[site_event_iterator_ as usize],
-                // we checked with !is_empty(), unwrap is safe
-                self.circle_events_.peek().unwrap(),
-            ) {
+                false
+            } else {
+                vp::event_comparison_predicate::event_comparison_bif::<I>(
+                    &self.site_events_[site_event_iterator_ as usize],
+                    self.circle_events_.peek().unwrap(),
+                )
+            };
+            if site {
                 self.process_site_event(&mut site_event_iterator_, &mut output)?;
             } else {
                 self.process_circle_event(&mut output)?;
@@ -310,13 +316,8 @@ impl<I: InputType> Builder<I> {
         let second = *site_event_iterator_;
         let second = self.site_events_[second as usize];
         tln!("insert_new_arc init_beach_line_default");
-        let _ = self.insert_new_arc(
-            first,
-            first,
-            second,
-            self.beach_line_.last_position(),
-            output,
-        );
+        // C++: insert_new_arc(*it_first, *it_first, *it_second, beach_line_.end(), output)
+        let _ = self.insert_new_arc(first, first, second, None, output)?;
 
         // The second site was already processed. Move the iterator.
         *site_event_iterator_ += 1;
@@ -342,19 +343,20 @@ impl<I: InputType> Builder<I> {
             let edge = output.insert_new_edge_2_(*first, *second).0;
 
             // Insert a new bisector into the beach line.
+            // C++: beach_line_.insert(beach_line_.end(), ...)
             #[cfg(feature = "console_debug")]
             let _ = self.beach_line_.insert(
-                self.beach_line_.last_position(),
-                new_node_key,
-                vb::BeachLineNodeData::new_1(edge),
-                &self.circle_events_,
-            );
-            #[cfg(not(feature = "console_debug"))]
-            let _ = self.beach_line_.insert(
-                self.beach_line_.last_position(),
+                None,
                 new_node_key,
                 Some(vb::BeachLineNodeData::new_1(edge)),
-            );
+                &self.circle_events_,
+            )?;
+            #[cfg(not(feature = "console_debug"))]
+            let _ = self.beach_line_.insert(
+                None,
+                new_node_key,
+                Some(vb::BeachLineNodeData::new_1(edge)),
+            )?;
             // Update iterators.
             it_first += 1;
             it_second += 1;
@@ -415,7 +417,7 @@ impl<I: InputType> Builder<I> {
             if !site_event.is_segment() {
                 while !self.end_points_.is_empty()
                     // we checked with !is_empty(), unwrap is safe
-                    && self.end_points_.peek().unwrap().site() == site_event.point0()
+                    && self.end_points_.top().unwrap().site() == site_event.point0()
                 {
                     // we checked with !is_empty(), unwrap is safe
                     let b_it = self.end_points_.pop().unwrap();
@@ -606,7 +608,7 @@ impl<I: InputType> Builder<I> {
     /// we remove (A, B), (B, C) and insert (A, C). As beach line comparison
     /// works correctly only if one of the nodes is a new one we remove
     /// (B, C) bisector and change (A, B) bisector to the (A, C). That's
-    /// why we use replace_key() there and take all the responsibility that
+    /// why we change the key in place there and take all the responsibility that
     /// map data structure keeps correct ordering.
     pub(crate) fn process_circle_event(&mut self, output: &mut vd::Diagram) -> Result<(), BvError> {
         #[cfg(feature = "console_debug")]
@@ -716,7 +718,7 @@ impl<I: InputType> Builder<I> {
                 )?;
             }
 
-            let _ = it_first.replace_key(it_first_key_after)?;
+            it_first.set_key_in_place(it_first_key_after)?;
 
             #[cfg(feature = "console_debug")]
             {
@@ -768,11 +770,6 @@ impl<I: InputType> Builder<I> {
             )?;
         }
         // Remove the (B, C) bisector node from the beach line.
-        if it_first.current() == it_last.current() {
-            // todo: is this correct?
-            //println!("------- it_first.next()?");
-            it_first.next()?;
-        }
         #[cfg(feature = "console_debug")]
         assert_ne!(
             it_first.current_must_be_valid()?,
@@ -860,26 +857,22 @@ impl<I: InputType> Builder<I> {
         // Update the output.
         let edges = output.insert_new_edge_2_(site_arc2, site_event);
 
+        // As C++: each insertion is hinted by the node the previous one returned, starting at
+        // `position` (None for end()), so the map makes Boost's comparisons in Boost's order.
         #[cfg(not(feature = "console_debug"))]
-        let _ = self.beach_line_.insert(
+        let (_, mut position) = self.beach_line_.insert(
             position,
             new_right_node,
             Some(vb::BeachLineNodeData::new_1(edges.1)),
-        );
+        )?;
         #[cfg(feature = "console_debug")]
-        let _ = self.beach_line_.insert(
+        let (_, mut position) = self.beach_line_.insert(
             position,
             new_right_node,
-            vb::BeachLineNodeData::new_1(edges.1),
+            Some(vb::BeachLineNodeData::new_1(edges.1)),
             &self.circle_events_,
         )?;
 
-        #[cfg(feature = "console_debug")]
-        {
-            self.beach_line_.dbgpa_compat_(&self.circle_events_)?;
-            self.beach_line_.dbgp_all_cmp();
-            println!();
-        }
         if site_event.is_segment() {
             // Update the beach line with temporary bisector, that will
             // disappear after processing site event corresponding to the
@@ -887,41 +880,32 @@ impl<I: InputType> Builder<I> {
             let new_node =
                 vb::BeachLineNodeKey::<I>::new_2(site_event, *site_event.clone().inverse());
 
-            #[cfg(feature = "console_debug")]
-            let (_, index) = self.beach_line_.insert_2(new_node, &self.circle_events_)?;
             #[cfg(not(feature = "console_debug"))]
-            let (_, index) = self.beach_line_.insert_2(new_node)?;
-
+            let (_, index) = self.beach_line_.insert(Some(position), new_node, None)?;
             #[cfg(feature = "console_debug")]
-            {
-                self.beach_line_.dbgpa_compat_(&self.circle_events_)?;
-                self.beach_line_.dbgp_all_cmp();
-                println!();
-            }
+            let (_, index) =
+                self.beach_line_
+                    .insert(Some(position), new_node, None, &self.circle_events_)?;
+            position = index;
+
             // Update the data structure that holds temporary bisectors.
             self.end_points_
-                .push(vep::EndPointPair::new(site_event.point1(), index));
+                .push(vep::EndPointPair::new(site_event.point1(), position));
         }
         let new_node_data = vb::BeachLineNodeData::new_1(edges.0);
 
         #[cfg(not(feature = "console_debug"))]
-        {
-            Ok(self
-                .beach_line_
-                .insert(position, new_left_node, Some(new_node_data))?
-                .1)
-        }
+        let (_, position) =
+            self.beach_line_
+                .insert(Some(position), new_left_node, Some(new_node_data))?;
         #[cfg(feature = "console_debug")]
-        {
-            let rv = Ok(self
-                .beach_line_
-                .insert(position, new_left_node, new_node_data, &self.circle_events_)?
-                .1);
-            self.beach_line_.dbgpa_compat_(&self.circle_events_)?;
-            self.beach_line_.dbgp_all_cmp();
-            println!();
-            rv
-        }
+        let (_, position) = self.beach_line_.insert(
+            Some(position),
+            new_left_node,
+            Some(new_node_data),
+            &self.circle_events_,
+        )?;
+        Ok(position)
     }
 
     /// Add a new circle event to the event queue.

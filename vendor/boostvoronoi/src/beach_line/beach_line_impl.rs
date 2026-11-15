@@ -18,9 +18,8 @@ use super::{
 use crate::{BvError, InputType};
 #[cfg(feature = "console_debug")]
 use crate::{t, tln};
-use cpp_map::skiplist::{Index, SkipList};
+use super::rbtree::{Index, RbMap};
 use std::cell::{Cell, RefCell};
-use std::ops::Deref;
 use std::rc::Rc;
 
 impl<I: InputType> BeachLine<I> {
@@ -44,7 +43,7 @@ impl<I: InputType> BeachLine<I> {
     }
 
     #[inline(always)]
-    /// Returns a pointer to the last beach-line item or None
+    /// A cursor at the last beach-line node (`--end()`)
     pub(crate) fn last(&self) -> Result<BeachlineCursor<I>, BvError> {
         BeachlineCursor::new_from_index(
             Rc::clone(&self.beach_line_),
@@ -52,14 +51,9 @@ impl<I: InputType> BeachLine<I> {
         )
     }
 
-    #[inline(always)]
-    /// Returns the last position of the beach-line list
-    pub(crate) fn last_position(&self) -> Option<BeachLineIndex> {
-        self.beach_line_.borrow().last()
-    }
-
-    /// updates the node_index of the key, inserts it into the list and
-    /// returns a copy of it
+    /// `beach_line_.insert(position, (key, data))`, `position` a node or None for `end()`:
+    /// the inserted node, or the node already holding an equivalent key, as std::map's
+    /// hinted insert (and its probes) does.
     #[cfg(not(feature = "console_debug"))]
     pub(crate) fn insert(
         &mut self,
@@ -68,76 +62,34 @@ impl<I: InputType> BeachLine<I> {
         data: Option<BeachLineNodeData>,
     ) -> Result<(BeachLineNodeKey<I>, BeachLineIndex), BvError> {
         let node = Rc::new(Cell::new(data));
-        let node_index = if let Some(position) = position {
-            self.beach_line_
-                .borrow_mut()
-                .insert_with_hint(key, node, position)?
-        } else {
-            self.beach_line_.borrow_mut().insert(key, node)?
-        };
+        let node_index = self
+            .beach_line_
+            .try_borrow_mut()?
+            .insert_with_hint(position, key, node);
         Ok((key, node_index))
     }
 
-    /// updates the node_index of the key, inserts it into the list and
-    /// returns a copy of it
+    /// As the non-debug `insert`, printing the node.
     #[cfg(feature = "console_debug")]
     pub(crate) fn insert(
         &mut self,
         position: Option<BeachLineIndex>,
         key: BeachLineNodeKey<I>,
-        data: BeachLineNodeData,
+        data: Option<BeachLineNodeData>,
         _ce: &crate::circle_event::CircleEventQueue,
     ) -> Result<(BeachLineNodeKey<I>, BeachLineIndex), BvError> {
-        let node = Rc::from(Cell::from(Some(data)));
+        let node = Rc::new(Cell::new(data));
         let node_clone = node.clone();
-        let node_index = if let Some(position) = position {
-            let rv = self
-                .beach_line_
-                .borrow_mut()
-                .insert_with_hint(key, node, position)?;
-            t!("inserted beach_line_1:");
-            rv
-        } else {
-            let rv = self.beach_line_.borrow_mut().insert(key, node)?;
-            t!("inserted beach_line_2:");
-            rv
-        };
+        let node_index = self
+            .beach_line_
+            .try_borrow_mut()?
+            .insert_with_hint(position, key, node);
+        t!("inserted beach_line:");
         self.dbgpa_compat_node_(&key, &node_clone, _ce)?;
         Ok((key, node_index))
     }
 
-    /// updates the node_index of the key, inserts it into the list and
-    /// returns a copy of it
-    #[cfg(not(feature = "console_debug"))]
-    pub(crate) fn insert_2(
-        &mut self,
-        key: BeachLineNodeKey<I>,
-    ) -> Result<(BeachLineNodeKey<I>, BeachLineIndex), BvError> {
-        let node = Rc::new(Cell::new(None));
-        let node_index = self.beach_line_.borrow_mut().insert(key, node)?;
-        Ok((key, node_index))
-    }
-
-    /// inserts a new node key into the list and
-    /// returns a copy of it
-    #[cfg(feature = "console_debug")]
-    pub(crate) fn insert_2(
-        &mut self,
-        key: BeachLineNodeKey<I>,
-        _ce: &crate::circle_event::CircleEventQueue,
-    ) -> Result<(BeachLineNodeKey<I>, BeachLineIndex), BvError> {
-        let data_node = Rc::from(Cell::from(None));
-        let node_index = self.beach_line_.borrow_mut().insert(key, data_node)?;
-        t!("inserted beach_line_2:");
-        let _ = self.dbgpa_compat_node_(
-            &key,
-            self.beach_line_.borrow().get_v_at(node_index).unwrap(),
-            _ce,
-        );
-        Ok((key, node_index))
-    }
-
-    /// Clear the beach line list
+    /// Clear the beach line
     #[inline(always)]
     pub fn clear(&mut self) {
         self.beach_line_.borrow_mut().clear();
@@ -148,26 +100,21 @@ impl<I: InputType> BeachLine<I> {
         &self,
         beachline_index: &BeachLineIndex,
     ) -> Result<(BeachLineNodeKey<I>, BeachLineNodeDataType), BvError> {
-        let bl_borrow = self.beach_line_.borrow();
-        let node = bl_borrow.get_at(*beachline_index);
-
-        if node.is_none() {
-            eprintln!("Failed to retrieve beach line key : {beachline_index}");
-            return Err(BvError::InternalError(format!(
+        let bl_borrow = self.beach_line_.try_borrow()?;
+        let (k, v) = bl_borrow.get(*beachline_index).ok_or_else(|| {
+            BvError::InternalError(format!(
                 "Tried to retrieve a beach line node that doesn't exist. Id:{}. {}:{}",
                 beachline_index,
                 file!(),
                 line!()
-            )));
-        }
-        let node = node.unwrap();
-        Ok((*node.0, Rc::clone(node.1)))
+            ))
+        })?;
+        Ok((*k, Rc::clone(v)))
     }
 
     #[inline(always)]
-    /// Returns the first beach line element in the container whose key is not considered to go
-    /// before position (i.e., either it is equivalent or goes after).
-    /// Returns None if no data is found
+    /// `lower_bound(key)`: the first node not less than `key`; a cursor at `end()` (is_ok()
+    /// false) when there is none.
     pub(crate) fn lower_bound(
         &self,
         key: BeachLineNodeKey<I>,
@@ -179,7 +126,7 @@ impl<I: InputType> BeachLine<I> {
     #[cfg(feature = "console_debug")]
     pub(crate) fn debug_cmp_all(&self, key: BeachLineNodeKey<I>) {
         use crate::predicate::node_comparison_predicate;
-        for (i, (k, _)) in self.beach_line_.borrow().iter().rev().enumerate() {
+        for (i, (k, _)) in self.beach_line_.borrow().iter().collect::<Vec<_>>().into_iter().rev().enumerate() {
             t!("#{}:", i);
             let _rv = node_comparison_predicate::node_comparison::<I>(k, &key);
         }
@@ -190,7 +137,7 @@ impl<I: InputType> BeachLine<I> {
     pub(crate) fn debug_print_all(&self) -> Result<(), BvError> {
         tln!();
         tln!("beach_line.len()={}", self.beach_line_.borrow().len());
-        for (i, (node_key, node_data)) in self.beach_line_.borrow().iter().rev().enumerate() {
+        for (i, (node_key, node_data)) in self.beach_line_.borrow().iter().collect::<Vec<_>>().into_iter().rev().enumerate() {
             t!(
                 "beach_line{} L:{:?},R:{:?}",
                 i,
@@ -359,10 +306,10 @@ impl<I: InputType> BeachlineCursor<I> {
     // K= BeachLineNodeKey<I>
     // V= BeachLineNodeDataType
 
-    /// Initiates the pointer with a list, set current to the head of the list.
+    /// A cursor at `begin()`.
     #[allow(dead_code)]
     pub(crate) fn new_1(
-        list: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+        list: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
     ) -> Result<Self, BvError> {
         let head = list.try_borrow()?.first();
         Ok(Self {
@@ -372,7 +319,7 @@ impl<I: InputType> BeachlineCursor<I> {
     }
 
     pub(crate) fn new_2(
-        list: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+        list: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
         pos: Index,
     ) -> Result<Self, BvError> {
         Ok(Self {
@@ -381,6 +328,7 @@ impl<I: InputType> BeachlineCursor<I> {
         })
     }
 
+    /// The node, or None at `end()`.
     #[inline(always)]
     pub fn current(&self) -> Option<Index> {
         self.current
@@ -388,106 +336,84 @@ impl<I: InputType> BeachlineCursor<I> {
 
     #[inline(always)]
     pub fn current_must_be_valid(&self) -> Result<Index, BvError> {
-        if let Some(index) = self.current {
-            Ok(index)
-        } else {
-            Err(BvError::IndexError(
-                format!(
-                    "current_must_be_valid: was None when Some was expected {} {}",
-                    file!(),
-                    line!()
-                )
-                .to_string(),
+        self.current.ok_or_else(|| {
+            BvError::IndexError(format!(
+                "current_must_be_valid: was None when Some was expected {} {}",
+                file!(),
+                line!()
             ))
-        }
+        })
     }
 
-    /// Initiates the pointer with a list, set index.
+    /// A cursor at a node.
     pub fn new_from_index(
-        list: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+        list: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
         current: Option<BeachLineIndex>,
     ) -> Result<Self, BvError> {
         if current.is_some() {
-            Ok(Self {
-                current,
-                list: Rc::clone(&list),
-            })
+            Ok(Self { current, list })
         } else {
-            Err(BvError::IndexError(
-                format!(
-                    "new_from_index: was None when Some was expected {} {}",
-                    file!(),
-                    line!()
-                )
-                .to_string(),
-            ))
+            Err(BvError::IndexError(format!(
+                "new_from_index: was None when Some was expected {} {}",
+                file!(),
+                line!()
+            )))
         }
     }
 
     #[inline(always)]
-    /// Returns a clone of the key at current position.
-    /// It the replacement key is present in the value, that key will be returned instead.
+    /// A copy of the key at the cursor.
     pub fn get_k(&self) -> Result<BeachLineNodeKey<I>, BvError> {
         let list = self.list.try_borrow()?;
-        if let Some(current) = self.current {
-            if let Some(k) = list.get_k_at(current) {
-                return Ok(*k);
-            }
-        }
-        Err(BvError::IndexError(
-            format!(
-                "get_k: was None when Some was expected {} {}",
-                file!(),
-                line!()
-            )
-            .to_string(),
-        ))
+        self.current
+            .and_then(|c| list.get(c))
+            .map(|(k, _)| *k)
+            .ok_or_else(|| {
+                BvError::IndexError(format!(
+                    "get_k: was None when Some was expected {} {}",
+                    file!(),
+                    line!()
+                ))
+            })
     }
 
     #[inline(always)]
-    /// Returns a clone of the value at current position
+    /// A clone of the value at the cursor.
     pub fn get_v(&self) -> Result<BeachLineNodeDataType, BvError> {
         let list = self.list.try_borrow()?;
-        if let Some(current) = self.current {
-            if let Some(v) = list.get_v_at(current) {
-                return Ok(v.clone());
-            }
-        }
-        Err(BvError::IndexError(
-            format!(
-                "get_v: was None when Some was expected {} {}",
-                file!(),
-                line!()
-            )
-            .to_string(),
-        ))
+        self.current
+            .and_then(|c| list.get(c))
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| {
+                BvError::IndexError(format!(
+                    "get_v: was None when Some was expected {} {}",
+                    file!(),
+                    line!()
+                ))
+            })
     }
 
     #[allow(clippy::should_implement_trait)]
     #[inline(always)]
-    /// Move to the next element.
+    /// `++it`; `end()` past the last node.
     /// Note that this is NOT a Rust iterator next() method.
-    /// Always check validity of the iterator with is_ok() after next()
-    // todo: change the return value to Result<bool, MapError>
     pub fn next(&mut self) -> Result<(), BvError> {
         let list_borrow = self.list.try_borrow()?;
-        self.current = list_borrow.next_pos(self.current);
+        self.current = list_borrow.next(self.current);
         Ok(())
     }
 
     #[inline(always)]
-    /// Move to the previous element
-    /// Always check validity of the iterator with is_ok() after prev()
-    // todo: change the return value to Result<bool, MapError>
+    /// `--it`; from `end()` the last node.
     pub fn prev(&mut self) -> Result<(), BvError> {
         let list_borrow = self.list.try_borrow()?;
-        self.current = list_borrow.prev_pos(self.current);
+        self.current = list_borrow.prev(self.current);
         Ok(())
     }
 
     #[allow(dead_code)]
     #[inline(always)]
-    /// Move to the first element
+    /// Move to the first node
     pub fn move_to_head(&mut self) -> Result<(), BvError> {
         self.current = self.list.try_borrow()?.first();
         Ok(())
@@ -495,111 +421,76 @@ impl<I: InputType> BeachlineCursor<I> {
 
     #[allow(dead_code)]
     #[inline(always)]
-    /// Move to the last element
+    /// Move to the last node
     pub fn move_to_tail(&mut self) -> Result<(), BvError> {
         self.current = self.list.try_borrow()?.last();
         Ok(())
     }
 
     #[inline(always)]
-    /// Return true if pointer has *NOT* moved past beginning or end of the list
+    /// Whether the cursor is at a node, not `end()`.
     pub fn is_ok(&self) -> Result<bool, BvError> {
         let list = self.list.try_borrow()?;
-        Ok(list.is_pos_valid(self.current))
+        Ok(self.current.is_some_and(|c| list.get(c).is_some()))
     }
 
     #[inline(always)]
-    /// Return true if pointer is at head position or if the list is empty
+    /// `it == begin()`; true for an empty beach line as there begin() == end().
     pub fn is_at_head(&self) -> Result<bool, BvError> {
-        Ok(self.list.try_borrow()?.is_at_first(self.current))
+        Ok(self.current == self.list.try_borrow()?.first())
     }
 
     #[allow(dead_code)]
     #[inline(always)]
-    /// Return true if pointer is at tail position or if the list is empty
+    /// Whether the cursor is at the last node.
     pub fn is_at_tail(&self) -> Result<bool, BvError> {
-        Ok(self.list.try_borrow()?.is_at_last(self.current))
+        let list = self.list.try_borrow()?;
+        Ok(self.current.is_some() && self.current == list.last())
     }
 
     #[inline(always)]
-    /// Replace current key with the new one (re-order the list accordingly)
-    pub fn replace_key(&mut self, new_key: BeachLineNodeKey<I>) -> Result<Index, BvError> {
-        let result = {
-            let mut list = self.list.try_borrow_mut()?;
-            list.change_key_of_node(self.current.unwrap(), new_key)
-        };
-        match result {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                println!("Error: {e:?} when trying to change key");
-                let list = self.list.try_borrow()?;
-                println!(
-                    "     new key:{:?} existing value:{:?}",
-                    new_key,
-                    list.get_v_at(self.current.unwrap())
-                );
-                let existing_kv = list.deref().get_kv(&new_key).unwrap();
-                println!(
-                    "existing key:{:?} existing value:{:?}",
-                    existing_kv.0,
-                    existing_kv.1.get()
-                );
-                println!(
-                    "existing key .eq() new key == {:?}",
-                    existing_kv.0.eq(&new_key)
-                );
-                println!(
-                    "existing key .cmp() new key == {:?}",
-                    existing_kv.0.cmp(&new_key)
-                );
-                println!(
-                    "existing key .lt() new key == {:?}",
-                    existing_kv.0.lt(&new_key)
-                );
-                println!(
-                    "existing key .gt() new key == {:?}",
-                    existing_kv.0.gt(&new_key)
-                );
-                Err(e)?
-            }
-        }
-    }
-
-    #[inline(always)]
-    /// Remove the current element and return it. Move current to the old prev value if existed.
-    /// Else pick old next index.
-    /// Note: make sure that there are no other Pointer objects at this position.
-    pub fn remove_current(&mut self) -> Result<(), BvError> {
-        if self.current.is_some() {
-            let mut list = self.list.try_borrow_mut()?;
-            if list.remove_by_index(&mut self.current).is_none() {
-                println!(
-                    " Could not remove beachline index:{:?}, something is wrong",
-                    self.current
-                );
-            }
-        } else {
-            println!(
-                " Could not remove beachline index:{:?}, something is wrong",
-                self.current
-            );
-        }
+    /// Change the key at the cursor in place, without reordering: Boost's
+    /// `const_cast<key_type&>(it->first)`. The caller keeps the beach line ordered.
+    pub fn set_key_in_place(&mut self, new_key: BeachLineNodeKey<I>) -> Result<(), BvError> {
+        let mut list = self.list.try_borrow_mut()?;
+        let key = self.current.and_then(|c| list.key_mut(c)).ok_or_else(|| {
+            BvError::IndexError(format!(
+                "set_key_in_place: no node at the cursor {} {}",
+                file!(),
+                line!()
+            ))
+        })?;
+        *key = new_key;
         Ok(())
     }
 
     #[inline(always)]
-    /// Returns a new Pointer positioned at the lower bound item.
-    /// Lower bound item is the first element in the container whose key is not considered to go
-    /// before position (i.e., either it is equivalent or goes after).
-    /// Returns a Pointer where is_ok() returns false if no data is found
+    /// `beach_line_.erase(it)`; the cursor is then at `end()`.
+    /// Note: make sure that there are no other cursors at this position.
+    pub fn remove_current(&mut self) -> Result<(), BvError> {
+        let removed = match self.current {
+            Some(c) => self.list.try_borrow_mut()?.erase(c),
+            None => false,
+        };
+        if !removed {
+            return Err(BvError::InternalError(format!(
+                "Could not remove beach line node {:?} {}:{}",
+                self.current,
+                file!(),
+                line!()
+            )));
+        }
+        self.current = None;
+        Ok(())
+    }
+
+    #[inline(always)]
+    /// A cursor at `lower_bound(key)`, at `end()` (is_ok() false) when no node is not less.
     pub fn lower_bound(
-        list: Rc<RefCell<SkipList<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
+        list: Rc<RefCell<RbMap<BeachLineNodeKey<I>, BeachLineNodeDataType>>>,
         key: BeachLineNodeKey<I>,
     ) -> Result<Self, BvError> {
-        let position = {
-            let bt_list = list.try_borrow()?;
-            bt_list.deref().lower_bound(&key)
-        };
+        let position = list.try_borrow()?.lower_bound(&key);
         Ok(Self {
             list,
             current: position,

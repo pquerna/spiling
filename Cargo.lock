@@ -864,7 +864,6 @@ dependencies = [
 name = "boostvoronoi"
 version = "0.12.1"
 dependencies = [
- "approx",
  "cpp_map",
  "libm",
  "num-traits",

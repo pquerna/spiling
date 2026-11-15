@@ -17,7 +17,6 @@ exclude = [
 ]
 
 [dependencies]
-approx = "0.5.1"
 ordered-float = "5.1.0"
 rustc-hash = "2.1"
 vob="3.0.6"
@@ -61,6 +60,7 @@ glam-glam-assert = ["glam/glam-assert"]
 
 
 [dev-dependencies]
+approx = "0.5.1"
 regex = "1.12.2"
 rand = "0.9.2"
 bitflags = "2.10.0"

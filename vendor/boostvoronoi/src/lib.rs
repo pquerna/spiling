@@ -50,6 +50,7 @@ mod beach_line;
 #[doc(hidden)]
 pub mod builder;
 mod circle_event;
+mod cpp_heap;
 #[doc(hidden)]
 pub mod diagram;
 mod end_point;

@@ -13,3 +13,16 @@ reason = "Evaluate signed cross products in i128 before conversion to f64 so adm
 [[changes]]
 paths = ["Cargo.toml"]
 reason = "Standalone published Cargo.toml.orig dependencies and features; omit unvendored GUI examples/benchmarks and their dev dependencies. Preserve runtime sources, original manifest, license and README."
+
+[[changes]]
+paths = ["src/beach_line.rs", "src/beach_line/rbtree.rs", "src/beach_line/beach_line_impl.rs", "src/beach_line/trait_impl.rs", "src/builder.rs", "src/cpp_heap.rs", "src/circle_event.rs", "src/end_point.rs", "src/lib.rs", "src/predicate/tests.rs"]
+reason = "The beach line follows C++ Boost.Polygon's red-black tree probe order. Boost's beach line comparator is non-monotone across the inverse arcs it keeps behind the sweep; that is in C++ Boost.Polygon too, a known upstream flaw not fixed here, so a search's answer depends on which nodes it probes. The port's skip list probed differently and stopped inside such a stretch on a real part (1234-segment wall section): circle events went missing and half-edges were left without next/prev. The beach line is now a red-black tree that transcribes libstdc++'s _Rb_tree (unique insert with and without a hint, lower_bound, erase with its rebalancing, header-based end() and iteration), and the builder calls it as voronoi_builder.hpp calls std::map: chained insertion hints, end() hints, in-place key change (const_cast) and erase. The circle event queue and the segment end-point queue keep libstdc++'s std::priority_queue heap (push_heap/pop_heap), so equal events surface in C++'s order; circle events compare by lower x then y exactly, as Boost's event_comparison_predicate."
+
+[[changes]]
+paths = ["src/predicate/lazy_circle_formation.rs"]
+reason = "Remove two port-only departures from C++ Boost.Polygon that changed which circle events the queue holds: the point-segment-segment shortcut that placed a circle at a shared end point's integer coordinates (C++ computes them; the site-point mark is kept), and the point-point-segment 'dot' test that refused circles whose tangent point projects off the segment (C++ keeps every circle its existence predicate admits). The non-finite-circle guards of the change above stay."
+
+[[changes]]
+paths = ["tests/cpp_differential.rs", "tests/data/part28_wall_segments.txt", "tests/data/cpp_reference_digests.txt", "tests/reference/boost_digest.cpp", "Cargo.toml"]
+reason = "Differential tests guard fidelity to the reference: the real part's wall section and 400 generated rectilinear segment sets (many vertical and collinear segments) are built and digested (counts, every cell's site, every vertex's coordinate bits, every edge's cell, vertex, twin, next, prev and kind) and compared with the digests C++ Boost.Polygon 1.86 (g++, libstdc++) computes, recorded by tests/reference/boost_digest.cpp. approx is a dev dependency (only tests use it)."
+
