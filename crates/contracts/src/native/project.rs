@@ -547,6 +547,7 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
             }),
         ),
         ProjectCommand::Open {
+            display,
             session_id,
             base_revision,
             path,
@@ -555,6 +556,7 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
             discard_changes,
         } => {
             return Ok(ProjectCall::Open(rpc::OpenProjectRequest {
+                display: rpc::SourceDisplayDemand::from(display) as i32,
                 parent: format!("sessions/{}", session_id.as_str()),
                 request_id: id.into(),
                 base_revision: base_revision.0,
@@ -907,6 +909,7 @@ impl TryFrom<rpc::OpenProjectRequest> for ProjectCommand {
     fn try_from(v: rpc::OpenProjectRequest) -> Result<Self, String> {
         request_id(&v.request_id)?;
         Ok(Self::Open {
+            display: crate::geometry::SourceDisplayDemand::try_from(v.display)?,
             session_id: session_parent(&v.parent)?,
             base_revision: SceneRevision(v.base_revision),
             path: required(v.path, "project path")?.try_into()?,

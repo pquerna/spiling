@@ -71,12 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         findings: source.findings.clone(),
                     }),
                 };
-                let definition = SourceDefinition::Hybrid(HybridDefinition {
-                    id: provenance.definition_id(),
+                let definition = SourceDefinition::Hybrid(HybridDefinition::new(
+                    provenance.definition_id(),
                     provenance,
                     bounds,
-                    complex: restored,
-                });
+                    restored,
+                ));
                 let display_started = Instant::now();
                 let mesh = definition.display(
                     DisplayProfile::MeshTrimmedMm005V2,

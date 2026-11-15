@@ -175,6 +175,7 @@ async fn import(client: &mut EngineClient, source: &Path) {
     let s = scene(client).await;
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: s.session_id,
             base_revision: s.revision,
             source: native(source),
@@ -635,6 +636,7 @@ async fn open(client: &mut EngineClient, path: &Path, read_only: bool) -> Native
     let s = scene(client).await;
     let ProjectResponse::OperationAccepted { operation } = client
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: s.session_id,
             base_revision: s.revision,
             path: native(path),
@@ -3058,6 +3060,7 @@ async fn setup_and_first_material_create_automatic_supports_and_survive_saved_re
     let initial = scene(&mut client).await;
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: initial.session_id,
             base_revision: initial.revision,
             source: native(&source),
@@ -3179,6 +3182,7 @@ async fn one_step_defaults_need_a_printer_then_create_record_and_compile() {
     let initial = scene(&mut client).await;
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: initial.session_id,
             base_revision: initial.revision,
             source: native(&source),

@@ -180,6 +180,33 @@ fn generated(name: &str) -> Vec<u8> {
 }
 const BOX: &[u8] = include_bytes!("../../../../fixtures/geometry/box-mm.step");
 const HOLE: &[u8] = include_bytes!("../../../../fixtures/geometry/through-hole.step");
+
+#[test]
+fn resident_preparation_reuse_preserves_plan_program_and_fresh_replay() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(HOLE, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(false);
+    let cold = compile(scene.input(&intent), &cancel).unwrap();
+    let source = scene.definitions.values().next().unwrap();
+    let (first, outcome) = source
+        .prepare_with_budget(Default::default(), 0, &cancel)
+        .unwrap();
+    assert_eq!(outcome, spiling_geometry::tolerant::PreparationOutcome::Hit);
+    let warm = compile(scene.input(&intent), &cancel).unwrap();
+    let (again, outcome) = source
+        .prepare_with_budget(Default::default(), 0, &cancel)
+        .unwrap();
+    assert_eq!(outcome, spiling_geometry::tolerant::PreparationOutcome::Hit);
+    assert!(Arc::ptr_eq(&first, &again));
+    assert_eq!(cold.plan, warm.plan);
+    assert_eq!(
+        cold.program.to_vec().unwrap(),
+        warm.program.to_vec().unwrap()
+    );
+    let reloaded = reload(&encode(&warm), &warm.program);
+    assert!(crate::verify_bundle(&reloaded, &cancel).unwrap().verified);
+}
+
 fn translated(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

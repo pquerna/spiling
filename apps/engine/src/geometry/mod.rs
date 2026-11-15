@@ -363,7 +363,7 @@ impl Runtime {
             .filter(move |(id, _)| snapshot.sources.contains_key(*id))
             .filter_map(|(_, definition)| match &definition.record.display {
                 DefinitionDisplay::Mesh { artifact_id } => Some(*artifact_id),
-                DefinitionDisplay::Unavailable { .. } => None,
+                DefinitionDisplay::Unavailable { .. } | DefinitionDisplay::NotRequested => None,
             })
     }
 
@@ -1090,7 +1090,16 @@ impl Runtime {
                 }
                 // Staged artifacts are pinned definition meshes; their bytes,
                 // not their count, are admitted.
-                if self.definitions.len() + definitions.len() > MAX_DEFINITIONS as usize
+                if self.definitions.len()
+                    + definitions
+                        .iter()
+                        .filter(|definition| {
+                            !self
+                                .definitions
+                                .contains_key(&definition.record.definition_id)
+                        })
+                        .count()
+                    > MAX_DEFINITIONS as usize
                     || self.definitions.values().map(|d| d.vertices).sum::<u32>() + staged_vertices
                         > MAX_DISPLAY_VERTICES
                     || self.definitions.values().map(|d| d.triangles).sum::<u32>()
@@ -1140,7 +1149,16 @@ impl Runtime {
                 }
                 // Staged artifacts are pinned definition meshes; their bytes,
                 // not their count, are admitted.
-                if self.definitions.len() + definitions.len() > MAX_DEFINITIONS as usize
+                if self.definitions.len()
+                    + definitions
+                        .iter()
+                        .filter(|definition| {
+                            !self
+                                .definitions
+                                .contains_key(&definition.record.definition_id)
+                        })
+                        .count()
+                    > MAX_DEFINITIONS as usize
                     || self.definitions.values().map(|d| d.vertices).sum::<u32>() + staged_vertices
                         > MAX_DISPLAY_VERTICES
                     || self.definitions.values().map(|d| d.triangles).sum::<u32>()
@@ -1302,13 +1320,8 @@ impl Runtime {
             worker::ImportedDisplay::Unavailable(error) => {
                 (DefinitionDisplay::Unavailable { error }, None)
             }
+            worker::ImportedDisplay::NotRequested => (DefinitionDisplay::NotRequested, None),
         };
-        if self.definitions.contains_key(&definition_id) {
-            return Err(error(
-                GeometryErrorCode::KernelFailure,
-                "duplicate native definition stage",
-            ));
-        }
         let record = DefinitionRecord {
             definition_id: definition_id.clone(),
             provenance: imported.provenance,
@@ -1317,6 +1330,20 @@ impl Runtime {
             display,
         };
         record.validate()?;
+        if let Some(existing) = self.definitions.get(&definition_id) {
+            let mut expected = existing.record.clone();
+            expected.display = record.display.clone();
+            if !matches!(existing.record.display, DefinitionDisplay::NotRequested)
+                || matches!(record.display, DefinitionDisplay::NotRequested)
+                || expected != record
+                || existing.faces != imported.faces
+            {
+                return Err(error(
+                    GeometryErrorCode::KernelFailure,
+                    "duplicate native definition stage changed source or existing preview",
+                ));
+            }
+        }
         let mut definition = DefinitionState {
             record,
             faces: imported.faces,
@@ -1438,7 +1465,7 @@ impl Runtime {
             .filter(|(id, _)| !ids.contains(*id))
             .filter_map(|(_, definition)| match &definition.record.display {
                 DefinitionDisplay::Mesh { artifact_id } => Some(*artifact_id),
-                DefinitionDisplay::Unavailable { .. } => None,
+                DefinitionDisplay::Unavailable { .. } | DefinitionDisplay::NotRequested => None,
             })
             .collect();
         self.definitions.retain(|id, _| ids.contains(id));
@@ -1504,6 +1531,7 @@ impl Runtime {
     fn control_inner(&mut self, command: GeometryCommand) -> Domain<Reply> {
         match command {
             GeometryCommand::ImportPart {
+                display,
                 session_id,
                 base_revision,
                 source,
@@ -1540,6 +1568,7 @@ impl Runtime {
                     MAX_SCENE_MESH_BYTES,
                     move |_, _, _| {
                         Work::Import(worker::ImportRequest {
+                            display,
                             source,
                             options,
                             allowed_reuse,
@@ -1708,8 +1737,15 @@ impl Runtime {
                     center_xy,
                     contact_tolerance_mm,
                 };
+                let retained_source_bytes = self
+                    .project
+                    .retained_source_bytes()
+                    .map_err(|cause| error(GeometryErrorCode::ResourceLimit, cause.message))?;
                 self.start(Purpose::PrepareBedPose, 0, move |_, _, _| {
-                    Work::PrepareBedPose(request)
+                    Work::PrepareBedPose {
+                        request,
+                        retained_source_bytes,
+                    }
                 })
             }
             GeometryCommand::AddInstance {
@@ -2664,6 +2700,7 @@ impl Runtime {
                 }))
             }
             ProjectCommand::Open {
+                display,
                 session_id,
                 base_revision,
                 path,
@@ -2696,6 +2733,7 @@ impl Runtime {
                 let response = self
                     .start(Purpose::Open, 0, move |_, _, _| {
                         Work::Open(worker::OpenRequest {
+                            display,
                             path,
                             reuse_sources,
                             read_only,

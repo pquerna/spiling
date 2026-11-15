@@ -23,14 +23,12 @@ pub(super) struct Admission<'work> {
     pub geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
     /// ADR012: each occurrence's tessellation placed in world coordinates.
     pub models: BTreeMap<OccurrenceId, std::sync::Arc<TolerantModel>>,
+    model_growth_bytes: usize,
 }
 
 impl Admission<'_> {
     pub(super) fn model_bytes(&self) -> usize {
-        self.models
-            .values()
-            .map(|model| model.retained_bytes())
-            .sum::<usize>()
+        self.model_growth_bytes
     }
 }
 
@@ -125,8 +123,10 @@ pub(super) fn admit<'work>(
     geometry_work: &'work mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<Admission<'work>, ManufacturingError> {
     check_cancel(cancel)?;
-    let mut tolerant_models: BTreeMap<spiling_contracts::geometry::DefinitionId, TolerantModel> =
-        BTreeMap::new();
+    let mut tolerant_models: BTreeMap<
+        spiling_contracts::geometry::DefinitionId,
+        std::sync::Arc<TolerantModel>,
+    > = BTreeMap::new();
     let mut result = Admission {
         bounds: None,
         horizontal_events: Vec::new(),
@@ -135,6 +135,7 @@ pub(super) fn admit<'work>(
         surface_fields: BTreeMap::new(),
         geometry_work,
         models: BTreeMap::new(),
+        model_growth_bytes: 0,
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -406,11 +407,18 @@ pub(super) fn admit<'work>(
             }
         }
         if !tolerant_models.contains_key(&occurrence.definition_id) {
-            match definition.prepare(TolerantPolicy::default(), cancel) {
-                Ok(model) if model.failed_faces == 0 => {
+            let remaining = crate::working_set::bytes().saturating_sub(result.model_growth_bytes);
+            match definition.prepare_with_budget(TolerantPolicy::default(), remaining, cancel) {
+                Ok((model, outcome)) if model.failed_faces == 0 => {
+                    result.model_growth_bytes = result
+                        .model_growth_bytes
+                        .saturating_add(outcome.allocated_bytes());
                     tolerant_models.insert(occurrence.definition_id.clone(), model);
                 }
-                Ok(model) => {
+                Ok((model, outcome)) => {
+                    result.model_growth_bytes = result
+                        .model_growth_bytes
+                        .saturating_add(outcome.allocated_bytes());
                     add(
                         "native_unsupported_geometry",
                         format!(
@@ -422,7 +430,12 @@ pub(super) fn admit<'work>(
                     );
                     continue 'occurrences;
                 }
-                Err(e) if e.code == GeometryErrorCode::Cancelled => {
+                Err(e)
+                    if matches!(
+                        e.code,
+                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                    ) =>
+                {
                     return Err(super::native_error(e, "tolerant tessellation"));
                 }
                 Err(e) => {
@@ -436,7 +449,22 @@ pub(super) fn admit<'work>(
                 }
             }
         }
-        let model = tolerant_models[&occurrence.definition_id].placed(&occurrence.pose);
+        let base = &tolerant_models[&occurrence.definition_id];
+        let model = if occurrence.pose == spiling_contracts::geometry::RigidPoseMm::IDENTITY {
+            std::sync::Arc::clone(base)
+        } else {
+            let model = base
+                .placed_with_budget(
+                    &occurrence.pose,
+                    crate::working_set::bytes().saturating_sub(result.model_growth_bytes),
+                    cancel,
+                )
+                .map_err(|cause| super::native_error(cause, "placed source preparation"))?;
+            result.model_growth_bytes = result
+                .model_growth_bytes
+                .saturating_add(model.placement_bytes());
+            std::sync::Arc::new(model)
+        };
         let margin = model.policy().profile_mm;
         let (min, max) = model.bounds();
         // Tessellation vertices lie on the surface; chords can cut inside
@@ -448,7 +476,7 @@ pub(super) fn admit<'work>(
         };
         result
             .models
-            .insert(occurrence.occurrence_id, std::sync::Arc::new(model));
+            .insert(occurrence.occurrence_id, std::sync::Arc::clone(&model));
         let mut placed = placed;
         result
             .native_bounds

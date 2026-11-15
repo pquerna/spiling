@@ -1912,6 +1912,7 @@ impl Actor {
                     uncertain: false,
                 }));
                 ProjectCommand::Open {
+                    display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                     session_id,
                     base_revision,
                     path,
@@ -1949,6 +1950,7 @@ impl Actor {
                 crate::performance::mark("import_requested");
                 let result = client
                     .geometry(GeometryCommand::ImportPart {
+                        display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                         session_id,
                         base_revision,
                         source,

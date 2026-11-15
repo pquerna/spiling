@@ -59,6 +59,7 @@ async fn scene(client: &mut EngineClient) -> SceneSummary {
 async fn import(client: &mut EngineClient, path: &Path) -> spiling_contracts::NativeOperationView {
     let summary = scene(client).await;
     let command = GeometryCommand::ImportPart {
+        display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
         session_id: summary.session_id.clone(),
         base_revision: summary.revision,
         source: NativePath::from_os_str(path.as_os_str()).unwrap(),
@@ -137,6 +138,7 @@ async fn native_watch_drop_reconnect_and_terminal_receipts_preserve_work() {
     let before = scene(&mut client).await;
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: before.session_id,
             base_revision: before.revision,
             source: NativePath::from_os_str(fixture("box-mm.step").as_os_str()).unwrap(),
@@ -400,6 +402,7 @@ async fn preflight_rejections_leave_transport_unwritten_and_live() {
     let mut client = EngineClient::spawn(engine()).await.unwrap();
     let summary = scene(&mut client).await;
     let command = GeometryCommand::ImportPart {
+        display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
         session_id: summary.session_id,
         base_revision: summary.revision,
         source: NativePath::UnixBytes {
@@ -497,6 +500,7 @@ async fn open_project(
     let summary = scene(client).await;
     let response = client
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: summary.session_id,
             base_revision: summary.revision,
             path: NativePath::from_os_str(path.as_os_str()).unwrap(),
@@ -592,6 +596,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
             occurrence_id: occurrence.occurrence_id,
         },
         GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: readonly.session_id.clone(),
             base_revision: readonly.revision,
             source: NativePath::from_os_str(fixture("cylinder.step").as_os_str()).unwrap(),
@@ -667,6 +672,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
     assert_eq!(scene(&mut reader).await, readonly);
     let error = reader
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: readonly.session_id.clone(),
             base_revision: readonly.revision,
             path: NativePath::UnixBytes {

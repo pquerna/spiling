@@ -434,7 +434,7 @@ impl TolerantModel {
     fn critical_heights(&self, cancel: &AtomicBool) -> Result<Vec<f64>, GeometryError> {
         let count = self.positions.len();
         let mut start = vec![0usize; count + 1];
-        for triangle in &self.triangles {
+        for triangle in self.triangles.iter() {
             for v in triangle {
                 start[*v as usize + 1] += 1;
             }
@@ -445,7 +445,7 @@ impl TolerantModel {
         let mut fill = start.clone();
         // Each corner's opposite edge in the triangle's winding.
         let mut link = vec![[0u32; 2]; start[count]];
-        for t in &self.triangles {
+        for t in self.triangles.iter() {
             for k in 0..3 {
                 let v = t[k] as usize;
                 link[fill[v]] = [t[(k + 1) % 3], t[(k + 2) % 3]];
@@ -509,7 +509,7 @@ impl TolerantModel {
         // Require the derived facet complex itself to close, after exact
         // coordinate welding, before asserting complete hole inventory.
         let mut edges = HashMap::<(u32, u32), u32>::new();
-        for triangle in &self.triangles {
+        for triangle in self.triangles.iter() {
             cancelled(cancel)?;
             for [a, b] in [
                 [triangle[0], triangle[1]],
@@ -782,7 +782,7 @@ impl TolerantModel {
         for group in &mut result {
             cancelled(cancel)?;
             group.bottom = hull(std::mem::take(&mut group.bottom));
-            for triangle in &self.triangles {
+            for triangle in self.triangles.iter() {
                 cancelled(cancel)?;
                 let vertices = triangle.map(|i| self.positions[i as usize]);
                 if vertices.iter().all(|p| p[2] == group.height_mm[0]) {
@@ -910,7 +910,7 @@ mod tests {
             for group in &mut result {
                 cancelled(cancel)?;
                 group.bottom = hull(std::mem::take(&mut group.bottom));
-                for triangle in &self.triangles {
+                for triangle in self.triangles.iter() {
                     cancelled(cancel)?;
                     let vertices = triangle.map(|i| self.positions[i as usize]);
                     if vertices.iter().all(|p| p[2] == group.height_mm[0]) {

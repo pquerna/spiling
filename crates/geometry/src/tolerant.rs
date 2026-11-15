@@ -30,7 +30,10 @@ pub use support::{TolerantSupportPiece, TolerantSupportProjection, TolerantVoidP
 use crate::{GeometryError, GeometryErrorCode, kernel::Definition};
 use solidcore_tess::MeshTolerance;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 /// Height of a tessellation bucket used to find the triangles a plane crosses.
 const BUCKET_MM: f64 = 0.5;
@@ -86,8 +89,8 @@ impl Default for TolerantPolicy {
 #[derive(Debug, Clone)]
 pub struct TolerantModel {
     positions: Vec<[f64; 3]>,
-    triangles: Vec<[u32; 3]>,
-    faces: Vec<u32>,
+    triangles: Arc<Vec<[u32; 3]>>,
+    faces: Arc<Vec<u32>>,
     /// Analytic surface of each source face, by ordinal, in the model frame.
     surfaces: Vec<Option<exact::Implicit>>,
     buckets: Vec<Vec<u32>>,
@@ -133,23 +136,140 @@ fn weld(positions: &mut Vec<[f64; 3]>, triangles: &mut [[u32; 3]]) {
     }
 }
 
-/// The tolerant model's control of its plan: cancellation only (its work is not budgeted).
-struct Cancellable<'a>(&'a AtomicBool);
+struct Cancellable<'a> {
+    cancel: &'a AtomicBool,
+    bytes: AtomicUsize,
+    limit: usize,
+}
 impl solidcore_tess::Control for Cancellable<'_> {
     fn charge(&self, _work: u64) -> Result<(), solidcore_tess::Stop> {
-        if self.0.load(Ordering::Relaxed) {
+        if self.cancel.load(Ordering::Relaxed) {
             Err(solidcore_tess::Stop::Cancelled)
         } else {
             Ok(())
         }
     }
-    fn admit(&self, _bytes: usize) -> Result<(), solidcore_tess::Stop> {
-        Ok(())
+    fn admit(&self, bytes: usize) -> Result<(), solidcore_tess::Stop> {
+        self.bytes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|total| *total <= self.limit)
+            })
+            .map(|_| ())
+            .map_err(|_| solidcore_tess::Stop::Bytes)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PreparationCache(Mutex<Option<Arc<TolerantModel>>>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationOutcome {
+    Hit,
+    Published(usize),
+    Unpublished(usize),
+}
+
+impl PreparationOutcome {
+    pub fn allocated_bytes(self) -> usize {
+        match self {
+            Self::Hit => 0,
+            Self::Published(bytes) | Self::Unpublished(bytes) => bytes,
+        }
+    }
+}
+
+impl PreparationCache {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |model| model.retained_bytes())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        policy: TolerantPolicy,
+        cancel: &AtomicBool,
+        build: impl FnOnce() -> Result<TolerantModel, GeometryError>,
+    ) -> Result<(Arc<TolerantModel>, PreparationOutcome), GeometryError> {
+        crate::check_cancel(cancel)?;
+        {
+            let slot = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(model) = slot.as_ref().filter(|model| model.policy == policy) {
+                return Ok((Arc::clone(model), PreparationOutcome::Hit));
+            }
+        }
+        let model = Arc::new(build()?);
+        crate::check_cancel(cancel)?;
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = slot.as_ref() {
+            if existing.policy == policy {
+                return Ok((Arc::clone(existing), PreparationOutcome::Hit));
+            }
+            return Ok((
+                Arc::clone(&model),
+                PreparationOutcome::Unpublished(model.retained_bytes()),
+            ));
+        }
+        *slot = Some(Arc::clone(&model));
+        Ok((
+            Arc::clone(&model),
+            PreparationOutcome::Published(model.retained_bytes()),
+        ))
     }
 }
 
 fn unavailable(message: impl Into<String>) -> GeometryError {
     GeometryError::new(GeometryErrorCode::UnsupportedGeometry, message.into())
+}
+
+fn preparation_resource() -> GeometryError {
+    GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "source preparation exceeds admitted additional memory",
+    )
+}
+
+fn index_bytes(positions: &[[f64; 3]], triangles: &[[u32; 3]]) -> Result<usize, GeometryError> {
+    let minimum = positions
+        .iter()
+        .map(|point| point[2])
+        .fold(f64::INFINITY, f64::min);
+    let maximum = positions
+        .iter()
+        .map(|point| point[2])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let buckets = (((maximum - minimum) / BUCKET_MM).floor() as usize)
+        .checked_add(1)
+        .ok_or_else(preparation_resource)?;
+    let mut entries = 0usize;
+    for triangle in triangles {
+        let heights = triangle.map(|index| positions[index as usize][2]);
+        let lower = heights.into_iter().fold(f64::INFINITY, f64::min);
+        let upper = heights.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let first = ((lower - minimum) / BUCKET_MM).floor() as usize;
+        let last = (((upper - minimum) / BUCKET_MM).floor() as usize).min(buckets - 1);
+        entries = entries
+            .checked_add(last - first + 1)
+            .ok_or_else(preparation_resource)?;
+    }
+    buckets
+        .checked_mul(size_of::<Vec<u32>>() + 4 * size_of::<u32>())
+        .and_then(|bytes| {
+            entries
+                .checked_mul(2 * size_of::<u32>())
+                .and_then(|indices| bytes.checked_add(indices))
+        })
+        .ok_or_else(preparation_resource)
 }
 
 impl TolerantModel {
@@ -159,7 +279,21 @@ impl TolerantModel {
         policy: TolerantPolicy,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
-        if !(policy.join_mm > 0.0 && policy.profile_mm > 0.0) {
+        Self::build_with_budget(definition, policy, isize::MAX as usize, cancel)
+    }
+
+    pub fn build_with_budget(
+        definition: &Definition,
+        policy: TolerantPolicy,
+        additional_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        crate::check_cancel(cancel)?;
+        if !(policy.join_mm.is_finite()
+            && policy.profile_mm.is_finite()
+            && policy.join_mm > 0.0
+            && policy.profile_mm > 0.0)
+        {
             return Err(unavailable("tolerant section tolerances must be positive"));
         }
         // The chord alone (no facet angle): the profile, not the look, decides the mesh.
@@ -174,7 +308,11 @@ impl TolerantModel {
                 "tolerant tessellation cancelled",
             )
         };
-        let control = Cancellable(cancel);
+        let control = Cancellable {
+            cancel,
+            bytes: AtomicUsize::new(0),
+            limit: additional_bytes,
+        };
         let (plan, stats) = solidcore_tess::plan_with(
             definition.record(),
             &MeshTolerance::chord(policy.profile_mm * 0.5),
@@ -182,10 +320,36 @@ impl TolerantModel {
             &control,
         )
         .map_err(|e| match e {
-            solidcore_tess::TessError::Stopped(_) => cancelled(),
+            solidcore_tess::TessError::Stopped(solidcore_tess::Stop::Cancelled) => cancelled(),
+            solidcore_tess::TessError::Stopped(_) => preparation_resource(),
             e => unavailable(format!("tolerant tessellation failed: {e}")),
         })?;
-        let (mesh, refused) = plan.evaluate_with(&control).map_err(|_| cancelled())?;
+        let (mesh, refused) = plan.evaluate_with(&control).map_err(|stop| match stop {
+            solidcore_tess::TessError::Stopped(solidcore_tess::Stop::Cancelled) => cancelled(),
+            solidcore_tess::TessError::Stopped(_) => preparation_resource(),
+            cause => unavailable(format!("tolerant tessellation failed: {cause}")),
+        })?;
+        use solidcore_tess::Control;
+        control
+            .admit(
+                mesh.positions
+                    .len()
+                    .saturating_mul(
+                        size_of::<[f64; 3]>() + size_of::<([u64; 3], u32)>() + size_of::<u32>(),
+                    )
+                    .saturating_add(
+                        mesh.triangles
+                            .len()
+                            .saturating_mul(size_of::<[u32; 3]>() + size_of::<u32>()),
+                    )
+                    .saturating_add(
+                        definition
+                            .faces()
+                            .len()
+                            .saturating_mul(size_of::<Option<exact::Implicit>>()),
+                    ),
+            )
+            .map_err(|_| preparation_resource())?;
         // Faces left out of the mesh (unplanned, or refused where their carrier would not
         // evaluate): their area is missing, reported as failed faces.
         let analytic = |record_face: usize| {
@@ -257,6 +421,9 @@ impl TolerantModel {
             policy.join_mm,
             cancel,
         )?;
+        control
+            .admit(index_bytes(&positions, &triangles)?)
+            .map_err(|_| preparation_resource())?;
         let mut model = Self::indexed(
             positions,
             triangles,
@@ -267,6 +434,10 @@ impl TolerantModel {
             failed_faces,
         );
         model.conformed = conformed;
+        if model.retained_bytes() > additional_bytes {
+            return Err(preparation_resource());
+        }
+        crate::check_cancel(cancel)?;
         Ok(model)
     }
 
@@ -274,6 +445,14 @@ impl TolerantModel {
     pub fn from_complex(
         source: &crate::source::SurfaceComplex,
         policy: TolerantPolicy,
+    ) -> Result<Self, GeometryError> {
+        Self::from_complex_with_budget(source, policy, isize::MAX as usize)
+    }
+
+    pub fn from_complex_with_budget(
+        source: &crate::source::SurfaceComplex,
+        policy: TolerantPolicy,
+        additional_bytes: usize,
     ) -> Result<Self, GeometryError> {
         source.validate()?;
         if !policy.join_mm.is_finite()
@@ -284,6 +463,24 @@ impl TolerantModel {
             return Err(unavailable(
                 "source interpretation exceeds section profile tolerance",
             ));
+        }
+        let required = source
+            .retained_bytes()
+            .saturating_add(index_bytes(&source.positions, &source.triangles)?)
+            .saturating_add(
+                source
+                    .positions
+                    .len()
+                    .saturating_mul(size_of::<([u64; 3], u32)>() + size_of::<u32>()),
+            )
+            .saturating_add(
+                source
+                    .faces
+                    .len()
+                    .saturating_mul(size_of::<Option<exact::Implicit>>()),
+            );
+        if required > additional_bytes {
+            return Err(preparation_resource());
         }
         let mut positions = source.positions.clone();
         let mut triangles = source.triangles.clone();
@@ -328,8 +525,8 @@ impl TolerantModel {
             .collect();
         Self::indexed(
             positions,
-            self.triangles.clone(),
-            self.faces.clone(),
+            Arc::clone(&self.triangles),
+            Arc::clone(&self.faces),
             self.surfaces
                 .iter()
                 .map(|surface| surface.map(|surface| surface.placed(pose)))
@@ -348,13 +545,15 @@ impl TolerantModel {
 
     fn indexed(
         positions: Vec<[f64; 3]>,
-        triangles: Vec<[u32; 3]>,
-        faces: Vec<u32>,
+        triangles: impl Into<Arc<Vec<[u32; 3]>>>,
+        faces: impl Into<Arc<Vec<u32>>>,
         surfaces: Vec<Option<exact::Implicit>>,
         policy: TolerantPolicy,
         reach: f64,
         failed_faces: usize,
     ) -> Self {
+        let triangles = triangles.into();
+        let faces = faces.into();
         let z_min = positions.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
         let z_max = positions
             .iter()
@@ -398,7 +597,7 @@ impl TolerantModel {
     /// edge's two positions and the source face ordinals of its triangles.
     pub fn open_edges(&self) -> Vec<([[f64; 3]; 2], Vec<u32>)> {
         let mut edges = HashMap::<(u32, u32), Vec<u32>>::new();
-        for (triangle, face) in self.triangles.iter().zip(&self.faces) {
+        for (triangle, face) in self.triangles.iter().zip(self.faces.iter()) {
             for [a, b] in [
                 [triangle[0], triangle[1]],
                 [triangle[1], triangle[2]],
@@ -445,7 +644,7 @@ impl TolerantModel {
     /// `tolerance_mm`), merged within `tolerance_mm`, plus the bounds.
     pub fn feature_heights(&self, tolerance_mm: f64) -> Vec<f64> {
         let mut flat: HashMap<u32, (f64, f64, bool)> = HashMap::new();
-        for (triangle, face) in self.triangles.iter().zip(&self.faces) {
+        for (triangle, face) in self.triangles.iter().zip(self.faces.iter()) {
             let zs = triangle.map(|v| self.positions[v as usize][2]);
             let lo = zs.iter().copied().fold(f64::INFINITY, f64::min);
             let hi = zs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -478,7 +677,7 @@ impl TolerantModel {
     pub fn facing_heights(&self, tolerance_mm: f64) -> (Vec<f64>, Vec<f64>) {
         // Per face: z extent, flatness and signed projected area (+ up).
         let mut faces: HashMap<u32, (f64, f64, bool, f64)> = HashMap::new();
-        for (triangle, face) in self.triangles.iter().zip(&self.faces) {
+        for (triangle, face) in self.triangles.iter().zip(self.faces.iter()) {
             let [a, b, c] = triangle.map(|v| self.positions[v as usize]);
             let lo = a[2].min(b[2]).min(c[2]);
             let hi = a[2].max(b[2]).max(c[2]);
@@ -515,6 +714,74 @@ impl TolerantModel {
             + self.surfaces.capacity() * std::mem::size_of::<Option<exact::Implicit>>()
             + self.buckets.capacity() * std::mem::size_of::<Vec<u32>>()
             + self.buckets.iter().map(|b| b.capacity() * 4).sum::<usize>()
+    }
+
+    pub fn placement_bytes(&self) -> usize {
+        self.retained_bytes()
+            - self.triangles.capacity() * size_of::<[u32; 3]>()
+            - self.faces.capacity() * size_of::<u32>()
+    }
+
+    pub fn placed_with_budget(
+        &self,
+        pose: &spiling_contracts::geometry::RigidPoseMm,
+        additional_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        crate::check_cancel(cancel)?;
+        pose.validate()?;
+        let positions_bytes = self
+            .positions
+            .len()
+            .checked_mul(size_of::<[f64; 3]>())
+            .ok_or_else(preparation_resource)?;
+        let surface_bytes = self
+            .surfaces
+            .len()
+            .checked_mul(size_of::<Option<exact::Implicit>>())
+            .ok_or_else(preparation_resource)?;
+        if positions_bytes.saturating_add(surface_bytes) > additional_bytes {
+            return Err(preparation_resource());
+        }
+        let mut positions = Vec::with_capacity(self.positions.len());
+        for point in &self.positions {
+            crate::check_cancel(cancel)?;
+            let rotated = rotate(pose, *point);
+            positions.push(std::array::from_fn(|axis| {
+                rotated[axis] + pose.translation_mm[axis]
+            }));
+            if positions
+                .last()
+                .is_some_and(|point| point.iter().any(|value| !value.is_finite()))
+            {
+                return Err(unavailable("placed source coordinates are not finite"));
+            }
+        }
+        if positions_bytes
+            .saturating_add(surface_bytes)
+            .saturating_add(index_bytes(&positions, &self.triangles)?)
+            > additional_bytes
+        {
+            return Err(preparation_resource());
+        }
+        let model = Self::indexed(
+            positions,
+            Arc::clone(&self.triangles),
+            Arc::clone(&self.faces),
+            self.surfaces
+                .iter()
+                .map(|surface| surface.map(|surface| surface.placed(pose)))
+                .collect(),
+            self.policy,
+            self.reach,
+            self.failed_faces,
+        )
+        .with_conformed(self.conformed);
+        crate::check_cancel(cancel)?;
+        if model.placement_bytes() > additional_bytes {
+            return Err(preparation_resource());
+        }
+        Ok(model)
     }
 
     /// The section at definition-local height `z`.
@@ -968,6 +1235,83 @@ fn contains(ring: &[[f64; 2]], p: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preparation_model() -> TolerantModel {
+        TolerantModel::indexed(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+            vec![0; 4],
+            vec![None],
+            TolerantPolicy::default(),
+            0.01,
+            1,
+        )
+    }
+
+    #[test]
+    fn preparation_build_does_not_block_readers_and_concurrent_publish_is_first_wins() {
+        let cache = PreparationCache::default();
+        let cancel = AtomicBool::new(false);
+        let policy = TolerantPolicy::default();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let cache_ref = &cache;
+            let cancel_ref = &cancel;
+            let slow = scope.spawn(move || {
+                cache_ref.prepare(policy, cancel_ref, || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(preparation_model())
+                })
+            });
+            started_rx.recv().unwrap();
+            let (read_tx, read_rx) = std::sync::mpsc::channel();
+            scope.spawn(move || read_tx.send(cache_ref.retained_bytes()).unwrap());
+            let read = read_rx.recv_timeout(std::time::Duration::from_secs(5));
+            if read.is_err() {
+                release_tx.send(()).unwrap();
+                panic!("resident accounting blocked behind preparation");
+            }
+            assert_eq!(read.unwrap(), 0);
+            let (winner, outcome) = cache
+                .prepare(policy, &cancel, || Ok(preparation_model()))
+                .unwrap();
+            assert_eq!(
+                outcome,
+                PreparationOutcome::Published(winner.retained_bytes())
+            );
+            release_tx.send(()).unwrap();
+            let (other, outcome) = slow.join().unwrap().unwrap();
+            assert!(Arc::ptr_eq(&winner, &other));
+            assert_eq!(outcome, PreparationOutcome::Hit);
+            let (failed, outcome) = cache
+                .prepare(policy, &cancel, || panic!("failed-face result rebuilt"))
+                .unwrap();
+            assert_eq!(failed.failed_faces, 1);
+            assert_eq!(outcome, PreparationOutcome::Hit);
+        });
+    }
+
+    #[test]
+    fn cancelled_preparation_is_not_published() {
+        let cache = PreparationCache::default();
+        let cancel = AtomicBool::new(false);
+        let policy = TolerantPolicy::default();
+        let failure = cache
+            .prepare(policy, &cancel, || {
+                cancel.store(true, Ordering::Release);
+                Ok(preparation_model())
+            })
+            .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::Cancelled);
+        assert_eq!(cache.retained_bytes(), 0);
+        cancel.store(false, Ordering::Release);
+        let (_, outcome) = cache
+            .prepare(policy, &cancel, || Ok(preparation_model()))
+            .unwrap();
+        assert!(matches!(outcome, PreparationOutcome::Published(_)));
+    }
 
     #[test]
     fn unconverged_analytic_faces_are_admitted_only_within_measured_deviation() {

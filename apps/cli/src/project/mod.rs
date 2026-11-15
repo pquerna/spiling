@@ -1408,6 +1408,11 @@ async fn execute(
         appearance_report: mut appearance_report_output,
         optical_report: mut optical_report_output,
     } = outputs;
+    let display_demand = if output.is_some() {
+        spiling_contracts::geometry::SourceDisplayDemand::Preview
+    } else {
+        spiling_contracts::geometry::SourceDisplayDemand::None
+    };
     if workflow.mode == "list" {
         let mut listings = Vec::new();
         for operation in workflow.operations {
@@ -1436,6 +1441,7 @@ async fn execute(
     } else {
         client
             .project(ProjectCommand::Open {
+                display: display_demand,
                 session_id: session.clone(),
                 base_revision: summary.revision,
                 path: workflow.path.clone(),
@@ -2994,6 +3000,7 @@ async fn execute(
                 let response = geometry::control(
                     client,
                     GeometryCommand::ImportPart {
+                        display: display_demand,
                         session_id: session.clone(),
                         base_revision,
                         source,

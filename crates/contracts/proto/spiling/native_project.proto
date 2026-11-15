@@ -177,7 +177,7 @@ message ProcessEdit {
  }
 }
 message EditProcessRequest { uint32 base_revision = 1; ProcessEdit edit = 2; }
-message OpenProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath path = 4; bool read_only = 5; bool recover_previous = 6; bool discard_changes = 7;}
+message OpenProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath path = 4; bool read_only = 5; bool recover_previous = 6; bool discard_changes = 7; SourceDisplayDemand display = 8;}
 message SaveProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath target = 4;}
 enum StorageMaintenanceAction {
  STORAGE_MAINTENANCE_ACTION_UNSPECIFIED = 0;

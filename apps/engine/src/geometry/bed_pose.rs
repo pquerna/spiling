@@ -20,9 +20,10 @@ pub(super) struct Request {
     pub contact_tolerance_mm: f64,
 }
 
-pub(super) fn prepare(
+pub(super) fn prepare_with_budget(
     definition: &Definition,
     request: Request,
+    additional_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<BedPosePreparation, GeometryError> {
     check_cancel(cancel)?;
@@ -42,7 +43,7 @@ pub(super) fn prepare(
     let (brackets, basis) = match definition {
         Definition::Native(_) => match native_brackets(definition, &request, cancel) {
             Ok(Some(brackets)) => (brackets, BedPoseBasis::NativeBounded),
-            Ok(None) => tolerant_model_brackets(definition, &request, cancel)?,
+            Ok(None) => tolerant_model_brackets(definition, &request, additional_bytes, cancel)?,
             Err(failure)
                 if matches!(
                     failure.code,
@@ -53,11 +54,13 @@ pub(super) fn prepare(
                         | GeometryErrorCode::UnsupportedOperation
                 ) =>
             {
-                tolerant_model_brackets(definition, &request, cancel)?
+                tolerant_model_brackets(definition, &request, additional_bytes, cancel)?
             }
             Err(failure) => return Err(failure),
         },
-        Definition::Hybrid(_) => tolerant_model_brackets(definition, &request, cancel)?,
+        Definition::Hybrid(_) => {
+            tolerant_model_brackets(definition, &request, additional_bytes, cancel)?
+        }
     };
     let [
         minimum_lower_mm,
@@ -206,17 +209,28 @@ fn native_brackets(
 fn tolerant_model_brackets(
     definition: &Definition,
     request: &Request,
+    additional_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<([[f64; 3]; 4], BedPoseBasis), GeometryError> {
     let policy = spiling_geometry::tolerant::TolerantPolicy::default();
-    let model = definition.prepare(policy, cancel)?;
+    let (model, outcome) = definition.prepare_with_budget(policy, additional_bytes, cancel)?;
     if model.failed_faces != 0 {
         return Err(error(
             GeometryErrorCode::UnsupportedGeometry,
             "bed model omitted source faces",
         ));
     }
-    let (minimum, maximum) = model.placed(&request.pose).bounds();
+    let (minimum, maximum) = if request.pose == RigidPoseMm::IDENTITY {
+        model.bounds()
+    } else {
+        model
+            .placed_with_budget(
+                &request.pose,
+                additional_bytes.saturating_sub(outcome.allocated_bytes()),
+                cancel,
+            )?
+            .bounds()
+    };
     check_cancel(cancel)?;
     Ok((
         [minimum, minimum, maximum, maximum],

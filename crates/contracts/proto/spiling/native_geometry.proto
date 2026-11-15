@@ -31,6 +31,7 @@ message ImportPartRequest {
   NativePath source = 4;
   RigidPoseMm initial_pose = 5;
   ModelImportOptions options = 6;
+  SourceDisplayDemand display = 7;
 }
 message StartSectionRequest {
   string parent = 1;
@@ -133,8 +134,9 @@ enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_
 message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; optional string source_solid = 5; NormalizedSource normalized = 6; repeated ImportFinding findings = 7; }
 message NormalizedSource { string hash = 1; MeshSourceFormat format = 2; string selector = 3; repeated ImportFinding findings = 4; string object_name = 5; }
 enum MeshSourceFormat { MESH_SOURCE_FORMAT_UNSPECIFIED = 0; STL = 1; THREE_MF = 2; }
+enum SourceDisplayDemand { SOURCE_DISPLAY_DEMAND_UNSPECIFIED = 0; SOURCE_DISPLAY_NONE = 1; SOURCE_DISPLAY_PREVIEW = 2; }
 message DefinitionDisplay {
-  oneof kind { uint32 mesh_artifact_id = 1; DomainError unavailable = 2; }
+  oneof kind { uint32 mesh_artifact_id = 1; DomainError unavailable = 2; google.protobuf.Empty not_requested = 3; }
 }
 message DefinitionRecord {
   reserved 5;

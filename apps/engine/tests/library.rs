@@ -260,6 +260,7 @@ async fn personal_inventory_is_shared_but_project_copies_reopen_without_it() {
     let ProjectResponse::OperationAccepted { operation } = reopened
         .rpc()
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: reopened.hello().session_id.clone(),
             base_revision: scene_revision(&reopened).await,
             path: native(&workspace.0.join("Job.spil")),
@@ -547,6 +548,7 @@ async fn complete_recipes_copy_atomically_reassess_and_reopen_without_personal_s
     let ProjectResponse::OperationAccepted { operation } = reopened
         .rpc()
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: reopened.hello().session_id.clone(),
             base_revision: scene_revision(&reopened).await,
             path: native(&workspace.0.join("Recipes.spil")),
@@ -674,6 +676,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let GeometryResponse::OperationAccepted { operation } = client
         .rpc()
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: client.hello().session_id.clone(),
             base_revision: scene_revision(&client).await,
             source: native(&source),
@@ -873,6 +876,7 @@ async fn hardware_capture_compiles_replays_and_reopens_without_private_inventory
     let ProjectResponse::OperationAccepted { operation } = reopened
         .rpc()
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: reopened.hello().session_id.clone(),
             base_revision: scene_revision(&reopened).await,
             path: native(&path),
@@ -1083,6 +1087,7 @@ async fn bundled_reference_search_captures_declarations_stock_and_portable_proje
     let ProjectResponse::OperationAccepted { operation } = reopened
         .rpc()
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: reopened.hello().session_id.clone(),
             base_revision: scene_revision(&reopened).await,
             path: native(&path),

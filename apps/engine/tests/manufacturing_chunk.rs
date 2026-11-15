@@ -54,6 +54,7 @@ async fn manufacturing_bytestream_rejections_leave_actual_child_healthy() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: session_id.clone(),
             base_revision: summary.revision,
             source: NativePath::from_os_str(source.as_os_str()).unwrap(),

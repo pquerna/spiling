@@ -225,10 +225,30 @@ impl TryFrom<SceneSummary> for rpc::SceneSummary {
     }
 }
 
+impl TryFrom<i32> for SourceDisplayDemand {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match rpc::SourceDisplayDemand::try_from(value) {
+            Ok(rpc::SourceDisplayDemand::SourceDisplayNone) => Ok(Self::None),
+            Ok(rpc::SourceDisplayDemand::SourceDisplayPreview) => Ok(Self::Preview),
+            _ => Err("explicit source display demand is required".into()),
+        }
+    }
+}
+impl From<SourceDisplayDemand> for rpc::SourceDisplayDemand {
+    fn from(value: SourceDisplayDemand) -> Self {
+        match value {
+            SourceDisplayDemand::None => Self::SourceDisplayNone,
+            SourceDisplayDemand::Preview => Self::SourceDisplayPreview,
+        }
+    }
+}
+
 impl TryFrom<rpc::DefinitionDisplay> for DefinitionDisplay {
     type Error = String;
     fn try_from(value: rpc::DefinitionDisplay) -> Result<Self, String> {
         let value = match required(value.kind, "definition display kind")? {
+            rpc::definition_display::Kind::NotRequested(()) => Self::NotRequested,
             rpc::definition_display::Kind::MeshArtifactId(id) => Self::Mesh {
                 artifact_id: checked(ArtifactId::new(id))?,
             },
@@ -245,6 +265,7 @@ impl TryFrom<DefinitionDisplay> for rpc::DefinitionDisplay {
     fn try_from(value: DefinitionDisplay) -> Result<Self, String> {
         checked(value.validate())?;
         let kind = match value {
+            DefinitionDisplay::NotRequested => rpc::definition_display::Kind::NotRequested(()),
             DefinitionDisplay::Mesh { artifact_id } => {
                 rpc::definition_display::Kind::MeshArtifactId(artifact_id.get())
             }
@@ -1171,6 +1192,7 @@ impl TryFrom<rpc::ImportPartRequest> for GeometryCommand {
     fn try_from(value: rpc::ImportPartRequest) -> Result<Self, String> {
         request_id(&value.request_id)?;
         Ok(Self::ImportPart {
+            display: SourceDisplayDemand::try_from(value.display)?,
             session_id: session_parent(&value.parent)?,
             base_revision: SceneRevision(value.base_revision),
             options: {
@@ -1200,6 +1222,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
     request_id(id)?;
     let command = match command {
         GeometryCommand::ImportPart {
+            display,
             session_id,
             base_revision,
             source,
@@ -1207,6 +1230,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             initial_pose,
         } => {
             return Ok(GeometryCall::ImportPart(rpc::ImportPartRequest {
+                display: rpc::SourceDisplayDemand::from(display) as i32,
                 parent: format!("sessions/{session_id}", session_id = session_id.as_str()),
                 request_id: id.into(),
                 base_revision: base_revision.get(),
@@ -1961,6 +1985,7 @@ mod tests {
         };
         let commands = [
             GeometryCommand::ImportPart {
+                display: crate::geometry::SourceDisplayDemand::Preview,
                 session_id: session.clone(),
                 base_revision: revision,
                 source: NativePath::UnixBytes { hex: "2fff".into() },

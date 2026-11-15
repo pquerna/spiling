@@ -153,8 +153,10 @@ impl Workbench {
                             {
                                 ui.colored_label(
                                     self.prefs.theme.tokens().warning,
-                                    format!("Geometry only: {}", error.message),
-                                );
+                                    "Preview unavailable",
+                                ).on_hover_text(format!("Source remains loaded; slicing is checked separately. {}", error.message));
+                            } else if matches!(definition.record.display, DefinitionDisplay::NotRequested) {
+                                ui.weak("Preview not requested");
                             }
                             if let Some(profile) = definition
                                 .chunks

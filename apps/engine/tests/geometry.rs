@@ -81,6 +81,7 @@ async fn start_import(client: &mut EngineClient, source: NativePath, pose: Rigid
     let GeometryResponse::OperationAccepted { operation } = command(
         client,
         GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: summary.session_id,
             base_revision: summary.revision,
             source,
@@ -192,6 +193,7 @@ fn mesh_artifact(definition: &DefinitionRecord) -> ArtifactId {
         DefinitionDisplay::Unavailable { error } => {
             panic!("expected source-mapped native display: {error:?}")
         }
+        DefinitionDisplay::NotRequested => panic!("test did not request its required preview"),
     }
 }
 async fn mesh(client: &mut EngineClient, definition: &DefinitionRecord) -> Vec<SourceHash> {
@@ -1851,6 +1853,7 @@ async fn source_capture_and_saved_return_exceed_retired_byte_quotas_without_reme
     project_operation(
         &mut client,
         ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: before.session_id.clone(),
             base_revision: before.revision,
             path: NativePath::from_os_str(project.as_os_str()).unwrap(),
@@ -1873,6 +1876,7 @@ async fn source_capture_and_saved_return_exceed_retired_byte_quotas_without_reme
     project_operation(
         &mut client,
         ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: empty.session_id,
             base_revision: empty.revision,
             path: NativePath::from_os_str(project.as_os_str()).unwrap(),

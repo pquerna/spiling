@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut inventory_only = false;
     let mut import_only = false;
     let mut preview = false;
+    let mut preparation_only = false;
     let mut selected_solid = None;
     let mut paths = Vec::<PathBuf>::new();
     let mut arguments = std::env::args_os().skip(1);
@@ -49,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             import_only = true;
         } else if argument == "--preview" {
             preview = true;
+        } else if argument == "--preparation" {
+            preparation_only = true;
         } else if argument == "--solid" {
             let entity = arguments
                 .next()
@@ -108,6 +111,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "definition_id":definition.id(),"provenance":definition.provenance(),
                 "bounds_mm":definition.bounds_mm(),"face_count":definition.faces().len(),
                 "timing_us":{"import":import_us}})
+            );
+            continue;
+        }
+        if preparation_only {
+            let started = Instant::now();
+            let definition = spiling_geometry::source::SourceDefinition::from(definition);
+            let (model, allocation) =
+                definition.prepare_with_budget(Default::default(), isize::MAX as usize, &cancel)?;
+            let first_us = started.elapsed().as_micros();
+            let repeated_at = Instant::now();
+            let (repeated, reuse) =
+                definition.prepare_with_budget(Default::default(), 0, &cancel)?;
+            println!(
+                "{}",
+                json!({
+                    "source":path,"definition_id":definition.id(),"provenance":definition.provenance(),
+                    "face_count":definition.faces().len(),"failed_faces":model.failed_faces,
+                    "open_edges":model.open_edges().len(),"conformed":{
+                        "vertices":model.conformed.vertices,"max_offset_mm":model.conformed.max_offset_mm
+                },"retained_bytes":model.retained_bytes(),"preparation_us":first_us,
+                "allocated_bytes":allocation.allocated_bytes(), "reuse_allocated_bytes":reuse.allocated_bytes(),
+                "shared_preparation":std::sync::Arc::ptr_eq(&model, &repeated),
+                "reuse_us":repeated_at.elapsed().as_micros()
+                })
             );
             continue;
         }

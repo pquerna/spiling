@@ -499,6 +499,7 @@ pub enum ProjectCommand {
         discard_changes: bool,
     },
     Open {
+        display: crate::geometry::SourceDisplayDemand,
         session_id: SessionId,
         base_revision: SceneRevision,
         path: NativePath,

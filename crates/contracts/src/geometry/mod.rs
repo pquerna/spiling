@@ -1742,6 +1742,7 @@ impl SceneSummary {
 #[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DefinitionDisplay {
+    NotRequested,
     Mesh { artifact_id: ArtifactId },
     Unavailable { error: GeometryError },
 }
@@ -1753,6 +1754,7 @@ pub enum DefinitionDisplay {
     deny_unknown_fields
 )]
 enum RawDefinitionDisplay {
+    NotRequested,
     Mesh { artifact_id: ArtifactId },
     Unavailable { error: GeometryError },
 }
@@ -1766,7 +1768,7 @@ impl<'de> Deserialize<'de> for DefinitionDisplay {
 impl DefinitionDisplay {
     pub fn validate(&self) -> Result<(), GeometryError> {
         match self {
-            Self::Mesh { .. } => Ok(()),
+            Self::Mesh { .. } | Self::NotRequested => Ok(()),
             Self::Unavailable { error } => {
                 error.validate()?;
                 if matches!(

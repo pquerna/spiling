@@ -658,6 +658,7 @@ fn import_prepared(
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
+        preparation: Default::default(),
         id: DefinitionId::for_source(&digest, selected),
         provenance: SourceProvenance {
             normalized: None,

@@ -26,10 +26,27 @@ pub enum SourceDefinition {
     Hybrid(HybridDefinition),
 }
 pub struct HybridDefinition {
+    preparation: crate::tolerant::PreparationCache,
     pub id: DefinitionId,
     pub provenance: SourceProvenance,
     pub bounds: AabbMm,
     pub complex: SurfaceComplex,
+}
+impl HybridDefinition {
+    pub fn new(
+        id: DefinitionId,
+        provenance: SourceProvenance,
+        bounds: AabbMm,
+        complex: SurfaceComplex,
+    ) -> Self {
+        Self {
+            id,
+            provenance,
+            bounds,
+            complex,
+            preparation: Default::default(),
+        }
+    }
 }
 #[derive(Debug)]
 pub struct SurfaceComplex {
@@ -79,20 +96,53 @@ impl SourceDefinition {
     pub fn retained_query_proof_bytes(&self) -> usize {
         match self {
             Self::Native(d) => d.retained_query_proof_bytes(),
-            Self::Hybrid(d) => d.complex.retained_bytes(),
+            Self::Hybrid(d) => d
+                .complex
+                .retained_bytes()
+                .saturating_add(d.preparation.retained_bytes()),
         }
     }
     pub fn prepare(
         &self,
         policy: TolerantPolicy,
         cancel: &AtomicBool,
-    ) -> Result<TolerantModel, GeometryError> {
+    ) -> Result<std::sync::Arc<TolerantModel>, GeometryError> {
+        self.prepare_with_budget(policy, isize::MAX as usize, cancel)
+            .map(|(model, _)| model)
+    }
+    pub fn prepare_with_budget(
+        &self,
+        policy: TolerantPolicy,
+        additional_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<
+        (
+            std::sync::Arc<TolerantModel>,
+            crate::tolerant::PreparationOutcome,
+        ),
+        GeometryError,
+    > {
         match self {
-            Self::Native(d) => TolerantModel::build(d, policy, cancel),
-            Self::Hybrid(d) => {
-                crate::check_cancel(cancel)?;
-                TolerantModel::from_complex(&d.complex, policy)
-            }
+            Self::Native(d) => d.preparation.prepare(policy, cancel, || {
+                TolerantModel::build_with_budget(d, policy, additional_bytes, cancel)
+            }),
+            Self::Hybrid(d) => d.preparation.prepare(policy, cancel, || {
+                if d.complex.retained_bytes() > additional_bytes {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::ResourceLimit,
+                        "source preparation exceeds admitted additional memory",
+                    ));
+                }
+                let model =
+                    TolerantModel::from_complex_with_budget(&d.complex, policy, additional_bytes)?;
+                if model.retained_bytes() > additional_bytes {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::ResourceLimit,
+                        "source preparation exceeds admitted additional memory",
+                    ));
+                }
+                Ok(model)
+            }),
         }
     }
     pub fn circles(&self, pose: &RigidPoseMm) -> crate::tolerant::CircleSource {
@@ -117,6 +167,7 @@ impl SourceDefinition {
         let complex = SurfaceComplex::decode(bytes)?;
         let bounds = complex.bounds()?;
         Ok(Self::Hybrid(HybridDefinition {
+            preparation: Default::default(),
             id: provenance.definition_id(),
             provenance,
             bounds,
@@ -609,6 +660,109 @@ impl SourceDefinition {
 mod tests {
     use super::*;
     use spiling_model_import::{Affine, Mesh};
+    #[test]
+    fn source_preparation_reuses_success_without_poisoning_policy_or_cancellation() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/through-hole.step"),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let source =
+            SourceDefinition::Native(crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap());
+        let before = source.retained_query_proof_bytes();
+        let policy = TolerantPolicy::default();
+        assert_eq!(
+            source
+                .prepare_with_budget(policy, 0, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(source.retained_query_proof_bytes(), before);
+        let (first, outcome) = source
+            .prepare_with_budget(policy, isize::MAX as usize, &cancel)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tolerant::PreparationOutcome::Published(first.retained_bytes())
+        );
+        assert_eq!(
+            source.retained_query_proof_bytes() - before,
+            first.retained_bytes()
+        );
+        let (repeated, outcome) = source.prepare_with_budget(policy, 0, &cancel).unwrap();
+        assert_eq!(outcome, crate::tolerant::PreparationOutcome::Hit);
+        assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+        let other = TolerantPolicy {
+            profile_mm: policy.profile_mm * 0.5,
+            ..policy
+        };
+        assert_eq!(
+            source
+                .prepare_with_budget(other, 0, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        let retained = source.retained_query_proof_bytes();
+        let (alternate, outcome) = source
+            .prepare_with_budget(other, isize::MAX as usize, &cancel)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tolerant::PreparationOutcome::Unpublished(alternate.retained_bytes())
+        );
+        assert_eq!(source.retained_query_proof_bytes(), retained);
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            source
+                .prepare_with_budget(policy, 0, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
+        cancel.store(false, std::sync::atomic::Ordering::Release);
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            &source.prepare_with_budget(policy, 0, &cancel).unwrap().0
+        ));
+        let pose = RigidPoseMm {
+            translation_mm: [7., 4., 2.],
+            ..RigidPoseMm::IDENTITY
+        };
+        assert_eq!(
+            first
+                .placed_with_budget(&pose, 0, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        let placed = first
+            .placed_with_budget(&pose, isize::MAX as usize, &cancel)
+            .unwrap();
+        let reference = first.section(4.).unwrap();
+        let actual = placed.section(6.).unwrap();
+        assert_eq!(reference.loops.len(), actual.loops.len());
+        let perimeter = reference
+            .loops
+            .iter()
+            .flat_map(|boundary| boundary.points.windows(2))
+            .map(|segment| (segment[0][0] - segment[1][0]).hypot(segment[0][1] - segment[1][1]))
+            .sum::<f64>();
+        let area_error = reference
+            .loops
+            .iter()
+            .map(|boundary| boundary.area)
+            .sum::<f64>()
+            - actual
+                .loops
+                .iter()
+                .map(|boundary| boundary.area)
+                .sum::<f64>();
+        assert!(area_error.abs() <= perimeter * policy.profile_mm);
+        assert!(placed.placement_bytes() < placed.retained_bytes());
+    }
     pub(super) fn cube(lo: f64, hi: f64) -> Mesh {
         Mesh {
             vertices: vec![
@@ -913,40 +1067,70 @@ impl SourceDefinition {
         plane: PlaneMm,
         cancel: &AtomicBool,
     ) -> Result<Vec<crate::SectionLoopMm>, GeometryError> {
+        self.section_placed_with_budget(
+            pose,
+            plane,
+            crate::compute::MAX_PREPARED_SECTION_BYTES,
+            cancel,
+        )
+        .map(|(loops, _)| loops)
+    }
+
+    pub fn section_placed_with_budget(
+        &self,
+        pose: RigidPoseMm,
+        plane: PlaneMm,
+        additional_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<
+        (
+            Vec<crate::SectionLoopMm>,
+            crate::tolerant::PreparationOutcome,
+        ),
+        GeometryError,
+    > {
         let frame = PlaneFrameMm::from_plane(plane)?;
         let axes = [frame.x_axis, frame.y_axis, frame.z_axis];
         let columns = std::array::from_fn(|a| std::array::from_fn(|b| axes[b][a]));
         let translation =
             axes.map(|axis| -(0..3).map(|a| axis[a] * frame.origin_mm[a]).sum::<f64>());
         let inverse = rigid_pose(columns, translation)?;
-        let model = self
-            .prepare(TolerantPolicy::default(), cancel)?
-            .placed(&pose)
-            .placed(&inverse);
+        let (base, outcome) =
+            self.prepare_with_budget(TolerantPolicy::default(), additional_bytes, cancel)?;
+        let remaining = additional_bytes.saturating_sub(outcome.allocated_bytes());
+        let placed = base.placed_with_budget(&pose, remaining, cancel)?;
+        let model = placed.placed_with_budget(
+            &inverse,
+            remaining.saturating_sub(placed.placement_bytes()),
+            cancel,
+        )?;
         let section = model.section(0.)?;
         crate::check_cancel(cancel)?;
-        Ok(section
-            .loops
-            .into_iter()
-            .map(|boundary| {
-                let mut points_mm: Vec<_> = boundary
-                    .points
-                    .into_iter()
-                    .map(|p| {
-                        std::array::from_fn(|a| {
-                            frame.origin_mm[a] + p[0] * frame.x_axis[a] + p[1] * frame.y_axis[a]
+        Ok((
+            section
+                .loops
+                .into_iter()
+                .map(|boundary| {
+                    let mut points_mm: Vec<_> = boundary
+                        .points
+                        .into_iter()
+                        .map(|p| {
+                            std::array::from_fn(|a| {
+                                frame.origin_mm[a] + p[0] * frame.x_axis[a] + p[1] * frame.y_axis[a]
+                            })
                         })
-                    })
-                    .collect();
-                if let Some(first) = points_mm.first().copied() {
-                    points_mm.push(first);
-                }
-                crate::SectionLoopMm {
-                    is_hole: boundary.area < 0.,
-                    points_mm,
-                }
-            })
-            .collect())
+                        .collect();
+                    if let Some(first) = points_mm.first().copied() {
+                        points_mm.push(first);
+                    }
+                    crate::SectionLoopMm {
+                        is_hole: boundary.area < 0.,
+                        points_mm,
+                    }
+                })
+                .collect(),
+            outcome,
+        ))
     }
 }
 

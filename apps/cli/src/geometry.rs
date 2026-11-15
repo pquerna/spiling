@@ -525,6 +525,7 @@ pub async fn run(
         let accepted = control(
             client,
             GeometryCommand::ImportPart {
+                display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                 session_id: session.clone(),
                 base_revision: summary.revision,
                 source: part.source,
@@ -902,6 +903,7 @@ mod tests {
         let GeometryResponse::OperationAccepted { operation } = control(
             &mut client,
             GeometryCommand::ImportPart {
+                display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                 session_id: session.clone(),
                 base_revision: before.revision,
                 source: NativePath::from_os_str(fixtures.join("box-mm.step").as_os_str()).unwrap(),
@@ -945,6 +947,7 @@ mod tests {
         let GeometryResponse::OperationAccepted { operation } = control(
             &mut client,
             GeometryCommand::ImportPart {
+                display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                 session_id: session.clone(),
                 base_revision: before_failure.revision,
                 source: NativePath::from_os_str(fixtures.join("truncated.step").as_os_str())

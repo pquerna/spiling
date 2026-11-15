@@ -41,6 +41,7 @@ struct Resident {
     vertices: u32,
     triangles: u32,
     mesh_bytes: u32,
+    display_requested: bool,
 }
 #[derive(Default)]
 pub struct LiveSnapshot {
@@ -67,6 +68,7 @@ struct ImportReports<'a> {
     rejected: &'a mut dyn FnMut(spiling_contracts::display::EncodedMesh),
 }
 pub struct ImportRequest {
+    pub display: SourceDisplayDemand,
     pub options: ModelImportOptions,
     pub source: NativePath,
     pub allowed_reuse: BTreeSet<DefinitionId>,
@@ -75,6 +77,7 @@ pub struct ImportRequest {
 }
 
 pub struct OpenRequest {
+    pub display: SourceDisplayDemand,
     pub path: NativePath,
     pub reuse_sources: Vec<Arc<SourceAsset>>,
     pub read_only: bool,
@@ -188,7 +191,10 @@ pub enum Work {
         plane: PlaneMm,
         occurrences: Vec<OccurrenceRecord>,
     },
-    PrepareBedPose(super::bed_pose::Request),
+    PrepareBedPose {
+        request: super::bed_pose::Request,
+        retained_source_bytes: usize,
+    },
     PrepareLayout(super::layout::Request),
 }
 /// The single bounded control slot keeps owned work inline, without per-job boxing.
@@ -223,6 +229,7 @@ impl Command {
     }
 }
 pub enum ImportedDisplay {
+    NotRequested,
     Reused,
     Mesh(MeshArtifact),
     Unavailable(GeometryError),
@@ -653,7 +660,10 @@ fn run(
                 super::layout::prepare(request, &natives, &cancel, &report)
                     .map(Product::LayoutPrepared)
             }
-            Work::PrepareBedPose(request) => definitions
+            Work::PrepareBedPose {
+                request,
+                retained_source_bytes,
+            } => definitions
                 .get(&request.definition_id)
                 .ok_or_else(|| {
                     error(
@@ -662,7 +672,16 @@ fn run(
                     )
                 })
                 .and_then(|resident| {
-                    super::bed_pose::prepare(&resident.definition, request, &cancel)
+                    let additional = crate::resources::source_growth(source_retention(
+                        retained_source_bytes,
+                        &definitions,
+                    )?)?;
+                    super::bed_pose::prepare_with_budget(
+                        &resident.definition,
+                        request,
+                        additional,
+                        &cancel,
+                    )
                 })
                 .map(Product::BedPosePrepared)
                 .map_err(JobError::from),
@@ -755,6 +774,7 @@ fn run(
 /// Remaining capacity counts every old/history resident until the promotion ACK,
 /// including an old copy of an ID that cannot use the dispatcher's cache.
 struct Capacity {
+    display_demand: SourceDisplayDemand,
     definitions: u32,
     source_bytes: usize,
     /// Count live allocations, not hashes: a recapture of identical bytes is
@@ -768,8 +788,10 @@ impl Capacity {
         definitions: &BTreeMap<DefinitionId, Resident>,
         budget: MeshBudget,
         source_bytes: usize,
+        display_demand: SourceDisplayDemand,
     ) -> Self {
         Self {
+            display_demand,
             definitions: MAX_DEFINITIONS - definitions.len() as u32,
             source_bytes,
             charged_sources: BTreeSet::new(),
@@ -947,6 +969,10 @@ impl Capacity {
         work: &mut GeometryWorkBudget,
         progress: &dyn Fn(String),
     ) -> Result<ImportedDisplay, GeometryError> {
+        if self.display_demand == SourceDisplayDemand::None {
+            check_cancel(cancel)?;
+            return Ok(ImportedDisplay::NotRequested);
+        }
         match self.tessellate(definition, cancel, work, progress) {
             Ok(mesh) => Ok(ImportedDisplay::Mesh(mesh)),
             Err(failure) => {
@@ -957,6 +983,23 @@ impl Capacity {
                 Ok(ImportedDisplay::Unavailable(failure))
             }
         }
+    }
+
+    fn reuse_display(
+        &mut self,
+        resident: &Resident,
+        source: &SourceAsset,
+        cancel: &AtomicBool,
+        work: &mut GeometryWorkBudget,
+        progress: &dyn Fn(String),
+    ) -> Result<(ImportedDisplay, Option<Resident>), GeometryError> {
+        check_cancel(cancel)?;
+        if self.display_demand == SourceDisplayDemand::None || resident.display_requested {
+            return Ok((ImportedDisplay::Reused, None));
+        }
+        let display = self.display(&resident.definition, cancel, work, progress)?;
+        let replacement = shared_resident(Arc::clone(&resident.definition), source, &display);
+        Ok((display, Some(replacement)))
     }
 }
 fn validate_provenance(definition: &Definition, source: &SourceAsset) -> Result<(), ProjectError> {
@@ -989,19 +1032,27 @@ fn imported(
     }
 }
 fn resident(definition: Definition, source: &SourceAsset, display: &ImportedDisplay) -> Resident {
+    shared_resident(Arc::new(definition), source, display)
+}
+fn shared_resident(
+    definition: Arc<Definition>,
+    source: &SourceAsset,
+    display: &ImportedDisplay,
+) -> Resident {
     let (vertices, triangles, mesh_bytes) = match display {
         ImportedDisplay::Mesh(mesh) => (mesh.vertex_count, mesh.triangle_count, mesh.total_bytes),
-        ImportedDisplay::Unavailable(_) => (0, 0, 0),
+        ImportedDisplay::Unavailable(_) | ImportedDisplay::NotRequested => (0, 0, 0),
         ImportedDisplay::Reused => {
             unreachable!("reused captures keep their existing native resident")
         }
     };
     Resident {
-        definition: Arc::new(definition),
+        definition,
         record: source.record.clone(),
         vertices,
         triangles,
         mesh_bytes,
+        display_requested: !matches!(display, ImportedDisplay::NotRequested),
     }
 }
 type ImportedParts = (Vec<(Imported, Vec<RigidPoseMm>)>, Vec<Resident>);
@@ -1032,6 +1083,7 @@ fn import(
     rejected: &mut dyn FnMut(spiling_contracts::display::EncodedMesh),
 ) -> Result<ImportedParts, JobError> {
     let ImportRequest {
+        display,
         source,
         options,
         allowed_reuse: reuse,
@@ -1041,7 +1093,7 @@ fn import(
     check_cancel(cancel)?;
     let growth =
         crate::resources::source_growth(source_retention(retained_source_bytes, definitions)?)?;
-    let mut capacity = Capacity::new(definitions, budget, growth);
+    let mut capacity = Capacity::new(definitions, budget, growth, display);
     let captured = {
         let _span = crate::performance::span("import_capture");
         source::capture(source, capacity.source_bytes, cancel)?
@@ -1093,8 +1145,11 @@ fn import(
             // source's label and immutable record on an exact-byte reimport.
             let source = Arc::new(SourceAsset::shared(resident.record.clone(), bytes.clone())?);
             validate_provenance(&resident.definition, &source)?;
+            let (display, replacement) =
+                capacity.reuse_display(resident, &source, cancel, work, progress)?;
+            residents.extend(replacement);
             parts.push((
-                imported(&resident.definition, source, ImportedDisplay::Reused),
+                imported(&resident.definition, source, display),
                 body.placements.clone(),
             ));
             continue;
@@ -1193,8 +1248,11 @@ fn import_mesh(
                 Some(normalized),
             )?);
             validate_provenance(&resident.definition, &source)?;
+            let (display, replacement) =
+                capacity.reuse_display(resident, &source, cancel, work, progress)?;
+            residents.extend(replacement);
             parts.push((
-                imported(&resident.definition, source, ImportedDisplay::Reused),
+                imported(&resident.definition, source, display),
                 decoded.placements,
             ));
             continue;
@@ -1206,12 +1264,12 @@ fn import_mesh(
             )
             .into());
         }
-        let definition = SourceDefinition::Hybrid(HybridDefinition {
-            id: provenance.definition_id(),
-            provenance: provenance.clone(),
-            bounds: decoded.complex.bounds()?,
-            complex: decoded.complex,
-        });
+        let definition = SourceDefinition::Hybrid(HybridDefinition::new(
+            provenance.definition_id(),
+            provenance.clone(),
+            decoded.complex.bounds()?,
+            decoded.complex,
+        ));
         let definition = capacity.retain_definition(definition, cancel)?;
         let source = Arc::new(SourceAsset::with_normalized(
             StoredDefinition {
@@ -1267,6 +1325,7 @@ fn open(
     let _opening = crate::performance::span("open_prepare");
     crate::performance::mark("open_started");
     let OpenRequest {
+        display,
         path,
         reuse_sources,
         read_only,
@@ -1326,7 +1385,7 @@ fn open(
         &reuse_sources,
     )?;
     drop(loading);
-    let mut capacity = Capacity::new(definitions, budget, source_budget);
+    let mut capacity = Capacity::new(definitions, budget, source_budget, display);
     capacity
         .charged_sources
         .extend(reuse_sources.iter().flat_map(|source| {
@@ -1356,11 +1415,12 @@ fn open(
             validate_provenance(&resident.definition, source)?;
             validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
             validate_analysis_targets(&resident.definition, &loaded, cancel)?;
-            imports.push(imported(
-                &resident.definition,
-                source.clone(),
-                ImportedDisplay::Reused,
-            ));
+            let (display, replacement) =
+                capacity.reuse_display(resident, source, cancel, work, progress)?;
+            if let Some(replacement) = replacement {
+                pending.insert(id.clone(), replacement);
+            }
+            imports.push(imported(&resident.definition, source.clone(), display));
         } else {
             progress("preparing_native_geometry".into());
             let native = crate::performance::span("open_native");
@@ -1392,7 +1452,8 @@ fn open(
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
             validate_analysis_targets(&definition, &loaded, cancel)?;
             drop(native);
-            let tessellation = crate::performance::span("open_tessellate");
+            let tessellation = (display == SourceDisplayDemand::Preview)
+                .then(|| crate::performance::span("open_tessellate"));
             let display = capacity.display(&definition, cancel, work, progress)?;
             drop(tessellation);
             let resident = resident(definition, source, &display);
@@ -1555,9 +1616,14 @@ fn section(
             .get_mut(&occurrence.definition_id)
             .expect("section occurrence was counted");
         let loops = if matches!(definition.definition.as_ref(), Definition::Hybrid(_)) {
-            definition
-                .definition
-                .section_placed(occurrence.pose, plane, cancel)?
+            let (loops, outcome) = definition.definition.section_placed_with_budget(
+                occurrence.pose,
+                plane,
+                remaining_section_capacity(prepared_bytes, builder.retained_bytes())?,
+                cancel,
+            )?;
+            prepared_bytes = prepared_bytes.saturating_add(outcome.allocated_bytes());
+            loops
         } else {
             if source.is_none() {
                 // Raw sections need native coefficient correspondence, not material
@@ -2039,11 +2105,76 @@ mod geometry_only_tests {
     use super::*;
     use spiling_geometry::{BoundsPolicy, GeometryWorkBudget};
 
+    #[test]
+    fn headless_import_avoids_display_and_later_preview_reuses_the_source() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/through-hole.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::query();
+        let (parts, residents) = import(
+            ImportRequest {
+                display: SourceDisplayDemand::None,
+                options: ModelImportOptions::default(),
+                source: NativePath::from_os_str(path.as_os_str()).unwrap(),
+                allowed_reuse: BTreeSet::new(),
+                retained_source_bytes: 0,
+                budget: MeshBudget {
+                    vertices: 0,
+                    triangles: 0,
+                    bytes: 0,
+                },
+            },
+            &BTreeMap::new(),
+            &cancel,
+            &mut work,
+            &|phase| assert!(!phase.contains("display")),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(matches!(parts[0].0.display, ImportedDisplay::NotRequested));
+        assert_eq!(work.consumed(), 0);
+        let resident = &residents[0];
+        assert_eq!(
+            (resident.vertices, resident.triangles, resident.mesh_bytes),
+            (0, 0, 0)
+        );
+        let base = resident
+            .definition
+            .prepare(Default::default(), &cancel)
+            .unwrap();
+        let mut capacity = Capacity::new(
+            &BTreeMap::new(),
+            MeshBudget::FROZEN,
+            0,
+            SourceDisplayDemand::Preview,
+        );
+        let (display, upgraded) = capacity
+            .reuse_display(resident, &parts[0].0.source, &cancel, &mut work, &|_| {})
+            .unwrap();
+        assert!(matches!(display, ImportedDisplay::Mesh(_)));
+        let upgraded = upgraded.unwrap();
+        assert!(Arc::ptr_eq(&resident.definition, &upgraded.definition));
+        assert!(Arc::ptr_eq(
+            &base,
+            &upgraded
+                .definition
+                .prepare(Default::default(), &cancel)
+                .unwrap()
+        ));
+        assert!(upgraded.mesh_bytes > 0);
+        let (display, replacement) = capacity
+            .reuse_display(&upgraded, &parts[0].0.source, &cancel, &mut work, &|_| {})
+            .unwrap();
+        assert!(matches!(display, ImportedDisplay::Reused));
+        assert!(replacement.is_none());
+    }
+
     fn import_through_hole(budget: MeshBudget) -> ImportedDisplay {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/geometry/through-hole.step");
         let (mut parts, _) = import(
             ImportRequest {
+                display: SourceDisplayDemand::Preview,
                 options: ModelImportOptions::default(),
                 source: NativePath::from_os_str(path.as_os_str()).unwrap(),
                 allowed_reuse: BTreeSet::new(),
@@ -2108,6 +2239,7 @@ mod geometry_only_tests {
         let cancel = AtomicBool::new(false);
         let (mut parts, mut residents) = import(
             ImportRequest {
+                display: SourceDisplayDemand::Preview,
                 options: ModelImportOptions::default(),
                 source: NativePath::from_os_str(path.as_os_str()).unwrap(),
                 allowed_reuse: BTreeSet::new(),
@@ -2165,6 +2297,7 @@ mod geometry_only_tests {
                 bytes: 0,
             },
             0,
+            SourceDisplayDemand::Preview,
         );
         assert!(matches!(
             capacity.display(
@@ -2197,6 +2330,7 @@ mod source_admission_tests {
                 bytes: 0,
             },
             first.capacity(),
+            SourceDisplayDemand::Preview,
         );
         capacity.charge_source(&first).unwrap();
         capacity.charge_source(&Arc::clone(&first)).unwrap();

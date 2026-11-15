@@ -169,7 +169,7 @@ pub fn paint(
             .context_definitions
             .iter()
             .find(|d| d.record.definition_id == p.definition_id)
-            .is_none_or(|d| matches!(d.record.display, DefinitionDisplay::Unavailable { .. }))
+            .is_none_or(|d| !matches!(d.record.display, DefinitionDisplay::Mesh { .. }))
     }) {
         message(
             ui,

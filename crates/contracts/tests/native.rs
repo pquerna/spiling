@@ -412,6 +412,7 @@ fn project_typed_dispatch_preserves_scene_revision_and_native_paths() {
     };
     assert_eq!(ProjectCommand::try_from(*wire).unwrap(), command);
     let wire = rpc::OpenProjectRequest {
+        display: rpc::SourceDisplayDemand::SourceDisplayPreview as i32,
         parent: format!("sessions/{}", session_id.as_str()),
         request_id: String::new(),
         base_revision: 17,
@@ -437,6 +438,62 @@ fn project_typed_dispatch_preserves_scene_revision_and_native_paths() {
         let wire: rpc::NativePath = path.clone().try_into().unwrap();
         assert_eq!(NativePath::try_from(wire).unwrap(), path);
     }
+}
+
+#[test]
+fn display_demand_is_explicit_and_roundtrips_on_import_and_open() {
+    use spiling_contracts::geometry::{GeometryCommand, SourceDisplayDemand};
+    for display in [SourceDisplayDemand::None, SourceDisplayDemand::Preview] {
+        let value = rpc::SourceDisplayDemand::from(display) as i32;
+        assert_eq!(SourceDisplayDemand::try_from(value).unwrap(), display);
+        let open = rpc::OpenProjectRequest {
+            parent: "sessions/550e8400-e29b-41d4-a716-446655440000".into(),
+            path: Some(
+                NativePath::from_os_str(std::ffi::OsStr::new("test.spil"))
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            display: value,
+            ..Default::default()
+        };
+        assert!(
+            matches!(ProjectCommand::try_from(open.clone()).unwrap(), ProjectCommand::Open { display: actual, .. } if actual == display)
+        );
+        let import = rpc::ImportPartRequest {
+            parent: open.parent.clone(),
+            source: open.path.clone(),
+            initial_pose: Some(RigidPoseMm::IDENTITY.try_into().unwrap()),
+            display: value,
+            options: Some(rpc::ModelImportOptions::default()),
+            ..Default::default()
+        };
+        assert!(
+            matches!(GeometryCommand::try_from(import.clone()).unwrap(), GeometryCommand::ImportPart { display: actual, .. } if actual == display)
+        );
+        for invalid in [0, i32::MAX] {
+            assert!(
+                ProjectCommand::try_from(rpc::OpenProjectRequest {
+                    display: invalid,
+                    ..open.clone()
+                })
+                .is_err()
+            );
+            assert!(
+                GeometryCommand::try_from(rpc::ImportPartRequest {
+                    display: invalid,
+                    ..import.clone()
+                })
+                .is_err()
+            );
+        }
+    }
+    let state = spiling_contracts::geometry::DefinitionDisplay::NotRequested;
+    let wire: rpc::DefinitionDisplay = state.clone().try_into().unwrap();
+    assert_eq!(
+        spiling_contracts::geometry::DefinitionDisplay::try_from(wire).unwrap(),
+        state
+    );
 }
 
 #[test]

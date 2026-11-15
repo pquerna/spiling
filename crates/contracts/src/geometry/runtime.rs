@@ -20,10 +20,17 @@ pub struct ModelImportOptions {
     pub stl_unit: Option<SourceUnit>,
     pub source_plate: Option<u32>,
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDisplayDemand {
+    None,
+    Preview,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryCommand {
     ImportPart {
+        display: SourceDisplayDemand,
         session_id: SessionId,
         base_revision: SceneRevision,
         source: NativePath,

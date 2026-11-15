@@ -779,6 +779,7 @@ mod tests {
             .start_gated_for_test(
                 op.name.clone(),
                 Control::Geometry(GeometryCommand::ImportPart {
+                    display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
                     session_id: session,
                     base_revision: scene,
                     source: NativePath::from_os_str(source.as_os_str()).unwrap(),

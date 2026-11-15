@@ -266,6 +266,7 @@ async fn open(c: &EngineClient, path: &Path, read_only: bool) {
     let ProjectResponse::OperationAccepted { operation } = c
         .rpc()
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: c.hello().session_id.clone(),
             base_revision: scene(c).await.revision,
             path: native(path),
@@ -490,6 +491,7 @@ async fn matched_stock_recipe_reaches_actual_replay_export_and_source_free_recom
     let GeometryResponse::OperationAccepted { operation } = c
         .rpc()
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: session.clone(),
             base_revision: scene(&c).await.revision,
             source: native(&source),

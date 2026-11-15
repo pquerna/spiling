@@ -267,6 +267,7 @@ fn finish_support_extent(
 /// Sharing an `Arc<Definition>` across threads requires external synchronization (`Arc<Mutex<Definition>>`)
 /// or thread confinement.
 pub struct Definition {
+    pub(crate) preparation: crate::tolerant::PreparationCache,
     pub(crate) id: DefinitionId,
     pub(crate) provenance: SourceProvenance,
     pub(crate) faces: Vec<FaceInfo>,
@@ -420,7 +421,7 @@ impl Definition {
     /// Sums arena vector sizes, knot/control point vectors of all surfaces and curves,
     /// and topological provenance tables.
     pub fn retained_query_proof_bytes(&self) -> usize {
-        let mut total = 0usize;
+        let mut total = self.preparation.retained_bytes();
 
         // 1. Brep Arenas
         total += self.brep.regions().len() * std::mem::size_of::<solidcore::topology::Region>();

@@ -20,6 +20,73 @@ use support::{copy_project, manifest, write_manifest};
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
+#[tokio::test]
+async fn headless_saved_open_preserves_content_and_can_publish_preview_without_reimport() {
+    let workspace = Workspace::new();
+    let source = workspace.source("through-hole.step");
+    let path = workspace.path("headless.spil");
+    let copied = workspace.path("headless-copy.spil");
+    let mut writer = spawn().await;
+    import(&mut writer, &source, RigidPoseMm::IDENTITY).await;
+    let original = records(&mut writer).await;
+    let saved = save(&mut writer, Some(&path)).await;
+    writer.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut client = spawn().await;
+    for display in [SourceDisplayDemand::None, SourceDisplayDemand::Preview] {
+        let summary = scene(&mut client).await;
+        let ProjectResponse::OperationAccepted { operation } = client
+            .project(ProjectCommand::Open {
+                display,
+                session_id: summary.session_id,
+                base_revision: summary.revision,
+                path: native(if display == SourceDisplayDemand::None {
+                    &path
+                } else {
+                    &copied
+                }),
+                read_only: display == SourceDisplayDemand::Preview,
+                recover_previous: false,
+                discard_changes: false,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("open expected")
+        };
+        completed_scene(wait_job(&mut client, operation.name).await);
+        let current = info(&mut client).await;
+        assert!(!current.dirty);
+        assert_eq!(current.revision, saved.revision);
+        let (definitions, occurrences) = records(&mut client).await;
+        assert_eq!(definitions[0].provenance, original.0[0].provenance);
+        assert_eq!(occurrences[0].pose, original.1[0].pose);
+        match display {
+            SourceDisplayDemand::None => {
+                assert!(definitions.iter().all(|definition| matches!(
+                    definition.display,
+                    DefinitionDisplay::NotRequested
+                )))
+            }
+            SourceDisplayDemand::Preview => assert!(
+                definitions
+                    .iter()
+                    .all(|definition| matches!(definition.display, DefinitionDisplay::Mesh { .. }))
+            ),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        if display == SourceDisplayDemand::None {
+            assert_eq!(
+                save(&mut client, Some(&copied)).await.revision,
+                saved.revision
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+    client.shutdown().await.unwrap();
+}
+
 #[test]
 fn force_tool_native_disk_changes_rhs_and_survives_portable_source_absent_return() {
     std::thread::Builder::new()
@@ -1430,6 +1497,7 @@ async fn start_open(
     let summary = scene(client).await;
     let ProjectResponse::OperationAccepted { operation } = client
         .project(ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: summary.session_id,
             base_revision: summary.revision,
             path: native(path),
@@ -1529,6 +1597,7 @@ async fn import(client: &mut EngineClient, source: &Path, pose: RigidPoseMm) -> 
     let summary = scene(client).await;
     let GeometryResponse::OperationAccepted { operation } = client
         .geometry(GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: summary.session_id,
             base_revision: summary.revision,
             source: native(source),
@@ -1989,6 +2058,7 @@ async fn dirty_replacement_requires_discard_and_same_path_writer_reopen_invalida
     project_rejection(
         &mut client,
         ProjectCommand::Open {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: before.session_id.clone(),
             base_revision: before.revision,
             path: native(&path),
@@ -2152,6 +2222,7 @@ async fn writer_lock_read_only_snapshot_and_killed_writer_have_actual_process_li
     let definition = original.occurrences[0].definition_id.clone();
     for operation in [
         GeometryCommand::ImportPart {
+            display: spiling_contracts::geometry::SourceDisplayDemand::Preview,
             session_id: before.session_id.clone(),
             base_revision: before.revision,
             source: native(&fixture("cylinder.step")),
