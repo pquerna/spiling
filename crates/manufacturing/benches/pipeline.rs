@@ -287,6 +287,7 @@ struct SceneSpec {
     infill: f64,
     layer: f64,
     pattern: String,
+    disable_supports: bool,
 }
 impl SceneSpec {
     fn build(&self, cancel: &AtomicBool) -> Result<Scene> {
@@ -300,6 +301,9 @@ impl SceneSpec {
                     "cathedral" => SparseInfillPolicy::web_roof(),
                     _ => return Err("unknown infill pattern".into()),
                 };
+                if self.disable_supports {
+                    scene.intent.recipe.supports = SupportPolicy::Disabled;
+                }
                 scene.intent.validate()?;
                 Ok(scene)
             }
@@ -309,8 +313,15 @@ impl SceneSpec {
     fn label(&self) -> String {
         match self.size {
             Some([x, y, z]) => format!(
-                "box={x}x{y}x{z} infill={} layer={} pattern={}",
-                self.infill, self.layer, self.pattern
+                "box={x}x{y}x{z} infill={} layer={} pattern={} supports={}",
+                self.infill,
+                self.layer,
+                self.pattern,
+                if self.disable_supports {
+                    "disabled"
+                } else {
+                    "fixture"
+                }
             ),
             None => format!("parts={}", self.parts),
         }
@@ -343,6 +354,7 @@ fn main() -> Result<()> {
         "--box",
         "--infill",
         "--pattern",
+        "--supports",
         "--layer",
         "--samples",
         "--warmup",
@@ -377,6 +389,13 @@ fn main() -> Result<()> {
     let infill: f64 = option("--infill", "0.25")?.parse()?;
     let layer: f64 = option("--layer", "0.2")?.parse()?;
     let pattern = option("--pattern", "rectilinear")?;
+    let supports = option("--supports", "fixture")?;
+    if !["fixture", "disabled"].contains(&supports.as_str())
+        || size.is_none() && supports != "fixture"
+    {
+        return Err("--supports fixture|disabled requires --box for disabled".into());
+    }
+    let disable_supports = supports == "disabled";
     if !["rectilinear", "grid", "gyroid", "cathedral"].contains(&pattern.as_str())
         || size.is_none() && pattern != "rectilinear"
     {
@@ -418,6 +437,7 @@ fn main() -> Result<()> {
             infill,
             layer,
             pattern: pattern.clone(),
+            disable_supports,
         };
         return residency(&spec, &file);
     }
@@ -442,6 +462,7 @@ fn main() -> Result<()> {
                 infill,
                 layer,
                 pattern: pattern.clone(),
+                disable_supports,
             }
             .build(&cancel)?,
         )
@@ -535,7 +556,7 @@ fn main() -> Result<()> {
         if sample >= warmup {
             println!(
                 "{}",
-                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "compute_setup_us":compute_setup_us, "compute":compute, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":intent_source, "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true, "sparse_infill":b.provenance.intent.recipe.sparse_infill})
+                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "compute_setup_us":compute_setup_us, "compute":compute, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":intent_source, "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true, "sparse_infill":b.provenance.intent.recipe.sparse_infill, "supports":b.provenance.intent.recipe.supports})
             );
         }
     }

@@ -95,6 +95,13 @@ compiler, emitter and independent verifier:
   --phase verify --samples 3 --warmup 1 --compute-backend cpu
 ```
 
+For matched slicer comparisons of a box, add `--supports disabled`. The default
+`--supports fixture` keeps the frozen fixture's breakaway policy, which may refine
+physical layers even when it emits no support roads. Match the support policy
+and inspect the actual schedule before attributing material or print-time
+differences to the sparse pattern. The override also applies to `residency`;
+loading `--bundle` always uses its captured intent.
+
 Bundle and raw program stay together. The benchmark checks repeated program
 identity. Its allocator also collects residency counters; this is a native
 facade workload, not measured workbench responsiveness. Complete compilation
