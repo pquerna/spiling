@@ -47,71 +47,82 @@ pub(super) fn verify_two_axis_sparse(
                     "two-axis sparse row lacks its classified interior owner",
                 ));
             };
-            if path.points_mm.len() != 2 || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
+            if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
                 return Err(failed(
                     "two-axis sparse row changed its fine physical interval",
                 ));
             }
-            let a = project_xyz6_point_mm(path.points_mm[0])?;
-            let b = project_xyz6_point_mm(path.points_mm[1])?;
-            if (a[0] == b[0]) == (a[1] == b[1]) {
-                return Err(failed(
-                    "two-axis sparse row is not a positive build-X/Y segment",
-                ));
-            }
-            *families.entry(region_index).or_default() |= if a[0] == b[0] { 1 } else { 2 };
-            if usize::from(region_index) >= MAX_PROCESS_REGIONS {
-                return Err(failed(
-                    "two-axis sparse row owner exceeds the region budget",
-                ));
-            }
-            let Some(previous) = index.checked_sub(1).map(|i| &plan.layers[i]) else {
-                if layer.lower_z_mm != 0.0 {
+            let previous = match index.checked_sub(1).map(|i| &plan.layers[i]) {
+                None if layer.lower_z_mm != 0.0 => {
                     return Err(failed("two-axis sparse first interval is not bed rooted"));
                 }
-                continue;
+                None => None,
+                Some(previous) if previous.z_mm != layer.lower_z_mm => {
+                    return Err(failed("two-axis sparse row crosses a lower physical gap"));
+                }
+                Some(previous) => Some(previous),
             };
-            if previous.z_mm != layer.lower_z_mm {
-                return Err(failed("two-axis sparse row crosses a lower physical gap"));
-            }
-            let ends = [a, b];
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             let width = constant_width(path)?;
-            // Bridge-role Grid/Cathedral roads take the same span rule as every
-            // other sparse row below, and must really span something.
+            // Bridge-role Grid/Cathedral roads must really span something.
             let mut spans_gap = false;
-            for gap in anchors.gaps_edges(
-                AnchorCandidate {
-                    endpoints_mm: ends,
-                    bead_width_mm: width,
-                },
-                projected_edges(previous.paths.iter(), true),
-                work,
-                cancel,
-            )? {
-                let span = (gap.end - gap.start) * length;
-                // Supported, or an ordinary short span: a bridge between two
-                // anchors within the bridge limit, or an end overhanging by no
-                // more than a joint flange's designed three bead widths. A
-                // longer unsupported span must be one the layer reports.
-                let kind = gap_kind(gap, span, width, recipe.process.max_bridge_span_mm);
-                spans_gap |= !matches!(kind, GapKind::Supported);
-                let short = matches!(
-                    kind,
-                    GapKind::Supported | GapKind::Bridge | GapKind::Contact
-                ) || span <= 3.0 * width;
-                if !short && layer.region_coverage.unsupported_overhang_mm == 0.0 {
-                    return Err(failed(format!(
-                        "sparse row has an unreported unsupported span: layer {} {:?} to {:?}, {:.4}..{:.4} mm",
-                        layer.index,
-                        a,
-                        b,
-                        gap.start * length,
-                        gap.end * length
-                    )));
+            // Every road between wall connectors is one axis row; the
+            // connectors are checked against the layer's actual walls.
+            for (first, last) in path.road_ranges() {
+                if last != first + 1 {
+                    return Err(failed("two-axis sparse road is not one straight segment"));
+                }
+                let a = project_xyz6_point_mm(path.points_mm[first])?;
+                let b = project_xyz6_point_mm(path.points_mm[last])?;
+                if (a[0] == b[0]) == (a[1] == b[1]) {
+                    return Err(failed(
+                        "two-axis sparse row is not a positive build-X/Y segment",
+                    ));
+                }
+                *families.entry(region_index).or_default() |= if a[0] == b[0] { 1 } else { 2 };
+                if usize::from(region_index) >= MAX_PROCESS_REGIONS {
+                    return Err(failed(
+                        "two-axis sparse row owner exceeds the region budget",
+                    ));
+                }
+                let Some(previous) = previous else {
+                    continue;
+                };
+                let ends = [a, b];
+                let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+                // Each road takes the same span rule as every other sparse row.
+                for gap in anchors.gaps_edges(
+                    AnchorCandidate {
+                        endpoints_mm: ends,
+                        bead_width_mm: width,
+                    },
+                    projected_edges(previous.paths.iter(), true),
+                    work,
+                    cancel,
+                )? {
+                    let span = (gap.end - gap.start) * length;
+                    // Supported, or an ordinary short span: a bridge between two
+                    // anchors within the bridge limit, or an end overhanging by no
+                    // more than a joint flange's designed three bead widths. A
+                    // longer unsupported span must be one the layer reports.
+                    let kind = gap_kind(gap, span, width, recipe.process.max_bridge_span_mm);
+                    spans_gap |= !matches!(kind, GapKind::Supported);
+                    let short = matches!(
+                        kind,
+                        GapKind::Supported | GapKind::Bridge | GapKind::Contact
+                    ) || span <= 3.0 * width;
+                    if !short && layer.region_coverage.unsupported_overhang_mm == 0.0 {
+                        return Err(failed(format!(
+                            "sparse row has an unreported unsupported span: layer {} {:?} to {:?}, {:.4}..{:.4} mm",
+                            layer.index,
+                            a,
+                            b,
+                            gap.start * length,
+                            gap.end * length
+                        )));
+                    }
                 }
             }
-            if path.kind == DepositionKind::Bridge && !spans_gap {
+            if previous.is_some() && path.kind == DepositionKind::Bridge && !spans_gap {
                 return Err(failed(
                     "web + roof road is fully supported but labelled Bridge",
                 ));

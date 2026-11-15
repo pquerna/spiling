@@ -23,29 +23,38 @@
 //! All of these are software declarations, not measured cooling or flow.
 use super::*;
 
-/// The role a path's speed and fan follow. With role speeds, a Bridge owned
-/// by a sparse process region (fraction below one) is sparse infill spanning
-/// the rows beneath it and takes the sparse speed and ordinary fan; every
-/// other path keeps its own role. Flow factors and bridge construction
-/// checks always use the path's own role.
+/// A Bridge owned by a sparse process region (fraction below one): sparse
+/// infill spanning the rows beneath it within the bridge limit, not a bridge
+/// over a void. Its speed, fan and continuity follow sparse infill; flow
+/// factors and bridge construction checks keep the Bridge role.
+pub fn is_sparse_region_bridge(
+    layer: &PrintLayer,
+    kind: DepositionKind,
+    owner: Option<DepositionOwner>,
+) -> bool {
+    match (kind, owner) {
+        (DepositionKind::Bridge, Some(DepositionOwner::Regional { region_index })) => layer
+            .region_coverage
+            .process_regions
+            .get(usize::from(region_index))
+            .is_some_and(|region| region.fraction < 1.0),
+        _ => false,
+    }
+}
+
+/// The role a path's speed and fan follow. With role speeds, a sparse
+/// region's Bridge ([`is_sparse_region_bridge`]) takes the sparse speed and
+/// ordinary fan; every other path keeps its own role.
 pub fn speed_role(
     recipe: &PlanarPrintRecipe,
     layer: &PrintLayer,
     kind: DepositionKind,
     owner: Option<DepositionOwner>,
 ) -> DepositionKind {
-    match (kind, owner) {
-        (DepositionKind::Bridge, Some(DepositionOwner::Regional { region_index }))
-            if recipe.role_speeds.is_some()
-                && layer
-                    .region_coverage
-                    .process_regions
-                    .get(usize::from(region_index))
-                    .is_some_and(|region| region.fraction < 1.0) =>
-        {
-            DepositionKind::SparseFill
-        }
-        _ => kind,
+    if recipe.role_speeds.is_some() && is_sparse_region_bridge(layer, kind, owner) {
+        DepositionKind::SparseFill
+    } else {
+        kind
     }
 }
 

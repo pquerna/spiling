@@ -120,7 +120,8 @@ fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
 
 /// Every connector edge stays within the bead band inside an actual wall of
 /// its layer along its whole length and crosses no wall; connectors appear
-/// only on single-tool skin, solid and rectilinear/Gyroid sparse roads.
+/// only on single-tool skin, solid and sparse roads, including a sparse
+/// region's Bridge rows.
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     work: &mut usize,
@@ -134,16 +135,18 @@ pub(super) fn verify(
         }
         let walls = Walls::new(layer)?;
         for path in layer.paths.iter().filter(|p| !p.connectors.is_empty()) {
-            if !matches!(
-                (path.kind, path.owner),
-                (
-                    DepositionKind::BottomSkin | DepositionKind::TopSkin,
-                    Some(DepositionOwner::MandatorySkin { .. })
-                ) | (
-                    DepositionKind::SolidFill | DepositionKind::SparseFill,
-                    Some(DepositionOwner::Regional { .. })
+            if !speeds::is_sparse_region_bridge(layer, path.kind, path.owner)
+                && !matches!(
+                    (path.kind, path.owner),
+                    (
+                        DepositionKind::BottomSkin | DepositionKind::TopSkin,
+                        Some(DepositionOwner::MandatorySkin { .. })
+                    ) | (
+                        DepositionKind::SolidFill | DepositionKind::SparseFill,
+                        Some(DepositionOwner::Regional { .. })
+                    )
                 )
-            ) {
+            {
                 return Err(failed("connector on a road role that cannot connect"));
             }
             let WidthProfile::Constant { width_mm } = path.width else {

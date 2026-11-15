@@ -134,8 +134,7 @@ pub(super) fn verify(
             let Some(DepositionOwner::Regional { region_index }) = path.owner else {
                 return Err(failed("web + roof road lacks classified owner"));
             };
-            if path.points_mm.len() != 2
-                || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
+            if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
                 || path.width
                     != (WidthProfile::Constant {
                         width_mm: recipe.bead_width_mm,
@@ -143,8 +142,18 @@ pub(super) fn verify(
             {
                 return Err(failed("web + roof changed width or physical interval"));
             }
-            if !roads.insert((region_index, key(path.points_mm[0], path.points_mm[1])?)) {
-                return Err(failed("web + roof duplicates an actual road"));
+            // Each road between wall connectors is one inventory road; the
+            // connectors themselves are checked against actual walls.
+            for (first, last) in path.road_ranges() {
+                if last != first + 1 {
+                    return Err(failed("web + roof road is not one straight segment"));
+                }
+                if !roads.insert((
+                    region_index,
+                    key(path.points_mm[first], path.points_mm[last])?,
+                )) {
+                    return Err(failed("web + roof duplicates an actual road"));
+                }
             }
         }
         for (region_index, region) in coverage.process_regions.iter().enumerate() {

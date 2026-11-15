@@ -2566,10 +2566,10 @@ impl DepositionPath {
             && !matches!(self.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
             && self.owner != Some(DepositionOwner::Wall)
             && self.points_mm.first() != self.points_mm.last()
-            && self.points_mm.len() != 2
+            && self.road_ranges().any(|(first, last)| last != first + 1)
         {
             return Err(invalid(
-                "ordinary open Bridge rows require two points; a transition requires explicit mixed ownership",
+                "ordinary open Bridge rows require two points per road; a transition requires explicit mixed ownership",
             ));
         }
         let valid = match self.kind {
@@ -4521,22 +4521,26 @@ impl NormalizedPrintPlan {
                         SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
                     )
                 {
-                    if path.points_mm.len() != 2
-                        || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
-                    {
+                    if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
                         return Err(invalid(
-                            "two-axis sparse paths require one straight fine-interval row",
+                            "two-axis sparse paths require a fine physical interval",
                         ));
                     }
-                    let a = program_coordinates::project_xyz6_point_mm(path.points_mm[0])?;
-                    let b = program_coordinates::project_xyz6_point_mm(path.points_mm[1])?;
-                    fixed_axis = if a[0] == b[0] {
-                        Some(0)
-                    } else if a[1] == b[1] {
-                        Some(1)
-                    } else {
-                        return Err(invalid("two-axis sparse row must follow build X or Y"));
-                    };
+                    // Each road between wall connectors is one straight row
+                    // along build X or Y; connectors may turn between families.
+                    for (first, last) in path.road_ranges() {
+                        if last != first + 1 {
+                            return Err(invalid(
+                                "two-axis sparse roads must each be one straight row",
+                            ));
+                        }
+                        let a = program_coordinates::project_xyz6_point_mm(path.points_mm[first])?;
+                        let b = program_coordinates::project_xyz6_point_mm(path.points_mm[last])?;
+                        if (a[0] == b[0]) == (a[1] == b[1]) {
+                            return Err(invalid("two-axis sparse row must follow build X or Y"));
+                        }
+                    }
+                    fixed_axis = None;
                 }
                 if path.kind == DepositionKind::SparseFill
                     && matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Gyroid)

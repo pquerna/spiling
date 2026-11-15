@@ -2199,8 +2199,19 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
 
 #[track_caller]
 fn assert_reemitted_interface_refuses(
+    plan: NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+) -> ManufacturingError {
+    assert_emitted_refuses(plan, intent, true)
+}
+
+/// Re-emit a forged plan, optionally without canonicalization (which would
+/// re-derive labels such as a supported sparse Bridge), and require replay
+/// to refuse it.
+fn assert_emitted_refuses(
     mut plan: NormalizedPrintPlan,
     intent: &ManufacturingIntent,
+    canonicalize: bool,
 ) -> ManufacturingError {
     for layer in &mut plan.layers {
         // Re-emission mutations retain each actual path's explicit dimensions.
@@ -2236,7 +2247,9 @@ fn assert_reemitted_interface_refuses(
             .sum();
     }
     plan.validate(intent).unwrap();
-    realization::canonicalize(&mut plan, intent, &AtomicBool::new(false)).unwrap();
+    if canonicalize {
+        realization::canonicalize(&mut plan, intent, &AtomicBool::new(false)).unwrap();
+    }
     let actual = backend::emit(&plan, intent, &AtomicBool::new(false)).unwrap();
     let error =
         verifier::verify_actual(&actual, &plan, intent, &AtomicBool::new(false), None).unwrap_err();
@@ -3374,6 +3387,7 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
     let bundle = scene.compile(&requested).unwrap();
     assert!(bundle.verification.verified);
     let motion = actual_motion(&bundle);
+    let connectors = connector_moves(&bundle);
     let mut families = std::collections::BTreeMap::<u32, u8>::new();
     for pair in motion.windows(2) {
         let (kind, layer, end) = pair[1];
@@ -3381,6 +3395,9 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
             continue;
         }
         let start = pair[0].2;
+        if is_connector(&connectors, start, end) {
+            continue;
+        }
         let family = if start[0] == end[0] && start[1] != end[1] {
             1
         } else if start[1] == end[1] && start[0] != end[0] {
@@ -3398,14 +3415,17 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
         ((0.45 - height) * height + std::f64::consts::PI * (height / 2.0).powi(2)) / height / 0.15;
     for layer in &bundle.plan.layers {
         for fixed in [0, 1] {
+            // Every road between wall connectors is one grid row.
             let mut coordinates: Vec<_> = layer
                 .paths
                 .iter()
-                .filter(|p| {
-                    p.kind == DepositionKind::SparseFill
-                        && p.points_mm[0][fixed] == p.points_mm[1][fixed]
+                .filter(|p| p.kind == DepositionKind::SparseFill)
+                .flat_map(|p| {
+                    p.road_ranges()
+                        .map(|(first, last)| (p.points_mm[first], p.points_mm[last]))
                 })
-                .map(|p| p.points_mm[0][fixed])
+                .filter(|(a, b)| a[fixed] == b[fixed])
+                .map(|(a, _)| a[fixed])
                 .collect();
             coordinates.sort_by(f64::total_cmp);
             coordinates.dedup();
@@ -3419,7 +3439,9 @@ fn native_grid_infill_emits_both_half_density_families_and_replays() {
     let mut missing = bundle.plan.clone();
     for layer in &mut missing.layers {
         layer.paths.retain(|p| {
-            p.kind != DepositionKind::SparseFill || p.points_mm[0][0] != p.points_mm[1][0]
+            p.kind != DepositionKind::SparseFill
+                || p.road_ranges()
+                    .all(|(first, last)| p.points_mm[first][0] != p.points_mm[last][0])
         });
     }
     let error = assert_reemitted_interface_refuses(missing, &requested);
@@ -3757,6 +3779,54 @@ fn native_web_roof_builds_each_part_of_a_plate_on_one_lattice() {
     }));
 }
 
+/// The first single-road SparseFill path of `layer` with no unsupported span
+/// over the previous layer's actual strokes.
+fn fully_supported_sparse_road(plan: &NormalizedPrintPlan, layer: usize) -> usize {
+    use crate::planner::support::{
+        AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
+    };
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    let mut anchors = AnchorWorkspace::default();
+    let mut work = 0;
+    let cancel = AtomicBool::new(false);
+    let previous = &plan.layers[layer - 1];
+    plan.layers[layer]
+        .paths
+        .iter()
+        .position(|path| {
+            if path.kind != DepositionKind::SparseFill || path.points_mm.len() != 2 {
+                return false;
+            }
+            let ends = [
+                project_xyz6_point_mm(path.points_mm[0]).unwrap(),
+                project_xyz6_point_mm(path.points_mm[1]).unwrap(),
+            ];
+            let length = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
+            let WidthProfile::Constant { width_mm } = path.width else {
+                return false;
+            };
+            anchors
+                .gaps_edges(
+                    AnchorCandidate {
+                        endpoints_mm: ends,
+                        bead_width_mm: width_mm,
+                    },
+                    projected_edges(previous.paths.iter(), true),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .iter()
+                .all(|gap| {
+                    matches!(
+                        gap_kind(gap, (gap.end - gap.start) * length, width_mm, 10.0),
+                        GapKind::Supported
+                    )
+                })
+        })
+        .expect("a fully supported sparse road")
+}
+
 #[test]
 fn native_web_roof_curved_and_holed_domains_freshly_replay() {
     for (label, source) in [("cylinder", CYLINDER), ("through-hole", HOLE)] {
@@ -3821,12 +3891,9 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
                         layer.paths.push(road);
                     }
                     3 => {
-                        layer
-                            .paths
-                            .iter_mut()
-                            .find(|p| p.kind == DepositionKind::SparseFill)
-                            .unwrap()
-                            .kind = DepositionKind::Bridge;
+                        // A road the layer below supports throughout.
+                        let road = fully_supported_sparse_road(&bundle.plan, index);
+                        altered.layers[index].paths[road].kind = DepositionKind::Bridge;
                     }
                     _ => {
                         let road = layer
@@ -3839,6 +3906,9 @@ fn native_web_roof_curved_and_holed_domains_freshly_replay() {
                 }
                 let error = if attack == 0 {
                     altered.validate(&requested).unwrap_err()
+                } else if attack == 3 {
+                    // Canonicalization would re-derive the honest label.
+                    assert_emitted_refuses(altered, &requested, false)
                 } else {
                     assert_reemitted_interface_refuses(altered, &requested)
                 };
@@ -4194,6 +4264,41 @@ fn bed_exclusion_keeps_parts_and_adhesion_out_and_the_verifier_checks_it_indepen
     // Below the ceiling the same program is admitted.
     stricter.printer.bed_exclusions[1].max_material_z_mm = 9.0;
     verifier::verify(&clear.program, &clear.plan, &stricter, &cancel).unwrap();
+}
+
+#[test]
+fn straight_sparse_patterns_connect_each_row_along_walls() {
+    // Rectilinear (whose rows span the rows beneath as sparse-region
+    // Bridges), Grid and Cathedral roads all join at the walls, and every
+    // road between connectors stays one exact straight row.
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    for policy in [
+        SparseInfillPolicy::Fine,
+        SparseInfillPolicy::Grid,
+        SparseInfillPolicy::web_roof(),
+    ] {
+        let mut requested = intent();
+        requested.recipe.sparse_infill = policy;
+        requested.recipe.infill_fraction = 0.15;
+        let bundle = scene.compile(&requested).unwrap();
+        assert!(bundle.verification.verified);
+        let plan = &bundle.bundle.plan;
+        let mut sparse_connected = 0;
+        for layer in &plan.layers {
+            for path in layer.paths.iter().filter(|p| !p.connectors.is_empty()) {
+                if path.kind == DepositionKind::SparseFill
+                    || speeds::is_sparse_region_bridge(layer, path.kind, path.owner)
+                {
+                    sparse_connected += 1;
+                    for (first, last) in path.road_ranges() {
+                        assert_eq!(last, first + 1, "{policy:?}: a road range is one row");
+                    }
+                }
+            }
+        }
+        assert!(sparse_connected > 0, "{policy:?}: sparse rows connect");
+        assert!(!actual_motion(&bundle).is_empty());
+    }
 }
 
 #[test]

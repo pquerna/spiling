@@ -1399,7 +1399,7 @@ pub(crate) fn verify_actual(
                     {
                         fixed_axis = if from[0] == position[0] {
                             0
-                        } else if from[1] == position[1] {
+                        } else if from[1] == position[1] || connector {
                             1
                         } else {
                             return Err(failed("actual grid deposition must follow build X or Y"));

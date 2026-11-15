@@ -63,10 +63,19 @@ fn anchored<'a>(
                 width,
                 recipe.process.max_bridge_span_mm,
             );
+            // Sparse infill and wall connectors keep the one short-span rule:
+            // they may span lower strokes within the bridge limit, or run
+            // unanchored for at most three bead widths, and still root what
+            // rests on them. A road joined by a connector is judged as a road.
+            let sparse = path.kind == DepositionKind::SparseFill
+                || (first..last).all(|edge| path.is_connector_edge(edge));
+            let span = (gap.end - gap.start) * length;
             if matches!(kind, GapKind::Demand)
+                && !(sparse && span <= MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS * width)
                 || (matches!(kind, GapKind::Bridge)
                     && path.kind.is_model()
-                    && path.kind != DepositionKind::Bridge)
+                    && path.kind != DepositionKind::Bridge
+                    && !sparse)
             {
                 return Ok(false);
             }
@@ -711,6 +720,61 @@ mod tests {
             !anchored(
                 &path,
                 lower.iter(),
+                std::iter::empty(),
+                &intent.recipe,
+                &mut work,
+                &mut anchors,
+                &cancel
+            )
+            .unwrap()
+        );
+        // Sparse infill spanning the rows beneath it roots what rests on it.
+        path.kind = DepositionKind::SparseFill;
+        assert!(
+            anchored(
+                &path,
+                lower.iter(),
+                std::iter::empty(),
+                &intent.recipe,
+                &mut work,
+                &mut anchors,
+                &cancel
+            )
+            .unwrap()
+        );
+        // So does a wall connector, judged by the same short-span rule.
+        let mut connected = path.clone();
+        connected.kind = DepositionKind::TopSkin;
+        connected.points_mm = vec![
+            [1.0, 0.0, 2.0],
+            [1.0, 1.0, 2.0],
+            [5.0, 1.0, 2.0],
+            [5.0, 0.0, 2.0],
+        ];
+        connected.connectors = vec![ConnectorRun { first: 1, last: 2 }];
+        let mut under = lower.to_vec();
+        for x in [1.0, 5.0] {
+            let mut post = lower[0].clone();
+            post.points_mm = vec![[x, -0.5, 1.0], [x, 1.5, 1.0]];
+            under.push(post);
+        }
+        assert!(
+            anchored(
+                &connected,
+                under.iter(),
+                std::iter::empty(),
+                &intent.recipe,
+                &mut work,
+                &mut anchors,
+                &cancel
+            )
+            .unwrap()
+        );
+        connected.connectors.clear();
+        assert!(
+            !anchored(
+                &connected,
+                under.iter(),
                 std::iter::empty(),
                 &intent.recipe,
                 &mut work,

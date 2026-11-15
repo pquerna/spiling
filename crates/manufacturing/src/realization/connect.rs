@@ -4,7 +4,8 @@
 //! Continuous roads: join the ends of clipped infill and skin roads along the
 //! inside of the layer's walls, so each region prints as few uninterrupted
 //! extrusions as its geometry allows. One rule serves every eligible pattern
-//! (skin and solid rows, rectilinear sparse rows, Gyroid curves): a road end
+//! (skin and solid rows; rectilinear, Grid and Cathedral sparse rows; Gyroid
+//! curves): a road end
 //! lies in the bead band inside a wall; two ends that are neighbours along
 //! that wall, with nothing between them, may be joined by a connector that
 //! follows the wall at the roads' offset. Every road keeps its exact
@@ -179,10 +180,12 @@ fn eligible(path: &DepositionPath, policy: &SparseInfillPolicy, layer: &PrintLay
         ) => true,
         (DepositionKind::SolidFill, Some(DepositionOwner::Regional { .. })) => true,
         (DepositionKind::SparseFill, Some(DepositionOwner::Regional { .. })) => {
-            matches!(
-                policy,
-                SparseInfillPolicy::Fine | SparseInfillPolicy::Gyroid
-            )
+            !matches!(policy, SparseInfillPolicy::CombineEligible { .. })
+        }
+        // Sparse infill spanning the rows beneath it connects like sparse.
+        (DepositionKind::Bridge, owner) => {
+            speeds::is_sparse_region_bridge(layer, path.kind, owner)
+                && !matches!(policy, SparseInfillPolicy::CombineEligible { .. })
         }
         _ => false,
     };
@@ -258,6 +261,79 @@ fn along(points: &[[f64; 3]], cumulative: &[f64], s: f64, offset: f64) -> [f64; 
     ]
 }
 
+/// A sparse region's Bridge row spans the rows beneath it. Connectors on the
+/// layer below lie along the walls and may now support such a row
+/// throughout; it is then ordinary sparse fill, not a bridge, and keeps no
+/// Bridge label (or bridge flow) it no longer earns.
+fn relabel_supported_sparse_bridges(
+    plan: &mut NormalizedPrintPlan,
+    index: usize,
+    intent: &ManufacturingIntent,
+    anchors: &mut crate::planner::support::AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use crate::planner::support::{AnchorCandidate, GapKind, gap_kind, projected_edges};
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    let (lower, upper) = plan.layers.split_at_mut(index);
+    let previous = &lower[index - 1];
+    let layer = &mut upper[0];
+    if previous.paths.iter().all(|p| p.connectors.is_empty()) || previous.z_mm != layer.lower_z_mm {
+        return Ok(());
+    }
+    let mut changed = false;
+    for path_index in 0..layer.paths.len() {
+        check_cancel(cancel)?;
+        let path = &layer.paths[path_index];
+        if !speeds::is_sparse_region_bridge(layer, path.kind, path.owner)
+            || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
+        {
+            continue;
+        }
+        let WidthProfile::Constant { width_mm } = path.width else {
+            continue;
+        };
+        let mut spans_gap = false;
+        for (first, last) in path.road_ranges() {
+            for edge in first..last {
+                let ends = [
+                    project_xyz6_point_mm(path.points_mm[edge])?,
+                    project_xyz6_point_mm(path.points_mm[edge + 1])?,
+                ];
+                let length = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
+                for gap in anchors.gaps_edges(
+                    AnchorCandidate {
+                        endpoints_mm: ends,
+                        bead_width_mm: width_mm,
+                    },
+                    projected_edges(previous.paths.iter(), true),
+                    work,
+                    cancel,
+                )? {
+                    let span = (gap.end - gap.start) * length;
+                    spans_gap |= !matches!(
+                        gap_kind(
+                            gap,
+                            span,
+                            width_mm,
+                            intent.recipe.process.max_bridge_span_mm
+                        ),
+                        GapKind::Supported
+                    );
+                }
+            }
+        }
+        if !spans_gap {
+            layer.paths[path_index].kind = DepositionKind::SparseFill;
+            changed = true;
+        }
+    }
+    if changed {
+        crate::planner::support::object_volumes(std::slice::from_mut(layer), intent)?;
+    }
+    Ok(())
+}
+
 /// Join eligible roads on every single-tool layer whose rows no other
 /// construction names individually.
 pub(super) fn connect_roads(
@@ -270,8 +346,13 @@ pub(super) fn connect_roads(
         return Ok(());
     }
     let policy = intent.recipe.sparse_infill;
+    let mut anchors = crate::planner::support::AnchorWorkspace::default();
+    let mut work = 0usize;
     for index in 0..plan.layers.len() {
         check_cancel(cancel)?;
+        if index > 0 {
+            relabel_supported_sparse_bridges(plan, index, intent, &mut anchors, &mut work, cancel)?;
+        }
         let layer = &plan.layers[index];
         // Separators, diaphragms, process interfaces, skin-bridge domains and
         // minimum-command fits name individual rows of this layer.
@@ -301,6 +382,7 @@ pub(super) fn connect_roads(
             .flat_map(|above| &above.paths)
             .filter(|p| {
                 p.kind == DepositionKind::Bridge
+                    && !speeds::is_sparse_region_bridge(&plan.layers[index + 1], p.kind, p.owner)
                     || matches!(p.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
             })
             .map(|p| {
