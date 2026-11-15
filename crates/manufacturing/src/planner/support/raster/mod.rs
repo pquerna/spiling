@@ -134,6 +134,11 @@ impl Domains {
         self.owned_bytes
     }
 
+    pub(super) fn retain_bytes(&mut self, bytes: usize) -> Result<(), ManufacturingError> {
+        self.owned_bytes = self.owned_bytes.saturating_add(bytes);
+        self.admit().map(|_| ())
+    }
+
     pub(super) fn set_anchor_owned_bytes(&mut self, bytes: usize) {
         self.owned_bytes = self
             .owned_bytes
@@ -526,11 +531,14 @@ fn wall_piece(
     } = *ring;
     let [start, end] = edge;
     let length = (end.x - start.x).hypot(end.y - start.y);
-    if !length.is_finite() || length <= 0.000002 {
+    if !length.is_finite() {
         return Err(error(
             ManufacturingErrorCode::UnsupportedGeometry,
             "support wall role crossing creates unresolved deposition",
         ));
+    }
+    if length == 0.0 {
+        return Ok(());
     }
     if *segments >= crate::working_set::units() {
         return Err(resource("retained support wall segment budget exceeded"));
@@ -577,6 +585,7 @@ fn wall_piece(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn failure<'a>(
     paths: &[DepositionPath],
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
@@ -585,12 +594,22 @@ pub(super) fn failure<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
-    scan(paths, previous, recipe, anchors, work, cancel, true)
+    scan(
+        paths,
+        previous,
+        std::iter::empty(),
+        recipe,
+        anchors,
+        work,
+        cancel,
+        true,
+    )
 }
 
 /// The longest unanchored demand span of any stroke, when the raster has one.
 /// A layer whose rasters all have one prints the least-unanchored of them as
 /// authored and reports this span.
+#[cfg(test)]
 pub(super) fn worst_failure<'a>(
     paths: &[DepositionPath],
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
@@ -599,12 +618,26 @@ pub(super) fn worst_failure<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
-    scan(paths, previous, recipe, anchors, work, cancel, false)
+    scan(
+        paths,
+        previous,
+        std::iter::empty(),
+        recipe,
+        anchors,
+        work,
+        cancel,
+        false,
+    )
 }
 
-fn scan<'a>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Direct support and separated object contact retain distinct anchor provenance"
+)]
+pub(super) fn scan<'a>(
     paths: &[DepositionPath],
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
     recipe: &PlanarPrintRecipe,
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
@@ -625,15 +658,18 @@ fn scan<'a>(
                 previous
                     .clone()
                     .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                std::iter::empty(),
+                contacts.clone(),
                 work,
                 cancel,
             )? {
                 let span = (gap.end - gap.start) * length;
-                if matches!(
-                    strokes::gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
-                    strokes::GapKind::Demand
-                ) && worst.as_ref().is_none_or(|worst| span > worst.span)
+                let kind =
+                    strokes::gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm);
+                if (matches!(kind, strokes::GapKind::Demand)
+                    || (matches!(kind, strokes::GapKind::Bridge)
+                        && path.kind.is_model()
+                        && path.kind != DepositionKind::Bridge))
+                    && worst.as_ref().is_none_or(|worst| span > worst.span)
                 {
                     worst = Some(strokes::Failure {
                         path: path_index,
@@ -658,6 +694,115 @@ fn scan<'a>(
 mod tests {
     use super::*;
     use geo::{LineString, Polygon};
+
+    #[test]
+    fn optional_role_fragments_reach_command_fitting_and_report_omission() {
+        let centers = rectangle(0.0, 0.0, 2.0, 2.0);
+        let ring = WallRing {
+            z: 1.0,
+            lower_z: 0.0,
+            bead_width_mm: 1.0,
+            first_path: 0,
+        };
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        let mut points = 0;
+        wall_piece(
+            [
+                Coord { x: 0.5, y: 0.5 },
+                Coord {
+                    x: 0.5
+                        + spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM
+                            * 0.25,
+                    y: 0.5,
+                },
+            ],
+            DepositionKind::SupportInterface,
+            &ring,
+            &mut paths,
+            &mut segments,
+            &mut points,
+            crate::working_set::units(),
+            0,
+        )
+        .unwrap();
+        let omitted = commands::fit(
+            &centers,
+            &mut paths,
+            &mut segments,
+            0,
+            0,
+            &mut 0,
+            0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(paths.is_empty());
+        assert!(omitted > 0.0);
+    }
+
+    #[test]
+    fn unpartitioned_support_contours_fit_subcommand_original_edges() {
+        let centers = MultiPolygon(vec![Polygon::new(
+            LineString::from(vec![
+                (0.0, 0.0),
+                (0.0, 2.0),
+                (2.0, 2.0),
+                (2.0, 0.0),
+                (0.000001, 0.0),
+                (0.0, 0.0),
+            ]),
+            Vec::new(),
+        )]);
+        for kind in [DepositionKind::Support, DepositionKind::SupportInterface] {
+            let mut paths = Vec::new();
+            let mut segments = 0;
+            let cancel = AtomicBool::new(false);
+            region::support_contour_paths(
+                &centers,
+                1.0,
+                0.8,
+                0.4,
+                kind,
+                &mut paths,
+                &mut segments,
+                &cancel,
+            )
+            .unwrap();
+            let omitted = commands::fit(
+                &centers,
+                &mut paths,
+                &mut segments,
+                0,
+                0,
+                &mut 0,
+                0,
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(omitted, 0.0);
+            assert!(!paths.is_empty());
+            for path in paths {
+                assert_eq!(path.kind, kind);
+                assert_eq!(path.points_mm.first(), path.points_mm.last());
+                for edge in path.points_mm.windows(2) {
+                    assert!(
+                        commands::command_length(
+                            Coord {
+                                x: edge[0][0],
+                                y: edge[0][1]
+                            },
+                            Coord {
+                                x: edge[1][0],
+                                y: edge[1][1]
+                            },
+                        )
+                        .unwrap()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn support_domain_retention_is_not_a_command_count() {

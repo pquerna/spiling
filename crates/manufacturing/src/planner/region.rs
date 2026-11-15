@@ -439,8 +439,27 @@ pub(super) fn support_contour_paths(
         for ring in std::iter::once(p.exterior()).chain(p.interiors()) {
             check_cancel(cancel)?;
             reserve_segments(segments, ring.0.len() - 1)?;
-            let points_mm = ring.0.iter().map(|c| [c.x, c.y, z]).collect();
-            push_path(paths, kind, points_mm, bead_width_mm, [lower_z, z])?;
+            if ring.0.windows(2).any(|edge| {
+                let length = (edge[1].x - edge[0].x).hypot(edge[1].y - edge[0].y);
+                !length.is_finite() || length <= 0.0
+            }) {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "support contour contains a nonfinite or zero-length proposal",
+                ));
+            }
+            paths.push(DepositionPath {
+                material_domain: None,
+                kind,
+                width: WidthProfile::Constant {
+                    width_mm: bead_width_mm,
+                },
+                physical_z_mm: [lower_z, z],
+                owner: None,
+                points_mm: ring.0.iter().map(|c| [c.x, c.y, z]).collect(),
+                arcs: Vec::new(),
+                exposed: false,
+            });
         }
     }
     Ok(())

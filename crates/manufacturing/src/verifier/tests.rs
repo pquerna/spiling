@@ -86,7 +86,7 @@ fn coverage() -> PlanarRegionCoverage {
         process_regions: vec![],
     }
 }
-fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
+pub(super) fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
     plan.native_geometry.certified_layer_count = plan.layers.len() as u32;
     plan.native_geometry.slab_count = plan.layers.len() as u32;
     plan.native_geometry

@@ -25,6 +25,7 @@ mod joins;
 mod lifecycle;
 pub(crate) mod package;
 mod replay;
+mod supports;
 pub(crate) use replay::ReplaySink;
 
 const XYZ_HALF_STEP: f64 = 0.000_000_5;
@@ -1639,6 +1640,7 @@ pub(crate) fn verify_actual(
     adhesion::verify(plan, recipe, cancel)?;
     let mut geometry_work = 0usize;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
+    supports::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     interfaces::verify_projected_byte_geometry(
@@ -1710,6 +1712,7 @@ pub(crate) fn verify_actual(
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
             "Actual XYZ6 minimum deposition length and independently inverted XYZ6/E8 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
+            "Support roots (when present): matched actual XYZ6 bed, preceding support or established earlier-part capsules; separated lower contacts, symmetric object Z gaps and complete nominal capsule XY clearance without source requery".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
             "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
             "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
@@ -1805,7 +1808,7 @@ pub(crate) fn verify_actual(
         report.coverage.push(format!("Skirt {} / brim {} loops ({} islands) checked as non-model: clear of part/support beads, skirt at its distance, brim attached; no adhesion claim", adhesion.skirt_paths, adhesion.brim_paths, adhesion.brim_islands));
     }
     if unsupported_layers > 0 {
-        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no support reached from the build plate; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
+        report.limitations.insert(0, format!("Unsupported deposition reported on {unsupported_layers} layers where no verified support or bounded bridge covered the deposition; largest recorded span {largest_recorded_span:.3} mm. This is not a worst-span inventory or physical printability certification."));
     }
     if let (Some(job), Some(lc)) = (job, &lifecycle) {
         report.limitations.insert(0, lc.levelling_report().into());

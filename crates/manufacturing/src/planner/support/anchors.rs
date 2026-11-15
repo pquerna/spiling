@@ -296,10 +296,35 @@ pub(crate) fn projected_edges<'a>(
 }
 
 impl AnchorWorkspace {
-    pub(in crate::planner) fn set_budget(&mut self, remaining_records: usize) {
+    pub(crate) fn set_budget(&mut self, remaining_records: usize) {
         self.intervals.clear();
         self.uncovered.clear();
         self.record_limit = remaining_records.min(crate::working_set::units());
+    }
+
+    pub(crate) fn admit_beside(&mut self, owned_bytes: usize) -> Result<(), ManufacturingError> {
+        let remaining = crate::working_set::bytes()
+            .checked_sub(owned_bytes)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "deposited-anchor owners exceed live byte allowance",
+                )
+            })?;
+        let stride =
+            2 * std::mem::size_of::<AnchorGap>().max(std::mem::size_of::<(f64, f64, bool)>());
+        let records = (remaining / stride).min(crate::working_set::units());
+        if self
+            .intervals
+            .capacity()
+            .saturating_add(self.uncovered.capacity())
+            > records
+        {
+            self.intervals = Vec::new();
+            self.uncovered = Vec::new();
+        }
+        self.set_budget(records);
+        Ok(())
     }
 
     pub(in crate::planner) fn retained_records(&self) -> usize {
@@ -341,6 +366,51 @@ impl AnchorWorkspace {
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
         self.gaps_inputs(candidate, edges.map(AnchorInput::Edge), work, cancel)
+    }
+    pub(crate) fn gaps_projected<'a>(
+        &mut self,
+        candidate: AnchorCandidate,
+        previous: impl Iterator<Item = &'a DepositionPath>,
+        contacts: impl Iterator<Item = &'a DepositionPath>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
+        use spiling_contracts::manufacturing::program_coordinates::{
+            MAX_XYZ6_COORDINATE_MM, XYZ6_PROJECTION_SCREEN_MM, project_xyz6_point_mm,
+        };
+        let inputs = nominal_edges(previous, true)
+            .chain(nominal_edges(contacts, false))
+            .map(move |(points, direct, width)| {
+                if let Ok([a, b]) = points.as_ref()
+                    && a.iter()
+                        .chain(b)
+                        .all(|value| value.is_finite() && value.abs() <= MAX_XYZ6_COORDINATE_MM)
+                    && width.is_finite()
+                    && width * 0.5 > 0.0
+                    && (0..2)
+                        .any(|axis| (a[axis] - b[axis]).abs() > 2.0 * XYZ6_PROJECTION_SCREEN_MM)
+                {
+                    let reach = ((candidate.bead_width_mm * 0.5 + width * 0.5).next_up()
+                        + XYZ6_PROJECTION_SCREEN_MM)
+                        .next_up();
+                    let [first, last] = candidate.endpoints_mm;
+                    if (0..2).any(|axis| {
+                        first[axis].min(last[axis]) > (a[axis].max(b[axis]) + reach).next_up()
+                            || first[axis].max(last[axis])
+                                < (a[axis].min(b[axis]) - reach).next_down()
+                    }) {
+                        return AnchorInput::Skipped(1);
+                    }
+                }
+                AnchorInput::Edge((
+                    points.and_then(|[a, b]| {
+                        Ok([project_xyz6_point_mm(a)?, project_xyz6_point_mm(b)?])
+                    }),
+                    direct,
+                    width,
+                ))
+            });
+        self.gaps_inputs(candidate, inputs, work, cancel)
     }
     pub(crate) fn gaps_prepared(
         &mut self,
@@ -769,6 +839,62 @@ mod dimension_tests {
     use super::*;
 
     #[test]
+    fn projected_screens_preserve_contact_provenance_and_invalid_far_edges() {
+        use spiling_contracts::manufacturing::{DepositionKind, WidthProfile};
+        let cancel = AtomicBool::new(false);
+        let candidate = AnchorCandidate {
+            endpoints_mm: [[-2.0, 0.0, 0.4], [2.0, 0.0, 0.4]],
+            bead_width_mm: 0.4,
+        };
+        let path = |x, width_mm| DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![[x, -1.0, 0.2], [x, 1.0, 0.2]],
+            arcs: Vec::new(),
+            exposed: false,
+        };
+        let summarize = |rows: &[AnchorGap]| {
+            rows.iter()
+                .map(|gap| (gap.start, gap.end, gap.left, gap.right, gap.direct_ends))
+                .collect::<Vec<_>>()
+        };
+        let contacts = [path(-2.0, 0.4), path(2.0, 0.4)];
+        for x in [0.0000005, 20.0, f64::INFINITY] {
+            for width in [0.4, f64::from_bits(1)] {
+                let previous = [path(x, width)];
+                let mut original = AnchorWorkspace::default();
+                let mut screened = AnchorWorkspace::default();
+                let (mut old_work, mut new_work) = (0, 0);
+                let expected = original
+                    .gaps_edges(
+                        candidate,
+                        projected_edges(previous.iter(), true)
+                            .chain(projected_edges(contacts.iter(), false)),
+                        &mut old_work,
+                        &cancel,
+                    )
+                    .map(summarize)
+                    .map_err(|failure| (failure.code, failure.message));
+                let actual = screened
+                    .gaps_projected(
+                        candidate,
+                        previous.iter(),
+                        contacts.iter(),
+                        &mut new_work,
+                        &cancel,
+                    )
+                    .map(summarize)
+                    .map_err(|failure| (failure.code, failure.message));
+                assert_eq!(actual, expected);
+                assert_eq!(new_work, old_work);
+            }
+        }
+    }
+
+    #[test]
     fn prepared_paths_match_all_edge_gaps_and_cumulative_work() {
         use spiling_contracts::manufacturing::{DepositionKind, WidthProfile};
         let mut paths = (0..32)
@@ -815,9 +941,13 @@ mod dimension_tests {
                         .any(|entry| matches!(entry, AnchorInput::Skipped(_)))
                 );
                 for initial in [0, usize::MAX - 64, usize::MAX - 63, usize::MAX] {
-                    let (mut original, mut indexed) =
-                        (AnchorWorkspace::default(), AnchorWorkspace::default());
-                    let (mut old_work, mut new_work) = (initial, initial);
+                    let (mut original, mut indexed, mut screened) = (
+                        AnchorWorkspace::default(),
+                        AnchorWorkspace::default(),
+                        AnchorWorkspace::default(),
+                    );
+                    let (mut old_work, mut new_work, mut screened_work) =
+                        (initial, initial, initial);
                     let expected = original
                         .gaps_edges(
                             candidate,
@@ -833,6 +963,18 @@ mod dimension_tests {
                         .map_err(|e| (e.code, e.message));
                     assert_eq!(actual, expected, "x={x}, width={width}, initial={initial}");
                     assert_eq!(new_work, old_work);
+                    let screened = screened
+                        .gaps_projected(
+                            candidate,
+                            paths.iter(),
+                            std::iter::empty(),
+                            &mut screened_work,
+                            &cancel,
+                        )
+                        .map(gaps)
+                        .map_err(|e| (e.code, e.message));
+                    assert_eq!(screened, expected);
+                    assert_eq!(screened_work, old_work);
                 }
             }
         }

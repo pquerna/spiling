@@ -3860,6 +3860,8 @@ impl NormalizedPrintPlan {
         let complete = matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. });
         let mut object_xy = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
         let mut gap_start = None;
+        let mut gap_from_object = false;
+        let mut gap_from_interface = false;
         let alternation = hatch_alternation_keys(&self.layers);
         for (index, layer) in self.layers.iter().enumerate() {
             layer.region_coverage.validate(&intent.recipe)?;
@@ -3978,33 +3980,29 @@ impl NormalizedPrintPlan {
                 };
                 if index == 0
                     || index + 1 == self.layers.len()
-                    || !self.layers[0].paths.iter().any(|p| {
-                        matches!(
-                            p.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        )
-                    })
                     || (gap_start.is_none()
-                        && !self.layers[index - 1]
-                            .paths
-                            .iter()
-                            .any(|p| p.kind == DepositionKind::SupportInterface))
+                        && !self.layers[index - 1].paths.iter().any(|p| {
+                            p.kind == DepositionKind::SupportInterface || p.kind.is_model()
+                        }))
                 {
                     return Err(invalid(
-                        "contact gap requires bed-anchored support and preceding support interface",
+                        "contact gap requires preceding object deposition or support interface",
                     ));
                 }
                 if gap_start.is_none() {
                     let preceding = &self.layers[index - 1];
+                    gap_from_object = preceding.paths.iter().any(|path| path.kind.is_model());
+                    gap_from_interface = preceding
+                        .paths
+                        .iter()
+                        .any(|path| path.kind == DepositionKind::SupportInterface);
                     gap_start = Some(
                         preceding
                             .paths
                             .iter()
                             .filter(|path| {
-                                matches!(
-                                    path.kind,
-                                    DepositionKind::Support | DepositionKind::SupportInterface
-                                )
+                                path.kind.is_model()
+                                    || path.kind == DepositionKind::SupportInterface
                             })
                             .try_fold(f64::NEG_INFINITY, |top, path| {
                                 program_coordinates::project_xyz6_bead_height_mm(
@@ -4016,23 +4014,28 @@ impl NormalizedPrintPlan {
                     );
                 }
             } else if let Some(support_top) = gap_start {
-                if !layer.paths.iter().any(|p| p.kind.is_model()) {
-                    return Err(invalid("contact gap must end at actual object deposition"));
+                let eligible = |path: &&DepositionPath| {
+                    (gap_from_interface && path.kind.is_model())
+                        || (gap_from_object && path.kind == DepositionKind::SupportInterface)
+                };
+                if !layer.paths.iter().any(|path| eligible(&path)) {
+                    return Err(invalid(
+                        "contact gap must join object deposition and support interface",
+                    ));
                 }
                 let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
                     return Err(invalid("contact gap requires breakaway support policy"));
                 };
-                let object_bottom = layer
-                    .paths
-                    .iter()
-                    .filter(|path| path.kind.is_model())
-                    .try_fold(f64::INFINITY, |bottom, path| {
+                let object_bottom = layer.paths.iter().filter(eligible).try_fold(
+                    f64::INFINITY,
+                    |bottom, path| {
                         program_coordinates::project_xyz6_bead_height_mm(
                             path.physical_z_mm[1],
                             path.height_mm(),
                         )
                         .map(|interval| bottom.min(interval[0]))
-                    })?;
+                    },
+                )?;
                 if program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)?
                     < z_gap_mm
                 {

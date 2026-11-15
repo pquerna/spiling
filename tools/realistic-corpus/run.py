@@ -282,8 +282,7 @@ def prusa(step, cwd, brimmed=False):
         args = ["--load", PRUSA_INI]
     else:
         args = ["--layer-height", str(layer), "--fill-density", f"{round(fraction * 100)}%"]
-    # Spiling's generated supports stand on the build plate only.
-    args += ["--support-material", "--support-material-buildplate-only"] if SUPPORTS != "disabled" else []
+    args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
     try:
         proc = subprocess.run(["prusa-slicer", "--export-gcode", *args, "--center", center, "-o", gcode, step],

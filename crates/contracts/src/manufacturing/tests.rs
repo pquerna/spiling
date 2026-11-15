@@ -3217,6 +3217,25 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
         *z_gap_mm = 0.3;
     }
     assert!(admitted.validate(&data).is_err());
+    if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut data.recipe.supports {
+        *z_gap_mm = 0.2;
+    }
+    let mut on_part = admitted.clone();
+    on_part.layers[0].region_coverage = admitted.layers[2].region_coverage.clone();
+    on_part.layers[2].region_coverage = admitted.layers[0].region_coverage.clone();
+    for path in &mut on_part.layers[0].paths {
+        path.kind = DepositionKind::Perimeter;
+        path.owner = Some(DepositionOwner::Wall);
+    }
+    for path in &mut on_part.layers[2].paths {
+        path.kind = DepositionKind::SupportInterface;
+        path.owner = None;
+    }
+    on_part.validate(&data).unwrap();
+    for path in &mut on_part.layers[2].paths {
+        path.kind = DepositionKind::Support;
+    }
+    assert!(on_part.validate(&data).is_err());
 }
 
 #[test]

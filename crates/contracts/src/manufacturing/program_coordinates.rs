@@ -15,6 +15,7 @@ use super::{ManufacturingError, ManufacturingErrorCode};
 pub const MAX_XYZ6_COORDINATE_MM: f64 = (1u64 << 52) as f64 / 1_000_000.0;
 /// One step of the XYZ6 coordinate lattice.
 pub const XYZ6_QUANTUM_MM: f64 = 0.000_001;
+pub const XYZ6_PROJECTION_SCREEN_MM: f64 = 10.0 * XYZ6_QUANTUM_MM;
 
 /// Software deposition-resolution policy, not calibrated motion performance.
 pub const MIN_DEPOSITION_COMMAND_MM: f64 = 0.02;
@@ -31,6 +32,7 @@ fn conditioning(message: &'static str) -> ManufacturingError {
 }
 
 /// Sole projection to the current Cartesian XYZ6 command representation.
+#[inline]
 pub fn project_xyz6_coordinate_mm(value: f64) -> Result<f64, ManufacturingError> {
     if !value.is_finite() || value.abs() > MAX_XYZ6_COORDINATE_MM {
         return Err(conditioning(
@@ -42,6 +44,7 @@ pub fn project_xyz6_coordinate_mm(value: f64) -> Result<f64, ManufacturingError>
 }
 
 /// Constant-size checked current-output point projection; no coordinate buffer.
+#[inline]
 pub fn project_xyz6_point_mm(point: [f64; 3]) -> Result<[f64; 3], ManufacturingError> {
     Ok([
         project_xyz6_coordinate_mm(point[0])?,

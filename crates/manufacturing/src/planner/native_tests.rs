@@ -1245,21 +1245,204 @@ fn mixed_anchor_native_perimeter_remains_closed_under_bridge_process() {
 }
 
 #[test]
-fn blocked_native_component_is_not_certified_by_nearby_valid_support_column() {
+fn on_part_supports_land_on_deposited_floor_when_bed_corridor_is_blocked() {
+    let cancel = AtomicBool::new(false);
+    for bytes in [BOX, HOLE] {
+        let scene = NativeScene::new(bytes, &[RigidPoseMm::IDENTITY, translated(0.0, 0.0, 12.0)]);
+        let enabled = intent(true);
+        let SupportPolicy::Breakaway {
+            xy_clearance_mm, ..
+        } = enabled.recipe.supports
+        else {
+            unreachable!()
+        };
+        let bundle = compile(scene.input(&enabled), &cancel).unwrap();
+        let support = bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .filter(|path| {
+                matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !support.is_empty(),
+            "a blocked bed corridor needs a real on-part scaffold"
+        );
+        assert!(support.iter().all(|path| path.physical_z_mm[0] > 8.0));
+        assert!(
+            support
+                .iter()
+                .any(|path| path.kind == DepositionKind::SupportInterface)
+        );
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .filter(|layer| layer.lower_z_mm >= 12.0)
+                .all(|layer| layer.region_coverage.unsupported_overhang_mm == 0.0)
+        );
+        assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+        if bytes == HOLE {
+            for path in support {
+                for edge in path.checked_edges().unwrap() {
+                    let start = [edge.points_mm[0][0] - 10.0, edge.points_mm[0][1] - 10.0];
+                    let delta = [
+                        edge.points_mm[1][0] - edge.points_mm[0][0],
+                        edge.points_mm[1][1] - edge.points_mm[0][1],
+                    ];
+                    let fraction = (-(start[0] * delta[0] + start[1] * delta[1])
+                        / (delta[0] * delta[0] + delta[1] * delta[1]))
+                        .clamp(0.0, 1.0);
+                    assert!(
+                        (start[0] + fraction * delta[0]).hypot(start[1] + fraction * delta[1])
+                            >= 3.0 + edge.width_mm * 0.5 + xy_clearance_mm
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn whole_hook_on_part_supports_preserve_off_and_fresh_saved_replay() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/analysis-hook.step"),
+        &[RigidPoseMm {
+            translation_mm: [100.0, 80.0, 0.0],
+            rotation_xyzw: [
+                0.0,
+                -std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+        }],
+    );
+    let enabled_intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    let mut disabled_intent = enabled_intent.clone();
+    disabled_intent.recipe.supports = SupportPolicy::Disabled;
+    let off = compile(scene.input(&disabled_intent), &cancel).unwrap();
+    assert!(off.plan.layers.iter().all(|layer| {
+        layer.paths.iter().all(|path| {
+            !matches!(
+                path.kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            )
+        })
+    }));
+    assert!(
+        off.plan
+            .layers
+            .iter()
+            .any(|layer| { layer.region_coverage.unsupported_overhang_mm > 0.0 })
+    );
+    let enabled = compile(scene.input(&enabled_intent), &cancel).unwrap();
+    let supports = enabled
+        .plan
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.paths)
+        .filter(|path| {
+            matches!(
+                path.kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(!supports.is_empty());
+    assert!(supports.iter().all(|path| path.physical_z_mm[0] > 10.0));
+    assert!(
+        supports
+            .iter()
+            .any(|path| path.kind == DepositionKind::SupportInterface)
+    );
+    assert!(
+        enabled
+            .plan
+            .layers
+            .iter()
+            .all(|layer| { layer.region_coverage.unsupported_overhang_mm == 0.0 })
+    );
+    let returned = reload(&encode(&enabled), &enabled.program);
+    assert!(crate::verify_bundle(&returned, &cancel).unwrap().verified);
+}
+
+#[test]
+fn on_part_roots_follow_deposited_dependencies_across_multiple_floors() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(
+        BOX,
+        &[
+            RigidPoseMm::IDENTITY,
+            translated(0.0, 0.0, 12.0),
+            translated(0.0, 0.0, 24.0),
+        ],
+    );
+    let bundle = compile(scene.input(&intent(true)), &cancel).unwrap();
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .filter(|layer| layer.lower_z_mm >= 24.0)
+            .all(|layer| layer.region_coverage.unsupported_overhang_mm == 0.0)
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .any(|path| path.kind == DepositionKind::SupportInterface
+                && path.physical_z_mm[0] > 20.0)
+    );
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+}
+
+#[test]
+fn mixed_bed_and_on_part_roots_each_anchor_their_actual_component() {
     let mut scene = NativeScene::new(HOLE, &[RigidPoseMm::IDENTITY]);
     scene.add(
         BOX,
         &[translated(0.0, 0.0, 10.0), translated(30.0, 0.0, 10.0)],
     );
-    // A valid column under one box never certifies the blocked one: with
-    // supports build-plate-only, the blocked box prints and is reported.
     let bundle = compile(scene.input(&intent(true)), &AtomicBool::new(false)).unwrap();
     assert!(
         bundle
             .plan
             .layers
             .iter()
-            .any(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
+            .all(|layer| layer.region_coverage.unsupported_overhang_mm == 0.0)
+    );
+    let supports = || {
+        bundle
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .filter(|path| {
+                matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            })
+    };
+    assert!(
+        supports().any(|path| path.physical_z_mm[0] > 8.0
+            && path.points_mm.iter().all(|point| point[0] < 25.0))
+    );
+    assert!(
+        supports().any(|path| path.physical_z_mm[0] == 0.0
+            && path.points_mm.iter().all(|point| point[0] > 25.0))
     );
     assert!(bundle.verification.verified);
 }

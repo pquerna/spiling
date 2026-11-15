@@ -559,7 +559,7 @@ pub(super) fn certify_support_clearance(
 /// Outward enclosure of an emitted XYZ6 centerline point's displacement from
 /// its binary64 source plus its remaining physical-decimal endpoint error
 /// (each at most about one half micrometre per axis). Bounds screens only.
-pub(super) const XYZ6_SCREEN_SLACK_MM: f64 = 1e-5;
+pub(super) const XYZ6_SCREEN_SLACK_MM: f64 = program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
 
 /// Raw XY bounds of a validated path and its largest bead width.
 fn path_xy_bounds(path: &DepositionPath) -> Option<([[f64; 2]; 2], f64)> {
@@ -650,8 +650,8 @@ fn certify_polygon_capsules(
                                 super::native_error(
                                     failure,
                                     &format!(
-                                        "actual emitted support layer {} against {label}",
-                                        layer.index
+                            "actual emitted support layer {} against {label}, scope {scope:?}, segment {segment:?}, width {} mm, XY gap {clearance} mm",
+                            layer.index, local.width_mm
                                     ),
                                 )
                             })?,
@@ -674,8 +674,8 @@ fn certify_polygon_capsules(
                     super::native_error(
                         failure,
                         &format!(
-                            "actual emitted support layer {} against {label}",
-                            layer.index
+                            "actual emitted support layer {} against {label}, scope {scope:?}, segment {segment:?}, width {} mm, XY gap {clearance} mm",
+                            layer.index, local.width_mm
                         ),
                     )
                 })?;
