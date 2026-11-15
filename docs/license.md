@@ -50,6 +50,8 @@ The two SolidCraft companion libraries under `vendor/solidcraft/` are third-part
 
 `vendor/cpp_map/` is `boostvoronoi`'s MIT OR Apache-2.0 `cpp_map` dependency with deterministic skip-list levels, substituted through `[patch.crates-io]` and excluded from the workspace. Preserve its upstream headers and license texts; do not apply Spiling headers to imported source. `vendor/cpp_map/UPSTREAM.toml` owns its snapshot and local modifications.
 
+`vendor/boostvoronoi/` retains the BSL-1.0 source and license of the exact 0.12.1 registry release, with a finite-circle predicate correction recorded in `UPSTREAM.toml`. It is substituted through `[patch.crates-io]` and excluded from the workspace. Preserve its upstream source attribution; release provenance must include this non-workspace local dependency and its license.
+
 The in-tree Prusa v7 reference port in `crates/appearance/src/prusa_v7.rs` retains its original MIT copyright and full notice, separately from original OSL-3.0 study code. Keep `crates/appearance/LICENSE-prusa-fdm-mixer.txt` and the modification/source disclosure in [NOTICE.md](../NOTICE.md). Release provenance must collect this source component even though ordinary workspace packages are excluded from dependency notice collection. Model-code licensing does not grant rights to unrelated catalogs or measurement datasets.
 
 The xkcd survey under `crates/appearance/data/` retains its source-declared CC0-1.0 dedication, original bytes and provenance sidecar. Keep `LICENSE-xkcd-CC0.txt` and collect the dataset as an independent source component in release provenance. Its naming dictionary does not establish physical filament color. Original Spiling naming code remains OSL-3.0.

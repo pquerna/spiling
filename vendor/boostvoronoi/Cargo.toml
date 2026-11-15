@@ -1,0 +1,68 @@
+[package]
+name = "boostvoronoi"
+version = "0.12.1"
+authors = ["eadf <lacklustr@protonmail.com>"]
+edition = "2024"
+rust-version = "1.87.0"
+description = "Boost voronoi ported to 100% rust"
+readme = "README.md"
+repository = "https://codeberg.org/eadf/boostvoronoi_rs"
+license = "BSL-1.0"
+keywords = ["voronoi", "sweepline", "geometry"]
+exclude = [
+    "img/*",
+    "idea/*",
+    ".github/*",
+    "examples/input_data/*"
+]
+
+[dependencies]
+approx = "0.5.1"
+ordered-float = "5.1.0"
+rustc-hash = "2.1"
+vob="3.0.6"
+thiserror = "2.0.17"
+cpp_map = "0.2.0"
+#cpp_map = {git = "https://codeberg.org/eadf/cpp_map_rs.git", rev = "1912fd1181"}
+#cpp_map = { path="../cpp_map.rs"}
+num-traits = "0.2.19"
+libm = "0.2.15"
+smallvec = "1.15.1"
+
+# using "nalgebra" feature will enable From traits
+nalgebra = {version="0.34.1", default-features = false, optional=true}
+# using "mint" feature will enable From traits
+mint = {version="0.5.9", optional=true}
+# using "geo" feature will enable From traits
+geo = {version="0.31.0", default-features = false, optional=true}
+# using "cgmath" feature will enable From traits
+cgmath = {version="0.18.0", optional=true}
+# using "glam" feature will enable From traits
+glam = {version="0.30.9", optional=true}
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+
+# These features are only for debug purposes, should normally not be used
+[features]
+console_debug = []
+cpp_console_debug = ["cpp_map/console_debug"]
+ce_corruption_check = []
+
+# Math type conversions.
+glam = ["dep:glam"]
+mint = ["dep:mint"]
+geo = ["dep:geo"]
+cgmath = ["dep:cgmath"]
+nalgebra = ["dep:nalgebra"]
+# serde support
+serde = ["dep:serde"]
+glam-core-simd  = ["glam/core-simd"]
+glam-fast-math = ["glam/fast-math"]
+glam-glam-assert = ["glam/glam-assert"]
+
+
+[dev-dependencies]
+regex = "1.12.2"
+rand = "0.9.2"
+bitflags = "2.10.0"
+geo = { version = "0.31.0", default-features = false }
+serde_json = "1.0.145"

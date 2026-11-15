@@ -506,6 +506,15 @@ OS-seeded skip-list RNG; planner output must be bit-identical for identical
 input. Keep that patch when updating `boostvoronoi`, and test the copy with
 `cargo test --offline --manifest-path vendor/cpp_map/Cargo.toml`.
 
+`vendor/boostvoronoi/` retains the exact 0.12.1 runtime snapshot and its BSL-1.0
+attribution, with local finite-circle predicate corrections recorded in
+`UPSTREAM.toml`. Reject nonexistent circle events before invalid arithmetic;
+do not disable debug assertions or perturb source coordinates. Run its focused
+and retained unit controls from the repository root with
+`cargo test --manifest-path vendor/boostvoronoi/Cargo.toml --config 'patch.crates-io.cpp_map.path="vendor/cpp_map"' --lib`.
+Real whole-part compilation and independent saved-return replay remain separate
+consumer checks; predicate tests alone do not qualify wall construction.
+
 ## SolidCore fork freshness
 
 The integration owner refreshes upstream at the start of each active UTC workday

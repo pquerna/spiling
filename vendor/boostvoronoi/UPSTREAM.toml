@@ -1,0 +1,15 @@
+repository = "https://codeberg.org/eadf/boostvoronoi_rs"
+registry = "crates.io"
+version = "0.12.1"
+snapshot_revision = "4060736209b06919a08590f37480d88b429599ba"
+registry_checksum = "077839b66f949d7728595b25f9c24b6d6972e0fd3afbd35cf034de66dd1bdb34"
+license = "BSL-1.0"
+consumer = "manufacturing segment-Voronoi wall skeleton"
+
+[[changes]]
+paths = ["src/predicate.rs", "src/predicate/lazy_circle_formation.rs", "src/predicate/tests.rs"]
+reason = "Evaluate signed cross products in i128 before conversion to f64 so admitted i32-coordinate differences cannot overflow i64 products or lose cancellation signs. Reject point-point-segment triples with no finite tangent circle before divisions, and point-segment-segment events with negative discriminants before square roots. No epsilon or coordinate perturbation is used. Preserve valid zero-discriminant tangency, a point on the line, one-grid separation and envelope-scale finite circles."
+
+[[changes]]
+paths = ["Cargo.toml"]
+reason = "Standalone published Cargo.toml.orig dependencies and features; omit unvendored GUI examples/benchmarks and their dev dependencies. Preserve runtime sources, original manifest, license and README."

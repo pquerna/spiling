@@ -863,8 +863,6 @@ dependencies = [
 [[package]]
 name = "boostvoronoi"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "077839b66f949d7728595b25f9c24b6d6972e0fd3afbd35cf034de66dd1bdb34"
 dependencies = [
  "approx",
  "cpp_map",

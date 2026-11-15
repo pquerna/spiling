@@ -853,27 +853,45 @@ fn certify_deposited_clearance(
             }
             let objects =
                 applicable.expect("actual support selected a complete applicable layer slice");
-            for support_local in support.checked_edges()? {
-                let support_edge = support_local.points_mm;
+            let support_edges = support.checked_edges()?;
+            super::boolean::charge(work, support.points_mm.len())?;
+            let support_frame = path_xy_bounds(support);
+            for object_layer in objects {
                 charge_support_clearance(work, cancel)?;
-                let support_height = project_xyz6_segment_bead_height_mm(
-                    support_edge[0][2],
-                    support_edge[1][2],
-                    support.height_mm(),
-                )?;
-                let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
-                let support_bounds = edge_xy_bounds(support_edge);
-                for object_layer in objects {
+                for object in &object_layer.paths {
                     charge_support_clearance(work, cancel)?;
-                    for object in &object_layer.paths {
+                    if matches!(
+                        object.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    ) {
+                        continue;
+                    }
+                    let object_edges = object.checked_edges()?;
+                    super::boolean::charge(work, object.points_mm.len())?;
+                    if let (
+                        Some((support_bounds, support_width)),
+                        Some((object_bounds, object_width)),
+                    ) = (support_frame, path_xy_bounds(object))
+                        && spiling_geometry::planar_bounds_clear(
+                            support_bounds,
+                            object_bounds,
+                            (support_width + object_width) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM,
+                            xy_gap,
+                        )
+                    {
+                        continue;
+                    }
+                    for support_local in support_edges {
+                        let support_edge = support_local.points_mm;
                         charge_support_clearance(work, cancel)?;
-                        if matches!(
-                            object.kind,
-                            DepositionKind::Support | DepositionKind::SupportInterface
-                        ) {
-                            continue;
-                        }
-                        for object_local in object.checked_edges()? {
+                        let support_height = project_xyz6_segment_bead_height_mm(
+                            support_edge[0][2],
+                            support_edge[1][2],
+                            support.height_mm(),
+                        )?;
+                        let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
+                        let support_bounds = edge_xy_bounds(support_edge);
+                        for object_local in object_edges {
                             let object_edge = object_local.points_mm;
                             charge_support_clearance(work, cancel)?;
                             if spiling_geometry::planar_bounds_clear(
@@ -933,14 +951,17 @@ mod actual_deposition_tests {
     #[test]
     fn actual_bridge_and_support_strokes_require_z_gap_even_without_z_overlap() {
         let cancel = AtomicBool::new(false);
-        for (gap, required, object_x, support_above, accepted) in [
-            (0.1, 0.2, 0.0, false, false),
-            (0.25, 0.2, 0.0, false, true),
-            (0.25, 0.25, 0.0, false, true),
-            (0.1, 0.2, 2.0, false, true),
-            (0.1, 0.2, 0.0, true, false),
-            (0.25, 0.2, 0.0, true, true),
-            (0.0, 0.0, 0.0, false, true),
+        for (gap, required, object_x, support_above, variable_width, accepted) in [
+            (0.1, 0.2, 0.0, false, false, false),
+            (0.25, 0.2, 0.0, false, false, true),
+            (0.25, 0.25, 0.0, false, false, true),
+            (0.1, 0.2, 2.0, false, false, true),
+            (0.1, 0.2, 0.0, true, false, false),
+            (0.25, 0.2, 0.0, true, false, true),
+            (0.0, 0.0, 0.0, false, false, true),
+            (0.1, 0.2, 2.1, false, false, true),
+            (0.1, 0.2, 2.1, false, true, false),
+            (0.1, 0.2, 2.1, true, true, false),
         ] {
             let mut layers = Vec::new();
             let mut schedule = Vec::new();
@@ -1026,6 +1047,19 @@ mod actual_deposition_tests {
                 0.25,
                 if support_above { 0.0 } else { object_x },
             );
+            if variable_width {
+                let path = layers
+                    .iter_mut()
+                    .flat_map(|layer| &mut layer.paths)
+                    .find(|path| path.kind == object)
+                    .unwrap();
+                let first = path.points_mm[0];
+                path.points_mm
+                    .insert(0, [first[0] + 1.0, first[1] + 1.0, first[2]]);
+                path.width = WidthProfile::PerEdge {
+                    widths_mm: vec![0.5, 2.0],
+                };
+            }
             let mut work = 0;
             let mut native_work = spiling_geometry::GeometryWorkBudget::new(10_000);
             let vertical = deposition_vertical_extensions(&layers, &schedule, &mut work, &cancel)
