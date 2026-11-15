@@ -311,7 +311,7 @@ impl Workbench {
         let Some(p) = self.state.project.clone() else {
             return;
         };
-        ui::pane_header(ui, "Plates", "Independent print jobs");
+        ui::pane_header(ui, "Plates", "");
         let idle = self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none();

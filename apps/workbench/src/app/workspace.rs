@@ -88,7 +88,7 @@ impl Workbench {
     }
     pub(super) fn tree_ui(&mut self, ui: &mut egui::Ui) {
         self.plates_ui(ui);
-        ui::pane_header(ui, "Model", "Selected plate · parts and faces");
+        ui::pane_header(ui, "Model", "");
         if self.analysis.view.enabled {
             ui.weak(format!(
                 "Section {:?} · {:.3} mm",
@@ -142,7 +142,7 @@ impl Workbench {
                             if ui
                                 .selectable_label(
                                     self.occurrence.as_ref() == Some(&occurrence.occurrence_id),
-                                    "Occurrence properties",
+                                    "Properties",
                                 )
                                 .clicked()
                             {
@@ -173,6 +173,9 @@ impl Workbench {
                                     ),
                                 );
                             }
+                            egui::CollapsingHeader::new(format!("Faces ({})", definition.faces.len()))
+                                .id_salt(("faces", occurrence.occurrence_id))
+                                .show(ui, |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt(occurrence.occurrence_id)
                                 .max_height(240.0)
@@ -203,6 +206,7 @@ impl Workbench {
                                             }
                                         }
                                     }
+                                });
                                 });
                         });
                     if let (Some(p), Some(h)) = (&self.state.project, &self.state.hello) {

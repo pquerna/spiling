@@ -123,10 +123,13 @@ the buried boundary using the reversible cut. Stale, missing or oversized output
 does not produce an invented contact. This is not general adjacency discovery or
 physical bond qualification.
 
-Workspace switching hides and retains drafts. Slice plate uses the existing compile
-operation and refuses unapplied changes; Check setup is offered when preflight is
-required. The active editor owns Apply, and Review promotes Verify program followed
-by Export plate only after a fresh passing inspection. Prepare displays source
+Workspace switching hides and retains drafts. One **Slice** runs the existing
+operations in order (create print settings when the choice changed, preflight,
+compile, fresh inspection) and opens Review; it stops at the first refusal, whose
+plain reason and fix (such as Arrange on bed) stay in place. Slice refuses unapplied
+changes. Creating print settings rests the plate's parts on the bed and centres
+them when they are not already within it. The active editor owns Apply, and Review
+offers Export only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.
 
@@ -224,14 +227,19 @@ widget identities stable when errors or optional rows appear.
 Problem summaries remain short; exact diagnostic text stays selectable in Details.
 Preserve bounds, codes and witnesses instead of truncating the underlying evidence.
 Never invent a native cause or remedy. Software verification remains distinct from
-physical qualification; **NOT MACHINE READY** belongs in Review/export context.
+physical qualification; Review states it beside Export (software-verified, not
+machine-qualified).
 
 Prepare separates setup, material, settings, placement and infill into named tasks.
 Applying a settings draft still commits the complete intent. Infill edits display
-percentages while retaining the engine fraction contract. Check setup/Slice plate describe
-committed inputs; unapplied drafts stay labelled. Review promotes Verify program,
-then Export after current passing inspection. Qualification and stale state remain
-visible beside the action.
+percentages while retaining the engine fraction contract. Slice describes committed
+inputs; unapplied drafts stay labelled. Review leads with the numbers a person
+decides on (time, filament, layers, printed size) and located issues, then Export;
+verification statistics and evidence stay under Details. Qualification and stale
+state remain visible beside the action.
+
+Copy is terse: one primary action per pane named by its effect, labels on the left
+and values with units, no explanatory paragraphs where a number or tooltip will do.
 
 Seam settings apply to the entire print job's closed constructed walls, not the
 selected face. Nearest, Preferred direction and Spread starts share the existing

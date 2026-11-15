@@ -163,14 +163,16 @@ pub(super) fn unsupported_layers(
         return;
     };
     let count = unsupported().count();
-    ui.colored_label(
-        ui.visuals().warn_fg_color,
-        format!(
-            "Unsupported deposition · {count} {}",
-            if count == 1 { "layer" } else { "layers" }
-        ),
-    );
-    unsupported_layer_row(ui, first, display, view);
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Unsupported overhang · {count} {}",
+                if count == 1 { "layer" } else { "layers" }
+            ),
+        );
+        unsupported_layer_row(ui, first, display, view);
+    });
     if display.is_none() {
         ui.weak("Actual-program layer preview unavailable.");
     }
@@ -215,13 +217,13 @@ fn unsupported_layer_row(
                 egui::Button::new(format!("Show layer {}", u64::from(layer.index) + 1))
                     .selected(view.layer == Some(layer.index) && view.layer_end.is_none()),
             )
+            .on_hover_text(format!("Z {:.2} mm", layer.z_mm))
             .clicked()
         {
             view.layer = Some(layer.index);
             view.layer_end = None;
             view.events = window.expect("enabled layer preview").end;
         }
-        ui.weak(format!("Z {:.3}…{:.3} mm", layer.lower_z_mm, layer.z_mm));
     });
 }
 /// Keep the exact source encoding visible; only an explicit sRGB target has an sRGB swatch.

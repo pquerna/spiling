@@ -45,6 +45,10 @@ pub(super) struct PrintSettingsUi {
     supports: Option<bool>,
     hardware_requested: bool,
     filaments_requested: Option<(ProjectId, ProjectRevision)>,
+    /// The form differs from the plate's settings (or none exist yet).
+    pub(super) changed: bool,
+    /// Printed extent of the reviewed artifact.
+    printed_size: Option<(spiling_contracts::geometry::SourceHash, Option<[f64; 3]>)>,
 }
 
 /// A configured machine's plate: the one installed on it, else its one
@@ -204,12 +208,6 @@ impl Workbench {
                 s.supports.get_or_insert(r.supports);
             }
         }
-        ui::group(ui, "Print settings");
-        ui.weak(if intent.is_some() {
-            "Recreate the plate's settings from a printer, material and quality. Undo restores the current settings."
-        } else {
-            "Choose a printer, material and quality. Settings are created for you and stay editable."
-        });
         // Printer.
         let catalog = library.hardware.catalog.clone();
         let personal = library.hardware.personal.clone();
@@ -223,74 +221,9 @@ impl Workbench {
                         || s.label.clone(),
                         |m| format!("{} · {}", m.nickname, s.label),
                     ),
-                _ => setup_label(s),
+                _ => s.label.clone(),
             })
-            .unwrap_or_else(|| "Choose a printer".into());
-        egui::ComboBox::from_label("Printer")
-            .height(480.0)
-            .selected_text(printer_text)
-            .show_ui(ui, |ui| {
-                if let Some(catalog) = &catalog {
-                    ui.weak("Shipped printers");
-                    for s in catalog.setups.iter().filter(|s| {
-                        matches!(s.printer.workflow, JobWorkflow::CompleteMarlin { .. })
-                    }) {
-                        ui.selectable_value(
-                            &mut self.print_settings.printer,
-                            Some(PrinterKey::Shipped { id: s.id.clone() }),
-                            setup_label(s),
-                        );
-                    }
-                } else {
-                    ui.spinner();
-                }
-                if let Some(p) = &personal {
-                    let configured: Vec<_> = p
-                        .hardware
-                        .machines
-                        .iter()
-                        .filter_map(|m| m.configured_setup().ok().map(|s| (m, s)))
-                        .collect();
-                    if !configured.is_empty() {
-                        ui.separator();
-                        ui.weak("My hardware");
-                    }
-                    for (m, s) in configured {
-                        ui.selectable_value(
-                            &mut self.print_settings.printer,
-                            Some(PrinterKey::Machine { id: m.id.clone() }),
-                            format!("{} · {}", m.nickname, s.label),
-                        );
-                    }
-                }
-            });
-        let setup = self.print_settings_printer().cloned();
-        let mut problem = None;
-        if let Some(setup) = &setup {
-            let e = &setup.printer.build_envelope;
-            ui.weak(format!(
-                "{:.2} mm nozzle · {:.0} × {:.0} × {:.0} mm",
-                setup.printer.nozzle_diameter_mm,
-                e.max[0] - e.min[0],
-                e.max[1] - e.min[1],
-                e.max[2] - e.min[2]
-            ));
-            if setup.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 {
-                ui.weak(
-                    "Export writes a Bambu .gcode.3mf package (program.gcode.3mf) for SD/USB printing.",
-                );
-            }
-            if let (Some(PrinterKey::Machine { id }), Some(p)) =
-                (&self.print_settings.printer, &personal)
-                && let Err(reason) = machine_plate(&p.hardware, id)
-            {
-                problem = Some(reason);
-            }
-        }
-        if ui.small_button("Custom printer…").clicked() {
-            self.choose_hardware();
-        }
-        // Material.
+            .unwrap_or_else(|| "Choose…".into());
         let filaments = library.project.clone();
         let material_text = match &self.print_settings.material {
             Some(MaterialKey::Generic { family }) => format!("Generic {family}"),
@@ -298,65 +231,149 @@ impl Workbench {
                 .iter()
                 .find(|f| &f.entry.current.id.0 == id)
                 .map_or_else(|| "Filament not in this project".into(), |f| f.name.clone()),
-            None => "Choose a material".into(),
+            None => "Choose…".into(),
         };
-        egui::ComboBox::from_label("Material")
-            .height(480.0)
-            .selected_text(material_text)
-            .show_ui(ui, |ui| {
-                ui.weak("Generic");
-                for family in GENERIC_FAMILIES {
-                    ui.selectable_value(
-                        &mut self.print_settings.material,
-                        Some(MaterialKey::Generic {
-                            family: family.into(),
-                        }),
-                        format!("Generic {family}"),
+        let mut problem = None;
+        let tokens = self.prefs.theme.tokens();
+        egui::Grid::new("print-settings")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .min_col_width(64.0)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Printer").color(tokens.muted));
+                egui::ComboBox::from_id_salt("printer")
+                    .height(480.0)
+                    .width(ui.available_width().min(260.0))
+                    .selected_text(printer_text)
+                    .show_ui(ui, |ui| {
+                        if let Some(catalog) = &catalog {
+                            for s in catalog.setups.iter().filter(|s| {
+                                matches!(s.printer.workflow, JobWorkflow::CompleteMarlin { .. })
+                            }) {
+                                ui.selectable_value(
+                                    &mut self.print_settings.printer,
+                                    Some(PrinterKey::Shipped { id: s.id.clone() }),
+                                    setup_label(s),
+                                );
+                            }
+                        } else {
+                            ui.spinner();
+                        }
+                        if let Some(p) = &personal {
+                            let configured: Vec<_> = p
+                                .hardware
+                                .machines
+                                .iter()
+                                .filter_map(|m| m.configured_setup().ok().map(|s| (m, s)))
+                                .collect();
+                            if !configured.is_empty() {
+                                ui.separator();
+                                ui.weak("My hardware");
+                            }
+                            for (m, s) in configured {
+                                ui.selectable_value(
+                                    &mut self.print_settings.printer,
+                                    Some(PrinterKey::Machine { id: m.id.clone() }),
+                                    format!("{} · {}", m.nickname, s.label),
+                                );
+                            }
+                        }
+                    });
+                ui.end_row();
+                if let Some(setup) = self.print_settings_printer() {
+                    let e = &setup.printer.build_envelope;
+                    ui.label("");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{:.0} × {:.0} × {:.0} mm · {:.2} mm nozzle{}",
+                            e.max[0] - e.min[0],
+                            e.max[1] - e.min[1],
+                            e.max[2] - e.min[2],
+                            setup.printer.nozzle_diameter_mm,
+                            if setup.printer.capabilities.output_dialect
+                                == OutputDialect::BambuLabGcode3mfV1
+                            {
+                                " · .gcode.3mf"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .small()
+                        .color(tokens.muted),
                     );
+                    ui.end_row();
                 }
-                if !filaments.is_empty() {
-                    ui.separator();
-                    ui.weak("This project's filaments");
-                }
-                for f in &filaments {
-                    ui.selectable_value(
-                        &mut self.print_settings.material,
-                        Some(MaterialKey::Filament {
-                            id: f.entry.current.id.0.clone(),
-                        }),
-                        f.name.clone(),
-                    );
-                }
+                ui.label(egui::RichText::new("Material").color(tokens.muted));
+                egui::ComboBox::from_id_salt("material")
+                    .height(480.0)
+                    .width(ui.available_width().min(260.0))
+                    .selected_text(material_text)
+                    .show_ui(ui, |ui| {
+                        for family in GENERIC_FAMILIES {
+                            ui.selectable_value(
+                                &mut self.print_settings.material,
+                                Some(MaterialKey::Generic {
+                                    family: family.into(),
+                                }),
+                                format!("Generic {family}"),
+                            );
+                        }
+                        if !filaments.is_empty() {
+                            ui.separator();
+                            ui.weak("This project");
+                        }
+                        for f in &filaments {
+                            ui.selectable_value(
+                                &mut self.print_settings.material,
+                                Some(MaterialKey::Filament {
+                                    id: f.entry.current.id.0.clone(),
+                                }),
+                                f.name.clone(),
+                            );
+                        }
+                    });
+                ui.end_row();
+                let nozzle = self
+                    .print_settings_printer()
+                    .map(|s| s.printer.nozzle_diameter_mm);
+                let quality = self
+                    .print_settings
+                    .quality
+                    .get_or_insert(QualityPreset::Standard);
+                ui.label(egui::RichText::new("Layer").color(tokens.muted));
+                ui.horizontal(|ui| {
+                    for q in QualityPreset::ALL {
+                        let text = match nozzle {
+                            Some(n) => format!("{:.2} mm", q.layer_height_mm(n)),
+                            None => q.label().into(),
+                        };
+                        ui.selectable_value(quality, q, text)
+                            .on_hover_text(q.label());
+                    }
+                });
+                ui.end_row();
+                ui.label(egui::RichText::new("Supports").color(tokens.muted));
+                let supports = self.print_settings.supports.get_or_insert(true);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(supports, true, "Auto");
+                    ui.selectable_value(supports, false, "Off");
+                });
+                ui.end_row();
             });
-        if ui.small_button("Choose filament…").clicked() {
-            self.choose_filament();
-        }
-        // Quality and supports.
-        let nozzle = setup.as_ref().map(|s| s.printer.nozzle_diameter_mm);
-        let quality = self
-            .print_settings
-            .quality
-            .get_or_insert(QualityPreset::Standard);
-        ui.horizontal(|ui| {
-            ui.label("Quality");
-            for q in QualityPreset::ALL {
-                let text = match nozzle {
-                    Some(n) => format!("{} · {:.2} mm", q.label(), q.layer_height_mm(n)),
-                    None => q.label().into(),
-                };
-                ui.selectable_value(quality, q, text);
+        let setup = self.print_settings_printer().cloned();
+        if let Some(setup) = &setup {
+            if let (Some(PrinterKey::Machine { id }), Some(p)) =
+                (&self.print_settings.printer, &personal)
+                && let Err(reason) = machine_plate(&p.hardware, id)
+            {
+                problem = Some(reason);
             }
-        });
-        let supports = self.print_settings.supports.get_or_insert(true);
-        ui.checkbox(supports, "Generate supports where needed");
-        if *supports
-            && setup
-                .as_ref()
-                .is_some_and(|s| !s.printer.capabilities.generated_supports)
-        {
-            problem = Some("This printer declares no generated supports; turn supports off".into());
+            if self.print_settings.supports == Some(true)
+                && !setup.printer.capabilities.generated_supports
+            {
+                problem = Some("This printer has no generated supports: choose Off".into());
+            }
         }
-        // One primary action, named by its effect.
         let material = match &self.print_settings.material {
             Some(MaterialKey::Generic { family }) => Some(DefaultMaterialChoice::Generic {
                 polymer_family: family.clone(),
@@ -386,7 +403,7 @@ impl Workbench {
         };
         let drafts = self.project_drafts();
         let reason = if !writable {
-            Some("Project is read-only or an operation is pending".to_string())
+            Some("Read-only or busy".to_string())
         } else if drafts {
             Some("Apply or discard the open settings draft first".into())
         } else if setup.is_none() {
@@ -396,7 +413,8 @@ impl Workbench {
         } else {
             problem.clone()
         };
-        // With settings present, Replace is offered only for a different choice.
+        // Settings created from this exact choice need no new request; the
+        // pane's Slice action then slices them.
         let unchanged = intent.as_ref().is_some_and(|intent| {
             let (p, m, q, sup) =
                 seed_from_intent(intent, library.hardware.catalog.as_ref(), &library.project);
@@ -410,48 +428,132 @@ impl Workbench {
                 && q == self.print_settings.quality
                 && Some(sup) == self.print_settings.supports
         });
-        if unchanged {
-            ui.weak("The plate's settings were created from this choice.");
-            return;
+        self.print_settings.changed = !unchanged;
+        ui.add_space(8.0);
+        if !unchanged {
+            let slicing = self.slicing();
+            if ui::primary(
+                ui,
+                if slicing { "Slicing…" } else { "Slice" },
+                if slicing { Some("") } else { reason.as_deref() },
+            ) && let (Some(printer), Some(material)) = (printer, material)
+            {
+                let request = DefaultIntentRequest {
+                    material,
+                    quality: self
+                        .print_settings
+                        .quality
+                        .unwrap_or(QualityPreset::Standard),
+                    supports: if self.print_settings.supports.unwrap_or(true) {
+                        SupportChoice::Automatic
+                    } else {
+                        SupportChoice::Off
+                    },
+                };
+                self.prefs.new_job = Some(Remembered {
+                    printer: self.print_settings.printer.clone().expect("chosen printer"),
+                    material: self
+                        .print_settings
+                        .material
+                        .clone()
+                        .expect("chosen material"),
+                    quality: request.quality,
+                    supports: request.supports == SupportChoice::Automatic,
+                });
+                self.library.queued =
+                    Some(LibraryAction::Hardware(HardwareAction::DefaultSettings {
+                        project: project.project_id.clone(),
+                        layout_id: project.layout_id.clone(),
+                        base: project.revision,
+                        printer,
+                        request,
+                    }));
+                self.slice = Some(super::slice::SliceRun::after_settings(self.state.serial));
+            }
         }
-        let label = if intent.is_some() {
-            "Replace print settings"
-        } else {
-            "Create print settings"
-        };
-        if ui::primary(ui, label, reason.as_deref())
-            && let (Some(printer), Some(material)) = (printer, material)
-        {
-            let request = DefaultIntentRequest {
-                material,
-                quality: self
-                    .print_settings
-                    .quality
-                    .unwrap_or(QualityPreset::Standard),
-                supports: if self.print_settings.supports.unwrap_or(true) {
-                    SupportChoice::Automatic
-                } else {
-                    SupportChoice::Off
-                },
-            };
-            self.prefs.new_job = Some(Remembered {
-                printer: self.print_settings.printer.clone().expect("chosen printer"),
-                material: self
-                    .print_settings
-                    .material
-                    .clone()
-                    .expect("chosen material"),
-                quality: request.quality,
-                supports: request.supports == SupportChoice::Automatic,
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("More")
+            .id_salt("print-settings-more")
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Custom printer…").clicked() {
+                        self.choose_hardware();
+                    }
+                    if ui.button("Filament…").clicked() {
+                        self.choose_filament();
+                    }
+                });
+                self.hardware_summary(ui);
+                ui.horizontal_wrapped(|ui| {
+                    self.button(ui, Action::LoadIntent);
+                    self.button(ui, Action::Library);
+                });
             });
-            self.library.queued = Some(LibraryAction::Hardware(HardwareAction::DefaultSettings {
-                project: project.project_id.clone(),
-                layout_id: project.layout_id.clone(),
-                base: project.revision,
-                printer,
-                request,
-            }));
-        }
+    }
+
+    /// The few numbers a person decides on: time, filament, layers and size.
+    pub(super) fn job_headline(
+        &mut self,
+        ui: &mut egui::Ui,
+        report: &VerificationReport,
+        plan: &NormalizedPrintPlan,
+        artifact: &spiling_contracts::geometry::SourceHash,
+    ) {
+        let tokens = self.prefs.theme.tokens();
+        // One scan per artifact; a large plate is not rescanned every frame.
+        let size = match &self.print_settings.printed_size {
+            Some((k, size)) if k == artifact => *size,
+            _ => {
+                let size = printed_size(plan);
+                self.print_settings.printed_size = Some((artifact.clone(), size));
+                size
+            }
+        };
+        let time = report
+            .estimated_seconds
+            .map_or_else(|| "Time not estimated".into(), duration);
+        ui.label(egui::RichText::new(time).size(26.0).strong());
+        let filament = report.filament_length_mm
+            + report.support_filament_length_mm
+            + report.priming_filament_length_mm
+            + report.adhesion_filament_length_mm;
+        let goal = &report.layer_height;
+        let layers = if goal.realized_max_mm - goal.realized_min_mm > 0.0005 {
+            format!(
+                "{} · {:.2}–{:.2} mm",
+                plan.layers.len(),
+                goal.realized_min_mm,
+                goal.realized_max_mm
+            )
+        } else {
+            format!("{} × {:.2} mm", plan.layers.len(), goal.selected_mm)
+        };
+        egui::Grid::new("job-headline")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                    ui.label(egui::RichText::new(k).color(tokens.muted));
+                    ui.label(v);
+                    ui.end_row();
+                };
+                row(ui, "Filament", format!("{:.2} m", filament / 1000.0));
+                if report.support_filament_length_mm > 0.0 {
+                    row(
+                        ui,
+                        "Support",
+                        format!("{:.2} m", report.support_filament_length_mm / 1000.0),
+                    );
+                }
+                row(ui, "Layers", layers);
+                if let Some(size) = size {
+                    row(
+                        ui,
+                        "Size",
+                        format!("{:.1} × {:.1} × {:.1} mm", size[0], size[1], size[2]),
+                    );
+                }
+            });
     }
 
     /// The ordinary-job summary of a verified program: estimate, filament and
@@ -500,6 +602,36 @@ impl Workbench {
                 }
             });
     }
+}
+
+/// Extent of the printed part itself: model deposition, without skirt, brim
+/// or support.
+fn printed_size(plan: &NormalizedPrintPlan) -> Option<[f64; 3]> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for layer in &plan.layers {
+        for path in layer
+            .paths
+            .iter()
+            .filter(|p| !p.kind.is_adhesion() && !p.kind.is_support())
+        {
+            let r = match &path.width {
+                WidthProfile::Constant { width_mm } => *width_mm,
+                WidthProfile::PerEdge { widths_mm } => {
+                    widths_mm.iter().copied().fold(0.0, f64::max)
+                }
+            } * 0.5;
+            for p in &path.points_mm {
+                for a in 0..2 {
+                    lo[a] = lo[a].min(p[a] - r);
+                    hi[a] = hi[a].max(p[a] + r);
+                }
+            }
+            lo[2] = lo[2].min(path.physical_z_mm[0]);
+            hi[2] = hi[2].max(path.physical_z_mm[1]);
+        }
+    }
+    (hi[0] > lo[0]).then(|| [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])
 }
 
 pub(super) fn duration(seconds: f64) -> String {

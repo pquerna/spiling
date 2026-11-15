@@ -199,17 +199,23 @@ impl Workbench {
         if ui::close(ui, "Back to preparation") {
             self.show_panel(Panel::Parts);
         }
-        if !prepare {
-            ui.colored_label(self.prefs.theme.tokens().warning, "NOT MACHINE READY");
-            ui::help(
-                ui,
-                "verification-scope",
-                "Software verification",
-                "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
-            );
-        }
         // Keep the primary action above optional comparison controls and outside scrolling.
         self.manufacturing_actions(ui);
+        if !prepare {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Software-verified · not machine-qualified")
+                        .small()
+                        .color(self.prefs.theme.tokens().muted),
+                );
+                ui::help(
+                    ui,
+                    "verification-scope",
+                    "Software verification",
+                    "Independent replay checks the emitted program. Physical printability, collisions and machine execution remain unqualified.",
+                );
+            });
+        }
         if !prepare || self.manufacturing.prepare_section == 2 {
             ui.collapsing("Compare settings", |ui| self.try_alternative_entry(ui));
         }
@@ -236,15 +242,12 @@ impl Workbench {
             return;
         }
         if self.work_area.panel == Panel::Review {
-            if m.artifact.is_none() {
-                if ui::primary(ui, "Prepare plate", self.disabled(Action::PrepareWorkspace)) {
-                    self.queued = Some(Action::PrepareWorkspace);
-                }
-            } else if self.manufacturing_current() {
-                self.button(ui, Action::Verify);
+            if self.manufacturing_current() {
                 self.primary_button(ui, Action::Export);
-            } else {
-                self.primary_button(ui, Action::Verify);
+            } else if m.intent.is_some() {
+                self.slice_button(ui);
+            } else if ui::primary(ui, "Prepare plate", self.disabled(Action::PrepareWorkspace)) {
+                self.queued = Some(Action::PrepareWorkspace);
             }
             return;
         }
@@ -317,12 +320,10 @@ impl Workbench {
             }
             _ => {}
         }
-        if !draft && m.intent.is_some() {
-            if self.disabled(Action::Compile).is_none() {
-                self.primary_button(ui, Action::Compile);
-            } else {
-                self.primary_button(ui, Action::Preflight);
-            }
+        // On Printer, a changed choice is sliced by the form's own action.
+        let form_owns = self.manufacturing.prepare_section == 0 && self.print_settings.changed;
+        if !draft && m.intent.is_some() && !form_owns {
+            self.slice_button(ui);
         } else if draft {
             ui.label("Apply or discard in the changed section");
         }
@@ -427,12 +428,6 @@ impl Workbench {
             }
             if section == 0 {
                 self.print_settings_ui(ui, writable);
-                ui::group(ui, "Machine and plate");
-                self.hardware_summary(ui);
-                // Print settings above own the primary action; explicit
-                // declarations stay available.
-                self.button(ui, Action::LoadIntent);
-                self.button(ui, Action::Library);
             }
             if section == 1 {
                 self.material_ui(ui, writable);
@@ -536,12 +531,30 @@ impl Workbench {
                     }
                 }
             }
-            if let Some(preflight) = &m.preflight {
-                ui.label(format!(
-                    "Preflight: {:?} · revision {}",
-                    preflight.disposition, preflight.input_revision.0
-                ));
-                ui.collapsing("Eligibility evidence", |ui| {
+            if let Some(preflight) = &m.preflight
+                && preflight.disposition != PreflightDisposition::Admitted
+                && preflight.input_revision == project.revision
+            {
+                use spiling_contracts::manufacturing::PreflightEvidence;
+                ui.add_space(6.0);
+                ui.colored_label(ui.visuals().error_fg_color, "Can't slice");
+                let mut placement = false;
+                for check in preflight.checks.iter().filter(|c| {
+                    matches!(
+                        c.evidence,
+                        PreflightEvidence::Failed | PreflightEvidence::Unsupported
+                    )
+                }) {
+                    placement |= matches!(
+                        check.code.as_str(),
+                        "hardware_placement" | "outside_envelope"
+                    );
+                    ui.add(egui::Label::new(&check.message).wrap());
+                }
+                if placement && ui.button("Arrange on bed").clicked() {
+                    self.open_layout(ui.ctx());
+                }
+                ui.collapsing("All checks", |ui| {
                     for check in &preflight.checks {
                         ui.label(format!(
                             "{:?} · {}: {}",
@@ -572,42 +585,76 @@ impl Workbench {
                     );
                 }
                 let report = &review.capture.report;
-                ui.label(format!(
-                    "Software verification: {}",
-                    if report.verified { "Passed" } else { "Failed" }
-                ));
+                if !report.verified {
+                    ui.colored_label(ui.visuals().error_fg_color, "Verification failed");
+                }
+                self.job_headline(ui, report, &review.bundle.plan, &review.capture.record.hash);
                 super::review::unsupported_layers(
                     ui,
                     &review.bundle.plan.layers,
                     review.display.as_deref(),
                     &mut self.manufacturing.replay,
                 );
-                self.job_summary(ui, report);
-                ui.label(format!(
-                    "{} deposition · {} travel segments",
-                    report.deposition_segments, report.travel_segments
-                ));
-                ui.label(format!(
-                    "{:.3} mm³ deposited · {:.3} mm filament",
-                    report.deposited_volume_mm3, report.filament_length_mm
-                ));
-                let goal = &report.layer_height;
-                ui.separator();
-                ui::group(ui, "Construction goals");
-                ui.label(match goal.policy {
-                    LayerHeightPolicy::Preferred => "Layer height · preferred target",
-                    LayerHeightPolicy::ProtectedMaximum => "Layer height · protected maximum",
-                });
-                ui.label(format!(
-                    "Requested {:.3} mm; selected nominal {:.3} mm",
-                    goal.requested_mm, goal.selected_mm
-                ));
-                ui.label(format!(
-                    "Actual layer heights {:.6}–{:.6} mm",
-                    goal.realized_min_mm, goal.realized_max_mm
-                ));
-                if goal.reason != LayerHeightReason::Requested {
-                    ui.colored_label(
+                if let Some(label) = &m.last_export {
+                    ui.add_space(4.0);
+                    ui.label("Exported");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(label).small())
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+                if let Some(index) = self.manufacturing.replay.layer
+                    && let Some(layer) = review.bundle.plan.layers.get(index as usize)
+                {
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "Layer {} · Z {:.2} mm · {:.2} mm thick · {} paths",
+                        index + 1,
+                        layer.z_mm,
+                        layer.z_mm - layer.lower_z_mm,
+                        layer.paths.len()
+                    ));
+                }
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Details")
+                    .id_salt("review-details")
+                    .show(ui, |ui| {
+                        if ui.button("Verify again").clicked() {
+                            self.queued = Some(Action::Verify);
+                        }
+                        ui.label(format!(
+                            "Software verification: {}",
+                            if report.verified { "Passed" } else { "Failed" }
+                        ));
+                        self.job_summary(ui, report);
+                        ui.label(format!(
+                            "{} deposition · {} travel segments",
+                            report.deposition_segments, report.travel_segments
+                        ));
+                        ui.label(format!(
+                            "{:.3} mm³ deposited · {:.3} mm filament",
+                            report.deposited_volume_mm3, report.filament_length_mm
+                        ));
+                        let goal = &report.layer_height;
+                        ui.separator();
+                        ui::group(ui, "Construction goals");
+                        ui.label(match goal.policy {
+                            LayerHeightPolicy::Preferred => "Layer height · preferred target",
+                            LayerHeightPolicy::ProtectedMaximum => {
+                                "Layer height · protected maximum"
+                            }
+                        });
+                        ui.label(format!(
+                            "Requested {:.3} mm; selected nominal {:.3} mm",
+                            goal.requested_mm, goal.selected_mm
+                        ));
+                        ui.label(format!(
+                            "Actual layer heights {:.6}–{:.6} mm",
+                            goal.realized_min_mm, goal.realized_max_mm
+                        ));
+                        if goal.reason != LayerHeightReason::Requested {
+                            ui.colored_label(
                         self.prefs.theme.tokens().warning,
                         match goal.reason {
                             LayerHeightReason::ProcessMinimum => {
@@ -619,106 +666,103 @@ impl Workbench {
                             LayerHeightReason::Requested => unreachable!(),
                         },
                     );
-                }
-                if let Some(index) = goal.first_differing_layer {
-                    ui.label(format!(
+                        }
+                        if let Some(index) = goal.first_differing_layer {
+                            ui.label(format!(
                         "{} of {} layers differ from the target by more than command precision.",
                         goal.differing_layer_count, goal.layer_count
                     ));
-                    if ui.button("Inspect first adjusted layer").clicked() {
-                        self.manufacturing.replay.layer = Some(index);
-                        self.manufacturing.replay.layer_end = None;
-                        self.analysis.open = true;
-                        self.analysis.follow_layer = true;
-                        self.analysis.view.enabled = true;
-                        self.analysis.view.representation =
-                            crate::analysis::Representation::Compare;
-                        self.manufacturing.replay.events = review
-                            .display
-                            .as_ref()
-                            .and_then(|display| {
-                                display
-                                    .batches
-                                    .iter()
-                                    .flat_map(|batch| batch.events.iter())
-                                    .filter(|event| event.1 == index)
-                                    .map(|event| event.0)
-                                    .max()
-                                    .and_then(|event| event.checked_add(1))
-                            })
-                            .unwrap_or(u32::MAX);
-                        self.manufacturing.replay.visible = true;
-                        self.manufacturing.replay.role = None;
-                        self.manufacturing.replay.tool = None;
-                    }
-                }
-
-                super::review::details(ui, &review);
-                ui.collapsing("Coverage", |ui| {
-                    for row in &report.coverage {
-                        ui.label(row);
-                    }
-                });
-                ui.collapsing("Limits", |ui| {
-                    for row in &report.limitations {
-                        ui.label(row);
-                    }
-                });
-                ui.collapsing("Captured inspection identity", |ui| {
-                    ui.label(format!("{:#?}", review.capture.provenance));
-                });
-
-                if let Some(label) = &m.last_export {
-                    ui.label("Export complete");
-                    ui.add(egui::Label::new(label).wrap().selectable(true));
-                    ui.collapsing("Exported files", |ui| {
-                        ui.label("plan.json · program.gcode · verification.json · provenance.json");
-                    });
-                }
-                let plan = &review.bundle.plan;
-                if let Some(index) = self.manufacturing.replay.layer
-                    && let Some(layer) = plan.layers.get(index as usize)
-                {
-                    ui.separator();
-                    ui::group(ui, format!("Layer {}", index + 1));
-                    ui.label(format!(
-                        "Layer schedule interval {:.6}…{:.6} mm",
-                        layer.lower_z_mm, layer.z_mm
-                    ));
-                    ui.label(format!(
-                        "Section Z {:.6} mm · {} paths",
-                        layer.section_z_mm,
-                        layer.paths.len()
-                    ));
-                    if layer.paths.is_empty() {
-                        ui.weak("Empty gap layer · no events");
-                    }
-                    ui.collapsing("Resolved regional coverage", |ui| {
-                        super::review::layer(ui, layer);
-                    });
-                }
-                ui.collapsing("Sparse band decisions", |ui| {
-                    egui::ScrollArea::vertical().max_height(240.0).show_rows(
-                        ui,
-                        24.0,
-                        plan.sparse_bands.len(),
-                        |ui, range| {
-                            for index in range {
-                                let band = &plan.sparse_bands[index];
-                                ui.label(format!(
-                                    "Layers {}–{} · {:?} · {:?}",
-                                    band.first_layer, band.last_layer, band.owner, band.disposition
-                                ));
+                            if ui.button("Inspect first adjusted layer").clicked() {
+                                self.manufacturing.replay.layer = Some(index);
+                                self.manufacturing.replay.layer_end = None;
+                                self.analysis.open = true;
+                                self.analysis.follow_layer = true;
+                                self.analysis.view.enabled = true;
+                                self.analysis.view.representation =
+                                    crate::analysis::Representation::Compare;
+                                self.manufacturing.replay.events = review
+                                    .display
+                                    .as_ref()
+                                    .and_then(|display| {
+                                        display
+                                            .batches
+                                            .iter()
+                                            .flat_map(|batch| batch.events.iter())
+                                            .filter(|event| event.1 == index)
+                                            .map(|event| event.0)
+                                            .max()
+                                            .and_then(|event| event.checked_add(1))
+                                    })
+                                    .unwrap_or(u32::MAX);
+                                self.manufacturing.replay.visible = true;
+                                self.manufacturing.replay.role = None;
+                                self.manufacturing.replay.tool = None;
                             }
-                        },
-                    );
-                });
-                self.construction_interfaces_ui(ui, &review);
+                        }
+
+                        super::review::details(ui, &review);
+                        ui.collapsing("Coverage", |ui| {
+                            for row in &report.coverage {
+                                ui.label(row);
+                            }
+                        });
+                        ui.collapsing("Limits", |ui| {
+                            for row in &report.limitations {
+                                ui.label(row);
+                            }
+                        });
+                        ui.collapsing("Captured inspection identity", |ui| {
+                            ui.label(format!("{:#?}", review.capture.provenance));
+                        });
+
+                        let plan = &review.bundle.plan;
+                        if let Some(index) = self.manufacturing.replay.layer
+                            && let Some(layer) = plan.layers.get(index as usize)
+                        {
+                            ui.separator();
+                            ui::group(ui, format!("Layer {}", index + 1));
+                            ui.label(format!(
+                                "Layer schedule interval {:.6}…{:.6} mm",
+                                layer.lower_z_mm, layer.z_mm
+                            ));
+                            ui.label(format!(
+                                "Section Z {:.6} mm · {} paths",
+                                layer.section_z_mm,
+                                layer.paths.len()
+                            ));
+                            if layer.paths.is_empty() {
+                                ui.weak("Empty gap layer · no events");
+                            }
+                            ui.collapsing("Resolved regional coverage", |ui| {
+                                super::review::layer(ui, layer);
+                            });
+                        }
+                        ui.collapsing("Sparse band decisions", |ui| {
+                            egui::ScrollArea::vertical().max_height(240.0).show_rows(
+                                ui,
+                                24.0,
+                                plan.sparse_bands.len(),
+                                |ui, range| {
+                                    for index in range {
+                                        let band = &plan.sparse_bands[index];
+                                        ui.label(format!(
+                                            "Layers {}–{} · {:?} · {:?}",
+                                            band.first_layer,
+                                            band.last_layer,
+                                            band.owner,
+                                            band.disposition
+                                        ));
+                                    }
+                                },
+                            );
+                        });
+                        self.construction_interfaces_ui(ui, &review);
+                    });
             } else {
-                ui.weak(if m.artifact.is_some() {
-                    "Verify the current output to review layers and export."
+                ui.weak(if self.slicing() {
+                    "Slicing…"
                 } else {
-                    "Slice this plate in Prepare to review its actual layers."
+                    "Not sliced yet"
                 });
             }
         }
@@ -731,7 +775,6 @@ impl Workbench {
             return;
         };
         self.manufacturing.sync_replay_review(&review);
-        let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;
         let section_representation = self.analysis.view.enabled;
         let mut section = self.analysis.view.clone();
         section.enabled &= section.valid()
@@ -739,54 +782,15 @@ impl Workbench {
             && (!section.selected_only || self.occurrence.is_some());
         let plane = self.analysis_plane();
         let view = &mut self.manufacturing.replay;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Actual emitted motion");
-            if section_representation {
-                ui.weak("Representation controlled by Section Analysis");
-            } else {
-                ui.checkbox(&mut view.source, "Show source");
-                ui.checkbox(&mut view.visible, "Motion");
-            }
-            ui.checkbox(&mut view.travels, "Travels");
-            ui.checkbox(&mut view.pressure, "Pressure events");
-            if crate::replay::declared_tool_colors(&review.capture.provenance.workflow).is_some() {
-                ui.checkbox(&mut view.material, "Declared material tints");
-            }
-        });
-        if view.material
-            && let Some(colors) =
-                crate::replay::declared_tool_colors(&review.capture.provenance.workflow)
+        let tints = crate::replay::declared_tool_colors(&review.capture.provenance.workflow);
+        if let Some(display) = &review.display
+            && display.beads.is_err()
         {
-            ui.collapsing("Declared tool-color legend", |ui| {
-                for (tool, rgba) in colors.iter().enumerate() {
-                    if let JobWorkflow::FixedDualMarlin { job } =
-                        &review.capture.provenance.workflow
-                    {
-                        let material = &job.tools[tool].material;
-                        ui.label(format!(
-                            "Tool T{tool} · {} · {}",
-                            material.polymer_family, material.id
-                        ));
-                    }
-                    ui::ColorPresentation::known(
-                        [rgba[0], rgba[1], rgba[2]].map(|c| (c * 255.0).round() as u8),
-                        ui::ColorMeaning::CatalogEstimate,
-                    )
-                    .show(ui, ("tool-color", tool), ui::ColorDensity::Standard);
-                }
-            });
+            view.beads = false;
         }
-        if let Some(display) = &review.display {
-            if display.beads.is_err() {
-                view.beads = false;
-            }
-            ui.horizontal_wrapped(|ui| {
-                if !section_representation {
-                    ui.selectable_value(&mut view.beads, false, "Centerlines");
-                    ui.add_enabled_ui(display.beads.is_ok(), |ui| {
-                        ui.selectable_value(&mut view.beads, true, "Nominal beads");
-                    });
-                }
+        // One row: what is drawn, then a Display menu for the rest.
+        ui.horizontal_wrapped(|ui| {
+            if let Some(display) = &review.display {
                 egui::ComboBox::from_id_salt("replay-role")
                     .selected_text(
                         view.role
@@ -815,53 +819,93 @@ impl Workbench {
                             }
                         });
                 }
-            });
-            match &display.beads {
-                Ok(beads) if view.beads => {
-                    let cache = &mut self.manufacturing.bead_statistics;
-                    if cache.as_ref().is_none_or(|c| {
-                        c.nonce != review.capture.nonce
-                            || !c.display.ptr_eq(&Arc::downgrade(display))
-                            || c.view != *view
-                    }) {
-                        *cache = Some(BeadStatistics {
-                            display: Arc::downgrade(display),
-                            nonce: review.capture.nonce,
-                            view: *view,
-                            value: beads.statistics(*view),
-                        });
-                    }
-                    let label = if let Some(stats) = cache.as_ref().and_then(|c| c.value) {
-                        let dimension = |range: [f32; 2]| {
-                            if range[1] - range[0] < 0.000001 {
-                                format!("{:.3}", range[0])
-                            } else {
-                                format!("{:.3}…{:.3}", range[0], range[1])
+                if !section_representation {
+                    ui.add_enabled_ui(display.beads.is_ok(), |ui| {
+                        ui.selectable_value(&mut view.beads, true, "Beads");
+                    });
+                    ui.selectable_value(&mut view.beads, false, "Lines");
+                }
+            }
+            ui.checkbox(&mut view.travels, "Travels");
+            ui.menu_button("Display", |ui| {
+                if section_representation {
+                    ui.weak("Representation follows Section analysis");
+                } else {
+                    ui.checkbox(&mut view.source, "Source model");
+                    ui.checkbox(&mut view.visible, "Motion");
+                }
+                ui.checkbox(&mut view.pressure, "Pressure events");
+                if tints.is_some() {
+                    ui.checkbox(&mut view.material, "Material tints");
+                }
+                if let Some(display) = &review.display {
+                    match &display.beads {
+                        Ok(beads) if view.beads => {
+                            let cache = &mut self.manufacturing.bead_statistics;
+                            if cache.as_ref().is_none_or(|c| {
+                                c.nonce != review.capture.nonce
+                                    || !c.display.ptr_eq(&Arc::downgrade(display))
+                                    || c.view != *view
+                            }) {
+                                *cache = Some(BeadStatistics {
+                                    display: Arc::downgrade(display),
+                                    nonce: review.capture.nonce,
+                                    view: *view,
+                                    value: beads.statistics(*view),
+                                });
                             }
-                        };
-                        format!(
-                            "Nominal W {} · H {} mm · {} strokes",
-                            dimension(stats.width),
-                            dimension(stats.height),
-                            stats.count
-                        )
-                    } else {
-                        "No nominal deposition in this selection".into()
-                    };
-                    ui.weak(label).on_hover_text(format!("Visible nominal widths and physical stroke heights, distinct from the layer schedule. Section chord bound {:.6} mm; numerical expansion ≤ 0.001 mm. No physical bead-shape or mass measurement.",beads.chord_error_mm));
+                            ui.separator();
+                            if let Some(stats) = cache.as_ref().and_then(|c| c.value) {
+                                let dimension = |range: [f32; 2]| {
+                                    if range[1] - range[0] < 0.000001 {
+                                        format!("{:.2}", range[0])
+                                    } else {
+                                        format!("{:.2}–{:.2}", range[0], range[1])
+                                    }
+                                };
+                                ui.weak(format!(
+                                    "Width {} mm · height {} mm · {} strokes",
+                                    dimension(stats.width),
+                                    dimension(stats.height),
+                                    stats.count
+                                ))
+                                .on_hover_text(format!("Visible nominal widths and physical stroke heights, distinct from the layer schedule. Section chord bound {:.6} mm; numerical expansion ≤ 0.001 mm. No physical bead-shape or mass measurement.", beads.chord_error_mm));
+                            }
+                            ui.collapsing("Bead display model", |ui| {
+                                ui.label(BEAD_MODEL);
+                            });
+                        }
+                        Err(reason) => {
+                            ui.weak(format!("Lines only · {reason}"));
+                        }
+                        _ => {}
+                    }
                 }
-                Err(reason) => {
-                    ui.weak(format!("Centerlines · {reason}"));
+            });
+        });
+        if view.material
+            && let Some(colors) = &tints
+        {
+            ui.collapsing("Tool colors", |ui| {
+                for (tool, rgba) in colors.iter().enumerate() {
+                    if let JobWorkflow::FixedDualMarlin { job } =
+                        &review.capture.provenance.workflow
+                    {
+                        let material = &job.tools[tool].material;
+                        ui.label(format!(
+                            "Tool T{tool} · {} · {}",
+                            material.polymer_family, material.id
+                        ));
+                    }
+                    ui::ColorPresentation::known(
+                        [rgba[0], rgba[1], rgba[2]].map(|c| (c * 255.0).round() as u8),
+                        ui::ColorMeaning::CatalogEstimate,
+                    )
+                    .show(ui, ("tool-color", tool), ui::ColorDensity::Standard);
                 }
-                _ => {}
-            }
-            if !compact {
-                ui.collapsing("Bead display model", |ui| {
-                    ui.label(BEAD_MODEL);
-                });
-            }
+            });
         }
-        self.manufacturing.layers.controls(ui, view, &review);
+        // The layer rail beside the view owns layer selection.
         if let Some(display) = &review.display {
             let bounds = self
                 .state

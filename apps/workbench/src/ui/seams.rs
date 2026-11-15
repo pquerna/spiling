@@ -91,13 +91,18 @@ pub fn seam_review(
     origin: DVec3,
     policy: &SeamPolicy,
 ) {
-    ui.checkbox(&mut view.seams, "Seam starts");
-    ui.label(format!("Captured policy · {}", seam_summary(policy)));
     let in_layers = starts.iter().filter(|start| start.in_layers(*view)).count();
-    ui.label(format!("{in_layers} closed wall starts in selected layers"));
+    ui.checkbox(&mut view.seams, "Seams").on_hover_text(format!(
+        "{} · {in_layers} closed wall starts in selected layers",
+        seam_summary(policy)
+    ));
     if !view.seams {
         return;
     }
+    ui.weak(format!(
+        "{} · {in_layers} in selected layers",
+        seam_summary(policy)
+    ));
     let visible = || {
         starts
             .iter()

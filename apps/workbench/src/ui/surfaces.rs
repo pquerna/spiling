@@ -5,18 +5,24 @@
 use egui::{Color32, RichText, Ui};
 
 /// Presentation only: callers retain command enablement and receipt ownership.
+/// A disabled action keeps its short reason beside it, in muted text.
 pub fn primary(ui: &mut Ui, label: &str, disabled: Option<&str>) -> bool {
-    let clicked = ui
-        .add_enabled(
-            disabled.is_none(),
-            egui::Button::new(RichText::new(label).color(Color32::WHITE))
-                .fill(Color32::from_rgb(23, 95, 181)),
-        )
-        .clicked();
-    if let Some(reason) = disabled {
-        ui.add(egui::Label::new(reason).wrap());
-    }
-    clicked
+    ui.horizontal_wrapped(|ui| {
+        let clicked = ui
+            .add_enabled(
+                disabled.is_none(),
+                egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
+                    .fill(Color32::from_rgb(23, 95, 181))
+                    .min_size(egui::vec2(96.0, 30.0)),
+            )
+            .on_disabled_hover_text(disabled.unwrap_or_default())
+            .clicked();
+        if let Some(reason) = disabled.filter(|r| !r.is_empty()) {
+            ui.label(RichText::new(reason).small().weak());
+        }
+        clicked
+    })
+    .inner
 }
 
 pub fn pane_header(ui: &mut Ui, title: &str, scope: &str) {

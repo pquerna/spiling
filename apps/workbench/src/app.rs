@@ -116,6 +116,7 @@ pub struct Workbench {
     colors: ui::ColorInspector,
     library: library::LibraryUi,
     queued_image: Option<crate::assets::ImageRequest>,
+    slice: Option<slice::SliceRun>,
 }
 impl Workbench {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -203,6 +204,7 @@ impl Workbench {
             colors: ui::ColorInspector::default(),
             library: library::LibraryUi::default(),
             queued_image: None,
+            slice: None,
         }
     }
     fn start(&mut self, ctx: &egui::Context) {
@@ -562,7 +564,7 @@ impl Workbench {
     }
     fn project(&self, ui: &mut egui::Ui) {
         let tokens = self.prefs.theme.tokens();
-        ui::pane_header(ui, "Project", "Saved state and identity");
+        ui::pane_header(ui, "Project", "");
         if self.state.phase != Phase::Running {
             ui.colored_label(tokens.warning, "Last observed state · engine disconnected");
         }
@@ -713,6 +715,7 @@ mod policies;
 mod print_settings;
 mod process;
 mod review;
+mod slice;
 mod stock;
 mod study;
 mod surface;
@@ -737,6 +740,7 @@ impl eframe::App for Workbench {
         self.reconcile_alternative_receipt();
         self.reconcile_process_receipt();
         self.reconcile_mechanics();
+        self.advance_slice();
         if self.state.phase == Phase::Running
             && !self.state.busy
             && self.awaiting_serial.is_none()
@@ -919,7 +923,18 @@ impl eframe::App for Workbench {
         self.chrome_ui(ui, compact);
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(format!("{:?}", self.state.phase));
+                match self.state.phase {
+                    Phase::Running => {}
+                    Phase::Starting => {
+                        ui.label("Starting engine…");
+                    }
+                    Phase::Interrupted => {
+                        ui.colored_label(self.prefs.theme.tokens().warning, "Engine interrupted");
+                    }
+                    Phase::Closed => {
+                        ui.label("Engine closed");
+                    }
+                }
                 if self
                     .state
                     .project
@@ -930,13 +945,12 @@ impl eframe::App for Workbench {
                 }
                 let problems =
                     self.state.problems.len() + usize::from(self.local_problem.is_some());
-                ui.toggle_value(
-                    &mut self.show_feedback,
-                    format!(
-                        "Activity · {} jobs · {problems} problems",
-                        self.state.jobs.len()
-                    ),
-                );
+                let activity = match problems {
+                    0 => "Activity".to_string(),
+                    1 => "Activity · 1 problem".to_string(),
+                    n => format!("Activity · {n} problems"),
+                };
+                ui.toggle_value(&mut self.show_feedback, activity);
                 ui.add(egui::Label::new(&self.state.message).truncate())
                     .on_hover_text(&self.state.message);
             });

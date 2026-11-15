@@ -317,13 +317,18 @@ fn prepare_single(
     let bed = Rect::from_bounds(bed_bounds, 0.0);
     // Reserve room beyond the full native/finish envelope. The final complete
     // deposition check below independently refuses constructions escaping it.
+    // A brim is attached to its part, so it belongs to that part's reservation.
     let construction_margin = intent.recipe.bead_width_mm
         + match intent.recipe.supports {
             SupportPolicy::Disabled => 0.0,
             SupportPolicy::Breakaway {
                 xy_clearance_mm, ..
             } => xy_clearance_mm,
-        };
+        }
+        + intent
+            .recipe
+            .brim
+            .map_or(0.0, |brim| brim.width_mm + brim.separation_mm);
     let padding = construction_margin + r.request.spacing_mm * 0.5;
     let mut axis_padding = [padding; 2];
     let mut obstacles = vec![];
@@ -669,8 +674,14 @@ fn prepare_single(
     };
     // Every whole actual nominal bead must remain in one disjoint construction
     // reservation. This catches support/skin/bridge growth omitted by a heuristic.
+    // A skirt surrounds the whole plate rather than one part; the planner keeps
+    // only loops that fit the bed and the verifier rechecks the bed envelope.
     for layer in &bundle.plan.layers {
-        for path in &layer.paths {
+        for path in layer
+            .paths
+            .iter()
+            .filter(|p| p.kind != DepositionKind::Skirt)
+        {
             let edges = path.checked_edges()?;
             for edge in edges {
                 let radius = edge.width_mm * 0.5;

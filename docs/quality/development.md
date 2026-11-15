@@ -370,7 +370,7 @@ For compiled construction inspection, run the actual-child
 `native_h1_housing_and_physical_plate_parity` workbench test with
 `SPILING_TEST_ENGINE` pointing to the matching engine. An optional
 `SPILING_NATIVE_EVIDENCE_ROOT` retains its saved housing/plate projects. Open one
-read-only, freshly Verify program, select a physical layer containing construction,
+read-only, freshly verify (Details › Verify again), select a physical layer containing construction,
 and expand Construction interfaces in Review. Select a separator or plate, inspect
 its cyan centerlines/outline and holes, and exercise Focus interface, Reveal
 interface and Clear highlight. Single, Through and Range follow the same upper
@@ -381,8 +381,8 @@ not material-contact discovery or mixed-polymer interlock manufacture.
 For the manufacturing journey, import an unchanged admitted housing from an owned
 copy and load a full intent JSON through its native file picker. Apply a consumed
 sparse value, select the occurrence, prepare and review native placement, explicitly
-Apply, then **Check setup** and **Compile program**. Review requires **Verify program**;
-stored verification alone cannot enable Export. Exercise source-hidden replay,
+Apply, then **Slice** (preflight, compile and fresh inspection in order). Export
+requires that fresh inspection; stored verification alone cannot enable it. Exercise source-hidden replay,
 true layer intervals, event/travel controls and the independent report's coverage
 and limitations. Export selects a **new directory name**, writing plan.json,
 program.gcode, verification.json and provenance.json without overwriting. Reusing
@@ -799,7 +799,7 @@ contribution edits invalidate all affected jobs. Navigation itself must not dirt
 Exercise Prepare/Review transitions with an unapplied Settings or surface draft;
 return to the same task and confirm slicing refuses the draft. Check narrow command
 group menus, palette routes, cross-workspace properties/section inspection and Color
-study return. Complete Check setup, Slice plate, fresh verification and export;
+study return. Complete Slice (through fresh verification) and export;
 background completion must not steal the active workspace.
 In Overview, exercise distinct curved and perforated parts, rotated occurrences,
 a configured empty plate and an inactive-only source definition. Check three-quarter

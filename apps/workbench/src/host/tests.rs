@@ -5141,3 +5141,96 @@ fn one_step_settings_select_a_shipped_printer_and_create_an_editable_intent() {
     assert_eq!(after.manufacturing.intent, s.manufacturing.intent);
     assert!(!after.problems.is_empty());
 }
+
+#[test]
+#[ignore = "actual one-step settings engine services; requires SPILING_TEST_ENGINE"]
+fn one_step_settings_place_off_bed_parts_on_the_chosen_printer() {
+    use super::hardware::{DefaultPrinter, HardwareAction};
+    use spiling_contracts::manufacturing::*;
+    fn act(host: &Host, action: LibraryAction) -> Snapshot {
+        let serial = host.snapshot().serial;
+        host.library(action).unwrap();
+        idle_after(host, serial)
+    }
+    let root = tempfile::tempdir().unwrap();
+    let host = Host::new(
+        Config {
+            engine: engine(),
+            store: root.path().join("operations"),
+        },
+        || {},
+    )
+    .unwrap();
+    assert_eq!(
+        wait(&host, |s| s.phase != Phase::Starting).phase,
+        Phase::Running
+    );
+    imported(&host);
+    let shown = displayed(&host).display.unwrap();
+    let mut pose = shown.occurrences[0].pose;
+    pose.translation_mm = [-400.0, 700.0, 25.0];
+    let project = host.snapshot().project.unwrap();
+    host.geometry(GeometryCommand::SetInstancePose {
+        session_id: shown.summary.session_id.clone(),
+        base_revision: shown.summary.revision,
+        project_revision: project.revision,
+        occurrence_id: shown.occurrences[0].occurrence_id,
+        pose,
+    })
+    .unwrap();
+    wait(&host, |s| {
+        s.scene
+            .as_ref()
+            .is_some_and(|s| s.revision != shown.summary.revision)
+    });
+    displayed(&host);
+    act(&host, LibraryAction::Hardware(HardwareAction::Refresh));
+    let s = host.snapshot();
+    let project = s.project.as_ref().unwrap();
+    let setup = s
+        .library
+        .hardware
+        .catalog
+        .as_ref()
+        .unwrap()
+        .setups
+        .iter()
+        .find(|s| s.id == "generic.marlin-bedslinger.04")
+        .unwrap()
+        .clone();
+    let s = act(
+        &host,
+        LibraryAction::Hardware(HardwareAction::DefaultSettings {
+            project: project.project_id.clone(),
+            layout_id: project.layout_id.clone(),
+            base: project.revision,
+            printer: DefaultPrinter::Shipped(setup.id.clone()),
+            request: DefaultIntentRequest {
+                material: DefaultMaterialChoice::Generic {
+                    polymer_family: "PLA".into(),
+                },
+                quality: QualityPreset::Standard,
+                supports: SupportChoice::Off,
+            },
+        }),
+    );
+    assert!(s.problems.is_empty(), "{:?}", s.problems);
+    assert!(s.manufacturing.intent.is_some());
+    let bounds = s.scene.as_ref().unwrap().bounds_mm.unwrap();
+    let bed = setup.printer.build_envelope;
+    for a in 0..2 {
+        assert!(
+            bounds.min[a] >= bed.min[a] && bounds.max[a] <= bed.max[a],
+            "{bounds:?} on {bed:?}"
+        );
+        let off = (bounds.min[a] + bounds.max[a] - bed.min[a] - bed.max[a]) * 0.5;
+        assert!(
+            off.abs() < 1.0,
+            "not centred on axis {a}: {bounds:?} on {bed:?}"
+        );
+    }
+    assert!(
+        (bounds.min[2] - bed.min[2]).abs() < 0.01,
+        "not resting on the bed: {bounds:?}"
+    );
+}

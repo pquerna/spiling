@@ -136,6 +136,36 @@ async fn layout_proposals_preserve_current_apply_atomically_and_reopen_without_o
     );
     reader.shutdown().await.unwrap();
 }
+/// Skirt and brim are ordinary defaults: a brim belongs to its part's
+/// reservation and a skirt surrounds the plate, so layout admits both.
+#[tokio::test]
+async fn layout_admits_skirt_and_brim() {
+    let workspace = Workspace::new();
+    let source = native_box(&workspace);
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    let mut profile: ManufacturingIntent = serde_json::from_str(include_str!(
+        "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    profile.recipe.skirt = Some(SkirtPolicy {
+        loops: 1,
+        distance_mm: 3.0,
+        minimum_length_mm: 0.0,
+    });
+    profile.recipe.brim = Some(BrimPolicy {
+        width_mm: 5.0,
+        separation_mm: 0.0,
+        placement: BrimPlacement::Always,
+    });
+    set_intent(&mut client, profile).await;
+    for (objective, quantity) in [(LayoutObjective::Arrange, 1), (LayoutObjective::Copies, 2)] {
+        let proposal = prepare(&mut client, request(objective, quantity)).await;
+        assert_eq!(proposal.placed_count, quantity);
+        assert!(proposal.verification.verified);
+    }
+    client.shutdown().await.unwrap();
+}
 #[tokio::test]
 async fn layout_partial_fit_keeps_existing_parts_and_pin_conflicts_are_explicit() {
     let workspace = Workspace::new();
