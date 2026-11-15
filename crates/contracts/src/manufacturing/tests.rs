@@ -5064,3 +5064,57 @@ fn fixed_dual_router_matches_reservation_scan_exactly() {
         router.assignment_for_path(&path).unwrap_err().message
     );
 }
+
+/// Values recomputed by hand from each firmware's own G2/G3 segmentation.
+#[test]
+fn firmware_arc_segmentation_follows_each_stock_rule() {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let klipper = ArcFirmware::for_dialect(OutputDialect::KlipperSingleExtruderGcodeV1).unwrap();
+    // An arc shorter than two resolutions is one chord.
+    assert_eq!(klipper.segments(5.0, 1.99 / 5.0), 1.0);
+    assert!(near(
+        klipper.deviation_mm(5.0, 1.99 / 5.0),
+        0.098_676_214_471_614_68
+    ));
+    let marlin = ArcFirmware::for_dialect(OutputDialect::Marlin2SingleExtruderGcodeV1).unwrap();
+    // A quarter circle needs at least 18 of 72 segments per circle.
+    assert_eq!(marlin.segments(5.0, FRAC_PI_2), 18.0);
+    assert!(marlin.deviation_mm(5.0, FRAC_PI_2) < MAX_FIRMWARE_ARC_DEVIATION_MM);
+    // Near 11.5 mm, 18 segments would exceed 1 mm, so Marlin takes 19;
+    // they still leave about 0.0098 mm: too coarse for the tolerance.
+    assert_eq!(marlin.segments(11.5, FRAC_PI_2), 19.0);
+    assert!(near(
+        marlin.deviation_mm(11.5, FRAC_PI_2),
+        0.009823778546038275
+    ));
+    assert!(marlin.deviation_mm(11.5, FRAC_PI_2) > MAX_FIRMWARE_ARC_DEVIATION_MM);
+    let buddy = ArcFirmware::for_dialect(OutputDialect::PrusaMarlinSingleExtruderGcodeV1).unwrap();
+    assert_eq!(buddy.segments(10.0, FRAC_PI_2), 13.0);
+    assert!(buddy.deviation_mm(10.0, FRAC_PI_2) > MAX_FIRMWARE_ARC_DEVIATION_MM);
+    // Large radii keep 2 mm segments well inside tolerance.
+    assert_eq!(buddy.segments(200.0, 0.05), 5.0);
+    assert!(buddy.deviation_mm(200.0, 0.05) < MAX_FIRMWARE_ARC_DEVIATION_MM);
+    // Unreadable firmware takes the conservative rule, the generic dialect
+    // stock Marlin; fixed-dual has none.
+    assert_eq!(
+        ArcFirmware::for_dialect(OutputDialect::BambuLabGcode3mfV1),
+        Some(buddy)
+    );
+    assert_eq!(
+        ArcFirmware::for_dialect(OutputDialect::CartesianAbsoluteGcodeV1),
+        Some(marlin)
+    );
+    assert_eq!(
+        ArcFirmware::for_dialect(OutputDialect::Marlin2FixedDualGcodeV1),
+        None
+    );
+    for firmware in [klipper, marlin, buddy] {
+        for radius in [0.5, 3.0, 50.0, 900.0] {
+            for sweep in [0.01, 1.0, TAU * 0.75] {
+                let d = firmware.deviation_mm(radius, sweep);
+                assert!(d.is_finite() && d >= 0.0 && d <= radius);
+            }
+        }
+    }
+}

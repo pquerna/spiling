@@ -90,7 +90,11 @@ impl Wave {
             let v = self.ordinate(u, branch);
             error.max((du * (v - a[1]) - dv * (u - a[0])).abs() / length)
         });
-        if error * self.scale <= super::super::OFFSET_TOLERANCE_MM * 0.5 {
+        // Hidden sparse roads use the recorded profile tolerance. The
+        // independent field check allows the full PROFILE_TOLERANCE_MM through
+        // an upper gradient bound; keep a margin for that bound and output
+        // rounding.
+        if error * self.scale <= PROFILE_TOLERANCE_MM * 0.8 {
             reserve_points(output, 1)?;
             output.push(b);
             return Ok(());
@@ -420,7 +424,8 @@ fn finish(
     road.dedup_by(|b, a| (b[0] - a[0]).hypot(b[1] - a[1]) <= 0.000002);
     // Clip endpoints stay fixed. Combine a short command with a neighbour
     // only within the existing profile allowance and unchanged center domain.
-    // Unrepresentable fragments refuse explicitly; nothing is dropped.
+    // A sliver at a road end that cannot merge is trimmed; an interior one
+    // that cannot merge still refuses explicitly.
     use spiling_contracts::manufacturing::program_coordinates::{
         MIN_DEPOSITION_COMMAND_MM, project_xyz6_point_mm,
     };
@@ -506,6 +511,24 @@ fn finish(
                 merged = true;
                 break;
             }
+        }
+        if !merged && (index == 0 || index + 2 == road.len()) {
+            // A sub-command sliver at a clipped road end is not a printable
+            // command (ADR012 permits omitting it). Trim it: the road end
+            // moves inward by less than MIN_DEPOSITION_COMMAND_MM, far inside
+            // its bead width, and nothing else changes.
+            if index == 0 {
+                road.remove(0);
+                fit_errors.remove(0);
+            } else {
+                road.pop();
+                fit_errors.pop();
+            }
+            if road.len() < 2 {
+                road.clear();
+                return Ok(());
+            }
+            continue;
         }
         if !merged {
             return Err(unsupported(&format!(

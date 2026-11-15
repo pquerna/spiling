@@ -2133,6 +2133,108 @@ pub const MAX_ARC_RADIUS_MM: f64 = 1000.0;
 /// ambiguous; a full circle is two runs.
 pub const MAX_ARC_SWEEP_RADIANS: f64 = 1.5 * std::f64::consts::PI;
 
+/// Largest distance a firmware's own segmentation of an emitted arc may
+/// leave from the true circle. The run's points already sit within
+/// [`MAX_ARC_POINT_DEVIATION_MM`] of it, so together they stay within the
+/// recorded profile tolerance. A run the firmware would render worse stays
+/// chords.
+pub const MAX_FIRMWARE_ARC_DEVIATION_MM: f64 = PROFILE_TOLERANCE_MM - MAX_ARC_POINT_DEVIATION_MM;
+/// Shortest straight distance between an emitted arc's ends. Firmware derives
+/// the sweep from atan2 of the rounded ends and center; well above output
+/// rounding, its sign and so its direction cannot flip.
+pub const MIN_ARC_CHORD_MM: f64 = 0.05;
+
+/// How a firmware lowers one G2/G3 into straight segments, as its source
+/// does it with stock configuration. A declaration, not a measurement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArcFirmware {
+    /// Klipper `gcode_arcs`: `max(1, floor(length / resolution))` segments.
+    Klipper { resolution_mm: f64 },
+    /// Marlin 2 `G2_G3.cpp`: at least `ceil(min_circle_segments * sweep / 2pi)`
+    /// segments of nominal `max_segment_mm`, kept between both segment limits.
+    Marlin {
+        min_segment_mm: f64,
+        max_segment_mm: f64,
+        min_circle_segments: f64,
+    },
+    /// Prusa Buddy `G2_G3.cpp`: segment length from a chord deviation, kept
+    /// between both limits; `max(1, floor(length / segment + 0.8))` segments.
+    /// Its feedrate term only shortens segments, so leaving it out is safe.
+    Deviation {
+        max_deviation_mm: f64,
+        min_segment_mm: f64,
+        max_segment_mm: f64,
+    },
+}
+impl ArcFirmware {
+    /// Stock behaviour of each single-tool dialect's firmware. The generic
+    /// Cartesian dialect writes Marlin-flavoured moves and takes stock Marlin;
+    /// firmware this project cannot read (Bambu Lab) takes the most
+    /// conservative model. The fixed-dual dialect has no arcs.
+    pub fn for_dialect(dialect: OutputDialect) -> Option<Self> {
+        const CONSERVATIVE: ArcFirmware = ArcFirmware::Deviation {
+            max_deviation_mm: 0.02,
+            min_segment_mm: 0.1,
+            max_segment_mm: 2.0,
+        };
+        match dialect {
+            OutputDialect::Marlin2FixedDualGcodeV1 => None,
+            OutputDialect::Marlin2SingleExtruderGcodeV1
+            | OutputDialect::CartesianAbsoluteGcodeV1 => Some(Self::Marlin {
+                min_segment_mm: 0.1,
+                max_segment_mm: 1.0,
+                min_circle_segments: 72.0,
+            }),
+            OutputDialect::KlipperSingleExtruderGcodeV1 => {
+                Some(Self::Klipper { resolution_mm: 1.0 })
+            }
+            OutputDialect::PrusaMarlinSingleExtruderGcodeV1 | OutputDialect::BambuLabGcode3mfV1 => {
+                Some(CONSERVATIVE)
+            }
+        }
+    }
+    /// Straight segments the firmware cuts an arc of this radius and sweep into.
+    pub fn segments(&self, radius_mm: f64, sweep_radians: f64) -> f64 {
+        let length = radius_mm * sweep_radians;
+        match *self {
+            Self::Klipper { resolution_mm } => (length / resolution_mm).floor().max(1.0),
+            Self::Marlin {
+                min_segment_mm,
+                max_segment_mm,
+                min_circle_segments,
+            } => {
+                let minimum = (min_circle_segments * sweep_radians / std::f64::consts::TAU)
+                    .ceil()
+                    .max(1.0);
+                let nominal = (length / max_segment_mm).floor().max(minimum);
+                let nominal_mm = length / nominal;
+                if nominal_mm > max_segment_mm {
+                    (length / max_segment_mm).ceil()
+                } else if nominal_mm < min_segment_mm {
+                    (length / min_segment_mm).floor().max(1.0)
+                } else {
+                    nominal
+                }
+            }
+            Self::Deviation {
+                max_deviation_mm,
+                min_segment_mm,
+                max_segment_mm,
+            } => {
+                let segment = (8.0 * radius_mm * max_deviation_mm)
+                    .sqrt()
+                    .clamp(min_segment_mm, max_segment_mm);
+                (length / segment + 0.8).floor().max(1.0)
+            }
+        }
+    }
+    /// Largest distance between the true circle and the firmware's segments.
+    pub fn deviation_mm(&self, radius_mm: f64, sweep_radians: f64) -> f64 {
+        let half = sweep_radians / (2.0 * self.segments(radius_mm, sweep_radians));
+        radius_mm * (1.0 - half.cos())
+    }
+}
+
 /// Consecutive points `first..=last` of a path on one horizontal circle.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]

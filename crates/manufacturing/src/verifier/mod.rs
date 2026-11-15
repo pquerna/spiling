@@ -249,9 +249,11 @@ impl ArcReplay {
         state: &MotionState,
         intent: &ManufacturingIntent,
     ) -> Result<Self, ManufacturingError> {
-        if !intent.printer.capabilities.arc_moves {
+        let Some(firmware) = ArcFirmware::for_dialect(intent.printer.capabilities.output_dialect)
+            .filter(|_| intent.printer.capabilities.arc_moves)
+        else {
             return Err(failed("arc move for a printer that declares no arc moves"));
-        }
+        };
         let start = state
             .position
             .ok_or_else(|| failed("arc move before positioning"))?;
@@ -268,6 +270,16 @@ impl ArcReplay {
             || arc.length_mm < program_coordinates::MIN_DEPOSITION_COMMAND_MM
         {
             return Err(failed("decoded arc is not one bounded circular move"));
+        }
+        // Declared firmware segmentation, recomputed from the decoded move:
+        // this checks the printer declaration is honoured, not the machine.
+        if (start[0] - end[0]).hypot(start[1] - end[1]) < MIN_ARC_CHORD_MM - 2.0 * XYZ_HALF_STEP
+            || firmware.deviation_mm(arc.radius_mm, arc.sweep_radians)
+                > MAX_FIRMWARE_ARC_DEVIATION_MM + 4.0 * XYZ_HALF_STEP
+        {
+            return Err(failed(
+                "decoded arc is too short or segmented beyond tolerance by its firmware",
+            ));
         }
         let envelope = intent.printer.build_envelope;
         let [lo, hi] = arc.xy_bounds();

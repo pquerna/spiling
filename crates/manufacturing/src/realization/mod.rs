@@ -74,6 +74,53 @@ pub(crate) fn canonicalize_with_tool_order(
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
     schedule::apply(plan, intent, routed, position, cancel, order)?;
+    lower_arcs(plan, intent, routed.is_some(), cancel)
+}
+
+/// Keep only the arc runs this printer will execute faithfully, after seams
+/// have split them. A run its firmware would segment beyond the recorded
+/// profile tolerance, or too short to name its direction safely, stays the
+/// chords its points already are. This only ever removes arcs, so it cannot
+/// refuse a job; the stored plan is exactly what the emitter writes.
+fn lower_arcs(
+    plan: &mut NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    routed: bool,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let capabilities = &intent.printer.capabilities;
+    let firmware = ArcFirmware::for_dialect(capabilities.output_dialect)
+        .filter(|_| capabilities.arc_moves && !routed);
+    for layer in &mut plan.layers {
+        check_cancel(cancel)?;
+        for path in &mut layer.paths {
+            if path.arcs.is_empty() {
+                continue;
+            }
+            let Some(firmware) = firmware else {
+                path.arcs.clear();
+                continue;
+            };
+            let points = &path.points_mm;
+            path.arcs.retain(|run| {
+                let (first, last) = (run.first as usize, run.last as usize);
+                let radius = run.radius_mm(points);
+                let sweep: f64 = (first..last)
+                    .map(|i| run.step_radians(points[i], points[i + 1]))
+                    .sum();
+                let (a, b) = (points[first], points[last]);
+                // Segment counts are whole numbers: decide on the worst count
+                // that output rounding of the ends and center could produce.
+                let worst = [1.0 - 1e-5, 1.0 + 1e-5]
+                    .into_iter()
+                    .flat_map(|r| [1.0 - 1e-5, 1.0 + 1e-5].map(|t| (r, t)))
+                    .map(|(r, t)| firmware.deviation_mm(radius * r, sweep * t))
+                    .fold(0.0, f64::max);
+                (a[0] - b[0]).hypot(a[1] - b[1]) >= MIN_ARC_CHORD_MM
+                    && worst <= MAX_FIRMWARE_ARC_DEVIATION_MM
+            });
+        }
+    }
     Ok(())
 }
 
