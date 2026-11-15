@@ -143,8 +143,47 @@ integration and complete default commands on a coherent candidate.
 
 Build the matching engine and workbench before real-surface acceptance. Do not
 replace binaries while their window/engine is live. Reuse one disk-backed target
-and honor `CARGO_TARGET_DIR`; development/test profiles disable debug information
-and incremental compilation. Selected numerical crates are optimized separately.
+per checkout and honor `CARGO_TARGET_DIR`; never `cargo clean` it.
+
+### Build profiles and the feedback loop
+
+The dev profile is the only build for `check`, `test`, `clippy` and debug binaries:
+incremental, line tables for backtraces, our crates unoptimized, every dependency
+(SolidCore, tess, CubeCL, voronoi, booleans) at `opt-level = 3`. Dependencies compile
+once per target dir and never rebuild in the loop. `.cargo/config.toml` sets
+`RUST_MIN_STACK`. `release` (thin LTO, one codegen unit) is for shipped binaries, and
+`profiling` is release with symbols for CPU profiles and the realistic corpus. Never
+pass either to a test. A slow test is an algorithm to fix, not a reason to optimize
+the crate.
+
+On the shared dev host, `export CARGO_BUILD_JOBS=4` and pass `--test-threads 4`; run
+one heavy job at a time. The tiers, with what each costs on that host (4 jobs, warm
+dependencies):
+
+```sh
+# Edit loop: seconds. One crate, one binary, the narrowest filter.
+cargo check -p spiling-geometry
+cargo test -p spiling-geometry --lib tolerant::            # module path or test name
+cargo test -p spiling-manufacturing --lib planner::walls:: -- --test-threads 4
+cargo test -p spiling-e2e-tests --test <target> <name>     # one integration binary
+
+# Before commit: each touched crate's whole suite, clippy and fmt.
+cargo test --locked -p spiling-geometry -- --test-threads 4
+cargo clippy --locked -p spiling-geometry --all-targets -- -D warnings
+cargo fmt -p spiling-geometry                              # never --all (vendored code)
+cargo xtask contracts --check                              # contracts/protobuf changes
+
+# Before landing slicing-affecting work: real parts (the one optimized build).
+cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
+SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling OUT.ndjson
+```
+
+A one-line geometry edit rebuilds its test binary in about 4 s. The crate's first build
+on warm dependencies is about 3 min. The whole geometry lib suite is about 6.5 min, two
+rational-torus tests (`imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence`,
+`rational_torus_near_terminal_section_preserves_annulus_and_native_lineage`) take most
+of that and are the next algorithmic targets. While iterating on one corpus part, put
+only that part in the corpus input directory instead of rerunning all of them.
 
 ### Feedback cost and coverage
 
@@ -157,12 +196,9 @@ toolchain, profile, feature set, target/cache state and resource limits. Compare
 unchanged warm, test-only edit and owning-code edit separately. Do not clean a
 shared target to manufacture a cold measurement.
 
-Keep the owning area's required acceptance profile, including `--profile profiling`
-for manufacturing. Faster semantic-feedback configurations are experiments, not
-waivers of that gate. A proposed profile must reduce edit-to-answer cost without
-losing numerical controls or making real fixture execution impractical. Compare
-production performance with identical compiler settings on both sides; changing
-those settings is not a product algorithm speedup.
+Compare production performance with identical compiler settings on both sides; a
+profile change is not a product algorithm speedup, and a test's runtime under the
+dev profile is the number to improve.
 
 Test declarations, passing counts and line coverage are not execution coverage of
 operator workflows. Name the selected actual-child/CLI/host journeys, including
@@ -635,22 +671,22 @@ Fork maintenance does not re-enable Spiling's disabled remote CI.
 
 ## Resources and test inputs
 
-Root tools default to one Cargo job; raise `CARGO_BUILD_JOBS` explicitly for the
-host. Root Rust test commands default `RUST_MIN_STACK` to 8 MiB for debug typed
-RPC futures, matching the native host runtime; explicit overrides are preserved.
-Direct Cargo integration-test runs need the same setting. This test-harness
+Root tools take Cargo's job and test-thread defaults; set `CARGO_BUILD_JOBS` for a shared
+host. `.cargo/config.toml` sets `RUST_MIN_STACK` to 8 MiB for every Cargo-run test and
+binary, for debug typed RPC futures, matching the native host runtime; an explicit
+environment value still wins. This test-harness
 stack does not change native geometry work, depth, byte or tolerance policies.
 Parallel compiler count is not a memory limit. Use a whole-process cgroup
 when bounds matter, and distinguish host RAM/disk allowances from geometry
 work/depth/tolerance, protocol and watchdog limits. `/tmp` may be RAM-backed.
 
 ```sh
-export CARGO_TARGET_DIR="$PWD/target" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=16
-export RAYON_NUM_THREADS=1 RUST_TEST_THREADS=1 RUST_MIN_STACK=8388608
+export CARGO_TARGET_DIR="$PWD/target" CARGO_BUILD_JOBS=16
+export RAYON_NUM_THREADS=1 RUST_TEST_THREADS=1
 systemd-run --wait --pipe --collect --property=WorkingDirectory="$PWD" \
   --property=MemoryMax=16G --property=MemorySwapMax=2G --property=TasksMax=1024 \
   /usr/bin/env PATH="$PATH" CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-  CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" RAYON_NUM_THREADS=1 \
+  CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" RAYON_NUM_THREADS=1 \
   cargo test --locked -p spiling-manufacturing --lib -- --test-threads=1
 ```
 

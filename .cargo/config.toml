@@ -5,3 +5,8 @@
 [alias]
 xtask = "run --locked --package xtask --"
 mac-arm = "build --locked --target aarch64-apple-darwin -p spiling-workbench -p spiling-engine -p spiling-cli"
+
+# Debug typed RPC futures need an 8 MiB test-thread stack, as the native host runtime has.
+# An explicit RUST_MIN_STACK in the environment still wins.
+[env]
+RUST_MIN_STACK = "8388608"

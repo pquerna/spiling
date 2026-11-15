@@ -69,28 +69,16 @@ boolmesh = { path = "vendor/boolmesh" }
 cpp_map = { path = "vendor/cpp_map" }
 boostvoronoi = { path = "vendor/boostvoronoi" }
 
+# One fast default for check, test, run and debug binaries (`cargo test -p <crate>`):
+# our crates unoptimized and incremental, so an edit rebuilds in seconds; dependencies
+# (kernel, tess, compute, voronoi) optimized once per target dir, since they never rebuild
+# in the loop. Release/profiling are for shipped binaries and CPU profiles only, never tests.
 [profile.dev]
-debug = 0
-incremental = false
+debug = "line-tables-only"
+incremental = true
 
-# Keep geometry/manufacturing numerical work practical without optimizing the desktop stack.
-[profile.dev.package.solidcore]
-opt-level = 2
-
-[profile.dev.package.solidcore-mesh]
-opt-level = 2
-
-[profile.dev.package.spiling-geometry]
-opt-level = 2
-
-[profile.dev.package.spiling-manufacturing]
-opt-level = 2
-
-[profile.dev.package.spiling-deposition-routing]
-opt-level = 2
-
-[profile.dev.package.spiling-analysis]
-opt-level = 2
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

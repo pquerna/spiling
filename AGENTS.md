@@ -56,10 +56,11 @@ Dependencies point inward: contracts depend on nothing project-specific; geometr
 
 1. Read this file, then the brain's `AGENTS.md` and the live card for your task, then any `AGENT-RULES.md` along the directories you will touch.
 2. Change the owning area; reuse its patterns. Update every affected caller, contract and generated file together (`cargo xtask contracts`; optional TypeScript authoring checks use `node tools/run.mjs check:tooling`).
-3. Verify through the real surface, not unit tests alone:
-   - `cargo test --locked -p <crate>` for touched crates (set `RUST_MIN_STACK=8388608`; use `--profile profiling` for manufacturing).
-   - Real parts: `tools/realistic-corpus/run.py` against PrusaSlicer, with and without supports (`SPILING_CORPUS_SUPPORTS`); the wall generator census is `wall_census` in `crates/manufacturing/src/planner/walls/tests.rs`.
-   - `cargo xtask contracts --check`; optional TypeScript/observer checks use `node tools/run.mjs check:tooling` and `node tools/run.mjs test:tooling`. Clippy with warnings denied on touched crates.
+3. Verify in tiers, through the real surface, not unit tests alone. Every check and test uses the default dev profile (incremental; our crates unoptimized, dependencies optimized once). Never pass `--release` or `--profile profiling` to `cargo test`/`check`/`clippy`. On the shared dev host, `export CARGO_BUILD_JOBS=4` and pass `--test-threads 4`. Keep one target dir per checkout, never `cargo clean` it, and run one heavy job at a time.
+   - **Edit loop (seconds):** `cargo check -p spiling-geometry`, then the narrowest test: `cargo test -p spiling-geometry --lib tolerant::` (a module path or test name; put `--lib` or `--test <target>` before the filter so Cargo builds one binary).
+   - **Before commit:** for every touched crate, `cargo test --locked -p <crate>`, `cargo clippy --locked -p <crate> --all-targets -- -D warnings` and `cargo fmt -p <crate>`. Run `cargo xtask contracts --check` when contracts or protobuf change. The wall generator census is `wall_census` in `crates/manufacturing/src/planner/walls/tests.rs`.
+   - **Before landing slicing-affecting changes:** the realistic corpus against PrusaSlicer, with and without supports (`SPILING_CORPUS_SUPPORTS`). It is the one optimized build in the loop, because it times real parts: see [development.md](docs/quality/development.md#build-profiles-and-the-feedback-loop). While iterating on one part, run that part alone, not the whole corpus.
+   - Optional TypeScript/observer checks: `node tools/run.mjs check:tooling` and `node tools/run.mjs test:tooling`.
 4. Commit with a message that states what changed, why, and what was verified, including known failures. Push to `main` after rebasing; never force-push. Brain changes are committed and pushed to the brain's `main` the same way.
 
 There is no remote CI. Report only commands you actually ran.

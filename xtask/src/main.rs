@@ -51,11 +51,6 @@ impl Context {
     fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
         command.current_dir(&self.root);
-        for key in ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "RAYON_NUM_THREADS"] {
-            if env::var_os(key).is_none() {
-                command.env(key, "1");
-            }
-        }
         if cfg!(target_os = "macos") {
             command.env(
                 "MACOSX_DEPLOYMENT_TARGET",

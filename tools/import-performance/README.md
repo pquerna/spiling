@@ -50,8 +50,8 @@ native-polished face counts and the largest accepted sampled carrier/direct and
 trim deviations, while checking the packed buffers:
 
 ```sh
-SPILING_PREVIEW_STEP=/path/to/part.step RUST_MIN_STACK=8388608 \
-  cargo test --locked --profile profiling -p spiling-geometry --lib \
+SPILING_PREVIEW_STEP=/path/to/part.step \
+  cargo test --locked -p spiling-geometry --lib \
   preview_external_step_reports_measurement_paths -- --ignored --nocapture
 ```
 
