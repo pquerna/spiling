@@ -931,6 +931,202 @@ pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Definition, G
 /// A complete native enclosure for scene fitting and coarse exclusion, not a
 /// tight measurement or material receipt. Evaluate whole retained carrier/edge
 /// restrictions; never substitute a vertex hull or a failed tight-box result.
+/// The indices of the B-spline basis functions of `degree` over `knots` (`count` of them) that
+/// are nonzero somewhere on `[a, b]`: support `[k_i, k_{i+degree+1}]` meeting it. `None` when the
+/// range leaves the knot domain (no hull covers it) or is not ordered.
+fn active_controls(
+    knots: &[f64],
+    degree: usize,
+    count: usize,
+    [a, b]: [f64; 2],
+) -> Option<std::ops::Range<usize>> {
+    let (start, end) = (*knots.get(degree)?, *knots.get(count)?);
+    if !(a <= b && start <= a && b <= end) || knots.len() != count + degree + 1 {
+        return None;
+    }
+    let first = (0..count).find(|&i| knots.get(i + degree + 1).is_some_and(|&k| k >= a))?;
+    let last = (0..count)
+        .rev()
+        .find(|&i| knots.get(i).is_some_and(|&k| k <= b))?;
+    (first <= last).then_some(first..last + 1)
+}
+
+/// The box of Euclidean control points (homogeneous / weight), widened by their division's
+/// rounding. A rational net qualifies only with every weight finite and positive: each point
+/// is then a convex combination of them. `None` when no point qualifies.
+fn control_hull<'a>(
+    points: impl Iterator<Item = &'a solidcore::nurbs::math::CPoint>,
+    rational: bool,
+) -> Option<[[f64; 2]; 3]> {
+    let mut hull = [[f64::INFINITY, f64::NEG_INFINITY]; 3];
+    let mut any = false;
+    for p in points {
+        let w = if rational { p.w } else { 1.0 };
+        if !(w.is_finite() && w > 0.0) {
+            return None;
+        }
+        for (axis, value) in [p.x, p.y, p.z].into_iter().enumerate() {
+            let x = value / w;
+            if !x.is_finite() {
+                return None;
+            }
+            let slack = 4.0 * f64::EPSILON * x.abs() + f64::MIN_POSITIVE;
+            hull[axis][0] = hull[axis][0].min(x - slack);
+            hull[axis][1] = hull[axis][1].max(x + slack);
+        }
+        any = true;
+    }
+    any.then_some(hull)
+}
+
+/// Whether a face's carrier is a plane (unwrapping curve-bounded bases).
+fn is_plane(surface: &solidcore::surface::surface::Surface) -> bool {
+    use solidcore::surface::surface::SurfaceKind;
+    let mut base = surface;
+    for _ in 0..32 {
+        match base.kind() {
+            SurfaceKind::CurveBounded(b) => base = b.basis(),
+            SurfaceKind::Plane(_) => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The control hull of a face's NURBS on `chart`, where the face's parameters are that NURBS's:
+/// a spline, or a kernel cylinder, cone, sphere or torus on its form (not one under a STEP
+/// wrapper, whose chart is the original's).
+fn surface_hull(
+    surface: &solidcore::surface::surface::Surface,
+    chart: [[f64; 2]; 2],
+) -> Result<Option<[[f64; 2]; 3]>, GeometryError> {
+    use solidcore::surface::surface::SurfaceKind;
+    let mut base = surface;
+    for _ in 0..32 {
+        match base.kind() {
+            SurfaceKind::CurveBounded(b) => base = b.basis(),
+            SurfaceKind::BSpline(_)
+            | SurfaceKind::Cone(_)
+            | SurfaceKind::Sphere(_)
+            | SurfaceKind::Torus(_) => break,
+            _ => return Ok(None),
+        }
+    }
+    let Some(net) = crate::parametric::analytic_eval::native_surface_nurbs(base)? else {
+        return Ok(None);
+    };
+    let (Some(rows), Some(columns)) = (
+        active_controls(net.u_knots(), net.p(), net.n() + 1, chart[0]),
+        active_controls(net.v_knots(), net.q(), net.m() + 1, chart[1]),
+    ) else {
+        return Ok(None);
+    };
+    let mut points = Vec::with_capacity(rows.len() * columns.len());
+    for i in rows {
+        for j in columns.clone() {
+            points.push(
+                net.cpt(i, j)
+                    .map_err(|e| kernel(&format!("native face net: {e}")))?,
+            );
+        }
+    }
+    Ok(control_hull(points.iter(), net.is_rational()))
+}
+
+/// An interval enclosure intersected with a control hull, both sound, so the tighter of the
+/// two on each side. A hull that misses the enclosure (rounding only) leaves the enclosure.
+fn within_hull(
+    position: [crate::parametric::Interval; 3],
+    hull: Option<[[f64; 2]; 3]>,
+) -> Result<[crate::parametric::Interval; 3], GeometryError> {
+    let Some(hull) = hull else {
+        return Ok(position);
+    };
+    let mut out = position;
+    for axis in 0..3 {
+        let (lo, hi) = (
+            position[axis].lo.max(hull[axis][0]),
+            position[axis].hi.min(hull[axis][1]),
+        );
+        if lo <= hi {
+            out[axis] = crate::parametric::Interval::new(lo, hi)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Import bounds are tight to this (mm): a piece reaching at most this far past the bounds so
+/// far is taken whole, rather than split further.
+const BOUNDS_SLACK_MM: f64 = 1e-3;
+
+/// The running box, grown only by sound enclosures.
+struct Box3 {
+    minimum: [f64; 3],
+    maximum: [f64; 3],
+}
+
+impl Box3 {
+    fn include(&mut self, position: [crate::parametric::Interval; 3]) -> Result<(), GeometryError> {
+        for axis in 0..3 {
+            let span = crate::parametric::Interval::new(position[axis].lo, position[axis].hi)?;
+            self.minimum[axis] = self.minimum[axis].min(span.lo);
+            self.maximum[axis] = self.maximum[axis].max(span.hi);
+        }
+        Ok(())
+    }
+    /// How far `position` reaches past the box on any side (0 inside it).
+    fn excess(&self, position: &[crate::parametric::Interval; 3]) -> f64 {
+        (0..3)
+            .map(|axis| {
+                (self.minimum[axis] - position[axis].lo)
+                    .max(position[axis].hi - self.maximum[axis])
+                    .max(0.0)
+            })
+            .fold(0.0, f64::max)
+    }
+}
+
+/// Grow `bounds` by the image of `domain` (one or two parameter ranges): a piece whose sound
+/// enclosure (`enclose`) lies inside the bounds so far adds nothing; one reaching past them by at
+/// most [`BOUNDS_SLACK_MM`], or too small to split, is taken whole; any other is halved in each
+/// range. Vertices and edges seed the bounds, so only pieces holding a body extreme split.
+fn refine_bounds<const N: usize>(
+    bounds: &mut Box3,
+    domain: [[f64; 2]; N],
+    work: &mut crate::GeometryWorkBudget,
+    cancel: &AtomicBool,
+    mut enclose: impl FnMut(
+        [[f64; 2]; N],
+        &mut crate::GeometryWorkBudget,
+    ) -> Result<[crate::parametric::Interval; 3], GeometryError>,
+) -> Result<(), GeometryError> {
+    let mut stack = vec![domain];
+    while let Some(piece) = stack.pop() {
+        work.charge(1, cancel)?;
+        let position = enclose(piece, work)?;
+        let excess = bounds.excess(&position);
+        if excess == 0.0 {
+            continue;
+        }
+        let splittable = piece.iter().all(|[a, b]| {
+            let m = 0.5 * (a + b);
+            a < &m && &m < b
+        });
+        if excess <= BOUNDS_SLACK_MM || !splittable {
+            bounds.include(position)?;
+            continue;
+        }
+        let halves = piece.map(|[a, b]| {
+            let m = 0.5 * (a + b);
+            [[a, m], [m, b]]
+        });
+        for k in 0..(1usize << N) {
+            stack.push(std::array::from_fn(|d| halves[d][(k >> d) & 1]));
+        }
+    }
+    Ok(())
+}
+
 fn native_enclosure_bounds(
     brep: &solidcore::topology::Brep,
     cancel: &AtomicBool,
@@ -938,19 +1134,13 @@ fn native_enclosure_bounds(
     use crate::parametric::{self, CurveEvaluator, Interval};
     let mut work = crate::GeometryWorkBudget::query();
     let kernel = crate::kernel::make_kernel_context();
-    let mut minimum = [f64::INFINITY; 3];
-    let mut maximum = [f64::NEG_INFINITY; 3];
-    let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {
-        for axis in 0..3 {
-            let span = Interval::new(position[axis].lo, position[axis].hi)?;
-            minimum[axis] = minimum[axis].min(span.lo);
-            maximum[axis] = maximum[axis].max(span.hi);
-        }
-        Ok(())
+    let mut bounds = Box3 {
+        minimum: [f64::INFINITY; 3],
+        maximum: [f64::NEG_INFINITY; 3],
     };
     for (_, vertex) in brep.vertices().iter() {
         work.charge(1, cancel)?;
-        include([
+        bounds.include([
             Interval::new(vertex.point.x, vertex.point.x)?,
             Interval::new(vertex.point.y, vertex.point.y)?,
             Interval::new(vertex.point.z, vertex.point.z)?,
@@ -961,22 +1151,27 @@ fn native_enclosure_bounds(
         let Some(curve) = &edge.curve else {
             return Err(invalid("native edge has no coefficient curve"));
         };
-        let before = work.consumed();
-        let position = curve
-            .tensor(
-                [edge.interval.min(), edge.interval.max()],
-                0,
-                &mut work,
-                cancel,
-            )
-            .map_err(|failure| {
+        // A spline edge lies in the hull of its control points active on a piece of it.
+        let net = match curve.kind() {
+            solidcore::curve::curve::CurveKind::BSpline(b) => b.gw_nurb(),
+            _ => None,
+        };
+        let domain = [[edge.interval.min(), edge.interval.max()]];
+        refine_bounds(&mut bounds, domain, &mut work, cancel, |[range], work| {
+            let before = work.consumed();
+            let position = curve.tensor(range, 0, work, cancel).map_err(|failure| {
                 work.annotate_error(
                     failure,
                     before,
                     format_args!("native import edge enclosure; edge={edge_id:?}"),
                 )
             })?[0];
-        include(position)?;
+            let hull = net.and_then(|n| {
+                let rows = active_controls(n.knots(), n.degree(), n.cpts().len(), range)?;
+                control_hull(n.cpts().get(rows)?.iter(), n.is_rational())
+            });
+            within_hull(position, hull)
+        })?;
     }
     for (face_id, face) in brep.faces().iter() {
         work.charge(1, cancel)?;
@@ -984,6 +1179,11 @@ fn native_enclosure_bounds(
             .surface
             .as_ref()
             .ok_or_else(|| invalid("native face has no coefficient carrier"))?;
+        // A plane face's coordinates are linear on it, so their extremes lie on its boundary,
+        // whose edges are enclosed above; its parameter box reaches past its trims.
+        if is_plane(surface) {
+            continue;
+        }
         let low = face.uv_domain.min();
         let high = face.uv_domain.max();
         let mut chart = [[low.x, high.x], [low.y, high.y]];
@@ -1006,16 +1206,20 @@ fn native_enclosure_bounds(
                 }
             }
         }
-        let before = work.consumed();
-        let position = parametric::surface_position_enclosure(surface, chart, &mut work, cancel)
-            .map_err(|failure| {
-                work.annotate_error(
-                    failure,
-                    before,
-                    format_args!("native import face enclosure; face={face_id:?}"),
-                )
-            })?;
-        include(position)?;
+        // A spline, or a kernel cylinder/cone/sphere/torus on its NURBS form (whose parameters
+        // the face's chart is in), lies in the hull of its control points active on a piece.
+        refine_bounds(&mut bounds, chart, &mut work, cancel, |piece, work| {
+            let before = work.consumed();
+            let position = parametric::surface_position_enclosure(surface, piece, work, cancel)
+                .map_err(|failure| {
+                    work.annotate_error(
+                        failure,
+                        before,
+                        format_args!("native import face enclosure; face={face_id:?}"),
+                    )
+                })?;
+            within_hull(position, surface_hull(surface, piece)?)
+        })?;
     }
-    spiling_contracts::geometry::AabbMm::new(minimum, maximum)
+    spiling_contracts::geometry::AabbMm::new(bounds.minimum, bounds.maximum)
 }

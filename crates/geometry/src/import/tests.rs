@@ -1966,3 +1966,41 @@ fn a_reader_reading_of_the_source_is_reported_as_a_finding() {
             .is_empty()
     );
 }
+
+/// Import bounds are the solid's own extent, not its enclosures' looseness: a whole NURBS
+/// cylinder of radius 5 and height 8 (rational quarter arcs, a NURBS floor and roof) bounds
+/// to x, y in [-5, 5] and z in [0, 8] within the bounds slack, and contains its own mesh.
+#[test]
+fn import_bounds_are_tight_and_contain_the_mesh() {
+    let definition = crate::analysis::test_source::original_definition(
+        crate::analysis::test_source::nurbs_cylinder(),
+    );
+    let b = &definition.bounds;
+    let slack = 2.0 * super::BOUNDS_SLACK_MM + 1e-9;
+    for (axis, [lo, hi]) in [[-5.0, 5.0], [-5.0, 5.0], [0.0, 8.0]]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            b.min[axis] <= lo + 1e-9 && b.min[axis] >= lo - slack,
+            "{axis}: {b:?}"
+        );
+        assert!(
+            b.max[axis] >= hi - 1e-9 && b.max[axis] <= hi + slack,
+            "{axis}: {b:?}"
+        );
+    }
+    let (plan, _) = solidcore_tess::plan(
+        definition.record(),
+        &solidcore_tess::MeshTolerance::chord(0.005),
+        20.0,
+    )
+    .unwrap();
+    let (mesh, refused) = plan.evaluate();
+    assert!(refused.is_empty() && !mesh.positions.is_empty());
+    for p in &mesh.positions {
+        for (axis, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+            assert!(b.min[axis] <= v && v <= b.max[axis], "{p:?} outside {b:?}");
+        }
+    }
+}
