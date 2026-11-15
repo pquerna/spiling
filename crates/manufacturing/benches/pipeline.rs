@@ -286,19 +286,31 @@ struct SceneSpec {
     size: Option<[f64; 3]>,
     infill: f64,
     layer: f64,
+    pattern: String,
 }
 impl SceneSpec {
     fn build(&self, cancel: &AtomicBool) -> Result<Scene> {
         match self.size {
-            Some(size) => Scene::sized_box(size, self.infill, self.layer, cancel),
+            Some(size) => {
+                let mut scene = Scene::sized_box(size, self.infill, self.layer, cancel)?;
+                scene.intent.recipe.sparse_infill = match self.pattern.as_str() {
+                    "rectilinear" => SparseInfillPolicy::Fine,
+                    "grid" => SparseInfillPolicy::Grid,
+                    "gyroid" => SparseInfillPolicy::Gyroid,
+                    "cathedral" => SparseInfillPolicy::web_roof(),
+                    _ => return Err("unknown infill pattern".into()),
+                };
+                scene.intent.validate()?;
+                Ok(scene)
+            }
             None => Scene::new(self.parts, self.primary, cancel),
         }
     }
     fn label(&self) -> String {
         match self.size {
             Some([x, y, z]) => format!(
-                "box={x}x{y}x{z} infill={} layer={}",
-                self.infill, self.layer
+                "box={x}x{y}x{z} infill={} layer={} pattern={}",
+                self.infill, self.layer, self.pattern
             ),
             None => format!("parts={}", self.parts),
         }
@@ -330,6 +342,7 @@ fn main() -> Result<()> {
         "--parts",
         "--box",
         "--infill",
+        "--pattern",
         "--layer",
         "--samples",
         "--warmup",
@@ -363,6 +376,12 @@ fn main() -> Result<()> {
     };
     let infill: f64 = option("--infill", "0.25")?.parse()?;
     let layer: f64 = option("--layer", "0.2")?.parse()?;
+    let pattern = option("--pattern", "rectilinear")?;
+    if !["rectilinear", "grid", "gyroid", "cathedral"].contains(&pattern.as_str())
+        || size.is_none() && pattern != "rectilinear"
+    {
+        return Err("--pattern rectilinear|grid|gyroid|cathedral requires --box".into());
+    }
     let samples: usize = option("--samples", "3")?.parse()?;
     let warmup: usize = option("--warmup", "0")?.parse()?;
     let phase = option("--phase", "compile")?;
@@ -388,6 +407,9 @@ fn main() -> Result<()> {
     }
     let file = option("--bundle", "")?;
     let save = option("--write-bundle", "")?;
+    let intent_source = file
+        .is_empty()
+        .then(|| SourceHash::from_bytes(if size.is_some() { SINGLE_TOOL } else { INTENT }));
     if phase == "residency" {
         let spec = SceneSpec {
             parts,
@@ -395,6 +417,7 @@ fn main() -> Result<()> {
             size,
             infill,
             layer,
+            pattern: pattern.clone(),
         };
         return residency(&spec, &file);
     }
@@ -418,6 +441,7 @@ fn main() -> Result<()> {
                 size,
                 infill,
                 layer,
+                pattern: pattern.clone(),
             }
             .build(&cancel)?,
         )
@@ -511,7 +535,7 @@ fn main() -> Result<()> {
         if sample >= warmup {
             println!(
                 "{}",
-                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "compute_setup_us":compute_setup_us, "compute":compute, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":SourceHash::from_bytes(INTENT), "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true})
+                serde_json::json!({"benchmark":"native-manufacturing-v1", "phase":phase, "policy":if file.is_empty() { policy.as_str() } else { "captured" }, "sample":sample-warmup, "samples":samples, "warmup":warmup, "setup_us":setup_us, "compute_setup_us":compute_setup_us, "compute":compute, "elapsed_us":elapsed_us, "engine_build":spiling_contracts::ENGINE_BUILD_ID, "kernel":spiling_geometry::KERNEL_REVISION, "input_hash":b.provenance.input_hash, "program_hash":program_hash, "occurrences":b.provenance.occurrences.len(), "definitions":b.provenance.definitions.len(), "layers":b.plan.layers.len(), "deposition_segments":b.verification.deposition_segments, "geometry_work":b.plan.native_geometry.geometry_work, "selection":b.plan.interior_selection.as_ref().map(|s| s.selected), "sources":b.provenance.definitions.iter().map(|d| &d.provenance.source_hash).collect::<Vec<_>>(), "debug_assertions":cfg!(debug_assertions), "intent_source":intent_source, "available_parallelism":std::thread::available_parallelism().map(|v|v.get()).unwrap_or(1), "rayon_threads":std::env::var("RAYON_NUM_THREADS").ok(), "software_only":true, "sparse_infill":b.provenance.intent.recipe.sparse_infill})
             );
         }
     }

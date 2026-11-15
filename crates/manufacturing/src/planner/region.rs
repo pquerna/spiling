@@ -14,6 +14,8 @@ use std::sync::atomic::AtomicBool;
 mod convolution;
 mod gyroid;
 mod hatch;
+#[cfg(test)]
+mod performance;
 
 /// Borrowed mandatory coverage operand. Requested relief may contain fine
 /// additions, but these source/ordinary material pieces must remain reachable.
