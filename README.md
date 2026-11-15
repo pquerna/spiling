@@ -36,7 +36,7 @@ read the owning evidence for supported positives and explicit refusals.
 
 This setup is for contributors evaluating the unfinished native workbench and software workflows, not for manufacturing or operating a machine.
 
-Install Rustup and the [platform-native prerequisites](docs/quality/development.md#prerequisites), then:
+Install Rustup, sccache and the [platform-native prerequisites](docs/quality/development.md#prerequisites), then:
 
 ```sh
 git clone https://github.com/pquerna/spiling.git

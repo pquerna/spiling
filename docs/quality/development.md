@@ -9,6 +9,7 @@ Licensed under the Open Software License version 3.0
 ## Prerequisites
 
 - Rust toolchain/components in `rust-toolchain.toml` (stable 1.100); no Node/pnpm needed for native build, launch, checks or packaging.
+- sccache 0.19.0 on `PATH`; [compiler-cache setup](#compiler-cache) must precede the first Cargo task, including bootstrap.
 - Native C/C++ tools: MSVC on Windows, Xcode command-line tools on macOS, GCC/Clang and pkg-config on Linux.
 - Vulkan/Metal/DX12 graphics, an OS window session and native dialog services.
 
@@ -18,6 +19,7 @@ Typical Ubuntu native dependencies:
 sudo apt-get install build-essential pkg-config cmake ninja-build libssl-dev \
   libx11-dev libxkbcommon-dev libwayland-dev libvulkan1 \
   xdg-desktop-portal xdg-desktop-portal-gtk desktop-file-utils
+# Install sccache first, as described below.
 cargo xtask bootstrap
 cargo xtask dev
 ```
@@ -184,6 +186,93 @@ rational-torus tests (`imported_rational_torus_has_generic_terminal_metric_and_c
 `rational_torus_near_terminal_section_preserves_annulus_and_native_lineage`) take most
 of that and are the next algorithmic targets. While iterating on one corpus part, put
 only that part in the corpus input directory instead of rerunning all of them.
+
+### Compiler cache
+
+`.cargo/config.toml` sets `build.rustc-wrapper = "sccache"` for **all** ordinary
+Cargo entry points, including compilation of xtask itself and its child Cargo
+commands. No special task or shell activation is needed. Install sccache before
+`cargo xtask bootstrap`; Cargo cannot build an installer task with a missing
+compiler wrapper. Use the official **0.19.0** prebuilt release for your host
+(verify its SHA-256), or build the local-cache-only tool with:
+
+```sh
+# The explicit Cargo override also works from a checkout before sccache exists.
+cargo --config 'build.rustc-wrapper=""' install --locked --version 0.19.0 sccache --no-default-features
+sccache --version
+```
+
+Keep the installed executable on `PATH`. Upstream's
+[installation guide](https://github.com/mozilla/sccache/tree/v0.19.0#installation)
+and [release assets](https://github.com/mozilla/sccache/releases/tag/v0.19.0)
+cover Linux, macOS and Windows. Installation is host setup, not something each
+build or disposable worktree repeats. An explicit `RUSTC_WRAPPER` wins, including
+an empty value; to diagnose without caching use `RUSTC_WRAPPER= cargo test ...`
+in a POSIX shell, or `cargo --config 'build.rustc-wrapper=""' test ...` when no
+environment wrapper is set. Never silently hide a missing or broken wrapper.
+For an xtask bypass, set the empty environment wrapper so child Cargo commands
+inherit it; an outer Cargo `--config` override alone does not configure children.
+The opt-in packaging workflow explicitly bypasses sccache on disposable runners;
+it retains dependency downloads, not a compiler cache or a cache-tool install.
+
+**Keep incremental workspace compilation enabled.** sccache primarily saves the
+nonincremental, optimized registry/git dependency compilations after target
+retirement or in another checkout with matching compiler inputs. Incremental
+workspace crates, linker invocations (executables, tests, proc macros), build
+script execution and metadata-only `cargo check`/Clippy invocations are not
+compiler-cache hits. A warm target's Cargo-fresh checks need no compiler at all.
+This complements the dev profile; it does not replace target reuse or accelerate
+test execution. See upstream's [Rust caveats](https://github.com/mozilla/sccache/blob/v0.19.0/docs/Rust.md).
+
+Use **one host-local cache**, outside disposable worktrees/targets, shared by that
+user's jobs. sccache defaults to a bounded 10 GiB local store and evicts entries
+to its size limit. Place it on a real, capacity-managed disk: on the shared
+development host use `~/work/cache/sccache`, never `/tmp` or the root disk. Set the absolute path in
+the host's sccache configuration (`~/.config/sccache/config` on Linux), for example:
+
+```toml
+[cache.disk]
+dir = "/absolute/disk-backed/cache/sccache"
+size = 10737418240
+```
+
+Environment configuration is an alternative: set both `SCCACHE_DIR` and
+`SCCACHE_CACHE_SIZE` together, not a per-task cache name. A size-only environment
+override replaces the complete disk configuration in sccache 0.19.0, including a
+file-configured directory; therefore the repository does not set it. Other
+platforms' default locations and configuration are in
+[local storage](https://github.com/mozilla/sccache/blob/v0.19.0/docs/Local.md) and
+[configuration](https://github.com/mozilla/sccache/blob/v0.19.0/docs/Configuration.md).
+The auto-started server reads storage settings at startup; inspect
+`sccache --show-stats` for the actual path and capacity. Coordinate any server
+restart/configuration change with other builds. Do not run multiple servers
+against one directory. Ordinary target retirement must **keep this bounded
+shared cache**; do not clear another task's entries or reset shared statistics.
+No remote service, credentials or distributed compilation is required.
+
+Do not enable `SCCACHE_BASEDIRS`, ignore environment inputs or remap paths merely
+to increase the hit rate: build scripts, `OUT_DIR`, generated files and embedded
+manifest paths can make different worktrees genuinely different compiler inputs.
+Keep the compiler's normal cache keys unless a separate correctness experiment
+qualifies normalization.
+
+sccache 0.19.0 hashes Cargo environment variables, including `CARGO_TARGET_DIR`.
+Avoid exporting a different absolute target path for every task when the ordinary
+per-checkout `target/` suffices. Honor an existing explicit override; do not erase
+it inside tasks. For experiments varying only output location, prefer Cargo's
+`--target-dir` argument without changing the environment. Different generated
+inputs or compiler working directories can still legitimately miss.
+
+Measure actual reuse with before/after `sccache --show-stats --stats-format json`
+snapshots and elapsed time. A second command on the **same warm target** proves
+Cargo freshness, not sccache reuse. To investigate target-retirement savings,
+run the same small real command in two distinct, owned target directories with
+matching toolchain/profile/features and no change to incremental settings. For
+example, expand the xtask alias as `cargo run --locked -p xtask --target-dir PATH -- --help`
+with a different `PATH` each time. Inspect hit/miss/non-cacheable deltas and retire only
+those experiment directories. Separately measure a workspace edit and ordinary
+warm check; never report a dependency-cache measurement as a whole-engine or
+end-to-end test speedup.
 
 ### Feedback cost and coverage
 

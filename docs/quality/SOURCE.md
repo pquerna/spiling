@@ -19,6 +19,10 @@ git checkout <commit-recorded-in-notices/provenance.json>
 cargo xtask bootstrap
 ```
 
+Install the [development prerequisites](development.md#prerequisites), including
+the default sccache wrapper, before the Cargo command. Builds without compiler
+caching can instead use `RUSTC_WRAPPER= cargo xtask bootstrap` in a POSIX shell.
+
 The repository must remain inexpensively and conveniently accessible while that release is distributed, as required by OSL section 3. A release owner must verify recipient access; a private URL or missing commit does not meet this procedure. Release source excludes private research and third-party customer CAD.
 
 The desktop displays the complete license offline and requires explicit assent before entering the workbench. The acknowledgement is local and versioned; it is not telemetry or a copyright assignment. CLI diagnostics are developer tools; a public CLI distribution must be accompanied by a documented recipient-assent procedure suited to its distribution channel. No B0 development smoke establishes legal compliance for every deployment.

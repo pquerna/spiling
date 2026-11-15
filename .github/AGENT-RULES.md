@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # CI rules
 
-- Actions are pinned to immutable commits; native packaging uses the pinned Rust toolchain without Node/pnpm.
+- Actions are pinned to immutable commits; native packaging uses the pinned Rust toolchain without Node/pnpm. Disposable packaging runners explicitly bypass the development sccache wrapper; no compiler cache or installer is required there.
 - Automatic remote CI is disabled. Local checks remain required; native packaging is explicit workflow dispatch.
 - Use read-only repository permissions. Never expose credentials to untrusted pull-request code.
 - Uploaded development packages are not signed/public releases or hardware acceptance evidence. Physical GPU support requires recorded reference-machine runs.
