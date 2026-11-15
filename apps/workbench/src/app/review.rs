@@ -180,6 +180,135 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     }
 }
 
+#[derive(Default)]
+pub(super) struct SupportInspection {
+    has_support: bool,
+    selection: Option<(Option<u32>, Option<u32>)>,
+    bands: [Option<(u32, u32)>; 2],
+}
+
+impl SupportInspection {
+    pub(super) fn from_layers(layers: &[PrintLayer]) -> Self {
+        Self {
+            has_support: layers.iter().any(|layer| {
+                layer.paths.iter().any(|path| {
+                    matches!(
+                        path.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    )
+                })
+            }),
+            ..Default::default()
+        }
+    }
+}
+
+pub(super) fn support_inspection(
+    ui: &mut egui::Ui,
+    layers: &[PrintLayer],
+    display: Option<&crate::replay::Replay>,
+    view: &mut crate::replay::View,
+    inspection: &mut SupportInspection,
+) {
+    if !inspection.has_support {
+        return;
+    }
+    ui.push_id("support-inspection", |ui| {
+        ui.add_enabled_ui(display.is_some(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (role, label, hint) in [
+                    (None, "All paths", "Show all deposition roles"),
+                    (Some(9), "Scaffold", "Show ordinary support paths"),
+                    (
+                        Some(10),
+                        "Interfaces",
+                        "Show upper and lower support interface paths",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(view.role == role, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        view.role = role;
+                        view.layer = None;
+                        view.layer_end = None;
+                        view.events = display.expect("enabled actual preview").event_count;
+                        view.visible = true;
+                        view.source = false;
+                        view.tool = None;
+                    }
+                }
+            });
+            if view.role == Some(10) {
+                if inspection.selection != Some((view.layer, view.layer_end)) {
+                    inspection.bands = [
+                        interface_band(layers, view, false),
+                        interface_band(layers, view, true),
+                    ];
+                    inspection.selection = Some((view.layer, view.layer_end));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (band, label) in inspection
+                        .bands
+                        .into_iter()
+                        .zip(["Previous band", "Next band"])
+                    {
+                        let band = band.filter(|&(start, end)| {
+                            display.is_some_and(|display| {
+                                display.layer_windows.get(start as usize).is_some()
+                                    && display.layer_windows.get(end as usize).is_some()
+                            })
+                        });
+                        if ui
+                            .add_enabled(band.is_some(), egui::Button::new(label))
+                            .clicked()
+                        {
+                            let (start, end) = band.expect("enabled interface band");
+                            view.layer = Some(start);
+                            view.layer_end = (start != end).then_some(end);
+                            view.events = display.expect("enabled actual preview").layer_windows
+                                [end as usize]
+                                .end;
+                        }
+                    }
+                });
+            }
+        });
+    });
+}
+
+fn interface_band(
+    layers: &[PrintLayer],
+    view: &crate::replay::View,
+    forward: bool,
+) -> Option<(u32, u32)> {
+    let has_interface = |layer: &PrintLayer| {
+        layer
+            .paths
+            .iter()
+            .any(|path| path.kind == DepositionKind::SupportInterface)
+    };
+    let mut bands = layers.iter().enumerate().filter_map(|(index, layer)| {
+        if !has_interface(layer) || index > 0 && has_interface(&layers[index - 1]) {
+            return None;
+        }
+        let end = layers[index..]
+            .iter()
+            .take_while(|layer| has_interface(layer))
+            .last()?;
+        Some((layer.index, end.index))
+    });
+    if forward {
+        bands.find(|&(start, _)| {
+            view.layer
+                .is_none_or(|layer| start > view.layer_end.unwrap_or(layer))
+        })
+    } else {
+        bands.rfind(|&(_, end)| view.layer.is_none_or(|layer| end < layer))
+    }
+}
+
 pub(super) fn unsupported_layers(
     ui: &mut egui::Ui,
     layers: &[PrintLayer],
@@ -191,7 +320,11 @@ pub(super) fn unsupported_layers(
             .iter()
             .filter(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
     };
-    let Some(first) = unsupported().next() else {
+    let Some(featured) = unsupported().max_by(|left, right| {
+        left.region_coverage
+            .unsupported_overhang_mm
+            .total_cmp(&right.region_coverage.unsupported_overhang_mm)
+    }) else {
         return;
     };
     let count = unsupported().count();
@@ -203,17 +336,17 @@ pub(super) fn unsupported_layers(
                 if count == 1 { "layer" } else { "layers" }
             ),
         );
-        unsupported_layer_row(ui, first, display, view);
+        unsupported_layer_row(ui, featured, display, view);
     });
     if display.is_none() {
         ui.weak("Actual-program layer preview unavailable.");
     }
     ui.collapsing("Support details", |ui| {
         ui.label("Each affected layer records one unsupported span, not its exact location or necessarily its longest span.");
-        ui.label("Show layer selects the actual-program layer, not an individual span. Role and tool filters stay unchanged.");
+        ui.label("Show layer reveals all actual paths on that layer, not an individual span.");
         ui.weak(format!(
-            "Recorded layer index {} (zero-based) · span {:.6} mm",
-            first.index, first.region_coverage.unsupported_overhang_mm
+            "Largest recorded span {:.3} mm · layer {}",
+            featured.region_coverage.unsupported_overhang_mm, u64::from(featured.index) + 1
         ));
         if count > 1 {
             let row_height = ui.spacing().interact_size.y
@@ -223,7 +356,7 @@ pub(super) fn unsupported_layers(
                 .id_salt("unsupported-layers")
                 .max_height(180.0)
                 .show_rows(ui, row_height, count - 1, |ui, rows| {
-                    for layer in unsupported().skip(rows.start + 1).take(rows.len()) {
+                    for layer in unsupported().filter(|layer| layer.index != featured.index).skip(rows.start).take(rows.len()) {
                         unsupported_layer_row(ui, layer, display, view);
                         ui.weak(format!(
                             "Index {} · span {:.6} mm",
@@ -249,12 +382,19 @@ fn unsupported_layer_row(
                 egui::Button::new(format!("Show layer {}", u64::from(layer.index) + 1))
                     .selected(view.layer == Some(layer.index) && view.layer_end.is_none()),
             )
-            .on_hover_text(format!("Z {:.2} mm", layer.z_mm))
+            .on_hover_text(format!(
+                "Recorded span {:.3} mm · Z {:.2} mm",
+                layer.region_coverage.unsupported_overhang_mm, layer.z_mm
+            ))
             .clicked()
         {
             view.layer = Some(layer.index);
             view.layer_end = None;
             view.events = window.expect("enabled layer preview").end;
+            view.role = None;
+            view.tool = None;
+            view.source = false;
+            view.visible = true;
         }
     });
 }

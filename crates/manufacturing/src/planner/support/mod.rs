@@ -24,6 +24,7 @@ pub(crate) use strokes::{GapKind, gap_kind};
 mod contact_extensions;
 mod proximity;
 mod raster;
+mod union_memo;
 
 #[derive(Clone)]
 struct Demand {
@@ -1804,7 +1805,7 @@ pub(super) fn realize(
         nominal.sort_unstable_by(|a, b| a.floor.total_cmp(&b.floor).then(a.index.cmp(&b.index)));
         check_cancel(cancel)?;
         let base_retained = retained;
-        let retained = retained
+        let mut retained = retained
             .checked_add(nominal.capacity())
             .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
@@ -1826,6 +1827,8 @@ pub(super) fn realize(
         reserve_owned(&mut outside_beads, nominal.len(), owned_bytes)?;
         outside_beads.resize_with(nominal.len(), || None);
         owned_bytes = owned_bytes.saturating_add(vec_bytes(&outside_beads));
+        let mut union_memo =
+            union_memo::UnionMemo::new(crate::working_set::bytes().saturating_sub(owned_bytes) / 8);
         for demand in &demands {
             check_cancel(cancel)?;
             let demanded_path = &layers[demand.target].paths[demand.failure.path];
@@ -1841,6 +1844,7 @@ pub(super) fn realize(
                 return Err(unreachable_layer_error(layers, demand, z_gap_mm)?);
             };
             let interface_bottom = layers[top].z_mm - interface_thickness_mm;
+            let mut candidate_search: Option<OwnedMaterial> = None;
             // Realized object D supplies a conservative support candidate only
             // AFTER actual deposited strokes prove demand; it is never an anchor map.
             // The half-bead search expansion permits a real support bead under an
@@ -1866,21 +1870,40 @@ pub(super) fn realize(
                 let mut column = if let Some(material) = replayed_column {
                     OwnedMaterial::new(material)
                 } else {
-                    let demanded_section = &sections[span_at(sections, demand.target as u32)];
-                    let candidate = &demanded_section.material;
+                    if candidate_search.is_none() {
+                        let demanded_section = &sections[span_at(sections, demand.target as u32)];
+                        let candidate = &demanded_section.material;
+                        remaining_geometry_budget(
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected],
+                        )?;
+                        charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
+                        let search = OwnedMaterial::new(candidate.buffer_with_style(
+                            BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel),
+                        ));
+                        remaining_geometry_budget(
+                            retained,
+                            owned_bytes,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected, &search],
+                        )?;
+                        retained = retained.saturating_add(search.units);
+                        owned_bytes = owned_bytes.saturating_add(search.bytes);
+                        candidate_search = Some(search);
+                    }
+                    let search = candidate_search.as_ref().expect("prepared demand search");
                     remaining_geometry_budget(
                         retained,
                         owned_bytes,
                         &support_regions,
                         &interfaces,
-                        &[&protected],
+                        &[&protected, search],
                     )?;
-                    charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
-                    // Beveled corners bound this placement search without constructing a
-                    // fine round-disk Minkowski sum. Search geometry is never occupied C.
-                    let mut column = OwnedMaterial::new(candidate.buffer_with_style(
-                        BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel),
-                    ));
+                    let mut column = OwnedMaterial::new(search.material.clone());
                     if let Root::Part { landing, .. } = root {
                         let landing = &root_landings[landing];
                         charge_boolean(&column, landing, &mut work, foreign_work, cancel)?;
@@ -1989,7 +2012,9 @@ pub(super) fn realize(
                                         &mut work,
                                         foreign_work,
                                         cancel,
+                                        &mut union_memo,
                                     )?;
+                                    union_memo.account(&mut retained, &mut owned_bytes);
                                     screen.set(ColumnScreen::new(&column, xy_clearance_mm)?);
                                 }
                                 Ok(!column.0.is_empty())
@@ -2015,7 +2040,9 @@ pub(super) fn realize(
                             &mut work,
                             foreign_work,
                             cancel,
+                            &mut union_memo,
                         )?;
+                        union_memo.account(&mut retained, &mut owned_bytes);
                     }
                     column
                 };
@@ -2376,6 +2403,7 @@ pub(super) fn realize(
                                 &mut work,
                                 foreign_work,
                                 cancel,
+                                None,
                             )
                             .map_err(|mut e| {
                                 e.message = format!(
@@ -2434,6 +2462,7 @@ pub(super) fn realize(
                             &mut work,
                             foreign_work,
                             cancel,
+                            None,
                         )? {
                             column = next.into_shared();
                             shared_union = None;
@@ -2606,6 +2635,10 @@ pub(super) fn realize(
                 }
                 owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
             }
+            if let Some(search) = candidate_search {
+                retained -= search.units;
+                owned_bytes -= search.bytes;
+            }
         }
         if truncated {
             // No demand in range refines; only the complete pass decides
@@ -2613,6 +2646,8 @@ pub(super) fn realize(
             return Ok(SupportAdmission::Undecided);
         }
         drop(nominal);
+        owned_bytes -= union_memo.receipt().1;
+        drop(union_memo);
         // Recomputed for the raster stage below, which no longer charges these.
         drop(outside_beads);
         let mut retained = base_retained;
@@ -4611,6 +4646,7 @@ fn subtract_batch(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
+    memo: &mut union_memo::UnionMemo,
 ) -> Result<(), ManufacturingError> {
     let owned = owned_bytes.saturating_add(proximity.bytes());
     let Some(next) = subtract_staged(
@@ -4625,15 +4661,17 @@ fn subtract_batch(
         work,
         foreign_work,
         cancel,
+        Some(memo),
     )?
     else {
         return Ok(());
     };
     *column = next;
+    let (extra_units, extra_bytes) = memo.unaccounted();
     *proximity = index_column(
         column,
-        retained,
-        owned,
+        retained.saturating_add(extra_units),
+        owned.saturating_add(extra_bytes),
         support,
         interfaces,
         &[protected, column],
@@ -4659,6 +4697,7 @@ fn subtract_staged(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
+    mut memo: Option<&mut union_memo::UnionMemo>,
 ) -> Result<Option<OwnedMaterial>, ManufacturingError> {
     let staged = std::mem::take(batch);
     let (Some(frame), Some(b)) = (staged.frame, column.bounding_rect()) else {
@@ -4671,7 +4710,7 @@ fn subtract_staged(
     )?;
     // Union the raw pieces first: (A ∪ B) ⊕ D = (A ⊕ D) ∪ (B ⊕ D), and stacked
     // facet hulls then cross only their few own edges, not offset cycles.
-    let merged = if staged.pieces.0.len() > 1 {
+    let (merged, cached) = if staged.pieces.0.len() > 1 {
         let (units, bytes) = geometry_receipt(support, interfaces, &[protected, column]);
         // Packed overlay input and output each hold at most twice the staged
         // coordinates before the merged pieces replace the staged copy.
@@ -4684,17 +4723,50 @@ fn subtract_staged(
                 .saturating_add(3 * staged.owned_bytes()),
         )?;
         boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
-        let merged = union_pieces(&staged.pieces);
-        region::check_size(&merged)?;
-        merged
+        match memo.as_deref_mut() {
+            Some(memo) => memo.merge(
+                &staged.pieces,
+                retained
+                    .saturating_add(units)
+                    .saturating_add(3 * staged.points),
+                owned_bytes
+                    .saturating_add(bytes)
+                    .saturating_add(3 * staged.owned_bytes()),
+                work,
+                cancel,
+            )?,
+            None => {
+                let merged = OwnedMaterial::new(union_pieces(&staged.pieces));
+                region::check_size(&merged)?;
+                (merged.into_shared(), false)
+            }
+        }
     } else {
-        staged.pieces.clone()
+        (
+            OwnedMaterial::new(staged.pieces.clone()).into_shared(),
+            false,
+        )
+    };
+    let (extra_units, extra_bytes) = memo.as_ref().map_or((0, 0), |memo| memo.unaccounted());
+    let retained = retained.saturating_add(extra_units);
+    let owned_bytes = owned_bytes.saturating_add(extra_bytes);
+    let (temporary_units, temporary_bytes) = if cached {
+        (0, 0)
+    } else {
+        (
+            merged.units,
+            merged.bytes.saturating_add(merged.header_bytes),
+        )
     };
     let clearance = OwnedMaterial::new(offset_owned(
         &merged,
         distance,
-        retained.saturating_add(staged.points),
-        owned_bytes.saturating_add(staged.owned_bytes()),
+        retained
+            .saturating_add(staged.points)
+            .saturating_add(temporary_units),
+        owned_bytes
+            .saturating_add(staged.owned_bytes())
+            .saturating_add(temporary_bytes),
         support,
         interfaces,
         &[protected, column],

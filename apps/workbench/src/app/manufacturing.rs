@@ -53,6 +53,7 @@ pub(super) struct ManufacturingUi {
     pub replay: crate::replay::View,
     pub layers: crate::layers::Browser,
     pub review_nonce: Option<u64>,
+    support_inspection: super::review::SupportInspection,
     bead_statistics: Option<BeadStatistics>,
     selected_seam: Option<u32>,
     pub(super) trial: Option<super::alternative::Trial>,
@@ -67,6 +68,8 @@ impl ManufacturingUi {
         if self.review_nonce != Some(review.capture.nonce) {
             self.review_nonce = Some(review.capture.nonce);
             if self.replay_record.as_ref() != Some(&review.capture.record.hash) {
+                self.support_inspection =
+                    super::review::SupportInspection::from_layers(&review.bundle.plan.layers);
                 self.replay.events = descriptor.info.event_count;
                 self.replay.layer = None;
                 self.replay.layer_end = None;
@@ -574,6 +577,13 @@ impl Workbench {
                     ui.colored_label(ui.visuals().error_fg_color, "Verification failed");
                 }
                 self.job_headline(ui, report, &review.bundle.plan, &review.capture.record.hash);
+                super::review::support_inspection(
+                    ui,
+                    &review.bundle.plan.layers,
+                    review.display.as_deref(),
+                    &mut self.manufacturing.replay,
+                    &mut self.manufacturing.support_inspection,
+                );
                 super::review::unsupported_layers(
                     ui,
                     &review.bundle.plan.layers,
@@ -1127,7 +1137,13 @@ mod goal_draft_tests {
                 section_z_mm: f64::from(index) * 0.2 + 0.1,
                 paths: Vec::new(),
                 region_coverage: PlanarRegionCoverage {
-                    unsupported_overhang_mm: if index >= 2 { 1.25 } else { 0.0 },
+                    unsupported_overhang_mm: if index == 2 {
+                        0.5
+                    } else if index == 3 {
+                        1.25
+                    } else {
+                        0.0
+                    },
                     ..coverage.clone()
                 },
                 skin_command_fits: Vec::new(),
@@ -1148,7 +1164,152 @@ mod goal_draft_tests {
     }
 
     #[test]
-    fn unsupported_layer_row_selects_actual_inspection_without_changing_drafts_or_filters() {
+    fn support_inspection_reveals_actual_bands_and_handles_missing_preview() {
+        for theme in [Theme::Graphite, Theme::Paper] {
+            for width in [240.0, 400.0] {
+                let context = egui::Context::default();
+                theme.apply(&context);
+                context.global_style_mut(|style| style.animation_time = 0.0);
+                let mut layers = inspection_layers();
+                for index in [0, 2, 3] {
+                    let layer = &mut layers[index];
+                    layer.paths.push(DepositionPath {
+                        material_domain: None,
+                        kind: DepositionKind::SupportInterface,
+                        width: WidthProfile::Constant { width_mm: 0.45 },
+                        physical_z_mm: [layer.lower_z_mm, layer.z_mm],
+                        owner: None,
+                        points_mm: vec![[0.0, 0.0, layer.z_mm], [1.0, 0.0, layer.z_mm]],
+                        arcs: Vec::new(),
+                        exposed: false,
+                    });
+                }
+                let display = inspection_display();
+                let inspection = std::cell::RefCell::new(
+                    super::super::review::SupportInspection::from_layers(&layers),
+                );
+                let before = crate::replay::View {
+                    tool: Some(1),
+                    source: true,
+                    travels: false,
+                    ..Default::default()
+                };
+                let mut view = before;
+                let revealed = crate::replay::View {
+                    visible: true,
+                    source: false,
+                    tool: None,
+                    ..before
+                };
+                let frame = |events, view: &mut crate::replay::View, available: bool| {
+                    context.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 400.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            super::super::review::support_inspection(
+                                ui,
+                                &layers,
+                                available.then_some(&display),
+                                view,
+                                &mut inspection.borrow_mut(),
+                            )
+                        },
+                    )
+                };
+                let click_label = |label: &str, view: &mut crate::replay::View, available| {
+                    let output = frame(Vec::new(), view, available);
+                    let point = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape {
+                                assert!(
+                                    shape.clip_rect.contains_rect(text.visual_bounding_rect()),
+                                    "{theme:?} {width}: {}",
+                                    text.galley.text()
+                                );
+                                (text.galley.text() == label)
+                                    .then(|| text.visual_bounding_rect().center())
+                            } else {
+                                None
+                            }
+                        })
+                        .expect("visible support action");
+                    output.drop_without_applying_deltas();
+                    for pressed in [true, false] {
+                        frame(
+                            vec![
+                                egui::Event::PointerMoved(point),
+                                egui::Event::PointerButton {
+                                    pos: point,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                            view,
+                            available,
+                        )
+                        .drop_without_applying_deltas();
+                    }
+                };
+                click_label("Interfaces", &mut view, false);
+                assert_eq!(view, before);
+                click_label("Interfaces", &mut view, true);
+                assert_eq!(
+                    view,
+                    crate::replay::View {
+                        role: Some(10),
+                        events: display.event_count,
+                        ..revealed
+                    }
+                );
+                click_label("Next band", &mut view, true);
+                assert_eq!(
+                    (view.layer, view.layer_end, view.events),
+                    (Some(0), None, 6)
+                );
+                click_label("Next band", &mut view, true);
+                assert_eq!(
+                    (view.layer, view.layer_end, view.events),
+                    (Some(2), Some(3), 28)
+                );
+                click_label("Next band", &mut view, true);
+                assert_eq!((view.layer, view.layer_end), (Some(2), Some(3)));
+                click_label("Previous band", &mut view, true);
+                assert_eq!(
+                    (view.layer, view.layer_end, view.events),
+                    (Some(0), None, 6)
+                );
+                click_label("Scaffold", &mut view, true);
+                assert_eq!(
+                    view,
+                    crate::replay::View {
+                        role: Some(9),
+                        events: display.event_count,
+                        ..revealed
+                    }
+                );
+                click_label("All paths", &mut view, true);
+                assert_eq!(
+                    view,
+                    crate::replay::View {
+                        events: display.event_count,
+                        ..revealed
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn largest_recorded_issue_reveals_actual_paths_without_changing_drafts() {
         for theme in [Theme::Graphite, Theme::Paper] {
             for width in [240.0, 400.0] {
                 let context = egui::Context::default();
@@ -1180,6 +1341,7 @@ mod goal_draft_tests {
                         role: Some(9),
                         tool: Some(1),
                         source: true,
+                        visible: false,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1247,7 +1409,7 @@ mod goal_draft_tests {
                             "{theme:?} {width}: {}",
                             text.galley.text()
                         );
-                        if text.galley.text().starts_with("Show layer") {
+                        if text.galley.text() == "Show layer 4" {
                             target = Some(text.visual_bounding_rect().center());
                         }
                     }
@@ -1262,6 +1424,10 @@ mod goal_draft_tests {
                         layer: Some(layers[3].index),
                         layer_end: None,
                         events: display.layer_windows[3].end,
+                        role: None,
+                        tool: None,
+                        source: false,
+                        visible: true,
                         ..before
                     }
                 );
