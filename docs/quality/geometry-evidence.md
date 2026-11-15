@@ -891,9 +891,11 @@ ADR012 tolerant path. The corpus intent's Marlin reference printer declares
 arc moves, so wall runs on the BREP's vertical-axis circles go out as G2/G3
 and replay checks each one against its planned points. Multi-solid and
 assembly sources import one definition per solid at its source placement and
-are placed on the bed as one rigid group (`--center-all-on-bed`). Modelled
-threads (`26`, `27`, `28`) slice: a flank whose trims run past its cylinder's
-seam meshes in the unwrapped chart, however far past the seam they run. The
+are placed on the bed as one rigid group (`--center-all-on-bed`). Sources read
+through upstream `solidcore-step` with the kernel's pcurves (`KernelTrims`) and mesh
+with `solidcore-tess` (verified at `a65234eb`). Modelled threads (`26`, `27`, `28`)
+slice: a flank winding past a turn is the reader's wound spline face, and an Inventor
+root band split along a ruling off it (`26`) has its cut laid inside the band. The
 two refusals are no solid in the file (`00`) and a part longer than the bed
 (`01`). Horn and
 spindle tori import as OCCT's `Geom_ToroidalSurface` does: a face uses the
