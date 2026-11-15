@@ -421,6 +421,7 @@ mod tests {
                     points_mm: vec![[0.0, row, 0.2], [2.0, row, 0.2]],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 }
             })
             .collect();

@@ -544,6 +544,7 @@ mod tests {
             ],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         }
     }
 

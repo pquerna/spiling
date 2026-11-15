@@ -922,6 +922,7 @@ fn align_to_landing(
                 .collect(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
     }
     Ok(result)

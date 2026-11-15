@@ -5411,6 +5411,7 @@ mod tests {
                 ],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             };
             let mut layers: Vec<_> = (0..5)
                 .map(|index| {
@@ -5642,6 +5643,7 @@ mod tests {
             points_mm: vec![[a, 0.0, z], [b, 0.0, z]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         }
     }
 
@@ -6272,6 +6274,7 @@ mod tests {
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
         for nested in [false, true] {
             let required = vec![
@@ -6394,6 +6397,7 @@ mod tests {
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 })
                 .collect();
             let mut candidate = RasterCandidate {
@@ -6505,6 +6509,7 @@ mod tests {
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 })
             });
             for (left_end, right_start, connected) in [
@@ -6614,6 +6619,7 @@ mod tests {
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
         for (reorientation, missing_anchor, limit) in [
             (false, false, 6.0),
@@ -6706,6 +6712,7 @@ mod tests {
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
         let layer = region::HatchLayer {
             roof: None,
@@ -7040,6 +7047,7 @@ mod tests {
             points_mm: vec![[1.0, 2.0, 0.8], [9.0, 2.0, 0.8]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         }];
         let polygon = |points: Vec<(f64, f64)>| Polygon::new(geo::LineString::from(points), vec![]);
         for tip in [2.0, 2.0 - 0.00000001] {

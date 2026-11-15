@@ -587,6 +587,7 @@ mod tests {
             points_mm: points,
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let base = MaterialConstructionRole::FunctionalBase;
         let region = MaterialConstructionRole::FunctionalRegion;

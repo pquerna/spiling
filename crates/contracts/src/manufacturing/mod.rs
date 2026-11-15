@@ -253,6 +253,7 @@ fn components<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<MachineCompo
 struct SegmentBudget {
     remaining_segments: u32,
     remaining_arcs: u32,
+    remaining_connectors: u32,
     remaining_widths: u32,
     remaining_width_bytes: usize,
     remaining_skin_fits: u32,
@@ -264,6 +265,8 @@ impl SegmentBudget {
             remaining_segments: u32::MAX,
             // Every run spans at least two edges.
             remaining_arcs: u32::MAX / 2,
+            // Every connector run spans at least one edge between two roads.
+            remaining_connectors: u32::MAX / 2,
             remaining_widths: u32::MAX,
             remaining_width_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
             remaining_skin_fits: u32::MAX,
@@ -358,6 +361,31 @@ impl<'de> serde::de::Visitor<'de> for ArcsSeed<'_> {
             arcs.push(arc);
         }
         Ok(arcs)
+    }
+}
+
+struct ConnectorsSeed<'a>(&'a mut SegmentBudget);
+impl<'de> serde::de::DeserializeSeed<'de> for ConnectorsSeed<'_> {
+    type Value = Vec<ConnectorRun>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ConnectorsSeed<'_> {
+    type Value = Vec<ConnectorRun>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("connector runs within the cumulative connector budget")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut runs = Vec::new();
+        while let Some(run) = seq.next_element::<ConnectorRun>()? {
+            if self.0.remaining_connectors == 0 {
+                return Err(serde::de::Error::custom("connector run limit exceeded"));
+            }
+            self.0.remaining_connectors -= 1;
+            runs.push(run);
+        }
+        Ok(runs)
     }
 }
 
@@ -506,6 +534,7 @@ enum PathField {
     PointsMm,
     Arcs,
     Exposed,
+    Connectors,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
@@ -522,6 +551,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
                 "points_mm",
                 "arcs",
                 "exposed",
+                "connectors",
             ],
             self,
         )
@@ -541,6 +571,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let mut points_mm = None;
         let mut arcs = None;
         let mut exposed = None;
+        let mut connectors = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
                 PathField::MaterialDomain => {
@@ -591,6 +622,12 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     exposed = Some(map.next_value()?);
                 }
+                PathField::Connectors => {
+                    if connectors.is_some() {
+                        return Err(serde::de::Error::duplicate_field("connectors"));
+                    }
+                    connectors = Some(map.next_value_seed(ConnectorsSeed(&mut *self.0))?);
+                }
             }
         }
         let path = DepositionPath {
@@ -606,6 +643,8 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
             arcs: arcs.unwrap_or_default(),
             // Omitted, like arcs, when false: an inner, covered or non-surface path.
             exposed: exposed.unwrap_or_default(),
+            // Omitted when empty: the path is one road.
+            connectors: connectors.unwrap_or_default(),
         };
         path.validate_owner().map_err(serde::de::Error::custom)?;
         Ok(path)
@@ -2124,13 +2163,28 @@ pub struct DepositionPath {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[ts(as = "Option<bool>", optional)]
     pub exposed: bool,
+    /// Runs of edges that join two roads of this continuous path along the
+    /// inside of a wall, in point order. Every other edge belongs to a road
+    /// and keeps its role's geometry rules; a connector keeps only the
+    /// generic ones and its own (see [`DepositionPath::validate_connectors`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ConnectorRun>>", optional)]
+    pub connectors: Vec<ConnectorRun>,
 }
 
-/// Longest connector, in bead widths, that may join two adjacent straight
-/// mandatory skin rows inside one continuous path. A connector is an
-/// interior edge between two rows along the authored axis; every other edge
-/// of such a path must follow the authored row axis.
-pub const MAX_ROW_CONNECTOR_WIDTHS: f64 = 2.0;
+/// Longest connector joining two roads of one continuous path. PrusaSlicer's
+/// infill anchors default to 12 mm; a connector also never leaves the bead
+/// band inside a wall, so its length only bounds how far one runs.
+pub const MAX_CONNECTOR_LENGTH_MM: f64 = 10.0;
+
+/// Edges `first..last` (points `first..=last`) of a path that connect two of
+/// its roads along the inside of a wall.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorRun {
+    pub first: u32,
+    pub last: u32,
+}
 
 /// Largest distance of a run's points from its circle. The commanded arc and
 /// the planned points agree within this, the same as the lateral command
@@ -2315,6 +2369,10 @@ impl DepositionPath {
             arc.clockwise = !arc.clockwise;
         }
         self.arcs.reverse();
+        for run in &mut self.connectors {
+            (run.first, run.last) = (last - run.last, last - run.first);
+        }
+        self.connectors.reverse();
         self.points_mm.reverse();
         if let WidthProfile::PerEdge { widths_mm } = &mut self.width {
             widths_mm.reverse();
@@ -2379,43 +2437,71 @@ impl DepositionPath {
     /// and [`MAX_ARC_SWEEP_RADIANS`] in all, with every point within
     /// [`MAX_ARC_POINT_DEVIATION_MM`] of the circle through its first point
     /// and every chord within [`MAX_ARC_SAGITTA_MM`] of the arc.
-    /// Whether edge `index` joins two straight rows of one continuous
-    /// mandatory skin path: an interior edge at most [`MAX_ROW_CONNECTOR_WIDTHS`]
-    /// bead widths long, between two edges that share one fixed axis it does
-    /// not follow. Callers still check those rows against the authored axis.
-    pub fn is_row_connector(&self, index: usize) -> bool {
-        let p = &self.points_mm;
-        if !matches!(
-            self.kind,
-            DepositionKind::BottomSkin | DepositionKind::TopSkin
-        ) || !matches!(self.owner, Some(DepositionOwner::MandatorySkin { .. }))
-            || index == 0
-            || index + 2 >= p.len()
-        {
-            return false;
-        }
-        let WidthProfile::Constant { width_mm } = self.width else {
-            return false;
-        };
-        let fixed = |i: usize| {
-            let (a, b) = (p[i], p[i + 1]);
-            if a[1] == b[1] && a[0] != b[0] {
-                Some(1)
-            } else if a[0] == b[0] && a[1] != b[1] {
-                Some(0)
-            } else {
-                None
+    /// Whether edge `index` lies in a connector run.
+    pub fn is_connector_edge(&self, index: usize) -> bool {
+        self.connectors
+            .iter()
+            .any(|run| (run.first as usize) <= index && index < run.last as usize)
+    }
+    /// Point ranges `first..=last` of the roads between connectors.
+    pub fn road_ranges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let last = self.points_mm.len().saturating_sub(1);
+        let mut start = 0usize;
+        let mut runs = self.connectors.iter();
+        std::iter::from_fn(move || {
+            if start > last {
+                return None;
             }
-        };
-        let (a, b) = (p[index], p[index + 1]);
-        match (fixed(index - 1), fixed(index + 1)) {
-            (Some(before), Some(after)) => {
-                before == after
-                    && a[before] != b[before]
-                    && (b[0] - a[0]).hypot(b[1] - a[1]) <= MAX_ROW_CONNECTOR_WIDTHS * width_mm
+            match runs.next() {
+                Some(run) => {
+                    let road = (start, run.first as usize);
+                    start = run.last as usize;
+                    Some(road)
+                }
+                None => {
+                    let road = (start, last);
+                    start = last + 1;
+                    Some(road)
+                }
             }
-            _ => false,
+        })
+    }
+    /// Connector runs are ordered, disjoint, interior (a road on each side),
+    /// open-path only, of one width and at most [`MAX_CONNECTOR_LENGTH_MM`].
+    /// Where they lie is replay's to check against actual walls.
+    pub fn validate_connectors(&self) -> Result<(), ManufacturingError> {
+        if self.connectors.is_empty() {
+            return Ok(());
         }
+        let n = self.points_mm.len();
+        if self.points_mm.first() == self.points_mm.last() || !self.arcs.is_empty() {
+            return Err(invalid("connected roads form one open path without arcs"));
+        }
+        let mut previous_last = 0usize;
+        for run in &self.connectors {
+            let (first, last) = (run.first as usize, run.last as usize);
+            if first <= previous_last || last <= first || last + 1 >= n {
+                return Err(invalid(
+                    "connector runs must be ordered, disjoint and between two roads",
+                ));
+            }
+            previous_last = last;
+            let length: f64 = self.points_mm[first..=last]
+                .windows(2)
+                .map(|e| (e[1][0] - e[0][0]).hypot(e[1][1] - e[0][1]))
+                .sum();
+            if !length.is_finite() || length > MAX_CONNECTOR_LENGTH_MM {
+                return Err(invalid("connector exceeds its recorded length limit"));
+            }
+            if let WidthProfile::PerEdge { widths_mm } = &self.width
+                && widths_mm[first..last]
+                    .iter()
+                    .any(|w| *w != widths_mm[first - 1])
+            {
+                return Err(invalid("a connector keeps its roads' bead width"));
+            }
+        }
+        Ok(())
     }
     pub fn validate_arcs(&self) -> Result<(), ManufacturingError> {
         let mut previous_last = 0u32;
@@ -2475,6 +2561,7 @@ impl DepositionPath {
         self.width
             .validate_for(self.points_mm.len(), self.height_mm())?;
         self.validate_arcs()?;
+        self.validate_connectors()?;
         if self.kind == DepositionKind::Bridge
             && !matches!(self.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
             && self.owner != Some(DepositionOwner::Wall)
@@ -4335,12 +4422,12 @@ impl NormalizedPrintPlan {
                             "deposition regional owner index is outside its layer coverage",
                         ));
                     }
-                    if path.points_mm.len() != 2
+                    if path.road_ranges().any(|(first, last)| last != first + 1)
                         && !(path.kind == DepositionKind::SparseFill
                             && matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Gyroid))
                     {
                         return Err(invalid(
-                            "regional deposition requires an ordinary row or Gyroid curve",
+                            "regional deposition requires ordinary rows or Gyroid curves",
                         ));
                     }
                 }
@@ -4476,10 +4563,10 @@ impl NormalizedPrintPlan {
                         // coordinates, not a geometric angular tolerance.
                         let coordinate =
                             program_coordinates::project_xyz6_coordinate_mm(point[axis])?;
-                        // A row connector moves to the next row: its fixed
-                        // coordinate is the next row's.
+                        // A connector moves to the next road: the axis rule
+                        // applies within each road.
                         if previous_fixed_coordinate.is_some_and(|previous| previous != coordinate)
-                            && !(point_index > 0 && path.is_row_connector(point_index - 1))
+                            && !(point_index > 0 && path.is_connector_edge(point_index - 1))
                         {
                             return Err(invalid(
                                 "ordinary deposition segment violates the authored rectilinear axis",

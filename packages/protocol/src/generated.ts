@@ -204,6 +204,8 @@ export type ComputeStatus = { settings: ComputeSettings, default_device: Compute
 
 export type ConnectionFamily = "file" | "bambu_connect" | "bambu_developer_lan" | "moonraker" | "octo_print" | "prusa_link" | "development_simulator";
 
+export type ConnectorRun = { first: number, last: number, };
+
 export type CredentialBackend = "keyring" | "plaintext_file";
 
 export type CredentialRef = { slot_id: string, role: CredentialRole, backend: CredentialBackend, };
@@ -296,7 +298,14 @@ arcs?: Array<ArcRun>,
  * Bridge keeps it) and mandatory TopSkin paths may set it; serialized
  * only when true.
  */
-exposed?: boolean, };
+exposed?: boolean,
+/**
+ * Runs of edges that join two roads of this continuous path along the
+ * inside of a wall, in point order. Every other edge belongs to a road
+ * and keeps its role's geometry rules; a connector keeps only the
+ * generic ones and its own (see [`DepositionPath::validate_connectors`]).
+ */
+connectors?: Array<ConnectorRun>, };
 
 export type DiaphragmPolygonMm = { outer: Array<[number, number]>, holes: Array<Array<[number, number]>>, };
 

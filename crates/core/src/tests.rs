@@ -662,6 +662,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                     points_mm: vec![[1.0, 1.0, 0.2], end],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 }],
                 region_coverage,
             }],

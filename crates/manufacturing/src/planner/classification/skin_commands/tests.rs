@@ -51,6 +51,7 @@ fn paths() -> Vec<DepositionPath> {
         points_mm: vec![[2.0, 1.5, 0.4], [2.01, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     }]
 }
 fn select(domain: &SkinCommandFitDomain, paths: &[DepositionPath]) -> Option<[[f64; 3]; 2]> {
@@ -175,6 +176,7 @@ fn minimum_skin_cannot_leave_a_positive_subminimum_regional_remainder() {
         points_mm: vec![[2.02, 1.5, 0.4], [2.04, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     });
     assert!(select(&domain(), &paths).is_none());
     let mut alternate = domain();
@@ -260,6 +262,7 @@ fn minimum_skin_searches_shorter_permitted_lengths_to_preserve_regional_material
         points_mm: vec![[0.010, 1.5, 0.4], [0.040002, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     });
     let fitted = select(&domain, &paths).unwrap();
     assert!(fitted[0][0] <= 0.0 && fitted[1][0] >= 0.010);
@@ -281,6 +284,7 @@ fn regional_reservation_consumes_complete_actual_stroke_without_a_zero_command_t
         points_mm: vec![[0.000003, 1.5, 0.4], [0.0200034, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     });
     let original = [
         project_xyz6_point_mm(paths[1].points_mm[0]).unwrap(),

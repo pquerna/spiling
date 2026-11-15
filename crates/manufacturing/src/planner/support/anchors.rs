@@ -855,6 +855,7 @@ mod dimension_tests {
             points_mm: vec![[x, -1.0, 0.2], [x, 1.0, 0.2]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let summarize = |rows: &[AnchorGap]| {
             rows.iter()
@@ -915,6 +916,7 @@ mod dimension_tests {
                     ],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1015,6 +1017,7 @@ mod dimension_tests {
             points_mm: vec![[1000.0, 1000.0, 0.2], [1001.0, 1000.0, 0.2]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let cancel = AtomicBool::new(false);
         for invalid in 0..3 {

@@ -18,6 +18,11 @@ mod adhesion;
 mod bambu;
 mod bed_exclusion;
 mod bridge_split;
+mod connectors;
+#[cfg(test)]
+pub(crate) fn connectors_for_tests(plan: &NormalizedPrintPlan) -> Result<(), ManufacturingError> {
+    connectors::verify(plan, &mut 0, &AtomicBool::new(false))
+}
 mod construction;
 mod cost;
 mod expected;
@@ -1660,6 +1665,7 @@ pub(crate) fn verify_actual(
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    connectors::verify(plan, &mut geometry_work, cancel)?;
     interfaces::verify_projected_byte_geometry(
         plan,
         recipe,

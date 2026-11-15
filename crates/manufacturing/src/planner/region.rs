@@ -462,6 +462,7 @@ pub(super) fn support_contour_paths(
                 points_mm: ring.0.iter().map(|c| [c.x, c.y, z]).collect(),
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             });
         }
     }
@@ -1255,6 +1256,7 @@ fn push_path(
         points_mm,
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     });
     Ok(())
 }

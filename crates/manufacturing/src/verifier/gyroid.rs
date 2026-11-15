@@ -57,11 +57,17 @@ pub(super) fn verify(
                 return Err(failed("Gyroid crosses an unreported physical layer gap"));
             }
             let mut unsupported_run = 0.0_f64;
-            for edge in path.points_mm.windows(2) {
+            for (edge_index, edge) in path.points_mm.windows(2).enumerate() {
                 cancelled(cancel)?;
                 *work = work
                     .checked_add(1)
                     .ok_or_else(|| failed("Gyroid verification work overflow"))?;
+                // A connector follows a wall, not the field; the connector
+                // check owns it, and it does not extend an unsupported run.
+                if path.is_connector_edge(edge_index) {
+                    unsupported_run = 0.0;
+                    continue;
+                }
                 let a = project_xyz6_point_mm(edge[0])?;
                 let b = project_xyz6_point_mm(edge[1])?;
                 let length = (b[0] - a[0]).hypot(b[1] - a[1]);

@@ -450,6 +450,7 @@ mod tests {
             points_mm: vec![[0.0, 0.0, 0.8], [length, 0.0, 0.8]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         for lengths in [[1.0, 20.0], [20.0, 1.0]] {
             let paths = lengths.map(path);
@@ -489,6 +490,7 @@ mod tests {
             points_mm: points.to_vec(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let runs: Vec<_> = StrokeRuns::for_path(&path).unwrap().collect();
         assert_eq!(runs, [(2, 3, 0.6), (3, 4, 0.6), (4, 5, 0.6), (5, 2, 0.6)]);
@@ -503,6 +505,7 @@ mod tests {
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             },
             DepositionPath {
                 material_domain: None,
@@ -513,6 +516,7 @@ mod tests {
                 points_mm: vec![[23.3, 0.3, 8.0], [42.7, 0.3, 8.0]],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             },
         ];
         let mut query = AnchorWorkspace::default();
@@ -545,6 +549,7 @@ mod tests {
             points_mm: points.to_vec(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         assert_eq!(
             StrokeRuns::for_path(&path).unwrap().collect::<Vec<_>>(),
@@ -570,6 +575,7 @@ mod tests {
                 .collect(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let mut recipe = crate::planner::tests::recipe(0.15);
         recipe.sparse_infill = spiling_contracts::manufacturing::SparseInfillPolicy::Gyroid;
@@ -648,6 +654,7 @@ mod tests {
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
         let path = DepositionPath {
             material_domain: None,
@@ -662,6 +669,7 @@ mod tests {
             points_mm: vec![[0.4, 0.0, 0.8], [1.6, 0.0, 0.8]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let cancel = AtomicBool::new(false);
         let mut query = AnchorWorkspace::default();
@@ -738,6 +746,7 @@ mod tests {
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
         let cancel = AtomicBool::new(false);
         let mut query = AnchorWorkspace::default();
@@ -758,6 +767,7 @@ mod tests {
                 points_mm: vec![[a, 0.0, 0.8], [b, 0.0, 0.8]],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             };
             let gaps = query
                 .gaps(
@@ -810,6 +820,7 @@ mod dimension_tests {
             points_mm: vec![[0.0, 0.0, 0.5], [0.4, 0.0, 0.5]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let mut lower = DepositionPath {
             material_domain: None,
@@ -822,6 +833,7 @@ mod dimension_tests {
             points_mm: vec![[0.0, -1.0, 0.4], [0.0, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         };
         let mut anchors = AnchorWorkspace::default();
         let first = analyze(

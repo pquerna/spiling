@@ -267,6 +267,7 @@ pub(super) fn plan(
                 .collect(),
             arcs: Vec::new(),
             exposed,
+            connectors: Vec::new(),
         });
     }
     // A section thinner than the minimum feature everywhere has no bead;

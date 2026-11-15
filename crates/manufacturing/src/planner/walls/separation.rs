@@ -426,6 +426,7 @@ mod tests {
             points_mm: points.iter().map(|p| [p[0], p[1], 0.2]).collect(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         }
     }
 

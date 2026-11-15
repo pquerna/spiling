@@ -387,6 +387,7 @@ mod tests {
             points_mm: ring.0.iter().map(|p| [p.x, p.y, 0.2]).collect(),
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         }
     }
     fn attempt(

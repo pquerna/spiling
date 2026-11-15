@@ -21,6 +21,7 @@ fn stroke(
         points_mm: vec![[x[0], 5.0, z[1]], [x[1], 5.0, z[1]]],
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     }
 }
 

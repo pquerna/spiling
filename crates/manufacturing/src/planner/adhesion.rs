@@ -76,6 +76,7 @@ pub(super) fn plan(
         points_mm: ring.0.iter().map(|c| [c.x, c.y, z]).collect(),
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     };
     let mut added = Vec::new();
 

@@ -1306,12 +1306,29 @@ fn actual_motion(bundle: &ManufacturingResult) -> Vec<(u8, u32, [f64; 3])> {
         .collect()
 }
 
-/// A connector between two rows of a continuous mandatory skin path: a short
-/// move across the rows, which replay admits only between two rows.
-fn skin_row_connector(kind: u8, start: [f64; 3], end: [f64; 3], fixed: usize, width: f64) -> bool {
-    matches!(kind, 3 | 4)
-        && start[fixed] != end[fixed]
-        && (end[0] - start[0]).hypot(end[1] - start[1]) <= MAX_ROW_CONNECTOR_WIDTHS * width
+/// Decoded moves that are planned connector edges: the axis rule does not
+/// apply to them (replay checks them against the walls instead).
+fn connector_moves(bundle: &ManufacturingResult) -> std::collections::HashSet<[u64; 4]> {
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    let mut moves = std::collections::HashSet::new();
+    for path in bundle.bundle.plan.layers.iter().flat_map(|l| &l.paths) {
+        for run in &path.connectors {
+            for edge in run.first as usize..run.last as usize {
+                let a = project_xyz6_point_mm(path.points_mm[edge]).unwrap();
+                let b = project_xyz6_point_mm(path.points_mm[edge + 1]).unwrap();
+                moves.insert([a[0], a[1], b[0], b[1]].map(f64::to_bits));
+                moves.insert([b[0], b[1], a[0], a[1]].map(f64::to_bits));
+            }
+        }
+    }
+    moves
+}
+fn is_connector(
+    moves: &std::collections::HashSet<[u64; 4]>,
+    start: [f64; 3],
+    end: [f64; 3],
+) -> bool {
+    moves.contains(&[start[0], start[1], end[0], end[1]].map(f64::to_bits))
 }
 
 fn assert_actual_sparse_row_pitch(
@@ -2294,6 +2311,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
         arcs: Vec::new(),
         exposed: false,
+        connectors: Vec::new(),
     });
     assert_reemitted_interface_refuses(forged, &intent);
 }
@@ -2383,6 +2401,7 @@ fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
             intent.recipe.top_skin_axis = policy;
             let bundle = scene.compile(&intent).unwrap();
             let motion = actual_motion(&bundle);
+            let connectors = connector_moves(&bundle);
             let mut roles = std::collections::BTreeSet::new();
             for pair in motion.windows(2) {
                 let (kind, index, end) = pair[1];
@@ -2398,7 +2417,7 @@ fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
                 };
                 let start = pair[0].2;
                 let fixed = usize::from(along_x);
-                if skin_row_connector(kind, start, end, fixed, intent.recipe.bead_width_mm) {
+                if is_connector(&connectors, start, end) {
                     continue;
                 }
                 assert_eq!(
@@ -2457,6 +2476,7 @@ fn independent_top_skin_axis_survives_template_reuse() {
         intent.recipe.top_skin_axis = top;
         let bundle = scene.compile(&intent).unwrap();
         let motion = actual_motion(&bundle);
+        let connectors = connector_moves(&bundle);
         let mut top_layers = std::collections::BTreeSet::new();
         let mut ordinary_layers = std::collections::BTreeSet::new();
         for pair in motion.windows(2) {
@@ -2479,7 +2499,7 @@ fn independent_top_skin_axis_survives_template_reuse() {
             };
             let start = pair[0].2;
             let fixed = usize::from(along_x);
-            if skin_row_connector(kind, start, end, fixed, intent.recipe.bead_width_mm) {
+            if is_connector(&connectors, start, end) {
                 continue;
             }
             assert_eq!(
@@ -2516,6 +2536,7 @@ fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, 0.8] };
     let bundle = scene.compile(&intent).unwrap();
     let motion = actual_motion(&bundle);
+    let connectors = connector_moves(&bundle);
     let mut orthogonal_bridges = 0;
     let mut ordinary = 0;
     let mut aligned = std::collections::BTreeMap::<(u32, usize, u64), Vec<[f64; 2]>>::new();
@@ -2523,7 +2544,7 @@ fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
         let (kind, layer, end) = pair[1];
         let start = pair[0].2;
         if (2..=5).contains(&kind) {
-            if skin_row_connector(kind, start, end, 0, intent.recipe.bead_width_mm) {
+            if is_connector(&connectors, start, end) {
                 continue;
             }
             assert_eq!(
@@ -3162,6 +3183,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         },
         DepositionPath {
             material_domain: None,
@@ -3174,6 +3196,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         },
     ];
     let recipe = &intent.recipe;
@@ -4174,37 +4197,66 @@ fn bed_exclusion_keeps_parts_and_adhesion_out_and_the_verifier_checks_it_indepen
 }
 
 #[test]
-fn mandatory_skin_rows_print_as_continuous_paths_that_replay_verifies() {
+fn clipped_roads_connect_along_walls_and_replay_checks_every_connector() {
     let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
     let intent = intent();
     let bundle = scene.compile(&intent).unwrap();
     let plan = &bundle.bundle.plan;
-    let chained: Vec<&DepositionPath> = plan
+    let connected: Vec<&DepositionPath> = plan
         .layers
         .iter()
         .flat_map(|layer| &layer.paths)
-        .filter(|p| {
-            matches!(p.owner, Some(DepositionOwner::MandatorySkin { .. })) && p.points_mm.len() > 2
-        })
+        .filter(|p| !p.connectors.is_empty())
         .collect();
-    assert!(!chained.is_empty(), "the box's skins chain");
-    for path in &chained {
-        // Rows alternate with connectors; every connector joins two rows.
-        let edges = path.points_mm.len() - 1;
-        assert_eq!(edges % 2, 1, "a chain starts and ends on a row");
-        for edge in (1..edges).step_by(2) {
-            assert!(path.is_row_connector(edge), "edge {edge} joins two rows");
-        }
-        for edge in (0..edges).step_by(2) {
-            assert!(!path.is_row_connector(edge));
+    assert!(
+        connected
+            .iter()
+            .any(|p| matches!(p.owner, Some(DepositionOwner::MandatorySkin { .. }))),
+        "skin rows connect"
+    );
+    for path in &connected {
+        path.validate_connectors().unwrap();
+        // Roads keep their exact rows: every road range is one straight row.
+        if path.kind != DepositionKind::SparseFill
+            || !matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Gyroid)
+        {
+            for (first, last) in path.road_ranges() {
+                assert_eq!(last, first + 1, "a road range is one row");
+            }
         }
     }
     // Replay verifies the program independently (asserted inside).
-    let motion = actual_motion(&bundle);
-    assert!(!motion.is_empty());
-    // A connector that is too long is not a connector.
-    let mut long = chained[0].clone();
-    long.points_mm[2][0] += 5.0;
-    long.points_mm[3][0] += 5.0;
-    assert!(!long.is_row_connector(1));
+    assert!(!actual_motion(&bundle).is_empty());
+    // A connector moved off the wall band, or across a wall, is refused.
+    let mut moved = bundle.clone();
+    let (layer, path) = moved
+        .bundle
+        .plan
+        .layers
+        .iter()
+        .enumerate()
+        .find_map(|(l, layer)| {
+            layer
+                .paths
+                .iter()
+                .position(|p| !p.connectors.is_empty())
+                .map(|p| (l, p))
+        })
+        .unwrap();
+    let target = &mut moved.bundle.plan.layers[layer].paths[path];
+    let run = target.connectors[0];
+    let a = target.points_mm[run.first as usize];
+    let b = target.points_mm[run.last as usize];
+    // Bow the connector far inward through a new midpoint.
+    let mid = [(a[0] + b[0]) * 0.5 + 3.0, (a[1] + b[1]) * 0.5 + 3.0, a[2]];
+    let at = run.first as usize + 1;
+    target.points_mm.insert(at, mid);
+    target.connectors[0].last += 1;
+    for later in &mut target.connectors[1..] {
+        later.first += 1;
+        later.last += 1;
+    }
+    assert!(target.validate_connectors().is_ok());
+    let error = crate::verifier::connectors_for_tests(&moved.bundle.plan).unwrap_err();
+    assert!(error.message.contains("connector"), "{}", error.message);
 }

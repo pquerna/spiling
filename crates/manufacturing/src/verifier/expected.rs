@@ -387,7 +387,7 @@ impl Iterator for Expected<'_> {
                 };
                 self.edge += 1;
                 self.position = Some(target);
-                let connector = path.is_row_connector(self.edge - 2);
+                let connector = path.is_connector_edge(self.edge - 2);
                 return Some(Ok(Action::Move {
                     connector,
                     target,

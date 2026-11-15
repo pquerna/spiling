@@ -5184,6 +5184,7 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                     points_mm: vec![[0.0, offset, elevation.z], [20.0, offset, elevation.z]],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 }];
                 layer
             })

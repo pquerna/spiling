@@ -487,6 +487,7 @@ mod tests {
                     points_mm: vec![[offset, -1.0, 0.2], [offset, 0.0, 0.2], [offset, 1.0, 0.2]],
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 }
             })
             .collect()
@@ -697,6 +698,7 @@ mod tests {
                 ],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             })
             .collect::<Vec<_>>();
         let metadata = (paths.len() * size_of::<NominalPath<'_>>()
@@ -808,6 +810,7 @@ mod tests {
                             points_mm,
                             arcs: Vec::new(),
                             exposed: false,
+                            connectors: Vec::new(),
                         }
                     })
                     .collect::<Vec<_>>()

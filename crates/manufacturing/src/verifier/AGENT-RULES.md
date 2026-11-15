@@ -28,3 +28,5 @@ Skirt and brim (`adhesion.rs`) are checked from the matched first-layer paths, n
 Bed exclusions are checked on decoded positions with the verifier's own segment/rectangle distance (`bed_exclusion.rs`), each deposit's planned edge width plus its decoded arc sagitta, and the widest admitted bead for the prime; never call the contract predicate the planner uses.
 
 Gyroid verification uses the implicit physical-height field independently of analytic generation and checks actual XYZ6 chord samples. Accumulate unsupported length across adjoining chord edges so subdividing a curve cannot create short-overhang credit. A matched polyline is not permission for unsupported curved bridging or a strength claim.
+
+Connector runs are checked by `connectors.rs` against the decoded actual walls of their layer (quarter-bead samples inside the wall band, no wall crossing), with no planner helper. Role rules apply per road range: connector edges are exempt from the authored row axis and the Gyroid field only.

@@ -1819,6 +1819,7 @@ fn admit_schedule<'model>(
                     points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 });
             }
             let mut coverage = coverage.clone();

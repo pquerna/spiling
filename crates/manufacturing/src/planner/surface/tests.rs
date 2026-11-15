@@ -360,6 +360,7 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
                     points_mm: ring.0.iter().map(|p| [p.x, p.y, 2.0]).collect(),
                     arcs: Vec::new(),
                     exposed: false,
+                    connectors: Vec::new(),
                 });
                 boundary += 1;
             }

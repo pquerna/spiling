@@ -563,6 +563,7 @@ fn wall_piece(
             points_mm: vec![from, to],
             arcs: Vec::new(),
             exposed: false,
+            connectors: Vec::new(),
         });
     }
     Ok(())
@@ -761,6 +762,7 @@ pub(super) fn retain_anchored<'a>(
                 },
                 arcs: Vec::new(),
                 exposed: path.exposed,
+                connectors: Vec::new(),
             };
             anchors.set_budget(candidate_budget(
                 paths,
@@ -841,6 +843,7 @@ mod tests {
                 ],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             };
             let lower =
                 [0.0, 2.0, 4.0, 6.0].map(|offset| row([0.0, offset], [10.0, offset], 0.0, 0.2));
@@ -923,6 +926,7 @@ mod tests {
                     .collect(),
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             };
             let lower = make_path(&[[0.0, 0.0], [10.0, 0.0]], 0.0, 0.2);
             let mut candidate = vec![make_path(
@@ -999,6 +1003,7 @@ mod tests {
                 ],
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             })
             .collect();
         let mut support = rectangle(

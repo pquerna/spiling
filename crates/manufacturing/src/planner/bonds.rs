@@ -284,6 +284,7 @@ pub(super) fn construct(
                 points_mm: Vec::from(ends),
                 arcs: Vec::new(),
                 exposed: false,
+                connectors: Vec::new(),
             });
         }
     }

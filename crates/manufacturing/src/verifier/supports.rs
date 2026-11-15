@@ -584,6 +584,7 @@ mod tests {
                         points_mm: vec![[1.0, 1.0, layer.z_mm], [5.0, 1.0, layer.z_mm]],
                         arcs: Vec::new(),
                         exposed: false,
+                        connectors: Vec::new(),
                     });
                     if index == 2 {
                         layer.region_coverage.support_area_mm2 = 4.0;

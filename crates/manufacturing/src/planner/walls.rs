@@ -999,6 +999,7 @@ fn assemble(
                 exposed: correspondence[correspondence_base..]
                     .iter()
                     .all(|c| c.ordinal == 0),
+                connectors: Vec::new(),
             };
             let original = fitting::OriginalPath {
                 edges,

@@ -1182,6 +1182,7 @@ mod goal_draft_tests {
                         points_mm: vec![[0.0, 0.0, layer.z_mm], [1.0, 0.0, layer.z_mm]],
                         arcs: Vec::new(),
                         exposed: false,
+                        connectors: Vec::new(),
                     });
                 }
                 let display = inspection_display();

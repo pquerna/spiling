@@ -9,7 +9,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
-mod chain;
+mod connect;
 mod schedule;
 
 #[derive(Clone, Copy)]
@@ -74,7 +74,7 @@ pub(crate) fn canonicalize_with_tool_order(
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
-    chain::chain_rows(plan, intent, routed.is_some(), cancel)?;
+    connect::connect_roads(plan, intent, routed.is_some(), cancel)?;
     schedule::apply(plan, intent, routed, position, cancel, order)?;
     lower_arcs(plan, intent, routed.is_some(), cancel)
 }
