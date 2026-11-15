@@ -153,9 +153,10 @@ The dev profile is the only build for `check`, `test`, `clippy` and debug binari
 incremental, line tables for backtraces, our crates unoptimized, every dependency
 (SolidCore, tess, CubeCL, voronoi, booleans) at `opt-level = 3`. Dependencies compile
 once per target dir and never rebuild in the loop. `.cargo/config.toml` sets
-`RUST_MIN_STACK`. `release` (thin LTO, one codegen unit) is for shipped binaries, and
-`profiling` is release with symbols for CPU profiles and the realistic corpus. Never
-pass either to a test. A slow test is an algorithm to fix, not a reason to optimize
+`RUST_MIN_STACK`. `profiling` is optimized, incremental, without LTO and with symbols:
+the build for the realistic corpus and CPU profiles, quick to rebuild after an edit.
+`release` (thin LTO, one codegen unit) is for shipped binaries and their performance
+claims, compared release against release. Never pass either to a test. A slow test is an algorithm to fix, not a reason to optimize
 the crate.
 
 On the shared dev host, `export CARGO_BUILD_JOBS=4` and pass `--test-threads 4`; run
@@ -165,27 +166,32 @@ dependencies):
 ```sh
 # Edit loop: seconds. One crate, one binary, the narrowest filter.
 cargo check -p spiling-geometry
-cargo test -p spiling-geometry --lib tolerant::            # module path or test name
+cargo test -p spiling-geometry --lib tolerant:: -- --test-threads 4   # module path or test name
 cargo test -p spiling-manufacturing --lib planner::walls:: -- --test-threads 4
-cargo test -p spiling-e2e-tests --test <target> <name>     # one integration binary
+cargo test -p spiling-e2e-tests --test <target> <name>               # one integration binary
 
-# Before commit: each touched crate's whole suite, clippy and fmt.
+# Before commit: each touched crate and its consumers, clippy and fmt.
 cargo test --locked -p spiling-geometry -- --test-threads 4
+cargo test --locked -p spiling-manufacturing -- --test-threads 4     # consumers of geometry
+cargo test --locked -p spiling-e2e-tests -- --test-threads 4
 cargo clippy --locked -p spiling-geometry --all-targets -- -D warnings
-cargo fmt -p spiling-geometry                              # never --all (vendored code)
-cargo xtask contracts --check                              # contracts/protobuf changes
+cargo fmt -p spiling-geometry                                        # never --all (vendored code)
+cargo xtask contracts --check                                        # contracts/protobuf changes
+cargo xtask test                                                     # shared-crate behaviour, before landing
 
-# Before landing slicing-affecting work: real parts (the one optimized build).
+# Before landing slicing-affecting work: real parts on the profiling build.
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
-SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling OUT.ndjson
+SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling OUT/results.ndjson
+# Iterating on some parts: name their prefixes after the results file.
+SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py OUT target/profiling OUT/results.ndjson 18 28
 ```
 
 A one-line geometry edit rebuilds its test binary in about 4 s. The crate's first build
 on warm dependencies is about 3 min. The whole geometry lib suite is about 6.5 min, two
 rational-torus tests (`imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence`,
 `rational_torus_near_terminal_section_preserves_annulus_and_native_lineage`) take most
-of that and are the next algorithmic targets. While iterating on one corpus part, put
-only that part in the corpus input directory instead of rerunning all of them.
+of that and are the next algorithmic targets. The wall generator census is `wall_census`
+in `crates/manufacturing/src/planner/walls/tests.rs`.
 
 ### Compiler cache
 
@@ -276,26 +282,14 @@ end-to-end test speedup.
 
 ### Feedback cost and coverage
 
-Separate compilation/linking, fixture preparation, test execution and complete
-consumer time. A test-name filter does not select Cargo targets: use `--lib` for
-library checks or `--test TARGET` for one integration binary before the filter.
-For build attribution, add `--no-run --timings` to that selected `cargo test`
-command; retain the Cargo timing report alongside the command, producer,
-toolchain, profile, feature set, target/cache state and resource limits. Compare
-unchanged warm, test-only edit and owning-code edit separately. Do not clean a
-shared target to manufacture a cold measurement.
+A test-name filter does not select Cargo targets: put `--lib` or `--test TARGET`
+before it, or Cargo builds and runs every binary. For build attribution, add
+`--no-run --timings` to that selected command. A test's runtime under the dev profile
+is the number to improve; a profile change is not an algorithm speedup.
 
-Compare production performance with identical compiler settings on both sides; a
-profile change is not a product algorithm speedup, and a test's runtime under the
-dev profile is the number to improve.
-
-Test declarations, passing counts and line coverage are not execution coverage of
-operator workflows. Name the selected actual-child/CLI/host journeys, including
-ignored selections, and distinguish real-file material/replay checks from import
-or nonempty-preview checks. Preserve independent oracles, whole-source completion
-and failure visibility when sharing immutable setup or consolidating scenarios.
-The complete native commands above remain candidate gates; focused selection is
-not a claim that the entire workspace passed.
+Passing focused tests is not a claim that the workspace passed, and test counts are
+not workflow coverage. Report exactly which commands ran, including ignored
+selections and real-part journeys, and name what was not run.
 
 ## Native egui workbench
 

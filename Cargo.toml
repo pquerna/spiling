@@ -86,8 +86,13 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# Release-equivalent code generation with symbols for repeatable CPU profiles.
+# Optimized and fast to rebuild, for the realistic corpus and CPU profiles: release's
+# optimization without its LTO and single codegen unit, incremental, with symbols.
+# Shipped-binary performance claims compare `release` against `release`.
 [profile.profiling]
 inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
 debug = 1
 strip = "none"
