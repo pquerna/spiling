@@ -9,36 +9,6 @@ use spiling_contracts::{
 pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
     let report = &review.capture.report;
     let summary = &review.capture.record.summary;
-    let unsupported = || {
-        review
-            .bundle
-            .plan
-            .layers
-            .iter()
-            .filter(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
-    };
-    let count = unsupported().count();
-    if count > 0 {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!("Unsupported deposition · {count} layers"),
-        );
-        ui.weak("No support reached these strokes from the build plate. Verification checks commands, not printability; inspect these spans before printing. Each row records one unsupported span found on that layer, not necessarily its worst span.");
-        ui.collapsing("Unsupported layers", |ui| {
-            let row_height = ui.text_style_height(&egui::TextStyle::Body);
-            egui::ScrollArea::vertical()
-                .id_salt("unsupported-layers")
-                .max_height(180.0)
-                .show_rows(ui, row_height, count, |ui, rows| {
-                    for layer in unsupported().skip(rows.start).take(rows.len()) {
-                        ui.label(format!(
-                            "Layer {} · Z {:.3} mm · recorded span {:.3} mm",
-                            layer.index, layer.z_mm, layer.region_coverage.unsupported_overhang_mm
-                        ));
-                    }
-                });
-        });
-    }
     if let Some(selection) = &review.bundle.plan.interior_selection
         && let (JobWorkflow::FixedDualMarlin { job }, InteriorCandidateOutcome::Qualified { work }) = (
             &review.bundle.provenance.intent.printer.workflow,
@@ -176,6 +146,83 @@ pub(super) fn details(ui: &mut egui::Ui, review: &crate::manufacture::Review) {
         }
     });
     }
+}
+
+pub(super) fn unsupported_layers(
+    ui: &mut egui::Ui,
+    layers: &[PrintLayer],
+    display: Option<&crate::replay::Replay>,
+    view: &mut crate::replay::View,
+) {
+    let unsupported = || {
+        layers
+            .iter()
+            .filter(|layer| layer.region_coverage.unsupported_overhang_mm > 0.0)
+    };
+    let Some(first) = unsupported().next() else {
+        return;
+    };
+    let count = unsupported().count();
+    ui.colored_label(
+        ui.visuals().warn_fg_color,
+        format!(
+            "Unsupported deposition · {count} {}",
+            if count == 1 { "layer" } else { "layers" }
+        ),
+    );
+    unsupported_layer_row(ui, first, display, view);
+    if display.is_none() {
+        ui.weak("Actual-program layer preview unavailable.");
+    }
+    ui.collapsing("Support details", |ui| {
+        ui.label("Each affected layer records one unsupported span, not its exact location or necessarily its longest span.");
+        ui.label("Show layer selects the actual-program layer, not an individual span. Role and tool filters stay unchanged.");
+        ui.weak(format!(
+            "Recorded layer index {} (zero-based) · span {:.6} mm",
+            first.index, first.region_coverage.unsupported_overhang_mm
+        ));
+        if count > 1 {
+            let row_height = ui.spacing().interact_size.y
+                + 2.0 * ui.text_style_height(&egui::TextStyle::Body)
+                + 2.0 * ui.spacing().item_spacing.y;
+            egui::ScrollArea::vertical()
+                .id_salt("unsupported-layers")
+                .max_height(180.0)
+                .show_rows(ui, row_height, count - 1, |ui, rows| {
+                    for layer in unsupported().skip(rows.start + 1).take(rows.len()) {
+                        unsupported_layer_row(ui, layer, display, view);
+                        ui.weak(format!(
+                            "Index {} · span {:.6} mm",
+                            layer.index, layer.region_coverage.unsupported_overhang_mm
+                        ));
+                    }
+                });
+        }
+    });
+}
+
+fn unsupported_layer_row(
+    ui: &mut egui::Ui,
+    layer: &PrintLayer,
+    display: Option<&crate::replay::Replay>,
+    view: &mut crate::replay::View,
+) {
+    ui.push_id(("unsupported-layer", layer.index), |ui| {
+        let window = display.and_then(|display| display.layer_windows.get(layer.index as usize));
+        if ui
+            .add_enabled(
+                window.is_some(),
+                egui::Button::new(format!("Show layer {}", u64::from(layer.index) + 1))
+                    .selected(view.layer == Some(layer.index) && view.layer_end.is_none()),
+            )
+            .clicked()
+        {
+            view.layer = Some(layer.index);
+            view.layer_end = None;
+            view.events = window.expect("enabled layer preview").end;
+        }
+        ui.weak(format!("Z {:.3}…{:.3} mm", layer.lower_z_mm, layer.z_mm));
+    });
 }
 /// Keep the exact source encoding visible; only an explicit sRGB target has an sRGB swatch.
 pub(super) fn target(ui: &mut egui::Ui, color: AppearanceColor) {

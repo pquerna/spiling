@@ -494,7 +494,6 @@ impl Workbench {
         }
         egui::CollapsingHeader::new(format!("Limitations ({})", report.limitations.len()))
             .id_salt("job-limitations")
-            .default_open(!report.limitations.is_empty())
             .show(ui, |ui| {
                 for row in &report.limitations {
                     ui.add(egui::Label::new(row).wrap());

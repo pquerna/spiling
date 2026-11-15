@@ -60,6 +60,24 @@ pub(super) struct ManufacturingUi {
     pub(super) comparison_no_height_match: bool,
 }
 impl ManufacturingUi {
+    fn sync_replay_review(&mut self, review: &crate::manufacture::Review) {
+        let Some(descriptor) = &review.capture.replay else {
+            return;
+        };
+        if self.review_nonce != Some(review.capture.nonce) {
+            self.review_nonce = Some(review.capture.nonce);
+            if self.replay_record.as_ref() != Some(&review.capture.record.hash) {
+                self.replay.events = descriptor.info.event_count;
+                self.replay.layer = None;
+                self.replay.layer_end = None;
+                self.replay.role = None;
+                self.replay.tool = None;
+            }
+            self.replay_record = Some(review.capture.record.hash.clone());
+            self.selected_seam = None;
+        }
+    }
+
     pub(super) fn sync_intent(
         &mut self,
         project: &ProjectId,
@@ -542,6 +560,7 @@ impl Workbench {
             }
             self.manufacturing_options(ui);
             if let Some(review) = self.selected_manufacturing_review() {
+                self.manufacturing.sync_replay_review(&review);
                 if self.manufacturing.pending_loaded(m.loaded.as_deref())
                     || self
                         .manufacturing
@@ -557,6 +576,12 @@ impl Workbench {
                     "Software verification: {}",
                     if report.verified { "Passed" } else { "Failed" }
                 ));
+                super::review::unsupported_layers(
+                    ui,
+                    &review.bundle.plan.layers,
+                    review.display.as_deref(),
+                    &mut self.manufacturing.replay,
+                );
                 self.job_summary(ui, report);
                 ui.label(format!(
                     "{} deposition · {} travel segments",
@@ -705,18 +730,7 @@ impl Workbench {
         let Some(descriptor) = &review.capture.replay else {
             return;
         };
-        if self.manufacturing.review_nonce != Some(review.capture.nonce) {
-            self.manufacturing.review_nonce = Some(review.capture.nonce);
-            if self.manufacturing.replay_record.as_ref() != Some(&review.capture.record.hash) {
-                self.manufacturing.replay.events = descriptor.info.event_count;
-                self.manufacturing.replay.layer = None;
-                self.manufacturing.replay.layer_end = None;
-                self.manufacturing.replay.role = None;
-                self.manufacturing.replay.tool = None;
-            }
-            self.manufacturing.replay_record = Some(review.capture.record.hash.clone());
-            self.manufacturing.selected_seam = None;
-        }
+        self.manufacturing.sync_replay_review(&review);
         let compact = ui.available_height() < 500.0 || ui.available_width() < 600.0;
         let section_representation = self.analysis.view.enabled;
         let mut section = self.analysis.view.clone();
@@ -1046,6 +1060,214 @@ fn event_controls(
 #[cfg(test)]
 mod goal_draft_tests {
     use super::*;
+
+    fn inspection_layers() -> Vec<PrintLayer> {
+        let coverage = PlanarRegionCoverage {
+            section_area_mm2: 0.0,
+            source_section_area_mm2: 0.0,
+            surface_added_area_mm2: 0.0,
+            wall_area_mm2: 0.0,
+            bottom_skin_area_mm2: 0.0,
+            top_skin_area_mm2: 0.0,
+            solid_interior_area_mm2: 0.0,
+            sparse_interior_area_mm2: 0.0,
+            intentional_void_area_mm2: 0.0,
+            protected_hole_area_mm2: 0.0,
+            nominal_deposition_volume_mm3: 0.0,
+            support_area_mm2: 0.0,
+            support_nominal_deposition_volume_mm3: 0.0,
+            unsupported_overhang_mm: 0.0,
+            support_omitted_wall_mm: 0.0,
+            thin_widened_mm: 0.0,
+            thin_omitted_area_mm2: 0.0,
+            process_regions: Vec::new(),
+            process_interfaces: Vec::new(),
+            separator_area_mm2: 0.0,
+            process_diaphragms: Vec::new(),
+            diaphragm_area_mm2: 0.0,
+            skin_bridge_domains: Vec::new(),
+            web_roof_domains: Vec::new(),
+        };
+        (0..4)
+            .map(|index| PrintLayer {
+                index,
+                hatch_course: index,
+                lower_z_mm: f64::from(index) * 0.2,
+                z_mm: f64::from(index + 1) * 0.2,
+                height_mm: 0.2,
+                section_z_mm: f64::from(index) * 0.2 + 0.1,
+                paths: Vec::new(),
+                region_coverage: PlanarRegionCoverage {
+                    unsupported_overhang_mm: if index >= 2 { 1.25 } else { 0.0 },
+                    ..coverage.clone()
+                },
+                skin_command_fits: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn inspection_display() -> crate::replay::Replay {
+        crate::replay::Replay {
+            origin: DVec3::ZERO,
+            layer_windows: vec![2..6, 6..11, 11..20, 20..28],
+            event_count: 30,
+            batches: Vec::new(),
+            seams: Vec::new(),
+            owned_bytes: 0,
+            beads: Err("Centerlines only".into()),
+        }
+    }
+
+    #[test]
+    fn unsupported_layer_row_selects_actual_inspection_without_changing_drafts_or_filters() {
+        for theme in [Theme::Graphite, Theme::Paper] {
+            for width in [240.0, 400.0] {
+                let context = egui::Context::default();
+                theme.apply(&context);
+                context.global_style_mut(|style| style.animation_time = 0.0);
+                let layers = inspection_layers();
+                let captured_layers = layers.clone();
+                let display = inspection_display();
+                let original: ManufacturingIntent = serde_json::from_str(include_str!(
+                    "../../../../fixtures/manufacturing/preferred-layers.intent.json"
+                ))
+                .unwrap();
+                let mut edited = original.clone();
+                edited.recipe.layer_height_mm = 0.15;
+                let project = ProjectId::default();
+                let revision = ProjectRevision(3);
+                let mut manufacturing = ManufacturingUi {
+                    draft: Some(IntentDraft {
+                        project: project.clone(),
+                        revision,
+                        nonce: 7,
+                        original: Arc::new(original.clone()),
+                        value: edited.clone(),
+                    }),
+                    replay: crate::replay::View {
+                        layer: Some(0),
+                        layer_end: Some(1),
+                        events: 7,
+                        role: Some(9),
+                        tool: Some(1),
+                        source: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let before = manufacturing.replay;
+                let frame = |events, manufacturing: &mut ManufacturingUi| {
+                    context.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 600.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            super::super::review::unsupported_layers(
+                                ui,
+                                &layers,
+                                Some(&display),
+                                &mut manufacturing.replay,
+                            );
+                        },
+                    )
+                };
+                let click = |point, manufacturing: &mut ManufacturingUi| {
+                    for pressed in [true, false] {
+                        frame(
+                            vec![
+                                egui::Event::PointerMoved(point),
+                                egui::Event::PointerButton {
+                                    pos: point,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                            manufacturing,
+                        )
+                        .drop_without_applying_deltas();
+                    }
+                };
+                let output = frame(vec![], &mut manufacturing);
+                let details = output.shapes.iter().find_map(|shape| {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.text().starts_with("Support details")
+                    {
+                        Some(text.visual_bounding_rect().center())
+                    } else {
+                        None
+                    }
+                });
+                output.drop_without_applying_deltas();
+                click(
+                    details.expect("support evidence can be disclosed"),
+                    &mut manufacturing,
+                );
+                assert_eq!(manufacturing.replay, before);
+                let output = frame(vec![], &mut manufacturing);
+                let mut target = None;
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        assert!(
+                            shape.clip_rect.contains_rect(text.visual_bounding_rect()),
+                            "{theme:?} {width}: {}",
+                            text.galley.text()
+                        );
+                        if text.galley.text().starts_with("Show layer") {
+                            target = Some(text.visual_bounding_rect().center());
+                        }
+                    }
+                }
+                output.drop_without_applying_deltas();
+                assert_eq!(manufacturing.replay, before);
+                let point = target.expect("affected layer has a reachable inspection action");
+                click(point, &mut manufacturing);
+                assert_eq!(
+                    manufacturing.replay,
+                    crate::replay::View {
+                        layer: Some(layers[3].index),
+                        layer_end: None,
+                        events: display.layer_windows[3].end,
+                        ..before
+                    }
+                );
+                let draft = manufacturing.draft.as_ref().unwrap();
+                assert_eq!(draft.project, project);
+                assert_eq!(draft.revision, revision);
+                assert_eq!(draft.nonce, 7);
+                assert_eq!(*draft.original, original);
+                assert_eq!(draft.value, edited);
+                assert!(manufacturing.has_intent_draft(&project, Some(&original)));
+                assert_eq!(manufacturing.review_nonce, None);
+                assert_eq!(manufacturing.replay_record, None);
+                assert_eq!(layers, captured_layers);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_layers_without_actual_preview_leave_inspection_unchanged() {
+        let context = egui::Context::default();
+        let layers = inspection_layers();
+        let mut view = crate::replay::View {
+            layer: Some(0),
+            layer_end: Some(1),
+            events: 7,
+            ..Default::default()
+        };
+        let before = view;
+        context
+            .run_ui(egui::RawInput::default(), |ui| {
+                super::super::review::unsupported_layers(ui, &layers, None, &mut view);
+            })
+            .drop_without_applying_deltas();
+        assert_eq!(view, before);
+    }
 
     #[test]
     fn acknowledged_intent_is_not_pending_before_prepare_refreshes_its_draft() {
