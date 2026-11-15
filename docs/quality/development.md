@@ -181,9 +181,9 @@ cargo xtask test                                                     # shared-cr
 
 # Before landing slicing-affecting work: real parts on the profiling build.
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
-SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling OUT/results.ndjson
+SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling results.ndjson --profile profiling
 # Iterating on some parts: name their prefixes after the results file.
-SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py OUT target/profiling OUT/results.ndjson 18 28
+SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py NEW_OUT target/profiling results.ndjson 18 28 --profile profiling
 ```
 
 A one-line geometry edit rebuilds its test binary in about 4 s. The crate's first build
@@ -827,10 +827,10 @@ with no intent file (corpus details in
 python3 tools/smoke-defaults.py target/debug NEW_WORK_DIR [PART.step] [--material pla] [--quality standard]
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
 # CORPUS holds step/ (a symlink to the fetched STEP files is fine); real disk, not tmpfs.
-SPILING_CORPUS_JOBS=4 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=disabled \
-  python3 tools/realistic-corpus/run.py CORPUS target/profiling off.ndjson
-SPILING_CORPUS_JOBS=4 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=breakaway \
-  python3 tools/realistic-corpus/run.py CORPUS target/profiling brk.ndjson
+SPILING_CORPUS_JOBS=2 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=disabled \
+  python3 tools/realistic-corpus/run.py NEW_OFF_CORPUS target/profiling off.ndjson --profile profiling
+SPILING_CORPUS_JOBS=2 SPILING_CORPUS_PRUSA_INI=from-intent SPILING_CORPUS_SUPPORTS=breakaway \
+  python3 tools/realistic-corpus/run.py NEW_ON_CORPUS target/profiling brk.ndjson --profile profiling
 ```
 
 `SPILING_CORPUS_PRINTER`/`_MATERIAL`/`_QUALITY` choose the defaults (Marlin

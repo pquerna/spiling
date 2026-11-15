@@ -369,6 +369,16 @@ async fn run(options: Options) -> Result<(), Error> {
 
 fn failure_report(error: &(dyn std::error::Error + 'static)) -> serde_json::Value {
     use spiling_engine_client::ClientError;
+    if let Some(failure) = error.downcast_ref::<project::BuildEnvelopeExceeded>() {
+        return serde_json::json!({
+            "level": "error", "event": "cli_failure", "domain": "placement",
+            "error": {
+                "code": "build_envelope_exceeded", "message": failure.to_string(),
+                "placed_bounds_mm": failure.placed_bounds_mm,
+                "build_envelope": failure.build_envelope,
+            }
+        });
+    }
     if let Some(failure) = error.downcast_ref::<project::SaveFailure>() {
         let mut report = failure_report(failure.error.as_ref());
         report["project"] = serde_json::json!(failure.project);
@@ -440,6 +450,18 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn placement_refusal_retains_typed_bounds_without_matching_prose() {
+        use spiling_contracts::geometry::AabbMm;
+        let failure = project::BuildEnvelopeExceeded {
+            placed_bounds_mm: AabbMm::new([-5.0, 0.0, 0.0], [25.0, 10.0, 8.0]).unwrap(),
+            build_envelope: AabbMm::new([0.0; 3], [20.0; 3]).unwrap(),
+        };
+        let report = failure_report(&failure);
+        assert_eq!(report["error"]["code"], "build_envelope_exceeded");
+        assert_eq!(report["error"]["placed_bounds_mm"]["min"][0], -5.0);
+        assert_eq!(report["error"]["build_envelope"]["max"][0], 20.0);
+    }
     fn parse(args: &[&str]) -> Result<Option<Options>, Error> {
         parse_options(args.iter().map(OsString::from))
     }

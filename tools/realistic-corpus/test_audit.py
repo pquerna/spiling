@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+
+import copy
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+import audit
+
+
+class CorpusAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.case = {"file": "part.step", "sha256": hashlib.sha256(b"part").hexdigest()}
+        self.intent = {"printer": {"build_envelope": {"min": [0, 0, 0], "max": [20, 20, 20]}}}
+        self.record = {
+            "part": self.case["file"], "sha256": self.case["sha256"],
+            "spiling_compile": {"ok": True}, "spiling_return": {"ok": True},
+            "source_absent": True,
+            "export_checks": {name: True for name in ("manifest.json", "plan.json", "program.gcode",
+                             "verification.json", "fresh_verified", "actual_deposition", "nonempty_layers")},
+        }
+
+    def test_complete_journey_requires_real_return_and_all_export_obligations(self):
+        self.assertTrue(audit.verdict([self.case], [self.record], self.intent)["ok"])
+        for key in ("source_absent", "spiling_return", "export_checks"):
+            with self.subTest(key=key):
+                edited = copy.deepcopy(self.record)
+                del edited[key]
+                self.assertFalse(audit.verdict([self.case], [edited], self.intent)["ok"])
+        for key in self.record["export_checks"]:
+            with self.subTest(key=key):
+                edited = copy.deepcopy(self.record)
+                edited["export_checks"][key] = False
+                self.assertFalse(audit.verdict([self.case], [edited], self.intent)["ok"])
+
+    def test_missing_duplicate_and_unexpected_cases_cannot_pass(self):
+        self.assertFalse(audit.verdict([], [], self.intent)["ok"])
+        self.assertFalse(audit.verdict([self.case, self.case], [self.record], self.intent)["ok"])
+        unknown = dict(self.record, part="unrequested.step")
+        for rows in ([], [self.record, self.record], [self.record, unknown]):
+            with self.subTest(rows=len(rows)):
+                self.assertFalse(audit.verdict([self.case], rows, self.intent)["ok"])
+
+    def test_refusal_must_match_failure_class_not_just_a_failed_process(self):
+        case = dict(self.case, expectation={"kind": "refusal", "code": "unsupported_geometry", "domain": "geometry"})
+        record = dict(self.record, spiling_compile={"ok": False, "error": {"code": "unsupported_geometry", "domain": "geometry"}})
+        self.assertEqual(audit.assess(case, record, self.intent)["status"], "expected_refusal")
+        for error in ({"code": "timeout", "domain": "geometry"}, {"code": "unsupported_geometry", "domain": "transport"}):
+            record["spiling_compile"]["error"] = error
+            self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
+        self.assertEqual(audit.assess(case, self.record, self.intent)["status"], "failed")
+
+    def test_envelope_case_accepts_complete_journey_or_a_real_captured_exclusion(self):
+        case = dict(self.case, expectation={"kind": "complete_or_envelope_refusal"})
+        self.assertEqual(audit.assess(case, self.record, self.intent)["status"], "complete")
+        error = {"code": "build_envelope_exceeded", "domain": "placement", "details": {
+            "placed_bounds_mm": {"min": [-1, 0, 0], "max": [21, 10, 8]},
+            "build_envelope": copy.deepcopy(self.intent["printer"]["build_envelope"])}}
+        record = dict(self.record, spiling_compile={"ok": False, "error": error})
+        self.assertEqual(audit.assess(case, record, self.intent)["status"], "expected_refusal")
+        error["details"]["placed_bounds_mm"] = {"min": [1, 1, 0], "max": [10, 10, 8]}
+        self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
+        error["details"]["placed_bounds_mm"]["min"][0] = float("nan")
+        self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
+
+    def test_input_identity_is_checked_before_native_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, self.case["file"])
+            with self.assertRaises(ValueError):
+                audit.check_inputs([self.case], directory)
+            path.write_bytes(b"part")
+            audit.check_inputs([self.case], directory)
+            path.write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                audit.check_inputs([self.case], directory)
+        record = dict(self.record, sha256="different")
+        self.assertFalse(audit.verdict([self.case], [record], self.intent)["ok"])
+
+    def test_selection_is_nonempty_explicit_and_manifest_owned(self):
+        manifest = {"parts": [self.case], "cohorts": {"canary": [self.case["file"]]}}
+        self.assertEqual(audit.select_cases(manifest, ["part"], "canary"), [self.case])
+        for prefixes, cohort in ((["missing"], "full"), ([], "missing")):
+            with self.assertRaises(ValueError):
+                audit.select_cases(manifest, prefixes, cohort)
+        for parts in ([], [self.case, self.case], [dict(self.case, file="../outside.step")]):
+            with self.assertRaises(ValueError):
+                audit.select_cases({"parts": parts})
+
+    def test_exports_require_fresh_verification_and_actual_material(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text("{}")
+            (root / "program.gcode").write_text("program")
+            (root / "plan.json").write_text(json.dumps({"layers": [{}]}))
+            report = {"verified": True, "deposition_segments": 3, "filament_length_mm": 1.0}
+            (root / "verification.json").write_text(json.dumps(report))
+            self.assertTrue(all(audit.export_checks(root).values()))
+            for value in (0, float("nan"), None):
+                report["filament_length_mm"] = value
+                (root / "verification.json").write_text(json.dumps(report))
+                self.assertFalse(audit.export_checks(root)["actual_deposition"])
+            (root / "program.gcode").unlink()
+            self.assertFalse(all(audit.export_checks(root).values()))
+
+
+if __name__ == "__main__":
+    unittest.main()

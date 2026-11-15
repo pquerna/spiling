@@ -7,7 +7,7 @@ Spiling: create + import + printer/material/quality (or an explicit intent)
 + center the whole source on the bed + compile + save, then source-absent
 read-only reopen + verify + export. PrusaSlicer: slice the same STEP with
 matched settings as the printability reference.
-Usage: run.py CORPUS_DIR BIN_DIR [--intent INTENT_JSON] [RESULTS] [PART_PREFIX...]
+Usage: run.py CORPUS_DIR BIN_DIR [RESULTS] [PART_PREFIX...] --profile PROFILE [--intent INTENT_JSON]
 CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
 Writes one JSON record per part to results.ndjson. Standard library only.
 SPILING_CORPUS_INFILL selects rectilinear/grid/gyroid/cathedral; conventional
@@ -28,26 +28,35 @@ flattened to one file) instead of command-line overrides; `from-intent`
 derives one from the intent's printer, material and recipe. Each record keeps
 both slicers' estimated print time and filament length and their ratio.
 """
-import json, os, re, shutil, subprocess, sys, time, hashlib, threading
+import argparse, json, os, re, shutil, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+import audit
 
-ARGS = sys.argv[1:]
-INTENT_SRC = None
-if "--intent" in ARGS:
-    i = ARGS.index("--intent")
-    INTENT_SRC = os.path.abspath(ARGS[i + 1])
-    del ARGS[i:i + 2]
-ROOT = os.path.abspath(ARGS[0])
-R = os.path.abspath(ARGS[1])  # directory holding spiling-cli and spiling-engine
-OUT = os.path.join(ROOT, ARGS[2] if len(ARGS) > 2 else "results.ndjson")
-ONLY = ARGS[3:] if len(ARGS) > 3 else None
+PARSER = argparse.ArgumentParser(description=__doc__)
+PARSER.add_argument("corpus")
+PARSER.add_argument("binaries")
+PARSER.add_argument("results", nargs="?", default="results.ndjson")
+PARSER.add_argument("prefixes", nargs="*")
+PARSER.add_argument("--intent")
+PARSER.add_argument("--manifest", default=str(Path(__file__).with_name("manifest.json")))
+PARSER.add_argument("--cohort", default="full")
+PARSER.add_argument("--profile", choices=("dev", "profiling", "release"), required=True)
+PARSER.add_argument("--reference", choices=("prusa", "none"), default="prusa")
+PARSER.add_argument("--list", action="store_true")
+ARGS = PARSER.parse_intermixed_args()
+INTENT_SRC = os.path.abspath(ARGS.intent) if ARGS.intent else None
+ROOT = os.path.abspath(ARGS.corpus)
+R = os.path.abspath(ARGS.binaries)
+OUT = os.path.join(ROOT, ARGS.results)
 PRINTER = os.environ.get("SPILING_CORPUS_PRINTER", "spiling.reference.marlin.04")
 MATERIAL = os.environ.get("SPILING_CORPUS_MATERIAL", "pla")
 QUALITY = os.environ.get("SPILING_CORPUS_QUALITY", "standard")
 # Seconds per CLI step before the part is recorded as a timeout.
 TIMEOUT = int(os.environ.get("SPILING_CORPUS_TIMEOUT", "900"))
 # Parts compiled concurrently; each engine is one process (mostly one core).
-JOBS = int(os.environ.get("SPILING_CORPUS_JOBS", "4"))
+JOBS = int(os.environ.get("SPILING_CORPUS_JOBS", "2"))
 LOCK = threading.Lock()
 INFILL = os.environ.get("SPILING_CORPUS_INFILL")
 if INFILL not in (None, "rectilinear", "grid", "gyroid", "cathedral"):
@@ -55,6 +64,8 @@ if INFILL not in (None, "rectilinear", "grid", "gyroid", "cathedral"):
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 # "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
 SUPPORTS = os.environ.get("SPILING_CORPUS_SUPPORTS", "disabled")
+if SUPPORTS not in ("disabled", "breakaway") or JOBS < 1 or TIMEOUT < 1:
+    raise SystemExit("supports must be disabled|breakaway; jobs and timeout must be positive")
 # Without an explicit intent the engine's defaults are the values.
 DEFAULTS = INTENT_SRC is None or os.environ.get("SPILING_CORPUS_DEFAULTS") == "1"
 PRUSA_INI = os.environ.get("SPILING_CORPUS_PRUSA_INI")
@@ -136,6 +147,7 @@ def run_cli(args, cwd):
             proc.wait(timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
             return {"ok": False, "seconds": TIMEOUT, "error": {"code": "timeout"}}
     failure = None
     for line in open(err_path):
@@ -146,7 +158,8 @@ def run_cli(args, cwd):
         if record.get("level") == "error":
             failure = {"code": (record.get("error") or {}).get("code") or record.get("event"),
                        "domain": record.get("domain"),
-                       "message": (record.get("error") or {}).get("message") or record.get("message")}
+                       "message": (record.get("error") or {}).get("message") or record.get("message"),
+                       "details": record.get("error") or {}}
     return {"ok": proc.returncode == 0, "seconds": round(time.time() - started, 2),
             "engine_mib": peak, "error": failure}
 
@@ -359,15 +372,21 @@ def part(name, intent, results):
     plan = None
     if create["ok"]:
         os.remove(local)
-        ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], cwd)
+        record["source_absent"] = not os.path.exists(local)
+        returned = os.path.join(cwd, "return")
+        os.mkdir(returned)
+        os.rename(os.path.join(cwd, "p.spil"), os.path.join(returned, "p.spil"))
+        ret = run_cli(["open", "p.spil", "--read-only", "--verify", "--manufacturing-out", "out"], returned)
         record["spiling_return"] = ret
         if ret["ok"]:
-            plan = json.load(open(os.path.join(cwd, "out", "plan.json")))
+            record["export_checks"] = audit.export_checks(os.path.join(returned, "out"))
+            plan = json.load(open(os.path.join(returned, "out", "plan.json")))
     # PrusaSlicer slices the original source after Spiling, so its brim can
     # follow the brim Spiling planned.
-    record["prusa"] = prusa(src, cwd, brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
+    record["prusa"] = (prusa(src, cwd, brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
+                       if ARGS.reference == "prusa" else {"status": "not_requested"})
     if plan is not None:
-        stdout = open(os.path.join(cwd, "open.stdout.json")).read()
+        stdout = open(os.path.join(returned, "open.stdout.json")).read()
         m = re.search(r'"deposition_segments":\s*(\d+)', stdout)
         record["deposition_segments"] = int(m.group(1)) if m else None
         m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
@@ -383,7 +402,7 @@ def part(name, intent, results):
         # Printers whose firmware takes a delivery package (Bambu) export it
         # beside the program.
         record["delivery_package"] = os.path.exists(
-            os.path.join(cwd, "out", "program.gcode.3mf"))
+            os.path.join(returned, "out", "program.gcode.3mf"))
         layers = plan["layers"]
         spans = [l["region_coverage"]["unsupported_overhang_mm"] for l in layers]
         record["layers"] = len(layers)
@@ -396,26 +415,88 @@ def part(name, intent, results):
         results.write(json.dumps(record) + "\n")
         results.flush()
     c = record["spiling_compile"]
-    print(name, "prusa", record["prusa"]["ok"], "| spiling", c["ok"],
+    print(name, "prusa", record["prusa"].get("ok"), "| spiling", c["ok"],
           (c["error"] or {}).get("code"), "| return", (record.get("spiling_return") or {}).get("ok"),
           "| filament", record.get("filament_ratio"), "time", record.get("time_ratio"),
           "| package", record.get("delivery_package"), flush=True)
+    return record
 
 
 
 def main():
     global INTENT
-    os.makedirs(WORK, exist_ok=True)
+    manifest = json.load(open(ARGS.manifest))
+    cases = audit.select_cases(manifest, ARGS.prefixes, ARGS.cohort)
+    if ARGS.list:
+        print(json.dumps(cases, indent=2))
+        return 0
+    audit.check_inputs(cases, os.path.join(ROOT, "step"))
+    for path in (OUT, OUT + ".run.json", OUT + ".summary.json", WORK):
+        if os.path.exists(path):
+            raise ValueError(f"refusing to overwrite prior run: {path}; use a new corpus run directory")
+    os.mkdir(WORK)
+    started = time.monotonic()
+    receipt = {
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "command": sys.argv, "profile_declared": ARGS.profile,
+        "binaries": {name: {"path": str(Path(R, name).resolve()), "sha256": audit.digest(Path(R, name))}
+                     for name in ("spiling-cli", "spiling-engine")},
+        "runner_sha256": audit.digest(__file__), "audit_sha256": audit.digest(audit.__file__),
+        "manifest_sha256": audit.digest(ARGS.manifest),
+        "cohort": ARGS.cohort, "cases": cases,
+        "settings": {"supports": SUPPORTS, "infill": INFILL, "fraction": FRACTION,
+                     "reference": ARGS.reference, "reference_ini": PRUSA_INI,
+                     "intent_sha256": audit.digest(INTENT_SRC) if INTENT_SRC else None},
+        "jobs": JOBS, "per_cli_timeout_seconds": TIMEOUT,
+        "timing_scope": {"spiling_compile": "create/import/place/compile/save",
+                         "spiling_return": "fresh process reopen/verify/export",
+                         "prusa": "reference slice and mesh info",
+                         "not_separately_measured": ["build", "import", "placement", "construction", "emission", "save"]},
+    }
+    if ARGS.reference == "prusa":
+        reference = shutil.which("prusa-slicer")
+        if reference is None:
+            raise ValueError("requested Prusa reference is not installed; use --reference none for a labeled Spiling-only run")
+        receipt["reference_binary"] = {"path": reference, "sha256": audit.digest(reference)}
+    diagnose = subprocess.run([os.path.join(R, "spiling-cli"), "diagnose", "--engine", os.path.join(R, "spiling-engine")],
+                              cwd=WORK, capture_output=True, text=True, timeout=TIMEOUT)
+    if diagnose.returncode:
+        raise ValueError(f"matching CLI/engine readiness refused: {diagnose.stderr}")
+    receipt["readiness"] = json.loads(diagnose.stdout)
+    with open(OUT + ".run.json", "x") as output:
+        json.dump(receipt, output, indent=2)
     intent = intent_file()
     if INTENT is None:
         INTENT = probe_intent()
-    steps = sorted(os.listdir(os.path.join(ROOT, "step")))
-    if ONLY:
-        steps = [s for s in steps if any(s.startswith(o) for o in ONLY)]
-    with open(OUT, "a") as results, ThreadPoolExecutor(JOBS) as pool:
-        # Each part is single-threaded work in its own engine process; run
-        # them side by side so the run takes the slowest part, not the sum.
-        list(pool.map(lambda name: part(name, intent, results), steps))
+    else:
+        INTENT = json.load(open(intent))
+    receipt["effective_intent"] = INTENT
+    with open(OUT + ".run.json", "w") as output:
+        json.dump(receipt, output, indent=2)
+    records = []
+    failure = None
+    with open(OUT, "x") as results, ThreadPoolExecutor(JOBS) as pool:
+        try:
+            records = list(pool.map(lambda case: part(case["file"], intent, results), cases))
+        except Exception as error:
+            failure = str(error)
+    if failure is not None:
+        records = [json.loads(line) for line in Path(OUT).read_text().splitlines() if line.strip()]
+    summary = audit.verdict(cases, records, INTENT)
+    summary["harness_error"] = failure
+    summary["ok"] = summary["ok"] and failure is None
+    summary["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    summary["reference"] = {"requested": ARGS.reference,
+                            "sliced": sum(row.get("prusa", {}).get("ok") is True for row in records),
+                            "refused": sum(row.get("prusa", {}).get("ok") is False for row in records)}
+    with open(OUT + ".summary.json", "x") as output:
+        json.dump(summary, output, indent=2)
+    print(json.dumps(summary, indent=2))
+    return 0 if summary["ok"] else 1
 
 
-main()
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ValueError, OSError) as error:
+        PARSER.exit(1, f"corpus: {error}\n")

@@ -31,6 +31,20 @@ use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*}
 use spiling_engine_client::EngineClient;
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
 
+#[derive(Debug)]
+pub struct BuildEnvelopeExceeded {
+    pub placed_bounds_mm: spiling_contracts::geometry::AabbMm,
+    pub build_envelope: spiling_contracts::geometry::AabbMm,
+}
+
+impl std::fmt::Display for BuildEnvelopeExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the placed group exceeds the printer build envelope")
+    }
+}
+
+impl std::error::Error for BuildEnvelopeExceeded {}
+
 /// A failed checkpoint with freshly observed engine state, not an assumed rollback.
 #[derive(Debug)]
 pub struct SaveFailure {
@@ -3153,7 +3167,14 @@ async fn execute(
                     lower[axis] + delta[axis] < envelope.min[axis]
                         || upper[axis] + delta[axis] > envelope.max[axis]
                 }) {
-                    return Err("the placed group exceeds the printer build envelope".into());
+                    return Err(BuildEnvelopeExceeded {
+                        placed_bounds_mm: spiling_contracts::geometry::AabbMm {
+                            min: std::array::from_fn(|axis| lower[axis] + delta[axis]),
+                            max: std::array::from_fn(|axis| upper[axis] + delta[axis]),
+                        },
+                        build_envelope: envelope,
+                    }
+                    .into());
                 }
                 let mut base = summary.revision;
                 for occurrence in &occurrences {

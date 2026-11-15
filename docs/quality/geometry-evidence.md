@@ -844,9 +844,9 @@ GPL-3.0 parts, fetched into an ignored cache and never committed.
 python3 tools/realistic-corpus/fetch.py .cache/realistic-corpus
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
 SPILING_CORPUS_PRUSA_INI=from-intent \
-  python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling
+  python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling --profile profiling
 # explicit-intent path (0.2 mm layers, SPILING_CORPUS_FRACTION infill):
-python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling \
+python3 tools/realistic-corpus/run.py NEW_CORPUS target/profiling --profile profiling \
   --intent fixtures/manufacturing/complete-sparse.intent.json
 ```
 
@@ -860,6 +860,29 @@ matched settings follow the engine-created intent read from a part-free probe
 project. PrusaSlicer slices the
 same STEP with matched settings as the printability reference. Results record
 the refusing stage and code, wall time and sampled engine peak RSS per part.
+
+The runner admits only manifest-owned sources with their frozen hashes. Each run
+needs a new directory containing `step/` (a symlink to shared fetched sources is
+fine); it refuses existing work/results rather than appending another producer.
+`--profile dev|profiling|release` records the operator's declared build profile;
+binary hashes and an actual CLI/engine readiness exchange identify the producer.
+This is not an inference of compiler flags from an executable's directory.
+`results.ndjson.run.json` captures that identity, selected cases and effective
+intent. `results.ndjson.summary.json` is the verdict: missing/duplicate cases,
+unexpected refusals, failed source-absent return, missing exports, empty deposition
+or absent fresh verification fail the command. Case 00 requires its typed
+no-solid refusal; case 01 must either complete or report typed, captured bounds
+outside the selected printer's envelope. A generic CLI error is not a pass.
+Successful projects move alone to a new return directory before fresh verification
+and export, without their original source or producer working directory.
+
+PrusaSlicer remains a comparative observation, not an equality/physical-print
+oracle or a requirement that every reference slice succeed. `--reference none`
+explicitly labels a Spiling-only run; do not present it as a two-slicer comparison.
+Recorded compile/return times cover whole CLI journeys, not isolated native
+import, planning or replay CPU; unmeasured stages remain named in the receipt.
+Run `python3 -m unittest discover -s tools/realistic-corpus -p 'test_*.py'` for
+the inexpensive inventory, refusal, source-identity and export-admission controls.
 
 Current support: 28 of the 30 parts compile and complete the source-absent
 reopen, fresh verify and export; PrusaSlicer slices 25, and its five refusals
