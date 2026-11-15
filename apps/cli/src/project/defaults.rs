@@ -260,6 +260,7 @@ pub(super) fn summary(intent: &ManufacturingIntent) -> serde_json::Value {
         "bead_width_mm": intent.recipe.bead_width_mm,
         "perimeters": intent.recipe.perimeter_count,
         "infill_fraction": intent.recipe.infill_fraction,
+        "sparse_infill": intent.recipe.sparse_infill,
         "supports": intent.recipe.supports,
         "role_speeds_mm_s": intent.recipe.role_speeds,
         "max_volumetric_flow_mm3_s": intent.effective_max_volumetric_flow_mm3_s(),

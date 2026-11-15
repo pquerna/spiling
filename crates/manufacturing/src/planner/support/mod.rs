@@ -3821,7 +3821,7 @@ where
     }
     let construction = matches!(
         recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+        SparseInfillPolicy::Grid | SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
     );
     let retained_infill = |path: &DepositionPath| {
         construction
@@ -5238,7 +5238,11 @@ mod tests {
 
     #[test]
     fn structured_infill_keeps_roads_while_skin_rows_join() {
-        for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+        for policy in [
+            SparseInfillPolicy::Grid,
+            SparseInfillPolicy::Gyroid,
+            SparseInfillPolicy::web_roof(),
+        ] {
             let mut sparse = row(DepositionKind::SparseFill, 12.0, 15.0, 0.8);
             sparse.owner = Some(DepositionOwner::Regional { region_index: 0 });
             let mut sparse_row = sparse.clone();
@@ -5292,7 +5296,11 @@ mod tests {
 
     #[test]
     fn structured_infill_is_a_barrier_to_skin_row_joining() {
-        for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+        for policy in [
+            SparseInfillPolicy::Grid,
+            SparseInfillPolicy::Gyroid,
+            SparseInfillPolicy::web_roof(),
+        ] {
             let mut sparse = row(DepositionKind::SparseFill, 3.0, 7.0, 0.8);
             sparse.owner = Some(DepositionOwner::Regional { region_index: 0 });
             let mut candidate = RasterCandidate {

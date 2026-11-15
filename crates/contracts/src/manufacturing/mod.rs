@@ -1262,6 +1262,9 @@ pub enum SparseInfillPolicy {
     /// Two orthogonal fine-cadence line families, each at half the requested
     /// nominal fraction. Walls, skins and solid regions retain their own axes.
     Grid,
+    /// Periodic Gyroid contours at each physical printing height. Fraction sets
+    /// nominal volumetric pitch; clipped roads retain their actual dose.
+    Gyroid,
     /// Cathedral: continuous chamber webs, automatic joints and retained roof
     /// corbels. Density controls nominal web spacing; construction adds material.
     WebRoof {
@@ -1649,10 +1652,12 @@ impl ManufacturingIntent {
         if let JobWorkflow::FixedDualMarlin { job } = &p.workflow {
             if matches!(
                 r.sparse_infill,
-                SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+                SparseInfillPolicy::Grid
+                    | SparseInfillPolicy::Gyroid
+                    | SparseInfillPolicy::WebRoof { .. }
             ) {
                 return Err(invalid(
-                    "two-axis infill currently requires a single-tool workflow",
+                    "structured infill currently requires a single-tool workflow",
                 ));
             }
             for tool in &job.tools {
@@ -4176,8 +4181,13 @@ impl NormalizedPrintPlan {
                             "deposition regional owner index is outside its layer coverage",
                         ));
                     }
-                    if path.points_mm.len() != 2 {
-                        return Err(invalid("regional deposition is not one open row"));
+                    if path.points_mm.len() != 2
+                        && !(path.kind == DepositionKind::SparseFill
+                            && matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Gyroid))
+                    {
+                        return Err(invalid(
+                            "regional deposition requires an ordinary row or Gyroid curve",
+                        ));
                     }
                 }
                 if let Some(DepositionOwner::RegionalSkinBridge {
@@ -4286,6 +4296,14 @@ impl NormalizedPrintPlan {
                     } else {
                         return Err(invalid("two-axis sparse row must follow build X or Y"));
                     };
+                }
+                if path.kind == DepositionKind::SparseFill
+                    && matches!(intent.recipe.sparse_infill, SparseInfillPolicy::Gyroid)
+                {
+                    if path.physical_z_mm != [layer.lower_z_mm, layer.z_mm] {
+                        return Err(invalid("Gyroid paths require fine physical intervals"));
+                    }
+                    fixed_axis = None;
                 }
                 let mut previous_fixed_coordinate = None;
                 for point in &path.points_mm {
@@ -4423,7 +4441,9 @@ impl ManufacturingProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if matches!(
             self.intent.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+            SparseInfillPolicy::Grid
+                | SparseInfillPolicy::Gyroid
+                | SparseInfillPolicy::WebRoof { .. }
         ) && (self
             .process_document
             .layers
@@ -4436,7 +4456,7 @@ impl ManufacturingProvenance {
                 .any(|layer| layer.enabled))
         {
             return Err(invalid(
-                "two-axis infill currently excludes enabled process and finish layers",
+                "structured infill currently excludes enabled process and finish layers",
             ));
         }
         if self.surface_images.capacity() > crate::surface::MAX_SURFACE_IMAGES {

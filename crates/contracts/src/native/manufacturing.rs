@@ -1363,6 +1363,7 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
             match required(value.policy, "sparse infill policy selection")? {
                 Policy::Fine(_) => Self::Fine,
                 Policy::Grid(_) => Self::Grid,
+                Policy::Gyroid(_) => Self::Gyroid,
                 Policy::WebRoof(policy) => Self::WebRoof {
                     roof_spacing_mm: policy.roof_spacing_mm,
                     architecture: policy.architecture.map(TryInto::try_into).transpose()?,
@@ -1384,6 +1385,7 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
             policy: Some(match value {
                 SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
                 SparseInfillPolicy::Grid => Policy::Grid(rpc::GridSparseInfill {}),
+                SparseInfillPolicy::Gyroid => Policy::Gyroid(rpc::GyroidSparseInfill {}),
                 SparseInfillPolicy::WebRoof {
                     roof_spacing_mm,
                     architecture,
@@ -2144,6 +2146,19 @@ mod tests {
         ))
         .unwrap()
     }
+    #[test]
+    fn gyroid_policy_round_trips_as_a_typed_protobuf_selection() {
+        let wire = rpc::SparseInfillPolicy::try_from(SparseInfillPolicy::Gyroid).unwrap();
+        assert!(matches!(
+            wire.policy,
+            Some(rpc::sparse_infill_policy::Policy::Gyroid(_))
+        ));
+        assert_eq!(
+            SparseInfillPolicy::try_from(wire).unwrap(),
+            SparseInfillPolicy::Gyroid
+        );
+    }
+
     #[test]
     fn h1_wire_requires_limits_and_explicit_sparse_policy() {
         use prost::Message;

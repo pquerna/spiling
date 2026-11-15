@@ -181,7 +181,7 @@ pub(super) fn admit<'work>(
     }
     if matches!(
         input.intent.recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+        SparseInfillPolicy::Grid | SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
     ) && (input
         .process_document
         .layers
@@ -195,7 +195,7 @@ pub(super) fn admit<'work>(
     {
         add(
             "infill_scope",
-            "Two-axis infill currently requires no enabled process or finish layers".into(),
+            "Structured infill currently requires no enabled process or finish layers".into(),
             None,
             None,
         );

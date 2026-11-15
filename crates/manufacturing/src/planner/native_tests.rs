@@ -5071,7 +5071,11 @@ fn tolerant_supports_keep_real_anchors_holes_and_closed_pocket_floors() {
 fn tolerant_structured_interiors_keep_automatic_external_supports() {
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
-    for policy in [SparseInfillPolicy::Grid, SparseInfillPolicy::web_roof()] {
+    for policy in [
+        SparseInfillPolicy::Grid,
+        SparseInfillPolicy::Gyroid,
+        SparseInfillPolicy::web_roof(),
+    ] {
         let mut enabled = intent(true);
         // Exercise the shipping standard construction, not the region helper's
         // 0.6 mm / 0.4 mm lattice whose pitch exceeds its 6 mm bridge limit.
@@ -5414,5 +5418,46 @@ fn skirt_and_brim_are_first_layer_non_model_loops_checked_independently() {
         let failure =
             crate::verifier::verify(&chunks(&text), &tampered, &intent, &cancel).unwrap_err();
         assert!(failure.message.contains(reason), "{failure:?}");
+    }
+}
+
+#[test]
+fn native_gyroid_curves_and_bore_survive_fresh_replay_and_reject_wrong_phase() {
+    let cancel = AtomicBool::new(false);
+    for source in [BOX, HOLE] {
+        let scene = NativeScene::new(source, &[RigidPoseMm::IDENTITY]);
+        let mut intent = intent(false);
+        intent.recipe.sparse_infill = SparseInfillPolicy::Gyroid;
+        intent.recipe.infill_fraction = 0.15;
+        intent.recipe.bead_width_mm = 0.45;
+        intent.recipe.layer_height_mm = 0.2;
+        intent.recipe.process.max_bridge_span_mm = 10.0;
+        let result = compile(scene.input(&intent), &cancel).unwrap();
+        assert!(result.verification.verified);
+        assert!(
+            result
+                .plan
+                .layers
+                .iter()
+                .flat_map(|l| &l.paths)
+                .any(|p| p.kind == DepositionKind::SparseFill && p.points_mm.len() > 3)
+        );
+        visit_fresh_replayed_object_segments(&result, |_, _| {});
+        let mut changed = result.plan.clone();
+        let path = changed
+            .layers
+            .iter_mut()
+            .flat_map(|l| &mut l.paths)
+            .find(|p| p.kind == DepositionKind::SparseFill && p.points_mm.len() > 3)
+            .unwrap();
+        for point in &mut path.points_mm {
+            point[1] += 0.25;
+        }
+        let program = crate::backend::emit(&changed, &intent, &cancel).unwrap();
+        let error = crate::verifier::verify(&program, &changed, &intent, &cancel).unwrap_err();
+        assert!(
+            error.message.contains("Gyroid"),
+            "wrong-phase curve failed for an unrelated reason: {error:?}"
+        );
     }
 }

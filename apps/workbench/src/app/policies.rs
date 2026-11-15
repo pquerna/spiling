@@ -45,6 +45,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
     let infill_label = match intent.recipe.sparse_infill {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
+        SparseInfillPolicy::Gyroid => "Gyroid",
         SparseInfillPolicy::WebRoof {
             architecture: Some(_),
             ..
@@ -58,15 +59,18 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             let mut pattern = match intent.recipe.sparse_infill {
                 SparseInfillPolicy::Grid => 1,
                 SparseInfillPolicy::WebRoof { .. } => 2,
+                SparseInfillPolicy::Gyroid => 3,
                 _ => 0,
             };
             let original = pattern;
             egui::ComboBox::from_id_salt("infill-pattern")
-                .selected_text(["Rectilinear", "Grid", "Cathedral"][pattern])
+                .selected_text(["Rectilinear", "Grid", "Cathedral", "Gyroid"][pattern])
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut pattern, 0, "Rectilinear");
                     ui.selectable_value(&mut pattern, 1, "Grid")
                         .on_hover_text("Two perpendicular line families in every fine interval. Single tool; process regions and finishes are currently excluded.");
+                    ui.selectable_value(&mut pattern, 3, "Gyroid")
+                        .on_hover_text("Curved periodic infill. Density sets nominal material spacing; clipped roads and roof construction determine actual material. Single tool; no finishes or process modifiers.");
                     ui.selectable_value(&mut pattern, 2, "Cathedral")
                         .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes or process modifiers.");
                 });
@@ -74,6 +78,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                 select_infill(&mut intent.recipe, match pattern {
                     1 => SparseInfillPolicy::Grid,
                     2 => SparseInfillPolicy::web_roof(),
+                    3 => SparseInfillPolicy::Gyroid,
                     _ => SparseInfillPolicy::Fine,
                 });
             }
@@ -170,7 +175,9 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                 (
                     if matches!(
                         intent.recipe.sparse_infill,
-                        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+                        SparseInfillPolicy::Grid
+                            | SparseInfillPolicy::Gyroid
+                            | SparseInfillPolicy::WebRoof { .. }
                     ) {
                         "Solid / bottom hatch"
                     } else {

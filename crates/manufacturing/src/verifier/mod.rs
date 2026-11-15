@@ -21,6 +21,7 @@ mod bridge_split;
 mod construction;
 mod cost;
 mod expected;
+mod gyroid;
 mod joins;
 mod lifecycle;
 pub(crate) mod package;
@@ -1343,7 +1344,9 @@ pub(crate) fn verify_actual(
                         | DepositionKind::TopSkin
                         | DepositionKind::SolidFill
                         | DepositionKind::SparseFill
-                ) {
+                ) && !(deposition_kind == DepositionKind::SparseFill
+                    && matches!(recipe.sparse_infill, SparseInfillPolicy::Gyroid))
+                {
                     let policy = if deposition_kind == DepositionKind::TopSkin {
                         recipe.top_skin_axis
                     } else {
@@ -1643,6 +1646,7 @@ pub(crate) fn verify_actual(
     supports::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     interfaces::verify_projected_byte_geometry(
         plan,
         recipe,

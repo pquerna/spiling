@@ -12,6 +12,7 @@ use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
 mod convolution;
+mod gyroid;
 mod hatch;
 
 /// Borrowed mandatory coverage operand. Requested relief may contain fine
@@ -614,6 +615,11 @@ pub(super) fn hatch_with_phase(
             return Err(unsupported("web + roof requires its fixed chamber lattice"));
         }
         return web_roof::hatch(fill, fraction, layer, paths, segments, cancel);
+    }
+    if kind == DepositionKind::SparseFill
+        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Gyroid)
+    {
+        return gyroid::hatch(fill, fraction, layer, paths, segments, cancel);
     }
     if kind == DepositionKind::SparseFill
         && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)

@@ -10,6 +10,8 @@ matched settings as the printability reference.
 Usage: run.py CORPUS_DIR BIN_DIR [--intent INTENT_JSON] [RESULTS] [PART_PREFIX...]
 CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
 Writes one JSON record per part to results.ndjson. Standard library only.
+SPILING_CORPUS_INFILL selects rectilinear/grid/gyroid/cathedral; conventional
+patterns are matched in PrusaSlicer, Cathedral keeps a labeled rectilinear control.
 
 Default: no intent file. Each part runs `project create --import ... --printer
 P --material M --quality Q --supports on|off` (SPILING_CORPUS_PRINTER, default
@@ -47,7 +49,9 @@ TIMEOUT = int(os.environ.get("SPILING_CORPUS_TIMEOUT", "900"))
 # Parts compiled concurrently; each engine is one process (mostly one core).
 JOBS = int(os.environ.get("SPILING_CORPUS_JOBS", "4"))
 LOCK = threading.Lock()
-CATHEDRAL = os.environ.get("SPILING_CORPUS_INFILL") == "cathedral"
+INFILL = os.environ.get("SPILING_CORPUS_INFILL")
+if INFILL not in (None, "rectilinear", "grid", "gyroid", "cathedral"):
+    raise SystemExit("SPILING_CORPUS_INFILL must be rectilinear, grid, gyroid or cathedral")
 FRACTION = float(os.environ.get("SPILING_CORPUS_FRACTION", "0.15"))
 # "disabled" (PrusaSlicer's default) or "breakaway" (the intent fixture's supports).
 SUPPORTS = os.environ.get("SPILING_CORPUS_SUPPORTS", "disabled")
@@ -56,14 +60,13 @@ DEFAULTS = INTENT_SRC is None or os.environ.get("SPILING_CORPUS_DEFAULTS") == "1
 PRUSA_INI = os.environ.get("SPILING_CORPUS_PRUSA_INI")
 WORK = os.path.join(ROOT, "work")
 INTENT = json.load(open(INTENT_SRC)) if INTENT_SRC else None
-if INTENT_SRC is None and CATHEDRAL:
-    raise SystemExit("SPILING_CORPUS_INFILL=cathedral needs --intent")
 
 
 def defaults_args():
     """The one-step CLI flags replacing an intent file."""
     return ["--printer", PRINTER, "--material", MATERIAL, "--quality", QUALITY,
-            "--supports", "off" if SUPPORTS == "disabled" else "on"]
+            "--supports", "off" if SUPPORTS == "disabled" else "on"] + (
+                ["--infill", INFILL, "--infill-percent", str(FRACTION * 100)] if INFILL else [])
 
 
 def probe_intent():
@@ -89,8 +92,9 @@ def intent_file():
         d["recipe"]["supports"] = {"kind": "disabled"}
     elif d["recipe"]["supports"].get("kind") != SUPPORTS:
         raise SystemExit(f"intent fixture has no {SUPPORTS} supports to keep")
-    if CATHEDRAL:
-        d["recipe"]["sparse_infill"] = {"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
+    if INFILL:
+        d["recipe"]["sparse_infill"] = ({"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
+            if INFILL == "cathedral" else {"kind": "fine" if INFILL == "rectilinear" else INFILL})
     path = os.path.join(WORK, "intent.json")
     json.dump(d, open(path, "w"))
     return path
@@ -191,7 +195,7 @@ def prusa_ini_from_intent(path):
         "solid_infill_below_area": 0,
         "top_solid_min_thickness": recipe["top_skin_thickness_mm"],
         "bottom_solid_min_thickness": recipe["bottom_skin_thickness_mm"],
-        "fill_density": f"{round(recipe['infill_fraction'] * 100)}%", "fill_pattern": "rectilinear",
+        "fill_density": f"{recipe['infill_fraction'] * 100:.8g}%", "fill_pattern": prusa_pattern(recipe),
         "top_fill_pattern": "rectilinear", "bottom_fill_pattern": "rectilinear",
         "extrusion_multiplier": recipe["flow_multiplier"],
         "temperature": job["nozzle_temperature_c"],
@@ -269,6 +273,11 @@ def adhesion_args(brimmed):
     return args
 
 
+def prusa_pattern(recipe):
+    """Match native conventional patterns; Cathedral uses the labeled line control."""
+    return {"gyroid": "gyroid", "grid": "grid"}.get(recipe["sparse_infill"]["kind"], "rectilinear")
+
+
 def prusa(step, cwd, brimmed=False):
     started = time.time()
     gcode = os.path.join(cwd, "prusa.gcode")
@@ -281,7 +290,8 @@ def prusa(step, cwd, brimmed=False):
     elif PRUSA_INI:
         args = ["--load", PRUSA_INI]
     else:
-        args = ["--layer-height", str(layer), "--fill-density", f"{round(fraction * 100)}%"]
+        args = ["--layer-height", str(layer), "--fill-density", f"{fraction * 100:.8g}%",
+                "--fill-pattern", prusa_pattern(recipe)]
     args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
     try:
@@ -290,7 +300,7 @@ def prusa(step, cwd, brimmed=False):
     except subprocess.TimeoutExpired:
         return {"ok": False, "seconds": TIMEOUT}
     ok = proc.returncode == 0 and os.path.exists(gcode)
-    info = {"ok": ok, "seconds": round(time.time() - started, 2)}
+    info = {"ok": ok, "seconds": round(time.time() - started, 2), "fill_pattern": prusa_pattern(recipe)}
     if ok:
         info["g1_lines"] = 0
         # PrusaSlicer slices its own tessellation of the STEP: record whether

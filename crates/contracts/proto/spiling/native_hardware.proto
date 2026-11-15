@@ -83,10 +83,12 @@ message SparseInfillPolicy {
     CombineEligibleSparseInfill combine_eligible = 2;
     GridSparseInfill grid = 3;
     WebRoofSparseInfill web_roof = 4;
+    GyroidSparseInfill gyroid = 5;
   }
 }
 message FineSparseInfill {}
 message GridSparseInfill {}
+message GyroidSparseInfill {}
 message WebRoofSparseInfill {
   optional double roof_spacing_mm = 1;
   optional WebArchitecture architecture = 2;

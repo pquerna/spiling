@@ -1351,7 +1351,7 @@ export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained
 
 export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond" | "nominal_dose";
 
-export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "web_roof", roof_spacing_mm: number | null, architecture: WebArchitecture | null, } | { "kind": "combine_eligible", max_height_mm: number, };
+export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "gyroid" } | { "kind": "web_roof", roof_spacing_mm: number | null, architecture: WebArchitecture | null, } | { "kind": "combine_eligible", max_height_mm: number, };
 
 export type SpoolId = string;
 

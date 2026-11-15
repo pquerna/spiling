@@ -135,6 +135,7 @@ enum Operation {
     InteriorPolicy(InteriorToolPolicyEdit),
     CheckInteriorDefault,
     Intent(Arc<ManufacturingIntent>),
+    Infill(Option<SparseInfillPolicy>, Option<f64>),
     EvaluateAlternative(Arc<ManufacturingIntent>),
     EvaluateOption(SourceHash),
     ListOptions,
@@ -315,6 +316,24 @@ pub fn parse(
                 defaults::quality(&text(&mut args, "--quality draft|standard|fine")?)?,
                 "--quality",
             )?,
+            Some("--infill") => {
+                let pattern = text(&mut args, "--infill rectilinear|grid|gyroid|cathedral")?;
+                let policy = match pattern.as_str() {
+                    "rectilinear" => SparseInfillPolicy::Fine,
+                    "grid" => SparseInfillPolicy::Grid,
+                    "gyroid" => SparseInfillPolicy::Gyroid,
+                    "cathedral" => SparseInfillPolicy::web_roof(),
+                    _ => return Err(format!("unknown --infill {pattern:?}; choose rectilinear, grid, gyroid or cathedral").into()),
+                };
+                operations.push(Operation::Infill(Some(policy), None));
+            }
+            Some("--infill-percent") => {
+                let percent: f64 = text(&mut args, "--infill-percent 0..100")?.parse()?;
+                if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+                    return Err("--infill-percent must be finite and between 0 and 100".into());
+                }
+                operations.push(Operation::Infill(None, Some(percent / 100.0)));
+            }
             Some("--supports") => set_once(
                 &mut supports,
                 defaults::supports(&text(&mut args, "--supports on|off")?)?,
@@ -2666,6 +2685,58 @@ async fn execute(
                     _ => return Err("unexpected interior policy response".into()),
                 }
             }
+            Operation::Infill(policy, fraction) => {
+                label = "infill";
+                let (intent, base_revision) = match client
+                    .manufacturing(ManufacturingCommand::Get {
+                        session_id: session.clone(),
+                        layout_id: current_layout.clone(),
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status {
+                        intent: Some(intent),
+                        info,
+                        ..
+                    } => (intent, info.revision),
+                    ManufacturingResponse::Status { intent: None, .. } => {
+                        return Err(
+                            "--infill and --infill-percent require --material or --intent first"
+                                .into(),
+                        );
+                    }
+                    ManufacturingResponse::Error { error } => {
+                        return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
+                    }
+                    _ => return Err("unexpected manufacturing status response".into()),
+                };
+                let mut intent = Arc::unwrap_or_clone(intent);
+                if let Some(policy) = policy {
+                    intent.recipe.sparse_infill = policy;
+                }
+                if let Some(fraction) = fraction {
+                    intent.recipe.infill_fraction = fraction;
+                }
+                intent.validate()?;
+                let summary = defaults::summary(&intent);
+                match client
+                    .manufacturing(ManufacturingCommand::SetIntent {
+                        layout_id: current_layout.clone(),
+                        session_id: session.clone(),
+                        base_revision,
+                        intent: Arc::new(intent),
+                    })
+                    .await?
+                {
+                    ManufacturingResponse::Status { .. } => {
+                        history.push(serde_json::json!({"step":"infill", "selected":summary}))
+                    }
+                    ManufacturingResponse::Error { error } => {
+                        return Err(spiling_engine_client::ClientError::Manufacturing(error).into());
+                    }
+                    _ => return Err("unexpected infill update response".into()),
+                }
+            }
             Operation::Intent(intent) => {
                 label = "intent";
                 let base_revision = info(client).await?.revision;
@@ -3967,6 +4038,41 @@ mod tests {
         ));
         assert!(parse_args(&["inspect", "project", "--material-select", "profile", "1"]).is_err());
         assert!(parse_args(&["inspect", "project", "--material-page", "17"]).is_err());
+    }
+
+    #[test]
+    fn infill_selection_is_ordered_and_validated_before_engine_spawn() {
+        let options = parse_args(&[
+            "create",
+            "part.spil",
+            "--material",
+            "pla",
+            "--infill",
+            "gyroid",
+            "--infill-percent",
+            "12.5",
+            "--compile",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("expected project workflow");
+        };
+        assert!(matches!(workflow.operations.as_slice(), [
+            Operation::Defaults(..),
+            Operation::Infill(Some(SparseInfillPolicy::Gyroid), None),
+            Operation::Infill(None, Some(fraction)),
+            Operation::Compile,
+            Operation::Save(_),
+        ] if *fraction == 0.125));
+        for percent in ["-1", "101", "NaN", "inf"] {
+            assert!(parse_args(&["edit", "part.spil", "--infill-percent", percent]).is_err());
+        }
+        assert!(parse_args(&["edit", "part.spil", "--infill", "unknown"]).is_err());
+        assert!(parse_args(&["inspect", "part.spil", "--infill", "gyroid"]).is_err());
+        assert!(
+            parse_args(&["open", "part.spil", "--infill-percent", "15", "--read-only"]).is_err()
+        );
     }
 
     #[test]

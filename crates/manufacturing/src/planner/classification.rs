@@ -971,7 +971,9 @@ impl ClassifiedRegions {
         // interval. A single-family phase proposal cannot guide this pattern.
         if matches!(
             layer.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+            SparseInfillPolicy::Grid
+                | SparseInfillPolicy::Gyroid
+                | SparseInfillPolicy::WebRoof { .. }
         ) {
             return Ok(region::OrdinaryHatchPhase::Centered);
         }
@@ -1392,7 +1394,9 @@ impl ClassifiedRegions {
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         if matches!(
             layer.recipe.sparse_infill,
-            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
+            SparseInfillPolicy::Grid
+                | SparseInfillPolicy::Gyroid
+                | SparseInfillPolicy::WebRoof { .. }
         ) && self.interiors.iter().any(|interior| {
             interior.coverage.fraction > 0.0
                 && interior.coverage.fraction < 1.0

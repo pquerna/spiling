@@ -217,6 +217,15 @@ where
         for (path_index, path) in paths.iter().enumerate() {
             check_cancel(cancel)?;
             let mut has_bridge = false;
+            // A curved Gyroid road cannot become a taut straight bridge merely
+            // because its approximation contains short chords. Carry gaps over
+            // chord boundaries until an actual positive lower contact resets it.
+            let curved_fill = path.kind == DepositionKind::SparseFill
+                && matches!(
+                    recipe.sparse_infill,
+                    spiling_contracts::manufacturing::SparseInfillPolicy::Gyroid
+                );
+            let mut curved_gap = 0.0_f64;
             for (first, last, width_mm) in StrokeRuns::for_path(path)? {
                 let a = path.points_mm[first];
                 let b = path.points_mm[last];
@@ -249,10 +258,37 @@ where
                         cancel,
                     )?
                 };
+                let mut cursor = 0.0;
                 for gap in gaps {
                     let start = gap.start;
                     let end = gap.end;
                     let span = (end - start) * length;
+                    if curved_fill {
+                        if start > cursor {
+                            curved_gap = 0.0;
+                        }
+                        curved_gap += span;
+                        // Only real lower contact can admit a short overhang.
+                        // Curves have no straight-bridge process substitution.
+                        if !matches!(gap_kind(gap, curved_gap, width_mm, 0.0), GapKind::Supported)
+                            && result
+                                .failure
+                                .as_ref()
+                                .is_none_or(|old| curved_gap > old.span)
+                        {
+                            result.failure = Some(Failure {
+                                path: path_index,
+                                first,
+                                last,
+                                width_mm,
+                                start,
+                                end,
+                                span: curved_gap,
+                            });
+                        }
+                        cursor = end;
+                        continue;
+                    }
                     if path.kind == DepositionKind::SeparatorWall
                         && !matches!(
                             gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
@@ -286,6 +322,9 @@ where
                             }
                         }
                     }
+                }
+                if curved_fill && cursor < 1.0 {
+                    curved_gap = 0.0;
                 }
                 if !demand {
                     has_bridge |= bridge;
@@ -468,6 +507,52 @@ mod tests {
         assert_eq!(
             StrokeRuns::for_path(&path).unwrap().collect::<Vec<_>>(),
             [(0, 1, 0.6), (1, 2, 0.6)]
+        );
+    }
+
+    #[test]
+    fn gyroid_chords_accumulate_unanchored_length_and_never_become_straight_bridges() {
+        let path = DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SparseFill,
+            owner: Some(
+                spiling_contracts::manufacturing::DepositionOwner::Regional { region_index: 0 },
+            ),
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [0.2, 0.4],
+            points_mm: (0..=100)
+                .map(|i| {
+                    let x = i as f64 * 0.1;
+                    [x, 0.1 * x.sin(), 0.4]
+                })
+                .collect(),
+            arcs: Vec::new(),
+            exposed: false,
+        };
+        let mut recipe = crate::planner::tests::recipe(0.15);
+        recipe.sparse_infill = spiling_contracts::manufacturing::SparseInfillPolicy::Gyroid;
+        let admission = analyze(
+            &[path],
+            std::iter::empty(),
+            std::iter::empty(),
+            &recipe,
+            &mut AnchorWorkspace::default(),
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(admission.bridges.is_empty());
+        let failure = admission
+            .failure
+            .expect("unsupported curved road must be reported");
+        assert!(
+            failure.span > 10.0,
+            "short chords hid the continuous unsupported span"
+        );
+        assert_eq!(
+            failure.last - failure.first,
+            1,
+            "support demand must retain an actual chord, not flatten the curved road"
         );
     }
 
