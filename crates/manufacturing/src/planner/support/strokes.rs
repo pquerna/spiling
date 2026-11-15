@@ -8,7 +8,8 @@ use crate::planner::OFFSET_TOLERANCE_MM;
 #[cfg(test)]
 use spiling_contracts::manufacturing::WidthProfile;
 use spiling_contracts::manufacturing::{
-    DepositionEdges, DepositionKind, DepositionPath, ManufacturingError, PlanarPrintRecipe,
+    DepositionEdges, DepositionKind, DepositionPath, MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS,
+    ManufacturingError, PlanarPrintRecipe,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -271,8 +272,15 @@ where
                         }
                         curved_gap += span;
                         // Only real lower contact can admit a short overhang.
-                        // Curves have no straight-bridge process substitution.
-                        if !matches!(gap_kind(gap, curved_gap, width_mm, 0.0), GapKind::Supported)
+                        // Curves have no straight-bridge process substitution,
+                        // but a short unanchored run of hidden sparse infill
+                        // prints as is: demand support only beyond the run
+                        // independent replay accepts.
+                        if curved_gap > MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS * width_mm
+                            && !matches!(
+                                gap_kind(gap, curved_gap, width_mm, 0.0),
+                                GapKind::Supported
+                            )
                             && result
                                 .failure
                                 .as_ref()

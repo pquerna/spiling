@@ -71,8 +71,8 @@ pub(super) fn verify(
                 // Independent equation in physical build coordinates. The
                 // generator uses roots/atan and clipping, not this residual.
                 // |grad F| <= 2 sqrt(3); include XYZ6 projection in the same
-                // recorded 0.01 mm profile allowance, not a new site epsilon.
-                let allowance = 2.0 * 3.0_f64.sqrt() * frequency * 0.01;
+                // recorded sparse road tolerance, not a new site epsilon.
+                let allowance = 2.0 * 3.0_f64.sqrt() * frequency * SPARSE_ROAD_TOLERANCE_MM;
                 for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
                     let x = (a[0] + t * (b[0] - a[0])) * frequency;
                     let y = (a[1] + t * (b[1] - a[1])) * frequency;
@@ -105,7 +105,7 @@ pub(super) fn verify(
                         unsupported_run = 0.0;
                     }
                     unsupported_run += (gap.end - gap.start) * length;
-                    if unsupported_run > 3.0 * width
+                    if unsupported_run > MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS * width
                         && layer.region_coverage.unsupported_overhang_mm == 0.0
                     {
                         return Err(failed(

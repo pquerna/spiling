@@ -62,6 +62,7 @@ records the values it used:
 | -------------- | ------------------------------------------------- | ------------------------------------------------------------ |
 | Join `τ`       | max(source uncertainty, 1e-6 mm), at most 0.01 mm | Treating vertices, edge ends and seam gaps as the same point |
 | Profile `ε_xy` | 0.01 mm, at most bead width / 20                  | Curve-to-segment approximation and section deviation         |
+| Sparse road `ε_sparse` | 0.05 mm                                   | Curve-to-segment approximation of hidden sparse-infill roads only |
 | Height `ε_z`   | the printer's Z motion resolution                 | Merging near-coincident feature heights into one event       |
 
 Two heights closer than one Z step are one commanded height, so they are one
@@ -74,6 +75,13 @@ open or self-intersecting sections, trims disagreeing by more than the
 tolerance, heights the printer cannot reach. A work or time limit is only a
 fuse against defects, never an admission policy. Declared resolution is not
 measured accuracy or repeatability.
+
+`ε_sparse` (amended 2026-11-15) only lets hidden sparse-infill curves, such as
+Gyroid, be sampled more coarsely; Orca uses 0.04 mm and PrusaSlicer three times
+its base resolution for the same purpose. It governs no section, wall, skin or
+admission decision, and it never refuses anything: geometry already finer is
+left as it is. The generator and the independent check read the same recorded
+value.
 
 Gaps within `τ` are joined. A gap larger than `τ` in an otherwise closed loop is
 a defect in the source: that layer refuses with the location and size. No other

@@ -11,6 +11,11 @@ use geo::line_intersection::{LineIntersection, line_intersection};
 use geo::{Distance, Euclidean, Intersects, Line, Point};
 use std::f64::consts::{FRAC_PI_4, PI, TAU};
 
+/// Shares of [`SPARSE_ROAD_TOLERANCE_MM`]: profile sampling and the merge of
+/// short clip artifacts. Their sum stays below one for the check's margin.
+const PROFILE_SHARE: f64 = 0.7;
+const MERGE_SHARE: f64 = 0.2;
+
 // Bulk contour length calibration of the implicit surface, not an empirical
 // strength or final-part porosity. See docs/protocol/manufacturing.md.
 const DENSITY_MULTIPLIER: f64 = 2.55577;
@@ -90,11 +95,12 @@ impl Wave {
             let v = self.ordinate(u, branch);
             error.max((du * (v - a[1]) - dv * (u - a[0])).abs() / length)
         });
-        // Hidden sparse roads use the recorded profile tolerance. The
-        // independent field check allows the full PROFILE_TOLERANCE_MM through
-        // an upper gradient bound; keep a margin for that bound and output
-        // rounding.
-        if error * self.scale <= PROFILE_TOLERANCE_MM * 0.8 {
+        // Hidden sparse roads use the recorded sparse road tolerance. The
+        // independent field check allows the full SPARSE_ROAD_TOLERANCE_MM
+        // through an upper gradient bound. Sampling takes PROFILE_SHARE of it,
+        // clip merges at most MERGE_SHARE, leaving a margin for that bound
+        // and output rounding.
+        if error * self.scale <= SPARSE_ROAD_TOLERANCE_MM * PROFILE_SHARE {
             reserve_points(output, 1)?;
             output.push(b);
             return Ok(());
@@ -423,7 +429,7 @@ fn finish(
     // Remove only sub-command clip artifacts before they can become anchors.
     road.dedup_by(|b, a| (b[0] - a[0]).hypot(b[1] - a[1]) <= 0.000002);
     // Clip endpoints stay fixed. Combine a short command with a neighbour
-    // only within the existing profile allowance and unchanged center domain.
+    // only within the sparse road allowance and unchanged center domain.
     // A sliver at a road end that cannot merge is trimmed; an interior one
     // that cannot merge still refuses explicitly.
     use spiling_contracts::manufacturing::program_coordinates::{
@@ -470,7 +476,8 @@ fn finish(
             let along = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (length * length);
             let deviation = (dx * (p[1] - a[1]) - dy * (p[0] - a[0])).abs() / length;
             let error_bound = deviation + fit_errors[middle - 1].max(fit_errors[middle]);
-            if !(0.0..=1.0).contains(&along) || error_bound > super::super::OFFSET_TOLERANCE_MM {
+            if !(0.0..=1.0).contains(&along) || error_bound > SPARSE_ROAD_TOLERANCE_MM * MERGE_SHARE
+            {
                 continue;
             }
             let line = Line::new([a[0], a[1]], [b[0], b[1]]);

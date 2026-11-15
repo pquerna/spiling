@@ -1469,6 +1469,15 @@ pub mod speeds;
 /// ADR012 profile tolerance `ε_xy`: the one recorded bound on section
 /// deviation from the true surface, never a per-recipe choice.
 pub const PROFILE_TOLERANCE_MM: f64 = 0.01;
+/// Curve-to-segment approximation of hidden sparse-infill roads (ADR012).
+/// Sparse roads are never seen and carry no section, wall or skin
+/// obligation, so their sampling may be coarser than the profile tolerance.
+/// It never decides admission: geometry already finer is left alone.
+pub const SPARSE_ROAD_TOLERANCE_MM: f64 = 0.05;
+/// Longest continuous unanchored run of a curved sparse-infill road, in bead
+/// widths, that prints without support. Support admission demands nothing
+/// for a shorter run, and independent replay accepts it.
+pub const MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS: f64 = 3.0;
 impl PlanarPrintRecipe {
     /// The native shape error this recipe requests: the recorded profile
     /// tolerance, at most a twentieth of the bead width (ADR012).
