@@ -13,8 +13,10 @@ def mesh_info(text):
     fields = dict(re.findall(r"(?m)^([a-z_]+)\s*=\s*(.+)$", text))
     result = {"manifold": {"yes": True, "no": False}.get(fields.get("manifold")),
               "open_edges": int(fields["open_edges"]) if "open_edges" in fields else None}
-    for name in ("size_x", "size_y", "size_z", "volume"):
+    for name in ("size_x", "size_y", "size_z", "min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "volume"):
         result[name] = float(fields[name]) if name in fields else None
+    for name in ("number_of_parts", "number_of_facets"):
+        result[name] = int(fields[name]) if name in fields else None
     result["positive_geometry"] = all(isinstance(result[name], (int, float)) and
                                       math.isfinite(result[name]) and result[name] > 0
                                       for name in ("size_x", "size_y", "size_z", "volume"))

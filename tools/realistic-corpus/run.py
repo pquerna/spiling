@@ -71,6 +71,8 @@ if SUPPORTS not in ("disabled", "breakaway") or JOBS < 1 or TIMEOUT < 1:
 # Without an explicit intent the engine's defaults are the values.
 DEFAULTS = INTENT_SRC is None or os.environ.get("SPILING_CORPUS_DEFAULTS") == "1"
 PRUSA_INI = os.environ.get("SPILING_CORPUS_PRUSA_INI")
+if PRUSA_INI and PRUSA_INI != "from-intent":
+    PRUSA_INI = os.path.abspath(PRUSA_INI)
 WORK = os.path.join(ROOT, "work")
 INTENT = json.load(open(INTENT_SRC)) if INTENT_SRC else None
 
@@ -448,6 +450,7 @@ def main():
         "cohort": ARGS.cohort, "cases": cases,
         "settings": {"supports": SUPPORTS, "infill": INFILL, "fraction": FRACTION,
                      "reference": ARGS.reference, "reference_ini": PRUSA_INI,
+                     "reference_ini_sha256": audit.digest(PRUSA_INI) if PRUSA_INI and PRUSA_INI != "from-intent" else None,
                      "intent_sha256": audit.digest(INTENT_SRC) if INTENT_SRC else None},
         "jobs": JOBS, "per_cli_timeout_seconds": TIMEOUT,
         "timing_scope": {"spiling_compile": "create/import/place/compile/save",
@@ -461,6 +464,8 @@ def main():
         if reference_binary is None:
             raise ValueError("requested Prusa reference is not installed; use --reference none for a labeled Spiling-only run")
         receipt["reference_binary"] = {"path": reference_binary, "sha256": audit.digest(reference_binary)}
+        help_result = subprocess.run([reference_binary, "--help"], capture_output=True, text=True, timeout=TIMEOUT)
+        receipt["reference_binary"]["version_banner"] = (help_result.stdout or help_result.stderr).splitlines()[0]
     diagnose = subprocess.run([os.path.join(R, "spiling-cli"), "diagnose", "--engine", os.path.join(R, "spiling-engine")],
                               cwd=WORK, capture_output=True, text=True, timeout=TIMEOUT)
     if diagnose.returncode:

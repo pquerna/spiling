@@ -921,6 +921,16 @@ roofs. Missing oracle checks fail. These boxes do not qualify curved trims,
 protected holes or general support routing; retain the existing native tests and
 real-part witnesses for those obligations.
 
+Reuse the manufacturing library's existing focused witnesses before adding a
+new family: `sparse_native_roof_is_a_bounded_bridge_not_full_material_support`
+owns actual bounded bridge anchors;
+`off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_material`
+owns resolvable tunnel topology and emitted void preservation;
+`new_native_families_use_one_material_planner_and_independent_replay` owns the
+curved native-family integration. Run a named witness with
+`cargo test --locked -p spiling-manufacturing --lib NAME -- --test-threads 4`.
+The Python-generated boxes supplement these contracts, never replace them.
+
 The manifest's `canary` and `supports` cohorts name representative integration
 selections, not replacements for `full` (the default). Prefix selection intersects
 the named cohort and refuses empty matches. Scaling summaries report elapsed/CPU,
