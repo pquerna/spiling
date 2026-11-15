@@ -5,7 +5,7 @@
 //! program/path bijection. Does not call the analytic wave generator.
 
 use super::{cancelled, constant_width, failed, project_xyz6_point_mm};
-use crate::planner::support::{AnchorCandidate, AnchorWorkspace, projected_edges};
+use crate::planner::support::{AnchorCandidate, AnchorWorkspace, PreparedAnchorPaths};
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -20,6 +20,10 @@ pub(super) fn verify(
         return Ok(());
     }
     for (index, layer) in plan.layers.iter().enumerate() {
+        // Borrow and bound the previous roads once per layer. Conservative path
+        // bounds only skip disjoint capsules; the anchor math and work accounting
+        // remain the same for every chord, including skipped edges.
+        let mut prepared = None;
         for path in layer
             .paths
             .iter()
@@ -83,12 +87,15 @@ pub(super) fn verify(
                 let Some(previous) = previous else {
                     continue;
                 };
-                let gaps = anchors.gaps_edges(
+                if prepared.is_none() {
+                    prepared = Some(PreparedAnchorPaths::new(previous.paths.iter(), cancel)?);
+                }
+                let gaps = anchors.gaps_prepared(
                     AnchorCandidate {
                         endpoints_mm: [a, b],
                         bead_width_mm: width,
                     },
-                    projected_edges(previous.paths.iter(), true),
+                    prepared.as_ref().expect("earlier paths prepared"),
                     work,
                     cancel,
                 )?;
