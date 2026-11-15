@@ -1156,18 +1156,19 @@ pub(crate) fn verify_actual(
                     association,
                     closes_wall,
                     arc,
+                    connector,
                 } => (
                     target,
                     source,
                     tool,
                     layer,
-                    (role, speed_role),
+                    (role, speed_role, connector),
                     association,
                     closes_wall,
                     arc,
                 ),
             };
-            let (deposition_kind, move_speed_role) = deposition_kind;
+            let (deposition_kind, move_speed_role, connector) = deposition_kind;
             let (decoded, arc_segment) = match arc_replay.as_mut() {
                 Some(replay) => {
                     let (virtual_move, segment) = replay.step(target, source, run_start)?;
@@ -1399,7 +1400,7 @@ pub(crate) fn verify_actual(
                             return Err(failed("actual grid deposition must follow build X or Y"));
                         };
                     }
-                    if from[fixed_axis] != position[fixed_axis] {
+                    if from[fixed_axis] != position[fixed_axis] && !connector {
                         return Err(failed(
                             "actual ordinary deposition violates its authored axis policy",
                         ));

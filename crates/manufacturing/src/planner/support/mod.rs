@@ -4263,7 +4263,7 @@ fn admission_error(
     )
 }
 
-pub(in crate::planner) fn object_volumes(
+pub(crate) fn object_volumes(
     layers: &mut [PrintLayer],
     intent: &ManufacturingIntent,
 ) -> Result<(), ManufacturingError> {

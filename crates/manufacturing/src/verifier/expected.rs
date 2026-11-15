@@ -130,6 +130,9 @@ pub(super) enum Action {
         closes_wall: bool,
         /// The planned arc run this edge starts, if any.
         arc: Option<ArcRun>,
+        /// A short interior edge joining two straight rows of one continuous
+        /// skin or solid-fill path; exempt from the row-axis rule only.
+        connector: bool,
     },
     Recovery {
         retract: bool,
@@ -209,6 +212,7 @@ impl<'a> Expected<'a> {
                 association: None,
                 closes_wall: false,
                 arc: None,
+                connector: false,
             })
         };
         self.prefix = [None; 10];
@@ -383,7 +387,9 @@ impl Iterator for Expected<'_> {
                 };
                 self.edge += 1;
                 self.position = Some(target);
+                let connector = path.is_row_connector(self.edge - 2);
                 return Some(Ok(Action::Move {
+                    connector,
                     target,
                     tool: self.routing.map(|_| self.previous_group.unwrap().1),
                     source: Some(source),

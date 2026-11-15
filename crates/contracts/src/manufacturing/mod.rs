@@ -2126,6 +2126,12 @@ pub struct DepositionPath {
     pub exposed: bool,
 }
 
+/// Longest connector, in bead widths, that may join two adjacent straight
+/// mandatory skin rows inside one continuous path. A connector is an
+/// interior edge between two rows along the authored axis; every other edge
+/// of such a path must follow the authored row axis.
+pub const MAX_ROW_CONNECTOR_WIDTHS: f64 = 2.0;
+
 /// Largest distance of a run's points from its circle. The commanded arc and
 /// the planned points agree within this, the same as the lateral command
 /// allowance for a straight bead.
@@ -2373,6 +2379,44 @@ impl DepositionPath {
     /// and [`MAX_ARC_SWEEP_RADIANS`] in all, with every point within
     /// [`MAX_ARC_POINT_DEVIATION_MM`] of the circle through its first point
     /// and every chord within [`MAX_ARC_SAGITTA_MM`] of the arc.
+    /// Whether edge `index` joins two straight rows of one continuous
+    /// mandatory skin path: an interior edge at most [`MAX_ROW_CONNECTOR_WIDTHS`]
+    /// bead widths long, between two edges that share one fixed axis it does
+    /// not follow. Callers still check those rows against the authored axis.
+    pub fn is_row_connector(&self, index: usize) -> bool {
+        let p = &self.points_mm;
+        if !matches!(
+            self.kind,
+            DepositionKind::BottomSkin | DepositionKind::TopSkin
+        ) || !matches!(self.owner, Some(DepositionOwner::MandatorySkin { .. }))
+            || index == 0
+            || index + 2 >= p.len()
+        {
+            return false;
+        }
+        let WidthProfile::Constant { width_mm } = self.width else {
+            return false;
+        };
+        let fixed = |i: usize| {
+            let (a, b) = (p[i], p[i + 1]);
+            if a[1] == b[1] && a[0] != b[0] {
+                Some(1)
+            } else if a[0] == b[0] && a[1] != b[1] {
+                Some(0)
+            } else {
+                None
+            }
+        };
+        let (a, b) = (p[index], p[index + 1]);
+        match (fixed(index - 1), fixed(index + 1)) {
+            (Some(before), Some(after)) => {
+                before == after
+                    && a[before] != b[before]
+                    && (b[0] - a[0]).hypot(b[1] - a[1]) <= MAX_ROW_CONNECTOR_WIDTHS * width_mm
+            }
+            _ => false,
+        }
+    }
     pub fn validate_arcs(&self) -> Result<(), ManufacturingError> {
         let mut previous_last = 0u32;
         for (k, arc) in self.arcs.iter().enumerate() {
@@ -4416,7 +4460,7 @@ impl NormalizedPrintPlan {
                     fixed_axis = None;
                 }
                 let mut previous_fixed_coordinate = None;
-                for point in &path.points_mm {
+                for (point_index, point) in path.points_mm.iter().enumerate() {
                     if (0..3).any(|i| {
                         !point[i].is_finite()
                             || point[i] < envelope.min[i]
@@ -4432,7 +4476,10 @@ impl NormalizedPrintPlan {
                         // coordinates, not a geometric angular tolerance.
                         let coordinate =
                             program_coordinates::project_xyz6_coordinate_mm(point[axis])?;
+                        // A row connector moves to the next row: its fixed
+                        // coordinate is the next row's.
                         if previous_fixed_coordinate.is_some_and(|previous| previous != coordinate)
+                            && !(point_index > 0 && path.is_row_connector(point_index - 1))
                         {
                             return Err(invalid(
                                 "ordinary deposition segment violates the authored rectilinear axis",

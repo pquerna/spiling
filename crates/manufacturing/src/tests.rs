@@ -1306,6 +1306,14 @@ fn actual_motion(bundle: &ManufacturingResult) -> Vec<(u8, u32, [f64; 3])> {
         .collect()
 }
 
+/// A connector between two rows of a continuous mandatory skin path: a short
+/// move across the rows, which replay admits only between two rows.
+fn skin_row_connector(kind: u8, start: [f64; 3], end: [f64; 3], fixed: usize, width: f64) -> bool {
+    matches!(kind, 3 | 4)
+        && start[fixed] != end[fixed]
+        && (end[0] - start[0]).hypot(end[1] - start[1]) <= MAX_ROW_CONNECTOR_WIDTHS * width
+}
+
 fn assert_actual_sparse_row_pitch(
     motion: &[(u8, u32, [f64; 3])],
     source_translation: [f64; 3],
@@ -2390,6 +2398,9 @@ fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
                 };
                 let start = pair[0].2;
                 let fixed = usize::from(along_x);
+                if skin_row_connector(kind, start, end, fixed, intent.recipe.bead_width_mm) {
+                    continue;
+                }
                 assert_eq!(
                     start[fixed], end[fixed],
                     "{policy:?}, layer {index}, role {kind}"
@@ -2468,6 +2479,9 @@ fn independent_top_skin_axis_survives_template_reuse() {
             };
             let start = pair[0].2;
             let fixed = usize::from(along_x);
+            if skin_row_connector(kind, start, end, fixed, intent.recipe.bead_width_mm) {
+                continue;
+            }
             assert_eq!(
                 start[fixed], end[fixed],
                 "{ordinary:?}/{top:?}, layer {index}"
@@ -2509,6 +2523,9 @@ fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
         let (kind, layer, end) = pair[1];
         let start = pair[0].2;
         if (2..=5).contains(&kind) {
+            if skin_row_connector(kind, start, end, 0, intent.recipe.bead_width_mm) {
+                continue;
+            }
             assert_eq!(
                 start[0], end[0],
                 "ordinary role {kind} ignored Y at layer {layer}"
@@ -4154,4 +4171,40 @@ fn bed_exclusion_keeps_parts_and_adhesion_out_and_the_verifier_checks_it_indepen
     // Below the ceiling the same program is admitted.
     stricter.printer.bed_exclusions[1].max_material_z_mm = 9.0;
     verifier::verify(&clear.program, &clear.plan, &stricter, &cancel).unwrap();
+}
+
+#[test]
+fn mandatory_skin_rows_print_as_continuous_paths_that_replay_verifies() {
+    let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
+    let intent = intent();
+    let bundle = scene.compile(&intent).unwrap();
+    let plan = &bundle.bundle.plan;
+    let chained: Vec<&DepositionPath> = plan
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.paths)
+        .filter(|p| {
+            matches!(p.owner, Some(DepositionOwner::MandatorySkin { .. })) && p.points_mm.len() > 2
+        })
+        .collect();
+    assert!(!chained.is_empty(), "the box's skins chain");
+    for path in &chained {
+        // Rows alternate with connectors; every connector joins two rows.
+        let edges = path.points_mm.len() - 1;
+        assert_eq!(edges % 2, 1, "a chain starts and ends on a row");
+        for edge in (1..edges).step_by(2) {
+            assert!(path.is_row_connector(edge), "edge {edge} joins two rows");
+        }
+        for edge in (0..edges).step_by(2) {
+            assert!(!path.is_row_connector(edge));
+        }
+    }
+    // Replay verifies the program independently (asserted inside).
+    let motion = actual_motion(&bundle);
+    assert!(!motion.is_empty());
+    // A connector that is too long is not a connector.
+    let mut long = chained[0].clone();
+    long.points_mm[2][0] += 5.0;
+    long.points_mm[3][0] += 5.0;
+    assert!(!long.is_row_connector(1));
 }
