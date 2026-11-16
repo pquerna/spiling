@@ -4279,98 +4279,6 @@ fn startup_wall_handoff_preserves_fresh_complete_admission() {
 }
 
 #[test]
-fn rounded_housing_tentative_prefix_requires_actual_deposited_anchors() {
-    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
-        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
-    ))
-    .unwrap();
-    let scene = NativeScene::new(
-        include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ),
-        &[RigidPoseMm {
-            translation_mm: [98.0, 100.99999999999977, 1.225587472778531e-9],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }],
-    );
-    let input = scene.input(&intent);
-    let cancel = AtomicBool::new(false);
-    let mut admission_work_8 = spiling_geometry::GeometryWorkBudget::compile();
-    let mut admission = preflight::admit(&input, &cancel, &mut admission_work_8).unwrap();
-    let mut planar_work = 0;
-    preflight::resolve_native_events(&input, &mut admission, &mut planar_work, &cancel).unwrap();
-    let mut captures = input
-        .occurrences
-        .iter()
-        .map(|occurrence| {
-            zones::capture(
-                &input,
-                &admission,
-                occurrence.occurrence_id,
-                &mut planar_work,
-                &cancel,
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let mut schedule = scheduled_layers(&input, &mut admission, &captures, &cancel).unwrap();
-    let endpoints = schedule
-        .iter()
-        .map(|layer| layer.z.to_bits())
-        .collect::<Vec<_>>();
-    let mut support_work = support::SupportWork::default();
-    loop {
-        let probe = deposition_probe(
-            &input,
-            &captures,
-            &schedule,
-            AnchorProbeScope::UnreachableSupport,
-            &mut planar_work,
-            &cancel,
-        )
-        .unwrap()
-        .expect("the declared support gap has an actual unreachable prefix");
-        match admit_schedule(
-            &input,
-            &cancel,
-            &mut admission,
-            &mut captures,
-            &mut schedule,
-            &mut planar_work,
-            &mut support_work,
-            Some(probe),
-            None,
-            &mut WallMemo::default(),
-            &mut tolerant::VoidMemo::default(),
-            &mut neighborhood::SurvivalMemo::default(),
-            &mut cathedral::RoomsMemo::default(),
-        )
-        .unwrap()
-        {
-            ScheduleAdmission::RefineUnreachableLayer { index, failure, .. } => {
-                refine_deposition_pair(&mut schedule, index, &input, failure).unwrap();
-            }
-            ScheduleAdmission::PrefixAdmitted(capture) => {
-                assert!(!capture.sections.is_empty());
-                break;
-            }
-            ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
-                panic!("tentative actual paths cannot publish a plan")
-            }
-        }
-    }
-    for endpoint in endpoints {
-        assert!(schedule.iter().any(|layer| layer.z.to_bits() == endpoint));
-    }
-    assert!(schedule.iter().all(|layer| {
-        intent
-            .printer
-            .deposition_limits
-            .admits(intent.recipe.bead_width_mm, layer.z - layer.lower_z)
-    }));
-}
-
-#[test]
 fn hollow_native_box_preserves_walls_skins_void_accounting_and_fresh_replay() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut intent = intent(false);
@@ -5196,11 +5104,10 @@ fn tolerant_structured_interiors_keep_automatic_external_supports() {
 }
 
 #[test]
-fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
+fn an_unanchored_wall_is_carried_by_support_never_split() {
     let cancel = AtomicBool::new(false);
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let intent = intent(true);
-    let input = scene.input(&intent);
     let template = compile(scene.input(&intent), &cancel).unwrap().plan.layers[0].clone();
     let make_schedule = || {
         (0..2)
@@ -5275,14 +5182,12 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                 recipe,
                 nominal_height_mm: intent.select_layer_height().unwrap().height_mm,
                 source_z_allowance_mm: 0.0,
-                deposition_limits: intent.effective_deposition_limits(),
                 replay: false,
                 phases: &[],
             },
             &mut schedule.len(),
             &cancel,
             &mut spiling_geometry::GeometryWorkBudget::compile(),
-            false,
             false,
             bank,
             |index, _, _, _, _, _, _, _| {
@@ -5299,7 +5204,6 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                     return Ok(support::ProtectedVoidSet {
                         regions: geo::MultiPolygon(Vec::new()),
                         scopes: Vec::new(),
-                        unclaimed: Vec::new(),
                     });
                 }
                 Err(error(
@@ -5312,65 +5216,24 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
         (result, layers)
     };
 
-    let mut slope_work = support::SupportWork::default();
-    let mut schedule = make_schedule();
-    let (outcome, _) = run(&schedule, false, &intent.recipe, &mut slope_work);
-    let support::SupportAdmission::RefineUnreachableLayer {
-        index,
-        failure,
-        span_mm,
-    } = outcome.unwrap()
-    else {
-        panic!("an unanchored nearby slope should propose a schedule split");
-    };
-    exhaust_or_refine(
-        &mut schedule,
-        index,
-        &input,
-        failure,
-        span_mm,
-        &mut slope_work,
-    )
-    .unwrap();
-    for elevation in &initial {
-        assert!(schedule.iter().any(|layer| layer.z == elevation.z));
-    }
-    assert!(matches!(
-        run(&schedule, false, &intent.recipe, &mut slope_work)
-            .0
-            .unwrap(),
-        support::SupportAdmission::Complete
-    ));
-
-    let mut step_work = support::SupportWork::default();
-    let mut schedule = make_schedule();
-    let (outcome, _) = run(&schedule, true, &intent.recipe, &mut step_work);
-    let support::SupportAdmission::RefineUnreachableLayer {
-        index,
-        failure,
-        span_mm,
-    } = outcome.unwrap()
-    else {
-        panic!("a new nearby step may propose one split");
-    };
-    exhaust_or_refine(
-        &mut schedule,
-        index,
-        &input,
-        failure,
-        span_mm,
-        &mut step_work,
-    )
-    .unwrap();
-    let failure = run(&schedule, true, &intent.recipe, &mut step_work)
+    // A slope and a step both go to support construction; neither asks
+    // for a thinner layer.
+    for step in [false, true] {
+        let failure = run(
+            &initial,
+            step,
+            &intent.recipe,
+            &mut support::SupportWork::default(),
+        )
         .0
         .err()
         .unwrap();
-    assert!(
-        failure
-            .message
-            .contains("ordinary scaffold projection reached")
-    );
+        assert!(
+            failure
+                .message
+                .contains("ordinary scaffold projection reached")
+        );
+    }
 
     let mut disabled = intent.recipe.clone();
     disabled.supports = SupportPolicy::Disabled;
@@ -5386,75 +5249,20 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
     ));
     assert!(layers[1].region_coverage.unsupported_overhang_mm > 0.0);
 
-    let mut exhausted = support::SupportWork::default();
-    exhausted.exhausted.insert(initial[1].z.to_bits());
-    let (outcome, _) = run(&initial, true, &intent.recipe, &mut exhausted);
-    assert!(
-        matches!(outcome, Err(ref error) if error.message.contains("ordinary scaffold projection reached"))
-    );
+    // Too close to the bed for a support layer below the Z gap: printed
+    // and reported.
     allow_projection.set(true);
-    let (outcome, layers) = run(&initial, true, &intent.recipe, &mut exhausted);
+    let (outcome, layers) = run(
+        &initial,
+        true,
+        &intent.recipe,
+        &mut support::SupportWork::default(),
+    );
     assert!(matches!(
         outcome.unwrap(),
         support::SupportAdmission::Complete
     ));
     assert!(layers[1].region_coverage.unsupported_overhang_mm > 0.0);
-}
-
-#[test]
-fn anchor_refinement_exhausts_a_split_that_shortened_nothing() {
-    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
-        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
-    ))
-    .unwrap();
-    assert!(matches!(
-        intent.recipe.supports,
-        SupportPolicy::Breakaway { .. }
-    ));
-    let scene = NativeScene::new(
-        include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ),
-        &[RigidPoseMm {
-            translation_mm: [98.0, 100.0, 0.0],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-        }],
-    );
-    let input = scene.input(&intent);
-    let mut schedule = (0..5)
-        .map(|i| LayerElevation {
-            lower_z: i as f64 * 0.2,
-            z: (i + 1) as f64 * 0.2,
-            sample: (i as f64 + 0.5) * 0.2,
-            height: 0.2,
-            course: i,
-        })
-        .collect::<Vec<_>>();
-    let failure = || {
-        error(
-            ManufacturingErrorCode::NativeAnalysisIndeterminate,
-            "uncertified corridor",
-        )
-    };
-    let mut work = support::SupportWork::default();
-    // The first request splits the pair below layer 2 and records it.
-    exhaust_or_refine(&mut schedule, 2, &input, failure(), Some(0.8), &mut work).unwrap();
-    assert_eq!(schedule.len(), 6);
-    assert!(work.exhausted.is_empty());
-    // The same span returns inside the split interval: exhausted, not halved.
-    let z = schedule[2].z.to_bits();
-    exhaust_or_refine(&mut schedule, 2, &input, failure(), Some(0.805), &mut work).unwrap();
-    assert_eq!(schedule.len(), 6);
-    assert!(work.exhausted.contains(&z));
-    // A shorter span is progress, and a missing contact layer is always
-    // refined: both still split.
-    exhaust_or_refine(&mut schedule, 3, &input, failure(), Some(0.5), &mut work).unwrap();
-    assert_eq!(schedule.len(), 7);
-    exhaust_or_refine(&mut schedule, 4, &input, failure(), None, &mut work).unwrap();
-    assert_eq!(schedule.len(), 8);
-    // Outside every split interval a span is a fresh request.
-    exhaust_or_refine(&mut schedule, 7, &input, failure(), Some(0.9), &mut work).unwrap();
-    assert_eq!(schedule.len(), 9);
 }
 
 /// The defaults path: MK4S + generic PLA + standard quality, compiled and

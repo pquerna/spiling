@@ -661,7 +661,6 @@ pub(super) fn scan<'a>(
                         path: path_index,
                         first: first_point,
                         last,
-                        width_mm,
                         start: gap.start,
                         end: gap.end,
                         span,

@@ -370,7 +370,7 @@ pub(super) fn refine_surface_layer(
     })
 }
 
-fn split_resolved_layer(
+pub(super) fn split_resolved_layer(
     schedule: &mut Vec<LayerElevation>,
     index: u32,
     minimum_height_mm: f64,

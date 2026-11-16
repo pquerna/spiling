@@ -21,6 +21,7 @@ mod native;
 mod partition;
 mod preflight;
 mod region;
+mod slopes;
 mod startup;
 mod tolerant;
 use startup::StartupWall;
@@ -218,6 +219,7 @@ fn plan_with(
     }
     // A proposal: support and mapped-field refinement split it further.
     let mut schedule = scheduled_layers(input, &mut admission, &process_captures, cancel)?;
+    slopes::split_for_slopes(input, &admission, &mut schedule, cancel)?;
     let mut support_work = support::SupportWork::default();
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
@@ -227,13 +229,15 @@ fn plan_with(
     // charges its actual capacity against the working set.
     let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?;
     remaining_geometry_units(0, geometry_bytes(&[outside])?)?;
-    // Freeze the original startup pair's physical scope. Retrying by current
-    // layer count would shrink that scope each time one interval is split.
+    // Layer heights are decided before planning (`slopes`), so a complete
+    // pass constructs the plan once. Only explicit Off probes its startup
+    // pair, whose first layers must anchor without support; freeze that
+    // pair's physical scope so a split does not shrink it.
     let probe_scope = match input.intent.recipe.supports {
         SupportPolicy::Disabled => schedule
             .get(1)
             .map(|layer| AnchorProbeScope::StartupPair { top_mm: layer.z }),
-        SupportPolicy::Breakaway { .. } => Some(AnchorProbeScope::UnreachableSupport),
+        SupportPolicy::Breakaway { .. } => None,
     };
     let native_prefix = loop {
         let Some(scope) = probe_scope else { break None };
@@ -265,132 +269,38 @@ fn plan_with(
         );
         match outcome? {
             ScheduleAdmission::PrefixAdmitted(capture) => break Some(capture),
-            ScheduleAdmission::RefineUnreachableLayer {
-                index,
-                failure,
-                span_mm,
-            } => {
-                exhaust_or_refine(
-                    &mut schedule,
-                    index,
-                    input,
-                    failure,
-                    span_mm,
-                    &mut support_work,
-                )?;
+            ScheduleAdmission::RefineUnreachableLayer { index, failure } => {
+                refine_deposition_pair(&mut schedule, index, input, failure)?;
             }
-            ScheduleAdmission::Complete(_) | ScheduleAdmission::RetryUndecided => {
+            ScheduleAdmission::Complete(_) => {
                 unreachable!("tentative prefix cannot publish a plan")
             }
         }
     };
-    let mut prefix = native_prefix;
-    // After a complete-pass refinement only the refined neighborhood changed.
-    // Tolerant lanes first retry a truncated schedule through that
-    // neighborhood: its layers, demands and columns there equal the complete
-    // pass's, so a refinement it finds is the complete pass's first one.
-    // Anything else falls through to the complete pass, which decides.
-    let truncate_retries = matches!(
-        input.intent.recipe.supports,
-        SupportPolicy::Breakaway { .. }
-    ) && !matches!(
-        input.intent.recipe.sparse_infill,
-        SparseInfillPolicy::WebRoof { .. }
-    );
-    let mut refined = None;
-    loop {
-        if let Some(index) = refined.take()
-            && let Some(probe) = deposition_probe(
-                input,
-                &process_captures,
-                &schedule,
-                AnchorProbeScope::RefinedLayer {
-                    end: index + RETRY_WINDOW_LAYERS,
-                },
-                &mut surface_work,
-                cancel,
-            )?
-        {
-            let outcome = admit_schedule(
-                input,
-                cancel,
-                &mut admission,
-                &mut process_captures,
-                &mut schedule,
-                &mut surface_work,
-                &mut support_work,
-                Some(probe),
-                None,
-                &mut wall_memo,
-                &mut void_memo,
-                &mut survival_memo,
-                &mut rooms_memo,
-            );
-            match outcome {
-                Ok(ScheduleAdmission::RefineUnreachableLayer {
-                    index,
-                    failure,
-                    span_mm,
-                }) => {
-                    exhaust_or_refine(
-                        &mut schedule,
-                        index,
-                        input,
-                        failure,
-                        span_mm,
-                        &mut support_work,
-                    )?;
-                    refined = Some(index);
-                    continue;
-                }
-                Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
-                    return Err(failure);
-                }
-                _ => {}
-            }
-        }
-        let outcome = admit_schedule(
-            input,
-            cancel,
-            &mut admission,
-            &mut process_captures,
-            &mut schedule,
-            &mut surface_work,
-            &mut support_work,
-            None,
-            prefix.take(),
-            &mut wall_memo,
-            &mut void_memo,
-            &mut survival_memo,
-            &mut rooms_memo,
-        );
-        match outcome? {
-            ScheduleAdmission::Complete(plan) => return Ok(plan),
-            ScheduleAdmission::RefineUnreachableLayer {
-                index,
-                failure,
-                span_mm,
-            } => {
-                exhaust_or_refine(
-                    &mut schedule,
-                    index,
-                    input,
-                    failure,
-                    span_mm,
-                    &mut support_work,
-                )?;
-                refined = truncate_retries.then_some(index);
-            }
-            ScheduleAdmission::PrefixAdmitted(_) | ScheduleAdmission::RetryUndecided => {
-                unreachable!("complete schedule must produce a plan")
-            }
+    match admit_schedule(
+        input,
+        cancel,
+        &mut admission,
+        &mut process_captures,
+        &mut schedule,
+        &mut surface_work,
+        &mut support_work,
+        None,
+        native_prefix,
+        &mut wall_memo,
+        &mut void_memo,
+        &mut survival_memo,
+        &mut rooms_memo,
+    )? {
+        ScheduleAdmission::Complete(plan) => Ok(plan),
+        // A complete pass never re-plans; a split it would need is a defect
+        // of the schedule decided above, reported as such.
+        ScheduleAdmission::RefineUnreachableLayer { failure, .. } => Err(failure),
+        ScheduleAdmission::PrefixAdmitted(_) => {
+            unreachable!("complete schedule must produce a plan")
         }
     }
 }
-
-/// Output layers a truncated retry keeps above its refined index: the split
-/// may move the next demand up by one layer.
-const RETRY_WINDOW_LAYERS: usize = 3;
 
 /// Bytes held outside one schedule admission across retries.
 fn retry_outside_bytes(
@@ -421,11 +331,8 @@ enum ScheduleAdmission {
     RefineUnreachableLayer {
         index: usize,
         failure: ManufacturingError,
-        span_mm: Option<f64>,
     },
     Complete(NormalizedPrintPlan),
-    /// A truncated retry found no refinement the complete pass would make.
-    RetryUndecided,
 }
 
 struct OrdinaryTemplate {
@@ -468,8 +375,6 @@ fn admit_schedule<'model>(
     rooms_memo: &mut cathedral::RoomsMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let recipe = &input.intent.recipe;
-    let truncated =
-        probe.is_some_and(|probe| matches!(probe.scope, AnchorProbeScope::RefinedLayer { .. }));
     for capture in process_captures.iter_mut() {
         capture.applied = false;
     }
@@ -886,7 +791,7 @@ fn admit_schedule<'model>(
     let count = if let Some(probe) = probe {
         probe
             .scope
-            .end(schedule, recipe, surface_work, cancel)?
+            .end(schedule, surface_work, cancel)?
             .min(count as usize) as u32
     } else {
         count
@@ -1912,15 +1817,13 @@ fn admit_schedule<'model>(
                     .values()
                     .map(|model| model.support_margin())
                     .fold(0.0, f64::max),
-                deposition_limits: input.intent.effective_deposition_limits(),
                 replay: web_roof.is_none() && construction.domains.is_empty(),
                 phases: &phase_by_layer,
             },
             &mut segments,
             cancel,
             admission.geometry_work,
-            probe.is_some() && !truncated,
-            truncated,
+            probe.is_some(),
             support_work,
             |index,
              axis,
@@ -2297,7 +2200,6 @@ fn admit_schedule<'model>(
                     &admission.models,
                     void_memo,
                     demand_bounds,
-                    truncated,
                     retained_units,
                     live_bytes,
                     cancel,
@@ -2339,24 +2241,8 @@ fn admit_schedule<'model>(
         *neighborhoods.work_mut() = support_work.planar;
         let support_admission = support_admission?;
         match support_admission {
-            support::SupportAdmission::Complete | support::SupportAdmission::Undecided
-                if truncated =>
-            {
-                return Ok(ScheduleAdmission::RetryUndecided);
-            }
-            support::SupportAdmission::Undecided => {
-                unreachable!("only truncated retries leave support undecided")
-            }
-            support::SupportAdmission::RefineUnreachableLayer {
-                index,
-                failure,
-                span_mm,
-            } => {
-                return Ok(ScheduleAdmission::RefineUnreachableLayer {
-                    index,
-                    failure,
-                    span_mm,
-                });
+            support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
+                return Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure });
             }
             support::SupportAdmission::Complete if probe.is_some() => {
                 let startup_key = first_wall_key
@@ -2853,60 +2739,23 @@ struct LayerElevation {
     course: u32,
 }
 
-// No actual scheduled support top can fit beneath these object floors. This
-// derives the probe from the declared physical gap and XYZ6 bead intervals,
-// rather than a layer count, nozzle fraction or arbitrary near-bed distance.
-fn unreachable_support_end(
-    schedule: &[LayerElevation],
-    recipe: &PlanarPrintRecipe,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<usize, ManufacturingError> {
-    let SupportPolicy::Breakaway { z_gap_mm, .. } = recipe.supports else {
-        return Ok(0);
-    };
-    let Some(first) = schedule.first() else {
-        return Ok(0);
-    };
-    let earliest_top = project_xyz6_bead_height_mm(first.z, first.z - first.lower_z)?[1];
-    for (index, layer) in schedule.iter().enumerate().skip(1) {
-        preflight::charge_capture_proposal_work(work, 1, cancel)?;
-        let floor = project_xyz6_bead_height_mm(layer.z, layer.z - layer.lower_z)?[0];
-        if program_coordinates::enclosed_vertical_gap_mm(floor, earliest_top)? >= z_gap_mm {
-            return Ok(index);
-        }
-    }
-    Ok(schedule.len())
-}
-
 #[derive(Clone, Copy)]
 enum AnchorProbeScope {
-    UnreachableSupport,
-    StartupPair {
-        top_mm: f64,
-    },
-    /// Output layers below `end` after a complete-pass refinement. Support
-    /// keeps complete-pass semantics; only a refinement it finds is a decision.
-    RefinedLayer {
-        end: usize,
-    },
+    StartupPair { top_mm: f64 },
 }
 
 impl AnchorProbeScope {
     fn end(
         self,
         schedule: &[LayerElevation],
-        recipe: &PlanarPrintRecipe,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<usize, ManufacturingError> {
         match self {
-            Self::UnreachableSupport => unreachable_support_end(schedule, recipe, work, cancel),
             Self::StartupPair { top_mm } => {
                 preflight::charge_capture_proposal_work(work, 1, cancel)?;
                 Ok(schedule.partition_point(|layer| layer.lower_z < top_mm))
             }
-            Self::RefinedLayer { end } => Ok(end.min(schedule.len())),
         }
     }
 }
@@ -2925,7 +2774,7 @@ fn deposition_probe(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<DepositionProbe>, ManufacturingError> {
-    let end = scope.end(schedule, &input.intent.recipe, work, cancel)?;
+    let end = scope.end(schedule, work, cancel)?;
     if end <= 1 {
         return Ok(None);
     }
@@ -2980,86 +2829,6 @@ fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
     }
     schedule[top].course + (top - index) as u32
 }
-
-/// Refine the schedule at an unreachable layer. When it can be refined no
-/// further and supports are enabled, mark the layer exhausted so the retry
-/// continues scaffold construction without another split request. Final
-/// unresolved deposition is reported; a second split request still refuses.
-///
-/// A split can anchor a stroke only by moving the section below it closer in
-/// Z, which shortens the stagger it bridges. When an uncertified corridor
-/// returns inside an interval already split for one and its unanchored span
-/// is no shorter by more than the profile tolerance, the split moved nothing
-/// the stroke needed: the first layer above a flat ceiling, or a stroke
-/// across a sparse gap below, stays unanchored however thin the layers get.
-/// Such a layer stops requesting splits rather than halving toward the minimum
-/// bead height; exhaustion does not disable otherwise useful support contacts.
-fn exhaust_or_refine(
-    schedule: &mut Vec<LayerElevation>,
-    index: usize,
-    input: &CompilerInput<'_>,
-    failure: ManufacturingError,
-    span_mm: Option<f64>,
-    support_work: &mut support::SupportWork,
-) -> Result<(), ManufacturingError> {
-    let z = schedule.get(index).map(|layer| layer.z.to_bits());
-    let futile = span_mm.is_some_and(|span| {
-        schedule.get(index).is_some_and(|layer| {
-            support_work
-                .anchor_refinements
-                .iter()
-                .rev()
-                .find(|split| split.interval_mm[0] < layer.z && layer.z <= split.interval_mm[1])
-                .is_some_and(|split| span > split.span_mm - ANCHOR_REFINEMENT_PROGRESS_MM)
-        })
-    });
-    let interval = index
-        .checked_sub(1)
-        .filter(|_| index < schedule.len())
-        .map(|below| [schedule[below].lower_z, schedule[index].z]);
-    let refined = if futile {
-        Err(failure)
-    } else {
-        refine_deposition_pair(schedule, index, input, failure)
-    };
-    match refined {
-        Ok(()) => {
-            if let (Some(span_mm), Some(interval_mm)) = (span_mm, interval) {
-                support_work
-                    .anchor_refinements
-                    .try_reserve(1)
-                    .map_err(|_| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "actual-anchor refinement record allocation refused",
-                        )
-                    })?;
-                support_work
-                    .anchor_refinements
-                    .push(support::AnchorRefinement {
-                        interval_mm,
-                        span_mm,
-                    });
-            }
-            Ok(())
-        }
-        Err(failure)
-            if failure.code != ManufacturingErrorCode::ResourceLimit
-                && failure.code != ManufacturingErrorCode::Cancelled
-                && !matches!(input.intent.recipe.supports, SupportPolicy::Disabled) =>
-        {
-            match z {
-                Some(z) if support_work.exhausted.insert(z) => Ok(()),
-                _ => Err(failure),
-            }
-        }
-        Err(failure) => Err(failure),
-    }
-}
-
-/// Section changes below the ADR012 profile tolerance are not geometric
-/// progress for an actual-anchor split.
-const ANCHOR_REFINEMENT_PROGRESS_MM: f64 = 0.01;
 
 fn refine_deposition_pair(
     schedule: &mut Vec<LayerElevation>,
