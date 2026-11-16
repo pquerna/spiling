@@ -37,6 +37,107 @@ use std::sync::{
 
 /// Height of a tessellation bucket used to find the triangles a plane crosses.
 const BUCKET_MM: f64 = 0.5;
+/// How many items each phase of a section handles between checks of its cancellation flag.
+pub const CANCEL_STRIDE: usize = 4096;
+/// Deepest midpoint subdivision of one section chord on its true curve.
+const DENSIFY_DEPTH: u8 = 8;
+/// Most pieces one section chord is densified into: a full binary subdivision to
+/// [`DENSIFY_DEPTH`].
+pub const DENSIFY_PIECES: usize = 1 << DENSIFY_DEPTH;
+
+type Key = (u32, u32);
+type Segment = (Key, Key, u32);
+type Chain = (Vec<[f64; 2]>, Vec<u32>, bool);
+type Ring = (Vec<[f64; 2]>, Vec<u32>);
+
+/// What one tolerant section works on and may allocate at most, known before it runs
+/// ([`TolerantModel::section_demand`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionDemand {
+    /// Triangles the section reads: the work it is charged with.
+    pub triangles: usize,
+    /// Most heap it holds at once besides its result, at any moment of the section.
+    pub scratch_bytes: usize,
+    /// Most heap its returned section holds.
+    pub output_bytes: usize,
+}
+
+impl SectionDemand {
+    /// The bound for a section reading `t` triangles, besides its densification. A triangle
+    /// gives at most two crossings and one segment; chains hold at most two points a segment (an
+    /// open chain's last point); joining adds at most one face entry a segment; each crossed face
+    /// gives at most two circles. Densification starts each loop's new buffers at the loop's own
+    /// size and admits every growth past it.
+    pub fn for_triangles(t: usize) -> Self {
+        use std::mem::size_of;
+        let segments = t;
+        let crossings = t.saturating_mul(2);
+        let points = t.saturating_mul(2);
+        let faces = t.saturating_mul(3);
+        let point = size_of::<[f64; 2]>();
+        let face = size_of::<u32>();
+        // A vector grown by pushes to `n` items: its buffer at most twice that (or the smallest
+        // nonzero capacity), with the previous buffer still live while one grows.
+        let grown =
+            |n: usize, item: usize| n.saturating_mul(3).saturating_add(8).saturating_mul(item);
+        // A hash table sized for `n` entries up front: power-of-two buckets at 7/8 load, one
+        // control byte each, plus a group of control bytes and alignment.
+        let table = |n: usize, entry: usize| {
+            let buckets = (n.saturating_mul(8) / 7)
+                .saturating_add(1)
+                .next_power_of_two()
+                .max(8);
+            buckets
+                .saturating_mul(entry.saturating_add(1))
+                .saturating_add(32)
+        };
+        let scratch = [
+            segments.saturating_mul(size_of::<Segment>()),
+            table(crossings, size_of::<(Key, Crossing)>()),
+            segments
+                .saturating_mul(2)
+                .saturating_mul(size_of::<(Key, usize)>()),
+            crossings.saturating_mul(size_of::<Key>()),
+            segments,
+            segments.saturating_mul(size_of::<Chain>()),
+            segments.saturating_mul(2).saturating_mul(size_of::<Ring>()),
+            // Chains' rings and faces, every one grown by pushes (at most one a segment).
+            grown(points, point).saturating_add(segments.saturating_mul(8 * point)),
+            grown(faces, face).saturating_add(segments.saturating_mul(8 * face)),
+            // A join's extension: the joined ring's old and new buffers.
+            grown(points, point).saturating_add(grown(faces, face)),
+            // Deduplication copies one ring.
+            points
+                .saturating_mul(point)
+                .saturating_add(faces.saturating_mul(face)),
+            // Densification of one ring: its input and new buffers at its size (growth past it
+            // is admitted), the chord's subdivision stack, midpoints and their order.
+            points.saturating_mul(point + face),
+            points.saturating_mul(point + face),
+            (2 * DENSIFY_DEPTH as usize + 1).saturating_mul(size_of::<([f64; 2], [f64; 2], u8)>()),
+            grown(DENSIFY_PIECES, size_of::<(u8, [f64; 2])>()),
+            DENSIFY_PIECES.saturating_mul(size_of::<(f64, [f64; 2])>()),
+            // Nesting depths (the crossed faces are admitted at their count).
+            segments.saturating_mul(size_of::<usize>()),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        let output = [
+            segments.saturating_mul(size_of::<TolerantLoop>()),
+            points.saturating_mul(point + face),
+            segments
+                .saturating_mul(2)
+                .saturating_mul(size_of::<SectionCircle>()),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        Self {
+            triangles: t,
+            scratch_bytes: scratch,
+            output_bytes: output,
+        }
+    }
+}
 /// Largest measured mesh deviation, in profile tolerances, admitted where the
 /// mesher stopped refining analytic faces: their sections are projected onto
 /// the true surface, so only the mesh's topology is used there.
@@ -786,12 +887,69 @@ impl TolerantModel {
 
     /// The section at definition-local height `z`.
     pub fn section(&self, z: f64) -> Result<TolerantSection, GeometryError> {
-        self.section_with(z, true)
+        self.section_with(z, true, None, None)
+    }
+
+    /// [`Self::section`] under the caller's control. It stops with
+    /// [`GeometryErrorCode::Cancelled`] when `cancel` is set (checked on entry and every
+    /// [`CANCEL_STRIDE`] items of each of its phases). Densification on the true curve, which
+    /// [`Self::section_demand`] does not bound, asks `admit(bytes)` before each growth of its
+    /// buffers, and before the buffers sized by its result: `bytes` is heap it is about to hold
+    /// in addition to everything admitted before, and an `Err` from `admit` stops the section
+    /// and is returned unchanged. With `demand` the section's [`Self::section_demand`] and
+    /// `admitted` the sum of every `bytes` it asked for:
+    /// - the heap it holds at any moment of the call is at most
+    ///   `demand.scratch_bytes + demand.output_bytes + admitted`;
+    /// - the heap the returned section holds (its buffers' capacities) is at most
+    ///   `demand.output_bytes + admitted`.
+    ///
+    /// All of it is released when the call returns, but for the returned section.
+    pub fn section_admitted(
+        &self,
+        z: f64,
+        cancel: &AtomicBool,
+        admit: &mut dyn FnMut(usize) -> Result<(), GeometryError>,
+    ) -> Result<TolerantSection, GeometryError> {
+        self.section_with(z, true, Some(cancel), Some(admit))
+    }
+
+    /// What [`Self::section_admitted`] at `z` works on and holds besides its densification,
+    /// known before it runs: from the one bucket of triangles the plane can cross and the sizes
+    /// of the collections built from them, including hash-table control bytes and growth by
+    /// doubling with the old and new buffers both live. A caller holds
+    /// `scratch_bytes + output_bytes` for the call and admits densification as it asks.
+    pub fn section_demand(&self, z: f64) -> Result<SectionDemand, GeometryError> {
+        if !z.is_finite() {
+            return Err(unavailable("tolerant section height is not finite"));
+        }
+        Ok(SectionDemand::for_triangles(
+            self.bucket_at(z).map_or(0, |b| self.buckets[b].len()),
+        ))
+    }
+
+    fn bucket_at(&self, z: f64) -> Option<usize> {
+        let offset = (z - self.z_min) / BUCKET_MM;
+        (offset >= 0.0 && (offset as usize) < self.buckets.len()).then_some(offset as usize)
     }
 
     // Raw support traces label outgoing segments by triangle identity. Their
     // connectivity is constant strictly between consecutive mesh vertex heights.
-    fn section_with(&self, z: f64, analytic: bool) -> Result<TolerantSection, GeometryError> {
+    // Every collection is sized from the bucket's triangles up front (see
+    // `SectionDemand::for_triangles`), so its growth is the bound's.
+    fn section_with(
+        &self,
+        z: f64,
+        analytic: bool,
+        cancel: Option<&AtomicBool>,
+        mut admit: Option<&mut dyn FnMut(usize) -> Result<(), GeometryError>>,
+    ) -> Result<TolerantSection, GeometryError> {
+        let check = |i: usize| -> Result<(), GeometryError> {
+            match cancel {
+                Some(cancel) if i.is_multiple_of(CANCEL_STRIDE) => crate::check_cancel(cancel),
+                _ => Ok(()),
+            }
+        };
+        check(0)?;
         let empty = TolerantSection {
             z_mm: z,
             loops: Vec::new(),
@@ -803,10 +961,11 @@ impl TolerantModel {
         if !z.is_finite() {
             return Err(unavailable("tolerant section height is not finite"));
         }
-        let offset = (z - self.z_min) / BUCKET_MM;
-        if offset < 0.0 || offset as usize >= self.buckets.len() {
+        let Some(bucket) = self.bucket_at(z) else {
             return Ok(empty);
-        }
+        };
+        let bucket = &self.buckets[bucket];
+        let triangles = bucket.len();
         // A vertex exactly on the plane counts as above it, so each triangle
         // gives zero or two crossings and no vertex is shared by more than two.
         let above = |v: u32| self.positions[v as usize][2] >= z;
@@ -816,17 +975,18 @@ impl TolerantModel {
             [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])]
         };
         let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
-        let mut segments = Vec::new();
+        let mut segments: Vec<Segment> = Vec::with_capacity(triangles);
         // Each crossing with the face of each triangle that uses it.
-        let mut points: HashMap<(u32, u32), Crossing> = HashMap::new();
-        for &index in &self.buckets[offset as usize] {
+        let mut points: HashMap<Key, Crossing> = HashMap::with_capacity(2 * triangles);
+        for (i, &index) in bucket.iter().enumerate() {
+            check(i)?;
             let [a, b, c] = self.triangles[index as usize];
             let face = if analytic {
                 self.faces[index as usize]
             } else {
                 index
             };
-            let mut ends = Vec::with_capacity(2);
+            let (mut ends, mut count) = ([(0, 0); 2], 0);
             for (p, q) in [(a, b), (b, c), (c, a)] {
                 if above(p) != above(q) {
                     let k = key(p, q);
@@ -838,71 +998,77 @@ impl TolerantModel {
                             }
                         })
                         .or_insert_with(|| (crossing(p, q), face, None));
-                    ends.push(k);
+                    if count < 2 {
+                        ends[count] = k;
+                    }
+                    count += 1;
                 }
             }
-            if ends.len() == 2 {
+            if count == 2 {
                 segments.push((ends[0], ends[1], face));
             }
         }
         if segments.is_empty() {
             return Ok(empty);
         }
-        let points: HashMap<(u32, u32), [f64; 2]> = points
-            .into_iter()
-            .map(|(k, (p, first, second))| {
-                (
-                    k,
-                    if analytic {
-                        self.exact_crossing(p, z, first, second)
-                    } else {
-                        p
-                    },
-                )
-            })
-            .collect();
-        // Chain by crossing identity: open chains from degree-one crossings
-        // first, then the remaining closed cycles.
-        let mut incident: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-        for (i, (p, q, _)) in segments.iter().enumerate() {
-            incident.entry(*p).or_default().push(i);
-            incident.entry(*q).or_default().push(i);
+        if analytic {
+            for (i, (p, first, second)) in points.values_mut().enumerate() {
+                check(i)?;
+                *p = self.exact_crossing(*p, z, *first, *second);
+            }
         }
+        // Chain by crossing identity: open chains from degree-one crossings
+        // first, then the remaining closed cycles. Incidence is a sorted list
+        // of (crossing, segment), each crossing's segments one run of it.
+        let mut incident: Vec<(Key, usize)> = Vec::with_capacity(2 * segments.len());
+        for (i, (p, q, _)) in segments.iter().enumerate() {
+            incident.push((*p, i));
+            incident.push((*q, i));
+        }
+        incident.sort_unstable();
+        let run = |node: Key| -> &[(Key, usize)] {
+            let start = incident.partition_point(|(k, _)| *k < node);
+            let end = incident.partition_point(|(k, _)| *k <= node);
+            &incident[start..end]
+        };
         let mut used = vec![false; segments.len()];
-        let mut chains: Vec<(Vec<[f64; 2]>, Vec<u32>, bool)> = Vec::new();
-        let walk = |start_node: (u32, u32), first: usize, used: &mut Vec<bool>| {
+        let mut chains: Vec<Chain> = Vec::with_capacity(segments.len());
+        let walk = |start_node: Key, first: usize, used: &mut Vec<bool>| {
             let (mut ring, mut faces) = (Vec::new(), Vec::new());
             let (mut node, mut segment) = (start_node, first);
             loop {
                 used[segment] = true;
                 let (p, q, face) = segments[segment];
-                ring.push(points[&node]);
+                ring.push(points[&node].0);
                 faces.push(face);
                 node = if p == node { q } else { p };
                 if node == start_node {
                     return (ring, faces, true);
                 }
-                match incident[&node].iter().copied().find(|&s| !used[s]) {
+                match run(node).iter().map(|(_, s)| *s).find(|&s| !used[s]) {
                     Some(next) => segment = next,
                     None => {
-                        ring.push(points[&node]);
+                        ring.push(points[&node].0);
                         return (ring, faces, false);
                     }
                 }
             }
         };
-        let mut ends: Vec<(u32, u32)> = incident
-            .iter()
-            .filter(|(_, s)| s.len() % 2 == 1)
-            .map(|(k, _)| *k)
-            .collect();
-        ends.sort_unstable();
-        for end in ends {
-            if let Some(first) = incident[&end].iter().copied().find(|&s| !used[s]) {
-                chains.push(walk(end, first, &mut used));
+        let mut ends: Vec<Key> = Vec::with_capacity(points.len());
+        for group in incident.chunk_by(|a, b| a.0 == b.0) {
+            if group.len() % 2 == 1 {
+                ends.push(group[0].0);
             }
         }
+        for (i, end) in ends.iter().enumerate() {
+            check(i)?;
+            if let Some(first) = run(*end).iter().map(|(_, s)| *s).find(|&s| !used[s]) {
+                chains.push(walk(*end, first, &mut used));
+            }
+        }
+        drop(ends);
         for first in 0..segments.len() {
+            check(first)?;
             if !used[first] {
                 let start_node = segments[first].0;
                 chains.push(walk(start_node, first, &mut used));
@@ -911,8 +1077,8 @@ impl TolerantModel {
         // Join open chains end to start within the join tolerance.
         let mut joined_gaps = 0;
         let mut max_gap: f64 = 0.0;
-        let mut open: Vec<(Vec<[f64; 2]>, Vec<u32>)> = Vec::new();
-        let mut rings: Vec<(Vec<[f64; 2]>, Vec<u32>)> = Vec::new();
+        let mut open: Vec<Ring> = Vec::with_capacity(chains.len());
+        let mut rings: Vec<Ring> = Vec::with_capacity(chains.len());
         for (ring, faces, closed) in chains {
             if closed {
                 rings.push((ring, faces));
@@ -920,8 +1086,11 @@ impl TolerantModel {
                 open.push((ring, faces));
             }
         }
+        let mut steps = 0usize;
         while let Some((mut ring, mut faces)) = open.pop() {
             loop {
+                steps += 1;
+                check(steps)?;
                 let tail = *ring.last().unwrap();
                 let distance = |p: [f64; 2]| (p[0] - tail[0]).hypot(p[1] - tail[1]);
                 let head_gap = distance(ring[0]);
@@ -955,6 +1124,7 @@ impl TolerantModel {
                 }
             }
         }
+        drop(open);
         // Validate on the result: drop slivers, then orient by nesting depth.
         let sliver = if analytic {
             self.policy.profile_mm * self.policy.profile_mm
@@ -962,11 +1132,12 @@ impl TolerantModel {
             0.0
         };
         let mut dropped_slivers = 0;
-        let mut loops = Vec::new();
-        for (mut points, mut faces) in rings {
+        let mut loops = Vec::with_capacity(rings.len());
+        for (i, (mut points, mut faces)) in rings.into_iter().enumerate() {
+            check(i)?;
             dedupe(&mut points, &mut faces);
             if analytic {
-                self.densify(&mut points, &mut faces, z);
+                self.densify(&mut points, &mut faces, z, &mut admit)?;
             }
             if points.len() < 3 {
                 dropped_slivers += 1;
@@ -983,15 +1154,17 @@ impl TolerantModel {
                 area,
             });
         }
-        let depths: Vec<usize> = (0..loops.len())
-            .map(|i| {
-                let probe = loops[i].points[0];
+        let mut depths: Vec<usize> = Vec::with_capacity(loops.len());
+        for i in 0..loops.len() {
+            check(i)?;
+            let probe = loops[i].points[0];
+            depths.push(
                 (0..loops.len())
                     .filter(|&j| j != i && loops[j].area.abs() > loops[i].area.abs())
                     .filter(|&j| contains(&loops[j].points, probe))
-                    .count()
-            })
-            .collect();
+                    .count(),
+            );
+        }
         for (l, depth) in loops.iter_mut().zip(depths) {
             let outer = depth % 2 == 0;
             if (l.area > 0.0) != outer {
@@ -1001,10 +1174,15 @@ impl TolerantModel {
                 l.area = -l.area;
             }
         }
-        let mut crossed: Vec<u32> = loops.iter().flat_map(|l| l.faces.iter().copied()).collect();
+        let total: usize = loops.iter().map(|l| l.faces.len()).sum();
+        if let Some(admit) = admit.as_mut() {
+            admit(total.saturating_mul(std::mem::size_of::<u32>()))?;
+        }
+        let mut crossed: Vec<u32> = Vec::with_capacity(total);
+        crossed.extend(loops.iter().flat_map(|l| l.faces.iter().copied()));
         crossed.sort_unstable();
         crossed.dedup();
-        let mut circles = Vec::new();
+        let mut circles = Vec::with_capacity(if analytic { 2 * crossed.len() } else { 0 });
         for face in crossed {
             if analytic && let Some(Some(surface)) = self.surfaces.get(face as usize) {
                 surface.circles(z, face, &mut circles);
@@ -1048,11 +1226,17 @@ impl TolerantModel {
 
     /// Insert points on the true curve wherever a chord on a curved analytic
     /// face sags more than a quarter of the profile tolerance.
-    fn densify(&self, points: &mut Vec<[f64; 2]>, faces: &mut Vec<u32>, z: f64) {
+    fn densify(
+        &self,
+        points: &mut Vec<[f64; 2]>,
+        faces: &mut Vec<u32>,
+        z: f64,
+        admit: &mut Option<&mut dyn FnMut(usize) -> Result<(), GeometryError>>,
+    ) -> Result<(), GeometryError> {
         let sag = self.policy.profile_mm * 0.25;
         let reach = self.reach;
         if points.len() < 2 {
-            return;
+            return Ok(());
         }
         let mut dense_points = Vec::with_capacity(points.len());
         let mut dense_faces = Vec::with_capacity(faces.len());
@@ -1064,7 +1248,7 @@ impl TolerantModel {
             let Some(surface) = self.surface(face).filter(|s| !s.is_plane()) else {
                 continue;
             };
-            // Depth-first midpoint subdivision, at most 2^8 pieces per chord.
+            // Depth-first midpoint subdivision, at most DENSIFY_PIECES pieces per chord.
             let mut stack = vec![(a, b, 0u8)];
             let mut inserted = Vec::new();
             while let Some((a, b, depth)) = stack.pop() {
@@ -1072,7 +1256,7 @@ impl TolerantModel {
                 let Some(on) = surface.project(mid, z, reach) else {
                     continue;
                 };
-                if (on[0] - mid[0]).hypot(on[1] - mid[1]) <= sag || depth >= 8 {
+                if (on[0] - mid[0]).hypot(on[1] - mid[1]) <= sag || depth >= DENSIFY_DEPTH {
                     continue;
                 }
                 // Visit the later half first so points come out in order.
@@ -1092,13 +1276,29 @@ impl TolerantModel {
                 })
                 .collect();
             along.sort_by(|x, y| x.0.total_cmp(&y.0));
+            // Grow by doubling, each new pair of buffers admitted before it is made (the old
+            // pair, held until the move, was within the demand or admitted before).
+            let needed = dense_points.len() + along.len();
+            if needed > dense_points.capacity() {
+                let capacity = needed.max(dense_points.capacity().saturating_mul(2));
+                if let Some(admit) = admit.as_mut() {
+                    admit(capacity.saturating_mul(
+                        std::mem::size_of::<[f64; 2]>() + std::mem::size_of::<u32>(),
+                    ))?;
+                }
+                dense_points.reserve_exact(capacity - dense_points.len());
+                dense_faces.reserve_exact(capacity - dense_faces.len());
+            }
             for (_, p) in along {
                 dense_points.push(p);
                 dense_faces.push(face);
             }
         }
+        dense_points.shrink_to_fit();
+        dense_faces.shrink_to_fit();
         *points = dense_points;
         *faces = dense_faces;
+        Ok(())
     }
 }
 

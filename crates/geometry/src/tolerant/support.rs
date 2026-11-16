@@ -237,7 +237,8 @@ impl TolerantModel {
 
         // An interior section covers vertical lines with no boundary inside
         // this slab. Each boundary edge retains the same complete slab scope.
-        let section = self.section_with((interval[0] + interval[1]) * 0.5, false)?;
+        let section =
+            self.section_with((interval[0] + interval[1]) * 0.5, false, Some(cancel), None)?;
         let mut owners = vec![None; section.loops.len()];
         for (index, hole) in section
             .loops
@@ -615,7 +616,7 @@ impl TolerantModel {
             let mid = events[low] + (events[low + 1] - events[low]) * 0.5;
             let [lo, hi] = [events[low], events[high + 1]];
             let holes: Vec<_> = self
-                .section_with(mid, false)?
+                .section_with(mid, false, Some(cancel), None)?
                 .loops
                 .into_iter()
                 .filter(|l| l.area < 0.0)
@@ -831,7 +832,7 @@ mod tests {
                     continue;
                 }
                 for l in self
-                    .section_with(mid, false)?
+                    .section_with(mid, false, Some(cancel), None)?
                     .loops
                     .into_iter()
                     .filter(|l| l.area < 0.0)
