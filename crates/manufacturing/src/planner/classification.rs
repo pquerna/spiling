@@ -368,32 +368,219 @@ impl ClassifiedRegions {
                 result.retained_points().saturating_mul(2),
                 byte_sum(result.retained_bytes(), encoded)?,
             )?;
-            for (region_index, interior) in result.interiors.iter().enumerate() {
-                if interior.coverage.fraction > 0.0 && interior.coverage.fraction < 1.0 {
-                    result.coverage.web_roof_domains.push(WebRoofDomain {
-                        region_index: region_index as u16,
-                        extent: interior
-                            .domain
-                            .0
-                            .iter()
-                            .map(|polygon| DiaphragmPolygonMm {
-                                outer: polygon.exterior().0.iter().map(|p| [p.x, p.y]).collect(),
-                                holes: polygon
-                                    .interiors()
-                                    .iter()
-                                    .map(|ring| ring.0.iter().map(|p| [p.x, p.y]).collect())
-                                    .collect(),
-                            })
-                            .collect(),
-                        // Stamped with the part frame when the layer is
-                        // assembled.
-                        frame_mm: [[0.0; 2]; 2],
-                    });
-                }
-            }
+            result.record_web_roof_domains();
         }
         admit_scratch(result.retained_points(), result.retained_bytes())?;
         Ok(result)
+    }
+
+    fn record_web_roof_domains(&mut self) {
+        self.coverage.web_roof_domains.clear();
+        for (region_index, interior) in self.interiors.iter().enumerate() {
+            if interior.coverage.fraction > 0.0 && interior.coverage.fraction < 1.0 {
+                self.coverage.web_roof_domains.push(WebRoofDomain {
+                    region_index: region_index as u16,
+                    extent: interior
+                        .domain
+                        .0
+                        .iter()
+                        .map(|polygon| DiaphragmPolygonMm {
+                            outer: polygon.exterior().0.iter().map(|p| [p.x, p.y]).collect(),
+                            holes: polygon
+                                .interiors()
+                                .iter()
+                                .map(|ring| ring.0.iter().map(|p| [p.x, p.y]).collect())
+                                .collect(),
+                        })
+                        .collect(),
+                    // Stamped with the part frame when the layer is
+                    // assembled.
+                    frame_mm: [[0.0; 2]; 2],
+                });
+            }
+        }
+    }
+
+    /// Cathedral roofs land on room walls. Where this layer's top skin lands
+    /// over what the layer below still kept as interior (`landed`: the
+    /// material surviving that layer's own top-skin horizon), its border
+    /// would leave the skin rows and the remaining room's loop hanging over
+    /// the open room. Each lattice cell such skin reaches into becomes top
+    /// skin across its whole sparse part, so the border lies on a lattice
+    /// line and rests on the walls beneath. Skin over the cell's wall band,
+    /// or within a bead of the lower layer's own skin border (a sloped
+    /// wall), is already carried and converts nothing.
+    pub(super) fn snap_roof_to_cells(
+        mut self,
+        roof: Option<region::Roof>,
+        landed: Option<&MultiPolygon<f64>>,
+        recipe: &PlanarPrintRecipe,
+        mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        let (Some(roof), Some(landed)) = (roof, landed) else {
+            return Ok(self);
+        };
+        let fraction = recipe.infill_fraction;
+        if landed.0.is_empty() {
+            return Ok(self);
+        }
+        // Top skin over the lower layer's interior, a bead clear of its edge.
+        let base_points = self.retained_points();
+        let base_bytes = self.retained_bytes();
+        let open = region::offset_admitted(
+            landed,
+            -recipe.bead_width_mm,
+            |points, bytes, overlay| {
+                admit(
+                    point_sum(base_points, points)?,
+                    byte_sum(base_bytes, bytes)?,
+                )?;
+                if let Some((a, b)) = overlay {
+                    boolean_budget(a, b, cancel)?;
+                }
+                Ok(())
+            },
+            cancel,
+        )?;
+        let intruding = intersection(&self.top, &open, cancel)?;
+        if intruding.0.is_empty() {
+            return Ok(self);
+        }
+        let band = 0.5
+            * (super::cathedral::spacing(recipe.bead_width_mm, recipe.layer_height_mm)
+                + recipe.bead_width_mm);
+        if self.top.0.is_empty() || self.interiors.len() != 1 || fraction <= 0.0 || fraction >= 1.0
+        {
+            return Ok(self);
+        }
+        let (Some(top_bounds), Some(interior_bounds)) = (
+            self.top.bounding_rect(),
+            self.interiors[0].domain.bounding_rect(),
+        ) else {
+            return Ok(self);
+        };
+        let pitch =
+            super::cathedral::cell_pitch(recipe.bead_width_mm, recipe.layer_height_mm, fraction);
+        let lines = super::cathedral::lattice(roof.frame_mm, pitch);
+        // Cell intervals per axis; the outer cells reach past every domain.
+        let span = [
+            [
+                top_bounds.min().x.min(interior_bounds.min().x),
+                top_bounds.max().x.max(interior_bounds.max().x),
+            ],
+            [
+                top_bounds.min().y.min(interior_bounds.min().y),
+                top_bounds.max().y.max(interior_bounds.max().y),
+            ],
+        ];
+        let reach = |axis: usize| {
+            let l = &lines[axis];
+            let mut out = Vec::with_capacity(l.len() + 1);
+            out.push((span[axis][0].min(l[0]) - pitch, l[0]));
+            out.extend(l.windows(2).map(|pair| (pair[0], pair[1])));
+            out.push((l[l.len() - 1], span[axis][1].max(l[l.len() - 1]) + pitch));
+            out
+        };
+        let overlaps = |bounds: geo::Rect<f64>, axis: usize, (a, b): (f64, f64)| {
+            let (low, high) = if axis == 0 {
+                (bounds.min().x, bounds.max().x)
+            } else {
+                (bounds.min().y, bounds.max().y)
+            };
+            a < high && b > low
+        };
+        let sliver = recipe.bead_width_mm * recipe.bead_width_mm;
+        let mut touched = Vec::new();
+        for x in reach(0) {
+            if !overlaps(top_bounds, 0, x) || !overlaps(interior_bounds, 0, x) {
+                continue;
+            }
+            for y in reach(1) {
+                check_cancel(cancel)?;
+                if !overlaps(top_bounds, 1, y) || !overlaps(interior_bounds, 1, y) {
+                    continue;
+                }
+                let cell = MultiPolygon(vec![
+                    geo::Rect::new(geo::Coord { x: x.0, y: y.0 }, geo::Coord { x: x.1, y: y.1 })
+                        .to_polygon(),
+                ]);
+                admit(
+                    scratch_points(&[&self.top, &self.interiors[0].domain])?,
+                    self.retained_bytes(),
+                )?;
+                // The room inside the cell's wall band; outer cells have a
+                // lattice line on one side only, so the far side stays put.
+                let room = MultiPolygon(vec![
+                    geo::Rect::new(
+                        geo::Coord {
+                            x: x.0 + band,
+                            y: y.0 + band,
+                        },
+                        geo::Coord {
+                            x: (x.1 - band).max(x.0 + band),
+                            y: (y.1 - band).max(y.0 + band),
+                        },
+                    )
+                    .to_polygon(),
+                ]);
+                if intersection(&intruding, &room, cancel)?.unsigned_area() > sliver
+                    && intersection(&self.interiors[0].domain, &cell, cancel)?.unsigned_area() > 0.0
+                {
+                    touched.push(cell.0.into_iter().next().expect("one cell"));
+                }
+            }
+        }
+        if touched.is_empty() {
+            return Ok(self);
+        }
+        let mut work = 0usize;
+        let mut mask = MultiPolygon(Vec::new());
+        for cell in touched {
+            mask = union_accumulated(&mask, &MultiPolygon(vec![cell]), &mut work, cancel)?;
+        }
+        let interior = &self.interiors[0].domain;
+        let mut moved = intersection(interior, &mask, cancel)?;
+        let mut kept = difference(interior, &mask, cancel)?;
+        // Boolean dust along the cell border belongs to the skin side.
+        let (dust, real): (Vec<_>, Vec<_>) = kept.0.into_iter().partition(|polygon| {
+            let around: f64 = std::iter::once(polygon.exterior())
+                .chain(polygon.interiors())
+                .map(|ring| {
+                    ring.0
+                        .windows(2)
+                        .map(|e| (e[1].x - e[0].x).hypot(e[1].y - e[0].y))
+                        .sum::<f64>()
+                })
+                .sum();
+            around <= 0.0 || 2.0 * polygon.unsigned_area() / around < super::PROFILE_TOLERANCE_MM
+        });
+        kept = MultiPolygon(real);
+        if !dust.is_empty() {
+            moved = union_accumulated(&moved, &MultiPolygon(dust), &mut work, cancel)?;
+        }
+        let top = union_accumulated(&self.top, &moved, &mut work, cancel)?;
+        admit(
+            scratch_points(&[&top, &kept, &moved, &mask])?,
+            self.retained_bytes(),
+        )?;
+        self.top = top;
+        self.coverage.top_skin_area_mm2 = self.top.unsigned_area();
+        let area = kept.unsigned_area();
+        if area > 0.0 {
+            let interior = &mut self.interiors[0];
+            interior.domain = kept;
+            interior.coverage.area_mm2 = area;
+            self.coverage.process_regions = vec![interior.coverage.clone()];
+        } else {
+            self.interiors.clear();
+            self.coverage.process_regions.clear();
+        }
+        self.coverage.sparse_interior_area_mm2 = area;
+        self.coverage.intentional_void_area_mm2 = area * (1.0 - fraction);
+        self.record_web_roof_domains();
+        admit(self.retained_points(), self.retained_bytes())?;
+        Ok(self)
     }
 
     /// Resolve only the eligible interior. Global walls, physical skins and

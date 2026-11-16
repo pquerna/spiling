@@ -3599,19 +3599,27 @@ fn cathedral_replay_rejects_a_floating_loop_however_it_is_tessellated() {
         .filter(|&i| cathedral_roads(&plan.layers[i]).next().is_some())
         .collect();
     let middle = sparse[1];
-    // The center of the largest room, on a layer below any teeth.
-    let (_, template) = cathedral_roads(&plan.layers[middle])
-        .max_by_key(|(_, p)| p.points_mm.len())
-        .unwrap();
-    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-    for p in &template.points_mm {
-        for axis in 0..2 {
-            lo[axis] = lo[axis].min(p[axis]);
-            hi[axis] = hi[axis].max(p[axis]);
-        }
-    }
-    assert!(hi[0] - lo[0] > 3.0 && hi[1] - lo[1] > 3.0);
-    let (x, y) = (0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]));
+    // The center of a room near the middle of the part, on a layer below any
+    // teeth: halfway between neighbouring lattice lines (or a line and the
+    // frame) on each axis.
+    let domain = &plan.layers[middle].region_coverage.web_roof_domains[0];
+    let pitch = crate::planner::cathedral::cell_pitch(
+        requested.recipe.bead_width_mm,
+        requested.recipe.layer_height_mm,
+        requested.recipe.infill_fraction,
+    );
+    let lines = crate::planner::cathedral::lattice(domain.frame_mm, pitch);
+    let center = |axis: usize| {
+        let mid = 0.5 * (domain.frame_mm[0][axis] + domain.frame_mm[1][axis]);
+        let mut l = vec![domain.frame_mm[0][axis]];
+        l.extend(&lines[axis]);
+        l.push(domain.frame_mm[1][axis]);
+        let k = l.iter().rposition(|&c| c < mid).unwrap().min(l.len() - 2);
+        assert!(l[k + 1] - l[k] > 3.0);
+        0.5 * (l[k] + l[k + 1])
+    };
+    let (x, y) = (center(0), center(1));
+    let (_, template) = cathedral_roads(&plan.layers[middle]).next().unwrap();
     let z = plan.layers[middle].z_mm;
     for subdivisions in [1usize, 8] {
         let mut floating = plan.clone();
@@ -3658,6 +3666,63 @@ fn cathedral_builds_each_part_of_a_plate_on_one_lattice() {
             .iter()
             .any(|domain| domain.extent.len() == 2)
     }));
+}
+
+#[test]
+fn cathedral_replay_rejects_a_road_crossing_a_bore_between_legal_samples() {
+    let scene = Scene::new(HOLE, &[pose(40.0, 40.0, 0.0)]);
+    let mut requested = cathedral_intent(0.12);
+    requested.recipe.process.max_bridge_span_mm = 4.0;
+    let bundle = scene.compile(&requested).unwrap();
+    let plan = &bundle.plan;
+    let index = (0..plan.layers.len())
+        .filter(|&i| {
+            cathedral_roads(&plan.layers[i]).next().is_some()
+                && plan.layers[i].region_coverage.web_roof_domains[0]
+                    .extent
+                    .iter()
+                    .any(|p| !p.holes.is_empty())
+        })
+        .nth(2)
+        .unwrap();
+    let layer = &plan.layers[index];
+    let hole = &layer.region_coverage.web_roof_domains[0]
+        .extent
+        .iter()
+        .find(|p| !p.holes.is_empty())
+        .unwrap()
+        .holes[0];
+    let n = (hole.len() - 1) as f64;
+    let (cx, cy) = (
+        hole[..hole.len() - 1].iter().map(|p| p[0]).sum::<f64>() / n,
+        hole[..hole.len() - 1].iter().map(|p| p[1]).sum::<f64>() / n,
+    );
+    let r = hole
+        .iter()
+        .map(|p| (p[0] - cx).hypot(p[1] - cy))
+        .fold(0.0, f64::max);
+    // A chord of the bore, crossed by the first edge well before its middle:
+    // both ends and the midpoint of every edge lie in legal material.
+    let d = r - 0.6;
+    let half = (r * r - d * d).sqrt();
+    let (x0, x1, y0) = (cx - half - 1.0, cx + 3.0 * half + 3.0, cy + d);
+    let z = layer.z_mm;
+    let corners = [[x0, y0], [x1, y0], [x1, y0 + 0.8], [x0, y0 + 0.8], [x0, y0]];
+    for p in [[x0, y0], [x1, y0], [0.5 * (x0 + x1), y0]] {
+        assert!((p[0] - cx).hypot(p[1] - cy) > r + 0.5, "{p:?}");
+    }
+    // Inserted before an existing Cathedral road, after the walls, so the
+    // walls' deposition order and seams stay as planned.
+    let (at, template) = cathedral_roads(layer).next().unwrap();
+    let mut road = template.clone();
+    road.points_mm = corners.iter().map(|p| [p[0], p[1], z]).collect();
+    let mut crossing = plan.clone();
+    crossing.layers[index].paths.insert(at, road);
+    let error = assert_emitted_refuses(crossing, &requested, false);
+    assert!(
+        error.message.contains("leaves its room domain"),
+        "{error:?}"
+    );
 }
 
 #[test]

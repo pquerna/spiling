@@ -4,8 +4,8 @@
 //! Continuous roads: join the ends of clipped infill and skin roads along the
 //! inside of the layer's walls, so each region prints as few uninterrupted
 //! extrusions as its geometry allows. One rule serves every eligible pattern
-//! (skin and solid rows; rectilinear, Grid and Cathedral sparse rows; Gyroid
-//! curves): a road end
+//! (skin and solid rows; rectilinear and Grid sparse rows; Gyroid curves;
+//! Cathedral rooms are their own closed construction): a road end
 //! lies in the bead band inside a wall; two ends that are neighbours along
 //! that wall, with nothing between them, may be joined by a connector that
 //! follows the wall at the roads' offset. Every road keeps its exact
@@ -179,9 +179,10 @@ fn eligible(path: &DepositionPath, policy: &SparseInfillPolicy, layer: &PrintLay
             Some(DepositionOwner::MandatorySkin { .. }),
         ) => true,
         (DepositionKind::SolidFill, Some(DepositionOwner::Regional { .. })) => true,
-        (DepositionKind::SparseFill, Some(DepositionOwner::Regional { .. })) => {
-            !matches!(policy, SparseInfillPolicy::CombineEligible { .. })
-        }
+        (DepositionKind::SparseFill, Some(DepositionOwner::Regional { .. })) => !matches!(
+            policy,
+            SparseInfillPolicy::CombineEligible { .. } | SparseInfillPolicy::WebRoof { .. }
+        ),
         // Sparse infill spanning the rows beneath it connects like sparse.
         (DepositionKind::Bridge, owner) => {
             speeds::is_sparse_region_bridge(layer, path.kind, owner)

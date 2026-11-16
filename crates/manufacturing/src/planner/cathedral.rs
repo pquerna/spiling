@@ -9,7 +9,11 @@
 //! sparse domain) prints as closed loops offset inward by half the stadium
 //! bead spacing `s`, so each shared wall is two bonded beads and walls stack
 //! exactly. Corners at interior crossings are pinned inward until their bead
-//! covers the crossing: an explicit 2x2 pier.
+//! covers the crossing: an explicit 2x2 pier. A strip too narrow for a loop
+//! carries one open spine bead. Neighbouring loops are spliced across their
+//! shared wall into one loop per connected region, and top skin that covers
+//! part of a cell takes the whole cell on that layer, so roofs always end on
+//! walls.
 //!
 //! **Roofs.** Whatever the next physical layer deposits over a room (skin,
 //! solid, bridges) must be supported. Tooth columns perpendicular to those
@@ -21,7 +25,10 @@
 
 use super::region::offset_admitted;
 use crate::{check_cancel, error};
-use geo::{Area, BooleanOps, BoundingRect, Coord, LineString, MultiPolygon, Polygon, Rect};
+use geo::{
+    Area, BooleanOps, BoundingRect, Coord, LineString, MinimumRotatedRect, MultiPolygon, Polygon,
+    Rect,
+};
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 use spiling_contracts::manufacturing::*;
 use std::collections::BTreeMap;
@@ -54,6 +61,12 @@ pub(crate) fn lattice(frame: [[f64; 2]; 2], pitch: f64) -> [Vec<f64>; 2] {
         let first = frame[0][axis] + (length - (count - 1) as f64 * pitch) * 0.5;
         (0..count).map(|i| first + i as f64 * pitch).collect()
     })
+}
+
+/// A Cathedral road: regional sparse fill under the Cathedral policy.
+pub(super) fn is_road(path: &DepositionPath) -> bool {
+    path.kind == DepositionKind::SparseFill
+        && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
 }
 
 pub(super) struct Field {
@@ -130,12 +143,14 @@ impl Field {
             .map(|layer| layer_rooms(layer, self.frame_mm, recipe, cancel))
             .collect::<Result<Vec<_>, _>>()?;
         let teeth = grow_teeth(layers, &rooms, recipe, cancel)?;
-        for (index, layer) in layers.iter_mut().enumerate() {
+        let mut anchors = super::support::AnchorWorkspace::default();
+        let mut work = 0usize;
+        for index in 0..layers.len() {
             check_cancel(cancel)?;
-            let cathedral = |path: &DepositionPath| {
-                path.kind == DepositionKind::SparseFill
-                    && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
-            };
+            let (before, rest) = layers.split_at_mut(index);
+            let layer = &mut rest[0];
+            let lower = before.last().filter(|lower| lower.z_mm == layer.lower_z_mm);
+            let cathedral = is_road;
             let removed: usize = layer
                 .paths
                 .iter()
@@ -150,16 +165,48 @@ impl Field {
             })?;
             let mut replacement = Vec::new();
             for domain in &rooms[index] {
+                let mut roads = Vec::new();
                 for room in &domain.rooms {
-                    room_paths(
-                        room,
-                        &teeth[index],
-                        domain,
+                    room_roads(room, &teeth[index], domain, &mut roads, cancel)?;
+                }
+                let roads = splice(roads, domain, index, cancel)?;
+                // Spines print only where the actual layer below carries them.
+                let prepared = match lower {
+                    Some(lower) if roads.iter().any(|r| r.points.first() != r.points.last()) => {
+                        Some(super::support::PreparedAnchorPaths::new(
+                            lower.paths.iter().filter(|p| {
+                                p.kind.is_model() && p.physical_z_mm[1] == layer.lower_z_mm
+                            }),
+                            cancel,
+                        )?)
+                    }
+                    _ => None,
+                };
+                for road in roads {
+                    let open = road.points.first() != road.points.last();
+                    if open {
+                        let Some(prepared) = prepared.as_ref() else {
+                            continue;
+                        };
+                        if !rooted(
+                            &road.points,
+                            layer.z_mm,
+                            prepared,
+                            recipe,
+                            &mut anchors,
+                            &mut work,
+                            cancel,
+                        )? {
+                            continue;
+                        }
+                    }
+                    emit(
+                        &road.points,
+                        domain.region_index,
                         [layer.lower_z_mm, layer.z_mm],
                         recipe.bead_width_mm,
                         &mut replacement,
                         segments,
-                        cancel,
                     )?;
                 }
             }
@@ -170,6 +217,60 @@ impl Field {
         }
         Ok(())
     }
+}
+
+/// An open spine prints only where the layer below carries it, judged by the
+/// same capsule anchors replay uses: real supported length, and no
+/// unsupported run near the sparse allowance.
+fn rooted(
+    points: &[Coord<f64>],
+    z: f64,
+    prepared: &super::support::PreparedAnchorPaths<'_>,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut super::support::AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    use super::support::{AnchorCandidate, GapKind, gap_kind};
+    let w = recipe.bead_width_mm;
+    let (mut run, mut supported) = (0.0_f64, 0.0_f64);
+    for e in points.windows(2) {
+        check_cancel(cancel)?;
+        let length = (e[1].x - e[0].x).hypot(e[1].y - e[0].y);
+        let gaps = anchors.gaps_prepared(
+            AnchorCandidate {
+                endpoints_mm: [[e[0].x, e[0].y, z], [e[1].x, e[1].y, z]],
+                bead_width_mm: w,
+            },
+            prepared,
+            work,
+            cancel,
+        )?;
+        let (mut cursor, mut unsupported) = (0.0, 0.0);
+        for gap in gaps {
+            let span = (gap.end - gap.start) * length;
+            if gap.start > cursor {
+                run = 0.0;
+            }
+            match gap_kind(gap, span, w, recipe.process.max_bridge_span_mm) {
+                GapKind::Supported => {}
+                GapKind::Bridge | GapKind::Contact => run = 0.0,
+                GapKind::Demand => {
+                    run += span;
+                    unsupported += span;
+                    if run > 2.0 * w {
+                        return Ok(false);
+                    }
+                }
+            }
+            cursor = gap.end;
+        }
+        if cursor < 1.0 {
+            run = 0.0;
+        }
+        supported += (length - unsupported).max(0.0);
+    }
+    Ok(supported >= 2.0 * w)
 }
 
 /// Rooms of one layer's sparse domain, without roof teeth: the per-layer
@@ -196,19 +297,28 @@ pub(super) fn rooms(
     let domain = DomainRooms {
         region_index: 0,
         s,
+        lines: lattice(roof.frame_mm, pitch),
         rooms: cells(fill, roof.frame_mm, pitch, s, layer.width_mm, cancel)?,
     };
+    // A proposal knows no lower layer, so it carries no spines; the
+    // whole-part stabilization roots them.
     let empty = BTreeMap::new();
+    let mut roads = Vec::new();
     for room in &domain.rooms {
-        room_paths(
-            room,
-            &empty,
-            &domain,
+        room_roads(room, &empty, &domain, &mut roads, cancel)?;
+    }
+    let parity = (layer.z / layer.height).round() as usize;
+    for road in splice(roads, &domain, parity, cancel)? {
+        if road.points.first() != road.points.last() {
+            continue;
+        }
+        emit(
+            &road.points,
+            domain.region_index,
             [layer.lower_z, layer.z],
             layer.width_mm,
             paths,
             segments,
-            cancel,
         )?;
     }
     Ok(())
@@ -219,11 +329,15 @@ pub(super) fn rooms(
 pub(super) struct Room {
     bounds: [[f64; 2]; 2],
     rings: Vec<Vec<Coord<f64>>>,
+    /// A spine: one open road in a strip too narrow for a loop.
+    open: bool,
 }
 
 struct DomainRooms {
     region_index: u16,
     s: f64,
+    /// Lattice line coordinates per axis.
+    lines: [Vec<f64>; 2],
     rooms: Vec<Room>,
 }
 
@@ -249,6 +363,7 @@ fn layer_rooms(
         out.push(DomainRooms {
             region_index: domain.region_index,
             s,
+            lines: lattice(frame, pitch),
             rooms: cells(&fill, frame, pitch, s, recipe.bead_width_mm, cancel)?,
         });
     }
@@ -362,7 +477,19 @@ fn cells(
                     .chain(polygon.interiors())
                     .map(|ring| ring_length(&ring.0))
                     .sum();
-                if around <= 0.0 || 2.0 * polygon.unsigned_area() / around < s {
+                if around <= 0.0 {
+                    continue;
+                }
+                if 2.0 * polygon.unsigned_area() / around < s {
+                    // Too narrow for a loop: one spine bead, so whatever
+                    // lands on the strip later has a wall under it.
+                    for run in spine(&polygon, width) {
+                        rooms.push(Room {
+                            bounds: cell_bounds,
+                            rings: vec![run],
+                            open: true,
+                        });
+                    }
                     continue;
                 }
                 let mut rings = Vec::new();
@@ -384,12 +511,50 @@ fn cells(
                     rooms.push(Room {
                         bounds: cell_bounds,
                         rings,
+                        open: false,
                     });
                 }
             }
         }
     }
     Ok(rooms)
+}
+
+/// The midline of a thin piece's minimum rotated rectangle along its long
+/// side, clipped to the piece: every clipped run of at least two bead
+/// widths. A bent strip keeps only the runs its midline crosses; whatever
+/// later lands on the rest is judged, and reported, like any other road.
+fn spine(piece: &Polygon<f64>, width: f64) -> Vec<Vec<Coord<f64>>> {
+    spine_runs(piece, width).unwrap_or_default()
+}
+
+fn spine_runs(piece: &Polygon<f64>, width: f64) -> Option<Vec<Vec<Coord<f64>>>> {
+    let rect = piece.minimum_rotated_rect()?;
+    let c = &rect.exterior().0;
+    if c.len() < 4 {
+        return None;
+    }
+    let length = |a: Coord<f64>, b: Coord<f64>| (b.x - a.x).hypot(b.y - a.y);
+    let mid = |a: Coord<f64>, b: Coord<f64>| Coord {
+        x: 0.5 * (a.x + b.x),
+        y: 0.5 * (a.y + b.y),
+    };
+    // Join the midpoints of the two short sides.
+    let (from, to) = if length(c[0], c[1]) >= length(c[1], c[2]) {
+        (mid(c[1], c[2]), mid(c[3], c[0]))
+    } else {
+        (mid(c[0], c[1]), mid(c[2], c[3]))
+    };
+    let line = geo::MultiLineString(vec![LineString(vec![from, to])]);
+    let clipped = piece.clip(&line, false);
+    Some(
+        clipped
+            .0
+            .into_iter()
+            .map(|run| run.0)
+            .filter(|run| run.len() >= 2 && ring_length(run) >= 2.0 * width)
+            .collect(),
+    )
 }
 
 fn ring_length(points: &[Coord<f64>]) -> f64 {
@@ -503,6 +668,9 @@ struct Column {
 type Tips = BTreeMap<(Column, u8), Vec<f64>>;
 
 fn columns(room: &Room, family: usize, s: f64, spacing_mm: f64) -> Vec<f64> {
+    if room.open {
+        return Vec::new();
+    }
     let axis = family; // family 0 positions lie along X
     let low = room.bounds[0][axis];
     let high = room.bounds[1][axis];
@@ -809,16 +977,19 @@ fn roof_roads(layer: &PrintLayer) -> [Vec<(f64, f64, f64)>; 2] {
     out
 }
 
-/// Emit one room's loops with their teeth.
-#[allow(clippy::too_many_arguments)]
-fn room_paths(
+/// One Cathedral road before emission: closed iff its ends coincide.
+struct Road {
+    points: Vec<Coord<f64>>,
+    /// A room's outer loop, which may be spliced to its neighbours.
+    exterior: bool,
+}
+
+/// One room's roads: its loops with their teeth, or its spine.
+fn room_roads(
     room: &Room,
     tips: &Tips,
     domain: &DomainRooms,
-    physical_z_mm: [f64; 2],
-    width: f64,
-    paths: &mut Vec<DepositionPath>,
-    segments: &mut usize,
+    out: &mut Vec<Road>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let s = domain.s;
@@ -857,39 +1028,264 @@ fn room_paths(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     teeth.dedup_by(|a, b| a.family == b.family && a.c == b.c && a.root == b.root);
-    for ring in &room.rings {
+    for (index, ring) in room.rings.iter().enumerate() {
         check_cancel(cancel)?;
-        let points = insert_teeth(ring, &teeth, s);
-        let points = drop_short_edges(points);
-        if points.len() < 4 {
+        if room.open {
+            out.push(Road {
+                points: ring.clone(),
+                exterior: false,
+            });
             continue;
         }
-        let road: Vec<[f64; 3]> = points
-            .iter()
-            .map(|p| [p.x, p.y, physical_z_mm[1]])
-            .collect();
-        let additional = road.len() - 1;
-        if additional > crate::working_set::units().saturating_sub(*segments) {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "retained deposition segment limit exceeded",
-            ));
+        let points = drop_short_edges(insert_teeth(ring, &teeth, s));
+        if points.len() >= 4 {
+            out.push(Road {
+                points,
+                exterior: index == 0,
+            });
         }
-        *segments += additional;
-        paths.push(DepositionPath {
-            material_domain: None,
-            kind: DepositionKind::SparseFill,
-            width: WidthProfile::Constant { width_mm: width },
-            physical_z_mm,
-            points_mm: road,
-            arcs: Vec::new(),
-            connectors: Vec::new(),
-            owner: Some(DepositionOwner::Regional {
-                region_index: domain.region_index,
-            }),
-            exposed: false,
-        });
     }
+    Ok(())
+}
+
+/// Coordinate tolerance for recognising a shared wall's two parallel edges.
+const WALL_MATCH_MM: f64 = 1e-3;
+
+/// An axis-aligned straight edge of an outer loop.
+struct WallEdge {
+    road: usize,
+    /// 0: the edge runs along Y at a fixed X; 1: along X at a fixed Y.
+    axis: usize,
+    fixed: f64,
+    low: f64,
+    high: f64,
+}
+
+/// A splice between two loops across their shared wall: the window
+/// `[along, along + s]` on the edges at `fixed` (first loop) and `fixed + s`.
+struct Splice {
+    roads: [usize; 2],
+    axis: usize,
+    fixed: f64,
+    along: f64,
+    room: f64,
+}
+
+/// Merge neighbouring room loops into one loop per connected set (RFC 12
+/// section 5). Neighbouring loops run parallel `s` apart along their shared
+/// wall in opposite directions; a splice removes a window of length `s` from
+/// both edges and joins them by two crossings of the wall. The crossings are
+/// `s` apart, closer than a bead width, so the wall stays closed, and both
+/// rest on the wall below. A spanning tree chooses the splices, longest
+/// shared walls first; windows alternate along the wall between layers, so
+/// splices on walls long enough to separate them do not stack.
+fn splice(
+    roads: Vec<Road>,
+    domain: &DomainRooms,
+    layer: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Road>, ManufacturingError> {
+    let s = domain.s;
+    // Only an edge s/2 below a recorded lattice line faces a shared wall.
+    let on_wall = |axis: usize, fixed: f64| {
+        domain.lines[axis]
+            .iter()
+            .any(|c| (fixed + 0.5 * s - c).abs() <= WALL_MATCH_MM)
+    };
+    let mut loops: Vec<Option<Vec<Coord<f64>>>> = Vec::new();
+    let mut rest = Vec::new();
+    for road in roads {
+        if road.exterior && road.points.first() == road.points.last() {
+            let mut points = road.points;
+            if signed_area(&points) < 0.0 {
+                points.reverse();
+            }
+            loops.push(Some(points));
+        } else {
+            rest.push(road);
+        }
+    }
+    if loops.len() > 1 {
+        let mut edges = Vec::new();
+        for (road, points) in loops.iter().enumerate() {
+            let points = points.as_ref().expect("unspliced loop");
+            for e in points.windows(2) {
+                if (e[0].x - e[1].x).abs() <= WALL_MATCH_MM {
+                    edges.push(WallEdge {
+                        road,
+                        axis: 0,
+                        fixed: 0.5 * (e[0].x + e[1].x),
+                        low: e[0].y.min(e[1].y),
+                        high: e[0].y.max(e[1].y),
+                    });
+                } else if (e[0].y - e[1].y).abs() <= WALL_MATCH_MM {
+                    edges.push(WallEdge {
+                        road,
+                        axis: 1,
+                        fixed: 0.5 * (e[0].y + e[1].y),
+                        low: e[0].x.min(e[1].x),
+                        high: e[0].x.max(e[1].x),
+                    });
+                }
+            }
+        }
+        edges.sort_by(|a, b| {
+            (a.axis, a.fixed)
+                .partial_cmp(&(b.axis, b.fixed))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let t = if layer.is_multiple_of(2) { 0.25 } else { 0.75 };
+        let mut candidates = Vec::new();
+        for (i, a) in edges.iter().enumerate() {
+            check_cancel(cancel)?;
+            let target = a.fixed + s;
+            for b in &edges[i + 1..] {
+                if b.axis != a.axis || b.fixed > target + WALL_MATCH_MM {
+                    break;
+                }
+                if b.road == a.road || b.fixed < target - WALL_MATCH_MM || !on_wall(a.axis, a.fixed)
+                {
+                    continue;
+                }
+                // Keep one spacing clear of corners, pins and tooth legs.
+                let low = a.low.max(b.low) + s;
+                let high = a.high.min(b.high) - s;
+                if high - low < s {
+                    continue;
+                }
+                candidates.push(Splice {
+                    roads: [a.road, b.road],
+                    axis: a.axis,
+                    fixed: a.fixed,
+                    along: low + t * (high - low - s),
+                    room: high - low,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.room
+                .total_cmp(&a.room)
+                .then(a.axis.cmp(&b.axis))
+                .then(a.fixed.total_cmp(&b.fixed))
+                .then(a.along.total_cmp(&b.along))
+        });
+        let mut parent: Vec<usize> = (0..loops.len()).collect();
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        for candidate in &candidates {
+            check_cancel(cancel)?;
+            let [ra, rb] = candidate.roads.map(|r| find(&mut parent, r));
+            if ra == rb {
+                continue;
+            }
+            let (a, b) = (
+                loops[ra].as_ref().expect("live loop"),
+                loops[rb].as_ref().expect("live loop"),
+            );
+            if let Some(merged) = join(a, b, candidate, s) {
+                loops[rb] = None;
+                loops[ra] = Some(merged);
+                parent[rb] = ra;
+            }
+        }
+    }
+    Ok(loops
+        .into_iter()
+        .flatten()
+        .map(|points| Road {
+            points,
+            exterior: true,
+        })
+        .chain(rest)
+        .collect())
+}
+
+fn signed_area(points: &[Coord<f64>]) -> f64 {
+    points
+        .windows(2)
+        .map(|e| e[0].x * e[1].y - e[1].x * e[0].y)
+        .sum::<f64>()
+        * 0.5
+}
+
+/// Splice loop `b` (beyond the wall) into loop `a` at the candidate window.
+fn join(a: &[Coord<f64>], b: &[Coord<f64>], splice: &Splice, s: f64) -> Option<Vec<Coord<f64>>> {
+    let axis = splice.axis;
+    let fixed_of = |p: &Coord<f64>| if axis == 0 { p.x } else { p.y };
+    let along_of = |p: &Coord<f64>| if axis == 0 { p.y } else { p.x };
+    let at = |along: f64, fixed: f64| {
+        if splice.axis == 0 {
+            Coord { x: fixed, y: along }
+        } else {
+            Coord { x: along, y: fixed }
+        }
+    };
+    let (v0, v1) = (splice.along, splice.along + s);
+    // The edge of `ring` on `fixed` that holds the whole window, and its
+    // direction along the wall.
+    let window = |ring: &[Coord<f64>], fixed: f64| {
+        ring.windows(2).enumerate().find_map(|(k, e)| {
+            let on = |p: &Coord<f64>| (fixed_of(p) - fixed).abs() <= WALL_MATCH_MM;
+            let (p, q) = (along_of(&e[0]), along_of(&e[1]));
+            (on(&e[0]) && on(&e[1]) && p.min(q) < v0 && p.max(q) > v1).then_some((k, q > p))
+        })
+    };
+    let (fa, fb) = (splice.fixed, splice.fixed + s);
+    let (ka, up_a) = window(a, fa)?;
+    let (kb, up_b) = window(b, fb)?;
+    if up_a == up_b {
+        return None;
+    }
+    let (first_a, second_a) = if up_a { (v0, v1) } else { (v1, v0) };
+    let first_b = if up_b { v0 } else { v1 };
+    let (n, m) = (a.len() - 1, b.len() - 1);
+    let mut out = Vec::with_capacity(n + m + 5);
+    out.extend((0..n).map(|t| a[(ka + 1 + t) % n]));
+    out.push(at(first_a, fa));
+    out.push(at(first_a, fb));
+    out.extend((0..m).map(|t| b[(kb + 1 + t) % m]));
+    out.push(at(first_b, fb));
+    out.push(at(second_a, fa));
+    out.push(out[0]);
+    Some(out)
+}
+
+fn emit(
+    points: &[Coord<f64>],
+    region_index: u16,
+    physical_z_mm: [f64; 2],
+    width: f64,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+) -> Result<(), ManufacturingError> {
+    let road: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| [p.x, p.y, physical_z_mm[1]])
+        .collect();
+    let additional = road.len() - 1;
+    if additional > crate::working_set::units().saturating_sub(*segments) {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "retained deposition segment limit exceeded",
+        ));
+    }
+    *segments += additional;
+    paths.push(DepositionPath {
+        material_domain: None,
+        kind: DepositionKind::SparseFill,
+        width: WidthProfile::Constant { width_mm: width },
+        physical_z_mm,
+        points_mm: road,
+        arcs: Vec::new(),
+        connectors: Vec::new(),
+        owner: Some(DepositionOwner::Regional { region_index }),
+        exposed: false,
+    });
     Ok(())
 }
 
@@ -1162,5 +1558,89 @@ mod tests {
         assert!(has(5.2, 10.0) && has(5.2, 6.0) && has(4.8, 6.0) && has(4.8, 10.0));
         // Still a simple closed loop of the original corners plus 8 tooth points.
         assert_eq!(out.len(), 5 + 8);
+    }
+
+    #[test]
+    fn splices_join_every_room_of_a_region_into_one_loop() {
+        let cancel = AtomicBool::new(false);
+        let (w, h) = (0.45, 0.2);
+        let s = spacing(w, h);
+        let pitch = cell_pitch(w, h, 0.15);
+        let frame = [[0.0, 0.0], [40.0, 40.0]];
+        let rooms = cells(&square(40.0), frame, pitch, s, w, &cancel).unwrap();
+        let domain = DomainRooms {
+            region_index: 0,
+            s,
+            lines: lattice(frame, pitch),
+            rooms,
+        };
+        let total: f64 = domain
+            .rooms
+            .iter()
+            .map(|room| ring_length(&room.rings[0]))
+            .sum();
+        let mut windows = Vec::new();
+        for layer in 0..2 {
+            let mut roads = Vec::new();
+            for room in &domain.rooms {
+                room_roads(room, &BTreeMap::new(), &domain, &mut roads, &cancel).unwrap();
+            }
+            let joined = splice(roads, &domain, layer, &cancel).unwrap();
+            assert_eq!(joined.len(), 1);
+            let ring = &joined[0].points;
+            assert_eq!(ring.first(), ring.last());
+            // Each splice removes 2s of wall and adds two crossings of s.
+            assert!((ring_length(ring) - total).abs() < 1e-6);
+            // Crossings span exactly one wall: s long, across a lattice line.
+            let lines = lattice(frame, pitch);
+            let crossings: Vec<[f64; 2]> = ring
+                .windows(2)
+                .filter_map(|e| {
+                    let (dx, dy) = (e[1].x - e[0].x, e[1].y - e[0].y);
+                    let mid = [0.5 * (e[0].x + e[1].x), 0.5 * (e[0].y + e[1].y)];
+                    let across = |d: f64, at: f64, axis: usize| {
+                        (d.abs() - s).abs() < 1e-5
+                            && lines[axis].iter().any(|c| (at - c).abs() < 1e-5)
+                    };
+                    (across(dx, mid[0], 0) && dy.abs() < 1e-12
+                        || across(dy, mid[1], 1) && dx.abs() < 1e-12)
+                        .then_some(mid)
+                })
+                .collect();
+            assert_eq!(crossings.len(), 2 * (domain.rooms.len() - 1));
+            windows.push(crossings);
+        }
+        // Splice windows move between layers so they never stack.
+        assert!(windows[0].iter().all(|a| !windows[1].contains(a)));
+    }
+
+    #[test]
+    fn a_strip_too_narrow_for_a_loop_carries_spines() {
+        let cancel = AtomicBool::new(false);
+        let (w, h) = (0.45, 0.2);
+        let s = spacing(w, h);
+        let pitch = cell_pitch(w, h, 0.15);
+        // 0.6 wide: room for one bead centerline, not for a loop. The frame
+        // puts one lattice line across the strip at x = 4 and none along it.
+        let strip = MultiPolygon(vec![Rect::new([0.0, 0.0], [8.0, 0.6]).to_polygon()]);
+        let frame = [[0.0, -10.0], [8.0, 30.0]];
+        assert_eq!(lattice(frame, pitch)[0], vec![4.0]);
+        let rooms = cells(&strip, frame, pitch, s, w, &cancel).unwrap();
+        assert_eq!(rooms.len(), 2);
+        for room in &rooms {
+            assert!(room.open);
+            let spine = &room.rings[0];
+            assert_eq!(spine.len(), 2);
+            for p in spine {
+                assert!((p.y - 0.3).abs() < 1e-6, "{p:?}");
+                // Inside the strip and s/2 clear of the wall line at x = 4.
+                assert!(
+                    p.x >= 0.5 * s - 1e-6 && p.x <= 8.0 - 0.5 * s + 1e-6,
+                    "{p:?}"
+                );
+                assert!((p.x - 4.0).abs() >= 0.5 * s - 1e-6, "{p:?}");
+            }
+            assert!(columns(room, 0, s, 1.0).is_empty());
+        }
     }
 }

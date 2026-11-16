@@ -1955,3 +1955,69 @@ fn refinement_splits_keep_their_course_and_every_axis_above() {
     assert!(run[1..].windows(2).all(|pair| pair[0].1 != pair[1].1));
     assert_eq!(run[6..], before[3..]);
 }
+
+#[test]
+fn cathedral_top_skin_snaps_to_whole_lattice_cells() {
+    use geo::{Area, BoundingRect};
+    let cancel = AtomicBool::new(false);
+    let recipe = recipe(0.15);
+    let section = rectangle(40.0, 40.0);
+    // The part continues upward only left of x = 21.3, which is not a
+    // lattice line: the cell holding that border becomes top skin.
+    let above = MultiPolygon(vec![
+        geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 21.3, y: 40.0 }).to_polygon(),
+    ]);
+    let frame = [[0.0, 0.0], [40.0, 40.0]];
+    let pitch = cathedral::cell_pitch(recipe.bead_width_mm, recipe.layer_height_mm, 0.15);
+    let lines = cathedral::lattice(frame, pitch);
+    let line = lines[0]
+        .iter()
+        .copied()
+        .filter(|&x| x < 21.3)
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(21.3 - line > 1.0);
+    let snap = |landed: Option<&MultiPolygon<f64>>| {
+        classify(&section, &section, &above, &recipe, &cancel)
+            .unwrap()
+            .snap_roof_to_cells(
+                Some(region::Roof { frame_mm: frame }),
+                landed,
+                &recipe,
+                classification::fixed_owned_budget(0, 0),
+                &cancel,
+            )
+            .unwrap()
+    };
+    let plain = classify(&section, &section, &above, &recipe, &cancel).unwrap();
+    let before = plain.interiors[0].domain.unsigned_area() + plain.top.unsigned_area();
+    let untouched = plain.interiors[0].domain.unsigned_area();
+    // Nothing below, or a lower layer whose own skin border is the same or
+    // within a bead (a sloped wall): the border is carried, nothing converts.
+    assert_eq!(snap(None).interiors[0].domain.unsigned_area(), untouched);
+    assert_eq!(
+        snap(Some(&above)).interiors[0].domain.unsigned_area(),
+        untouched
+    );
+    let sloped = MultiPolygon(vec![
+        geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 21.5, y: 40.0 }).to_polygon(),
+    ]);
+    assert_eq!(
+        snap(Some(&sloped)).interiors[0].domain.unsigned_area(),
+        untouched
+    );
+    // The lower layer was still open room under this skin: the cell converts.
+    let snapped = snap(Some(&section));
+    let interior = &snapped.interiors[0].domain;
+    let right = interior.bounding_rect().unwrap().max().x;
+    assert!((right - line).abs() < 1e-6, "{right} vs {line}");
+    let after = interior.unsigned_area() + snapped.top.unsigned_area();
+    assert!((after - before).abs() < 1e-6 * before);
+    assert_eq!(
+        snapped.coverage.top_skin_area_mm2,
+        snapped.top.unsigned_area()
+    );
+    assert_eq!(
+        snapped.coverage.web_roof_domains[0].extent.len(),
+        interior.0.len()
+    );
+}

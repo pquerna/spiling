@@ -1078,6 +1078,16 @@ fn admit_schedule<'model>(
                 .map(|i| span_at(&sections, i));
             let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
                 .map(|i| span_at(&sections, i));
+            let landing = web_roof.as_ref().and_then(|_| {
+                roof_landing(
+                    schedule,
+                    &sections,
+                    index,
+                    current,
+                    above,
+                    recipe.top_skin_thickness_mm,
+                )
+            });
             if sections[current].material.0.is_empty() {
                 layers.push(PrintLayer {
                     skin_command_fits: Vec::new(),
@@ -1110,6 +1120,7 @@ fn admit_schedule<'model>(
                 current,
                 below,
                 above,
+                landing,
                 (z - elevation.lower_z).to_bits(),
                 required_owner,
                 construction_phase,
@@ -1273,6 +1284,16 @@ fn admit_schedule<'model>(
                     skin_query_retained_bytes(skin_owned_bytes, &[&lower])?,
                     cancel,
                 )?;
+                let landed = match landing {
+                    Some((span, horizon)) => Some(neighborhoods.survival(
+                        span,
+                        horizon,
+                        skin_query_retained_points(retained_points, &[&lower, &upper])?,
+                        skin_query_retained_bytes(skin_owned_bytes, &[&lower, &upper])?,
+                        cancel,
+                    )?),
+                    None => None,
+                };
                 classified = Some(
                     classification::ClassifiedRegions::new(
                         Arc::clone(
@@ -1294,6 +1315,24 @@ fn admit_schedule<'model>(
                             )
                         },
                         recipe,
+                        cancel,
+                    )?
+                    .snap_roof_to_cells(
+                        web_roof.as_ref().map(|field| field.roof()),
+                        landed.as_deref(),
+                        recipe,
+                        classification::fixed_owned_budget(
+                            skin_retained_points(
+                                retained_points,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                            skin_retained_bytes(
+                                skin_owned_bytes,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                        ),
                         cancel,
                     )?
                     .with_process(
@@ -1811,6 +1850,34 @@ fn admit_schedule<'model>(
         if let Some(field) = &web_roof {
             field.stabilize(&mut layers, recipe, &mut segments, cancel)?;
         }
+        // Support may regenerate a layer's roads from its classification.
+        // The finished Cathedral roads (teeth, splices, rooted spines) are
+        // whole-part constructions, so regeneration reuses them as built:
+        // what support admits is what prints.
+        let cathedral_roads: Vec<Vec<DepositionPath>> = if web_roof.is_some() {
+            let mut bytes = 0usize;
+            let mut kept = Vec::with_capacity(layers.len());
+            for layer in &layers {
+                check_cancel(cancel)?;
+                let roads: Vec<DepositionPath> = layer
+                    .paths
+                    .iter()
+                    .filter(|path| cathedral::is_road(path))
+                    .cloned()
+                    .collect();
+                bytes = bytes.saturating_add(bonds::path_bytes(&roads));
+                if bytes as u64 > crate::working_set::bytes_u64() {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "Cathedral road retention exceeds the working set",
+                    ));
+                }
+                kept.push(roads);
+            }
+            kept
+        } else {
+            Vec::new()
+        };
 
         support_work.planar = *neighborhoods.work_mut();
         let support_admission = support::realize(
@@ -1891,6 +1958,25 @@ fn admit_schedule<'model>(
                         skin_query_retained_bytes(live_owned_bytes, &[&lower])?,
                         cancel,
                     )?;
+                    let landed = match web_roof.as_ref().and_then(|_| {
+                        roof_landing(
+                            schedule,
+                            &sections,
+                            index as u32,
+                            current,
+                            above,
+                            recipe.top_skin_thickness_mm,
+                        )
+                    }) {
+                        Some((span, horizon)) => Some(neighborhoods.survival(
+                            span,
+                            horizon,
+                            skin_query_retained_points(live_retained_points, &[&lower, &upper])?,
+                            skin_query_retained_bytes(live_owned_bytes, &[&lower, &upper])?,
+                            cancel,
+                        )?),
+                        None => None,
+                    };
                     let wall = Arc::clone(
                         wall_layouts[index]
                             .as_ref()
@@ -1912,6 +1998,24 @@ fn admit_schedule<'model>(
                             )
                         },
                         recipe,
+                        cancel,
+                    )?
+                    .snap_roof_to_cells(
+                        web_roof.as_ref().map(|field| field.roof()),
+                        landed.as_deref(),
+                        recipe,
+                        classification::fixed_owned_budget(
+                            skin_retained_points(
+                                live_retained_points,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                            skin_retained_bytes(
+                                live_owned_bytes,
+                                &neighborhoods,
+                                &[&lower, &upper],
+                            )?,
+                        ),
                         cancel,
                     )?
                     .with_process(
@@ -2062,6 +2166,25 @@ fn admit_schedule<'model>(
                         )?;
                         skin_command_fits = fits;
                         paths
+                    };
+                    let paths = match cathedral_roads.get(index) {
+                        Some(built) => {
+                            let mut paths = paths;
+                            let count = |paths: &[DepositionPath]| -> usize {
+                                paths
+                                    .iter()
+                                    .filter(|path| cathedral::is_road(path))
+                                    .map(|path| path.points_mm.len().saturating_sub(1))
+                                    .sum()
+                            };
+                            *segments = segments
+                                .saturating_sub(count(&paths))
+                                .saturating_add(count(built));
+                            paths.retain(|path| !cathedral::is_road(path));
+                            paths.extend(built.iter().cloned());
+                            paths
+                        }
+                        None => paths,
                     };
                     // Recovery scratch carries the whole workspace receipt once.
                     // Refresh its capacity before cloning interface metadata below.
@@ -3581,6 +3704,29 @@ fn refine_surface_schedule(
         });
     }
     Ok(refined)
+}
+
+/// The adjacent layer below and its top-skin horizon, as section spans:
+/// what a Cathedral roof border on this layer lands on. `None` when there is
+/// no adjacent layer below or it shares this layer's section and horizon.
+fn roof_landing(
+    schedule: &[LayerElevation],
+    sections: &[SectionSpan],
+    index: u32,
+    current: usize,
+    above: Option<usize>,
+    top_skin_thickness_mm: f64,
+) -> Option<(usize, Option<usize>)> {
+    let i = index as usize;
+    if i == 0 || schedule[i - 1].z != schedule[i].lower_z {
+        return None;
+    }
+    let below = (
+        span_at(sections, index - 1),
+        physical_neighbor(schedule, index - 1, top_skin_thickness_mm, true)
+            .map(|j| span_at(sections, j)),
+    );
+    (below != (current, above)).then_some(below)
 }
 
 fn physical_neighbor(

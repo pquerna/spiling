@@ -5,8 +5,12 @@
 //! program/path bijection. It never calls the planner's offsets, columns or
 //! tooth growth; it checks what the construction must achieve:
 //!
+//! Rooms are closed loops; a strip too narrow for a loop carries one open
+//! spine bead. Both are checked the same way.
+//!
 //! 1. **Containment.** Every Cathedral road lies inside its layer's recorded
-//!    domain, at least half a bead spacing from its boundary.
+//!    domain: both ends of every segment inside it, and the whole segment
+//!    at least half a bead spacing from its boundary and holes.
 //! 2. **Rooms.** Every lattice line of the recorded frame and recipe pitch,
 //!    away from the domain boundary, carries a road centerline half a spacing
 //!    away on each side: a two-bead wall, with only short interruptions.
@@ -87,6 +91,34 @@ impl Segments {
         }
     }
 
+    /// Smallest distance from the whole segment `a..b` to any stored
+    /// segment that may lie within `radius` of it (zero if they cross).
+    fn segment_distance(
+        &self,
+        a: [f64; 2],
+        b: [f64; 2],
+        radius: f64,
+        work: &mut usize,
+    ) -> Result<f64, ManufacturingError> {
+        let cell = |v: f64| (v / self.cell).floor() as i64;
+        let (i0, i1) = (cell(a[0].min(b[0]) - radius), cell(a[0].max(b[0]) + radius));
+        let (j0, j1) = (cell(a[1].min(b[1]) - radius), cell(a[1].max(b[1]) + radius));
+        let mut seen = std::collections::HashSet::new();
+        let mut best = f64::INFINITY;
+        for i in i0..=i1 {
+            for j in j0..=j1 {
+                for &index in self.cells.get(&(i, j)).into_iter().flatten() {
+                    if seen.insert(index) {
+                        charge(work)?;
+                        let [c, d] = self.segments[index];
+                        best = best.min(segment_segment(a, b, c, d));
+                    }
+                }
+            }
+        }
+        Ok(best)
+    }
+
     fn distance(&self, p: [f64; 2], radius: f64) -> f64 {
         let mut best = f64::INFINITY;
         self.near(p, radius, |[a, b]| {
@@ -94,6 +126,26 @@ impl Segments {
         });
         best
     }
+}
+
+/// Distance between two closed segments: zero when they intersect,
+/// otherwise the nearest endpoint-to-segment distance.
+fn segment_segment(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
+    let cross = |o: [f64; 2], p: [f64; 2], q: [f64; 2]| {
+        (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+    };
+    let (d1, d2) = (cross(c, d, a), cross(c, d, b));
+    let (d3, d4) = (cross(a, b, c), cross(a, b, d));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return 0.0;
+    }
+    point_segment(a, c, d)
+        .0
+        .min(point_segment(b, c, d).0)
+        .min(point_segment(c, a, b).0)
+        .min(point_segment(d, a, b).0)
 }
 
 /// Distance and nearest point.
@@ -162,14 +214,14 @@ pub(super) fn verify(
         // Road segments of this layer, for rooms and coverage.
         let mut road_segments = Vec::new();
         for path in &roads {
-            if path.points_mm.first() != path.points_mm.last()
+            if path.points_mm.len() < 2
                 || !path.arcs.is_empty()
                 || !path.connectors.is_empty()
                 || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
                 || constant_width(path)? != w
             {
                 return Err(failed(
-                    "Cathedral roads are closed fine-interval loops of one bead width",
+                    "Cathedral roads are fine-interval roads of one bead width",
                 ));
             }
             let Some(DepositionOwner::Regional { region_index }) = path.owner else {
@@ -186,16 +238,19 @@ pub(super) fn verify(
                 charge(work)?;
                 let a = project_xyz6_point_mm(edge[0])?;
                 let b = project_xyz6_point_mm(edge[1])?;
-                for t in [0.0, 0.5] {
-                    let p = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
-                    if !inside(&domain.extent, p)
-                        || edges.distance(p, 0.5 * s) < 0.5 * s - TOLERANCE_MM
-                    {
-                        return Err(failed(format!(
-                            "Cathedral road leaves its room domain: layer {} at {p:?}",
-                            layer.index
-                        )));
-                    }
+                // Whole-segment clearance: both ends inside, and the segment
+                // nowhere nearer than s/2 to the boundary or any hole (a
+                // crossing has distance zero), so no hole between any two
+                // points of it survives unnoticed.
+                let (p, q) = ([a[0], a[1]], [b[0], b[1]]);
+                if !inside(&domain.extent, p)
+                    || !inside(&domain.extent, q)
+                    || edges.segment_distance(p, q, 0.5 * s, work)? < 0.5 * s - TOLERANCE_MM
+                {
+                    return Err(failed(format!(
+                        "Cathedral road leaves its room domain: layer {} between {p:?} and {q:?}",
+                        layer.index
+                    )));
                 }
                 road_segments.push([[a[0], a[1]], [b[0], b[1]]]);
             }
@@ -354,8 +409,11 @@ pub(super) fn verify(
                     }
                     supported += (length - unsupported).max(0.0);
                 }
-                // A closed loop's last run continues into its first.
-                if let Some(lead) = leading {
+                // A closed loop's last run continues into its first; an open
+                // spine's runs end at its ends.
+                if let Some(lead) = leading
+                    && path.points_mm.first() == path.points_mm.last()
+                {
                     worst = worst.max(run + lead);
                 } else {
                     worst = worst.max(run);
@@ -451,4 +509,41 @@ pub(super) fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_segment_clearance_sees_a_tiny_hole_between_any_samples() {
+        // A 0.02 mm hole near the quarter point of a 10 mm segment.
+        let hole = [
+            [2.49, 0.49],
+            [2.51, 0.49],
+            [2.51, 0.51],
+            [2.49, 0.51],
+            [2.49, 0.49],
+        ];
+        let segments: Vec<[[f64; 2]; 2]> = hole.windows(2).map(|e| [e[0], e[1]]).collect();
+        let grid = Segments::new(segments, 2.0);
+        let mut work = 0;
+        let s = 0.4;
+        // Passing straight through it.
+        let through = grid
+            .segment_distance([0.0, 0.5], [10.0, 0.5], 0.5 * s, &mut work)
+            .unwrap();
+        assert_eq!(through, 0.0);
+        // Passing 0.1 mm beside it: inside the s/2 clearance band.
+        let beside = grid
+            .segment_distance([0.0, 0.62], [10.0, 0.62], 0.5 * s, &mut work)
+            .unwrap();
+        assert!((beside - 0.11).abs() < 1e-9, "{beside}");
+        // Clear of it by more than s/2.
+        let clear = grid
+            .segment_distance([0.0, 1.0], [10.0, 1.0], 0.5 * s, &mut work)
+            .unwrap();
+        assert!(clear > 0.5 * s);
+        assert!(work > 0);
+    }
 }
