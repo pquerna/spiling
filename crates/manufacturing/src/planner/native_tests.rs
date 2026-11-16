@@ -207,6 +207,25 @@ fn resident_preparation_reuse_preserves_plan_program_and_fresh_replay() {
     assert!(crate::verify_bundle(&reloaded, &cancel).unwrap().verified);
 }
 
+#[test]
+fn stepped_wall_cache_retention_preserves_schedule_program_and_fresh_replay() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/manufacturing/native/source-sphere-belt.step"),
+        &[translated(0., 0., 3.)],
+    );
+    let intent = intent(true);
+    let retained = compile(scene.input(&intent), &cancel).unwrap();
+    let uncached = slopes::without_cache(|| compile(scene.input(&intent), &cancel)).unwrap();
+    assert_eq!(retained.plan, uncached.plan);
+    assert_eq!(
+        retained.program.to_vec().unwrap(),
+        uncached.program.to_vec().unwrap()
+    );
+    let returned = reload(&encode(&uncached), &uncached.program);
+    assert!(crate::verify_bundle(&returned, &cancel).unwrap().verified);
+}
+
 fn translated(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

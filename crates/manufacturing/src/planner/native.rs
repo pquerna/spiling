@@ -376,6 +376,17 @@ pub(super) fn split_resolved_layer(
     minimum_height_mm: f64,
     context: &str,
 ) -> Result<(), ManufacturingError> {
+    split_resolved_layer_admitted(schedule, index, minimum_height_mm, context, |_| Ok(()))
+}
+
+/// Admit caller-owned growth after child heights qualify and before mutation.
+pub(super) fn split_resolved_layer_admitted(
+    schedule: &mut Vec<LayerElevation>,
+    index: u32,
+    minimum_height_mm: f64,
+    context: &str,
+    admit_growth: impl FnOnce(&mut Vec<LayerElevation>) -> Result<(), ManufacturingError>,
+) -> Result<(), ManufacturingError> {
     let layer = &schedule[index as usize];
     let midpoint = layer.lower_z + (layer.z - layer.lower_z) * 0.5;
     let lower_height = midpoint - layer.lower_z;
@@ -441,6 +452,7 @@ pub(super) fn split_resolved_layer(
         height: lower_height,
         course: layer.course,
     };
+    admit_growth(schedule)?;
     schedule[index as usize] = lower;
     schedule.insert(index as usize + 1, upper);
     Ok(())

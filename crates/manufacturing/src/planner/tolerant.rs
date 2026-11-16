@@ -83,7 +83,14 @@ pub(super) fn section_at(
             format!("tolerant section at Z {z} mm: {}", e.message),
         )
     })?;
-    let mut result = polygons(&section);
+    Ok(material_from_section(model, &section))
+}
+
+pub(super) fn material_from_section(
+    model: &TolerantModel,
+    section: &TolerantSection,
+) -> MultiPolygon<f64> {
+    let mut result = polygons(section);
     // Chords of flat faces cross the plane in runs of collinear points, and
     // freeform faces in sub-micrometre steps. Drop vertices within a quarter
     // of the profile tolerance, the sag analytic curves were densified to, so
@@ -102,7 +109,7 @@ pub(super) fn section_at(
     result
         .0
         .retain(|polygon| geo::Area::unsigned_area(polygon) > epsilon * epsilon);
-    Ok(result)
+    result
 }
 
 fn start_at_least(ring: &mut LineString<f64>) {

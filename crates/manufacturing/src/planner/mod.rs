@@ -219,7 +219,16 @@ fn plan_with(
     }
     // A proposal: support and mapped-field refinement split it further.
     let mut schedule = scheduled_layers(input, &mut admission, &process_captures, cancel)?;
-    slopes::split_for_slopes(input, &admission, &mut schedule, cancel)?;
+    let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?
+        .saturating_sub(schedule.capacity() * std::mem::size_of::<LayerElevation>());
+    slopes::split_for_slopes(
+        input,
+        &admission,
+        &mut schedule,
+        outside,
+        &mut surface_work,
+        cancel,
+    )?;
     let mut support_work = support::SupportWork::default();
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
