@@ -26,8 +26,8 @@
 use super::region::offset_admitted;
 use crate::{check_cancel, error};
 use geo::{
-    Area, BooleanOps, BoundingRect, Coord, LineString, MinimumRotatedRect, MultiPolygon, Polygon,
-    Rect,
+    Area, BooleanOps, BoundingRect, ConvexHull, Coord, LineString, MinimumRotatedRect,
+    MultiPolygon, Polygon, Rect,
 };
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 use spiling_contracts::manufacturing::*;
@@ -298,7 +298,7 @@ pub(super) fn rooms(
         region_index: 0,
         s,
         lines: lattice(roof.frame_mm, pitch),
-        rooms: cells(fill, roof.frame_mm, pitch, s, layer.width_mm, cancel)?,
+        rooms: cells(fill, roof.frame_mm, pitch, s, layer.width_mm, false, cancel)?,
     };
     // A proposal knows no lower layer, so it carries no spines; the
     // whole-part stabilization roots them.
@@ -364,7 +364,7 @@ fn layer_rooms(
             region_index: domain.region_index,
             s,
             lines: lattice(frame, pitch),
-            rooms: cells(&fill, frame, pitch, s, recipe.bead_width_mm, cancel)?,
+            rooms: cells(&fill, frame, pitch, s, recipe.bead_width_mm, true, cancel)?,
         });
     }
     Ok(out)
@@ -406,13 +406,15 @@ fn offset(
 
 /// Room loops: the domain eroded by `s/2`, intersected with each lattice cell
 /// inset by `s/2` (erosion distributes over intersection, so lattice sides
-/// stay exact). Components narrower than one spacing print nothing.
+/// stay exact). Where a clipped piece is too narrow for a loop it carries
+/// spines instead.
 fn cells(
     fill: &MultiPolygon<f64>,
     frame: [[f64; 2]; 2],
     pitch: f64,
     s: f64,
     width: f64,
+    split_tails: bool,
     cancel: &AtomicBool,
 ) -> Result<Vec<Room>, ManufacturingError> {
     let eroded = offset(fill, -0.5 * s, cancel)?;
@@ -472,26 +474,90 @@ fn cells(
                 [x0.max(frame[0][0]), y0.max(frame[0][1])],
                 [x1.min(frame[1][0]), y1.min(frame[1][1])],
             ];
+            let untouched = |polygon: &Polygon<f64>| {
+                polygon.interiors().is_empty()
+                    && polygon.exterior().0.len() == 5
+                    && (polygon.unsigned_area() - rect.unsigned_area()).abs()
+                        <= 1e-9 * rect.unsigned_area()
+            };
+            let mut loops = Vec::new();
             for polygon in clipped.0 {
-                let around: f64 = std::iter::once(polygon.exterior())
-                    .chain(polygon.interiors())
-                    .map(|ring| ring_length(&ring.0))
-                    .sum();
-                if around <= 0.0 {
+                check_cancel(cancel)?;
+                // Only a non-convex piece can join a wide pocket to a thin
+                // tail; a convex one is a loop or, if thin, a spine. A
+                // per-layer proposal (always rebuilt) takes the simple rule.
+                let convex = untouched(&polygon) || {
+                    let hull = polygon.convex_hull().unsigned_area();
+                    hull <= polygon.unsigned_area() * (1.0 + 1e-6)
+                };
+                if !split_tails || convex {
+                    let around: f64 = std::iter::once(polygon.exterior())
+                        .chain(polygon.interiors())
+                        .map(|ring| ring_length(&ring.0))
+                        .sum();
+                    if around > 0.0 && 2.0 * polygon.unsigned_area() / around < s {
+                        for run in spine(&polygon, width, s) {
+                            rooms.push(Room {
+                                bounds: cell_bounds,
+                                rings: vec![run],
+                                open: true,
+                            });
+                        }
+                    } else if around > 0.0 {
+                        loops.push(polygon);
+                    }
                     continue;
                 }
-                if 2.0 * polygon.unsigned_area() / around < s {
-                    // Too narrow for a loop: one spine bead, so whatever
-                    // lands on the strip later has a wall under it.
-                    for run in spine(&polygon, width) {
+                // A loop needs its two sides a spacing apart. The part of
+                // the piece that allows it is its opening by s/2; what the
+                // opening leaves behind is too narrow and carries spines.
+                let piece = MultiPolygon(vec![polygon]);
+                let core = offset(&piece, -0.5 * s, cancel)?;
+                let fat = if core.0.is_empty() {
+                    core
+                } else {
+                    offset(&core, 0.5 * s, cancel)?
+                };
+                let rest = if fat.0.is_empty() {
+                    piece.clone()
+                } else {
+                    super::boolean_budget(&piece, &fat, cancel)?;
+                    piece.difference(&fat)
+                };
+                let mut tails = Vec::new();
+                for part in rest.0 {
+                    let runs = spine(&part, width, s);
+                    if runs.is_empty() {
+                        continue;
+                    }
+                    for run in runs {
                         rooms.push(Room {
                             bounds: cell_bounds,
                             rings: vec![run],
                             open: true,
                         });
                     }
+                    tails.push(part);
+                }
+                if fat.0.is_empty() {
                     continue;
                 }
+                if tails.is_empty() {
+                    loops.extend(piece.0);
+                } else {
+                    let tails = MultiPolygon(tails);
+                    super::boolean_budget(&piece, &tails, cancel)?;
+                    // Keep only what can hold a loop: slivers the cut
+                    // leaves beside a tail are dropped.
+                    for part in piece.difference(&tails).0 {
+                        let part = MultiPolygon(vec![part]);
+                        if !offset(&part, -0.5 * s, cancel)?.0.is_empty() {
+                            loops.extend(part.0);
+                        }
+                    }
+                }
+            }
+            for polygon in loops {
                 let mut rings = Vec::new();
                 for (index, ring) in std::iter::once(polygon.exterior())
                     .chain(polygon.interiors())
@@ -503,7 +569,10 @@ fn cells(
                         ring.0.clone()
                     };
                     let points = drop_short_edges(points);
-                    if points.len() >= 4 {
+                    // A real loop encloses at least a disk half a spacing
+                    // across (a hole ring) and usually far more; a ring
+                    // enclosing less is a collapsed sliver, not a room.
+                    if points.len() >= 4 && signed_area(&points).abs() >= 0.25 * s * s {
                         rings.push(points);
                     }
                 }
@@ -520,15 +589,242 @@ fn cells(
     Ok(rooms)
 }
 
-/// The midline of a thin piece's minimum rotated rectangle along its long
-/// side, clipped to the piece: every clipped run of at least two bead
-/// widths. A bent strip keeps only the runs its midline crosses; whatever
-/// later lands on the rest is judged, and reported, like any other road.
-fn spine(piece: &Polygon<f64>, width: f64) -> Vec<Vec<Coord<f64>>> {
-    spine_runs(piece, width).unwrap_or_default()
+/// Spines of a thin piece: its centerline, clipped to the piece, as runs of
+/// at least two bead widths.
+///
+/// A strip's outline is two long sides joined at two tips. Walking away from
+/// a tip in both directions, points at equal arc length face each other
+/// across the strip, so their midpoints trace the centerline, around bends
+/// too. The tip is the outline point whose facing pairs stay closest. A
+/// piece that is not one strip (a hole, a branch: some pair further apart
+/// than one spacing) takes the straight midline of its minimum rotated
+/// rectangle instead; whatever later lands on the rest of it is judged, and
+/// reported, like any other road.
+fn spine(piece: &Polygon<f64>, width: f64, s: f64) -> Vec<Vec<Coord<f64>>> {
+    let line = centerline(piece, width, s).or_else(|| midline(piece));
+    let Some(line) = line else {
+        return Vec::new();
+    };
+    let mut runs: Vec<Vec<Coord<f64>>> = Vec::new();
+    for run in piece
+        .clip(&geo::MultiLineString(vec![LineString(line)]), false)
+        .0
+    {
+        let mut run = run.0;
+        if run.len() < 2 {
+            continue;
+        }
+        // Clipping may cut one run in two at a vertex: join them again.
+        let touches = |a: &Coord<f64>, b: &Coord<f64>| (a.x - b.x).hypot(a.y - b.y) < 1e-9;
+        if let Some(last) = runs.last_mut() {
+            if touches(&last[last.len() - 1], &run[run.len() - 1]) || touches(&last[0], &run[0]) {
+                run.reverse();
+            }
+            if touches(&last[last.len() - 1], &run[0]) {
+                last.extend(run.into_iter().skip(1));
+                continue;
+            }
+            if touches(&last[0], &run[run.len() - 1]) {
+                run.extend(last.drain(..).skip(1));
+                *last = run;
+                continue;
+            }
+        }
+        runs.push(run);
+    }
+    runs.into_iter()
+        .map(drop_short_steps)
+        .filter(|run| run.len() >= 2 && ring_length(run) >= 2.0 * width)
+        .collect()
 }
 
-fn spine_runs(piece: &Polygon<f64>, width: f64) -> Option<Vec<Vec<Coord<f64>>>> {
+/// Keep a polyline's ends and every point at least one deposition command
+/// from the last kept point.
+fn drop_short_steps(points: Vec<Coord<f64>>) -> Vec<Coord<f64>> {
+    let Some((&last, rest)) = points.split_last() else {
+        return points;
+    };
+    let mut out: Vec<Coord<f64>> = Vec::with_capacity(points.len());
+    for &p in rest {
+        if out
+            .last()
+            .is_none_or(|q| (p.x - q.x).hypot(p.y - q.y) >= MIN_DEPOSITION_COMMAND_MM)
+        {
+            out.push(p);
+        }
+    }
+    while out.len() > 1
+        && out
+            .last()
+            .is_some_and(|q| (last.x - q.x).hypot(last.y - q.y) < MIN_DEPOSITION_COMMAND_MM)
+    {
+        out.pop();
+    }
+    out.push(last);
+    out
+}
+
+fn centerline(piece: &Polygon<f64>, width: f64, s: f64) -> Option<Vec<Coord<f64>>> {
+    if !piece.interiors().is_empty() {
+        return None;
+    }
+    let ring = &piece.exterior().0;
+    if ring.len() < 4 {
+        return None;
+    }
+    // Arc length at each outline vertex.
+    let mut along = Vec::with_capacity(ring.len());
+    let mut total = 0.0;
+    along.push(0.0);
+    for e in ring.windows(2) {
+        total += (e[1].x - e[0].x).hypot(e[1].y - e[0].y);
+        along.push(total);
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    let at = |distance: f64| {
+        let d = distance.rem_euclid(total);
+        let edge = along.partition_point(|&v| v <= d).clamp(1, ring.len() - 1) - 1;
+        let length = along[edge + 1] - along[edge];
+        let t = if length > 0.0 {
+            ((d - along[edge]) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (a, b) = (ring[edge], ring[edge + 1]);
+        Coord {
+            x: a.x + t * (b.x - a.x),
+            y: a.y + t * (b.y - a.y),
+        }
+    };
+    // Facing pairs a quarter bead apart along the outline, sampled once.
+    let pairs = ((0.5 * total / (0.25 * width)).ceil() as usize).max(2);
+    let count = 2 * pairs;
+    let step = total / count as f64;
+    let mut samples = Vec::with_capacity(count);
+    let mut edge = 0usize;
+    for k in 0..count {
+        let d = k as f64 * step;
+        while edge + 2 < along.len() && along[edge + 1] <= d {
+            edge += 1;
+        }
+        let length = along[edge + 1] - along[edge];
+        let t = if length > 0.0 {
+            ((d - along[edge]) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (a, b) = (ring[edge], ring[edge + 1]);
+        samples.push(Coord {
+            x: a.x + t * (b.x - a.x),
+            y: a.y + t * (b.y - a.y),
+        });
+    }
+    let gap = |i: usize, j: usize| {
+        let (a, b) = (samples[i % count], samples[j % count]);
+        (a.x - b.x).hypot(a.y - b.y)
+    };
+    // Widest facing pair from sample tip `t`, abandoned once over `bound`.
+    let widest_from = |t: usize, bound: f64| {
+        let mut worst = 0.0_f64;
+        for k in 1..pairs {
+            worst = worst.max(gap(t + k, t + count - k));
+            if worst > bound {
+                break;
+            }
+        }
+        worst
+    };
+    // A tip is where the outline doubles back: its neighbours face each
+    // other closely. Only those samples are tried.
+    let mut best = (f64::INFINITY, 0usize);
+    for t in 0..count {
+        if gap(t + 1, t + count - 1) > s {
+            continue;
+        }
+        let worst = widest_from(t, best.0);
+        if worst < best.0 {
+            best = (worst, t);
+        }
+    }
+    if !best.0.is_finite() {
+        return None;
+    }
+    let widest = |tip: f64| {
+        (1..pairs)
+            .map(|k| {
+                let (a, b) = (at(tip + k as f64 * step), at(tip - k as f64 * step));
+                (a.x - b.x).hypot(a.y - b.y)
+            })
+            .fold(0.0, f64::max)
+    };
+    // Refine the tip between samples, once.
+    let mut tip = best.1 as f64 * step;
+    let mut reach = step;
+    for _ in 0..2 {
+        tip = (-8..=8)
+            .map(|k| tip + f64::from(k) * reach / 8.0)
+            .min_by(|a, b| widest(*a).total_cmp(&widest(*b)))?;
+        reach /= 8.0;
+    }
+    if widest(tip) > s {
+        return None;
+    }
+    // Stop half a spacing short of each tip, where facing pairs span the
+    // end cap and their midpoints wander off the centerline.
+    let cap = ((0.5 * s / step).ceil() as usize).min(pairs / 2);
+    let line: Vec<Coord<f64>> = (cap..=pairs - cap)
+        .map(|k| {
+            let (a, b) = (at(tip + k as f64 * step), at(tip - k as f64 * step));
+            Coord {
+                x: 0.5 * (a.x + b.x),
+                y: 0.5 * (a.y + b.y),
+            }
+        })
+        .collect();
+    Some(straighten(&line, 0.2 * PROFILE_TOLERANCE_MM))
+}
+
+/// Douglas-Peucker: drop points within `tolerance` of the kept polyline.
+fn straighten(points: &[Coord<f64>], tolerance: f64) -> Vec<Coord<f64>> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut spans = vec![(0usize, points.len() - 1)];
+    while let Some((first, last)) = spans.pop() {
+        let (a, b) = (points[first], points[last]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let length = dx.hypot(dy);
+        let mut worst = (0.0, first);
+        for (i, p) in points.iter().enumerate().take(last).skip(first + 1) {
+            let d = if length > 0.0 {
+                ((p.x - a.x) * dy - (p.y - a.y) * dx).abs() / length
+            } else {
+                (p.x - a.x).hypot(p.y - a.y)
+            };
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        if worst.0 > tolerance {
+            keep[worst.1] = true;
+            spans.push((first, worst.1));
+            spans.push((worst.1, last));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
+/// The midline of a piece's minimum rotated rectangle along its long side.
+fn midline(piece: &Polygon<f64>) -> Option<Vec<Coord<f64>>> {
     let rect = piece.minimum_rotated_rect()?;
     let c = &rect.exterior().0;
     if c.len() < 4 {
@@ -540,21 +836,11 @@ fn spine_runs(piece: &Polygon<f64>, width: f64) -> Option<Vec<Vec<Coord<f64>>>> 
         y: 0.5 * (a.y + b.y),
     };
     // Join the midpoints of the two short sides.
-    let (from, to) = if length(c[0], c[1]) >= length(c[1], c[2]) {
-        (mid(c[1], c[2]), mid(c[3], c[0]))
+    Some(if length(c[0], c[1]) >= length(c[1], c[2]) {
+        vec![mid(c[1], c[2]), mid(c[3], c[0])]
     } else {
-        (mid(c[0], c[1]), mid(c[2], c[3]))
-    };
-    let line = geo::MultiLineString(vec![LineString(vec![from, to])]);
-    let clipped = piece.clip(&line, false);
-    Some(
-        clipped
-            .0
-            .into_iter()
-            .map(|run| run.0)
-            .filter(|run| run.len() >= 2 && ring_length(run) >= 2.0 * width)
-            .collect(),
-    )
+        vec![mid(c[0], c[1]), mid(c[2], c[3])]
+    })
 }
 
 fn ring_length(points: &[Coord<f64>]) -> f64 {
@@ -640,7 +926,22 @@ fn drop_short_edges(mut points: Vec<Coord<f64>>) -> Vec<Coord<f64>> {
             let a = points[i];
             let b = points[next];
             if (b.x - a.x).hypot(b.y - a.y) < MIN_DEPOSITION_COMMAND_MM {
-                points.remove(next);
+                // Drop whichever end moves the outline least: a vertex lying
+                // on its neighbours' line vanishes without tilting a wall.
+                let n = points.len();
+                let before = points[(i + n - 1) % n];
+                let after = points[(next + 1) % n];
+                let off = |p: Coord<f64>, u: Coord<f64>, v: Coord<f64>| {
+                    let (dx, dy) = (v.x - u.x, v.y - u.y);
+                    let length = dx.hypot(dy);
+                    if length > 0.0 {
+                        ((p.x - u.x) * dy - (p.y - u.y) * dx).abs() / length
+                    } else {
+                        (p.x - u.x).hypot(p.y - u.y)
+                    }
+                };
+                let keep_a = off(b, a, after) <= off(a, before, b);
+                points.remove(if keep_a { next } else { i });
                 changed = true;
             } else {
                 i += 1;
@@ -1037,8 +1338,8 @@ fn room_roads(
             });
             continue;
         }
-        let points = drop_short_edges(insert_teeth(ring, &teeth, s));
-        if points.len() >= 4 {
+        let points = drop_short_edges(insert_teeth(ring, &room.rings, &teeth, s));
+        if points.len() >= 4 && signed_area(&points).abs() >= 0.25 * s * s {
             out.push(Road {
                 points,
                 exterior: index == 0,
@@ -1327,8 +1628,17 @@ fn crossings(ring: &[Coord<f64>], family: usize, c: f64) -> Vec<OnRing> {
 }
 
 /// Replace, for each tooth rooted on this ring, the short ring arc between
-/// its two leg lines by the tooth: leg, tip, leg.
-fn insert_teeth(ring: &[Coord<f64>], teeth: &[Tooth], s: f64) -> Vec<Coord<f64>> {
+/// its two leg lines by the tooth: leg, tip, leg. Every room ring bounds
+/// the tooth: a leg stops before it meets any ring again (a curved wall or
+/// a hole), so the whole tooth stays inside the room, and a tooth whose tip
+/// would still cross a ring, or that no longer reaches half a spacing, is
+/// left out.
+fn insert_teeth(
+    ring: &[Coord<f64>],
+    room: &[Vec<Coord<f64>>],
+    teeth: &[Tooth],
+    s: f64,
+) -> Vec<Coord<f64>> {
     let edges = ring.len() - 1;
     let along = |p: &Coord<f64>, family: usize| if family == 0 { p.y } else { p.x };
     // (start, end, replacement) with start < end in ring parameter.
@@ -1371,6 +1681,35 @@ fn insert_teeth(ring: &[Coord<f64>], teeth: &[Tooth], s: f64) -> Vec<Coord<f64>>
         if !ok(&a) || !ok(&b) {
             continue;
         }
+        // Each leg stops a quarter spacing before it meets a room ring again.
+        let mut tip = tooth.tip;
+        for leg in [&a, &b] {
+            let start = along(&leg.point, tooth.family);
+            let line = if tooth.family == 0 {
+                leg.point.x
+            } else {
+                leg.point.y
+            };
+            for other in room {
+                for hit in crossings(other, tooth.family, line) {
+                    let v = along(&hit.point, tooth.family);
+                    if grows_up && v > start + 1e-9 {
+                        tip = tip.min(v - 0.25 * s);
+                    } else if !grows_up && v < start - 1e-9 {
+                        tip = tip.max(v + 0.25 * s);
+                    }
+                }
+            }
+        }
+        let reach = |p: &OnRing| {
+            let v = along(&p.point, tooth.family);
+            if grows_up { tip - v } else { v - tip }
+        };
+        if reach(&a) < 0.5 * s || reach(&b) < 0.5 * s {
+            continue;
+        }
+        let tooth = Tooth { tip, ..*tooth };
+        let tooth = &tooth;
         // Order the cut forward along the ring from the first leg met.
         let (first, second) = if forward(a.at, root.at, edges) <= forward(a.at, b.at, edges)
             && forward(a.at, b.at, edges) < edges as f64 * 0.5
@@ -1401,6 +1740,21 @@ fn insert_teeth(ring: &[Coord<f64>], teeth: &[Tooth], s: f64) -> Vec<Coord<f64>>
             tip_point(&second),
             second.point,
         ];
+        // The tip joins the legs; it must not cross a ring between them.
+        let (p, q) = (replacement[1], replacement[2]);
+        let crosses = room.iter().any(|other| {
+            other.windows(2).any(|e| {
+                let side = |o: Coord<f64>, u: Coord<f64>, v: Coord<f64>| {
+                    (u.x - o.x) * (v.y - o.y) - (u.y - o.y) * (v.x - o.x)
+                };
+                let (d1, d2) = (side(e[0], e[1], p), side(e[0], e[1], q));
+                let (d3, d4) = (side(p, q, e[0]), side(p, q, e[1]));
+                d1 * d2 <= 0.0 && d3 * d4 <= 0.0
+            })
+        });
+        if crosses {
+            continue;
+        }
         let (start, mut end) = (first.at, second.at);
         if end < start {
             end += edges as f64;
@@ -1495,7 +1849,7 @@ mod tests {
         let pitch = cell_pitch(w, h, 0.15);
         assert!((pitch - 10.86).abs() < 0.01, "{pitch}");
         let frame = [[0.0, 0.0], [40.0, 40.0]];
-        let rooms = cells(&square(40.0), frame, pitch, s, w, &cancel).unwrap();
+        let rooms = cells(&square(40.0), frame, pitch, s, w, true, &cancel).unwrap();
         let lines = lattice(frame, pitch);
         assert_eq!(rooms.len(), (lines[0].len() + 1) * (lines[1].len() + 1));
         for room in &rooms {
@@ -1548,7 +1902,7 @@ mod tests {
                 tip: 6.0,
             },
         ];
-        let out = drop_short_edges(insert_teeth(&ring, &teeth, s));
+        let out = drop_short_edges(insert_teeth(&ring, std::slice::from_ref(&ring), &teeth, s));
         assert_eq!(out.first(), out.last());
         let has = |x: f64, y: f64| {
             out.iter()
@@ -1567,7 +1921,7 @@ mod tests {
         let s = spacing(w, h);
         let pitch = cell_pitch(w, h, 0.15);
         let frame = [[0.0, 0.0], [40.0, 40.0]];
-        let rooms = cells(&square(40.0), frame, pitch, s, w, &cancel).unwrap();
+        let rooms = cells(&square(40.0), frame, pitch, s, w, true, &cancel).unwrap();
         let domain = DomainRooms {
             region_index: 0,
             s,
@@ -1625,14 +1979,14 @@ mod tests {
         let strip = MultiPolygon(vec![Rect::new([0.0, 0.0], [8.0, 0.6]).to_polygon()]);
         let frame = [[0.0, -10.0], [8.0, 30.0]];
         assert_eq!(lattice(frame, pitch)[0], vec![4.0]);
-        let rooms = cells(&strip, frame, pitch, s, w, &cancel).unwrap();
+        let rooms = cells(&strip, frame, pitch, s, w, true, &cancel).unwrap();
         assert_eq!(rooms.len(), 2);
         for room in &rooms {
             assert!(room.open);
             let spine = &room.rings[0];
             assert_eq!(spine.len(), 2);
             for p in spine {
-                assert!((p.y - 0.3).abs() < 1e-6, "{p:?}");
+                assert!((p.y - 0.3).abs() < 1e-3, "{p:?}");
                 // Inside the strip and s/2 clear of the wall line at x = 4.
                 assert!(
                     p.x >= 0.5 * s - 1e-6 && p.x <= 8.0 - 0.5 * s + 1e-6,
@@ -1641,6 +1995,167 @@ mod tests {
                 assert!((p.x - 4.0).abs() >= 0.5 * s - 1e-6, "{p:?}");
             }
             assert!(columns(room, 0, s, 1.0).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_bent_strip_carries_a_spine_along_both_arms() {
+        let (w, s) = (0.45, spacing(0.45, 0.2));
+        // An L of centerline-region width 0.2: arms along +X and +Y.
+        let piece = Polygon::new(
+            LineString(
+                [
+                    [0.0, 0.0],
+                    [6.0, 0.0],
+                    [6.0, 0.2],
+                    [0.2, 0.2],
+                    [0.2, 5.0],
+                    [0.0, 5.0],
+                    [0.0, 0.0],
+                ]
+                .iter()
+                .map(|p| Coord { x: p[0], y: p[1] })
+                .collect(),
+            ),
+            vec![],
+        );
+        let runs = spine(&piece, w, s);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let run = &runs[0];
+        // The whole L, tip to tip, not one arm's straight chord.
+        assert!(ring_length(run) > 10.0, "{}", ring_length(run));
+        let near = |x: f64, y: f64| run.iter().any(|p| (p.x - x).hypot(p.y - y) < 0.15);
+        assert!(
+            near(6.0, 0.1) && near(0.1, 5.0) && near(0.1, 0.1),
+            "{run:?}"
+        );
+        for e in run.windows(2) {
+            assert!((e[1].x - e[0].x).hypot(e[1].y - e[0].y) >= MIN_DEPOSITION_COMMAND_MM);
+        }
+        // A piece with a hole is not one strip: the straight midline serves.
+        let ring = Polygon::new(
+            piece.exterior().clone(),
+            vec![LineString(
+                [
+                    [2.0, 0.05],
+                    [3.0, 0.05],
+                    [3.0, 0.15],
+                    [2.0, 0.15],
+                    [2.0, 0.05],
+                ]
+                .iter()
+                .map(|p| Coord { x: p[0], y: p[1] })
+                .collect(),
+            )],
+        );
+        assert!(centerline(&ring, w, s).is_none());
+    }
+
+    #[test]
+    fn dropping_a_short_edge_never_tilts_a_wall() {
+        // A stray vertex 0.017 mm from a corner, on the top edge's line.
+        let ring: Vec<Coord<f64>> = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 8.0],
+            [9.983, 8.0],
+            [0.0, 8.0],
+            [0.0, 0.0],
+        ]
+        .iter()
+        .map(|p| Coord { x: p[0], y: p[1] })
+        .collect();
+        let out = drop_short_edges(ring);
+        assert_eq!(out.len(), 5);
+        assert!(out.contains(&Coord { x: 10.0, y: 8.0 }), "{out:?}");
+        assert!(!out.contains(&Coord { x: 9.983, y: 8.0 }), "{out:?}");
+    }
+
+    #[test]
+    fn a_pocket_with_thin_tails_gets_a_loop_and_spines() {
+        let cancel = AtomicBool::new(false);
+        let (w, h) = (0.45, 0.2);
+        let s = spacing(w, h);
+        // A 4 x 4 pocket with a 0.6 mm strip running 8 mm out of each side:
+        // mostly strip by perimeter, but the pocket holds a loop.
+        let piece = Polygon::new(
+            LineString(
+                [
+                    [0.0, 0.0],
+                    [8.0, 0.0],
+                    [8.0, -4.0],
+                    [12.0, -4.0],
+                    [12.0, 0.0],
+                    [20.0, 0.0],
+                    [20.0, 0.6],
+                    [0.0, 0.6],
+                    [0.0, 0.0],
+                ]
+                .iter()
+                .map(|p| Coord { x: p[0], y: p[1] })
+                .collect(),
+            ),
+            vec![],
+        );
+        // One cell holds it all: the only lattice lines are far away.
+        let frame = [[-500.0, -500.0], [100.0, 100.0]];
+        assert_eq!(lattice(frame, 2000.0), [vec![-200.0], vec![-200.0]]);
+        let rooms = cells(
+            &MultiPolygon(vec![piece]),
+            frame,
+            2000.0,
+            s,
+            w,
+            true,
+            &cancel,
+        )
+        .unwrap();
+        let loops: Vec<&Room> = rooms.iter().filter(|r| !r.open).collect();
+        let spines: Vec<&Room> = rooms.iter().filter(|r| r.open).collect();
+        assert_eq!(loops.len(), 1, "one loop in the pocket");
+        assert_eq!(spines.len(), 2, "one spine per strip");
+        for p in &loops[0].rings[0] {
+            assert!(
+                p.x > 7.0 && p.x < 13.0,
+                "the loop stays in the pocket: {p:?}"
+            );
+        }
+        for spine in &spines {
+            let run = &spine.rings[0];
+            assert!(ring_length(run) > 6.0, "{}", ring_length(run));
+            assert!(run.iter().all(|p| (p.y - 0.3).abs() < 0.05), "{run:?}");
+        }
+    }
+
+    #[test]
+    fn a_collapsed_sliver_ring_is_not_a_room() {
+        let cancel = AtomicBool::new(false);
+        let (w, h) = (0.45, 0.2);
+        let s = spacing(w, h);
+        // A wedge whose eroded tip is a sliver: the clipped tip must not
+        // survive as a closed road of almost no area.
+        let wedge = MultiPolygon(vec![Polygon::new(
+            LineString(
+                [
+                    [0.0, 0.0],
+                    [12.0, 0.0],
+                    [12.0, 1.4],
+                    [0.0, 0.05],
+                    [0.0, 0.0],
+                ]
+                .iter()
+                .map(|p| Coord { x: p[0], y: p[1] })
+                .collect(),
+            ),
+            vec![],
+        )]);
+        let frame = [[-50.0, -50.0], [50.0, 50.0]];
+        for pitch in [2.0, 3.0, 5.0] {
+            for room in cells(&wedge, frame, pitch, s, w, true, &cancel).unwrap() {
+                for ring in room.rings.iter().filter(|_| !room.open) {
+                    assert!(signed_area(ring).abs() >= 0.25 * s * s, "{ring:?}");
+                }
+            }
         }
     }
 }
