@@ -3163,22 +3163,35 @@ async fn execute(
                             - preparation.original_pose.translation_mm[2],
                     );
                 }
+                let placed = |delta: [f64; 3]| AabbMm {
+                    min: std::array::from_fn(|axis| lower[axis] + delta[axis]),
+                    max: std::array::from_fn(|axis| upper[axis] + delta[axis]),
+                };
                 let mut delta = [0.0, 0.0, lift];
-                if center {
+                // Place rests the group where it is when preflight would admit
+                // it there; a group off the bed (or its usable region) is
+                // centred on the usable region, as in the workbench.
+                let on_bed = |placed: &AabbMm| {
+                    intent.printer.envelope_admits(placed)
+                        && intent
+                            .hardware
+                            .as_ref()
+                            .is_none_or(|h| h.admits_bounds(placed).is_ok())
+                };
+                if center || !on_bed(&placed(delta)) {
+                    let target = match &intent.hardware {
+                        Some(hardware) => hardware.usable_center_xy()?,
+                        None => std::array::from_fn(|axis| {
+                            (envelope.min[axis] + envelope.max[axis]) * 0.5
+                        }),
+                    };
                     for axis in 0..2 {
-                        delta[axis] = (envelope.min[axis] + envelope.max[axis]) * 0.5
-                            - (lower[axis] + upper[axis]) * 0.5;
+                        delta[axis] = target[axis] - (lower[axis] + upper[axis]) * 0.5;
                     }
                 }
-                if (0..3).any(|axis| {
-                    lower[axis] + delta[axis] < envelope.min[axis]
-                        || upper[axis] + delta[axis] > envelope.max[axis]
-                }) {
+                if !intent.printer.envelope_admits(&placed(delta)) {
                     return Err(BuildEnvelopeExceeded {
-                        placed_bounds_mm: spiling_contracts::geometry::AabbMm {
-                            min: std::array::from_fn(|axis| lower[axis] + delta[axis]),
-                            max: std::array::from_fn(|axis| upper[axis] + delta[axis]),
-                        },
+                        placed_bounds_mm: placed(delta),
                         build_envelope: envelope,
                     }
                     .into());

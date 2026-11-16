@@ -131,8 +131,8 @@ compile, fresh inspection) and opens Review; it stops at the first refusal, whos
 plain reason and fix (such as Arrange on bed) stay in place. Slice refuses unapplied
 changes. Prepare and Review offer the same Slice; a reopened project whose saved
 output is still current needs only the fresh inspection. Creating print settings
-rests the plate's parts on the bed and centres them when they are not already
-within it. The active editor owns Apply, and Review
+rests the plate's parts on the bed and centres them on the selected plate's usable
+region when preflight would not already admit them where they are. The active editor owns Apply, and Review
 offers Export only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.

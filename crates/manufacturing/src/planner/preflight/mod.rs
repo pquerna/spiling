@@ -577,10 +577,7 @@ pub(super) fn admit<'work>(
         occurrence_bounds.insert(occurrence.occurrence_id, placed);
         // ADR012: extents within one motion step of the envelope are the same
         // commanded position; tessellated extents may sit that far outside.
-        if (0..3).any(|a| {
-            placed.min[a] < envelope.min[a] - axis_resolution(input, a)
-                || placed.max[a] > envelope.max[a] + axis_resolution(input, a)
-        }) {
+        if !input.intent.printer.envelope_admits(&placed) {
             add("outside_envelope", "Placed native extrema plus admitted surface-finish expansion exceed the build envelope; change placement, finish or printer".into(), Some(occurrence.occurrence_id), None);
         }
         if let Some(region) = input.intent.printer.bed_exclusions.iter().find(|x| {

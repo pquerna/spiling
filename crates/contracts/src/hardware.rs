@@ -306,13 +306,22 @@ impl ProjectHardwareCapture {
         Ok(())
     }
     /// Conservative whole-material admission, separate from machine travel and purge areas.
+    /// Where bed preparation centres parts: the selected face's usable region.
+    pub fn usable_center_xy(&self) -> Result<[f64; 2], String> {
+        let usable = self.selected_face()?.usable_mm;
+        Ok([
+            (usable.min[0] + usable.max[0]) * 0.5,
+            (usable.min[1] + usable.max[1]) * 0.5,
+        ])
+    }
     pub fn admits_bounds(&self, b: &AabbMm) -> Result<(), String> {
         bounds(b)?;
         let f = self.selected_face()?;
-        let p = &self.setup.printer.build_envelope;
-        if (0..3).any(|a| b.min[a] < p.min[a] - 1e-6 || b.max[a] > p.max[a] + 1e-6)
+        // ADR012: within one motion step is the same commanded position.
+        let step = self.setup.printer.motion_resolution.xy_mm;
+        if !self.setup.printer.envelope_admits(b)
             || (0..2).any(|a| {
-                b.min[a] < f.usable_mm.min[a] - 1e-6 || b.max[a] > f.usable_mm.max[a] + 1e-6
+                b.min[a] < f.usable_mm.min[a] - step || b.max[a] > f.usable_mm.max[a] + step
             })
         {
             return Err(

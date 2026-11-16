@@ -560,14 +560,30 @@ impl Actor {
             }
             lift = lift.max(p.pose.translation_mm[2] - p.original_pose.translation_mm[2]);
         }
-        let inside = (0..2).all(|a| lower[a] >= envelope.min[a] && upper[a] <= envelope.max[a]);
+        // The same question preflight asks: within the envelope and the
+        // selected face's usable region, within one motion step (ADR012).
+        let resting = spiling_contracts::geometry::AabbMm {
+            min: [lower[0], lower[1], lower[2] + lift],
+            max: [upper[0], upper[1], upper[2] + lift],
+        };
+        let inside = match &project.hardware {
+            Some(hardware) => hardware.admits_bounds(&resting).is_ok(),
+            None => (0..2).all(|a| {
+                lower[a] >= envelope.min[a] - contact_tolerance_mm
+                    && upper[a] <= envelope.max[a] + contact_tolerance_mm
+            }),
+        };
         if inside && lift.abs() <= contact_tolerance_mm {
             return Ok(());
         }
+        let target = project
+            .hardware
+            .as_ref()
+            .and_then(|hardware| hardware.usable_center_xy().ok())
+            .unwrap_or_else(|| std::array::from_fn(|a| (envelope.min[a] + envelope.max[a]) * 0.5));
         let mut delta = [0.0, 0.0, lift];
         for axis in 0..2 {
-            delta[axis] =
-                (envelope.min[axis] + envelope.max[axis] - lower[axis] - upper[axis]) * 0.5;
+            delta[axis] = target[axis] - (lower[axis] + upper[axis]) * 0.5;
         }
         let mut base = summary.revision;
         for occurrence in &display.occurrences {

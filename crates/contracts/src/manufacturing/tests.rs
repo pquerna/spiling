@@ -5054,3 +5054,32 @@ fn firmware_arc_segmentation_follows_each_stock_rule() {
         }
     }
 }
+
+#[test]
+fn envelope_admits_extents_within_one_motion_step() {
+    let printer = intent().printer;
+    let envelope = printer.build_envelope;
+    let step = printer.motion_resolution.xy_mm;
+    let mut placed = AabbMm {
+        min: [envelope.min[0] - 3.6e-15, envelope.min[1], envelope.min[2]],
+        max: [
+            envelope.min[0] + 20.0,
+            envelope.min[1] + 10.0,
+            envelope.min[2] + 8.0,
+        ],
+    };
+    assert!(
+        printer.envelope_admits(&placed),
+        "roundoff at the edge is inside"
+    );
+    placed.min[0] = envelope.min[0] - step;
+    assert!(
+        printer.envelope_admits(&placed),
+        "one motion step is inside"
+    );
+    placed.min[0] = envelope.min[0] - step * 1.5;
+    assert!(
+        !printer.envelope_admits(&placed),
+        "beyond one step is outside"
+    );
+}

@@ -3116,3 +3116,77 @@ fn assert_shallow_overlap_saved_job(height: f64) {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "actual native CLI bed placement; requires SPILING_TEST_ENGINE"]
+fn bed_placement_accepts_parts_on_the_envelope_edge_and_centres_off_bed_groups() {
+    let root = root();
+    let source = root.join("source.step");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    // The box imports at the origin corner, touching the envelope edge. Its
+    // outward-rounded native brackets sit a few ulps outside; ADR012 treats
+    // extents within one motion step as inside, so placement keeps its XY.
+    let edge = report(
+        cli("create", &root.join("edge.spil"))
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(manufacturing_intent_fixture())
+            .args(["--place-on-bed", "1", "--place-all-on-bed", "--preflight"])
+            .output()
+            .unwrap(),
+    );
+    let pose = &edge["occurrences"][0]["pose"]["translation_mm"];
+    assert_eq!(pose[0].as_f64().unwrap(), 0.0);
+    assert_eq!(pose[1].as_f64().unwrap(), 0.0);
+    assert_eq!(
+        edge["manufacturing"]["preflight"]["disposition"],
+        "admitted"
+    );
+    // A group off the bed is centred rather than refused.
+    let off = report(
+        cli("create", &root.join("off.spil"))
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(manufacturing_intent_fixture())
+            .args([
+                "--pose",
+                "1",
+                r#"{"translation_mm":[-400,700,25],"rotation_xyzw":[0,0,0,1]}"#,
+                "--place-all-on-bed",
+                "--preflight",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let pose = &off["occurrences"][0]["pose"]["translation_mm"];
+    // box-mm is 20 x 10 x 8 mm; centred on a 220 mm bed.
+    assert!((pose[0].as_f64().unwrap() - 100.0).abs() < 0.01, "{pose}");
+    assert!((pose[1].as_f64().unwrap() - 105.0).abs() < 0.01, "{pose}");
+    assert!(pose[2].as_f64().unwrap().abs() < 0.01, "{pose}");
+    assert_eq!(off["manufacturing"]["preflight"]["disposition"], "admitted");
+    // A shipped printer also has a plate face usable region; placement asks
+    // the same question preflight does, so the result is admitted either way.
+    for name in ["box-mm.step", "cylinder.step"] {
+        let shipped = report(
+            cli("create", &root.join(format!("{name}.spil")))
+                .arg("--import")
+                .arg(fixture(name))
+                .args([
+                    "--printer",
+                    "generic.marlin-bedslinger.04",
+                    "--material",
+                    "pla",
+                    "--place-all-on-bed",
+                    "--preflight",
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(
+            shipped["manufacturing"]["preflight"]["disposition"], "admitted",
+            "{name}"
+        );
+    }
+}

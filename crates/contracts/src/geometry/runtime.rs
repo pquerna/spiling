@@ -421,6 +421,13 @@ impl BedPosePreparation {
         {
             return Err(invalid("invalid native bed-contact evidence"));
         }
+        let xy_slack = |axis: usize| {
+            if axis < 2 {
+                self.contact_tolerance_mm
+            } else {
+                0.0
+            }
+        };
         for axis in 0..3 {
             let values = [
                 self.minimum_lower_mm[axis],
@@ -445,8 +452,12 @@ impl BedPosePreparation {
             if delta.iter().any(|value| !value.is_finite())
                 || !placed_min.is_finite()
                 || !placed_max.is_finite()
-                || placed_min < self.envelope_mm.min[axis]
-                || placed_max > self.envelope_mm.max[axis]
+                // ADR012: in XY, within one step (the contact tolerance) of
+                // the envelope is the same commanded position, so outward-
+                // rounded brackets of a part touching a side are inside. Z
+                // stays exact: bed contact never admits penetration.
+                || placed_min < self.envelope_mm.min[axis] - xy_slack(axis)
+                || placed_max > self.envelope_mm.max[axis] + xy_slack(axis)
                 || (axis < 2
                     && !self.center_xy
                     && self.pose.translation_mm[axis] != self.original_pose.translation_mm[axis])

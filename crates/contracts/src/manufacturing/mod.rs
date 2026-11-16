@@ -1230,6 +1230,24 @@ impl PrinterSpecification {
     }
 }
 impl PrinterSpecification {
+    /// ADR012: placed extents within one motion step of the build envelope are
+    /// the same commanded position, so they are inside. The single containment
+    /// rule for preflight, bed preparation and clients.
+    pub fn envelope_admits(&self, placed: &AabbMm) -> bool {
+        let step = |axis: usize| {
+            if axis == 2 {
+                self.motion_resolution.z_mm
+            } else {
+                self.motion_resolution.xy_mm
+            }
+        };
+        (0..3).all(|axis| {
+            placed.min[axis] >= self.build_envelope.min[axis] - step(axis)
+                && placed.max[axis] <= self.build_envelope.max[axis] + step(axis)
+        })
+    }
+}
+impl PrinterSpecification {
     /// A machine cannot deposit a layer thinner than one Z step.
     pub fn admits_layer_limits(&self, limits: &DepositionLimits) -> Result<(), ManufacturingError> {
         if limits.min_bead_height_mm < self.motion_resolution.z_mm {
