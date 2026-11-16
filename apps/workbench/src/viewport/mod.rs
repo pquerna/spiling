@@ -596,6 +596,15 @@ impl Viewport {
             self.camera_restored = true;
         }
     }
+    /// Fit frames the parts (and their output) when there are any; the whole
+    /// plate is its own Fit plate action.
+    fn fit_action(&self) -> ViewAction {
+        if self.had_source {
+            ViewAction::FitParts
+        } else {
+            ViewAction::Fit
+        }
+    }
     pub fn fit(&mut self) {
         self.interrupt_focus();
         self.camera_restored = false;
@@ -809,7 +818,7 @@ impl Viewport {
         ui.horizontal_wrapped(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if ui.button("Fit").clicked() {
-                self.queue_view(ViewAction::Fit);
+                self.queue_view(self.fit_action());
             }
             ui.menu_button("View…", |ui| {
             self.navigation_menu(ui);
@@ -888,15 +897,24 @@ impl Viewport {
             );
             let (action, focus) = navigation::keys(ui);
             if let Some(action) = action {
-                self.queue_view(action);
+                self.queue_view(if action == ViewAction::Fit {
+                    self.fit_action()
+                } else {
+                    action
+                });
             }
-            if focus
-                && interactive
-                && view.source
-                && let Some(scene) = &scene
-                && let Ok(target) = scene.focus_target(selected, scope)
-            {
-                self.focus_on(scene, target);
+            if focus {
+                let target = scene
+                    .as_ref()
+                    .filter(|_| interactive && view.source)
+                    .and_then(|scene| Some((scene, scene.focus_target(selected, scope).ok()?)));
+                if let Some((scene, target)) = target {
+                    self.focus_on(scene, target);
+                } else {
+                    // Nothing focusable (no selection, or source hidden in Review):
+                    // frame the parts rather than ignore the key.
+                    self.queue_view(self.fit_action());
+                }
             }
         }
         if let Some(action) = self.pending_view.take() {
@@ -906,6 +924,18 @@ impl Viewport {
                 ui.style().animation_time > 0.0,
             );
             response.request_focus();
+        }
+        // Parts appearing (import, open, first part on an empty plate) frame
+        // the parts, not the whole plate, unless a fit was explicitly requested.
+        if !self.camera_restored
+            && !self.had_source
+            && self.fit_scope.is_none()
+            && scene
+                .as_ref()
+                .is_some_and(|s| s.summary.bounds_mm.is_some())
+        {
+            self.fit = true;
+            self.fit_scope = Some(ViewAction::FitParts);
         }
         let fit_source = self.fit_scope == Some(ViewAction::FitParts);
         let fit_plate = self.fit_scope == Some(ViewAction::FitPlate);
@@ -1124,7 +1154,9 @@ impl Viewport {
             rect.height(),
         );
         let mut zoom = key_motion.zoom;
-        let scroll_allowed = (response.hovered() || force_owns_pointer)
+        // Overlays drawn on the canvas (the section handle, focus rings) must
+        // not swallow the wheel: zoom whenever the pointer is over the canvas.
+        let scroll_allowed = (response.contains_pointer() || force_owns_pointer)
             && !self.navigation.owns_tool()
             && !cube::bounds(rect).is_some_and(|cube| {
                 ui.input(|input| {
@@ -2348,6 +2380,18 @@ fn pick_clipped_hit(
         return None;
     }
     selected
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+    #[test]
+    fn fit_frames_parts_when_present_and_everything_otherwise() {
+        let mut viewport = Viewport::default();
+        assert_eq!(viewport.fit_action(), ViewAction::Fit);
+        viewport.had_source = true;
+        assert_eq!(viewport.fit_action(), ViewAction::FitParts);
+    }
 }
 
 #[cfg(test)]

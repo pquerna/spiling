@@ -129,8 +129,10 @@ Workspace switching hides and retains drafts. One **Slice** runs the existing
 operations in order (create print settings when the choice changed, preflight,
 compile, fresh inspection) and opens Review; it stops at the first refusal, whose
 plain reason and fix (such as Arrange on bed) stay in place. Slice refuses unapplied
-changes. Creating print settings rests the plate's parts on the bed and centres
-them when they are not already within it. The active editor owns Apply, and Review
+changes. Prepare and Review offer the same Slice; a reopened project whose saved
+output is still current needs only the fresh inspection. Creating print settings
+rests the plate's parts on the bed and centres them when they are not already
+within it. The active editor owns Apply, and Review
 offers Export only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.
@@ -149,7 +151,11 @@ keyboard alternatives for every face, edge and corner target.
 All named snaps select orthographic projection with a stable screen-up, including
 exact Top/Bottom. Orbit permits underneath inspection and preserves projection.
 Projection switching preserves scale at the target plane. Fit changes framing,
-not orientation; Fit parts and Fit plate have explicit scopes. Normal inspection
+not orientation. The canvas Fit button and F fit the parts (Fit plate is its own
+action; Fit view in the View menu frames everything, including travel). G with
+nothing focusable fits the parts rather than doing nothing. Opening a project or
+adding the first part fits the parts, not the plate. The wheel zooms
+whenever the pointer is over the canvas, including over its handles. Normal inspection
 uses the active section or a stable selected display-face normal, never a new
 geometric authority. View also exposes opposite normal, screen roll and Previous.
 Small canvases omit the cube but retain all named actions. Cube input is separate
@@ -162,7 +168,7 @@ from source picking and load/fastener placement.
 | Mouse wheel; native pinch                                    | Zoom, with one global reverse-zoom preference               |
 | Trackpad preference                                          | Two-finger scroll pans; pinch zooms; Option/Alt drag orbits |
 | Canvas 0–6                                                   | Isometric, Top, Bottom, Front, Back, Left, Right            |
-| Canvas F / G / P                                             | Fit / Focus selection / Toggle projection                   |
+| Canvas F / G / P                                             | Fit parts / Focus selection / Toggle projection             |
 | Canvas N / Shift+N                                           | Normal to section or selection / Opposite normal            |
 | Canvas arrows / Shift+arrows / plus-or-equal and minus       | Orbit / Pan / Zoom                                          |
 

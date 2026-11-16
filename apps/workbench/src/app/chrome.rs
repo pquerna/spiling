@@ -372,14 +372,15 @@ impl Workbench {
             if self.project_drafts() || self.subject_drafts() {
                 ui.weak("Unapplied changes are retained in their editor");
             } else if self.state.manufacturing.intent.is_some() {
-                self.primary_button(
-                    ui,
-                    if self.disabled(Action::Compile).is_none() {
-                        Action::Compile
-                    } else {
-                        Action::Preflight
-                    },
-                );
+                // The same one-step Slice as Review: check, slice, verify, then
+                // open Review. A sliced, verified plate offers Review instead.
+                if self.manufacturing_current() && !self.slicing() {
+                    if ui::primary(ui, "Review", None) {
+                        self.show_panel(Panel::Review);
+                    }
+                } else {
+                    self.slice_button(ui);
+                }
             } else if ui::primary(ui, "Choose printer", self.disabled(Action::Printer)) {
                 self.queued = Some(Action::Printer);
             }
