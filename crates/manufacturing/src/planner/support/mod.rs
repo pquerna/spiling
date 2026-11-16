@@ -1707,11 +1707,10 @@ pub(super) fn realize(
                 continue;
             }
             charge_boolean(below, above, &mut work, foreign_work, cancel)?;
-            let landing = OwnedMaterial::new(below.difference(above.as_ref()));
+            let landing = landing_output(below.difference(above.as_ref()))?;
             if landing.0.is_empty() {
                 continue;
             }
-            region::check_size(&landing)?;
             let mut object_top = f64::NEG_INFINITY;
             for path in layers[object_layer]
                 .paths
@@ -4980,10 +4979,99 @@ fn clearance_distance_in_frame(
     Ok(distance)
 }
 
+fn landing_output(mut material: MultiPolygon<f64>) -> Result<OwnedMaterial, ManufacturingError> {
+    use geo::Area;
+    use geo::kernels::{Kernel, Orientation, RobustKernel};
+    for polygon in &material.0 {
+        if std::iter::once(polygon.exterior())
+            .chain(polygon.interiors())
+            .flat_map(|ring| &ring.0)
+            .any(|point| !point.x.is_finite() || !point.y.is_finite())
+            || !polygon.unsigned_area().is_finite()
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "support landing difference returned nonfinite geometry",
+            ));
+        }
+    }
+    material.0.retain(|polygon| {
+        polygon.unsigned_area() != 0.0
+            || std::iter::once(polygon.exterior())
+                .chain(polygon.interiors())
+                .any(|ring| {
+                    let Some(&first) = ring.0.first() else {
+                        return false;
+                    };
+                    let Some(&second) = ring.0.iter().find(|&&point| point != first) else {
+                        return false;
+                    };
+                    ring.0.iter().any(|&point| {
+                        RobustKernel::orient2d(first, second, point) != Orientation::Collinear
+                    })
+                })
+    });
+    for polygon in &mut material.0 {
+        if polygon.unsigned_area() == 0.0 {
+            region::canonicalize_polygon(polygon);
+        }
+    }
+    region::check_size(&material)?;
+    Ok(OwnedMaterial::new(material))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
+
+    #[test]
+    fn landing_difference_discards_only_zero_area_output() {
+        let zero = polygon![(x: 0., y: 0.), (x: 1., y: 1.), (x: 2., y: 2.)];
+        let tiny = polygon![(x: 0., y: 0.), (x: 1e-8, y: 0.), (x: 1e-8, y: 1e-8)];
+        let holed = Polygon::new(
+            line_string![(x: 0., y: 0.), (x: 4., y: 0.), (x: 4., y: 4.), (x: 0., y: 4.), (x: 0., y: 0.)],
+            vec![
+                line_string![(x: 1., y: 1.), (x: 2., y: 1.), (x: 2., y: 2.), (x: 1., y: 2.), (x: 1., y: 1.)],
+            ],
+        );
+        let result = landing_output(MultiPolygon(vec![zero, tiny.clone(), holed.clone()])).unwrap();
+        assert_eq!(result.material.0, vec![tiny, holed]);
+        assert!(
+            landing_output(MultiPolygon(Vec::new()))
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        for nonfinite in [f64::NAN, f64::INFINITY] {
+            let invalid = polygon![(x: 0., y: 0.), (x: nonfinite, y: 1.), (x: 2., y: 2.)];
+            assert_eq!(
+                landing_output(MultiPolygon(vec![invalid]))
+                    .err()
+                    .unwrap()
+                    .code,
+                ManufacturingErrorCode::UnsupportedGeometry
+            );
+        }
+    }
+
+    #[test]
+    fn landing_difference_preserves_positive_triangle_hidden_by_area_cancellation() {
+        use geo::Area;
+        let sliver = polygon![
+            (x: 103.03553390940172, y: 119.66446610950895),
+            (x: 94.83403265913469, y: 127.86596730017133),
+            (x: 94.83403271873934, y: 127.86596724056669),
+        ];
+        assert_eq!(sliver.unsigned_area(), 0.);
+        let result = landing_output(MultiPolygon(vec![sliver.clone()])).unwrap();
+        assert_eq!(result.0.len(), 1);
+        assert!(result.0[0].unsigned_area() > 0.);
+        assert_eq!(result.0[0].exterior().0.len(), sliver.exterior().0.len());
+        for point in sliver.exterior().points() {
+            assert!(result.0[0].exterior().points().any(|kept| kept == point));
+        }
+    }
 
     #[test]
     fn cached_column_bounds_preserve_candidate_clearance() {
