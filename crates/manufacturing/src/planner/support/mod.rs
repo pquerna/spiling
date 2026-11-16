@@ -3,8 +3,6 @@
 
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
-#[cfg(test)]
-use geo::Area;
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
 use geo::{BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
@@ -24,9 +22,134 @@ pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
+pub(in crate::planner) mod projection;
 mod proximity;
 mod raster;
-mod union_memo;
+
+struct ProjectionTrace {
+    enabled: bool,
+    started: std::time::Instant,
+    section_pieces: Vec<std::cell::Cell<usize>>,
+    bed: std::cell::Cell<usize>,
+    part: std::cell::Cell<usize>,
+    visits: std::cell::Cell<usize>,
+    screened: std::cell::Cell<usize>,
+    built: std::cell::Cell<usize>,
+    staged: std::cell::Cell<usize>,
+    cohorts: std::cell::Cell<usize>,
+    cohort_retries: std::cell::Cell<usize>,
+    section_builds: std::cell::Cell<usize>,
+    frame_distance: std::cell::Cell<f64>,
+    frame_quantum: std::cell::Cell<f64>,
+    old_max_reach: std::cell::Cell<f64>,
+    batches: std::cell::Cell<usize>,
+    column_time: std::cell::Cell<std::time::Duration>,
+    bead_time: std::cell::Cell<std::time::Duration>,
+    sheet_time: std::cell::Cell<std::time::Duration>,
+    union_time: std::cell::Cell<std::time::Duration>,
+    offset_time: std::cell::Cell<std::time::Duration>,
+    difference_time: std::cell::Cell<std::time::Duration>,
+}
+
+impl ProjectionTrace {
+    fn new(sections: usize, retained: usize, owned_bytes: usize) -> Self {
+        let mut section_pieces = Vec::new();
+        let enabled = std::env::var_os("SPILING_TRACE_SUPPORT_PROJECTION").is_some()
+            && super::remaining_geometry_units(
+                retained.saturating_add(sections),
+                owned_bytes.saturating_add(sections.saturating_mul(std::mem::size_of::<usize>())),
+            )
+            .is_ok()
+            && section_pieces.try_reserve_exact(sections).is_ok();
+        if enabled {
+            section_pieces.resize_with(sections, || std::cell::Cell::new(0));
+        }
+        Self {
+            enabled,
+            started: std::time::Instant::now(),
+            section_pieces,
+            bed: Default::default(),
+            part: Default::default(),
+            visits: Default::default(),
+            screened: Default::default(),
+            built: Default::default(),
+            staged: Default::default(),
+            cohorts: Default::default(),
+            cohort_retries: Default::default(),
+            section_builds: Default::default(),
+            frame_distance: Default::default(),
+            frame_quantum: Default::default(),
+            old_max_reach: Default::default(),
+            batches: Default::default(),
+            column_time: Default::default(),
+            bead_time: Default::default(),
+            sheet_time: Default::default(),
+            union_time: Default::default(),
+            offset_time: Default::default(),
+            difference_time: Default::default(),
+        }
+    }
+
+    fn add(&self, counter: &std::cell::Cell<usize>, count: usize) {
+        if self.enabled {
+            counter.set(counter.get().saturating_add(count));
+        }
+    }
+
+    fn measure<'a>(&self, total: &'a std::cell::Cell<std::time::Duration>) -> ProjectionClock<'a> {
+        ProjectionClock {
+            started: self.enabled.then(std::time::Instant::now),
+            total,
+        }
+    }
+
+    fn report(&self, phase: &str) {
+        if self.enabled && (phase != "complete" || self.visits.get() > 0) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "support_projection", "phase": phase,
+                    "elapsed_seconds": self.started.elapsed().as_secs_f64(),
+                    "bed_columns": self.bed.get(),
+                    "part_columns": self.part.get(), "section_visits": self.visits.get(),
+                    "piece_visits": self.screened.get(), "distinct_pieces": self.section_pieces.iter().map(std::cell::Cell::get).sum::<usize>(),
+                    "pieces_built": self.built.get(), "pieces_staged": self.staged.get(),
+                    "cohorts": self.cohorts.get(), "clearance_batches": self.batches.get(),
+                    "cohort_retries": self.cohort_retries.get(), "section_builds": self.section_builds.get(),
+                    "fixed_clearance_distance_mm": self.frame_distance.get(),
+                    "fixed_grid_quantum_mm": self.frame_quantum.get(),
+                    "old_max_column_reach_mm": self.old_max_reach.get(),
+                    "column_seconds": self.column_time.get().as_secs_f64(),
+                    "bead_seconds": self.bead_time.get().as_secs_f64(),
+                    "sheet_seconds": self.sheet_time.get().as_secs_f64(),
+                    "union_seconds": self.union_time.get().as_secs_f64(),
+                    "offset_seconds": self.offset_time.get().as_secs_f64(),
+                    "difference_seconds": self.difference_time.get().as_secs_f64(),
+                })
+            );
+        }
+    }
+}
+
+impl Drop for ProjectionTrace {
+    fn drop(&mut self) {
+        self.report("complete");
+    }
+}
+
+struct ProjectionClock<'a> {
+    started: Option<std::time::Instant>,
+    total: &'a std::cell::Cell<std::time::Duration>,
+}
+
+impl Drop for ProjectionClock<'_> {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            self.total
+                .set(self.total.get().saturating_add(started.elapsed()));
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Demand {
@@ -282,6 +405,7 @@ pub(super) struct SupportReplay {
     /// above its last layer.
     entries: Vec<ReplayEntry>,
     columns: std::collections::BTreeMap<usize, (usize, usize, MultiPolygon<f64>)>,
+    column_frame: Option<[u64; 5]>,
     bytes: usize,
 }
 
@@ -688,6 +812,7 @@ fn merge_shared(
 
 /// Realized object geometry and the retained native ownership used by support.
 pub(super) struct SupportInput<'a> {
+    pub(super) build_bounds: [[f64; 2]; 2],
     pub(super) sections: &'a [SectionSpan],
     pub(super) schedule: &'a [super::LayerElevation],
     pub(super) native_points: usize,
@@ -842,6 +967,11 @@ pub(super) fn realize(
         usize,
     ) -> Result<bool, ManufacturingError>,
 ) -> Result<SupportAdmission, ManufacturingError> {
+    let trace = ProjectionTrace::new(
+        input.schedule.len(),
+        input.native_points,
+        input.native_owned_bytes,
+    );
     let mut work = work_bank.planar;
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
@@ -857,6 +987,7 @@ pub(super) fn realize(
     let exhausted_layers = &work_bank.exhausted;
     let outcome = (|| {
         let SupportInput {
+            build_bounds: _,
             sections,
             schedule,
             mut native_points,
@@ -868,6 +999,8 @@ pub(super) fn realize(
             replay: _,
             phases,
         } = *input;
+        native_points = native_points.saturating_add(trace.section_pieces.len());
+        native_owned_bytes = native_owned_bytes.saturating_add(vec_bytes(&trace.section_pieces));
         let resolved_recipe = PlanarPrintRecipe {
             layer_height_mm: nominal_height_mm,
             ..recipe.clone()
@@ -1507,6 +1640,7 @@ pub(super) fn realize(
                 .fold(0usize, usize::saturating_add);
             replay_new = Some(SupportReplay {
                 columns: Default::default(),
+                column_frame: None,
                 schedule: schedule.iter().map(elevation_bits).collect(),
                 entries: recorded,
                 bytes,
@@ -1677,6 +1811,7 @@ pub(super) fn realize(
         let mut interfaces = vec![empty; layers.len()];
         let mut object_start = vec![0; layers.len()];
         let mut support_wall_paths = vec![0; layers.len()];
+        trace.report("analysis_complete");
         let mut contact_tops = vec![None; layers.len()];
         let mut roots = Vec::new();
         let mut root_landings = Vec::new();
@@ -1884,8 +2019,36 @@ pub(super) fn realize(
         reserve_owned(&mut outside_beads, nominal.len(), owned_bytes)?;
         outside_beads.resize_with(nominal.len(), || None);
         owned_bytes = owned_bytes.saturating_add(vec_bytes(&outside_beads));
-        let mut union_memo =
-            union_memo::UnionMemo::new(crate::working_set::bytes().saturating_sub(owned_bytes) / 8);
+        let frame = projection::Frame::new(
+            input,
+            xy_clearance_mm,
+            owned_bytes
+                .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1),
+            cancel,
+        )?;
+        let column_valid = if replay_old.column_frame == Some(frame.identity()) {
+            column_valid
+        } else {
+            0
+        };
+        if let Some(replay) = &mut replay_new {
+            replay.column_frame = Some(frame.identity());
+        }
+        let projection_input = projection::Input {
+            support: input,
+            layers,
+            demands: &demands,
+            roots: &roots,
+            landings: &root_landings,
+            replay: &column_replay,
+            valid: column_valid,
+            gap: selection_gap_mm,
+            requested: xy_clearance_mm,
+        };
+        let mut projected_columns = projection::Columns::new(frame);
+        let projection_receipt = projected_columns.receipt();
+        retained = retained.saturating_add(projection_receipt.0);
+        owned_bytes = owned_bytes.saturating_add(projection_receipt.1);
         for demand in &demands {
             check_cancel(cancel)?;
             let demanded_path = &layers[demand.target].paths[demand.failure.path];
@@ -1904,7 +2067,6 @@ pub(super) fn realize(
                 return Err(unreachable_layer_error(layers, demand, z_gap_mm)?);
             };
             let interface_bottom = layers[top].z_mm - interface_thickness_mm;
-            let mut candidate_search: Option<OwnedMaterial> = None;
             // Realized object D supplies a conservative support candidate only
             // AFTER actual deposited strokes prove demand; it is never an anchor map.
             // The half-bead search expansion permits a real support bead under an
@@ -1912,11 +2074,22 @@ pub(super) fn realize(
             // A replayed demand's layer and every section below it are bit-identical
             // to the recorded pass, so its corridor clipped by all occupied sections
             // is too; protected voids are still applied below.
-            for root in std::iter::once(Root::Bed).chain(roots.iter().copied()) {
+            for (root_index, root) in std::iter::once(Root::Bed)
+                .chain(roots.iter().copied())
+                .enumerate()
+            {
                 let first = root.first_layer();
                 if first > top {
                     continue;
                 }
+                trace.add(
+                    if matches!(root, Root::Bed) {
+                        &trace.bed
+                    } else {
+                        &trace.part
+                    },
+                    1,
+                );
                 let corridor_floor = layers[first].lower_z_mm;
                 let replayed_column = column_replay
                     .get(&demand.target)
@@ -1930,184 +2103,27 @@ pub(super) fn realize(
                 let mut column = if let Some(material) = replayed_column {
                     OwnedMaterial::new(material)
                 } else {
-                    if candidate_search.is_none() {
-                        let demanded_section = &sections[span_at(sections, demand.target as u32)];
-                        let candidate = &demanded_section.material;
-                        remaining_geometry_budget(
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &[&protected],
-                        )?;
-                        charge_boolean(candidate, candidate, &mut work, foreign_work, cancel)?;
-                        let search = OwnedMaterial::new(candidate.buffer_with_style(
-                            BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel),
-                        ));
-                        remaining_geometry_budget(
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &[&protected, &search],
-                        )?;
-                        retained = retained.saturating_add(search.units);
-                        owned_bytes = owned_bytes.saturating_add(search.bytes);
-                        candidate_search = Some(search);
-                    }
-                    let search = candidate_search.as_ref().expect("prepared demand search");
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, search],
-                    )?;
-                    let mut column = OwnedMaterial::new(search.material.clone());
-                    if let Root::Part { landing, .. } = root {
-                        let landing = &root_landings[landing];
-                        charge_boolean(&column, landing, &mut work, foreign_work, cancel)?;
-                        column =
-                            OwnedMaterial::new(column.material.intersection(&landing.material));
-                    }
-                    check_cancel(cancel)?;
-                    region::check_size(&column)?;
-                    let mut proximity = index_column(
-                        &column,
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                    )?;
-                    // Certify a fixed-XY corridor all the way to the bed before publishing.
-                    // Top-down publication before lower clipping leaves floating components.
-                    for section in &sections[span_at(sections, first.saturating_sub(1) as u32)
-                        ..=span_at(sections, (top + 1).min(layers.len() - 1) as u32)]
-                    {
-                        if column.0.is_empty() {
-                            break;
-                        }
-                        // Independent certified outer operands may overlap. Even-odd
-                        // normalization would erase their overlap; the staged pieces are
-                        // instead offset together, whose positive-winding convolution is
-                        // their union, and that union is subtracted once per section.
-                        let mut batch = PieceBatch::default();
-                        // Bounds-only rejection before a piece is constructed. It makes
-                        // exactly the per-piece decisions below with a distance bound.
-                        let screen =
-                            std::cell::Cell::new(ColumnScreen::new(&column, xy_clearance_mm)?);
-                        let scanned = std::cell::Cell::new(0usize);
-                        let interval = [
-                            schedule[section.start as usize].lower_z,
-                            schedule[(section.end - 1) as usize].z,
-                        ];
-                        let bed = program_coordinates::project_xyz6_bead_height_mm(
-                            layers[first].z_mm,
-                            layers[first].height_mm,
-                        )?[0];
-                        let top_z = program_coordinates::project_xyz6_bead_height_mm(
-                            layers[top].z_mm,
-                            layers[top].height_mm,
-                        )?[1];
-                        let scoped = |height: Option<[f64; 2]>| {
-                            height.map_or(interval, |height| {
-                                [interval[0].max(height[0]), interval[1].min(height[1])]
-                            })
-                        };
-                        let screen_piece = |bounds: [[f64; 2]; 2], height: Option<[f64; 2]>| {
-                            check_cancel(cancel)?;
-                            scanned.set(scanned.get().saturating_add(1));
-                            let [lower, upper] = scoped(height);
-                            if lower > upper || lower > top_z || upper < bed {
-                                return Ok(false);
-                            }
-                            Ok(!screen.get().is_some_and(|screen| screen.rejects(bounds)))
-                        };
-                        let visited = section.visit_occupied_screened(
-                            cancel,
-                            screen_piece,
-                            |occupied, height| {
-                                check_cancel(cancel)?;
-                                if column.0.is_empty() {
-                                    return Ok(false);
-                                }
-                                let [lower, upper] = scoped(height);
-                                if lower > upper || lower > top_z || upper < bed {
-                                    return Ok(true);
-                                }
-                                super::boolean::budget_polygon_accumulated(
-                                    occupied, &mut work, cancel,
-                                )?;
-                                let Some(distance) = candidate_clearance_distance_in_bounds(
-                                    occupied,
-                                    screen
-                                        .get()
-                                        .map(|screen| screen.column)
-                                        .or_else(|| material_bounds(&column)),
-                                    xy_clearance_mm,
-                                )?
-                                else {
-                                    return Ok(true);
-                                };
-                                if proximity.separated(occupied, separation_reach(distance)) {
-                                    return Ok(true);
-                                }
-                                batch.stage(
-                                    occupied,
-                                    retained,
-                                    owned_bytes.saturating_add(proximity.bytes()),
-                                    &support_regions,
-                                    &interfaces,
-                                    &[&protected, &column],
-                                )?;
-                                if batch.points >= PieceBatch::FLUSH_POINTS {
-                                    subtract_batch(
-                                        &mut batch,
-                                        &mut column,
-                                        &mut proximity,
-                                        xy_clearance_mm,
-                                        retained,
-                                        owned_bytes,
-                                        &support_regions,
-                                        &interfaces,
-                                        &protected,
-                                        &mut work,
-                                        foreign_work,
-                                        cancel,
-                                        &mut union_memo,
-                                    )?;
-                                    union_memo.account(&mut retained, &mut owned_bytes);
-                                    screen.set(ColumnScreen::new(&column, xy_clearance_mm)?);
-                                }
-                                Ok(!column.0.is_empty())
-                            },
-                        );
-                        work = work.checked_add(scanned.get()).ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "cumulative continuous occupied scope work counter overflow",
-                            )
-                        })?;
-                        visited?;
-                        subtract_batch(
-                            &mut batch,
-                            &mut column,
-                            &mut proximity,
-                            xy_clearance_mm,
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &protected,
-                            &mut work,
-                            foreign_work,
-                            cancel,
-                            &mut union_memo,
-                        )?;
-                        union_memo.account(&mut retained, &mut owned_bytes);
-                    }
-                    column
+                    let before = projected_columns.receipt();
+                    let admission = projection::Admission {
+                        retained: retained.saturating_sub(before.0),
+                        owned_bytes: owned_bytes.saturating_sub(before.1),
+                        support: &support_regions,
+                        interfaces: &interfaces,
+                        protected: &protected,
+                        foreign_work,
+                    };
+                    let result = projected_columns.take(
+                        (demand.target, root_index),
+                        &projection_input,
+                        &admission,
+                        &mut work,
+                        &trace,
+                        cancel,
+                    );
+                    let after = projected_columns.receipt();
+                    retained = retained - before.0 + after.0;
+                    owned_bytes = owned_bytes - before.1 + after.1;
+                    result?
                 };
                 if recording_columns && matches!(root, Root::Bed) {
                     let bytes = column.bytes.saturating_add(std::mem::size_of::<(
@@ -2441,6 +2457,7 @@ pub(super) fn realize(
                                 .as_deref()
                                 .expect("cached outside bead edges");
                             let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
+                            let _bead_time = trace.measure(&trace.bead_time);
                             let mut batch = stage_object_beads(
                                 edges,
                                 &column,
@@ -2469,7 +2486,7 @@ pub(super) fn realize(
                                 &mut work,
                                 foreign_work,
                                 cancel,
-                                None,
+                                Some(&trace),
                             )
                             .map_err(|mut e| {
                                 e.message = format!(
@@ -2498,6 +2515,7 @@ pub(super) fn realize(
                     // closed occupancy sheet; final proof keeps such equal sheets.
                     // Clip only this top layer, never the lower corridor.
                     if i == top && !column.0.is_empty() {
+                        let _sheet_time = trace.measure(&trace.sheet_time);
                         let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
                         let mut batch = stage_touching_sheet(
                             layers,
@@ -2528,7 +2546,7 @@ pub(super) fn realize(
                             &mut work,
                             foreign_work,
                             cancel,
-                            None,
+                            Some(&trace),
                         )? {
                             column = next.into_shared();
                             shared_union = None;
@@ -2707,19 +2725,17 @@ pub(super) fn realize(
                 }
                 owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
             }
-            if let Some(search) = candidate_search {
-                retained -= search.units;
-                owned_bytes -= search.bytes;
-            }
         }
+        let projection_receipt = projected_columns.receipt();
+        owned_bytes -= projection_receipt.1;
+        drop(projected_columns);
         if truncated {
             // No demand in range refines; only the complete pass decides
             // the rest of the schedule and publishes support.
             return Ok(SupportAdmission::Undecided);
         }
+        trace.report("corridors_complete");
         drop(nominal);
-        owned_bytes -= union_memo.receipt().1;
-        drop(union_memo);
         // Recomputed for the raster stage below, which no longer charges these.
         drop(outside_beads);
         let mut retained = base_retained;
@@ -4852,6 +4868,13 @@ impl PieceBatch {
 /// Positive-winding union of possibly overlapping pieces, each oriented with
 /// its material on the left; overlaps are never XOR-normalized.
 fn union_pieces(pieces: &MultiPolygon<f64>) -> MultiPolygon<f64> {
+    union_pieces_in_frame(pieces, None)
+}
+
+fn union_pieces_in_frame(
+    pieces: &MultiPolygon<f64>,
+    frame: Option<&projection::Frame>,
+) -> MultiPolygon<f64> {
     use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
     use i_overlay::float::overlay::FloatOverlay;
     let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -4877,7 +4900,14 @@ fn union_pieces(pieces: &MultiPolygon<f64>) -> MultiPolygon<f64> {
             paths.push(points);
         }
     }
-    let shapes = FloatOverlay::with_subj(&paths).overlay(OverlayRule::Subject, FillRule::Positive);
+    let mut overlay = if let Some(frame) = frame {
+        FloatOverlay::with_adapter(frame.adapter.clone(), paths.iter().map(Vec::len).sum())
+            .unsafe_add_source(&paths, i_overlay::core::overlay::ShapeType::Subject)
+    } else {
+        FloatOverlay::with_subj(&paths)
+    };
+    let shapes = overlay.overlay(OverlayRule::Subject, FillRule::Positive);
+    drop(overlay);
     MultiPolygon(
         shapes
             .into_iter()
@@ -4914,6 +4944,7 @@ fn union_frame(frame: Option<[[f64; 2]; 2]>, other: [[f64; 2]; 2]) -> [[f64; 2];
     clippy::too_many_arguments,
     reason = "Batch subtraction inventories shared support, interfaces and temporary material"
 )]
+#[cfg(test)]
 fn subtract_batch(
     batch: &mut PieceBatch,
     column: &mut OwnedMaterial,
@@ -4927,7 +4958,7 @@ fn subtract_batch(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
-    memo: &mut union_memo::UnionMemo,
+    trace: Option<&ProjectionTrace>,
 ) -> Result<(), ManufacturingError> {
     let owned = owned_bytes.saturating_add(proximity.bytes());
     let Some(next) = subtract_staged(
@@ -4942,17 +4973,16 @@ fn subtract_batch(
         work,
         foreign_work,
         cancel,
-        Some(memo),
+        trace,
     )?
     else {
         return Ok(());
     };
     *column = next;
-    let (extra_units, extra_bytes) = memo.unaccounted();
     *proximity = index_column(
         column,
-        retained.saturating_add(extra_units),
-        owned.saturating_add(extra_bytes),
+        retained,
+        owned,
         support,
         interfaces,
         &[protected, column],
@@ -4978,7 +5008,7 @@ fn subtract_staged(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
-    mut memo: Option<&mut union_memo::UnionMemo>,
+    trace: Option<&ProjectionTrace>,
 ) -> Result<Option<OwnedMaterial>, ManufacturingError> {
     let staged = std::mem::take(batch);
     let (Some(frame), Some(b)) = (staged.frame, column.bounding_rect()) else {
@@ -4991,7 +5021,8 @@ fn subtract_staged(
     )?;
     // Union the raw pieces first: (A ∪ B) ⊕ D = (A ⊕ D) ∪ (B ⊕ D), and stacked
     // facet hulls then cross only their few own edges, not offset cycles.
-    let (merged, cached) = if staged.pieces.0.len() > 1 {
+    let merged = if staged.pieces.0.len() > 1 {
+        let _union_time = trace.map(|trace| trace.measure(&trace.union_time));
         let (units, bytes) = geometry_receipt(support, interfaces, &[protected, column]);
         // Packed overlay input and output each hold at most twice the staged
         // coordinates before the merged pieces replace the staged copy.
@@ -5004,55 +5035,28 @@ fn subtract_staged(
                 .saturating_add(3 * staged.owned_bytes()),
         )?;
         boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
-        match memo.as_deref_mut() {
-            Some(memo) => memo.merge(
-                &staged.pieces,
-                retained
-                    .saturating_add(units)
-                    .saturating_add(3 * staged.points),
-                owned_bytes
-                    .saturating_add(bytes)
-                    .saturating_add(3 * staged.owned_bytes()),
-                work,
-                cancel,
-            )?,
-            None => {
-                let merged = OwnedMaterial::new(union_pieces(&staged.pieces));
-                region::check_size(&merged)?;
-                (merged.into_shared(), false)
-            }
-        }
+        let merged = OwnedMaterial::new(union_pieces(&staged.pieces));
+        region::check_size(&merged)?;
+        merged
     } else {
-        (
-            OwnedMaterial::new(staged.pieces.clone()).into_shared(),
-            false,
-        )
+        OwnedMaterial::new(staged.pieces.clone())
     };
-    let (extra_units, extra_bytes) = memo.as_ref().map_or((0, 0), |memo| memo.unaccounted());
-    let retained = retained.saturating_add(extra_units);
-    let owned_bytes = owned_bytes.saturating_add(extra_bytes);
-    let (temporary_units, temporary_bytes) = if cached {
-        (0, 0)
-    } else {
-        (
-            merged.units,
-            merged.bytes.saturating_add(merged.header_bytes),
-        )
-    };
+    let offset_time = trace.map(|trace| trace.measure(&trace.offset_time));
     let clearance = OwnedMaterial::new(offset_owned(
         &merged,
         distance,
         retained
             .saturating_add(staged.points)
-            .saturating_add(temporary_units),
+            .saturating_add(merged.units),
         owned_bytes
             .saturating_add(staged.owned_bytes())
-            .saturating_add(temporary_bytes),
+            .saturating_add(merged.bytes),
         support,
         interfaces,
         &[protected, column],
         cancel,
     )?);
+    drop(offset_time);
     drop(staged);
     drop(merged);
     remaining_geometry_budget(
@@ -5063,7 +5067,9 @@ fn subtract_staged(
         &[protected, column, &clearance],
     )?;
     charge_boolean(column, &clearance, work, foreign_work, cancel)?;
+    let difference_time = trace.map(|trace| trace.measure(&trace.difference_time));
     let next = OwnedMaterial::new(column.material.difference(&clearance.material));
+    drop(difference_time);
     remaining_geometry_budget(
         retained,
         owned_bytes,
@@ -5513,7 +5519,7 @@ mod tests {
             &mut 0,
             0,
             &cancel,
-            &mut union_memo::UnionMemo::new(0),
+            None,
         )
         .unwrap();
         let after = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
@@ -5622,6 +5628,7 @@ mod tests {
                 let result = realize(
                     &mut layers,
                     &SupportInput {
+                        build_bounds: [[0.0; 2]; 2],
                         sections: &sections,
                         schedule: &schedule,
                         native_points: 0,
@@ -6051,6 +6058,7 @@ mod tests {
         }
         let paths = [unrelated, wall];
         let input = SupportInput {
+            build_bounds: [[0.0; 2]; 2],
             sections: &[],
             schedule: &[],
             native_points: 0,

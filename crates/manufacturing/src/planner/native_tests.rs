@@ -1303,6 +1303,35 @@ fn mixed_anchor_native_perimeter_remains_closed_under_bridge_process() {
 }
 
 #[test]
+fn support_projection_cohort_size_preserves_native_plan_and_program() {
+    let cancel = AtomicBool::new(false);
+    for (source, poses) in [
+        (BOX, vec![RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]),
+        (
+            HOLE,
+            vec![RigidPoseMm::IDENTITY, translated(0.0, 0.0, 12.0)],
+        ),
+    ] {
+        let scene = NativeScene::new(source, &poses);
+        let enabled = intent(true);
+        let shared = compile(scene.input(&enabled), &cancel).unwrap();
+        let single = support::projection::with_single_column(|| {
+            compile(scene.input(&enabled), &cancel).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&shared.plan).unwrap(),
+            serde_json::to_vec(&single.plan).unwrap(),
+        );
+        assert_eq!(
+            shared.program.to_vec().unwrap(),
+            single.program.to_vec().unwrap(),
+        );
+        assert!(shared.verification.verified && single.verification.verified);
+        assert!(shared.verification.support_deposition_segments > 0);
+    }
+}
+
+#[test]
 fn on_part_supports_land_on_deposited_floor_when_bed_corridor_is_blocked() {
     let cancel = AtomicBool::new(false);
     for bytes in [BOX, HOLE] {
@@ -5235,6 +5264,7 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
         let result = support::realize(
             &mut layers,
             &support::SupportInput {
+                build_bounds: [[0.0; 2]; 2],
                 sections: &sections,
                 schedule,
                 native_points: 0,

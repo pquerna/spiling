@@ -1883,6 +1883,16 @@ fn admit_schedule<'model>(
         let support_admission = support::realize(
             &mut layers,
             &support::SupportInput {
+                build_bounds: [
+                    [
+                        input.intent.printer.build_envelope.min[0],
+                        input.intent.printer.build_envelope.min[1],
+                    ],
+                    [
+                        input.intent.printer.build_envelope.max[0],
+                        input.intent.printer.build_envelope.max[1],
+                    ],
+                ],
                 sections: &sections,
                 schedule,
                 native_points: support_native_points,
