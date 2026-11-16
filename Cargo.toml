@@ -47,12 +47,12 @@ i_overlay = "=4.0.7"
 boolmesh = "=0.2.2"
 boostvoronoi = { version = "=0.12.1", default-features = false }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
-solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
-solidcore-tess = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
-solidcore-step = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
-solidcore-record = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
-solidcore-convert = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
-solidcore-ops = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f7f4c7a3ac958550971f9ee5054e2b2e7861767b" }
+solidcore = { version = "=1.0.1", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
+solidcore-tess = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
+solidcore-step = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
+solidcore-record = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
+solidcore-convert = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
+solidcore-ops = { version = "=0.1.0", git = "https://github.com/pquerna/solidcore", rev = "f941fa80a8370d6895168c6e2d265781a9ae60c1" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-model-import = { path = "crates/model-import" }
