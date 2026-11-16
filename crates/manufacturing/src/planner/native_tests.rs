@@ -5182,6 +5182,7 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
             .collect::<Vec<_>>()
     };
     let initial = make_schedule();
+    let allow_projection = std::cell::Cell::new(false);
     let run = |schedule: &[LayerElevation],
                step: bool,
                recipe: &PlanarPrintRecipe,
@@ -5261,6 +5262,13 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
                 })
             },
             |_, _, _, _, _, _, _| {
+                if allow_projection.get() {
+                    return Ok(support::ProtectedVoidSet {
+                        regions: geo::MultiPolygon(Vec::new()),
+                        scopes: Vec::new(),
+                        unclaimed: Vec::new(),
+                    });
+                }
                 Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,
                     "ordinary scaffold projection reached",
@@ -5347,6 +5355,11 @@ fn automatic_wall_refinement_rechecks_deposition_and_stops_on_constant_steps() {
 
     let mut exhausted = support::SupportWork::default();
     exhausted.exhausted.insert(initial[1].z.to_bits());
+    let (outcome, _) = run(&initial, true, &intent.recipe, &mut exhausted);
+    assert!(
+        matches!(outcome, Err(ref error) if error.message.contains("ordinary scaffold projection reached"))
+    );
+    allow_projection.set(true);
     let (outcome, layers) = run(&initial, true, &intent.recipe, &mut exhausted);
     assert!(matches!(
         outcome.unwrap(),

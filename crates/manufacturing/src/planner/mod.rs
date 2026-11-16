@@ -2943,7 +2943,8 @@ fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
 
 /// Refine the schedule at an unreachable layer. When it can be refined no
 /// further and supports are enabled, mark the layer exhausted so the retry
-/// prints its overhang as authored; a second request for it still refuses.
+/// continues scaffold construction without another split request. Final
+/// unresolved deposition is reported; a second split request still refuses.
 ///
 /// A split can anchor a stroke only by moving the section below it closer in
 /// Z, which shortens the stagger it bridges. When an uncertified corridor
@@ -2951,8 +2952,8 @@ fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
 /// is no shorter by more than the profile tolerance, the split moved nothing
 /// the stroke needed: the first layer above a flat ceiling, or a stroke
 /// across a sparse gap below, stays unanchored however thin the layers get.
-/// Such a layer is exhausted at once rather than halved toward the minimum
-/// bead height.
+/// Such a layer stops requesting splits rather than halving toward the minimum
+/// bead height; exhaustion does not disable otherwise useful support contacts.
 fn exhaust_or_refine(
     schedule: &mut Vec<LayerElevation>,
     index: usize,

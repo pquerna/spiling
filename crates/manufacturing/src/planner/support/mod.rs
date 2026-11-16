@@ -714,8 +714,7 @@ pub(super) struct SupportWork {
     pub(super) support_owned: usize,
     pub(super) anchors: usize,
     /// Deposition Z (bits) of layers the schedule can refine no further.
-    /// Their unanchored strokes print as authored and are reported, the
-    /// unsupported outcome, instead of requesting refinement again.
+    /// Scaffold construction still runs; only further split requests stop.
     pub(super) exhausted: std::collections::BTreeSet<u64>,
     /// Physical intervals already split for an uncertified corridor, with
     /// the unanchored span that requested each split, in request order. Each
@@ -1395,7 +1394,7 @@ pub(super) fn realize(
                         span_mm: None,
                     });
                 }
-                if matches!(recipe.supports, SupportPolicy::Disabled) || exhausted {
+                if matches!(recipe.supports, SupportPolicy::Disabled) {
                     if tentative && index > 0 && !exhausted {
                         let failure =
                             admission_error(index, layer.z_mm, &layer.paths, &failure, recipe);
@@ -1405,9 +1404,7 @@ pub(super) fn realize(
                             span_mm: None,
                         });
                     }
-                    // Supports are off, or no finer schedule can anchor or
-                    // support this layer: print the overhang as PrusaSlicer
-                    // does and report it, rather than refuse the part.
+                    // Explicit Off retains authored overhangs and reports them.
                     layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
                 } else {
                     let live = native_owned_bytes
@@ -1544,6 +1541,7 @@ pub(super) fn realize(
                     cancel,
                 )?
                 .is_none()
+                    && !exhausted_layers.contains(&layers[demand.target].z_mm.to_bits())
                 {
                     return Ok(SupportAdmission::RefineUnreachableLayer {
                         index: demand.target,
@@ -1900,6 +1898,9 @@ pub(super) fn realize(
                 cancel,
             )?
             else {
+                if exhausted_layers.contains(&layers[demand.target].z_mm.to_bits()) {
+                    continue;
+                }
                 return Err(unreachable_layer_error(layers, demand, z_gap_mm)?);
             };
             let interface_bottom = layers[top].z_mm - interface_thickness_mm;
@@ -2261,7 +2262,10 @@ pub(super) fn realize(
                         .into_iter()
                         .flatten()
                         .any(|stroke| stroke.distance_mm < (width + stroke.width_mm) * 0.5);
-                    if near && attached_end {
+                    if near
+                        && attached_end
+                        && !exhausted_layers.contains(&layers[demand.target].z_mm.to_bits())
+                    {
                         return Ok(SupportAdmission::RefineUnreachableLayer {
                             index: demand.target,
                             failure: unresolved,
@@ -5392,6 +5396,161 @@ fn clearance_distance_in_frame(
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
+
+    #[test]
+    fn exhausted_refinement_keeps_accessible_support_contacts() {
+        let cancel = AtomicBool::new(false);
+        for shift in [0.0, 0.37] {
+            for (target, disabled, tentative) in [
+                (5, false, false),
+                (1, false, false),
+                (1, false, true),
+                (5, true, false),
+            ] {
+                let mut recipe = crate::planner::tests::recipe(1.0);
+                recipe.supports = if disabled {
+                    SupportPolicy::Disabled
+                } else {
+                    SupportPolicy::Breakaway {
+                        density: 0.3,
+                        xy_clearance_mm: 0.2,
+                        z_gap_mm: 0.2,
+                        interface_thickness_mm: 0.4,
+                    }
+                };
+                let schedule: Vec<_> = (0..=target as u32)
+                    .map(|index| super::super::LayerElevation {
+                        lower_z: index as f64 * 0.2,
+                        z: (index + 1) as f64 * 0.2,
+                        sample: (index as f64 + 0.5) * 0.2,
+                        height: 0.2,
+                        course: index,
+                    })
+                    .collect();
+                let mut layers: Vec<_> = schedule
+                    .iter()
+                    .enumerate()
+                    .map(|(index, elevation)| PrintLayer {
+                        index: index as u32,
+                        hatch_course: elevation.course,
+                        lower_z_mm: elevation.lower_z,
+                        z_mm: elevation.z,
+                        section_z_mm: elevation.sample,
+                        height_mm: elevation.height,
+                        paths: vec![DepositionPath {
+                            material_domain: None,
+                            kind: DepositionKind::Perimeter,
+                            owner: Some(DepositionOwner::Wall),
+                            width: WidthProfile::Constant {
+                                width_mm: recipe.bead_width_mm,
+                            },
+                            physical_z_mm: [elevation.lower_z, elevation.z],
+                            points_mm: vec![
+                                [-0.5 + shift, shift, elevation.z],
+                                [
+                                    if index == target { 15.5 } else { 0.5 } + shift,
+                                    shift,
+                                    elevation.z,
+                                ],
+                            ],
+                            arcs: Vec::new(),
+                            exposed: false,
+                            connectors: Vec::new(),
+                        }],
+                        region_coverage: super::super::empty_coverage(1.0),
+                        skin_command_fits: Vec::new(),
+                    })
+                    .collect();
+                let candidates: Vec<_> = layers.iter().map(|layer| layer.paths.clone()).collect();
+                let sections: Vec<_> = [
+                    (0, target as u32, 1.0),
+                    (target as u32, target as u32 + 1, 16.0),
+                ]
+                .into_iter()
+                .map(|(start, end, right)| SectionSpan {
+                    start,
+                    end,
+                    material: Arc::new(MultiPolygon(vec![polygon![
+                        (x: -1.0 + shift, y: -2.0 + shift), (x: right + shift, y: -2.0 + shift),
+                        (x: right + shift, y: 2.0 + shift), (x: -1.0 + shift, y: 2.0 + shift),
+                    ]])),
+                    process_domains: Vec::new(),
+                    occupied: None,
+                    source_area_mm2: (right + 1.0) * 4.0,
+                })
+                .collect();
+                let mut bank = SupportWork::default();
+                bank.exhausted.insert(schedule[target].z.to_bits());
+                let result = realize(
+                    &mut layers,
+                    &SupportInput {
+                        sections: &sections,
+                        schedule: &schedule,
+                        native_points: 0,
+                        native_owned_bytes: 0,
+                        recipe: &recipe,
+                        nominal_height_mm: 0.2,
+                        source_z_allowance_mm: 0.0,
+                        deposition_limits: DepositionLimits {
+                            min_bead_width_mm: 0.1,
+                            max_bead_width_mm: 1.0,
+                            min_bead_height_mm: 0.2,
+                            max_bead_height_mm: 0.2,
+                        },
+                        replay: false,
+                        phases: &[],
+                    },
+                    &mut (target + 1),
+                    &cancel,
+                    &mut spiling_geometry::GeometryWorkBudget::compile(),
+                    tentative,
+                    false,
+                    &mut bank,
+                    |index, _, _, _, _, _, _, _| {
+                        Ok(RasterCandidate {
+                            paths: candidates[index].clone(),
+                            whole_rows: Vec::new(),
+                            process_interfaces: Vec::new(),
+                            skin_command_fits: Vec::new(),
+                            skin_bridge_domains: Vec::new(),
+                        })
+                    },
+                    |_, _, _, _, _, _, _| {
+                        Ok(ProtectedVoidSet {
+                            regions: MultiPolygon(Vec::new()),
+                            scopes: Vec::new(),
+                            unclaimed: Vec::new(),
+                        })
+                    },
+                    |_, _, _, _, _| Ok(true),
+                )
+                .unwrap();
+                assert!(matches!(result, SupportAdmission::Complete));
+                let has_support = layers
+                    .iter()
+                    .flat_map(|layer| &layer.paths)
+                    .any(|path| support_role(path.kind));
+                if tentative {
+                    assert!(!has_support);
+                } else if target == 5 && !disabled {
+                    assert!(
+                        has_support,
+                        "no further schedule split must not disable an accessible scaffold"
+                    );
+                    assert_eq!(layers[target].region_coverage.unsupported_overhang_mm, 0.0);
+                } else {
+                    assert!(!has_support);
+                    assert!(layers[target].region_coverage.unsupported_overhang_mm > 0.0);
+                }
+                assert!(
+                    layers[target]
+                        .paths
+                        .iter()
+                        .any(|path| path.points_mm == candidates[target][0].points_mm)
+                );
+            }
+        }
+    }
 
     #[test]
     fn regenerated_part_roots_prune_only_their_dependent_support_and_report_real_demand() {
