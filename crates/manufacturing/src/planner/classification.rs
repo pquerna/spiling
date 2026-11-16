@@ -385,10 +385,9 @@ impl ClassifiedRegions {
                                     .collect(),
                             })
                             .collect(),
-                        // Stamped with the part frame and this layer's
-                        // ceilings when the layer is assembled.
+                        // Stamped with the part frame when the layer is
+                        // assembled.
                         frame_mm: [[0.0; 2]; 2],
-                        ceilings: Vec::new(),
                     });
                 }
             }
@@ -1185,7 +1184,7 @@ impl ClassifiedRegions {
         axis: region::HatchAxis,
         top_axis: region::HatchAxis,
         recipe: &PlanarPrintRecipe,
-        roof: Option<region::Roof<'_>>,
+        roof: Option<region::Roof>,
         phase: region::OrdinaryHatchPhase,
         classified_owned_bytes: usize,
         source_domains: &[super::ProcessDomain],

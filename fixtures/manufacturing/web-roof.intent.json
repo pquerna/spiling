@@ -214,8 +214,7 @@
     "infill_fraction": 0.08,
     "sparse_infill": {
       "kind": "web_roof",
-      "roof_spacing_mm": null,
-      "architecture": null
+      "roof_spacing_mm": null
     },
     "top_skin_thickness_mm": 0.8,
     "bottom_skin_thickness_mm": 0.8,

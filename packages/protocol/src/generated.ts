@@ -1369,7 +1369,7 @@ export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained
 
 export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond" | "nominal_dose";
 
-export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "gyroid" } | { "kind": "web_roof", roof_spacing_mm: number | null, architecture: WebArchitecture | null, } | { "kind": "combine_eligible", max_height_mm: number, };
+export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "grid" } | { "kind": "gyroid" } | { "kind": "web_roof", roof_spacing_mm: number | null, } | { "kind": "combine_eligible", max_height_mm: number, };
 
 export type SpoolId = string;
 
@@ -1472,23 +1472,12 @@ cooling_slowed_layers: number, minimum_cooling_scale: number,
  */
 estimated_seconds: number | null, };
 
-export type WebArchitecture = { opening: WebOpening | null, pier_rib_depth_mm: number | null, };
-
-export type WebOpening = { bottom_z_mm: number, height_mm: number, width_mm: number, cap_height_mm: number, pier_width_mm: number, };
-
-export type WebRoofCeiling = { roof_z_mm: number, extent: Array<DiaphragmPolygonMm>, };
-
 export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>,
 /**
- * Part-level XY bounds `[min, max]` that anchor the web lattice on every
- * layer, so webs stack vertically through changing sections.
+ * Part-level XY bounds `[min, max]` that anchor the cell lattice on every
+ * layer, so cell walls stack vertically through changing sections.
  */
-frame_mm: [[number, number], [number, number]],
-/**
- * Areas whose ceiling is lower than the part's top roof horizon, each with
- * the height its corbels must close by.
- */
-ceilings: Array<WebRoofCeiling>, };
+frame_mm: [[number, number], [number, number]], };
 
 export type WidthProfile = { "kind": "constant", width_mm: number, } | { "kind": "per_edge", widths_mm: Array<number>, };
 

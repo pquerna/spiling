@@ -3488,285 +3488,166 @@ fn fresh_report_retains_recorded_overhangs_without_inventing_locations() {
     assert!(report.limitations[0].contains("not an exact-location inventory"));
 }
 
-#[test]
-fn native_web_roof_keeps_continuous_rooms_grows_roof_and_freshly_replays() {
-    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+fn cathedral_intent(fraction: f64) -> ManufacturingIntent {
     let mut requested = intent();
-    requested.recipe.infill_fraction = 0.08;
+    requested.recipe.infill_fraction = fraction;
     requested.recipe.sparse_infill = SparseInfillPolicy::web_roof();
     requested.recipe.layer_height_mm = 0.2;
     requested.recipe.bead_width_mm = 0.45;
     requested.recipe.perimeter_count = 2;
-    requested.recipe.process.max_bridge_span_mm = 2.0;
+    requested
+}
+
+fn cathedral_roads(layer: &PrintLayer) -> impl Iterator<Item = (usize, &DepositionPath)> {
+    layer.paths.iter().enumerate().filter(|(_, p)| {
+        p.kind == DepositionKind::SparseFill
+            && matches!(p.owner, Some(DepositionOwner::Regional { .. }))
+    })
+}
+
+#[test]
+fn cathedral_rooms_are_closed_loops_with_roof_teeth_and_replay_rejects_damage() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let mut requested = cathedral_intent(0.1);
+    // Rooms wider than the roof spacing need teeth.
+    requested.recipe.process.max_bridge_span_mm = 4.0;
     let bundle = scene.compile(&requested).unwrap();
     assert!(bundle.verification.verified);
-    assert!(bundle.plan.sparse_bands.is_empty());
-    let sparse: Vec<_> = bundle
-        .plan
-        .layers
-        .iter()
-        .filter(|layer| {
-            layer
-                .paths
-                .iter()
-                .any(|path| path.kind == DepositionKind::SparseFill)
-        })
+    let plan = &bundle.plan;
+    let sparse: Vec<usize> = (0..plan.layers.len())
+        .filter(|&i| cathedral_roads(&plan.layers[i]).next().is_some())
         .collect();
-    assert!(sparse.len() > 5);
-    let sparse_length = |layer: &PrintLayer| {
-        layer
-            .paths
-            .iter()
-            .filter(|p| p.kind == DepositionKind::SparseFill)
-            .flat_map(|p| p.checked_edges().unwrap())
-            .map(|edge| {
-                let a = edge.points_mm[0];
-                let b = edge.points_mm[1];
-                (b[0] - a[0]).hypot(b[1] - a[1])
-            })
-            .sum::<f64>()
+    assert!(!sparse.is_empty());
+    for &i in &sparse {
+        for (_, road) in cathedral_roads(&plan.layers[i]) {
+            assert_eq!(
+                road.points_mm.first(),
+                road.points_mm.last(),
+                "rooms are closed loops"
+            );
+        }
+    }
+    // Under the roof, rooms carry teeth: more points than a pinned room.
+    let low = sparse[1];
+    let high = *sparse.last().unwrap();
+    let points = |i: usize| -> usize {
+        cathedral_roads(&plan.layers[i])
+            .map(|(_, p)| p.points_mm.len())
+            .sum()
     };
-    assert!(
-        sparse
-            .iter()
-            .any(|layer| sparse_length(layer) > sparse_length(sparse[0]) + 0.01),
-        "roof growth must increase real road length; merging may reduce road count"
-    );
-    let mut solid_intent = requested.clone();
-    solid_intent.recipe.sparse_infill = SparseInfillPolicy::Fine;
-    solid_intent.recipe.infill_fraction = 1.0;
-    let solid = scene.compile(&solid_intent).unwrap();
-    let dose = |b: &ManufacturingBundle| {
-        b.plan
-            .layers
-            .iter()
-            .map(|layer| layer.region_coverage.nominal_deposition_volume_mm3)
-            .sum::<f64>()
-    };
-    assert!(
-        dose(&bundle) < dose(&solid),
-        "the pattern must retain actual interior voids"
-    );
-    let motion = actual_motion(&bundle);
-    assert!(motion.iter().any(|(kind, _, _)| *kind == 5));
-    let inspection = inspect_bundle(
-        &bundle,
-        &SourceHash::from_bytes(&encode(&bundle)),
-        VerificationOutput::ReportOnly,
-        &AtomicBool::new(false),
+    assert!(points(high) > points(low), "roof teeth grow under the roof");
+    verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
+    let restored = ManufacturingResult::new(
+        serde_json::from_slice::<ManufacturingBundle>(&encode(&bundle)).unwrap(),
+        bundle.program.clone(),
     )
     .unwrap();
-    assert!(inspection.report.verified);
-    // Automatic joints require no authored architecture or reinforcement flag.
-    // Mutating both plan and emission with reconciled dose must still fail the
-    // independently reconstructed inventory, not just path/program matching.
-    let first_sparse = bundle
-        .plan
-        .layers
-        .iter()
-        .position(|l| l.paths.iter().any(|p| p.kind == DepositionKind::SparseFill))
+    verify_bundle(&restored, &AtomicBool::new(false)).unwrap();
+
+    let middle = sparse[sparse.len() / 2];
+    // A missing room loop leaves its walls single.
+    let mut missing = plan.clone();
+    let (road, _) = cathedral_roads(&missing.layers[middle])
+        .max_by_key(|(_, p)| p.points_mm.len())
         .unwrap();
-    let joint = bundle.plan.layers[first_sparse]
-        .paths
-        .iter()
-        .position(|p| {
-            p.kind == DepositionKind::SparseFill
-                && p.points_mm.len() == 2
-                && ((p.points_mm[1][0] - p.points_mm[0][0])
-                    .hypot(p.points_mm[1][1] - p.points_mm[0][1])
-                    - 6.0 * requested.recipe.bead_width_mm)
-                    .abs()
-                    < 1e-8
+    missing.layers[middle].paths.remove(road);
+    let error = assert_emitted_refuses(missing, &requested, false);
+    assert!(error.message.contains("bonded bead"), "{error:?}");
+    // A road outside its room domain.
+    let mut outside = plan.clone();
+    let (road, _) = cathedral_roads(&outside.layers[middle])
+        .max_by_key(|(_, p)| p.points_mm.len())
+        .unwrap();
+    for point in &mut outside.layers[middle].paths[road].points_mm {
+        point[1] += 0.3;
+    }
+    let error = assert_emitted_refuses(outside, &requested, false);
+    assert!(error.message.contains("Cathedral"), "{error:?}");
+    // Teeth removed under the roof: the roof is no longer carried.
+    let mut toothless = plan.clone();
+    let below = high;
+    let (template, _) = cathedral_roads(&plan.layers[low]).next().unwrap();
+    let _ = template;
+    let bare: Vec<DepositionPath> = cathedral_roads(&plan.layers[low])
+        .map(|(_, p)| {
+            let mut p = p.clone();
+            for point in &mut p.points_mm {
+                point[2] = plan.layers[below].z_mm;
+            }
+            p.physical_z_mm = plan.layers[below].paths
+                [cathedral_roads(&plan.layers[below]).next().unwrap().0]
+                .physical_z_mm;
+            p
         })
-        .expect("automatic one-sided joint exists in the sparse interior");
-    for attack in 0..3 {
-        let mut changed = bundle.plan.clone();
-        let paths = &mut changed.layers[first_sparse].paths;
-        match attack {
-            0 => {
-                paths.remove(joint);
-            }
-            1 => {
-                paths.push(paths[joint].clone());
-            }
-            _ => {
-                let p = &mut paths[joint];
-                let fixed = usize::from(p.points_mm[0][0] != p.points_mm[1][0]);
-                for point in &mut p.points_mm {
-                    point[fixed] += 0.01;
-                }
-            }
-        }
-        assert!(
-            assert_reemitted_interface_refuses(changed, &requested)
-                .message
-                .contains("web + roof")
-        );
-    }
-    // The roof horizon belongs to the configured bed frame, including a
-    // negative bed: absolute Z=0 is not manufacturing authority.
-    let shifted_scene = Scene::new(BOX, &[pose(30.0, 40.0, -10.0)]);
-    let mut shifted_intent = requested.clone();
-    shifted_intent.printer.build_envelope.min[2] = -10.0;
-    let shifted = shifted_scene.compile(&shifted_intent).unwrap();
-    assert!(shifted.verification.verified);
-    assert!((dose(&shifted) - dose(&bundle)).abs() < 1e-6);
-    // Re-emitting edited paths with reconciled dose cannot bless an incomplete
-    // construction. Test both an early continuous web and a later roof branch.
-    for (target, web) in [
-        (sparse[0].index, true),
-        (sparse.last().unwrap().index, false),
-    ] {
-        let mut missing = bundle.plan.clone();
-        let layer = &mut missing.layers[target as usize];
-        let length = |p: &DepositionPath| {
-            (p.points_mm[1][0] - p.points_mm[0][0]).hypot(p.points_mm[1][1] - p.points_mm[0][1])
-        };
-        let index = layer
-            .paths
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.kind == DepositionKind::SparseFill)
-            .max_by(|(_, a), (_, b)| {
-                if web {
-                    length(a).total_cmp(&length(b))
-                } else {
-                    length(b).total_cmp(&length(a))
-                }
-            })
-            .unwrap()
-            .0;
-        layer.paths.remove(index);
-        let error = assert_reemitted_interface_refuses(missing, &requested);
-        assert!(error.message.contains("web + roof"), "{}", error.message);
-    }
-    // Captured bytes retain the selected pattern through strict serialization.
-    let decoded: ManufacturingBundle = serde_json::from_slice(&encode(&bundle)).unwrap();
-    assert_eq!(
-        decoded.provenance.intent.recipe.sparse_infill,
-        SparseInfillPolicy::web_roof()
-    );
+        .collect();
+    toothless.layers[below].paths.retain(|p| {
+        !(p.kind == DepositionKind::SparseFill
+            && matches!(p.owner, Some(DepositionOwner::Regional { .. })))
+    });
+    toothless.layers[below].paths.extend(bare);
+    let error = assert_emitted_refuses(toothless, &requested, false);
+    assert!(error.message.contains("Cathedral"), "{error:?}");
 }
 
 #[test]
-fn native_web_roof_architecture_ablations_keep_complete_construction_and_reject_damage() {
-    let scene = Scene::new(BOX, &[pose(30., 40., 0.)]);
-    let mut requested = intent();
-    requested.recipe.infill_fraction = 0.35;
-    requested.recipe.layer_height_mm = 0.2;
-    requested.recipe.bead_width_mm = 0.45;
-    requested.recipe.perimeter_count = 2;
-    requested.recipe.process.max_bridge_span_mm = 2.;
-    let opening = WebOpening {
-        bottom_z_mm: 1.,
-        height_mm: 0.6,
-        width_mm: 0.45,
-        cap_height_mm: 0.5,
-        pier_width_mm: 0.9,
-    };
-    let mut volumes = Vec::new();
-    for (windows, ribs) in [(false, false), (true, false), (false, true), (true, true)] {
-        requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
-            roof_spacing_mm: None,
-            architecture: if windows || ribs {
-                Some(WebArchitecture {
-                    opening: windows.then_some(opening),
-                    pier_rib_depth_mm: ribs.then_some(0.45),
-                })
-            } else {
-                None
-            },
-        };
-        let bundle = scene
-            .compile(&requested)
-            .unwrap_or_else(|e| panic!("windows={windows} ribs={ribs}: {e}"));
-        assert!(bundle.verification.verified);
-        volumes.push(
-            bundle
-                .plan
-                .layers
-                .iter()
-                .map(|l| l.region_coverage.nominal_deposition_volume_mm3)
-                .sum::<f64>(),
-        );
-        let bytes = encode(&bundle);
-        let restored = ManufacturingResult::new(
-            serde_json::from_slice::<ManufacturingBundle>(&bytes).unwrap(),
-            bundle.program.clone(),
-        )
+fn cathedral_replay_rejects_a_floating_loop_however_it_is_tessellated() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let requested = cathedral_intent(0.1);
+    let bundle = scene.compile(&requested).unwrap();
+    let plan = &bundle.plan;
+    let sparse: Vec<usize> = (0..plan.layers.len())
+        .filter(|&i| cathedral_roads(&plan.layers[i]).next().is_some())
+        .collect();
+    let middle = sparse[1];
+    // The center of the largest room, on a layer below any teeth.
+    let (_, template) = cathedral_roads(&plan.layers[middle])
+        .max_by_key(|(_, p)| p.points_mm.len())
         .unwrap();
-        assert!(
-            inspect_bundle(
-                &restored,
-                &SourceHash::from_bytes(&bytes),
-                VerificationOutput::ReportOnly,
-                &AtomicBool::new(false)
-            )
-            .unwrap()
-            .report
-            .verified
-        );
-        if ribs {
-            let mut missing = bundle.plan.clone();
-            let layer = missing
-                .layers
-                .iter_mut()
-                .find(|l| l.paths.iter().any(|p| p.kind == DepositionKind::SparseFill))
-                .unwrap();
-            let index = layer
-                .paths
-                .iter()
-                .position(|p| {
-                    p.kind == DepositionKind::SparseFill
-                        && (p.points_mm[1][0] - p.points_mm[0][0])
-                            .hypot(p.points_mm[1][1] - p.points_mm[0][1])
-                            < 1.
-                })
-                .unwrap();
-            layer.paths.remove(index);
-            assert_reemitted_interface_refuses(missing, &requested);
-        }
-        if windows {
-            for (bottom, height) in [(0., 0.6), (1., 6.)] {
-                let mut bad = requested.clone();
-                bad.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
-                    roof_spacing_mm: None,
-                    architecture: Some(WebArchitecture {
-                        opening: Some(WebOpening {
-                            bottom_z_mm: bottom,
-                            height_mm: height,
-                            ..opening
-                        }),
-                        pier_rib_depth_mm: None,
-                    }),
-                };
-                let e = scene.compile(&bad).unwrap_err();
-                assert!(
-                    e.message.contains("landing") || e.message.contains("roof-root corridor"),
-                    "{e}"
-                );
-            }
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for p in &template.points_mm {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(p[axis]);
+            hi[axis] = hi[axis].max(p[axis]);
         }
     }
-    assert!(
-        volumes[1] < volumes[0],
-        "openings must remove actual complete-object dose"
-    );
-    assert!(
-        volumes[2] > volumes[0],
-        "ribs are charged, not free stiffness"
-    );
-    assert!(volumes[3] < volumes[2]);
+    assert!(hi[0] - lo[0] > 3.0 && hi[1] - lo[1] > 3.0);
+    let (x, y) = (0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]));
+    let z = plan.layers[middle].z_mm;
+    for subdivisions in [1usize, 8] {
+        let mut floating = plan.clone();
+        let mut loop_points = Vec::new();
+        let corners = [
+            [x - 0.6, y - 0.6],
+            [x + 0.6, y - 0.6],
+            [x + 0.6, y + 0.6],
+            [x - 0.6, y + 0.6],
+            [x - 0.6, y - 0.6],
+        ];
+        for pair in corners.windows(2) {
+            for k in 0..subdivisions {
+                let t = k as f64 / subdivisions as f64;
+                loop_points.push([
+                    pair[0][0] + t * (pair[1][0] - pair[0][0]),
+                    pair[0][1] + t * (pair[1][1] - pair[0][1]),
+                    z,
+                ]);
+            }
+        }
+        loop_points.push([corners[0][0], corners[0][1], z]);
+        let mut road = template.clone();
+        road.points_mm = loop_points;
+        floating.layers[middle].paths.push(road);
+        let error = assert_emitted_refuses(floating, &requested, false);
+        assert!(
+            error.message.contains("Cathedral"),
+            "{subdivisions}: {error:?}"
+        );
+    }
 }
 
 #[test]
-fn native_web_roof_builds_each_part_of_a_plate_on_one_lattice() {
-    let mut requested = intent();
-    requested.recipe.infill_fraction = 0.08;
-    requested.recipe.sparse_infill = SparseInfillPolicy::web_roof();
-    requested.recipe.layer_height_mm = 0.2;
-    requested.recipe.bead_width_mm = 0.45;
-    requested.recipe.process.max_bridge_span_mm = 2.0;
+fn cathedral_builds_each_part_of_a_plate_on_one_lattice() {
+    let requested = cathedral_intent(0.08);
     let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0), pose(60.0, 40.0, 0.0)]);
     let bundle = scene.compile(&requested).unwrap();
     assert!(bundle.verification.verified);
@@ -3779,147 +3660,18 @@ fn native_web_roof_builds_each_part_of_a_plate_on_one_lattice() {
     }));
 }
 
-/// The first single-road SparseFill path of `layer` with no unsupported span
-/// over the previous layer's actual strokes.
-fn fully_supported_sparse_road(plan: &NormalizedPrintPlan, layer: usize) -> usize {
-    use crate::planner::support::{
-        AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
-    };
-    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
-    let mut anchors = AnchorWorkspace::default();
-    let mut work = 0;
-    let cancel = AtomicBool::new(false);
-    let previous = &plan.layers[layer - 1];
-    plan.layers[layer]
-        .paths
-        .iter()
-        .position(|path| {
-            if path.kind != DepositionKind::SparseFill || path.points_mm.len() != 2 {
-                return false;
-            }
-            let ends = [
-                project_xyz6_point_mm(path.points_mm[0]).unwrap(),
-                project_xyz6_point_mm(path.points_mm[1]).unwrap(),
-            ];
-            let length = (ends[1][0] - ends[0][0]).hypot(ends[1][1] - ends[0][1]);
-            let WidthProfile::Constant { width_mm } = path.width else {
-                return false;
-            };
-            anchors
-                .gaps_edges(
-                    AnchorCandidate {
-                        endpoints_mm: ends,
-                        bead_width_mm: width_mm,
-                    },
-                    projected_edges(previous.paths.iter(), true),
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap()
-                .iter()
-                .all(|gap| {
-                    matches!(
-                        gap_kind(gap, (gap.end - gap.start) * length, width_mm, 10.0),
-                        GapKind::Supported
-                    )
-                })
-        })
-        .expect("a fully supported sparse road")
-}
-
 #[test]
-fn native_web_roof_curved_and_holed_domains_freshly_replay() {
+fn cathedral_curved_holed_and_concave_rooms_freshly_replay() {
     for (label, source) in [("cylinder", CYLINDER), ("through-hole", HOLE)] {
         let scene = Scene::new(source, &[pose(40.0, 40.0, 0.0)]);
-        let mut requested = intent();
-        requested.recipe.infill_fraction = 0.12;
-        requested.recipe.sparse_infill = SparseInfillPolicy::WebRoof {
-            roof_spacing_mm: Some(1.5),
-            architecture: None,
-        };
-        requested.recipe.layer_height_mm = 0.2;
-        requested.recipe.bead_width_mm = 0.45;
-        requested.recipe.perimeter_count = 2;
+        let mut requested = cathedral_intent(0.12);
         requested.recipe.process.max_bridge_span_mm = 4.0;
         let bundle = scene
             .compile(&requested)
             .unwrap_or_else(|e| panic!("{label}: {e:?}"));
         assert!(bundle.verification.verified, "{label}");
-        assert!(
-            bundle
-                .plan
-                .layers
-                .iter()
-                .any(|l| !l.region_coverage.web_roof_domains.is_empty()),
-            "{label}"
-        );
         verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
-        let restored = ManufacturingResult::new(
-            serde_json::from_slice::<ManufacturingBundle>(&encode(&bundle)).unwrap(),
-            bundle.program.clone(),
-        )
-        .unwrap();
-        verify_bundle(&restored, &AtomicBool::new(false)).unwrap();
-        if label == "through-hole" {
-            let index = bundle
-                .plan
-                .layers
-                .iter()
-                .position(|l| !l.region_coverage.web_roof_domains.is_empty())
-                .unwrap();
-            for attack in 0..5 {
-                let mut altered = bundle.plan.clone();
-                let layer = &mut altered.layers[index];
-                match attack {
-                    0 => {
-                        layer.region_coverage.web_roof_domains.clear();
-                    }
-                    1 => {
-                        let hole =
-                            &mut layer.region_coverage.web_roof_domains[0].extent[0].holes[0];
-                        for point in hole {
-                            point[0] += 0.25;
-                        }
-                    }
-                    2 => {
-                        let road = layer
-                            .paths
-                            .iter()
-                            .find(|p| p.kind == DepositionKind::SparseFill)
-                            .unwrap()
-                            .clone();
-                        layer.paths.push(road);
-                    }
-                    3 => {
-                        // A road the layer below supports throughout.
-                        let road = fully_supported_sparse_road(&bundle.plan, index);
-                        altered.layers[index].paths[road].kind = DepositionKind::Bridge;
-                    }
-                    _ => {
-                        let road = layer
-                            .paths
-                            .iter()
-                            .position(|path| path.kind == DepositionKind::SparseFill)
-                            .unwrap();
-                        layer.paths.remove(road);
-                    }
-                }
-                let error = if attack == 0 {
-                    altered.validate(&requested).unwrap_err()
-                } else if attack == 3 {
-                    // Canonicalization would re-derive the honest label.
-                    assert_emitted_refuses(altered, &requested, false)
-                } else {
-                    assert_reemitted_interface_refuses(altered, &requested)
-                };
-                assert!(error.message.contains("web + roof"), "{error:?}");
-            }
-        }
     }
-}
-
-#[test]
-fn native_web_roof_retains_local_annular_roots_and_genuine_concave_web_bridges() {
     let input = include_bytes!("../../../fixtures/manufacturing/web-roof.intent.json");
     for (label, source, fraction) in [
         (
@@ -3939,56 +3691,7 @@ fn native_web_roof_retains_local_annular_roots_and_genuine_concave_web_bridges()
         let bundle = scene
             .compile(&requested)
             .unwrap_or_else(|e| panic!("{label}: {e:?}"));
-        assert!(
-            verify_bundle(&bundle, &AtomicBool::new(false))
-                .unwrap()
-                .verified
-        );
-        if label == "concave" {
-            let mut missing_bridge = bundle.plan.clone();
-            let layer = missing_bridge
-                .layers
-                .iter_mut()
-                .find(|l| {
-                    !l.region_coverage.web_roof_domains.is_empty()
-                        && l.paths.iter().any(|p| {
-                            p.kind == DepositionKind::Bridge
-                                && matches!(p.owner, Some(DepositionOwner::Regional { .. }))
-                        })
-                })
-                .expect("concave web has a genuine earlier-layer gap");
-            let road = layer
-                .paths
-                .iter()
-                .position(|p| {
-                    p.kind == DepositionKind::Bridge
-                        && matches!(p.owner, Some(DepositionOwner::Regional { .. }))
-                })
-                .unwrap();
-            layer.paths.remove(road);
-            assert!(
-                assert_reemitted_interface_refuses(missing_bridge, &requested)
-                    .message
-                    .contains("web + roof")
-            );
-        }
-        let mut incomplete = bundle.plan.clone();
-        let layer = incomplete
-            .layers
-            .iter_mut()
-            .find(|l| !l.region_coverage.web_roof_domains.is_empty())
-            .unwrap();
-        let road = layer
-            .paths
-            .iter()
-            .position(|p| p.kind == DepositionKind::SparseFill)
-            .unwrap();
-        layer.paths.remove(road);
-        assert!(
-            assert_reemitted_interface_refuses(incomplete, &requested)
-                .message
-                .contains("web + roof")
-        );
+        assert!(bundle.verification.verified, "{label}");
     }
 }
 
@@ -4269,14 +3972,11 @@ fn bed_exclusion_keeps_parts_and_adhesion_out_and_the_verifier_checks_it_indepen
 #[test]
 fn straight_sparse_patterns_connect_each_row_along_walls() {
     // Rectilinear (whose rows span the rows beneath as sparse-region
-    // Bridges), Grid and Cathedral roads all join at the walls, and every
-    // road between connectors stays one exact straight row.
+    // Bridges) and Grid roads join at the walls, and every road between
+    // connectors stays one exact straight row. Cathedral rooms are closed
+    // loops and need no connectors.
     let scene = Scene::new(BOX, &[pose(20.0, 20.0, 0.0)]);
-    for policy in [
-        SparseInfillPolicy::Fine,
-        SparseInfillPolicy::Grid,
-        SparseInfillPolicy::web_roof(),
-    ] {
+    for policy in [SparseInfillPolicy::Fine, SparseInfillPolicy::Grid] {
         let mut requested = intent();
         requested.recipe.sparse_infill = policy;
         requested.recipe.infill_fraction = 0.15;

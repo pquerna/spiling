@@ -1004,14 +1004,13 @@ refused by name, because STEP's out-of-tube normal and the kernels' parametric
 normal point opposite ways there.
 
 `SPILING_CORPUS_INFILL=cathedral` runs the same parts with Cathedral infill and
-`SPILING_CORPUS_FRACTION` sets the infill fraction (default 0.15). The same 12
-parts pass with Cathedral at 15% and at 8%, where corbels are active, using
-filament within about 7% of rectilinear at 15%. Each record also carries
-filament length, the count of layers reporting an unsupported span and the
-count of layers with a Cathedral ceiling. Cathedral reports more such layers
-than rectilinear on some parts, because rectilinear re-hatches skins over
-sparse interior into anchored bridge rows and Cathedral keeps its construction
-as built.
+`SPILING_CORPUS_FRACTION` sets the infill fraction (default 0.15). Parts 02, 05,
+07, 09, 12 and 14 pass with Cathedral 2 at 15%, supports off and breakaway,
+with filament 0.70–0.99 of the PrusaSlicer reference. Each record also carries
+filament length and the count of layers reporting an unsupported span;
+Cathedral reports more such layers than rectilinear on some parts, because
+rectilinear re-hatches skins over sparse interior into anchored bridge rows and
+Cathedral keeps its construction as built.
 
 ## Minimal user flows
 

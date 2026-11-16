@@ -1363,7 +1363,10 @@ pub(crate) fn verify_actual(
                         | DepositionKind::SolidFill
                         | DepositionKind::SparseFill
                 ) && !(deposition_kind == DepositionKind::SparseFill
-                    && matches!(recipe.sparse_infill, SparseInfillPolicy::Gyroid))
+                    && matches!(
+                        recipe.sparse_infill,
+                        SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
+                    ))
                 {
                     let policy = if deposition_kind == DepositionKind::TopSkin {
                         recipe.top_skin_axis
@@ -1392,10 +1395,7 @@ pub(crate) fn verify_actual(
                         }
                     };
                     if deposition_kind == DepositionKind::SparseFill
-                        && matches!(
-                            recipe.sparse_infill,
-                            SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
-                        )
+                        && matches!(recipe.sparse_infill, SparseInfillPolicy::Grid)
                     {
                         fixed_axis = if from[0] == position[0] {
                             0
@@ -1665,6 +1665,7 @@ pub(crate) fn verify_actual(
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    cathedral::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     connectors::verify(plan, &mut geometry_work, cancel)?;
     interfaces::verify_projected_byte_geometry(
         plan,
@@ -1731,7 +1732,7 @@ pub(crate) fn verify_actual(
             "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
             "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
-            "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); explicit Grid/Web + roof two-axis sparse construction; immutable closed-wall seam policy and deterministic projected tie ordering".into(),
+            "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); explicit Grid two-axis and Cathedral room construction; immutable closed-wall seam policy and deterministic projected tie ordering".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
             "Actual XYZ6 minimum deposition length and independently inverted XYZ6/E8 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
@@ -1859,6 +1860,6 @@ fn count_event(count: u32) -> Result<u32, ManufacturingError> {
         .ok_or_else(|| failed("verified event count exceeds its u32 representation"))
 }
 
+mod cathedral;
 #[cfg(test)]
 mod tests;
-mod web_roof;

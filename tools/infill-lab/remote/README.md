@@ -222,7 +222,7 @@ fast-math and floating-point contraction are disabled. TetGen is separately
 licensed AGPL-3.0-or-later, not linked into or included in the Spiling runtime.
 The resulting immutable image ID, not a repeat build's tag, identifies a cohort.
 
-Use `cathedral.py pack --mesh-method tetgen` and dispatch through **`--backend
+Pack with `--mesh-method tetgen` and dispatch through **`--backend
 vault`** with an explicit single BLAS thread for comparison. The adapter first
 constructs the ordinary admitted prism mesh, then exports its closed oriented
 boundary. `-pQMYJ` requests a PLC tetrahedralization, quiet output, no facet/vertex

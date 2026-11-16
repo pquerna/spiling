@@ -46,10 +46,6 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
         SparseInfillPolicy::Fine => "Rectilinear",
         SparseInfillPolicy::Grid => "Grid",
         SparseInfillPolicy::Gyroid => "Gyroid",
-        SparseInfillPolicy::WebRoof {
-            architecture: Some(_),
-            ..
-        } => "Cathedral · study",
         SparseInfillPolicy::WebRoof { .. } => "Cathedral",
         SparseInfillPolicy::CombineEligible { .. } => "Rectilinear · combined",
     };
@@ -72,7 +68,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
                     ui.selectable_value(&mut pattern, 3, "Gyroid")
                         .on_hover_text("Curved periodic infill. Density sets nominal material spacing; clipped roads and roof construction determine actual material. Single tool; no finishes or process modifiers.");
                     ui.selectable_value(&mut pattern, 2, "Cathedral")
-                        .on_hover_text("Continuous chamber webs with stable seed and joint columns, and retained corbels under each ceiling. Base density sets web spacing; joints and corbels add material only where constructed. Single tool; no finishes or process modifiers.");
+                        .on_hover_text("Rooms with two-bead walls that stack through the part, each printed as one closed loop, and roof teeth grown from the walls under every roof. Density sets room size; roof support adds material only where a roof needs it. Single tool; no finishes or process modifiers.");
                 });
             if pattern != original {
                 select_infill(&mut intent.recipe, match pattern {
@@ -84,15 +80,7 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
             }
             if pattern == 2 {
                 let automatic_spacing = intent.recipe.automatic_web_roof_spacing_mm();
-                if let SparseInfillPolicy::WebRoof { roof_spacing_mm, architecture } = &mut intent.recipe.sparse_infill {
-                    if architecture.is_some() {
-                        ui.horizontal(|ui| {
-                            ui.label("Study architecture").on_hover_text("An explicit research construction replaces the automatic joint policy. Its complete parameters remain in the declaration.");
-                            if ui.small_button("Reset").on_hover_text("Restore automatic Cathedral construction; keep density and roof spacing.").clicked() {
-                                *architecture = None;
-                            }
-                        });
-                    }
+                if let SparseInfillPolicy::WebRoof { roof_spacing_mm } = &mut intent.recipe.sparse_infill {
                     let mut automatic = roof_spacing_mm.is_none();
                     if ui.checkbox(&mut automatic, "Automatic roof spacing")
                         .on_hover_text("Uses 75% of the captured bridge-span limit. A tighter override adds roof contacts and material; actual support is verified independently.")

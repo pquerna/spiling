@@ -492,44 +492,16 @@ impl HatchAxis {
     }
 }
 
-/// Material that ends above a layer, with the height its corbels close by.
-#[derive(Debug)]
-pub(super) struct Ceiling {
-    pub roof_z_mm: f64,
-    pub area: MultiPolygon<f64>,
-}
-
 /// Cathedral construction inputs for one layer.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Roof<'a> {
-    /// Last physical web interval before the part's top roof skin.
-    pub z_mm: f64,
-    /// Part-level XY bounds `[min, max]` anchoring the web lattice.
+pub(super) struct Roof {
+    /// Part-level XY bounds `[min, max]` anchoring the cell lattice.
     pub frame_mm: [[f64; 2]; 2],
-    /// Lower ceilings above this layer, within the corbel growth horizon.
-    pub ceilings: &'a [Ceiling],
-    pub columns: Option<&'a WebColumns>,
-}
-
-#[derive(Debug)]
-pub(super) struct WebColumns {
-    pub roots: [Vec<f64>; 2],
-    pub joints: Vec<(usize, f64, f64, f64)>,
-}
-
-impl WebColumns {
-    pub(super) fn allocated_bytes(&self) -> usize {
-        self.roots
-            .iter()
-            .map(|roots| roots.capacity() * std::mem::size_of::<f64>())
-            .sum::<usize>()
-            + self.joints.capacity() * std::mem::size_of::<(usize, f64, f64, f64)>()
-    }
 }
 
 pub(super) struct HatchLayer<'a> {
-    /// Cathedral roof horizon, lattice frame and local ceilings.
-    pub roof: Option<Roof<'a>>,
+    /// Cathedral lattice frame.
+    pub roof: Option<Roof>,
     /// Actual proposed hatch width, independent of wall/skin recipe defaults.
     pub width_mm: f64,
     pub z: f64,
@@ -566,8 +538,6 @@ impl OrdinaryHatchPhase {
         }
     }
 }
-
-pub(super) mod web_roof;
 
 // Fill endpoints belong to the eroded interior boundary, half a bead from
 // the final wall center. No wall-extension strokes or duplicate outlines.
@@ -632,9 +602,9 @@ pub(super) fn hatch_with_phase(
         )
     {
         if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
-            return Err(unsupported("web + roof requires its fixed chamber lattice"));
+            return Err(unsupported("Cathedral requires its fixed room lattice"));
         }
-        return web_roof::hatch(fill, fraction, layer, paths, segments, cancel);
+        return super::cathedral::rooms(fill, fraction, layer, paths, segments, cancel);
     }
     if kind == DepositionKind::SparseFill
         && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Gyroid)

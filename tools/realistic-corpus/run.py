@@ -108,7 +108,7 @@ def intent_file():
     elif d["recipe"]["supports"].get("kind") != SUPPORTS:
         raise SystemExit(f"intent fixture has no {SUPPORTS} supports to keep")
     if INFILL:
-        d["recipe"]["sparse_infill"] = ({"kind": "web_roof", "roof_spacing_mm": None, "architecture": None}
+        d["recipe"]["sparse_infill"] = ({"kind": "web_roof", "roof_spacing_mm": None}
             if INFILL == "cathedral" else {"kind": "fine" if INFILL == "rectilinear" else INFILL})
     path = os.path.join(WORK, "intent.json")
     json.dump(d, open(path, "w"))
@@ -408,9 +408,6 @@ def part(case, intent, results):
         record["layers"] = len(layers)
         record["overhang_layers"] = sum(1 for v in spans if v > 0)
         record["max_overhang_mm"] = round(max(spans, default=0), 3)
-        record["ceiling_layers"] = sum(
-            1 for l in layers
-            if any(d["ceilings"] for d in l["region_coverage"]["web_roof_domains"]))
     with LOCK:
         results.write(json.dumps(record) + "\n")
         results.flush()

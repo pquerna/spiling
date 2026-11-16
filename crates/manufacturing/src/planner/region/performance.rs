@@ -105,11 +105,6 @@ fn measure_infill_generation() {
         _ => panic!("unknown measurement pattern"),
     };
     let cancel = AtomicBool::new(false);
-    let roof_z = if setting("SPILING_INFILL_ROOF", "core") == "roof" {
-        (layers + 1) as f64 * 0.2
-    } else {
-        40.0
-    };
     for repeat in 0..=repeats {
         let mut nanos = 0u128;
         let mut path_count = 0;
@@ -123,10 +118,7 @@ fn measure_infill_generation() {
             let z = index as f64 * 0.2;
             let layer = HatchLayer {
                 roof: Some(Roof {
-                    z_mm: roof_z,
                     frame_mm: [[0.0, 0.0], [size, size]],
-                    ceilings: &[],
-                    columns: None,
                 }),
                 width_mm: 0.45,
                 z,
@@ -165,7 +157,7 @@ fn measure_infill_generation() {
             println!(
                 "INFILL_PERF {}",
                 serde_json::json!({
-                    "pattern":pattern,"shape":shape,"size_mm":size,"fraction":fraction,"roof_z_mm":roof_z,
+                    "pattern":pattern,"shape":shape,"size_mm":size,"fraction":fraction,
                     "layers":layers,"sample":repeat,"generation_us":nanos as f64 / 1000.0,
                     "paths":path_count,"segments":segment_count,"length_mm":length,"volume_mm3":volume,
                     "signature":format!("{signature:016x}"),"observed":observe_output,

@@ -14,7 +14,7 @@ mod joins;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
 mod bonds;
-mod cathedral;
+pub(crate) mod cathedral;
 mod combined;
 mod exposure;
 mod native;
@@ -905,105 +905,13 @@ fn admit_schedule<'model>(
                 "startup wall retained-point overflow",
             )
         })?;
-    if matches!(
-        recipe.sparse_infill,
-        SparseInfillPolicy::WebRoof {
-            architecture: Some(_),
-            ..
-        }
-    ) {
-        let first = sections.first().ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof study architecture requires an upright constant-section part",
-            )
-        })?;
-        if input.occurrences.len() != 1
-            || sections
-                .iter()
-                .any(|span| !same_section(&first.material, &span.material))
-        {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof study architecture requires one upright constant-section part",
-            ));
-        }
-        let occurrence = &input.occurrences[0];
-        let definition = &input.definitions[&occurrence.definition_id];
-        let face = definition.faces().first().ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof lacks native carrier metadata",
-            )
-        })?;
-        let bounds = admission.native_bounds[&occurrence.occurrence_id];
-        // Eligibility uses all analytic carriers and the exact pose; equal
-        // sampled sections alone never authorize a curved/sloped source.
-        let mut cap_z = [f64::INFINITY, f64::NEG_INFINITY];
-        for carrier in definition.faces() {
-            if let Some(spiling_contracts::geometry::AnalyticSurfaceDescription::Plane {
-                origin_mm,
-                normal,
-            }) = &carrier.geometry.analytic
-                && normal[0] == 0.0
-                && normal[1] == 0.0
-                && normal[2] != 0.0
-            {
-                cap_z[0] = cap_z[0].min(origin_mm[2]);
-                cap_z[1] = cap_z[1].max(origin_mm[2]);
-            }
-        }
-        if !cap_z.iter().all(|z| z.is_finite()) || cap_z[0] >= cap_z[1] {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "web + roof requires finite separated native extrusion caps",
-            ));
-        }
-        surface::admit_extrusion(
-            input,
-            occurrence,
-            bounds,
-            &face.face_id,
-            cap_z[0],
-            cap_z[1],
-            cancel,
-        )
-        .map_err(|mut failure| {
-            failure.message = format!("web + roof: {}", failure.message);
-            failure
-        })?;
-        if let SparseInfillPolicy::WebRoof {
-            architecture: Some(a),
-            ..
-        } = recipe.sparse_infill
-            && let Some(o) = a.opening
-        {
-            let landing = bounds.min[2] + recipe.bottom_skin_thickness_mm + recipe.layer_height_mm;
-            if o.bottom_z_mm < landing {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    format!("web opening must retain its bottom landing through {landing} mm"),
-                ));
-            }
-        }
-    }
-    // Cathedral on any part: one lattice frame and each layer's ceilings.
-    let mut web_roof = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
+    // Cathedral on any part: one lattice frame for every layer.
+    let web_roof = if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
         let covered = sections.last().map_or(0, |span| span.end as usize);
         let materials: Vec<&Arc<MultiPolygon<f64>>> = (0..schedule.len().min(covered))
             .map(|index| &sections[span_at(&sections, index as u32)].material)
             .collect();
-        let tops: Vec<f64> = schedule[..materials.len()]
-            .iter()
-            .map(|layer| layer.z)
-            .collect();
-        Some(cathedral::field(
-            &materials,
-            &tops,
-            recipe,
-            input.intent.printer.build_envelope.min[2],
-            cancel,
-        )?)
+        Some(cathedral::field(&materials, recipe, cancel)?)
     } else {
         None
     };
@@ -1597,7 +1505,7 @@ fn admit_schedule<'model>(
                 &templates,
             )?;
             let hatch_layer = region::HatchLayer {
-                roof: web_roof.as_ref().map(|field| field.roof(index as usize)),
+                roof: web_roof.as_ref().map(|field| field.roof()),
                 width_mm: recipe.bead_width_mm,
                 z,
                 lower_z: elevation.lower_z,
@@ -1668,7 +1576,7 @@ fn admit_schedule<'model>(
                     axis,
                     top_axis,
                     recipe,
-                    web_roof.as_ref().map(|field| field.roof(index as usize)),
+                    web_roof.as_ref().map(|field| field.roof()),
                     phase,
                     classified_owned_bytes,
                     &sections[current].process_domains,
@@ -1835,7 +1743,7 @@ fn admit_schedule<'model>(
             coverage.surface_added_area_mm2 =
                 coverage.section_area_mm2 - coverage.source_section_area_mm2;
             if let Some(field) = &web_roof {
-                field.stamp(index as usize, &mut coverage.web_roof_domains);
+                field.stamp(&mut coverage.web_roof_domains);
             }
             layers.push(PrintLayer {
                 skin_command_fits,
@@ -1897,19 +1805,11 @@ fn admit_schedule<'model>(
             resolution_allocated_bytes,
             &[None, None],
         )?;
-        let mut support_native_owned_bytes =
+        let support_native_owned_bytes =
             skin_retained_bytes(support_outside_bytes, &neighborhoods, &[])?;
 
-        if let Some(field) = &mut web_roof {
-            field.stabilize(
-                &mut layers,
-                recipe,
-                &mut segments,
-                support_native_owned_bytes,
-                cancel,
-            )?;
-            support_native_owned_bytes =
-                geometry_bytes(&[support_native_owned_bytes, field.column_bytes()])?;
+        if let Some(field) = &web_roof {
+            field.stabilize(&mut layers, recipe, &mut segments, cancel)?;
         }
 
         support_work.planar = *neighborhoods.work_mut();
@@ -2069,7 +1969,7 @@ fn admit_schedule<'model>(
                     )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
-                        roof: web_roof.as_ref().map(|field| field.roof(index)),
+                        roof: web_roof.as_ref().map(|field| field.roof()),
                         width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
@@ -2141,7 +2041,7 @@ fn admit_schedule<'model>(
                                 hatch_key(schedule, index),
                             ),
                             recipe,
-                            web_roof.as_ref().map(|field| field.roof(index)),
+                            web_roof.as_ref().map(|field| field.roof()),
                             phase_by_layer[index],
                             classified_bytes,
                             &sections[current].process_domains,
@@ -3707,32 +3607,6 @@ fn physical_neighbor(
     }
 }
 
-#[cfg(feature = "roof-research")]
-pub struct CathedralResearchColumns {
-    pub roots: [Vec<f64>; 2],
-    pub joints: Vec<(usize, f64, f64, f64)>,
-}
-
-#[cfg(feature = "roof-research")]
-pub fn cathedral_research_columns(
-    plan: &NormalizedPrintPlan,
-    recipe: &PlanarPrintRecipe,
-    cancel: &AtomicBool,
-) -> Result<Option<CathedralResearchColumns>, ManufacturingError> {
-    region::web_roof::synthesize(
-        &plan.layers,
-        recipe,
-        layer_payload_bytes(&plan.layers)?,
-        cancel,
-    )
-    .map(|columns| {
-        columns.map(|columns| CathedralResearchColumns {
-            roots: columns.roots,
-            joints: columns.joints,
-        })
-    })
-}
-
 fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         web_roof_domains: Vec::new(),
@@ -3869,23 +3743,6 @@ fn prefill_walls(
         }
     }
     check_cancel(cancel)
-}
-
-/// Two sections are the same shape when they differ by less than the
-/// recorded profile tolerance along their boundary: sliced sections of one
-/// prism can differ in ring start and redundant collinear vertices.
-fn same_section(a: &MultiPolygon<f64>, b: &MultiPolygon<f64>) -> bool {
-    use geo::{Area, BooleanOps, Euclidean, Length};
-    if a == b {
-        return true;
-    }
-    let perimeter: f64 =
-        a.0.iter()
-            .flat_map(|p| std::iter::once(p.exterior()).chain(p.interiors()))
-            .map(|ring| Euclidean.length(ring))
-            .sum();
-    let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
-    a.0.len() == b.0.len() && a.xor(b).unsigned_area() <= profile * perimeter
 }
 
 fn material_hash(material: &MultiPolygon<f64>) -> u64 {

@@ -223,10 +223,13 @@ where
             // A curved Gyroid road cannot become a taut straight bridge merely
             // because its approximation contains short chords. Carry gaps over
             // chord boundaries until an actual positive lower contact resets it.
+            // Cathedral loops are whole constructions too: their runs are
+            // judged along the road, and they never become bridges.
             let curved_fill = path.kind == DepositionKind::SparseFill
                 && matches!(
                     recipe.sparse_infill,
                     spiling_contracts::manufacturing::SparseInfillPolicy::Gyroid
+                        | spiling_contracts::manufacturing::SparseInfillPolicy::WebRoof { .. }
                 );
             let mut curved_gap = 0.0_f64;
             for (first, last, width_mm) in StrokeRuns::for_path(path)? {

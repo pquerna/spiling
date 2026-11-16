@@ -5,82 +5,9 @@
 
 Candidate deposition comes from **Spiling's Rust planner**, through the ordinary engine/CLI, independent emitted-program replay and source-absent saved return/export. Python coordinates experiments, runs numerical evaluation and renders reports; it must not construct, replace or mutate candidate roads. Fixed STEP test specimens may be authored by offline CAD tooling before native import. They are inputs, not a second infill generator.
 
-## Source-edit experiments
+## Native captures
 
-### Roof-support subset research
-
-`roof_support.py` is a separate, explicitly derived research lane. Its opt-in
-Rust `roof_support` example reads the production generator's complete shared
-seed/joint columns to freeze mandatory versus optional roads. Editable Rust
-`examples/roof_support/policy.rs` selects unique immutable baseline IDs; Python
-never generates or modifies deposition. Whole merged roads containing a web or
-joint remain protected. The shipping engine does not enable `roof-research`.
-
-`roof_support_judge.py` freezes analytic capsule intervals against actual prior
-physical-height deposition, endpoint overlap, complete skin/corbel obligations
-and inherited process roles. Every fixed stroke is checked, including lower
-ceilings and roads dependent on removed material. New unlicensed bridges,
-floating short strokes and enlarged inherited warning intervals refuse.
-The native baseline completes source/intent-absent saved return and identical
-four-file exports; a changed subset **does not inherit native replay success**.
-Production adoption requires a separately reviewed construction contract and
-complete engine/emitter/verifier journey, not a changed research badge.
-
-```sh
-cargo build --locked -p spiling-engine -p spiling-cli -p spiling-workbench
-cargo build --locked -p spiling-manufacturing --example roof_support --features roof-research
-python tools/infill-lab/roof_support.py --root "$COHORT" capture --bin target/debug
-python tools/infill-lab/roof_support.py --root "$COHORT" freeze
-python tools/infill-lab/roof_support.py --root "$COHORT" trial material-v1 \
-  --policy '{"family":"material","seed":1,"bridge_limit_mm":10}' \
-  --hypothesis 'Remove highest-dose redundant corbels in descending physical height'
-python tools/infill-lab/roof_support_report.py "$COHORT"
-```
-
-Freeze the mixed-roof panel, judge, build settings and fixed sources before any
-scored trial. Keep every hypothesis, parent, Rust snapshot and failed outcome.
-Search material- and start-led pruning, directional canopies, physical-height
-phase/bundle edits and backwards demand; retained support/process floors are
-hard gates, not scalar penalties. Compare complete-object actual E8 material,
-commanded-feed deposition time, explicitly modeled filtered-order travel and
-starts separately. Acceleration, lifecycle, pressure and structural strength
-are not inferred. `roof_support_report.py` writes the nondominated archive and
-self-contained chart from the append-only records; reserve final shapes from
-search and do not tune after their single final audit.
-
-The campaign adapts pi-autoresearch's frozen measurement, parentage, learning
-and backpressure discipline, not automatic shared-checkout commits/reverts or
-single-scalar acceptance. Baobab motivates demand-led canopy work and separate
-permanent roots; this independently authored selector is not an upstream port.
-
-### Native generator source edits
-
-`algorithm_loop.py` freezes the specimen/recipe panel, Rust compiler and all public source outside its explicit Rust-generator allowlist. During scored iterations edit only:
-
-- `crates/manufacturing/src/planner/region/web_roof.rs`
-- `crates/manufacturing/src/planner/region/web_roof/architecture.rs`
-- `crates/manufacturing/src/planner/region/web_roof/joints.rs`
-
-The verifier, contracts, source fixtures, numerical evaluators, capture/decoder tools and dependency locks remain frozen. New topology may require a separately reviewed construction-contract/verifier extension **before freezing a new cohort**. A generator edit outside the frozen native contract earns an explicit refusal, not a fabricated successful construction or a changed judge. The controller chooses each next hypothesis from prior outcomes; this is not an autonomous proposal model or a parameter-only sweep.
-
-Freeze from a committed baseline; only the allowed generator files may have working edits. The baseline commit plus the archived Rust snapshots must reconstruct every frozen source file. Use the locked Python environment (`uv sync --extra fixtures --extra test`) and pinned Rust toolchain. Keep the cohort outside the checkout or in ignored `.cache`. For example, a JSONL panel can contain `{"pattern":"web_roof","fraction":0.05}` and `{"pattern":"web_roof","fraction":0.16}`.
-
-```sh
-python tools/infill-lab/algorithm_loop.py --root "$COHORT" freeze \
-  --candidates "$PANEL" --specimens cube48 beam80 panel48
-python tools/infill-lab/algorithm_loop.py --root "$COHORT" prepare control \
-  --hypothesis 'Reproduce the native control'
-# Run inside an externally enforced memory/task scope; --jobs is a reservation.
-python tools/infill-lab/algorithm_loop.py --root "$COHORT" run control --jobs 2
-# Edit only the declared Rust generator files. Run before the next source edit.
-python tools/infill-lab/algorithm_loop.py --root "$COHORT" prepare candidate \
-  --parent control --hypothesis 'Describe the construction intervention'
-python tools/infill-lab/algorithm_loop.py --root "$COHORT" run candidate --jobs 2
-```
-
-Preparation snapshots every allowed Rust file with its hash, parent and hypothesis. Run requires that exact snapshot and unchanged frozen source, builds engine/CLI with the locked graph, copies immutable binaries and records their hashes, then executes the complete frozen native panel. It checks source identity again after build and capture. A concurrent edit stops acceptance; it never resets, stashes or overwrites another checkout. Build failures, missing/failed captures and native refusals remain named outcomes with `native_replayed=false`. Completed trials cannot be overwritten.
-
-A successful native trial means compile, fresh independent replay, Save, removal of owned external inputs, a fresh engine reopen/replay and exact four-file export. It is **not** a mechanical score. Use the existing `campaign.py pack` / frozen evaluator dispatch and collection commands on `trials/NAME/capture` for finite-coupon mechanics (`cathedral.py pack` separately requires a declared one-source cube panel and its automatic native control); keep its native manifests and code lineage with that separate numerical cohort. Freeze exact physical crops, assumed law, solver, mesh and image IDs before comparing. Never splice Python-generated roads into a native capture or transfer a verified flag to modified geometry.
+Capture candidates through the ordinary engine/CLI (`campaign.py`, `native.py`) and evaluate them with the frozen numerical images below. Cathedral 2 (RFC 12) replaced the earlier web, flange and corbel construction together with its source-edit loop, roof-support subset lane and reinforcement benchmark; those lanes and their frozen reports live in Git history. New Cathedral studies capture the shipping construction and screen wall, junction, splice and roof-bay specimens.
 
 ## Evaluation and promotion
 
@@ -106,51 +33,4 @@ discard deposited material or change contact rules.
 
 Numerical jobs consume inert hashed deposition in exact existing Docker images; they execute no candidate code and install no host packages or services. Retain external CPU/RAM/task/time bounds and combined live reservations. Native builds/captures remain sequential and independently bounded.
 
-The superseded Python source-edit campaign is retained in its immutable archive and published Git history. `algorithm_report.py` and its historical judges can reproduce that frozen report; their derived rows are not native verification evidence and cannot supply future generation. There is no current Python candidate mutator.
-
 Promotion requires the reviewed Rust implementation, appropriate producer identity, independent emitted-program replay, source-absent saved return/export, complete costs and held-out native geometry. Attractive coupon results alone do not justify a production default or strength claim. Production authoring remains typed Rust/protobuf; JSON here is inert experiment interchange and archived output.
-
-## Reinforcement benchmark
-
-`reinforcement_study.py` compares two complete native capture panels without
-editing their roads. Both retain the same original source and base recipe;
-density or an explicitly selected existing pier-rib depth may differ for a
-material-budget alternative (`--control-rib-depth-mm` / `--candidate-rib-depth-mm`). Historical
-controls retain their original producer and return-evidence fields. Candidate
-binaries, full-object deposition and decoded motion bounds remain in the report.
-
-```sh
-python tools/infill-lab/reinforcement_study.py pack \
-  --control CONTROL_CAPTURE --candidate CANDIDATE_CAPTURE \
-  --context FROZEN_CONTEXT --output PAIRED_INPUTS
-# Dispatch through campaign.py with --backend reference in the matching image.
-python tools/infill-lab/reinforcement_study.py collect \
-  --inputs PAIRED_INPUTS --results PAIRED_RESULTS --image IMAGE_JSON \
-  --output REPORT_JSON
-```
-
-The default fixed bay contains two complete piers and flange tips. The candidate
-capture defines one shared physical crop for both constructions; `--shift-mm`
-creates a separately reported phase check and refuses a clipped flange envelope.
-Two explicit maximum-edge levels exercise X/Z compression and transverse bending.
-For a constant-section actual crop, the free axial extrusion solution supplies an
-additional analytical check. Changing sections receive no analytical substitute.
-
-The collector keeps missing/failed finest results unknown, checks exact
-input/scenario/image/cleanup and physical residual/work/volume obligations, and
-requires each directional refinement to pass. Its numerical gate does **not**
-establish independent-formulation qualification or whole-part strength; ratios
-remain provisional. `--backend quadratic` packs the same physical fixtures for
-in-process parity; `--element C3D15 --mesh-method prisms` supplies a distinct
-quadratic reference formulation. Keep those panels separate and compare the
-matched responses explicitly before a policy decision:
-
-```sh
-python tools/infill-lab/reinforcement_study.py compare \
-  --first TET_REPORT_JSON --second WEDGE_REPORT_JSON --output AGREEMENT_JSON
-```
-
-The comparison requires complete per-panel refinement, the same native captures,
-physical fixtures, law, cap resolution and scientific image, and distinct element
-formulations. Every duty must agree; a favorable mean cannot hide a weak direction.
-No minimum useful-gain threshold applies.

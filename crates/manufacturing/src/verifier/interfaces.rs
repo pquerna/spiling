@@ -22,15 +22,8 @@ pub(super) fn verify_two_axis_sparse(
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if !matches!(
-        recipe.sparse_infill,
-        SparseInfillPolicy::Grid | SparseInfillPolicy::WebRoof { .. }
-    ) {
+    if !matches!(recipe.sparse_infill, SparseInfillPolicy::Grid) {
         return Ok(());
-    }
-    let web_roof = matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. });
-    if web_roof {
-        super::web_roof::verify(plan, recipe, work, cancel)?;
     }
     for (index, layer) in plan.layers.iter().enumerate() {
         // Line families per present region, sized by the layer's own regions.
@@ -63,7 +56,7 @@ pub(super) fn verify_two_axis_sparse(
                 Some(previous) => Some(previous),
             };
             let width = constant_width(path)?;
-            // Bridge-role Grid/Cathedral roads must really span something.
+            // Bridge-role Grid roads must really span something.
             let mut spans_gap = false;
             // Every road between wall connectors is one axis row; the
             // connectors are checked against the layer's actual walls.
@@ -123,15 +116,12 @@ pub(super) fn verify_two_axis_sparse(
                 }
             }
             if previous.is_some() && path.kind == DepositionKind::Bridge && !spans_gap {
-                return Err(failed(
-                    "web + roof road is fully supported but labelled Bridge",
-                ));
+                return Err(failed("Grid road is fully supported but labelled Bridge"));
             }
         }
         // Grid has no road-by-road replay: both line families are its
-        // completeness check. Cathedral replays every road, and a narrow
-        // interior may hold webs of one direction only.
-        if !web_roof {
+        // completeness check.
+        {
             for (region_index, region) in layer.region_coverage.process_regions.iter().enumerate() {
                 if region.area_mm2 > 0.0
                     && region.fraction > 0.0
