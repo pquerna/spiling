@@ -1042,7 +1042,7 @@ correspondence-map capacity are charged once; each query uses only the remaining
 shared geometry bytes. Preparation and all directions share one cumulative
 monitored cancellable contact-work guard without a unit ceiling. Exercise this path with `--center-on-bed 1`
 before Compile on the ordinary housing above; the revision/nonpenetration gate is
-`cargo test --locked -p spiling-engine --test geometry native_bed_contact_is_nonpenetrating_read_only_and_revision_bound`.
+`cargo test --locked -p spiling-engine --test geometry native_bed_contact_is_nonpenetrating_and_revision_bound`.
 
 Seam and hatch direction are required recipe data: `seam_policy` is `nearest` or
 `preferred_build_direction` with normalized build-XY `xy`; `rectilinear_axis` is

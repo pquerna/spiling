@@ -828,31 +828,19 @@ async fn distributed_seams_change_actual_closed_wall_starts_and_survive_fresh_re
     )
     .unwrap();
     nearest.recipe.perimeter_count = 1;
+    assert_eq!(nearest.recipe.seam_policy, SeamPolicy::Nearest);
+    set_intent(&mut client, nearest.clone()).await;
     let revision = status(&mut client).await.0.revision;
-    let prepared = client
-        .prepare_bed_pose(
+    client
+        .place_on_bed(
             &captured,
             revision,
-            &occurrences[0],
-            nearest.printer.build_envelope,
+            Some(occurrences[0].occurrence_id),
             true,
-            nearest.printer.motion_resolution.z_mm,
         )
         .await
         .unwrap();
-    client
-        .geometry(GeometryCommand::SetInstancePose {
-            session_id: captured.session_id,
-            base_revision: prepared.scene_revision,
-            project_revision: prepared.project_revision,
-            occurrence_id: occurrences[0].occurrence_id,
-            pose: prepared.pose,
-        })
-        .await
-        .unwrap();
     let unchanged_scene = scene(&mut client).await;
-    assert_eq!(nearest.recipe.seam_policy, SeamPolicy::Nearest);
-    set_intent(&mut client, nearest.clone()).await;
     let baseline_record = compile(&mut client).await;
     let baseline = fetch_bundle(&mut client, &baseline_record).await.unwrap();
     let (baseline_motion, baseline_report, _) = seam_motion(&mut client, &baseline_record).await;
@@ -2298,32 +2286,28 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
     let occurrence = &occurrences[0];
     let revision = status(&mut client).await.0.revision;
     // Operator placement must use native support/contact, not a guessed Z offset.
-    let prepared = client
-        .prepare_bed_pose(
-            &captured,
-            revision,
-            occurrence,
-            requested.printer.build_envelope,
-            true,
-            requested.printer.motion_resolution.z_mm,
-        )
+    let (_, placement) = client
+        .place_on_bed(&captured, revision, Some(occurrence.occurrence_id), true)
         .await
         .unwrap();
-    assert_eq!(scene(&mut client).await, captured);
-    assert!(matches!(
-        client
-            .geometry(GeometryCommand::SetInstancePose {
-                session_id: captured.session_id,
-                base_revision: prepared.scene_revision,
-                project_revision: prepared.project_revision,
-                occurrence_id: occurrence.occurrence_id,
-                pose: prepared.pose,
-            })
-            .await
-            .unwrap(),
-        GeometryResponse::SceneChanged { .. }
-    ));
+    assert_eq!(placement.outcome, BedGroupOutcome::Centred);
     let placed_scene = scene(&mut client).await;
+    let GeometryResponse::ScenePage {
+        occurrences: placed,
+        ..
+    } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: placed_scene.session_id.clone(),
+            revision: placed_scene.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("placed housing occurrence")
+    };
+    let placed_pose = placed[0].pose;
     let scope = SurfaceScope::Definition {
         definition_id: occurrence.definition_id.clone(),
     };
@@ -2386,7 +2370,7 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
     );
     assert_eq!(bundle.provenance.definitions.len(), 1);
     assert_eq!(bundle.provenance.occurrences.len(), 1);
-    assert_eq!(bundle.provenance.occurrences[0].pose, prepared.pose);
+    assert_eq!(bundle.provenance.occurrences[0].pose, placed_pose);
     assert_eq!(scene(&mut client).await, placed_scene);
     // Finite-selection outcomes describe boxes. The whole-owned base remains
     // independently attributed on the actual light region, not another box.
@@ -3385,7 +3369,7 @@ async fn place_on_bed_moves_the_whole_scene_as_one_undo_step() {
     let captured = scene(&mut client).await;
     let revision = status(&mut client).await.0.revision;
     let (summary, placement) = client
-        .place_on_bed(&captured, revision, false)
+        .place_on_bed(&captured, revision, None, false)
         .await
         .unwrap();
     assert_eq!(placement.outcome, BedGroupOutcome::Centred);
@@ -3414,7 +3398,7 @@ async fn place_on_bed_moves_the_whole_scene_as_one_undo_step() {
     let captured = scene(&mut client).await;
     let revision = status(&mut client).await.0.revision;
     let (again, placement) = client
-        .place_on_bed(&captured, revision, false)
+        .place_on_bed(&captured, revision, None, false)
         .await
         .unwrap();
     assert_eq!(placement.outcome, BedGroupOutcome::Unchanged);

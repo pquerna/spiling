@@ -5,7 +5,7 @@
 use crate::{ArtifactView, geometry::*, rpc};
 mod analysis;
 mod appearance;
-mod bed_pose;
+mod bed_placement;
 mod color_naming;
 mod cost;
 mod error;

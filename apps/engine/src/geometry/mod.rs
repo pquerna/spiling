@@ -129,7 +129,6 @@ enum Purpose {
         pose: RigidPoseMm,
     },
     Section,
-    PrepareBedPose,
     PlaceOnBed,
     PrepareLayout,
     Open,
@@ -207,7 +206,6 @@ enum PublicationKind {
         asset: Arc<spiling_core::ManufacturingAsset>,
         replay: spiling_manufacturing::EncodedReplayDisplay,
     },
-    BedPosePrepared(BedPosePreparation),
     BedPlaced {
         edit: Option<(PreparedEdit, SceneRevision)>,
         placement: BedGroupPlacement,
@@ -517,7 +515,6 @@ impl Runtime {
                                 | Purpose::ImportSurfaceImage { .. }
                                 | Purpose::GetSurfaceImage
                                 | Purpose::PrepareLayout
-                                | Purpose::PrepareBedPose
                                 | Purpose::PlaceOnBed
                                 | Purpose::ImportAppearancePalette
                                 | Purpose::CompareAppearance
@@ -884,9 +881,6 @@ impl Runtime {
                             }
                             self.prepared_analysis_faces.push(preparation.clone());
                             Some(JobResult::AnalysisFacePrepared { preparation })
-                        }
-                        PublicationKind::BedPosePrepared(preparation) => {
-                            Some(JobResult::BedPosePrepared { preparation })
                         }
                         PublicationKind::BedPlaced { edit, placement } => {
                             // One Core transaction (one undo step) for the group.
@@ -1290,19 +1284,6 @@ impl Runtime {
                 };
                 Ok(Publication {
                     kind: PublicationKind::BedPlaced { edit, placement },
-                    artifact: None,
-                })
-            }
-            (Purpose::PrepareBedPose, Product::BedPosePrepared(preparation)) => {
-                preparation.validate()?;
-                if preparation.session_id != self.session_id
-                    || preparation.scene_revision != active.base
-                    || preparation.project_revision != active.project_base
-                {
-                    return Err(stale().into());
-                }
-                Ok(Publication {
-                    kind: PublicationKind::BedPosePrepared(preparation),
                     artifact: None,
                 })
             }
@@ -1737,6 +1718,7 @@ impl Runtime {
                 session_id,
                 base_revision,
                 project_revision,
+                occurrence_id,
                 center_xy,
             } => {
                 self.base(&session_id, base_revision)?;
@@ -1764,6 +1746,11 @@ impl Runtime {
                         "Add a part before placing parts on the bed",
                     ));
                 }
+                if let Some(id) = occurrence_id
+                    && !snapshot.occurrences.contains_key(&id)
+                {
+                    return Err(unknown());
+                }
                 let envelope = intent.printer.build_envelope;
                 // Each member's own resting brackets: a wide XY envelope at the
                 // real bed height only gathers them; the group rule decides.
@@ -1775,15 +1762,14 @@ impl Runtime {
                 let requests = snapshot
                     .occurrences
                     .values()
+                    .filter(|occurrence| {
+                        occurrence_id.is_none_or(|id| id == occurrence.occurrence_id)
+                    })
                     .map(|occurrence| bed_pose::Request {
-                        session_id: session_id.clone(),
-                        scene_revision: base_revision,
-                        project_revision,
                         occurrence_id: occurrence.occurrence_id,
                         definition_id: occurrence.definition_id.clone(),
                         pose: occurrence.pose,
                         envelope_mm: wide,
-                        center_xy: false,
                         contact_tolerance_mm,
                     })
                     .collect();
@@ -1799,58 +1785,6 @@ impl Runtime {
                     printer,
                     hardware,
                     center_xy,
-                })
-            }
-            GeometryCommand::PrepareBedPose {
-                session_id,
-                base_revision,
-                project_revision,
-                occurrence_id,
-                expected_definition_id,
-                expected_pose,
-                envelope_mm,
-                center_xy,
-                contact_tolerance_mm,
-            } => {
-                self.base(&session_id, base_revision)?;
-                if project_revision != self.project.info().revision {
-                    return Err(stale());
-                }
-                if self.active.is_some() {
-                    return Err(busy());
-                }
-                expected_pose.validate()?;
-                envelope_mm.validate()?;
-                let snapshot = self.project.snapshot();
-                let occurrence = snapshot
-                    .occurrences
-                    .get(&occurrence_id)
-                    .ok_or_else(unknown)?;
-                if occurrence.definition_id != expected_definition_id
-                    || occurrence.pose != expected_pose
-                {
-                    return Err(stale());
-                }
-                let request = bed_pose::Request {
-                    session_id,
-                    scene_revision: base_revision,
-                    project_revision,
-                    occurrence_id,
-                    definition_id: expected_definition_id,
-                    pose: expected_pose,
-                    envelope_mm,
-                    center_xy,
-                    contact_tolerance_mm,
-                };
-                let retained_source_bytes = self
-                    .project
-                    .retained_source_bytes()
-                    .map_err(|cause| error(GeometryErrorCode::ResourceLimit, cause.message))?;
-                self.start(Purpose::PrepareBedPose, 0, move |_, _, _| {
-                    Work::PrepareBedPose {
-                        request,
-                        retained_source_bytes,
-                    }
                 })
             }
             GeometryCommand::AddInstance {
@@ -2985,7 +2919,6 @@ impl Runtime {
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
             Purpose::PrepareLayout => "finding_and_verifying_layout",
-            Purpose::PrepareBedPose => "preparing_native_bed_pose",
             Purpose::PlaceOnBed => "placing_parts_on_bed",
             Purpose::Open => "opening",
             Purpose::Save => "saving",

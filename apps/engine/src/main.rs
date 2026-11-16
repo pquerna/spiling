@@ -353,28 +353,6 @@ impl geometry_server::Geometry for Service {
             self.jobs.start_native(self.native.clone(), input).await?,
         ))
     }
-    async fn prepare_bed_pose(
-        &self,
-        req: Request<PrepareBedPoseRequest>,
-    ) -> Result<Response<Operation>, Status> {
-        let mut req = req.into_inner();
-        let id = std::mem::take(&mut req.request_id);
-        let parent = req.parent.clone();
-        let digest = native_digest("Geometry.PrepareBedPose", &req);
-        let command = req.try_into().map_err(|e: String| {
-            request_error(spiling_contracts::native::geometry_request_status(&e))
-        })?;
-        let input = jobs::NativeAdmission {
-            parent,
-            request_id: id,
-            digest,
-            command: Control::Geometry(command),
-            reservation: 0,
-        };
-        Ok(Response::new(
-            self.jobs.start_native(self.native.clone(), input).await?,
-        ))
-    }
     async fn place_on_bed(
         &self,
         req: Request<PlaceOnBedRequest>,

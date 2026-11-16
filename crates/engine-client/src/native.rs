@@ -9,9 +9,9 @@ use spiling_contracts::{
     ArtifactView, MAX_CONTROL_BYTES,
     display::{validate_mesh_chunk, validate_section_chunk, validate_section_summary},
     geometry::{
-        AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedGroupPlacement, BedPosePreparation,
-        GeometryCommand, GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
-        MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SceneSummary, SessionId, SourceHash,
+        ArtifactChunkMetadata, ArtifactSummary, BedGroupPlacement, GeometryCommand, GeometryError,
+        GeometryErrorCode, GeometryResponse, JobError, JobResult, MAX_GEOMETRY_CHUNK_BYTES,
+        OccurrenceId, SceneSummary, SessionId, SourceHash,
     },
     manufacturing::{
         DeliveryPackageDescriptor, MAX_DELIVERY_PACKAGE_BYTES, MAX_MANUFACTURING_BUNDLE_BYTES,
@@ -414,17 +414,6 @@ impl EngineRpc {
             GeometryCall::PrepareLayout(request) => {
                 let operation = client
                     .prepare_layout(self.request(bounded(request)?))
-                    .await
-                    .map_err(rpc_error)?
-                    .into_inner();
-                Ok(GeometryResponse::OperationAccepted {
-                    operation: native::native_operation_view(&operation)
-                        .map_err(ClientError::Protocol)?,
-                })
-            }
-            GeometryCall::PrepareBedPose(request) => {
-                let operation = client
-                    .prepare_bed_pose(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -861,91 +850,15 @@ impl EngineRpc {
         let operation = self.resolve_operation(operation).await?;
         native::native_operation_view(&operation).map_err(ClientError::Protocol)
     }
-    /// Query native support in world axes; does not mutate or hide an Apply.
-    pub async fn prepare_bed_pose(
-        &self,
-        scene: &SceneSummary,
-        project_revision: ProjectRevision,
-        occurrence: &OccurrenceRecord,
-        envelope_mm: AabbMm,
-        center_xy: bool,
-        contact_tolerance_mm: f64,
-    ) -> Result<BedPosePreparation, ClientError> {
-        let response = self
-            .geometry(GeometryCommand::PrepareBedPose {
-                session_id: scene.session_id.clone(),
-                base_revision: scene.revision,
-                project_revision,
-                occurrence_id: occurrence.occurrence_id,
-                expected_definition_id: occurrence.definition_id.clone(),
-                expected_pose: occurrence.pose,
-                envelope_mm,
-                center_xy,
-                contact_tolerance_mm,
-            })
-            .await?;
-        let GeometryResponse::OperationAccepted { operation } = response else {
-            return Err(ClientError::Protocol(
-                "native contact operation was not admitted".into(),
-            ));
-        };
-        let name = operation.name.clone();
-        // Operation watches have no overall job deadline. Unary request deadlines
-        // still bound individual calls; cancellation belongs to the admitted job.
-        let mut terminal = operation;
-        if !terminal.done {
-            let mut watch = self.watch_operation(name.clone()).await?;
-            loop {
-                let operation = watch.message().await.map_err(rpc_error)?.ok_or_else(|| {
-                    ClientError::Protocol(
-                        "native contact observation ended before a terminal result".into(),
-                    )
-                })?;
-                if operation.name != name {
-                    return Err(ClientError::Protocol(
-                        "native contact observation name mismatch".into(),
-                    ));
-                }
-                let operation = self.resolve_operation(operation).await?;
-                terminal =
-                    native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
-                if terminal.done {
-                    break;
-                }
-            }
-        }
-        if let Some(error) = terminal.error {
-            return Err(domain_error(error));
-        }
-        let Some(JobResult::BedPosePrepared { preparation }) = terminal.result else {
-            return Err(ClientError::Protocol(
-                "native contact result missing".into(),
-            ));
-        };
-        if preparation.session_id != scene.session_id
-            || preparation.scene_revision != scene.revision
-            || preparation.project_revision != project_revision
-            || preparation.occurrence_id != occurrence.occurrence_id
-            || preparation.definition_id != occurrence.definition_id
-            || preparation.original_pose != occurrence.pose
-            || preparation.envelope_mm != envelope_mm
-            || preparation.center_xy != center_xy
-            || preparation.contact_tolerance_mm != contact_tolerance_mm
-        {
-            return Err(ClientError::Protocol(
-                "native contact capture mismatch".into(),
-            ));
-        }
-        Ok(preparation)
-    }
-
-    /// Rest every scene part on the bed as one group (one undo step), keeping
-    /// XY when the printer admits it there, else centring on the usable
-    /// region. The engine decides; `DoesNotFit` moves nothing.
+    /// Rest the scene's parts (or only `occurrence_id`) on the bed as one
+    /// group (one undo step), keeping XY when the printer admits it there,
+    /// else centring on the usable region. The engine decides; `DoesNotFit`
+    /// moves nothing.
     pub async fn place_on_bed(
         &self,
         scene: &SceneSummary,
         project_revision: ProjectRevision,
+        occurrence_id: Option<OccurrenceId>,
         center_xy: bool,
     ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
         let response = self
@@ -953,6 +866,7 @@ impl EngineRpc {
                 session_id: scene.session_id.clone(),
                 base_revision: scene.revision,
                 project_revision,
+                occurrence_id,
                 center_xy,
             })
             .await?;
@@ -1443,34 +1357,15 @@ impl EngineClient {
             .layout_overview(session_id, scene_revision, project_revision)
             .await
     }
-    pub async fn prepare_bed_pose(
-        &self,
-        scene: &SceneSummary,
-        project_revision: ProjectRevision,
-        occurrence: &OccurrenceRecord,
-        envelope_mm: AabbMm,
-        center_xy: bool,
-        contact_tolerance_mm: f64,
-    ) -> Result<BedPosePreparation, ClientError> {
-        self.rpc
-            .prepare_bed_pose(
-                scene,
-                project_revision,
-                occurrence,
-                envelope_mm,
-                center_xy,
-                contact_tolerance_mm,
-            )
-            .await
-    }
     pub async fn place_on_bed(
         &self,
         scene: &SceneSummary,
         project_revision: ProjectRevision,
+        occurrence_id: Option<OccurrenceId>,
         center_xy: bool,
     ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
         self.rpc
-            .place_on_bed(scene, project_revision, center_xy)
+            .place_on_bed(scene, project_revision, occurrence_id, center_xy)
             .await
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {

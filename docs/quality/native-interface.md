@@ -137,7 +137,9 @@ changes. Prepare and Review offer the same Slice; a reopened project whose saved
 output is still current needs only the fresh inspection. Creating print settings
 then calls the engine's `PlaceOnBed`, the same rule as the CLI's `--place-all-on-bed`:
 the plate's parts rest on the bed as one group (one undo step), kept where the
-printer admits them and otherwise centred on the selected plate's usable region. The active editor owns Apply, and Review
+printer admits them and otherwise centred on the selected plate's usable region. Prepare's Placement
+section runs the same action directly: Place on bed and Centre on bed for the selected part (all parts
+when none is selected), matching `--place-on-bed`/`--center-on-bed`. The active editor owns Apply, and Review
 offers Export only after a fresh passing inspection. Prepare displays source
 geometry; Review exposes checked actual output. Section analysis can deliberately
 inspect either representation. None of these navigation controls writes a project.

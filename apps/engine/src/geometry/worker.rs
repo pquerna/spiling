@@ -192,10 +192,6 @@ pub enum Work {
         plane: PlaneMm,
         occurrences: Vec<OccurrenceRecord>,
     },
-    PrepareBedPose {
-        request: super::bed_pose::Request,
-        retained_source_bytes: usize,
-    },
     PlaceOnBed {
         requests: Vec<super::bed_pose::Request>,
         retained_source_bytes: usize,
@@ -280,7 +276,6 @@ pub enum Product {
         replay: spiling_manufacturing::EncodedReplayDisplay,
     },
     Preflight(PreflightReport),
-    BedPosePrepared(BedPosePreparation),
     BedPlaced {
         moves: Vec<LayoutPlacement>,
         placement: BedGroupPlacement,
@@ -672,31 +667,6 @@ fn run(
                 super::layout::prepare(request, &natives, &cancel, &report)
                     .map(Product::LayoutPrepared)
             }
-            Work::PrepareBedPose {
-                request,
-                retained_source_bytes,
-            } => definitions
-                .get(&request.definition_id)
-                .ok_or_else(|| {
-                    error(
-                        GeometryErrorCode::StaleRevision,
-                        "native contact definition was reclaimed",
-                    )
-                })
-                .and_then(|resident| {
-                    let additional = crate::resources::source_growth(source_retention(
-                        retained_source_bytes,
-                        &definitions,
-                    )?)?;
-                    super::bed_pose::prepare_with_budget(
-                        &resident.definition,
-                        request,
-                        additional,
-                        &cancel,
-                    )
-                })
-                .map(Product::BedPosePrepared)
-                .map_err(JobError::from),
             Work::PlaceOnBed {
                 requests,
                 retained_source_bytes,

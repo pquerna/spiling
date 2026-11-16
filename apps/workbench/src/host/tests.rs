@@ -948,27 +948,12 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
     let o = &d.occurrences[0];
     let scene = s.scene.as_ref().unwrap();
     let serial = s.serial;
-    host.geometry(GeometryCommand::PrepareBedPose {
+    host.geometry(GeometryCommand::PlaceOnBed {
         session_id: h.session_id.clone(),
         base_revision: scene.revision,
         project_revision: s.project.as_ref().unwrap().revision,
-        occurrence_id: o.occurrence_id,
-        expected_definition_id: o.definition_id.clone(),
-        expected_pose: o.pose,
-        envelope_mm: intent.printer.build_envelope,
+        occurrence_id: Some(o.occurrence_id),
         center_xy: true,
-        contact_tolerance_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
-    })
-    .unwrap();
-    let s = idle_after(&host, serial);
-    let p = s.bed_proposal.as_ref().expect("native placement proposal");
-    let serial = s.serial;
-    host.geometry(GeometryCommand::SetInstancePose {
-        session_id: p.session_id.clone(),
-        base_revision: p.scene_revision,
-        project_revision: p.project_revision,
-        occurrence_id: p.occurrence_id,
-        pose: p.pose,
     })
     .unwrap();
     let s = idle_after(&host, serial);
@@ -1911,7 +1896,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
             intent: original.clone(),
         }
     });
-    place_on_bed(&host, &original);
+    place_on_bed(&host);
     manufacture_control(&host, |session_id, base_revision| {
         ManufacturingCommand::Preflight {
             layout_id: layout_id(&host),
@@ -2319,10 +2304,7 @@ fn manufacturing_alternative_keep_inspect_reopen_evaluate_use_and_current_only_e
         wait(&host, |snapshot| snapshot.phase == Phase::Closed);
     }
 }
-fn place_on_bed(
-    host: &Host,
-    intent: &spiling_contracts::manufacturing::ManufacturingIntent,
-) -> Snapshot {
+fn place_on_bed(host: &Host) -> Snapshot {
     let s = wait(host, |s| {
         s.display
             .as_ref()
@@ -2331,27 +2313,12 @@ fn place_on_bed(
     let o = &s.display.as_ref().unwrap().occurrences[0];
     let scene = s.scene.as_ref().unwrap();
     let serial = s.serial;
-    host.geometry(GeometryCommand::PrepareBedPose {
+    host.geometry(GeometryCommand::PlaceOnBed {
         session_id: scene.session_id.clone(),
         base_revision: scene.revision,
         project_revision: s.project.as_ref().unwrap().revision,
-        occurrence_id: o.occurrence_id,
-        expected_definition_id: o.definition_id.clone(),
-        expected_pose: o.pose,
-        envelope_mm: intent.printer.build_envelope,
+        occurrence_id: Some(o.occurrence_id),
         center_xy: true,
-        contact_tolerance_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
-    })
-    .unwrap();
-    let s = idle_after(host, serial);
-    let p = s.bed_proposal.as_ref().expect("native bed proposal");
-    let serial = s.serial;
-    host.geometry(GeometryCommand::SetInstancePose {
-        session_id: p.session_id.clone(),
-        base_revision: p.scene_revision,
-        project_revision: p.project_revision,
-        occurrence_id: p.occurrence_id,
-        pose: p.pose,
     })
     .unwrap();
     idle_after(host, serial)
@@ -2412,7 +2379,7 @@ fn finish_layers_canonical_image_preview_and_recovery() {
             intent: intent.clone(),
         }
     });
-    let placed = place_on_bed(&host, &intent);
+    let placed = place_on_bed(&host);
     reference.scene_revision = placed.scene.as_ref().unwrap().revision;
     let s = project_edit(&host, |session_id, base_revision| {
         ProjectCommand::AddSurfaceFinish {
@@ -2656,7 +2623,7 @@ fn native_h1_housing_and_physical_plate_parity() {
                 intent: intent.clone(),
             }
         });
-        let s = place_on_bed(&host, &intent);
+        let s = place_on_bed(&host);
         let scope = SurfaceScope::Definition {
             definition_id: s.display.as_ref().unwrap().occurrences[0]
                 .definition_id
@@ -2836,9 +2803,9 @@ fn native_cylindrical_ribs_and_fixed_dual_replay_parity() {
             }
         });
         if name == "cathedral" {
-            place_on_bed(&host, &intent);
+            place_on_bed(&host);
         } else if cylinder {
-            place_on_bed(&host, &intent);
+            place_on_bed(&host);
             let s = wait(&host, |s| {
                 s.display
                     .as_ref()

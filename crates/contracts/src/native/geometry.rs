@@ -1063,7 +1063,6 @@ pub enum GeometryCall {
     Execute(rpc::GeometryRequest),
     ImportPart(rpc::ImportPartRequest),
     StartSection(rpc::StartSectionRequest),
-    PrepareBedPose(rpc::PrepareBedPoseRequest),
     PlaceOnBed(rpc::PlaceOnBedRequest),
     PrepareLayout(rpc::PrepareLayoutRequest),
 }
@@ -1287,6 +1286,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             session_id,
             base_revision,
             project_revision,
+            occurrence_id,
             center_xy,
         } => {
             return Ok(GeometryCall::PlaceOnBed(rpc::PlaceOnBedRequest {
@@ -1295,31 +1295,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
                 base_revision: base_revision.get(),
                 project_revision: project_revision.0,
                 center_xy,
-            }));
-        }
-        GeometryCommand::PrepareBedPose {
-            session_id,
-            base_revision,
-            project_revision,
-            occurrence_id,
-            expected_definition_id,
-            expected_pose,
-            envelope_mm,
-            center_xy,
-            contact_tolerance_mm,
-        } => {
-            super::bed_pose::validate_request(expected_pose, envelope_mm, contact_tolerance_mm)?;
-            return Ok(GeometryCall::PrepareBedPose(rpc::PrepareBedPoseRequest {
-                parent: format!("sessions/{}", session_id.as_str()),
-                request_id: id.into(),
-                base_revision: base_revision.get(),
-                project_revision: project_revision.0,
-                occurrence_id: occurrence_id.get(),
-                expected_definition_id: expected_definition_id.into(),
-                expected_pose: Some(expected_pose.try_into()?),
-                envelope_mm: Some(envelope_mm.try_into()?),
-                center_xy,
-                contact_tolerance_mm,
+                occurrence_id: occurrence_id.map(OccurrenceId::get),
             }));
         }
         GeometryCommand::AddInstance {
@@ -2068,10 +2044,18 @@ mod tests {
                 artifact_id: artifact,
             },
             GeometryCommand::PlaceOnBed {
+                session_id: session.clone(),
+                base_revision: SceneRevision(4),
+                project_revision: crate::project::ProjectRevision(9),
+                occurrence_id: None,
+                center_xy: true,
+            },
+            GeometryCommand::PlaceOnBed {
                 session_id: session,
                 base_revision: SceneRevision(4),
                 project_revision: crate::project::ProjectRevision(9),
-                center_xy: true,
+                occurrence_id: Some(OccurrenceId::new(2).unwrap()),
+                center_xy: false,
             },
         ];
         let id = SessionId::new();
@@ -2087,10 +2071,6 @@ mod tests {
                     GeometryCommand::try_from(request).unwrap()
                 }
                 GeometryCall::PrepareLayout(request) => request.try_into().unwrap(),
-                GeometryCall::PrepareBedPose(request) => {
-                    assert_eq!(request.request_id, id.as_str());
-                    GeometryCommand::try_from(request).unwrap()
-                }
                 GeometryCall::PlaceOnBed(request) => {
                     assert_eq!(request.request_id, id.as_str());
                     GeometryCommand::try_from(request).unwrap()

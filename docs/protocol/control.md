@@ -74,25 +74,25 @@ List uses bounded keyset pagination with parent-bound opaque tokens and default 
 
 ## Bed placement evidence
 
-`PlaceOnBed { center_xy }` is the one group placement rule both clients use (CLI
-`--place-all-on-bed`/`--center-all-on-bed`, workbench print settings). It is a
-cancellable job that gathers each scene part's `PrepareBedPose` brackets against
-a wide XY envelope at the bed height, rests the scene as one rigid group, keeps
-its XY when `PrinterSpecification::envelope_admits` and the hardware capture's
-`admits_bounds` (one motion step, ADR012) accept it there, and otherwise centres
-it on the selected plate's usable region. Its moves commit as one Core
-`ApplyPlacement` transaction (one undo step) and `BedPlaced` reports
+`PlaceOnBed { occurrence_id, center_xy }` is the one bed placement action both
+clients use (CLI `--place-on-bed`/`--center-on-bed ID` and
+`--place-all-on-bed`/`--center-all-on-bed`; workbench Placement and print
+settings). `occurrence_id` names one part; without it, every part of the scene
+moves as one rigid group. It is a cancellable job that gathers each member's
+support brackets against a wide XY envelope at the bed height, rests the group,
+keeps its XY when `PrinterSpecification::envelope_admits` and the hardware
+capture's `admits_bounds` (one motion step, ADR012) accept it there, and
+otherwise centres it on the selected plate's usable region. Its moves commit as
+one Core `ApplyPlacement` transaction (one undo step) and `BedPlaced` reports
 `Unchanged`, `Rested`, `Centred` or `DoesNotFit` (nothing moved) with the placed
-bounds and envelope. It requires a printer in the manufacturing intent.
+bounds and envelope. It requires a printer in the manufacturing intent. There
+is no separate preview/apply step.
 
-`PrepareBedPose` is a read-only source/pose/revision-bound proposal; Core alone
-applies its pose. Required `BedPosePreparation.basis` distinguishes native
-bounded support from the ADR012 tolerant model. Native bounds enclose the native
-material and retain the requested no-penetration/contact uncertainty. Tolerant
-values are placed model-vertex extrema, carry the exact join/profile policy,
-and do not certify native extrema or physical contact. Their reported gap applies
-only to that model. The workbench labels this as approximate placement rather
-than presenting a native-contact receipt.
+Each member's brackets come from native bounded support, or the ADR012 tolerant
+model when native support does not resolve. Native bounds enclose the native
+material and retain the no-penetration/contact uncertainty (at most one printer
+Z step). Tolerant values are placed model-vertex extrema with the exact
+join/profile policy; they do not certify native extrema or physical contact.
 
 Native support uses complete native exclusion and independently feasible
 boundary vertex and curve-point witnesses. Ordinary placement uses this bounded

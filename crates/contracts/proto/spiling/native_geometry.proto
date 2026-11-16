@@ -20,9 +20,6 @@ service Geometry {
   rpc PrepareLayout(PrepareLayoutRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
   }
-  rpc PrepareBedPose(PrepareBedPoseRequest) returns (google.longrunning.Operation) {
-    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
-  }
   rpc PlaceOnBed(PlaceOnBedRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
   }
@@ -42,26 +39,16 @@ message StartSectionRequest {
   uint32 base_revision = 3;
   PlaneMm plane = 4;
 }
-message PrepareBedPoseRequest {
-  string parent = 1;
-  string request_id = 2;
-  uint32 base_revision = 3;
-  uint32 project_revision = 4;
-  uint32 occurrence_id = 5;
-  string expected_definition_id = 6;
-  RigidPoseMm expected_pose = 7;
-  AabbMm envelope_mm = 8;
-  bool center_xy = 9;
-  double contact_tolerance_mm = 10;
-}
-// Rests every scene part on the bed as one group and one undo step;
-// centres it on the usable region when asked or when not admitted in place.
+// Rests the scene's parts (or the one named part) on the bed as one group
+// and one undo step; centres it on the usable region when asked or when not
+// admitted in place.
 message PlaceOnBedRequest {
   string parent = 1;
   string request_id = 2;
   uint32 base_revision = 3;
   uint32 project_revision = 4;
   bool center_xy = 5;
+  optional uint32 occurrence_id = 6;
 }
 enum BedGroupOutcome {
   BED_GROUP_OUTCOME_UNSPECIFIED = 0;
@@ -74,26 +61,6 @@ message BedGroupPlacement {
   BedGroupOutcome outcome = 1;
   AabbMm placed_bounds_mm = 2;
   AabbMm build_envelope_mm = 3;
-}
-message NativeBedBounds {}
-message TolerantBedBounds { double join_mm = 1; double profile_mm = 2; }
-message BedPosePreparation {
-  string session_id = 1;
-  uint32 scene_revision = 2;
-  uint32 project_revision = 3;
-  uint32 occurrence_id = 4;
-  string definition_id = 5;
-  RigidPoseMm original_pose = 6;
-  RigidPoseMm pose = 7;
-  AabbMm envelope_mm = 8;
-  Vec3 minimum_lower_mm = 9;
-  Vec3 minimum_upper_mm = 10;
-  Vec3 maximum_lower_mm = 11;
-  Vec3 maximum_upper_mm = 12;
-  bool center_xy = 13;
-  double contact_tolerance_mm = 14;
-  double maximum_contact_gap_mm = 15;
-  oneof basis { NativeBedBounds native_bounded = 16; TolerantBedBounds tolerant_model = 17; }
 }
 message GeometryRequest {
   oneof command {

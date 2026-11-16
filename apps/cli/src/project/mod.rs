@@ -117,9 +117,9 @@ enum Operation {
     Import(NativePath, ModelImportOptions),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
-    PrepareBed(OccurrenceId, bool),
-    /// Every occurrence of the plate moves as one rigid group.
-    PrepareBedGroup(bool),
+    /// The engine's one placement rule: the named part, or every part of
+    /// the plate as one rigid group; `true` always centres.
+    PlaceOnBed(Option<OccurrenceId>, bool),
     PrepareLayout(LayoutRequest),
     ApplyLayout,
     Remove(OccurrenceId),
@@ -897,13 +897,13 @@ pub fn parse(
             }
             Some("--apply-layout") => operations.push(Operation::ApplyLayout),
             Some("--place-all-on-bed" | "--center-all-on-bed") => {
-                operations.push(Operation::PrepareBedGroup(arg == "--center-all-on-bed"));
+                operations.push(Operation::PlaceOnBed(None, arg == "--center-all-on-bed"));
             }
             Some("--place-on-bed" | "--center-on-bed") => {
                 let center = arg == "--center-on-bed";
                 let id =
                     OccurrenceId::new(text(&mut args, "--place-on-bed/--center-on-bed")?.parse()?)?;
-                operations.push(Operation::PrepareBed(id, center));
+                operations.push(Operation::PlaceOnBed(Some(id), center));
             }
             Some("--compile") => operations.push(Operation::Compile),
             Some("--verify") => operations.push(Operation::Verify),
@@ -3102,61 +3102,20 @@ async fn execute(
                 Box::pin(layout::apply(client, p)).await?;
                 layout_proposal = None;
             }
-            Operation::PrepareBed(occurrence_id, center) => {
-                label = if center {
-                    "center_on_bed"
-                } else {
-                    "place_on_bed"
+            Operation::PlaceOnBed(occurrence_id, center) => {
+                label = match (occurrence_id, center) {
+                    (Some(_), false) => "place_on_bed",
+                    (Some(_), true) => "center_on_bed",
+                    (None, false) => "place_all_on_bed",
+                    (None, true) => "center_all_on_bed",
                 };
-                let summary = geometry::scene(client, &session).await?;
-                let (_, occurrences) = geometry::records(client, &summary).await?;
-                let occurrence = occurrences
-                    .iter()
-                    .find(|row| row.occurrence_id == occurrence_id)
-                    .ok_or("bed preparation occurrence not in project")?;
-                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone(), layout_id: current_layout.clone() }).await? {
-                    ManufacturingResponse::Status { intent: Some(intent), info, .. } => (intent, info.revision),
-                    ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
-                    ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
-                    _ => return Err("unexpected manufacturing status response".into()),
-                };
-                let preparation = client
-                    .prepare_bed_pose(
-                        &summary,
-                        project_revision,
-                        occurrence,
-                        intent.printer.build_envelope,
-                        center,
-                        intent.printer.motion_resolution.z_mm,
-                    )
-                    .await?;
-                let response = geometry::control(
-                    client,
-                    GeometryCommand::SetInstancePose {
-                        session_id: session.clone(),
-                        base_revision: preparation.scene_revision,
-                        project_revision: preparation.project_revision,
-                        occurrence_id,
-                        pose: preparation.pose,
-                    },
-                )
-                .await?;
-                if !matches!(response, GeometryResponse::SceneChanged { .. }) {
-                    return Err("unexpected bed preparation pose response".into());
-                }
-            }
-            Operation::PrepareBedGroup(center) => {
-                label = if center {
-                    "center_all_on_bed"
-                } else {
-                    "place_all_on_bed"
-                };
-                // One engine rule for both clients: rest the scene as a group,
-                // keep XY when admitted there, else centre on the usable region.
+                // One engine rule for both clients: rest the part (or the
+                // plate as a group), keep XY when admitted there, else centre
+                // on the usable region.
                 let summary = geometry::scene(client, &session).await?;
                 let project_revision = info(client).await?.revision;
                 let (_, placement) = client
-                    .place_on_bed(&summary, project_revision, center)
+                    .place_on_bed(&summary, project_revision, occurrence_id, center)
                     .await?;
                 if placement.outcome == BedGroupOutcome::DoesNotFit {
                     return Err(BuildEnvelopeExceeded {
@@ -4205,8 +4164,8 @@ mod tests {
         assert!(matches!(
             workflow.operations.as_slice(),
             [
-                Operation::PrepareBed(_, false),
-                Operation::PrepareBed(_, true),
+                Operation::PlaceOnBed(Some(_), false),
+                Operation::PlaceOnBed(Some(_), true),
                 Operation::Preflight,
                 Operation::Compile,
                 Operation::Verify,

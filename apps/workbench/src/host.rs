@@ -119,7 +119,6 @@ pub struct Snapshot {
     pub plate_edit: Option<Arc<PlateEditReceipt>>,
     pub process_edit: Option<Arc<ProcessEditReceipt>>,
     pub layout_proposal: Option<Arc<spiling_contracts::geometry::LayoutProposal>>,
-    pub bed_proposal: Option<Arc<spiling_contracts::geometry::BedPosePreparation>>,
     pub busy: bool,
     pub active_operation: bool,
     pub picker_open: bool,
@@ -160,7 +159,6 @@ impl Default for Snapshot {
             optical_report: None,
             optical_loading: false,
             stock: stock::State::default(),
-            bed_proposal: None,
             plate_edit: None,
             process_edit: None,
             layout_proposal: None,
@@ -1038,7 +1036,6 @@ impl Actor {
         manufacturing.inspected_option = None;
         self.state.image_preview = None;
         self.state.manufacturing = Arc::default();
-        self.state.bed_proposal = None;
         self.state.layout_proposal = None;
         self.state.phase = Phase::Starting;
         self.state.generation += 1;
@@ -1182,7 +1179,6 @@ impl Actor {
             task.abort();
             let _ = task.await;
         }
-        self.state.bed_proposal = None;
         self.state.layout_proposal = None;
         if let Some(mut client) = self.client.take() {
             let _ = client.terminate().await;
@@ -1340,7 +1336,6 @@ impl Actor {
             } else {
                 self.clear_review();
             }
-            self.state.bed_proposal = None;
             self.state.layout_proposal = None;
             if self
                 .state
@@ -2128,6 +2123,7 @@ impl Actor {
             }
         }
 
+        let mut refusal = None;
         match (&pending.receipt, &operation.result) {
             (Receipt::Import, Some(JobResult::Scene { .. })) if completed => {
                 crate::performance::mark("import_published");
@@ -2206,8 +2202,11 @@ impl Actor {
             (Receipt::Geometry, Some(JobResult::LayoutPrepared { proposal })) if completed => {
                 self.state.layout_proposal = Some(Arc::new(proposal.clone()));
             }
-            (Receipt::Geometry, Some(JobResult::BedPosePrepared { preparation })) if completed => {
-                self.state.bed_proposal = Some(Arc::new(preparation.clone()));
+            (Receipt::Geometry, Some(JobResult::BedPlaced { placement, .. })) if completed => {
+                if placement.outcome == spiling_contracts::geometry::BedGroupOutcome::DoesNotFit {
+                    refusal =
+                        Some("Doesn't fit the printer's build volume, even centred; nothing moved");
+                }
             }
             (
                 Receipt::Project,
@@ -2434,7 +2433,9 @@ impl Actor {
             }
             _ => {}
         }
-        if completed {
+        if let Some(refusal) = refusal {
+            self.problem(refusal);
+        } else if completed {
             self.state.message = format!("{label} completed");
         } else {
             let detail = operation

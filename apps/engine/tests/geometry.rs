@@ -1561,11 +1561,35 @@ async fn terminal_execution_eviction_preserves_operations_without_retaining_sess
     client.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
+async fn set_bed_intent(
+    client: &mut EngineClient,
+    captured: &SceneSummary,
+) -> spiling_contracts::manufacturing::ManufacturingIntent {
     use spiling_contracts::manufacturing::{
         ManufacturingCommand, ManufacturingResponse, decode_intent,
     };
+    let intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/solid-fill.intent.json"
+    ))
+    .unwrap();
+    assert!(intent.hardware.is_none(), "centre on the envelope");
+    assert!(matches!(
+        client
+            .manufacturing(ManufacturingCommand::SetIntent {
+                layout_id: captured.layout_id.clone(),
+                session_id: captured.session_id.clone(),
+                base_revision: project_revision(client).await,
+                intent: intent.clone().into(),
+            })
+            .await
+            .unwrap(),
+        ManufacturingResponse::Status { .. }
+    ));
+    intent
+}
+
+#[tokio::test]
+async fn native_bed_contact_is_nonpenetrating_and_revision_bound() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     let angle = std::f64::consts::PI / 6.0;
     let pose = RigidPoseMm {
@@ -1574,116 +1598,68 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
     };
     let captured = import(&mut client, "cylinder.step", pose).await;
     let occurrence = occurrences(&mut client, &captured).await.remove(0);
-    let revision = project_revision(&client).await;
-    let envelope = AabbMm::new([0.0; 3], [200.0; 3]).unwrap();
-    let prepared = client
-        .prepare_bed_pose(
+    let intent = set_bed_intent(&mut client, &captured).await;
+    let step = intent.printer.motion_resolution.z_mm;
+    let envelope = intent.printer.build_envelope;
+
+    // A stale project revision cannot place.
+    let stale = client
+        .place_on_bed(
             &captured,
-            revision,
-            &occurrence,
-            envelope,
+            ProjectRevision(project_revision(&client).await.0 - 1),
+            Some(occurrence.occurrence_id),
             true,
-            SECTION_PLANE_TOLERANCE_MM,
         )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(spiling_engine_client::ClientError::Geometry(
+            GeometryError {
+                code: GeometryErrorCode::StaleRevision,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(scene(&mut client).await, captured, "stale placement moved");
+
+    let revision = project_revision(&client).await;
+    let (moved, placement) = client
+        .place_on_bed(&captured, revision, Some(occurrence.occurrence_id), true)
         .await
         .unwrap();
-    assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
-    assert!(matches!(prepared.basis, BedPoseBasis::NativeBounded));
+    assert_eq!(placement.outcome, BedGroupOutcome::Centred);
+    let placed = occurrences(&mut client, &moved).await.remove(0);
+    assert_eq!(placed.pose.rotation_xyzw, pose.rotation_xyzw);
     // Independent analytic support: radius 5, source axial height [0,8].
-    let true_minimum_z = prepared.pose.translation_mm[2] - 5.0 * angle.sin();
+    let true_minimum_z = placed.pose.translation_mm[2] - 5.0 * angle.sin();
     assert!(
         true_minimum_z >= 0.0,
         "native contact penetrates by {}",
         -true_minimum_z
     );
-    assert!(true_minimum_z <= prepared.maximum_contact_gap_mm);
-    assert!(prepared.maximum_contact_gap_mm <= SECTION_PLANE_TOLERANCE_MM);
     assert!(
-        (prepared.pose.translation_mm[0] + 4.0 * angle.sin() - 100.0).abs()
+        true_minimum_z <= step,
+        "gap {true_minimum_z} above one step"
+    );
+    let centre = |axis: usize| (envelope.min[axis] + envelope.max[axis]) * 0.5;
+    assert!(
+        (placed.pose.translation_mm[0] + 4.0 * angle.sin() - centre(0)).abs()
             <= SECTION_PLANE_TOLERANCE_MM
     );
-    assert!((prepared.pose.translation_mm[1] - 100.0).abs() <= SECTION_PLANE_TOLERANCE_MM);
-    assert_eq!(scene(&mut client).await, captured, "query must not Apply");
-    assert_eq!(project_revision(&client).await, revision);
+    assert!((placed.pose.translation_mm[1] - centre(1)).abs() <= SECTION_PLANE_TOLERANCE_MM);
 
-    // A project-only change cannot authorize an old preparation at the same scene.
-    let intent = decode_intent(include_bytes!(
-        "../../../fixtures/manufacturing/solid-fill.intent.json"
-    ))
-    .unwrap();
-    assert!(matches!(
-        client
-            .manufacturing(ManufacturingCommand::SetIntent {
-                layout_id: captured.layout_id.clone(),
-                session_id: captured.session_id.clone(),
-                base_revision: revision,
-                intent: intent.into(),
-            })
-            .await
-            .unwrap(),
-        ManufacturingResponse::Status { .. }
-    ));
-    assert_eq!(scene(&mut client).await, captured);
-    let stale = client
-        .geometry(GeometryCommand::SetInstancePose {
-            session_id: captured.session_id.clone(),
-            base_revision: prepared.scene_revision,
-            project_revision: prepared.project_revision,
-            occurrence_id: occurrence.occurrence_id,
-            pose: prepared.pose,
-        })
-        .await;
-    assert!(matches!(
-        stale,
-        Ok(GeometryResponse::Error {
-            error: GeometryError {
-                code: GeometryErrorCode::StaleRevision,
-                ..
-            }
-        })
-    ));
-    let current_revision = project_revision(&client).await;
-    let fresh = client
-        .prepare_bed_pose(
-            &captured,
-            current_revision,
-            &occurrence,
-            envelope,
-            true,
-            SECTION_PLANE_TOLERANCE_MM,
+    // Already resting and admitted: nothing moves.
+    let (unchanged, again) = client
+        .place_on_bed(
+            &moved,
+            project_revision(&client).await,
+            Some(occurrence.occurrence_id),
+            false,
         )
         .await
         .unwrap();
-    assert!(matches!(
-        client
-            .geometry(GeometryCommand::SetInstancePose {
-                session_id: captured.session_id.clone(),
-                base_revision: fresh.scene_revision,
-                project_revision: fresh.project_revision,
-                occurrence_id: occurrence.occurrence_id,
-                pose: fresh.pose,
-            })
-            .await
-            .unwrap(),
-        GeometryResponse::SceneChanged { .. }
-    ));
-    let moved = scene(&mut client).await;
-    let placed = occurrences(&mut client, &moved).await.remove(0);
-    let too_small = AabbMm::new([0.0; 3], [1.0; 3]).unwrap();
-    assert!(matches!(
-        client
-            .prepare_bed_pose(
-                &moved,
-                project_revision(&client).await,
-                &placed,
-                too_small,
-                true,
-                SECTION_PLANE_TOLERANCE_MM,
-            )
-            .await,
-        Err(spiling_engine_client::ClientError::Geometry(_))
-    ));
-    assert_eq!(scene(&mut client).await, moved, "failed fit must not Apply");
+    assert_eq!(again.outcome, BedGroupOutcome::Unchanged);
+    assert_eq!(unchanged.revision, moved.revision);
     client.shutdown().await.unwrap();
 }
 
@@ -1696,32 +1672,22 @@ async fn native_bed_contact_resolves_support_before_large_world_translation() {
     };
     let captured = import(&mut client, "box-mm.step", pose).await;
     let occurrence = occurrences(&mut client, &captured).await.remove(0);
-    let revision = project_revision(&client).await;
-    let prepared = client
-        .prepare_bed_pose(
+    let intent = set_bed_intent(&mut client, &captured).await;
+    let (moved, _) = client
+        .place_on_bed(
             &captured,
-            revision,
-            &occurrence,
-            AabbMm::new([0.0; 3], [200.0; 3]).unwrap(),
+            project_revision(&client).await,
+            Some(occurrence.occurrence_id),
             true,
-            SECTION_PLANE_TOLERANCE_MM,
         )
         .await
         .unwrap();
     // This rotation gives Z = 0.96*Y + 0.28*Z for the [0,20]x[0,10]x[0,8]
     // source box, so the minimum is its origin, independently of the old pose.
-    assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
-    assert!(prepared.pose.translation_mm[2] >= 0.0);
-    assert!(prepared.pose.translation_mm[2] <= prepared.maximum_contact_gap_mm);
-    assert!(prepared.minimum_lower_mm[2] <= pose.translation_mm[2]);
-    assert!(prepared.minimum_upper_mm[2] >= pose.translation_mm[2]);
-    assert!(prepared.maximum_contact_gap_mm <= SECTION_PLANE_TOLERANCE_MM);
-    assert_eq!(
-        scene(&mut client).await,
-        captured,
-        "preparation must not Apply"
-    );
-    assert_eq!(project_revision(&client).await, revision);
+    let placed = occurrences(&mut client, &moved).await.remove(0);
+    assert_eq!(placed.pose.rotation_xyzw, pose.rotation_xyzw);
+    assert!(placed.pose.translation_mm[2] >= 0.0);
+    assert!(placed.pose.translation_mm[2] <= intent.printer.motion_resolution.z_mm);
     client.shutdown().await.unwrap();
 }
 

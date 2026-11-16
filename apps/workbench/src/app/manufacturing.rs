@@ -324,10 +324,10 @@ impl Workbench {
         ) else {
             return;
         };
-        let Some(intent) = self.state.manufacturing.intent.as_ref() else {
+        if self.state.manufacturing.intent.is_none() {
             self.primary_button(ui, Action::LoadIntent);
             return;
-        };
+        }
         let occurrence = scene
             .occurrences
             .iter()
@@ -338,51 +338,42 @@ impl Workbench {
             && self.awaiting_serial.is_none()
             && !project.read_only
             && self.display_current();
-        let reason = if !ready {
-            Some("Open a writable project and wait for pending operations")
-        } else if occurrence.is_none() {
-            Some("Select a part in the model tree")
-        } else {
-            None
+        let reason = (!ready).then_some("Open a writable project and wait for pending operations");
+        // The engine's one placement rule, the same as the CLI's
+        // --place-on-bed / --center-on-bed (selected part) and
+        // --place-all-on-bed / --center-all-on-bed (no selection): rest on the
+        // bed, keep XY when the printer admits it there, else centre; one
+        // undo step.
+        let place = |center_xy| GeometryCommand::PlaceOnBed {
+            session_id: hello.session_id.clone(),
+            base_revision: scene.summary.revision,
+            project_revision: project.revision,
+            occurrence_id: occurrence.map(|o| o.occurrence_id),
+            center_xy,
         };
-        let proposal = self.state.bed_proposal.as_ref().filter(|p| {
-            p.session_id == hello.session_id
-                && p.project_revision == project.revision
-                && p.scene_revision == scene.summary.revision
-                && Some(p.occurrence_id) == self.occurrence
-        });
-        if let Some(proposal) = proposal {
-            if ui::primary(ui, "Apply placement", reason) {
-                self.queued_geometry = Some(GeometryCommand::SetInstancePose {
-                    session_id: proposal.session_id.clone(),
-                    base_revision: proposal.scene_revision,
-                    project_revision: proposal.project_revision,
-                    occurrence_id: proposal.occurrence_id,
-                    pose: proposal.pose,
-                });
-            }
-        } else if ui::primary(ui, "Review bed placement", reason) {
-            let o = occurrence.expect("checked selection");
-            self.queued_geometry = Some(GeometryCommand::PrepareBedPose {
-                session_id: hello.session_id.clone(),
-                base_revision: scene.summary.revision,
-                project_revision: project.revision,
-                occurrence_id: o.occurrence_id,
-                expected_definition_id: o.definition_id.clone(),
-                expected_pose: o.pose,
-                envelope_mm: intent.printer.build_envelope,
-                center_xy: true,
-                contact_tolerance_mm: intent.printer.motion_resolution.z_mm,
-            });
+        let (place_label, centre_label) = if occurrence.is_some() {
+            ("Place on bed", "Centre on bed")
+        } else {
+            ("Place all on bed", "Centre all on bed")
+        };
+        if ui::primary(ui, place_label, reason) {
+            self.queued_geometry = Some(place(false));
+        }
+        if ui
+            .add_enabled(reason.is_none(), egui::Button::new(centre_label))
+            .on_disabled_hover_text(reason.unwrap_or_default())
+            .clicked()
+        {
+            self.queued_geometry = Some(place(true));
         }
     }
     pub(super) fn manufacturing_ui(&mut self, ui: &mut egui::Ui) {
         let Some(project) = self.state.project.clone() else {
             return;
         };
-        let Some(hello) = self.state.hello.clone() else {
+        if self.state.hello.is_none() {
             return;
-        };
+        }
         let ready = self.state.phase == Phase::Running
             && !self.state.busy
             && !self.state.picker_open
@@ -484,40 +475,7 @@ impl Workbench {
             }
             if section == 3 {
                 ui::group(ui, "Placement");
-                if let Some(proposal) = &self.state.bed_proposal {
-                    let current = proposal.session_id == hello.session_id
-                        && proposal.project_revision == project.revision
-                        && self
-                            .state
-                            .scene
-                            .as_ref()
-                            .is_some_and(|s| s.revision == proposal.scene_revision);
-                    ui.label(format!(
-                        "Proposed translation: {:.4?} mm",
-                        proposal.pose.translation_mm
-                    ));
-                    ui.label(format!(
-                        "Original support Z: {:.6}…{:.6} mm",
-                        proposal.minimum_lower_mm[2], proposal.minimum_upper_mm[2]
-                    ));
-                    match proposal.basis {
-                        spiling_contracts::geometry::BedPoseBasis::NativeBounded => {
-                            ui.weak(format!(
-                                "Native contact · ≤ {:.6} mm",
-                                proposal.maximum_contact_gap_mm
-                            ));
-                        }
-                        spiling_contracts::geometry::BedPoseBasis::TolerantModel { .. } => {
-                            ui.weak("Approximate placement");
-                        }
-                    }
-                    ui.collapsing("Placement details", |ui| {
-                        ui.label(format!("{proposal:#?}"));
-                    });
-                    if !current {
-                        ui.label("Placement proposal is out of date");
-                    }
-                }
+                ui.weak("Rests the selected part, or every part when none is selected, on the bed. Parts keep their position when the printer can reach it there; otherwise they are centred.");
             }
             if let Some(preflight) = &m.preflight
                 && preflight.disposition != PreflightDisposition::Admitted

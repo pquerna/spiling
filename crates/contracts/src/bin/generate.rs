@@ -262,8 +262,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Declarations::visit::<DefinitionDisplay>,
         Declarations::visit::<DefinitionRecord>,
         Declarations::visit::<OccurrenceRecord>,
-        Declarations::visit::<BedPoseBasis>,
-        Declarations::visit::<BedPosePreparation>,
         Declarations::visit::<LayoutObjective>,
         Declarations::visit::<LayoutStyle>,
         Declarations::visit::<LayoutLimit>,

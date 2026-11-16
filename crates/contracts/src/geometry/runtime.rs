@@ -101,26 +101,16 @@ pub enum GeometryCommand {
         project_revision: crate::project::ProjectRevision,
         proposal_id: SourceHash,
     },
-    /// Rests every scene part on the bed as one group (one undo step), and
+    /// Rests the scene's parts on the bed as one group (one undo step), and
     /// centres it on the selected plate's usable region when asked or when
-    /// the printer would not admit it where it is. The one placement rule
-    /// both clients use.
+    /// the printer would not admit it where it is. `occurrence_id` places only
+    /// that part. The one placement rule both clients use.
     PlaceOnBed {
         session_id: SessionId,
         base_revision: SceneRevision,
         project_revision: crate::project::ProjectRevision,
+        occurrence_id: Option<OccurrenceId>,
         center_xy: bool,
-    },
-    PrepareBedPose {
-        session_id: SessionId,
-        base_revision: SceneRevision,
-        project_revision: crate::project::ProjectRevision,
-        occurrence_id: OccurrenceId,
-        expected_definition_id: DefinitionId,
-        expected_pose: RigidPoseMm,
-        envelope_mm: AabbMm,
-        center_xy: bool,
-        contact_tolerance_mm: f64,
     },
     GetArtifactPage {
         session_id: SessionId,
@@ -208,9 +198,6 @@ pub enum JobResult {
     },
     LayoutPrepared {
         proposal: LayoutProposal,
-    },
-    BedPosePrepared {
-        preparation: BedPosePreparation,
     },
     BedPlaced {
         summary: SceneSummary,
@@ -378,13 +365,6 @@ pub enum GeometryResponse {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BedPoseBasis {
-    NativeBounded,
-    TolerantModel { join_mm: f64, profile_mm: f64 },
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BedGroupOutcome {
@@ -410,115 +390,6 @@ impl BedGroupPlacement {
     pub fn validate(&self) -> Result<(), GeometryError> {
         self.placed_bounds_mm.validate()?;
         self.build_envelope_mm.validate()?;
-        Ok(())
-    }
-}
-
-/// Read-only placement evidence; applying the pose requires both revisions.
-/// Native brackets enclose source material; tolerant brackets describe only
-/// the sampled model identified by `basis`, not certified native extrema.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BedPosePreparation {
-    pub basis: BedPoseBasis,
-    pub session_id: SessionId,
-    pub scene_revision: SceneRevision,
-    pub project_revision: crate::project::ProjectRevision,
-    pub occurrence_id: OccurrenceId,
-    pub definition_id: DefinitionId,
-    pub original_pose: RigidPoseMm,
-    pub pose: RigidPoseMm,
-    pub envelope_mm: AabbMm,
-    pub minimum_lower_mm: [f64; 3],
-    pub minimum_upper_mm: [f64; 3],
-    pub maximum_lower_mm: [f64; 3],
-    pub maximum_upper_mm: [f64; 3],
-    pub center_xy: bool,
-    pub contact_tolerance_mm: f64,
-    pub maximum_contact_gap_mm: f64,
-}
-
-impl BedPosePreparation {
-    pub fn validate(&self) -> Result<(), GeometryError> {
-        if let BedPoseBasis::TolerantModel {
-            join_mm,
-            profile_mm,
-        } = self.basis
-            && (!join_mm.is_finite()
-                || join_mm <= 0.0
-                || !profile_mm.is_finite()
-                || profile_mm <= 0.0)
-        {
-            return Err(invalid("invalid tolerant bed-placement model policy"));
-        }
-        self.original_pose.validate()?;
-        self.pose.validate()?;
-        self.envelope_mm.validate()?;
-        if self.pose.rotation_xyzw != self.original_pose.rotation_xyzw
-            || !self.contact_tolerance_mm.is_finite()
-            || self.contact_tolerance_mm <= 0.0
-            || self.contact_tolerance_mm > MAX_BED_CONTACT_TOLERANCE_MM
-            || !self.maximum_contact_gap_mm.is_finite()
-            || self.maximum_contact_gap_mm < 0.0
-            || self.maximum_contact_gap_mm > self.contact_tolerance_mm
-        {
-            return Err(invalid("invalid native bed-contact evidence"));
-        }
-        let xy_slack = |axis: usize| {
-            if axis < 2 {
-                self.contact_tolerance_mm
-            } else {
-                0.0
-            }
-        };
-        for axis in 0..3 {
-            let values = [
-                self.minimum_lower_mm[axis],
-                self.minimum_upper_mm[axis],
-                self.maximum_lower_mm[axis],
-                self.maximum_upper_mm[axis],
-            ];
-            if values.iter().any(|value| !value.is_finite())
-                || values[0] > values[1]
-                || values[2] > values[3]
-                || values[0] > values[3]
-                || self.envelope_mm.min[axis] >= self.envelope_mm.max[axis]
-            {
-                return Err(invalid("invalid native support bracket"));
-            }
-            let delta = rounded_sum_interval(
-                self.pose.translation_mm[axis],
-                -self.original_pose.translation_mm[axis],
-            );
-            let placed_min = rounded_sum_interval(values[0], delta[0])[0];
-            let placed_max = rounded_sum_interval(values[3], delta[1])[1];
-            if delta.iter().any(|value| !value.is_finite())
-                || !placed_min.is_finite()
-                || !placed_max.is_finite()
-                // ADR012: in XY, within one step (the contact tolerance) of
-                // the envelope is the same commanded position, so outward-
-                // rounded brackets of a part touching a side are inside. Z
-                // stays exact: bed contact never admits penetration.
-                || placed_min < self.envelope_mm.min[axis] - xy_slack(axis)
-                || placed_max > self.envelope_mm.max[axis] + xy_slack(axis)
-                || (axis < 2
-                    && !self.center_xy
-                    && self.pose.translation_mm[axis] != self.original_pose.translation_mm[axis])
-            {
-                return Err(invalid("prepared native pose exceeds its envelope"));
-            }
-        }
-        let delta = rounded_sum_interval(
-            self.pose.translation_mm[2],
-            -self.original_pose.translation_mm[2],
-        );
-        let gap = rounded_sum_interval(
-            rounded_sum_interval(self.minimum_upper_mm[2], delta[1])[1],
-            -self.envelope_mm.min[2],
-        )[1];
-        if !gap.is_finite() || gap < 0.0 || gap > self.maximum_contact_gap_mm {
-            return Err(invalid("prepared native contact gap is not enclosed"));
-        }
         Ok(())
     }
 }

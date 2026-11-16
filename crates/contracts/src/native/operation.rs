@@ -552,16 +552,6 @@ pub fn native_operation_view(
                     return Err("layout capture or outputs mismatch".into());
                 }
             }
-            JobResult::BedPosePrepared { preparation } => {
-                preparation.validate().map_err(|error| error.to_string())?;
-                if preparation.session_id != session_id
-                    || preparation.scene_revision.get() != meta.captured_scene_revision
-                    || preparation.project_revision.0 != meta.captured_project_revision
-                    || !meta.outputs.is_empty()
-                {
-                    return Err("native placement capture or outputs mismatch".into());
-                }
-            }
             JobResult::BedPlaced { summary, placement } => {
                 placement.validate().map_err(|error| error.to_string())?;
                 if summary.session_id != session_id || !meta.outputs.is_empty() {
@@ -851,9 +841,6 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::LayoutPrepared(value) => Self::LayoutPrepared {
                 proposal: value.try_into()?,
             },
-            R::BedPosePrepared(value) => Self::BedPosePrepared {
-                preparation: value.try_into()?,
-            },
             R::BedPlaced(value) => Self::BedPlaced {
                 summary: required(value.summary, "bed placement summary")?.try_into()?,
                 placement: required(value.placement, "bed placement")?.try_into()?,
@@ -1041,9 +1028,6 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
             JobResult::LayoutPrepared { proposal } => R::LayoutPrepared(proposal.try_into()?),
-            JobResult::BedPosePrepared { preparation } => {
-                R::BedPosePrepared(preparation.try_into()?)
-            }
             JobResult::BedPlaced { summary, placement } => R::BedPlaced(rpc::BedPlacedResult {
                 summary: Some(summary.try_into()?),
                 placement: Some(placement.try_into()?),

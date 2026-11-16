@@ -514,7 +514,9 @@ impl Actor {
                 "unexpected project reply".into(),
             ));
         };
-        client.place_on_bed(&summary, info.revision, false).await?;
+        client
+            .place_on_bed(&summary, info.revision, None, false)
+            .await?;
         self.refresh().await
     }
     pub(super) async fn refresh_hardware(&mut self) -> Result<(), ClientError> {
