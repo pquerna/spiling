@@ -2039,9 +2039,12 @@ pub(super) fn realize(
                                 super::boolean::budget_polygon_accumulated(
                                     occupied, &mut work, cancel,
                                 )?;
-                                let Some(distance) = candidate_clearance_distance(
+                                let Some(distance) = candidate_clearance_distance_in_bounds(
                                     occupied,
-                                    &column,
+                                    screen
+                                        .get()
+                                        .map(|screen| screen.column)
+                                        .or_else(|| material_bounds(&column)),
                                     xy_clearance_mm,
                                 )?
                                 else {
@@ -4742,10 +4745,9 @@ impl ColumnScreen {
     const FRAME_MM: f64 = 1024.0;
 
     fn new(column: &MultiPolygon<f64>, requested: f64) -> Result<Option<Self>, ManufacturingError> {
-        let Some(b) = column.bounding_rect() else {
+        let Some(column) = material_bounds(column) else {
             return Ok(None);
         };
-        let column = [[b.min().x, b.min().y], [b.max().x, b.max().y]];
         let frame = [
             column[0].map(|v| v - Self::FRAME_MM),
             column[1].map(|v| v + Self::FRAME_MM),
@@ -5200,7 +5202,11 @@ fn stage_touching_sheet(
                 return Ok(true);
             }
             super::boolean::budget_polygon_accumulated(piece, work, cancel)?;
-            let Some(distance) = candidate_clearance_distance(piece, column, xy_clearance_mm)?
+            let Some(distance) = candidate_clearance_distance_in_bounds(
+                piece,
+                Some(screen.column),
+                xy_clearance_mm,
+            )?
             else {
                 return Ok(true);
             };
@@ -5270,7 +5276,8 @@ fn stage_object_beads(
         }
         let capsule = bead_capsule(p, q, edge.half)?;
         super::boolean::budget_polygon_accumulated(&capsule, work, cancel)?;
-        let Some(distance) = candidate_clearance_distance(&capsule, column, xy_clearance_mm)?
+        let Some(distance) =
+            candidate_clearance_distance_in_bounds(&capsule, Some(screen.column), xy_clearance_mm)?
         else {
             continue;
         };
@@ -5335,26 +5342,43 @@ fn candidate_clearance_distance(
     column: &MultiPolygon<f64>,
     requested: f64,
 ) -> Result<Option<f64>, ManufacturingError> {
+    candidate_clearance_distance_in_bounds(occupied, material_bounds(column), requested)
+}
+
+fn material_bounds(material: &MultiPolygon<f64>) -> Option<[[f64; 2]; 2]> {
+    material.bounding_rect().map(|bounds| {
+        [
+            [bounds.min().x, bounds.min().y],
+            [bounds.max().x, bounds.max().y],
+        ]
+    })
+}
+
+fn candidate_clearance_distance_in_bounds(
+    occupied: &Polygon<f64>,
+    column: Option<[[f64; 2]; 2]>,
+    requested: f64,
+) -> Result<Option<f64>, ManufacturingError> {
     let a = occupied.bounding_rect().ok_or_else(|| {
         error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
             "native outer operand has no finite bounds",
         )
     })?;
-    let Some(b) = column.bounding_rect() else {
+    let Some(bounds) = column else {
         return Ok(None);
     };
     let distance = clearance_distance_in_frame(
         [[a.min().x, a.min().y], [a.max().x, a.max().y]],
-        [[b.min().x, b.min().y], [b.max().x, b.max().y]],
+        bounds,
         requested,
     )?;
     // A disjoint outward expanded box cannot affect this candidate. Avoid
     // offset/overlay work, while final raw-source capsule proof stays separate.
-    if (a.max().x + distance).next_up() < b.min().x
-        || (a.min().x - distance).next_down() > b.max().x
-        || (a.max().y + distance).next_up() < b.min().y
-        || (a.min().y - distance).next_down() > b.max().y
+    if (a.max().x + distance).next_up() < bounds[0][0]
+        || (a.min().x - distance).next_down() > bounds[1][0]
+        || (a.max().y + distance).next_up() < bounds[0][1]
+        || (a.min().y - distance).next_down() > bounds[1][1]
     {
         return Ok(None);
     }
@@ -5396,6 +5420,120 @@ fn clearance_distance_in_frame(
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
+
+    #[test]
+    fn cached_column_bounds_preserve_candidate_clearance() {
+        for shift in [0.0, 0.37, 1_048_576.0, 35_184_372_088_832.0] {
+            let rectangle = |lower: [f64; 2], upper: [f64; 2]| {
+                polygon![
+                    (x: lower[0] + shift, y: lower[1] + shift),
+                    (x: upper[0] + shift, y: lower[1] + shift),
+                    (x: upper[0] + shift, y: upper[1] + shift),
+                    (x: lower[0] + shift, y: upper[1] + shift),
+                ]
+            };
+            let outer = rectangle([0.0, 0.0], [10.0, 10.0]);
+            let hole = rectangle([3.0, 3.0], [7.0, 7.0]);
+            let pieces = [
+                Polygon::empty(),
+                rectangle([1.0, 1.0], [2.0, 2.0]),
+                hole.clone(),
+                rectangle([10.2, 1.0], [11.0, 2.0]),
+                rectangle([10.3, 1.0], [11.0, 2.0]),
+                rectangle([100.0, 1.0], [101.0, 2.0]),
+                rectangle([-2048.0, 1.0], [-2047.0, 2.0]),
+            ];
+            for column in [
+                MultiPolygon(Vec::new()),
+                MultiPolygon(vec![outer.clone()]),
+                MultiPolygon(vec![Polygon::new(
+                    outer.exterior().clone(),
+                    vec![hole.exterior().clone()],
+                )]),
+                MultiPolygon(vec![
+                    rectangle([0.0, 0.0], [1.0, 10.0]),
+                    rectangle([9.0, 0.0], [10.0, 10.0]),
+                ]),
+            ] {
+                for requested in [0.0, 0.2, 10.0] {
+                    let screen = ColumnScreen::new(&column, requested).unwrap();
+                    for piece in &pieces {
+                        let fresh = candidate_clearance_distance(piece, &column, requested)
+                            .map(|distance| distance.map(f64::to_bits))
+                            .map_err(|failure| failure.code);
+                        let cached = candidate_clearance_distance_in_bounds(
+                            piece,
+                            screen
+                                .map(|screen| screen.column)
+                                .or_else(|| material_bounds(&column)),
+                            requested,
+                        )
+                        .map(|distance| distance.map(f64::to_bits))
+                        .map_err(|failure| failure.code);
+                        assert_eq!(cached, fresh);
+                        if let Some(screen) = screen
+                            && let Some(bounds) =
+                                material_bounds(&MultiPolygon(vec![piece.clone()]))
+                            && screen.rejects(bounds)
+                        {
+                            assert_eq!(fresh, Ok(None));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_column_bounds_refresh_after_batch_subtraction() {
+        let cancel = AtomicBool::new(false);
+        let mut column = OwnedMaterial::new(MultiPolygon(vec![polygon![
+            (x: 0.0, y: 0.0), (x: 10.0, y: 0.0),
+            (x: 10.0, y: 10.0), (x: 0.0, y: 10.0),
+        ]]));
+        let protected = OwnedMaterial::new(MultiPolygon(Vec::new()));
+        let mut proximity = proximity::ColumnProximity::new(&column);
+        let mut batch = PieceBatch::default();
+        let mask = polygon![
+            (x: -1.0, y: -1.0), (x: 4.0, y: -1.0),
+            (x: 4.0, y: 11.0), (x: -1.0, y: 11.0),
+        ];
+        batch.stage(&mask, 0, 0, &[], &[], &[&column]).unwrap();
+        let before = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
+        subtract_batch(
+            &mut batch,
+            &mut column,
+            &mut proximity,
+            0.2,
+            0,
+            0,
+            &[],
+            &[],
+            &protected,
+            &mut 0,
+            0,
+            &cancel,
+            &mut union_memo::UnionMemo::new(0),
+        )
+        .unwrap();
+        let after = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
+        assert_ne!(before.column, after.column);
+        assert_eq!(Some(after.column), material_bounds(&column));
+        let removed = polygon![
+            (x: 1.0, y: 1.0), (x: 2.0, y: 1.0),
+            (x: 2.0, y: 2.0), (x: 1.0, y: 2.0),
+        ];
+        assert!(
+            candidate_clearance_distance_in_bounds(&removed, Some(before.column), 0.2)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            candidate_clearance_distance_in_bounds(&removed, Some(after.column), 0.2).unwrap(),
+            None
+        );
+        assert!(after.rejects(material_bounds(&MultiPolygon(vec![removed])).unwrap()));
+    }
 
     #[test]
     fn exhausted_refinement_keeps_accessible_support_contacts() {
