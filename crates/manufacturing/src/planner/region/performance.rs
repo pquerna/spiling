@@ -119,6 +119,7 @@ fn measure_infill_generation() {
             let layer = HatchLayer {
                 roof: Some(Roof {
                     frame_mm: [[0.0, 0.0], [size, size]],
+                    rooms: true,
                 }),
                 width_mm: 0.45,
                 z,

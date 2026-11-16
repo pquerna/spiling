@@ -521,6 +521,9 @@ impl HatchAxis {
 pub(super) struct Roof {
     /// Part-level XY bounds `[min, max]` anchoring the cell lattice.
     pub frame_mm: [[f64; 2]; 2],
+    /// False when the finished whole-part Cathedral roads will replace
+    /// this layer's sparse roads, so hatching builds no rooms.
+    pub rooms: bool,
 }
 
 pub(super) struct HatchLayer<'a> {

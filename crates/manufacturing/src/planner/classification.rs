@@ -422,113 +422,94 @@ impl ClassifiedRegions {
             return Ok(self);
         };
         let fraction = recipe.infill_fraction;
-        if landed.0.is_empty() {
-            return Ok(self);
-        }
-        // Top skin over the lower layer's interior, a bead clear of its edge.
-        let base_points = self.retained_points();
-        let base_bytes = self.retained_bytes();
-        let open = region::offset_admitted(
-            landed,
-            -recipe.bead_width_mm,
-            |points, bytes, overlay| {
-                admit(
-                    point_sum(base_points, points)?,
-                    byte_sum(base_bytes, bytes)?,
-                )?;
-                if let Some((a, b)) = overlay {
-                    boolean_budget(a, b, cancel)?;
-                }
-                Ok(())
-            },
-            cancel,
-        )?;
-        let intruding = intersection(&self.top, &open, cancel)?;
-        if intruding.0.is_empty() {
-            return Ok(self);
-        }
-        let band = 0.5
-            * (super::cathedral::spacing(recipe.bead_width_mm, recipe.layer_height_mm)
-                + recipe.bead_width_mm);
-        if self.top.0.is_empty() || self.interiors.len() != 1 || fraction <= 0.0 || fraction >= 1.0
+        if landed.0.is_empty()
+            || self.top.0.is_empty()
+            || self.interiors.len() != 1
+            || fraction <= 0.0
+            || fraction >= 1.0
         {
             return Ok(self);
         }
-        let (Some(top_bounds), Some(interior_bounds)) = (
-            self.top.bounding_rect(),
-            self.interiors[0].domain.bounding_rect(),
-        ) else {
+        // Top skin over what the lower layer kept as interior.
+        admit(scratch_points(&[&self.top, landed])?, self.retained_bytes())?;
+        let intruding = intersection(&self.top, landed, cancel)?;
+        let Some(bounds) = intruding.bounding_rect() else {
             return Ok(self);
         };
+        let band = 0.5
+            * (super::cathedral::spacing(recipe.bead_width_mm, recipe.layer_height_mm)
+                + recipe.bead_width_mm);
         let pitch =
             super::cathedral::cell_pitch(recipe.bead_width_mm, recipe.layer_height_mm, fraction);
         let lines = super::cathedral::lattice(roof.frame_mm, pitch);
-        // Cell intervals per axis; the outer cells reach past every domain.
+        // Cell intervals per axis; the outer cells reach past the skin.
         let span = [
-            [
-                top_bounds.min().x.min(interior_bounds.min().x),
-                top_bounds.max().x.max(interior_bounds.max().x),
-            ],
-            [
-                top_bounds.min().y.min(interior_bounds.min().y),
-                top_bounds.max().y.max(interior_bounds.max().y),
-            ],
+            [bounds.min().x, bounds.max().x],
+            [bounds.min().y, bounds.max().y],
         ];
         let reach = |axis: usize| {
             let l = &lines[axis];
             let mut out = Vec::with_capacity(l.len() + 1);
-            out.push((span[axis][0].min(l[0]) - pitch, l[0]));
-            out.extend(l.windows(2).map(|pair| (pair[0], pair[1])));
-            out.push((l[l.len() - 1], span[axis][1].max(l[l.len() - 1]) + pitch));
+            out.push((span[axis][0].min(l[0]) - pitch, l[0], false, true));
+            out.extend(l.windows(2).map(|pair| (pair[0], pair[1], true, true)));
+            out.push((
+                l[l.len() - 1],
+                span[axis][1].max(l[l.len() - 1]) + pitch,
+                true,
+                false,
+            ));
             out
         };
-        let overlaps = |bounds: geo::Rect<f64>, axis: usize, (a, b): (f64, f64)| {
-            let (low, high) = if axis == 0 {
-                (bounds.min().x, bounds.max().x)
-            } else {
-                (bounds.min().y, bounds.max().y)
-            };
-            a < high && b > low
-        };
-        let sliver = recipe.bead_width_mm * recipe.bead_width_mm;
+        let (columns, rows) = (reach(0), reach(1));
+        let mut pieces = std::collections::BTreeMap::new();
+        super::cathedral::halve(
+            intruding,
+            &columns,
+            &rows,
+            [0, columns.len()],
+            [0, rows.len()],
+            &mut pieces,
+            cancel,
+        )?;
+        // A cell converts when skin reaches into its room (inside the wall
+        // band) over more than a bead's area and thicker than a bead: a band
+        // along a sloped wall, where the lower layer's own border was a bead
+        // or less away, carries itself and converts nothing.
+        let w = recipe.bead_width_mm;
         let mut touched = Vec::new();
-        for x in reach(0) {
-            if !overlaps(top_bounds, 0, x) || !overlaps(interior_bounds, 0, x) {
+        for (&(ci, ri), piece) in &pieces {
+            check_cancel(cancel)?;
+            let (x0, x1, x0_line, x1_line) = columns[ci];
+            let (y0, y1, y0_line, y1_line) = rows[ri];
+            let inset = |v: f64, line: bool, sign: f64| if line { v + sign * band } else { v };
+            let (rx0, rx1) = (inset(x0, x0_line, 1.0), inset(x1, x1_line, -1.0));
+            let (ry0, ry1) = (inset(y0, y0_line, 1.0), inset(y1, y1_line, -1.0));
+            if rx1 <= rx0 || ry1 <= ry0 {
                 continue;
             }
-            for y in reach(1) {
-                check_cancel(cancel)?;
-                if !overlaps(top_bounds, 1, y) || !overlaps(interior_bounds, 1, y) {
-                    continue;
-                }
-                let cell = MultiPolygon(vec![
-                    geo::Rect::new(geo::Coord { x: x.0, y: y.0 }, geo::Coord { x: x.1, y: y.1 })
-                        .to_polygon(),
-                ]);
-                admit(
-                    scratch_points(&[&self.top, &self.interiors[0].domain])?,
-                    self.retained_bytes(),
-                )?;
-                // The room inside the cell's wall band; outer cells have a
-                // lattice line on one side only, so the far side stays put.
-                let room = MultiPolygon(vec![
-                    geo::Rect::new(
-                        geo::Coord {
-                            x: x.0 + band,
-                            y: y.0 + band,
-                        },
-                        geo::Coord {
-                            x: (x.1 - band).max(x.0 + band),
-                            y: (y.1 - band).max(y.0 + band),
-                        },
-                    )
+            let room = MultiPolygon(vec![
+                geo::Rect::new(geo::Coord { x: rx0, y: ry0 }, geo::Coord { x: rx1, y: ry1 })
                     .to_polygon(),
-                ]);
-                if intersection(&intruding, &room, cancel)?.unsigned_area() > sliver
-                    && intersection(&self.interiors[0].domain, &cell, cancel)?.unsigned_area() > 0.0
-                {
-                    touched.push(cell.0.into_iter().next().expect("one cell"));
-                }
+            ]);
+            let reaching = intersection(piece, &room, cancel)?;
+            let thick = reaching.0.iter().any(|polygon| {
+                let area = polygon.unsigned_area();
+                let around: f64 = std::iter::once(polygon.exterior())
+                    .chain(polygon.interiors())
+                    .map(|ring| {
+                        ring.0
+                            .windows(2)
+                            .map(|e| (e[1].x - e[0].x).hypot(e[1].y - e[0].y))
+                            .sum::<f64>()
+                    })
+                    .sum();
+                area > w * w && around > 0.0 && 2.0 * area / around > w
+            });
+            if thick {
+                touched.push(
+                    geo::Rect::new(geo::Coord { x: x0, y: y0 }, geo::Coord { x: x1, y: y1 })
+                        .to_polygon(),
+                );
             }
         }
         if touched.is_empty() {

@@ -222,6 +222,7 @@ fn plan_with(
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
     let mut survival_memo = neighborhood::SurvivalMemo::default();
+    let mut rooms_memo = cathedral::RoomsMemo::default();
     // Refinement grows the schedule in place; every retry and admission
     // charges its actual capacity against the working set.
     let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?;
@@ -260,6 +261,7 @@ fn plan_with(
             &mut wall_memo,
             &mut void_memo,
             &mut survival_memo,
+            &mut rooms_memo,
         );
         match outcome? {
             ScheduleAdmission::PrefixAdmitted(capture) => break Some(capture),
@@ -322,6 +324,7 @@ fn plan_with(
                 &mut wall_memo,
                 &mut void_memo,
                 &mut survival_memo,
+                &mut rooms_memo,
             );
             match outcome {
                 Ok(ScheduleAdmission::RefineUnreachableLayer {
@@ -359,6 +362,7 @@ fn plan_with(
             &mut wall_memo,
             &mut void_memo,
             &mut survival_memo,
+            &mut rooms_memo,
         );
         match outcome? {
             ScheduleAdmission::Complete(plan) => return Ok(plan),
@@ -461,6 +465,7 @@ fn admit_schedule<'model>(
     wall_memo: &mut WallMemo,
     void_memo: &mut tolerant::VoidMemo,
     survival_memo: &mut neighborhood::SurvivalMemo,
+    rooms_memo: &mut cathedral::RoomsMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
     let recipe = &input.intent.recipe;
     let truncated =
@@ -1284,75 +1289,83 @@ fn admit_schedule<'model>(
                     skin_query_retained_bytes(skin_owned_bytes, &[&lower])?,
                     cancel,
                 )?;
-                let landed = match landing {
+                let mut fresh = classification::ClassifiedRegions::new(
+                    Arc::clone(
+                        wall_layout
+                            .as_ref()
+                            .expect("current wall layout initialized"),
+                    ),
+                    &lower,
+                    &upper,
+                    |scratch, scratch_bytes| {
+                        admit_skin_scratch(
+                            retained_points,
+                            skin_owned_bytes,
+                            &mut neighborhoods,
+                            &[&lower, &upper],
+                            scratch,
+                            scratch_bytes,
+                            cancel,
+                        )
+                    },
+                    recipe,
+                    cancel,
+                )?;
+                // The lower layer matters only under top skin.
+                let landed = match landing.filter(|_| !fresh.top.0.is_empty()) {
                     Some((span, horizon)) => Some(neighborhoods.survival(
                         span,
                         horizon,
-                        skin_query_retained_points(retained_points, &[&lower, &upper])?,
-                        skin_query_retained_bytes(skin_owned_bytes, &[&lower, &upper])?,
+                        skin_query_retained_points(
+                            retained_points + fresh.retained_points(),
+                            &[&lower, &upper],
+                        )?,
+                        skin_query_retained_bytes(
+                            geometry_bytes(&[skin_owned_bytes, fresh.retained_bytes()])?,
+                            &[&lower, &upper],
+                        )?,
                         cancel,
                     )?),
                     None => None,
                 };
                 classified = Some(
-                    classification::ClassifiedRegions::new(
-                        Arc::clone(
-                            wall_layout
-                                .as_ref()
-                                .expect("current wall layout initialized"),
-                        ),
-                        &lower,
-                        &upper,
-                        |scratch, scratch_bytes| {
-                            admit_skin_scratch(
-                                retained_points,
-                                skin_owned_bytes,
-                                &mut neighborhoods,
-                                &[&lower, &upper],
-                                scratch,
-                                scratch_bytes,
-                                cancel,
-                            )
-                        },
-                        recipe,
-                        cancel,
-                    )?
-                    .snap_roof_to_cells(
-                        web_roof.as_ref().map(|field| field.roof()),
-                        landed.as_deref(),
-                        recipe,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                skin_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        cancel,
-                    )?
-                    .with_process(
-                        &sections[current].process_domains,
-                        input.intent,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                skin_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        neighborhoods.work_mut(),
-                        cancel,
-                    )?,
+                    fresh
+                        .snap_roof_to_cells(
+                            web_roof.as_ref().map(|field| field.roof()),
+                            landed.as_deref(),
+                            recipe,
+                            classification::fixed_owned_budget(
+                                skin_retained_points(
+                                    retained_points,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                                skin_retained_bytes(
+                                    skin_owned_bytes,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                            ),
+                            cancel,
+                        )?
+                        .with_process(
+                            &sections[current].process_domains,
+                            input.intent,
+                            classification::fixed_owned_budget(
+                                skin_retained_points(
+                                    retained_points,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                                skin_retained_bytes(
+                                    skin_owned_bytes,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                            ),
+                            neighborhoods.work_mut(),
+                            cancel,
+                        )?,
                 );
                 construction.classify(
                     classified.as_mut().expect("classified material regions"),
@@ -1599,11 +1612,6 @@ fn admit_schedule<'model>(
                 resolution_allocated_bytes,
                 &templates,
             )?;
-            if matches!(recipe.sparse_infill, SparseInfillPolicy::WebRoof { .. }) {
-                // Roof branches depend on physical height, even when native D
-                // and its wall/classification templates remain unchanged.
-                templates[axis_slot] = None;
-            }
             if templates[axis_slot].is_none() {
                 let mut template_segments = segments;
                 let classified = classified
@@ -1848,7 +1856,7 @@ fn admit_schedule<'model>(
             skin_retained_bytes(support_outside_bytes, &neighborhoods, &[])?;
 
         if let Some(field) = &web_roof {
-            field.stabilize(&mut layers, recipe, &mut segments, cancel)?;
+            field.stabilize(&mut layers, recipe, &mut segments, rooms_memo, cancel)?;
         }
         // Support may regenerate a layer's roads from its classification.
         // The finished Cathedral roads (teeth, splices, rooted spines) are
@@ -1968,31 +1976,12 @@ fn admit_schedule<'model>(
                         skin_query_retained_bytes(live_owned_bytes, &[&lower])?,
                         cancel,
                     )?;
-                    let landed = match web_roof.as_ref().and_then(|_| {
-                        roof_landing(
-                            schedule,
-                            &sections,
-                            index as u32,
-                            current,
-                            above,
-                            recipe.top_skin_thickness_mm,
-                        )
-                    }) {
-                        Some((span, horizon)) => Some(neighborhoods.survival(
-                            span,
-                            horizon,
-                            skin_query_retained_points(live_retained_points, &[&lower, &upper])?,
-                            skin_query_retained_bytes(live_owned_bytes, &[&lower, &upper])?,
-                            cancel,
-                        )?),
-                        None => None,
-                    };
                     let wall = Arc::clone(
                         wall_layouts[index]
                             .as_ref()
                             .expect("physical-height wall construction already admitted"),
                     );
-                    let mut classified = classification::ClassifiedRegions::new(
+                    let mut fresh = classification::ClassifiedRegions::new(
                         wall,
                         &lower,
                         &upper,
@@ -2009,43 +1998,72 @@ fn admit_schedule<'model>(
                         },
                         recipe,
                         cancel,
-                    )?
-                    .snap_roof_to_cells(
-                        web_roof.as_ref().map(|field| field.roof()),
-                        landed.as_deref(),
-                        recipe,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                live_retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                live_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        cancel,
-                    )?
-                    .with_process(
-                        &sections[current].process_domains,
-                        input.intent,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                live_retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                live_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        neighborhoods.work_mut(),
-                        cancel,
                     )?;
+                    let landed = match web_roof
+                        .as_ref()
+                        .filter(|_| !fresh.top.0.is_empty())
+                        .and_then(|_| {
+                            roof_landing(
+                                schedule,
+                                &sections,
+                                index as u32,
+                                current,
+                                above,
+                                recipe.top_skin_thickness_mm,
+                            )
+                        }) {
+                        Some((span, horizon)) => Some(neighborhoods.survival(
+                            span,
+                            horizon,
+                            skin_query_retained_points(
+                                live_retained_points + fresh.retained_points(),
+                                &[&lower, &upper],
+                            )?,
+                            skin_query_retained_bytes(
+                                geometry_bytes(&[live_owned_bytes, fresh.retained_bytes()])?,
+                                &[&lower, &upper],
+                            )?,
+                            cancel,
+                        )?),
+                        None => None,
+                    };
+                    let mut classified = fresh
+                        .snap_roof_to_cells(
+                            web_roof.as_ref().map(|field| field.roof()),
+                            landed.as_deref(),
+                            recipe,
+                            classification::fixed_owned_budget(
+                                skin_retained_points(
+                                    live_retained_points,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                                skin_retained_bytes(
+                                    live_owned_bytes,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                            ),
+                            cancel,
+                        )?
+                        .with_process(
+                            &sections[current].process_domains,
+                            input.intent,
+                            classification::fixed_owned_budget(
+                                skin_retained_points(
+                                    live_retained_points,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                                skin_retained_bytes(
+                                    live_owned_bytes,
+                                    &neighborhoods,
+                                    &[&lower, &upper],
+                                )?,
+                            ),
+                            neighborhoods.work_mut(),
+                            cancel,
+                        )?;
                     construction.classify(
                         &mut classified,
                         [elevation.lower_z, elevation.z],
@@ -2083,7 +2101,13 @@ fn admit_schedule<'model>(
                     )?;
                     let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
-                        roof: web_roof.as_ref().map(|field| field.roof()),
+                        roof: web_roof.as_ref().map(|field| {
+                            if cathedral_roads.get(index).is_some() {
+                                field.reused_roof()
+                            } else {
+                                field.roof()
+                            }
+                        }),
                         width_mm: recipe.bead_width_mm,
                         z: elevation.z,
                         lower_z: elevation.lower_z,
@@ -2155,7 +2179,13 @@ fn admit_schedule<'model>(
                                 hatch_key(schedule, index),
                             ),
                             recipe,
-                            web_roof.as_ref().map(|field| field.roof()),
+                            web_roof.as_ref().map(|field| {
+                                if cathedral_roads.get(index).is_some() {
+                                    field.reused_roof()
+                                } else {
+                                    field.roof()
+                                }
+                            }),
                             phase_by_layer[index],
                             classified_bytes,
                             &sections[current].process_domains,

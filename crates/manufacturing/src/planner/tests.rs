@@ -1980,7 +1980,10 @@ fn cathedral_top_skin_snaps_to_whole_lattice_cells() {
         classify(&section, &section, &above, &recipe, &cancel)
             .unwrap()
             .snap_roof_to_cells(
-                Some(region::Roof { frame_mm: frame }),
+                Some(region::Roof {
+                    frame_mm: frame,
+                    rooms: true,
+                }),
                 landed,
                 &recipe,
                 classification::fixed_owned_budget(0, 0),

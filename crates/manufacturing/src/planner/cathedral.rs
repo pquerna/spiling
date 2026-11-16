@@ -119,6 +119,16 @@ impl Field {
     pub(super) fn roof(&self) -> super::region::Roof {
         super::region::Roof {
             frame_mm: self.frame_mm,
+            rooms: true,
+        }
+    }
+
+    /// The roof handle for a layer whose finished Cathedral roads are
+    /// reused: classification still uses the frame, hatching builds no rooms.
+    pub(super) fn reused_roof(&self) -> super::region::Roof {
+        super::region::Roof {
+            frame_mm: self.frame_mm,
+            rooms: false,
         }
     }
 
@@ -136,13 +146,47 @@ impl Field {
         layers: &mut [PrintLayer],
         recipe: &PlanarPrintRecipe,
         segments: &mut usize,
+        memo: &mut RoomsMemo,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
-        let rooms = layers
-            .iter()
-            .map(|layer| layer_rooms(layer, self.frame_mm, recipe, cancel))
-            .collect::<Result<Vec<_>, _>>()?;
-        let teeth = grow_teeth(layers, &rooms, recipe, cancel)?;
+        // A layer whose recorded domains, height and fractions equal the
+        // previous layer's has the same rooms: most layers of a part.
+        let mut rooms: Vec<Vec<DomainRooms>> = Vec::with_capacity(layers.len());
+        for (index, layer) in layers.iter().enumerate() {
+            check_cancel(cancel)?;
+            let same = index > 0 && {
+                let previous = &layers[index - 1];
+                previous.height_mm == layer.height_mm
+                    && previous.region_coverage.web_roof_domains.len()
+                        == layer.region_coverage.web_roof_domains.len()
+                    && previous
+                        .region_coverage
+                        .web_roof_domains
+                        .iter()
+                        .zip(&layer.region_coverage.web_roof_domains)
+                        .all(|(a, b)| {
+                            a.region_index == b.region_index
+                                && a.extent == b.extent
+                                && previous
+                                    .region_coverage
+                                    .process_regions
+                                    .get(usize::from(a.region_index))
+                                    .map(|r| r.fraction)
+                                    == layer
+                                        .region_coverage
+                                        .process_regions
+                                        .get(usize::from(b.region_index))
+                                        .map(|r| r.fraction)
+                        })
+            };
+            let built = if same {
+                rooms[index - 1].clone()
+            } else {
+                memo.rooms(layer, self.frame_mm, recipe, cancel)?
+            };
+            rooms.push(built);
+        }
+        let desired = desire_teeth(layers, &rooms, recipe, cancel)?;
         let mut anchors = super::support::AnchorWorkspace::default();
         let mut work = 0usize;
         for index in 0..layers.len() {
@@ -163,25 +207,36 @@ impl Field {
                     "Cathedral segment accounting underflow",
                 )
             })?;
+            // The actual layer below: it roots spines and carries teeth.
+            let prepared = match lower {
+                Some(lower) if !rooms[index].is_empty() => {
+                    Some(super::support::PreparedAnchorPaths::new(
+                        lower.paths.iter().filter(|p| {
+                            p.kind.is_model() && p.physical_z_mm[1] == layer.lower_z_mm
+                        }),
+                        cancel,
+                    )?)
+                }
+                _ => None,
+            };
+            let teeth = reach_teeth(
+                &desired[index],
+                &rooms[index],
+                layer.z_mm,
+                layer.height_mm,
+                prepared.as_ref(),
+                recipe,
+                &mut anchors,
+                &mut work,
+                cancel,
+            )?;
             let mut replacement = Vec::new();
             for domain in &rooms[index] {
                 let mut roads = Vec::new();
                 for room in &domain.rooms {
-                    room_roads(room, &teeth[index], domain, &mut roads, cancel)?;
+                    room_roads(room, &teeth, domain, &mut roads, cancel)?;
                 }
                 let roads = splice(roads, domain, index, cancel)?;
-                // Spines print only where the actual layer below carries them.
-                let prepared = match lower {
-                    Some(lower) if roads.iter().any(|r| r.points.first() != r.points.last()) => {
-                        Some(super::support::PreparedAnchorPaths::new(
-                            lower.paths.iter().filter(|p| {
-                                p.kind.is_model() && p.physical_z_mm[1] == layer.lower_z_mm
-                            }),
-                            cancel,
-                        )?)
-                    }
-                    _ => None,
-                };
                 for road in roads {
                     let open = road.points.first() != road.points.last();
                     if open {
@@ -289,7 +344,7 @@ pub(super) fn rooms(
             "Cathedral requires its part-level lattice frame",
         ));
     };
-    if fraction <= 0.0 || fill.0.is_empty() {
+    if fraction <= 0.0 || fill.0.is_empty() || !roof.rooms {
         return Ok(());
     }
     let s = spacing(layer.width_mm, layer.height);
@@ -326,6 +381,7 @@ pub(super) fn rooms(
 
 /// One room component: its loops (exterior first) in the frame-clipped
 /// lattice cell `bounds`.
+#[derive(Clone)]
 pub(super) struct Room {
     bounds: [[f64; 2]; 2],
     rings: Vec<Vec<Coord<f64>>>,
@@ -333,12 +389,112 @@ pub(super) struct Room {
     open: bool,
 }
 
+#[derive(Clone)]
 struct DomainRooms {
     region_index: u16,
     s: f64,
     /// Lattice line coordinates per axis.
     lines: [Vec<f64>; 2],
     rooms: Vec<Room>,
+}
+
+/// Rooms by exact layer domain, kept across schedule attempts: support may
+/// refine and replan a part many times, and most layers keep their domain.
+/// Entries are byte-admitted against the working set; a full memo stops
+/// keeping new entries and simply recomputes.
+#[derive(Default)]
+pub(super) struct RoomsMemo {
+    entries: std::collections::HashMap<u64, Vec<(RoomsKey, Vec<DomainRooms>)>>,
+    bytes: usize,
+}
+
+#[derive(PartialEq)]
+struct RoomsKey {
+    frame: [[u64; 2]; 2],
+    height: u64,
+    domains: Vec<(u16, u64, Vec<DiaphragmPolygonMm>)>,
+}
+
+impl RoomsMemo {
+    fn rooms(
+        &mut self,
+        layer: &PrintLayer,
+        frame: [[f64; 2]; 2],
+        recipe: &PlanarPrintRecipe,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DomainRooms>, ManufacturingError> {
+        use std::hash::{Hash, Hasher};
+        let fraction = |index: u16| {
+            layer
+                .region_coverage
+                .process_regions
+                .get(usize::from(index))
+                .map_or(recipe.infill_fraction, |region| region.fraction)
+        };
+        let key = RoomsKey {
+            frame: frame.map(|p| p.map(f64::to_bits)),
+            height: layer.height_mm.to_bits(),
+            domains: layer
+                .region_coverage
+                .web_roof_domains
+                .iter()
+                .map(|d| {
+                    (
+                        d.region_index,
+                        fraction(d.region_index).to_bits(),
+                        d.extent.clone(),
+                    )
+                })
+                .collect(),
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.frame.hash(&mut hasher);
+        key.height.hash(&mut hasher);
+        for (index, fraction, extent) in &key.domains {
+            index.hash(&mut hasher);
+            fraction.hash(&mut hasher);
+            for polygon in extent {
+                for ring in std::iter::once(&polygon.outer).chain(&polygon.holes) {
+                    for point in ring {
+                        point[0].to_bits().hash(&mut hasher);
+                        point[1].to_bits().hash(&mut hasher);
+                    }
+                }
+            }
+        }
+        let hash = hasher.finish();
+        if let Some(found) = self
+            .entries
+            .get(&hash)
+            .and_then(|list| list.iter().find(|(k, _)| *k == key))
+        {
+            return Ok(found.1.clone());
+        }
+        let built = layer_rooms(layer, frame, recipe, cancel)?;
+        let points = |rooms: &[DomainRooms]| -> usize {
+            rooms
+                .iter()
+                .flat_map(|d| &d.rooms)
+                .flat_map(|r| &r.rings)
+                .map(Vec::len)
+                .sum()
+        };
+        let key_points: usize = key
+            .domains
+            .iter()
+            .flat_map(|d| &d.2)
+            .map(|p| p.outer.len() + p.holes.iter().map(Vec::len).sum::<usize>())
+            .sum();
+        let bytes = (points(&built) + key_points) * 16;
+        if self.bytes.saturating_add(bytes) <= crate::working_set::bytes() / 8 {
+            self.bytes += bytes;
+            self.entries
+                .entry(hash)
+                .or_default()
+                .push((key, built.clone()));
+        }
+        Ok(built)
+    }
 }
 
 fn layer_rooms(
@@ -421,8 +577,9 @@ fn cells(
     if eroded.0.is_empty() {
         return Ok(Vec::new());
     }
-    // Junction pins need the crossing well inside the domain.
-    let deep = offset(fill, -s, cancel)?;
+    // Junction pins need the crossing well inside the domain: half a
+    // spacing inside the eroded domain, judged against its edges.
+    let deep = Clearance::new(&eroded);
     let lines = lattice(frame, pitch);
     let Some(bounds) = eroded.bounding_rect() else {
         return Ok(Vec::new());
@@ -445,16 +602,33 @@ fn cells(
         out
     };
     let (columns, rows) = (breaks(0), breaks(1));
+    // Cells overlapping the domain, and the domain cut into one piece per
+    // cell by halving at lattice lines: each Boolean sees only its share.
+    let span = |list: &[(f64, f64, bool, bool)], low: f64, high: f64| {
+        let first = list.iter().position(|c| c.1 >= low).unwrap_or(list.len());
+        let last = list.iter().rposition(|c| c.0 <= high).map_or(0, |i| i + 1);
+        (first, last.max(first))
+    };
+    let (cx, rx) = (
+        span(&columns, bounds.min().x, bounds.max().x),
+        span(&rows, bounds.min().y, bounds.max().y),
+    );
+    let mut pieces = BTreeMap::new();
+    halve(
+        eroded.clone(),
+        &columns,
+        &rows,
+        [cx.0, cx.1],
+        [rx.0, rx.1],
+        &mut pieces,
+        cancel,
+    )?;
     let mut rooms = Vec::new();
-    for &(x0, x1, x0_line, x1_line) in &columns {
-        if x1 < bounds.min().x || x0 > bounds.max().x {
-            continue;
-        }
-        for &(y0, y1, y0_line, y1_line) in &rows {
+    for (&(ci, ri), piece) in &pieces {
+        let (x0, x1, x0_line, x1_line) = columns[ci];
+        let (y0, y1, y0_line, y1_line) = rows[ri];
+        {
             check_cancel(cancel)?;
-            if y1 < bounds.min().y || y0 > bounds.max().y {
-                continue;
-            }
             let inset = |v: f64, line: bool, sign: f64| if line { v + sign * 0.5 * s } else { v };
             let rect = Rect::new(
                 Coord {
@@ -468,8 +642,8 @@ fn cells(
             )
             .to_polygon();
             let rect = MultiPolygon(vec![rect]);
-            super::boolean_budget(&eroded, &rect, cancel)?;
-            let clipped = eroded.intersection(&rect);
+            super::boolean_budget(piece, &rect, cancel)?;
+            let clipped = piece.intersection(&rect);
             let cell_bounds = [
                 [x0.max(frame[0][0]), y0.max(frame[0][1])],
                 [x1.min(frame[1][0]), y1.min(frame[1][1])],
@@ -843,6 +1017,119 @@ fn midline(piece: &Polygon<f64>) -> Option<Vec<Coord<f64>>> {
     })
 }
 
+/// Cut `region` into one piece per lattice cell in the index ranges given,
+/// halving the larger range at a lattice line each time, so a region of N
+/// vertices over C cells costs about N log C rather than N C.
+pub(super) fn halve(
+    region: MultiPolygon<f64>,
+    columns: &[(f64, f64, bool, bool)],
+    rows: &[(f64, f64, bool, bool)],
+    cx: [usize; 2],
+    rx: [usize; 2],
+    out: &mut BTreeMap<(usize, usize), MultiPolygon<f64>>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    if region.0.is_empty() || cx[0] >= cx[1] || rx[0] >= rx[1] {
+        return Ok(());
+    }
+    if cx[1] - cx[0] == 1 && rx[1] - rx[0] == 1 {
+        out.insert((cx[0], rx[0]), region);
+        return Ok(());
+    }
+    let split_columns = cx[1] - cx[0] >= rx[1] - rx[0];
+    let halves = if split_columns {
+        let mid = (cx[0] + cx[1]) / 2;
+        [[cx[0], mid], [mid, cx[1]]]
+    } else {
+        let mid = (rx[0] + rx[1]) / 2;
+        [[rx[0], mid], [mid, rx[1]]]
+    };
+    for half in halves {
+        let (x, y) = if split_columns {
+            (half, rx)
+        } else {
+            (cx, half)
+        };
+        let rect = MultiPolygon(vec![
+            Rect::new(
+                Coord {
+                    x: columns[x[0]].0,
+                    y: rows[y[0]].0,
+                },
+                Coord {
+                    x: columns[x[1] - 1].1,
+                    y: rows[y[1] - 1].1,
+                },
+            )
+            .to_polygon(),
+        ]);
+        super::boolean_budget(&region, &rect, cancel)?;
+        let part = region.intersection(&rect);
+        halve(part, columns, rows, x, y, out, cancel)?;
+    }
+    Ok(())
+}
+
+/// The edges of a region in a uniform grid, for clearance questions about a
+/// few points without offsetting the whole region.
+struct Clearance<'a> {
+    region: &'a MultiPolygon<f64>,
+    cell: f64,
+    grid: std::collections::HashMap<(i64, i64), Vec<[Coord<f64>; 2]>>,
+}
+
+impl<'a> Clearance<'a> {
+    fn new(region: &'a MultiPolygon<f64>) -> Self {
+        let cell = 2.0;
+        let mut grid: std::collections::HashMap<(i64, i64), Vec<[Coord<f64>; 2]>> =
+            std::collections::HashMap::new();
+        let key = |v: f64| (v / cell).floor() as i64;
+        for polygon in &region.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                for e in ring.0.windows(2) {
+                    for i in key(e[0].x.min(e[1].x))..=key(e[0].x.max(e[1].x)) {
+                        for j in key(e[0].y.min(e[1].y))..=key(e[0].y.max(e[1].y)) {
+                            grid.entry((i, j)).or_default().push([e[0], e[1]]);
+                        }
+                    }
+                }
+            }
+        }
+        Self { region, cell, grid }
+    }
+
+    /// Whether `target` lies inside the region with every edge at least
+    /// `distance` away.
+    fn holds(&self, target: Coord<f64>, distance: f64) -> bool {
+        use geo::Contains;
+        let key = |v: f64| (v / self.cell).floor() as i64;
+        let (x0, x1) = (key(target.x - distance), key(target.x + distance));
+        let (y0, y1) = (key(target.y - distance), key(target.y + distance));
+        for i in x0..=x1 {
+            for j in y0..=y1 {
+                for [a, b] in self.grid.get(&(i, j)).into_iter().flatten() {
+                    if point_segment(target, *a, *b) < distance {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.region.contains(&geo::Point(target))
+    }
+}
+
+fn point_segment(p: Coord<f64>, a: Coord<f64>, b: Coord<f64>) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length = dx * dx + dy * dy;
+    let t = if length > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.x - a.x - t * dx).hypot(p.y - a.y - t * dy)
+}
+
 fn ring_length(points: &[Coord<f64>]) -> f64 {
     points
         .windows(2)
@@ -856,11 +1143,10 @@ fn ring_length(points: &[Coord<f64>]) -> f64 {
 fn pin_junctions(
     ring: &[Coord<f64>],
     lines: &[Vec<f64>; 2],
-    deep: &MultiPolygon<f64>,
+    deep: &Clearance<'_>,
     s: f64,
     width: f64,
 ) -> Vec<Coord<f64>> {
-    use geo::Contains;
     let near = |value: f64, axis: usize| -> Option<f64> {
         let l = &lines[axis];
         let i = l.partition_point(|line| *line < value);
@@ -875,9 +1161,7 @@ fn pin_junctions(
     for index in 0..edges {
         let v = ring[index];
         let pinned = match (near(v.x, 0), near(v.y, 1)) {
-            (Some(x), Some(y)) if deep.contains(&geo::Point(Coord { x, y })) => {
-                Some(Coord { x, y })
-            }
+            (Some(x), Some(y)) if deep.holds(Coord { x, y }, 0.5 * s) => Some(Coord { x, y }),
             _ => None,
         };
         let Some(crossing) = pinned else {
@@ -1009,7 +1293,7 @@ fn chords(room: &Room, family: usize, c: f64) -> Vec<(f64, f64)> {
 }
 
 /// Top-down demand, then bottom-up growth: the actual tooth tips per layer.
-fn grow_teeth(
+fn desire_teeth(
     layers: &[PrintLayer],
     rooms: &[Vec<DomainRooms>],
     recipe: &PlanarPrintRecipe,
@@ -1117,63 +1401,143 @@ fn grow_teeth(
         desired[index] = next.clone();
         carried = next;
     }
-    // Actual tips, bottom-up: a tooth starts one spacing long and then
-    // advances at most one step per physical interface.
-    let mut actual: Vec<Tips> = vec![BTreeMap::new(); n];
-    for index in 0..n {
-        check_cancel(cancel)?;
-        let below = (index > 0 && adjacent(index - 1)).then(|| &actual[index - 1]);
-        let advance = step(index);
-        let mut grown: Tips = BTreeMap::new();
-        for domain in &rooms[index] {
-            let s = domain.s;
-            for room in &domain.rooms {
-                for family in 0..2 {
-                    for c in columns(room, family, s, spacing_mm) {
-                        let column = Column {
-                            region: domain.region_index,
-                            family: family as u8,
-                            coordinate: c.to_bits(),
-                        };
-                        for (low, high) in chords(room, family, c) {
-                            for side in 0..2u8 {
-                                let Some(want) = desired[index]
-                                    .get(&(column, side))
-                                    .into_iter()
-                                    .flatten()
-                                    .copied()
-                                    .find(|t| *t > low && *t < high)
-                                else {
-                                    continue;
-                                };
-                                let root = if side == 0 { low } else { high };
-                                let previous = below
-                                    .and_then(|b| b.get(&(column, side)))
-                                    .into_iter()
-                                    .flatten()
-                                    .copied()
-                                    .find(|t| *t > low && *t < high);
-                                let tip = match (previous, side) {
-                                    (Some(p), 0) => want.min(p + advance),
-                                    (Some(p), _) => want.max(p - advance),
-                                    (None, 0) => want.min(root + s),
-                                    (None, _) => want.max(root - s),
-                                };
-                                if (tip - root).abs() >= s - 1e-12 {
-                                    grown.entry((column, side)).or_default().push(tip);
+    Ok(desired)
+}
+
+/// Actual tooth tips on one layer, from its desired tips and the actual
+/// layer below. A tooth reaches as far as the material below carries both
+/// of its legs (floor skin, a bridge, a wall or its own lower tooth), less
+/// half a bead, plus one step: over its own lower tooth that is exactly one
+/// step per interface (about 45 degrees); straight off a floor it is the
+/// whole desired length. A tooth at least reaches one spacing from its
+/// root, where its own wall carries it.
+#[allow(clippy::too_many_arguments)]
+fn reach_teeth(
+    desired: &Tips,
+    rooms: &[DomainRooms],
+    z: f64,
+    height: f64,
+    lower: Option<&super::support::PreparedAnchorPaths<'_>>,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut super::support::AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Tips, ManufacturingError> {
+    let w = recipe.bead_width_mm;
+    let spacing_mm = recipe.web_roof_spacing_mm();
+    let advance = (ROOF_STEP_WIDTHS * w).min(height);
+    let mut grown: Tips = BTreeMap::new();
+    for domain in rooms {
+        let s = domain.s;
+        for room in &domain.rooms {
+            for family in 0..2 {
+                for c in columns(room, family, s, spacing_mm) {
+                    let column = Column {
+                        region: domain.region_index,
+                        family: family as u8,
+                        coordinate: c.to_bits(),
+                    };
+                    for (low, high) in chords(room, family, c) {
+                        for side in 0..2u8 {
+                            check_cancel(cancel)?;
+                            let Some(want) = desired
+                                .get(&(column, side))
+                                .into_iter()
+                                .flatten()
+                                .copied()
+                                .find(|t| *t > low && *t < high)
+                            else {
+                                continue;
+                            };
+                            let root = if side == 0 { low } else { high };
+                            let wanted = (want - root).abs();
+                            let carried = match lower {
+                                Some(lower) => {
+                                    let mut shortest = wanted;
+                                    for leg in [c - 0.5 * s, c + 0.5 * s] {
+                                        shortest = shortest.min(carried_length(
+                                            family, leg, root, want, z, w, lower, anchors, work,
+                                            cancel,
+                                        )?);
+                                    }
+                                    shortest
                                 }
+                                None => 0.0,
+                            };
+                            // Carried all the way: the whole tooth. Otherwise one
+                            // step past where the bead below ends.
+                            let reach = if carried >= wanted - 1e-12 {
+                                wanted
+                            } else {
+                                (carried - 0.5 * w + advance).max(s)
+                            };
+                            let length = wanted.min(reach);
+                            if length >= s - 1e-12 {
+                                let tip = if side == 0 {
+                                    root + length
+                                } else {
+                                    root - length
+                                };
+                                grown.entry((column, side)).or_default().push(tip);
                             }
                         }
                     }
                 }
             }
         }
-        actual[index] = grown;
     }
-    // Teeth of the two families must not cross: family 1 stops one spacing
-    // short of any family 0 tooth in its room.
-    for (index, tips) in actual.iter_mut().enumerate() {
-        for domain in &rooms[index] {
+    separate_families(&mut grown, rooms, spacing_mm);
+    Ok(grown)
+}
+
+/// How far from `root` toward `tip`, along the leg line at `leg`, the layer
+/// below carries a bead continuously (gaps under a quarter bead ignored).
+#[allow(clippy::too_many_arguments)]
+fn carried_length(
+    family: usize,
+    leg: f64,
+    root: f64,
+    tip: f64,
+    z: f64,
+    w: f64,
+    lower: &super::support::PreparedAnchorPaths<'_>,
+    anchors: &mut super::support::AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<f64, ManufacturingError> {
+    let point = |v: f64| {
+        if family == 0 {
+            [leg, v, z]
+        } else {
+            [v, leg, z]
+        }
+    };
+    let length = (tip - root).abs();
+    if length <= 0.0 {
+        return Ok(0.0);
+    }
+    let gaps = anchors.gaps_prepared(
+        super::support::AnchorCandidate {
+            endpoints_mm: [point(root), point(tip)],
+            bead_width_mm: w,
+        },
+        lower,
+        work,
+        cancel,
+    )?;
+    for gap in gaps {
+        if (gap.end - gap.start) * length > 0.25 * w || gap.end >= 1.0 {
+            return Ok(gap.start * length);
+        }
+    }
+    Ok(length)
+}
+
+/// Teeth of the two families must not cross: family 1 stops one and a half
+/// spacings short of any family 0 tooth in its room.
+fn separate_families(tips: &mut Tips, rooms: &[DomainRooms], spacing_mm: f64) {
+    {
+        for domain in rooms {
             let s = domain.s;
             for room in &domain.rooms {
                 let vertical: Vec<(f64, f64, f64)> = columns(room, 0, s, spacing_mm)
@@ -1239,7 +1603,6 @@ fn grow_teeth(
             }
         }
     }
-    Ok(actual)
 }
 
 /// Roads of a layer that a roof must carry, per family: family 0 holds roads
@@ -2157,5 +2520,117 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn road(points: &[[f64; 2]], z: f64, kind: DepositionKind) -> DepositionPath {
+        DepositionPath {
+            material_domain: None,
+            kind,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [z - 0.2, z],
+            points_mm: points.iter().map(|p| [p[0], p[1], z]).collect(),
+            arcs: Vec::new(),
+            connectors: Vec::new(),
+            owner: None,
+            exposed: false,
+        }
+    }
+
+    #[test]
+    fn ribbons_reach_as_far_as_the_layer_below_carries_them() {
+        let cancel = AtomicBool::new(false);
+        let mut recipe = super::super::tests::recipe(0.15);
+        recipe.bead_width_mm = 0.45;
+        recipe.layer_height_mm = 0.2;
+        recipe.sparse_infill = SparseInfillPolicy::web_roof();
+        let (w, h) = (0.45, 0.2);
+        let s = spacing(w, h);
+        let frame = [[0.0, 0.0], [40.0, 40.0]];
+        let pitch = cell_pitch(w, h, 0.15);
+        let domain = DomainRooms {
+            region_index: 0,
+            s,
+            lines: lattice(frame, pitch),
+            rooms: cells(&square(40.0), frame, pitch, s, w, true, &cancel).unwrap(),
+        };
+        // One room and one of its family 0 columns, wanting a tooth from the
+        // low chord end to the middle.
+        let room = domain
+            .rooms
+            .iter()
+            .find(|r| !columns(r, 0, s, recipe.web_roof_spacing_mm()).is_empty())
+            .unwrap();
+        let c = columns(room, 0, s, recipe.web_roof_spacing_mm())[0];
+        let (low, high) = chords(room, 0, c)[0];
+        let want = 0.5 * (low + high);
+        let column = Column {
+            region: 0,
+            family: 0,
+            coordinate: c.to_bits(),
+        };
+        let mut desired: Tips = BTreeMap::new();
+        desired.insert((column, 0), vec![want]);
+        let rooms = [DomainRooms {
+            region_index: 0,
+            s,
+            lines: domain.lines.clone(),
+            rooms: vec![Room {
+                bounds: room.bounds,
+                rings: room.rings.clone(),
+                open: false,
+            }],
+        }];
+        let z = 1.0;
+        let tip = |lower: &[DepositionPath]| {
+            let prepared =
+                super::super::support::PreparedAnchorPaths::new(lower.iter(), &cancel).unwrap();
+            let mut anchors = super::super::support::AnchorWorkspace::default();
+            let mut work = 0;
+            let tips = reach_teeth(
+                &desired,
+                &rooms,
+                z,
+                h,
+                Some(&prepared),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            tips.get(&(column, 0)).and_then(|t| t.first().copied())
+        };
+        // A solid floor below: the whole desired tooth at once.
+        let floor: Vec<DepositionPath> = (0..=100)
+            .map(|k| {
+                let y = k as f64 * 0.4;
+                road(&[[0.0, y], [40.0, y]], z - 0.2, DepositionKind::BottomSkin)
+            })
+            .collect();
+        let full = tip(&floor);
+        assert!(
+            full.is_some_and(|t| (t - want).abs() < 1e-9),
+            "{full:?} want {want} low {low} s {s}"
+        );
+        // Only its own lower tooth (legs and tip): one step further.
+        let lower_tip = low + 0.6;
+        assert!(lower_tip + 0.5 < want);
+        let own = vec![road(
+            &[
+                [c - 0.5 * s, low],
+                [c - 0.5 * s, lower_tip],
+                [c + 0.5 * s, lower_tip],
+                [c + 0.5 * s, low],
+            ],
+            z - 0.2,
+            DepositionKind::SparseFill,
+        )];
+        let grown = tip(&own).unwrap();
+        assert!(
+            (grown - (lower_tip + ROOF_STEP_WIDTHS * w)).abs() < 0.02,
+            "{grown}"
+        );
+        // Nothing below: one spacing, carried by its own wall.
+        assert!((tip(&[]).unwrap() - (low + s)).abs() < 1e-9);
     }
 }
