@@ -525,7 +525,8 @@ impl Workbench {
             {
                 use spiling_contracts::manufacturing::PreflightEvidence;
                 ui.add_space(6.0);
-                ui.colored_label(ui.visuals().error_fg_color, "Can't slice");
+                // Findings, not a gate: Slice still asks the engine to compile.
+                ui.colored_label(ui.visuals().warn_fg_color, "Setup issues");
                 let mut placement = false;
                 for check in preflight.checks.iter().filter(|c| {
                     matches!(

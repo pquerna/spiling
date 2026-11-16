@@ -51,44 +51,12 @@ pub(super) struct PrintSettingsUi {
     printed_size: Option<(spiling_contracts::geometry::SourceHash, Option<[f64; 3]>)>,
 }
 
-/// A configured machine's plate: the one installed on it, else its one
-/// compatible plate. Several or none need the hardware sheet.
+/// A configured machine's default plate and face (the shared contracts rule).
 pub(super) fn machine_plate(
     hardware: &HardwareLibrary,
     machine: &str,
 ) -> Result<(String, String), String> {
-    let m = hardware
-        .machines
-        .iter()
-        .find(|m| m.id == machine)
-        .ok_or("machine is no longer in My hardware")?;
-    let setup = m.configured_setup()?;
-    let compatible: Vec<_> = hardware
-        .plates
-        .iter()
-        .filter(|p| {
-            p.definition.mounting_interface == setup.model.mounting_interface
-                && p.installed_machine
-                    .as_deref()
-                    .is_none_or(|id| id == machine)
-        })
-        .collect();
-    let installed: Vec<_> = compatible
-        .iter()
-        .filter(|p| p.installed_machine.as_deref() == Some(machine))
-        .collect();
-    let plate = match (installed.as_slice(), compatible.as_slice()) {
-        ([one], _) => **one,
-        ([], [one]) => *one,
-        ([], []) => return Err("No compatible plate in My hardware".into()),
-        _ => return Err("Several compatible plates: choose one in Choose hardware".into()),
-    };
-    let face = plate
-        .definition
-        .faces
-        .first()
-        .ok_or("The plate declares no face")?;
-    Ok((plate.id.clone(), face.key.clone()))
+    hardware.default_plate_face(machine)
 }
 
 /// The choice a current intent was created from, where it names one.
@@ -247,9 +215,11 @@ impl Workbench {
                     .selected_text(printer_text)
                     .show_ui(ui, |ui| {
                         if let Some(catalog) = &catalog {
-                            for s in catalog.setups.iter().filter(|s| {
-                                matches!(s.printer.workflow, JobWorkflow::CompleteMarlin { .. })
-                            }) {
+                            for s in catalog
+                                .setups
+                                .iter()
+                                .filter(|s| s.offers_default_settings())
+                            {
                                 ui.selectable_value(
                                     &mut self.print_settings.printer,
                                     Some(PrinterKey::Shipped { id: s.id.clone() }),
@@ -353,26 +323,34 @@ impl Workbench {
                 });
                 ui.end_row();
                 ui.label(egui::RichText::new("Supports").color(tokens.muted));
-                let supports = self.print_settings.supports.get_or_insert(true);
+                // The shared default (as the CLI): Auto where the printer
+                // generates supports, else Off; Auto is not offered there.
+                let capable = self
+                    .print_settings_printer()
+                    .is_none_or(|s| s.printer.capabilities.generated_supports);
+                let default_auto = self.print_settings_printer().is_none_or(|s| {
+                    SupportChoice::default_for(&s.printer) == SupportChoice::Automatic
+                });
+                let supports = self.print_settings.supports.get_or_insert(default_auto);
+                if !capable {
+                    *supports = false;
+                }
                 ui.horizontal(|ui| {
-                    ui.selectable_value(supports, true, "Auto");
+                    ui.add_enabled_ui(capable, |ui| {
+                        ui.selectable_value(supports, true, "Auto")
+                            .on_disabled_hover_text("This printer has no generated supports");
+                    });
                     ui.selectable_value(supports, false, "Off");
                 });
                 ui.end_row();
             });
         let setup = self.print_settings_printer().cloned();
-        if let Some(setup) = &setup {
-            if let (Some(PrinterKey::Machine { id }), Some(p)) =
+        if setup.is_some()
+            && let (Some(PrinterKey::Machine { id }), Some(p)) =
                 (&self.print_settings.printer, &personal)
-                && let Err(reason) = machine_plate(&p.hardware, id)
-            {
-                problem = Some(reason);
-            }
-            if self.print_settings.supports == Some(true)
-                && !setup.printer.capabilities.generated_supports
-            {
-                problem = Some("This printer has no generated supports: choose Off".into());
-            }
+            && let Err(reason) = machine_plate(&p.hardware, id)
+        {
+            problem = Some(reason);
         }
         let material = match &self.print_settings.material {
             Some(MaterialKey::Generic { family }) => Some(DefaultMaterialChoice::Generic {

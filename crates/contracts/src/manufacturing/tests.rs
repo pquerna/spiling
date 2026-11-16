@@ -5083,3 +5083,15 @@ fn envelope_admits_extents_within_one_motion_step() {
         "beyond one step is outside"
     );
 }
+
+#[test]
+fn support_default_follows_the_printer_capability() {
+    let mut printer = intent().printer;
+    printer.capabilities.generated_supports = true;
+    assert_eq!(
+        SupportChoice::default_for(&printer),
+        SupportChoice::Automatic
+    );
+    printer.capabilities.generated_supports = false;
+    assert_eq!(SupportChoice::default_for(&printer), SupportChoice::Off);
+}

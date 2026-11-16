@@ -319,14 +319,10 @@ impl Action {
             Self::Preflight if m.intent.is_none() => {
                 Some("Apply a complete manufacturing intent first")
             }
-            Self::Compile
-                if !m.preflight.as_ref().is_some_and(|p| {
-                    p.input_revision == project.revision
-                        && p.disposition
-                            == spiling_contracts::manufacturing::PreflightDisposition::Admitted
-                }) =>
-            {
-                Some("Preflight must admit the current revision first")
+            // The engine's Compile runs its own admission and refuses what it
+            // cannot make; the client adds no preflight gate (same as the CLI).
+            Self::Compile if m.intent.is_none() => {
+                Some("Apply a complete manufacturing intent first")
             }
             Self::Verify if m.artifact.is_none() => Some("Compile a manufacturing artifact first"),
             Self::Export

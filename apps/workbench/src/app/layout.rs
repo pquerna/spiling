@@ -20,15 +20,7 @@ impl Default for LayoutUi {
     fn default() -> Self {
         Self {
             open: false,
-            request: LayoutRequest {
-                objective: LayoutObjective::Copies,
-                template: None,
-                quantity: 2,
-                use_additional_plates: false,
-                pinned: vec![],
-                spacing_mm: 3.0,
-                style: LayoutStyle::Balanced,
-            },
+            request: LayoutRequest::new(LayoutObjective::Copies, None, 2),
             project: None,
             focus: None,
             preview: None,

@@ -73,6 +73,17 @@ pub enum SupportChoice {
     Automatic,
     Off,
 }
+impl SupportChoice {
+    /// The default for a printer, shared by every client: Automatic where it
+    /// declares generated supports, otherwise Off.
+    pub fn default_for(printer: &super::PrinterSpecification) -> Self {
+        if printer.capabilities.generated_supports {
+            Self::Automatic
+        } else {
+            Self::Off
+        }
+    }
+}
 
 /// Where the material profile comes from.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

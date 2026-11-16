@@ -31,7 +31,22 @@ pub struct LayoutRequest {
     pub spacing_mm: f64,
     pub style: LayoutStyle,
 }
+/// Default spacing between laid-out parts, shared by every client.
+pub const DEFAULT_LAYOUT_SPACING_MM: f64 = 3.0;
 impl LayoutRequest {
+    /// The one default request for an objective, used by the CLI and the
+    /// workbench alike: balanced style, default spacing, no pins.
+    pub fn new(objective: LayoutObjective, template: Option<OccurrenceId>, quantity: u32) -> Self {
+        Self {
+            objective,
+            template,
+            quantity,
+            use_additional_plates: false,
+            pinned: vec![],
+            spacing_mm: DEFAULT_LAYOUT_SPACING_MM,
+            style: LayoutStyle::Balanced,
+        }
+    }
     pub fn validate(&self) -> Result<(), GeometryError> {
         if (self.use_additional_plates && self.objective != LayoutObjective::Copies)
             || self.quantity == 0
@@ -227,5 +242,23 @@ impl LayoutProposal {
             b.validate()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+    #[test]
+    fn every_client_gets_the_same_layout_defaults() {
+        for objective in [LayoutObjective::Copies, LayoutObjective::Fill] {
+            let request = LayoutRequest::new(objective, Some(OccurrenceId::new(1).unwrap()), 4);
+            assert_eq!(request.style, LayoutStyle::Balanced);
+            assert_eq!(request.spacing_mm, DEFAULT_LAYOUT_SPACING_MM);
+            assert!(request.pinned.is_empty() && !request.use_additional_plates);
+            request.validate().unwrap();
+        }
+        LayoutRequest::new(LayoutObjective::Arrange, None, 1)
+            .validate()
+            .unwrap();
     }
 }

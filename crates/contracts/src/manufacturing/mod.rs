@@ -1651,7 +1651,7 @@ impl ManufacturingIntent {
         ) && !(0.0 < self.recipe.infill_fraction && self.recipe.infill_fraction < 1.0)
         {
             return Err(invalid(
-                "web + roof requires a base web fraction strictly between zero and one",
+                "Cathedral infill needs a density above 0% and below 100%",
             ));
         }
         if let Some(hardware) = &self.hardware {

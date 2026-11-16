@@ -127,8 +127,12 @@ physical bond qualification.
 
 Workspace switching hides and retains drafts. One **Slice** runs the existing
 operations in order (create print settings when the choice changed, preflight,
-compile, fresh inspection) and opens Review; it stops at the first refusal, whose
-plain reason and fix (such as Arrange on bed) stay in place. Slice refuses unapplied
+compile, fresh inspection) and opens Review. The setup check is shown for its
+findings (with fixes such as Arrange on bed) but is not a client gate: the engine's
+Compile decides, exactly as for the CLI, and Slice stops only at an engine refusal.
+Print settings offer the setups that support one-step settings and default
+Supports to Auto only where the printer generates supports, the same shared rules
+the CLI uses. Slice refuses unapplied
 changes. Prepare and Review offer the same Slice; a reopened project whose saved
 output is still current needs only the fresh inspection. Creating print settings
 then calls the engine's `PlaceOnBed`, the same rule as the CLI's `--place-all-on-bed`:

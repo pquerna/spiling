@@ -26,12 +26,9 @@ pub(super) fn prepared(value: &ManufacturingIntent) -> Result<ManufacturingInten
     Ok(result)
 }
 
+/// Selecting a pattern never changes the density; the engine refuses a
+/// combination it cannot make (the same refusal the CLI gets).
 fn select_infill(recipe: &mut PlanarPrintRecipe, policy: SparseInfillPolicy) {
-    if matches!(policy, SparseInfillPolicy::WebRoof { .. })
-        && !(0.0 < recipe.infill_fraction && recipe.infill_fraction < 1.0)
-    {
-        recipe.infill_fraction = 0.08;
-    }
     recipe.sparse_infill = policy;
 }
 
@@ -278,7 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cathedral_selection_retains_authored_density_and_uses_a_sparse_start_when_needed() {
+    fn cathedral_selection_never_changes_density_and_out_of_range_is_refused() {
         let mut original: ManufacturingIntent = serde_json::from_str(include_str!(
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"
         ))
@@ -289,12 +286,17 @@ mod tests {
             requested.recipe.infill_fraction = fraction;
             let mut expected = requested.clone();
             expected.recipe.sparse_infill = SparseInfillPolicy::web_roof();
-            if fraction == 0.0 || fraction == 1.0 {
-                expected.recipe.infill_fraction = 0.08;
-            }
             select_infill(&mut requested.recipe, SparseInfillPolicy::web_roof());
             assert_eq!(requested, expected);
-            prepared(&requested).unwrap();
+            if fraction == 0.0 || fraction == 1.0 {
+                let refusal = prepared(&requested).unwrap_err();
+                assert!(
+                    refusal.contains("Cathedral infill needs a density"),
+                    "{refusal}"
+                );
+            } else {
+                prepared(&requested).unwrap();
+            }
             select_infill(&mut requested.recipe, SparseInfillPolicy::Grid);
             assert_eq!(
                 requested.recipe.infill_fraction,

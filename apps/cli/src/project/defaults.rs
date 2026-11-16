@@ -96,47 +96,18 @@ pub(super) async fn resolve_printer(client: &EngineClient, query: &str) -> Resul
         }
     };
     let setup = machine.configured_setup()?;
-    let plates: Vec<_> = personal
+    // The same default as the workbench; several plates need the local choice.
+    let (plate_id, face) = personal
         .hardware
-        .plates
-        .iter()
-        .filter(|p| {
-            p.definition.mounting_interface == setup.model.mounting_interface
-                && p.installed_machine
-                    .as_deref()
-                    .is_none_or(|id| id == machine.id)
-        })
-        .collect();
-    let installed: Vec<_> = plates
-        .iter()
-        .filter(|p| p.installed_machine.as_deref() == Some(machine.id.as_str()))
-        .collect();
-    let plate = match (installed.as_slice(), plates.as_slice()) {
-        ([one], _) => **one,
-        ([], [one]) => *one,
-        ([], []) => {
-            return Err(format!(
-                "machine {:?} has no compatible plate in My hardware",
-                machine.nickname
-            )
-            .into());
-        }
-        _ => {
-            return Err(format!(
-                "machine {:?} has several compatible plates; use --hardware-local MACHINE PLATE FACE",
-                machine.nickname
-            )
-            .into());
-        }
-    };
-    let face = plate
-        .definition
-        .faces
-        .first()
-        .ok_or("the plate declares no face")?
-        .key
-        .clone();
-    let capture = personal.hardware.capture(&machine.id, &plate.id, &face)?;
+        .default_plate_face(&machine.id)
+        .map_err(|e| {
+            if e.contains("several compatible plates") {
+                format!("{e} with --hardware-local MACHINE PLATE FACE")
+            } else {
+                e
+            }
+        })?;
+    let capture = personal.hardware.capture(&machine.id, &plate_id, &face)?;
     let report = serde_json::json!({
         "source": "my_hardware",
         "query": query,
@@ -144,13 +115,13 @@ pub(super) async fn resolve_printer(client: &EngineClient, query: &str) -> Resul
         "nickname": machine.nickname,
         "setup_id": setup.id,
         "label": setup.label,
-        "plate": plate.id,
+        "plate": plate_id,
         "face": face,
         "output": emission(&capture),
     });
     Ok(Printer {
         capture,
-        binding: Some((machine.id.clone(), plate.id.clone(), machine.generation)),
+        binding: Some((machine.id.clone(), plate_id.clone(), machine.generation)),
         report,
     })
 }

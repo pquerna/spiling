@@ -161,7 +161,8 @@ enum Operation {
     /// A shipped setup or My hardware machine by name.
     Printer(String),
     /// Default intent from the project printer; quality/supports are filled after parsing.
-    Defaults(String, QualityPreset, SupportChoice),
+    /// Supports `None` uses the chosen printer's default (shared rule).
+    Defaults(String, QualityPreset, Option<SupportChoice>),
     ListPrinters,
     ListMaterials,
     LocalHardware(String, String, String),
@@ -305,6 +306,7 @@ pub fn parse(
     let mut read_only = mode == "inspect";
     let mut operations = Vec::new();
     let mut import_options = ModelImportOptions::default();
+    let mut layout_style = LayoutStyle::Balanced;
     let mut plane = None;
     let mut output = None;
     let mut manufacturing_output = None;
@@ -323,7 +325,7 @@ pub fn parse(
             Some("--material") => operations.push(Operation::Defaults(
                 text(&mut args, "--material FAMILY_OR_FILAMENT")?,
                 QualityPreset::Standard,
-                SupportChoice::Automatic,
+                None,
             )),
             Some("--quality") => set_once(
                 &mut quality,
@@ -867,27 +869,31 @@ pub fn parse(
                 } else {
                     1
                 };
-                let request = LayoutRequest {
-                    objective: if arg == "--arrange" {
-                        LayoutObjective::Arrange
-                    } else if arg == "--make-copies" || arg == "--make-copies-across-plates" {
-                        LayoutObjective::Copies
-                    } else {
-                        LayoutObjective::Fill
-                    },
-                    template,
-                    quantity,
-                    use_additional_plates: arg == "--make-copies-across-plates",
-                    pinned: vec![],
-                    spacing_mm: 3.0,
-                    style: if arg == "--fill-plate" {
-                        LayoutStyle::Dense
-                    } else {
-                        LayoutStyle::Balanced
-                    },
+                let objective = if arg == "--arrange" {
+                    LayoutObjective::Arrange
+                } else if arg == "--make-copies" || arg == "--make-copies-across-plates" {
+                    LayoutObjective::Copies
+                } else {
+                    LayoutObjective::Fill
                 };
+                // The same defaults as the workbench; --layout-style overrides.
+                let mut request = LayoutRequest::new(objective, template, quantity);
+                request.use_additional_plates = arg == "--make-copies-across-plates";
+                request.style = layout_style;
                 request.validate()?;
                 operations.push(Operation::PrepareLayout(request));
+            }
+            Some("--layout-style") => {
+                layout_style = match text(&mut args, "--layout-style")?.as_str() {
+                    "balanced" => LayoutStyle::Balanced,
+                    "dense" => LayoutStyle::Dense,
+                    other => {
+                        return Err(format!(
+                            "--layout-style must be balanced or dense, not {other}"
+                        )
+                        .into());
+                    }
+                };
             }
             Some("--apply-layout") => operations.push(Operation::ApplyLayout),
             Some("--place-all-on-bed" | "--center-all-on-bed") => {
@@ -981,7 +987,7 @@ pub fn parse(
         if let Operation::Defaults(_, q, s) = operation {
             defaults_ops += 1;
             *q = quality.unwrap_or(QualityPreset::Standard);
-            *s = supports.unwrap_or(SupportChoice::Automatic);
+            *s = supports;
         }
     }
     if defaults_ops == 0 && (quality.is_some() || supports.is_some()) {
@@ -1485,6 +1491,10 @@ async fn execute(
     )> = None;
     let mut stock_saved = None;
     let mut stock_evidence = Vec::new();
+    let defaults_requested = workflow
+        .operations
+        .iter()
+        .any(|operation| matches!(operation, Operation::Defaults(..)));
     for operation in workflow.operations {
         let operation_started = std::time::Instant::now();
         let current_layout = info(client).await?.layout_id;
@@ -2621,6 +2631,14 @@ async fn execute(
             Operation::Printer(query) => {
                 label = "printer";
                 let printer = defaults::resolve_printer(client, &query).await?;
+                // Refuse before changing the project's printer, as the
+                // workbench never offers one-step settings for these setups.
+                if defaults_requested && !printer.capture.setup.offers_default_settings() {
+                    return Err(format!(
+                        "{query:?} cannot get default print settings (not a complete single-tool Marlin setup); use --intent"
+                    )
+                    .into());
+                }
                 let project = info(client).await?;
                 hardware_selection = printer
                     .binding
@@ -2631,6 +2649,17 @@ async fn execute(
             }
             Operation::Defaults(material, quality, supports) => {
                 label = "defaults";
+                // Unspecified supports follow the printer, as in the workbench.
+                let supports = match supports {
+                    Some(choice) => choice,
+                    None => info(client)
+                        .await?
+                        .hardware
+                        .as_ref()
+                        .map_or(SupportChoice::Automatic, |h| {
+                            SupportChoice::default_for(&h.setup.printer)
+                        }),
+                };
                 history.push(
                     defaults::create(client, &current_layout, &material, quality, supports).await?,
                 );
@@ -3384,11 +3413,39 @@ mod tests {
             [
                 Operation::Import(..),
                 Operation::Printer(p),
-                Operation::Defaults(m, QualityPreset::Fine, SupportChoice::Off),
+                Operation::Defaults(m, QualityPreset::Fine, Some(SupportChoice::Off)),
                 Operation::Compile,
                 Operation::Save(_),
             ] if p == "mk4s" && m == "petg"
         ));
+        for (args, style) in [
+            (
+                &["create", "p.spil", "--fill-plate", "1", "5"][..],
+                LayoutStyle::Balanced,
+            ),
+            (
+                &[
+                    "create",
+                    "p.spil",
+                    "--layout-style",
+                    "dense",
+                    "--fill-plate",
+                    "1",
+                    "5",
+                ][..],
+                LayoutStyle::Dense,
+            ),
+        ] {
+            let Command::Project { workflow, .. } = parse_args(args).unwrap().unwrap().command
+            else {
+                panic!("project expected")
+            };
+            assert!(matches!(
+                &workflow.operations[0],
+                Operation::PrepareLayout(request) if request.style == style
+            ));
+        }
+        assert!(parse_args(&["create", "p.spil", "--layout-style", "packed"]).is_err());
         let options = parse_args(&["create", "p.spil", "--material", "pla"])
             .unwrap()
             .unwrap();
@@ -3397,7 +3454,7 @@ mod tests {
         };
         assert!(matches!(
             workflow.operations[0],
-            Operation::Defaults(_, QualityPreset::Standard, SupportChoice::Automatic)
+            Operation::Defaults(_, QualityPreset::Standard, None)
         ));
         for bad in [
             &["create", "p.spil", "--quality", "fine"][..],

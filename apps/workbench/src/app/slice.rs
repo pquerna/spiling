@@ -7,7 +7,6 @@
 //! failure and leaves its explanation where that step reports it.
 
 use super::*;
-use spiling_contracts::manufacturing::PreflightDisposition;
 use spiling_contracts::project::ProjectRevision;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,14 +87,10 @@ impl Workbench {
             // Edits retire the artifact, so a present one is the current output.
             Some(Step::Verify)
         } else {
+            // The setup check is shown for its report; the engine's Compile
+            // decides whether the plate can be made, as in the CLI.
             match m.preflight.as_ref() {
-                Some(p) if p.input_revision == project.revision => {
-                    if p.disposition == PreflightDisposition::Admitted {
-                        Some(Step::Compile)
-                    } else {
-                        None
-                    }
-                }
+                Some(p) if p.input_revision == project.revision => Some(Step::Compile),
                 _ => Some(Step::Preflight),
             }
         };

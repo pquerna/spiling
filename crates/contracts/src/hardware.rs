@@ -217,6 +217,16 @@ pub struct ProjectHardwareCapture {
     pub face: String,
     pub accessories: Vec<AccessoryDefinition>,
 }
+impl HardwareSetupDefinition {
+    /// Whether default print settings can be created for this setup (both
+    /// clients offer and accept exactly these for one-step settings).
+    pub fn offers_default_settings(&self) -> bool {
+        matches!(
+            self.printer.workflow,
+            crate::manufacturing::JobWorkflow::CompleteMarlin { .. }
+        )
+    }
+}
 impl ProjectHardwareCapture {
     pub fn validate(&self) -> Result<(), String> {
         self.setup.validate()?;
@@ -619,6 +629,53 @@ pub struct HardwareLibrary {
     pub bindings: Vec<LocalProjectHardwareBinding>,
 }
 impl HardwareLibrary {
+    /// The plate and face a configured machine prints on by default: the one
+    /// plate installed on it, else its one compatible plate, and that plate's
+    /// first face. Every client uses this; several or none need a choice.
+    pub fn default_plate_face(&self, machine: &str) -> Result<(String, String), String> {
+        let m = self
+            .machines
+            .iter()
+            .find(|m| m.id == machine)
+            .ok_or("the machine is no longer in My hardware")?;
+        let setup = m.configured_setup()?;
+        let compatible: Vec<_> = self
+            .plates
+            .iter()
+            .filter(|p| {
+                p.definition.mounting_interface == setup.model.mounting_interface
+                    && p.installed_machine
+                        .as_deref()
+                        .is_none_or(|id| id == machine)
+            })
+            .collect();
+        let installed: Vec<_> = compatible
+            .iter()
+            .filter(|p| p.installed_machine.as_deref() == Some(machine))
+            .collect();
+        let plate = match (installed.as_slice(), compatible.as_slice()) {
+            ([one], _) => **one,
+            ([], [one]) => *one,
+            ([], []) => {
+                return Err(format!(
+                    "machine {:?} has no compatible plate in My hardware",
+                    m.nickname
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "machine {:?} has several compatible plates; choose one",
+                    m.nickname
+                ));
+            }
+        };
+        let face = plate
+            .definition
+            .faces
+            .first()
+            .ok_or("the plate declares no face")?;
+        Ok((plate.id.clone(), face.key.clone()))
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.machines.len() > 32
             || self.plates.len() > 64
