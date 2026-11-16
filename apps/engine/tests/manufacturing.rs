@@ -3318,3 +3318,120 @@ async fn one_step_defaults_need_a_printer_then_create_record_and_compile() {
     );
     client.shutdown().await.unwrap();
 }
+
+async fn scene_occurrences(client: &mut EngineClient) -> Vec<OccurrenceRecord> {
+    let captured = scene(client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: captured.session_id.clone(),
+            revision: captured.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("scene occurrences")
+    };
+    occurrences
+}
+
+#[tokio::test]
+async fn place_on_bed_moves_the_whole_scene_as_one_undo_step() {
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    let first = scene_occurrences(&mut client).await.remove(0);
+    let added = scene(&mut client).await;
+    assert!(matches!(
+        client
+            .geometry(GeometryCommand::AddInstance {
+                session_id: added.session_id.clone(),
+                base_revision: added.revision,
+                definition_id: first.definition_id.clone(),
+                pose: RigidPoseMm::IDENTITY,
+            })
+            .await
+            .unwrap(),
+        GeometryResponse::SceneChanged { .. }
+    ));
+    set_intent(&mut client, intent()).await;
+    // Both parts off the bed and floating, at different heights.
+    for (index, occurrence) in scene_occurrences(&mut client).await.iter().enumerate() {
+        let captured = scene(&mut client).await;
+        let revision = status(&mut client).await.0.revision;
+        let mut pose = occurrence.pose;
+        pose.translation_mm = [
+            -400.0 + 30.0 * index as f64,
+            700.0,
+            25.0 + 5.0 * index as f64,
+        ];
+        assert!(matches!(
+            client
+                .geometry(GeometryCommand::SetInstancePose {
+                    session_id: captured.session_id,
+                    base_revision: captured.revision,
+                    project_revision: revision,
+                    occurrence_id: occurrence.occurrence_id,
+                    pose,
+                })
+                .await
+                .unwrap(),
+            GeometryResponse::SceneChanged { .. }
+        ));
+    }
+    let before = scene_occurrences(&mut client).await;
+    let captured = scene(&mut client).await;
+    let revision = status(&mut client).await.0.revision;
+    let (summary, placement) = client
+        .place_on_bed(&captured, revision, false)
+        .await
+        .unwrap();
+    assert_eq!(placement.outcome, BedGroupOutcome::Centred);
+    assert!(summary.revision > captured.revision);
+    assert!(
+        intent()
+            .printer
+            .envelope_admits(&placement.placed_bounds_mm)
+    );
+    let after = scene_occurrences(&mut client).await;
+    assert_eq!(after.len(), 2);
+    for (moved, original) in after.iter().zip(&before) {
+        assert_ne!(moved.pose, original.pose);
+        assert_eq!(moved.pose.rotation_xyzw, original.pose.rotation_xyzw);
+    }
+    // A rigid group: relative offsets are kept.
+    for axis in 0..3 {
+        assert!(
+            ((after[1].pose.translation_mm[axis] - after[0].pose.translation_mm[axis])
+                - (before[1].pose.translation_mm[axis] - before[0].pose.translation_mm[axis]))
+                .abs()
+                < 1e-9
+        );
+    }
+    // Placing again changes nothing.
+    let captured = scene(&mut client).await;
+    let revision = status(&mut client).await.0.revision;
+    let (again, placement) = client
+        .place_on_bed(&captured, revision, false)
+        .await
+        .unwrap();
+    assert_eq!(placement.outcome, BedGroupOutcome::Unchanged);
+    assert_eq!(again.revision, captured.revision);
+    // One undo restores every pose.
+    let s = scene(&mut client).await;
+    let undone = client
+        .project(ProjectCommand::Undo {
+            session_id: s.session_id,
+            base_revision: s.revision,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(undone, ProjectResponse::SceneChanged { .. }),
+        "{undone:?}"
+    );
+    assert_eq!(scene_occurrences(&mut client).await, before);
+    client.shutdown().await.unwrap();
+}

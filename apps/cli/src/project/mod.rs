@@ -3122,102 +3122,19 @@ async fn execute(
                 } else {
                     "place_all_on_bed"
                 };
+                // One engine rule for both clients: rest the scene as a group,
+                // keep XY when admitted there, else centre on the usable region.
                 let summary = geometry::scene(client, &session).await?;
-                let (_, occurrences) = geometry::records(client, &summary).await?;
-                if occurrences.is_empty() {
-                    return Err("group bed preparation requires at least one occurrence".into());
-                }
-                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone(), layout_id: current_layout.clone() }).await? {
-                    ManufacturingResponse::Status { intent: Some(intent), info, .. } => (intent, info.revision),
-                    ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
-                    ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
-                    _ => return Err("unexpected manufacturing status response".into()),
-                };
-                let envelope = intent.printer.build_envelope;
-                // The engine certifies each member's native material brackets;
-                // a wide XY envelope at the real bed height only gathers them.
-                let wide = AabbMm {
-                    min: [-1.0e5, -1.0e5, envelope.min[2]],
-                    max: [1.0e5, 1.0e5, 1.0e5],
-                };
-                let mut lower = [f64::INFINITY; 3];
-                let mut upper = [f64::NEG_INFINITY; 3];
-                let mut lift = f64::NEG_INFINITY;
-                for occurrence in &occurrences {
-                    let preparation = client
-                        .prepare_bed_pose(
-                            &summary,
-                            project_revision,
-                            occurrence,
-                            wide,
-                            false,
-                            intent.printer.motion_resolution.z_mm,
-                        )
-                        .await?;
-                    for axis in 0..3 {
-                        lower[axis] = lower[axis].min(preparation.minimum_lower_mm[axis]);
-                        upper[axis] = upper[axis].max(preparation.maximum_upper_mm[axis]);
-                    }
-                    lift = lift.max(
-                        preparation.pose.translation_mm[2]
-                            - preparation.original_pose.translation_mm[2],
-                    );
-                }
-                let placed = |delta: [f64; 3]| AabbMm {
-                    min: std::array::from_fn(|axis| lower[axis] + delta[axis]),
-                    max: std::array::from_fn(|axis| upper[axis] + delta[axis]),
-                };
-                let mut delta = [0.0, 0.0, lift];
-                // Place rests the group where it is when preflight would admit
-                // it there; a group off the bed (or its usable region) is
-                // centred on the usable region, as in the workbench.
-                let on_bed = |placed: &AabbMm| {
-                    intent.printer.envelope_admits(placed)
-                        && intent
-                            .hardware
-                            .as_ref()
-                            .is_none_or(|h| h.admits_bounds(placed).is_ok())
-                };
-                if center || !on_bed(&placed(delta)) {
-                    let target = match &intent.hardware {
-                        Some(hardware) => hardware.usable_center_xy()?,
-                        None => std::array::from_fn(|axis| {
-                            (envelope.min[axis] + envelope.max[axis]) * 0.5
-                        }),
-                    };
-                    for axis in 0..2 {
-                        delta[axis] = target[axis] - (lower[axis] + upper[axis]) * 0.5;
-                    }
-                }
-                if !intent.printer.envelope_admits(&placed(delta)) {
+                let project_revision = info(client).await?.revision;
+                let (_, placement) = client
+                    .place_on_bed(&summary, project_revision, center)
+                    .await?;
+                if placement.outcome == BedGroupOutcome::DoesNotFit {
                     return Err(BuildEnvelopeExceeded {
-                        placed_bounds_mm: placed(delta),
-                        build_envelope: envelope,
+                        placed_bounds_mm: placement.placed_bounds_mm,
+                        build_envelope: placement.build_envelope_mm,
                     }
                     .into());
-                }
-                let mut base = summary.revision;
-                for occurrence in &occurrences {
-                    let mut pose = occurrence.pose;
-                    for (translation, step) in pose.translation_mm.iter_mut().zip(delta) {
-                        *translation += step;
-                    }
-                    let project_revision = info(client).await?.revision;
-                    let response = geometry::control(
-                        client,
-                        GeometryCommand::SetInstancePose {
-                            session_id: session.clone(),
-                            base_revision: base,
-                            project_revision,
-                            occurrence_id: occurrence.occurrence_id,
-                            pose,
-                        },
-                    )
-                    .await?;
-                    let GeometryResponse::SceneChanged { summary } = response else {
-                        return Err("unexpected group bed preparation pose response".into());
-                    };
-                    base = summary.revision;
                 }
             }
             Operation::Remove(occurrence_id) => {

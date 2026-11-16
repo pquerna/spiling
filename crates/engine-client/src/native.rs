@@ -9,8 +9,8 @@ use spiling_contracts::{
     ArtifactView, MAX_CONTROL_BYTES,
     display::{validate_mesh_chunk, validate_section_chunk, validate_section_summary},
     geometry::{
-        AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
-        GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
+        AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedGroupPlacement, BedPosePreparation,
+        GeometryCommand, GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
         MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SceneSummary, SessionId, SourceHash,
     },
     manufacturing::{
@@ -425,6 +425,17 @@ impl EngineRpc {
             GeometryCall::PrepareBedPose(request) => {
                 let operation = client
                     .prepare_bed_pose(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(GeometryResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            GeometryCall::PlaceOnBed(request) => {
+                let operation = client
+                    .place_on_bed(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -928,6 +939,65 @@ impl EngineRpc {
         Ok(preparation)
     }
 
+    /// Rest every scene part on the bed as one group (one undo step), keeping
+    /// XY when the printer admits it there, else centring on the usable
+    /// region. The engine decides; `DoesNotFit` moves nothing.
+    pub async fn place_on_bed(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        center_xy: bool,
+    ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
+        let response = self
+            .geometry(GeometryCommand::PlaceOnBed {
+                session_id: scene.session_id.clone(),
+                base_revision: scene.revision,
+                project_revision,
+                center_xy,
+            })
+            .await?;
+        let GeometryResponse::OperationAccepted { operation } = response else {
+            return Err(ClientError::Protocol(
+                "bed placement operation was not admitted".into(),
+            ));
+        };
+        let name = operation.name.clone();
+        let mut terminal = operation;
+        if !terminal.done {
+            let mut watch = self.watch_operation(name.clone()).await?;
+            loop {
+                let operation = watch.message().await.map_err(rpc_error)?.ok_or_else(|| {
+                    ClientError::Protocol(
+                        "bed placement observation ended before a terminal result".into(),
+                    )
+                })?;
+                if operation.name != name {
+                    return Err(ClientError::Protocol(
+                        "bed placement observation name mismatch".into(),
+                    ));
+                }
+                let operation = self.resolve_operation(operation).await?;
+                terminal =
+                    native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
+                if terminal.done {
+                    break;
+                }
+            }
+        }
+        if let Some(error) = terminal.error {
+            return Err(domain_error(error));
+        }
+        let Some(JobResult::BedPlaced { summary, placement }) = terminal.result else {
+            return Err(ClientError::Protocol("bed placement result missing".into()));
+        };
+        if summary.session_id != scene.session_id {
+            return Err(ClientError::Protocol(
+                "bed placement session mismatch".into(),
+            ));
+        }
+        Ok((summary, placement))
+    }
+
     pub async fn fetch_stock_report(
         &self,
         record: &spiling_contracts::stock::StockMatchRecord,
@@ -1391,6 +1461,16 @@ impl EngineClient {
                 center_xy,
                 contact_tolerance_mm,
             )
+            .await
+    }
+    pub async fn place_on_bed(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        center_xy: bool,
+    ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
+        self.rpc
+            .place_on_bed(scene, project_revision, center_xy)
             .await
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {

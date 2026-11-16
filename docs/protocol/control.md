@@ -74,6 +74,17 @@ List uses bounded keyset pagination with parent-bound opaque tokens and default 
 
 ## Bed placement evidence
 
+`PlaceOnBed { center_xy }` is the one group placement rule both clients use (CLI
+`--place-all-on-bed`/`--center-all-on-bed`, workbench print settings). It is a
+cancellable job that gathers each scene part's `PrepareBedPose` brackets against
+a wide XY envelope at the bed height, rests the scene as one rigid group, keeps
+its XY when `PrinterSpecification::envelope_admits` and the hardware capture's
+`admits_bounds` (one motion step, ADR012) accept it there, and otherwise centres
+it on the selected plate's usable region. Its moves commit as one Core
+`ApplyPlacement` transaction (one undo step) and `BedPlaced` reports
+`Unchanged`, `Rested`, `Centred` or `DoesNotFit` (nothing moved) with the placed
+bounds and envelope. It requires a printer in the manufacturing intent.
+
 `PrepareBedPose` is a read-only source/pose/revision-bound proposal; Core alone
 applies its pose. Required `BedPosePreparation.basis` distinguishes native
 bounded support from the ADR012 tolerant model. Native bounds enclose the native

@@ -410,17 +410,8 @@ impl Actor {
             .hello()
             .session_id
             .clone();
-        // The chosen printer's build volume, for placing the plate's parts.
-        let bed;
         match printer {
-            DefaultPrinter::Current => {
-                bed = self
-                    .state
-                    .manufacturing
-                    .intent
-                    .as_ref()
-                    .map(|i| (i.printer.build_envelope, i.printer.motion_resolution.z_mm));
-            }
+            DefaultPrinter::Current => {}
             DefaultPrinter::Shipped(id) => {
                 let catalog = self
                     .client
@@ -433,10 +424,6 @@ impl Actor {
                     catalog.setups.iter().find(|s| s.id == id).ok_or_else(|| {
                         ClientError::InvalidRequest(format!("no shipped setup {id}"))
                     })?;
-                bed = Some((
-                    setup.printer.build_envelope,
-                    setup.printer.motion_resolution.z_mm,
-                ));
                 let capture = catalog
                     .stock_capture(setup)
                     .map_err(ClientError::InvalidRequest)?;
@@ -465,15 +452,6 @@ impl Actor {
                 plate,
                 face,
             } => {
-                bed = self
-                    .state
-                    .library
-                    .hardware
-                    .personal
-                    .as_ref()
-                    .and_then(|p| p.hardware.machines.iter().find(|m| m.id == machine))
-                    .and_then(|m| m.configured_setup().ok())
-                    .map(|s| (s.printer.build_envelope, s.printer.motion_resolution.z_mm));
                 Box::pin(self.hardware_action(HardwareAction::Select {
                     project: project.clone(),
                     layout_id: layout_id.clone(),
@@ -485,10 +463,6 @@ impl Actor {
                 }))
                 .await?;
             }
-        }
-        if let Some((envelope, contact_tolerance_mm)) = bed {
-            self.place_plate_on_bed(envelope, contact_tolerance_mm)
-                .await?;
         }
         let Some(current) = self.state.project.as_ref().filter(|p| {
             p.project_id == project && p.layout_id == layout_id && p.hardware.is_some()
@@ -502,20 +476,22 @@ impl Actor {
             request,
         };
         self.manufacturing(command).await;
+        if self.state.manufacturing.intent.is_some() {
+            self.place_plate_on_bed().await?;
+        }
         Ok(())
     }
-    /// Rests the plate's parts on the bed and centres them as one group when
-    /// they do not already lie within the build volume on the bed, as a new
-    /// import does. Parts the user already placed on the bed are left alone.
-    async fn place_plate_on_bed(
-        &mut self,
-        envelope: spiling_contracts::geometry::AabbMm,
-        contact_tolerance_mm: f64,
-    ) -> Result<(), ClientError> {
-        let Some(display) = self.state.display.clone() else {
-            return Ok(());
-        };
-        if display.occurrences.is_empty() {
+    /// Rests the plate's parts on the bed through the engine's one placement
+    /// rule, shared with the CLI: kept where the printer admits them, else
+    /// centred on the usable region, as one undo step. A group that does not
+    /// fit is left alone; preflight then reports it with Arrange on bed.
+    async fn place_plate_on_bed(&mut self) -> Result<(), ClientError> {
+        if self
+            .state
+            .display
+            .as_ref()
+            .is_none_or(|display| display.occurrences.is_empty())
+        {
             return Ok(());
         }
         let client = self.client.as_ref().expect("connected client");
@@ -528,99 +504,17 @@ impl Actor {
         else {
             return Err(ClientError::InvalidRequest("unexpected scene reply".into()));
         };
-        if summary.revision != display.summary.revision {
-            // The displayed parts are stale; leave placement to the user.
-            return Ok(());
-        }
-        let Some(project) = self.state.project.clone() else {
-            return Ok(());
+        let ProjectResponse::Status { info } = client
+            .project(ProjectCommand::Get {
+                session_id: session,
+            })
+            .await?
+        else {
+            return Err(ClientError::InvalidRequest(
+                "unexpected project reply".into(),
+            ));
         };
-        // Each part's own resting bounds; a wide XY envelope only gathers them.
-        let wide = spiling_contracts::geometry::AabbMm {
-            min: [-1.0e5, -1.0e5, envelope.min[2]],
-            max: [1.0e5, 1.0e5, 1.0e5],
-        };
-        let mut lower = [f64::INFINITY; 3];
-        let mut upper = [f64::NEG_INFINITY; 3];
-        let mut lift = f64::NEG_INFINITY;
-        for occurrence in &display.occurrences {
-            let p = client
-                .prepare_bed_pose(
-                    &summary,
-                    project.revision,
-                    occurrence,
-                    wide,
-                    false,
-                    contact_tolerance_mm,
-                )
-                .await?;
-            for axis in 0..3 {
-                lower[axis] = lower[axis].min(p.minimum_lower_mm[axis]);
-                upper[axis] = upper[axis].max(p.maximum_upper_mm[axis]);
-            }
-            lift = lift.max(p.pose.translation_mm[2] - p.original_pose.translation_mm[2]);
-        }
-        // The same question preflight asks: within the envelope and the
-        // selected face's usable region, within one motion step (ADR012).
-        let resting = spiling_contracts::geometry::AabbMm {
-            min: [lower[0], lower[1], lower[2] + lift],
-            max: [upper[0], upper[1], upper[2] + lift],
-        };
-        let inside = match &project.hardware {
-            Some(hardware) => hardware.admits_bounds(&resting).is_ok(),
-            None => (0..2).all(|a| {
-                lower[a] >= envelope.min[a] - contact_tolerance_mm
-                    && upper[a] <= envelope.max[a] + contact_tolerance_mm
-            }),
-        };
-        if inside && lift.abs() <= contact_tolerance_mm {
-            return Ok(());
-        }
-        let target = project
-            .hardware
-            .as_ref()
-            .and_then(|hardware| hardware.usable_center_xy().ok())
-            .unwrap_or_else(|| std::array::from_fn(|a| (envelope.min[a] + envelope.max[a]) * 0.5));
-        let mut delta = [0.0, 0.0, lift];
-        for axis in 0..2 {
-            delta[axis] = target[axis] - (lower[axis] + upper[axis]) * 0.5;
-        }
-        let mut base = summary.revision;
-        for occurrence in &display.occurrences {
-            let mut pose = occurrence.pose;
-            for (t, step) in pose.translation_mm.iter_mut().zip(delta) {
-                *t += step;
-            }
-            let ProjectResponse::Status { info } = client
-                .project(ProjectCommand::Get {
-                    session_id: session.clone(),
-                })
-                .await?
-            else {
-                return Err(ClientError::InvalidRequest(
-                    "unexpected project reply".into(),
-                ));
-            };
-            match client
-                .geometry(GeometryCommand::SetInstancePose {
-                    session_id: session.clone(),
-                    base_revision: base,
-                    project_revision: info.revision,
-                    occurrence_id: occurrence.occurrence_id,
-                    pose,
-                })
-                .await?
-            {
-                GeometryResponse::SceneChanged { summary } => base = summary.revision,
-                GeometryResponse::Error { error } => {
-                    return Err(ClientError::InvalidRequest(error.to_string()));
-                }
-                GeometryResponse::ProjectError { error } => {
-                    return Err(ClientError::InvalidRequest(error.to_string()));
-                }
-                _ => return Err(ClientError::InvalidRequest("unexpected pose reply".into())),
-            }
-        }
+        client.place_on_bed(&summary, info.revision, false).await?;
         self.refresh().await
     }
     pub(super) async fn refresh_hardware(&mut self) -> Result<(), ClientError> {

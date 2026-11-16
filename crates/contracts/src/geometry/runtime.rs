@@ -101,6 +101,16 @@ pub enum GeometryCommand {
         project_revision: crate::project::ProjectRevision,
         proposal_id: SourceHash,
     },
+    /// Rests every scene part on the bed as one group (one undo step), and
+    /// centres it on the selected plate's usable region when asked or when
+    /// the printer would not admit it where it is. The one placement rule
+    /// both clients use.
+    PlaceOnBed {
+        session_id: SessionId,
+        base_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+        center_xy: bool,
+    },
     PrepareBedPose {
         session_id: SessionId,
         base_revision: SceneRevision,
@@ -201,6 +211,10 @@ pub enum JobResult {
     },
     BedPosePrepared {
         preparation: BedPosePreparation,
+    },
+    BedPlaced {
+        summary: SceneSummary,
+        placement: BedGroupPlacement,
     },
     ProjectSaved {
         info: crate::project::ProjectInfo,
@@ -369,6 +383,35 @@ pub enum GeometryResponse {
 pub enum BedPoseBasis {
     NativeBounded,
     TolerantModel { join_mm: f64, profile_mm: f64 },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BedGroupOutcome {
+    /// Already resting on the bed where the printer admits it; nothing moved.
+    Unchanged,
+    /// Lowered or raised onto the bed; XY kept.
+    Rested,
+    /// Rested and centred on the selected plate's usable region.
+    Centred,
+    /// Does not fit the build envelope even when centred; nothing moved.
+    DoesNotFit,
+}
+/// Outcome of `PlaceOnBed`: the group's placed bounds (after any move, or as
+/// they would be when centred for `DoesNotFit`) and the envelope used.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BedGroupPlacement {
+    pub outcome: BedGroupOutcome,
+    pub placed_bounds_mm: AabbMm,
+    pub build_envelope_mm: AabbMm,
+}
+impl BedGroupPlacement {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        self.placed_bounds_mm.validate()?;
+        self.build_envelope_mm.validate()?;
+        Ok(())
+    }
 }
 
 /// Read-only placement evidence; applying the pose requires both revisions.

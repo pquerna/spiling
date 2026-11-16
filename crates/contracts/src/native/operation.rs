@@ -562,6 +562,12 @@ pub fn native_operation_view(
                     return Err("native placement capture or outputs mismatch".into());
                 }
             }
+            JobResult::BedPlaced { summary, placement } => {
+                placement.validate().map_err(|error| error.to_string())?;
+                if summary.session_id != session_id || !meta.outputs.is_empty() {
+                    return Err("bed placement capture or outputs mismatch".into());
+                }
+            }
             JobResult::Scene { summary } => {
                 if summary.session_id != session_id {
                     return Err("scene result session mismatch".into());
@@ -848,6 +854,10 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::BedPosePrepared(value) => Self::BedPosePrepared {
                 preparation: value.try_into()?,
             },
+            R::BedPlaced(value) => Self::BedPlaced {
+                summary: required(value.summary, "bed placement summary")?.try_into()?,
+                placement: required(value.placement, "bed placement")?.try_into()?,
+            },
             R::ManufacturingCompiled(v) => {
                 let record: ManufacturingArtifactRecord =
                     required(v.record, "manufacturing record")?.try_into()?;
@@ -1034,6 +1044,10 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::BedPosePrepared { preparation } => {
                 R::BedPosePrepared(preparation.try_into()?)
             }
+            JobResult::BedPlaced { summary, placement } => R::BedPlaced(rpc::BedPlacedResult {
+                summary: Some(summary.try_into()?),
+                placement: Some(placement.try_into()?),
+            }),
             JobResult::ProjectSaved { info } => {
                 if info.save_uncertain {
                     return Err("ProjectSaved requires confirmed publication".into());

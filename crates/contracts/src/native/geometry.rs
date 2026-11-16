@@ -1064,6 +1064,7 @@ pub enum GeometryCall {
     ImportPart(rpc::ImportPartRequest),
     StartSection(rpc::StartSectionRequest),
     PrepareBedPose(rpc::PrepareBedPoseRequest),
+    PlaceOnBed(rpc::PlaceOnBedRequest),
     PrepareLayout(rpc::PrepareLayoutRequest),
 }
 impl TryFrom<rpc::AddInstanceRequest> for GeometryCommand {
@@ -1282,6 +1283,20 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             project_revision: project_revision.0,
             proposal_id: proposal_id.into(),
         }),
+        GeometryCommand::PlaceOnBed {
+            session_id,
+            base_revision,
+            project_revision,
+            center_xy,
+        } => {
+            return Ok(GeometryCall::PlaceOnBed(rpc::PlaceOnBedRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.get(),
+                project_revision: project_revision.0,
+                center_xy,
+            }));
+        }
         GeometryCommand::PrepareBedPose {
             session_id,
             base_revision,
@@ -2049,8 +2064,14 @@ mod tests {
                 offset: 0,
             },
             GeometryCommand::ReleaseArtifact {
-                session_id: session,
+                session_id: session.clone(),
                 artifact_id: artifact,
+            },
+            GeometryCommand::PlaceOnBed {
+                session_id: session,
+                base_revision: SceneRevision(4),
+                project_revision: crate::project::ProjectRevision(9),
+                center_xy: true,
             },
         ];
         let id = SessionId::new();
@@ -2067,6 +2088,10 @@ mod tests {
                 }
                 GeometryCall::PrepareLayout(request) => request.try_into().unwrap(),
                 GeometryCall::PrepareBedPose(request) => {
+                    assert_eq!(request.request_id, id.as_str());
+                    GeometryCommand::try_from(request).unwrap()
+                }
+                GeometryCall::PlaceOnBed(request) => {
                     assert_eq!(request.request_id, id.as_str());
                     GeometryCommand::try_from(request).unwrap()
                 }

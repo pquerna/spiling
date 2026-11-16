@@ -5,6 +5,7 @@
 use super::{JobError, JobId, check_cancel, error, source};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
+use spiling_contracts::hardware::ProjectHardwareCapture;
 use spiling_contracts::{
     display::{EncodedSection, SectionChunkBuilder},
     geometry::*,
@@ -195,6 +196,13 @@ pub enum Work {
         request: super::bed_pose::Request,
         retained_source_bytes: usize,
     },
+    PlaceOnBed {
+        requests: Vec<super::bed_pose::Request>,
+        retained_source_bytes: usize,
+        printer: Box<PrinterSpecification>,
+        hardware: Option<Arc<ProjectHardwareCapture>>,
+        center_xy: bool,
+    },
     PrepareLayout(super::layout::Request),
 }
 /// The single bounded control slot keeps owned work inline, without per-job boxing.
@@ -273,6 +281,10 @@ pub enum Product {
     },
     Preflight(PreflightReport),
     BedPosePrepared(BedPosePreparation),
+    BedPlaced {
+        moves: Vec<LayoutPlacement>,
+        placement: BedGroupPlacement,
+    },
     LayoutPrepared(LayoutProposal),
     Verified {
         record: ManufacturingArtifactRecord,
@@ -685,6 +697,49 @@ fn run(
                 })
                 .map(Product::BedPosePrepared)
                 .map_err(JobError::from),
+            Work::PlaceOnBed {
+                requests,
+                retained_source_bytes,
+                printer,
+                hardware,
+                center_xy,
+            } => (|| {
+                let additional = crate::resources::source_growth(source_retention(
+                    retained_source_bytes,
+                    &definitions,
+                )?)?;
+                let mut members = Vec::with_capacity(requests.len());
+                for request in requests {
+                    let resident = definitions.get(&request.definition_id).ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::StaleRevision,
+                            "native contact definition was reclaimed",
+                        )
+                    })?;
+                    let occurrence_id = request.occurrence_id;
+                    let preparation = super::bed_pose::prepare_with_budget(
+                        &resident.definition,
+                        request,
+                        additional,
+                        &cancel,
+                    )?;
+                    members.push(super::bed_group::Member {
+                        occurrence_id,
+                        pose: preparation.original_pose,
+                        lower_mm: preparation.minimum_lower_mm,
+                        upper_mm: preparation.maximum_upper_mm,
+                        drop_mm: preparation.pose.translation_mm[2]
+                            - preparation.original_pose.translation_mm[2],
+                    });
+                }
+                let decision =
+                    super::bed_group::decide(&members, &printer, hardware.as_deref(), center_xy)?;
+                Ok(Product::BedPlaced {
+                    moves: decision.moves,
+                    placement: decision.placement,
+                })
+            })()
+            .map_err(|error: GeometryError| JobError::from(error)),
             Work::Verify { asset, output } => {
                 inspect_asset(&asset, output, &cancel).and_then(|inspection| {
                     let package = if output.delivery_package() {

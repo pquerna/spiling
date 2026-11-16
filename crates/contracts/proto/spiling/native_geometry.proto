@@ -23,6 +23,9 @@ service Geometry {
   rpc PrepareBedPose(PrepareBedPoseRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
   }
+  rpc PlaceOnBed(PlaceOnBedRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
+  }
 }
 message ImportPartRequest {
   string parent = 1;
@@ -50,6 +53,27 @@ message PrepareBedPoseRequest {
   AabbMm envelope_mm = 8;
   bool center_xy = 9;
   double contact_tolerance_mm = 10;
+}
+// Rests every scene part on the bed as one group and one undo step;
+// centres it on the usable region when asked or when not admitted in place.
+message PlaceOnBedRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+  uint32 project_revision = 4;
+  bool center_xy = 5;
+}
+enum BedGroupOutcome {
+  BED_GROUP_OUTCOME_UNSPECIFIED = 0;
+  BED_GROUP_OUTCOME_UNCHANGED = 1;
+  BED_GROUP_OUTCOME_RESTED = 2;
+  BED_GROUP_OUTCOME_CENTRED = 3;
+  BED_GROUP_OUTCOME_DOES_NOT_FIT = 4;
+}
+message BedGroupPlacement {
+  BedGroupOutcome outcome = 1;
+  AabbMm placed_bounds_mm = 2;
+  AabbMm build_envelope_mm = 3;
 }
 message NativeBedBounds {}
 message TolerantBedBounds { double join_mm = 1; double profile_mm = 2; }

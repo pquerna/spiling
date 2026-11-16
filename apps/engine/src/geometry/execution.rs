@@ -85,6 +85,10 @@ pub(crate) enum JobResult {
     BedPosePrepared {
         preparation: BedPosePreparation,
     },
+    BedPlaced {
+        summary: SceneSummary,
+        placement: BedGroupPlacement,
+    },
     ProjectSaved {
         info: ProjectInfo,
     },

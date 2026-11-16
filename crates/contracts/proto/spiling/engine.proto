@@ -164,7 +164,12 @@ message NativeOperationResult {
     // The complete NativeOperationResult encoding when it does not fit one
     // control frame: an immutable operation output read through ByteStream.
     Artifact staged = 23;
+    BedPlacedResult bed_placed = 24;
   }
+}
+message BedPlacedResult {
+  SceneSummary summary = 1;
+  BedGroupPlacement placement = 2;
 }
 
 // Presentation-only names. No project mutation, material assignment or color calibration.

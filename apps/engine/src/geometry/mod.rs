@@ -4,6 +4,7 @@
 
 mod analysis;
 mod appearance;
+mod bed_group;
 mod bed_pose;
 mod execution;
 mod import_diagnostic;
@@ -129,6 +130,7 @@ enum Purpose {
     },
     Section,
     PrepareBedPose,
+    PlaceOnBed,
     PrepareLayout,
     Open,
     Save,
@@ -206,6 +208,10 @@ enum PublicationKind {
         replay: spiling_manufacturing::EncodedReplayDisplay,
     },
     BedPosePrepared(BedPosePreparation),
+    BedPlaced {
+        edit: Option<(PreparedEdit, SceneRevision)>,
+        placement: BedGroupPlacement,
+    },
     LayoutPrepared(LayoutProposal),
     Verified {
         record: ManufacturingArtifactRecord,
@@ -512,6 +518,7 @@ impl Runtime {
                                 | Purpose::GetSurfaceImage
                                 | Purpose::PrepareLayout
                                 | Purpose::PrepareBedPose
+                                | Purpose::PlaceOnBed
                                 | Purpose::ImportAppearancePalette
                                 | Purpose::CompareAppearance
                                 | Purpose::RunAnalysis { .. }
@@ -880,6 +887,20 @@ impl Runtime {
                         }
                         PublicationKind::BedPosePrepared(preparation) => {
                             Some(JobResult::BedPosePrepared { preparation })
+                        }
+                        PublicationKind::BedPlaced { edit, placement } => {
+                            // One Core transaction (one undo step) for the group.
+                            if let Some((edit, revision)) = edit {
+                                self.project.commit(edit).map_err(|e| {
+                                    format!("core bed placement ACK invariant: {e}")
+                                })?;
+                                self.revision = revision;
+                                self.synchronize_native_pins();
+                            }
+                            Some(JobResult::BedPlaced {
+                                summary: self.summary(),
+                                placement,
+                            })
                         }
                         PublicationKind::Verified {
                             record,
@@ -1253,6 +1274,22 @@ impl Runtime {
                 }
                 Ok(Publication {
                     kind: PublicationKind::LayoutPrepared(proposal),
+                    artifact: None,
+                })
+            }
+            (Purpose::PlaceOnBed, Product::BedPlaced { moves, placement }) => {
+                placement.validate()?;
+                let edit = if moves.is_empty() {
+                    None
+                } else {
+                    let edit = self.project.prepare(Edit::ApplyPlacement {
+                        placements: moves,
+                        additional: vec![],
+                    })?;
+                    Some((edit, self.revision.next()?))
+                };
+                Ok(Publication {
+                    kind: PublicationKind::BedPlaced { edit, placement },
                     artifact: None,
                 })
             }
@@ -1695,6 +1732,74 @@ impl Runtime {
                     self.layout_proposal = None;
                 }
                 Ok(reply)
+            }
+            GeometryCommand::PlaceOnBed {
+                session_id,
+                base_revision,
+                project_revision,
+                center_xy,
+            } => {
+                self.base(&session_id, base_revision)?;
+                if project_revision != self.project.info().revision {
+                    return Err(stale());
+                }
+                if self.active.is_some() {
+                    return Err(busy());
+                }
+                if self.project.info().read_only {
+                    return Ok(Reply::Geometry(GeometryResponse::ProjectError {
+                        error: project_error(ProjectErrorCode::ReadOnly, "project is read-only"),
+                    }));
+                }
+                let snapshot = self.project.snapshot();
+                let intent = snapshot.manufacturing_intent.clone().ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::InvalidGeometry,
+                        "Choose a printer before placing parts on the bed",
+                    )
+                })?;
+                if snapshot.occurrences.is_empty() {
+                    return Err(error(
+                        GeometryErrorCode::InvalidGeometry,
+                        "Add a part before placing parts on the bed",
+                    ));
+                }
+                let envelope = intent.printer.build_envelope;
+                // Each member's own resting brackets: a wide XY envelope at the
+                // real bed height only gathers them; the group rule decides.
+                let wide = AabbMm {
+                    min: [-1.0e5, -1.0e5, envelope.min[2]],
+                    max: [1.0e5, 1.0e5, 1.0e5],
+                };
+                let contact_tolerance_mm = intent.printer.motion_resolution.z_mm;
+                let requests = snapshot
+                    .occurrences
+                    .values()
+                    .map(|occurrence| bed_pose::Request {
+                        session_id: session_id.clone(),
+                        scene_revision: base_revision,
+                        project_revision,
+                        occurrence_id: occurrence.occurrence_id,
+                        definition_id: occurrence.definition_id.clone(),
+                        pose: occurrence.pose,
+                        envelope_mm: wide,
+                        center_xy: false,
+                        contact_tolerance_mm,
+                    })
+                    .collect();
+                let retained_source_bytes = self
+                    .project
+                    .retained_source_bytes()
+                    .map_err(|cause| error(GeometryErrorCode::ResourceLimit, cause.message))?;
+                let printer = Box::new(intent.printer.clone());
+                let hardware = intent.hardware.clone();
+                self.start(Purpose::PlaceOnBed, 0, move |_, _, _| Work::PlaceOnBed {
+                    requests,
+                    retained_source_bytes,
+                    printer,
+                    hardware,
+                    center_xy,
+                })
             }
             GeometryCommand::PrepareBedPose {
                 session_id,
@@ -2881,6 +2986,7 @@ impl Runtime {
             Purpose::Section => "sectioning",
             Purpose::PrepareLayout => "finding_and_verifying_layout",
             Purpose::PrepareBedPose => "preparing_native_bed_pose",
+            Purpose::PlaceOnBed => "placing_parts_on_bed",
             Purpose::Open => "opening",
             Purpose::Save => "saving",
             Purpose::StorageMaintenance => "maintaining_storage",
