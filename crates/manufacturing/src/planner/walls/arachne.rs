@@ -851,7 +851,7 @@ fn cover(
         }
     }
     boolean::charge(work, capsules.len().saturating_mul(64))?;
-    let beads = union_capsules(&capsules, work, cancel)?;
+    let unbeaded = material_outside_capsules(request.material, &capsules, work, cancel)?;
     // Narrower than the narrowest bead is not printable by anything: not the
     // material's tips, and not a sliver left between beads.
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
@@ -862,7 +862,6 @@ fn cover(
         let eroded = offset(region, -reach_radius, work)?;
         offset(&eroded, reach_radius, work)
     };
-    let unbeaded = request.material.difference(&beads);
     let mut fill = open(&unbeaded, work, offset)?;
     // The fill boundary inherits every bead cap's arc vertices; it only
     // clips infill rows, so half the profile tolerance is its precision.
@@ -902,13 +901,21 @@ fn cover(
     Ok(fill)
 }
 
-/// Positive-winding capsule union on the original shared integer frame.
-/// Remove an ear only when its complete triangle lies strictly inside one
-/// current neighbor: the already-clipped predecessor or untouched successor.
-/// Updating the predecessor preserves union coverage inductively; using both
-/// original neighbors would let them discard the same shared material.
-/// The serial overlay avoids nested parallelism inside per-layer planning.
-fn union_capsules(
+/// The material outside every bead: one overlay of the material (subject)
+/// against the capsules (clip) on one shared integer frame, nonzero winding,
+/// so overlapping capsules count once and holes stay holes. The bead union is
+/// never extracted and snapped again into a second frame: that round trip
+/// created near-coincident vertices on which the overlay's contour
+/// extraction did not terminate.
+///
+/// Remove a capsule ear only when its complete triangle lies strictly inside
+/// one current neighbor: the already-clipped predecessor or untouched
+/// successor. Updating the predecessor preserves union coverage inductively;
+/// using both original neighbors would let them discard the same shared
+/// material. The serial overlay avoids nested parallelism inside per-layer
+/// planning.
+fn material_outside_capsules(
+    material: &MultiPolygon<f64>,
     capsules: &[Polygon<f64>],
     work: &mut usize,
     cancel: &AtomicBool,
@@ -919,27 +926,59 @@ fn union_capsules(
     use i_overlay::core::solver::Solver;
     use i_overlay::float::overlay::{FloatOverlay, OverlayOptions};
     use i_overlay::i_float::adapter::FloatPointAdapter;
-    let subject: Vec<Vec<[f64; 2]>> = capsules
+    // Open material rings, exteriors counterclockwise and holes clockwise, so
+    // nonzero winding keeps each hole empty whatever the input orientation.
+    let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+    for polygon in &material.0 {
+        check_cancel(cancel)?;
+        for (index, ring) in std::iter::once(polygon.exterior())
+            .chain(polygon.interiors())
+            .enumerate()
+        {
+            let mut points: Vec<[f64; 2]> = ring.0.iter().map(|c| [c.x, c.y]).collect();
+            if points.len() > 1 && points.first() == points.last() {
+                points.pop();
+            }
+            if points.len() < 3 {
+                continue;
+            }
+            let doubled: f64 = (0..points.len())
+                .map(|i| cross(points[i], points[(i + 1) % points.len()]))
+                .sum();
+            if (doubled > 0.0) != (index == 0) {
+                points.reverse();
+            }
+            rings.push(points);
+        }
+    }
+    let beads: Vec<Vec<[f64; 2]>> = capsules
         .iter()
         .map(|capsule| {
             let ring = &capsule.exterior().0;
             ring[..ring.len() - 1].iter().map(|c| [c.x, c.y]).collect()
         })
         .collect();
+    let material_points: usize = rings.iter().map(Vec::len).sum();
+    boolean::charge(work, material_points)?;
     let serial = Solver {
         multithreading: None,
         ..Solver::AUTO
     };
-    let adapter = FloatPointAdapter::with_iter(subject.iter().flatten());
+    let adapter =
+        FloatPointAdapter::with_iter(rings.iter().flatten().chain(beads.iter().flatten()));
     let mut overlay = FloatOverlay::new_custom(
         adapter.clone(),
         OverlayOptions::default(),
         serial,
-        subject.iter().map(Vec::len).sum(),
+        material_points + beads.iter().map(Vec::len).sum::<usize>(),
     );
+    for ring in &rings {
+        overlay = overlay.unsafe_add_contour(ring, ShapeType::Subject);
+    }
+    drop(rings);
     let mut prior = [IntPoint::ZERO; CAPSULE_POINTS];
     let mut prior_len = 0;
-    for (capsule_index, ring) in subject.iter().enumerate() {
+    for (capsule_index, ring) in beads.iter().enumerate() {
         check_cancel(cancel)?;
         let mut points = [IntPoint::ZERO; CAPSULE_POINTS];
         let mut covered = [0u8; CAPSULE_POINTS];
@@ -949,7 +988,7 @@ fn union_capsules(
             kept[index] = index;
         }
         let mut following = [IntPoint::ZERO; CAPSULE_POINTS];
-        let following_len = if let Some(next) = subject.get(capsule_index + 1) {
+        let following_len = if let Some(next) = beads.get(capsule_index + 1) {
             for (index, point) in next.iter().enumerate() {
                 following[index] = adapter.float_to_int(point);
             }
@@ -989,10 +1028,10 @@ fn union_capsules(
             prior[index] = points[vertex];
         }
         prior_len = count;
-        overlay = overlay.unsafe_add_contour(&clipped[..count], ShapeType::Subject);
+        overlay = overlay.unsafe_add_contour(&clipped[..count], ShapeType::Clip);
     }
     check_cancel(cancel)?;
-    let shapes = overlay.overlay(OverlayRule::Subject, FillRule::Positive);
+    let shapes = overlay.overlay(OverlayRule::Difference, FillRule::NonZero);
     check_cancel(cancel)?;
     Ok(MultiPolygon(
         shapes
@@ -1042,7 +1081,7 @@ fn capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Polygon<f64> {
 }
 
 #[test]
-fn capsule_union_retains_shared_bead_material_and_the_open_center() {
+fn material_outside_capsules_is_material_minus_every_capsule() {
     use geo::{Contains, Point};
 
     for translation in [[0.0, 0.0], [100.0, -80.0]] {
@@ -1058,23 +1097,52 @@ fn capsule_union_retains_shared_bead_material_and_the_open_center() {
             .enumerate()
             .map(|(index, edge)| capsule(edge[0], edge[1], 0.2 + 0.03 * (index % 3) as f64))
             .collect::<Vec<_>>();
-        for _ in 0..2 {
-            let union = union_capsules(&capsules, &mut 0, &AtomicBool::new(false)).unwrap();
-            assert!(!union.contains(&Point::new(translation[0], translation[1])));
-            for column in -32..=32 {
-                for row in -32..=32 {
-                    let point = Point::new(
-                        translation[0] + column as f64 * 0.04,
-                        translation[1] + row as f64 * 0.04,
-                    );
-                    assert_eq!(
-                        union.contains(&point),
-                        capsules.iter().any(|capsule| capsule.contains(&point)),
-                        "capsule coverage changed at {point:?}",
-                    );
+        let square = |half: f64| {
+            LineString::from(
+                [
+                    [-half, -half],
+                    [half, -half],
+                    [half, half],
+                    [-half, half],
+                    [-half, -half],
+                ]
+                .map(|p| (translation[0] + p[0], translation[1] + p[1]))
+                .to_vec(),
+            )
+        };
+        // The bead ring overlaps the material's edge on one side and encloses
+        // a hole that no capsule touches.
+        let mut material = MultiPolygon(vec![Polygon::new(square(1.1), vec![square(0.3)])]);
+        for orientation in 0..2 {
+            for _ in 0..2 {
+                let outside = material_outside_capsules(
+                    &material,
+                    &capsules,
+                    &mut 0,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                for column in -32..=32 {
+                    for row in -32..=32 {
+                        let point = Point::new(
+                            translation[0] + column as f64 * 0.04 + 0.001,
+                            translation[1] + row as f64 * 0.04 + 0.001,
+                        );
+                        assert_eq!(
+                            outside.contains(&point),
+                            material.contains(&point)
+                                && !capsules.iter().any(|capsule| capsule.contains(&point)),
+                            "material outside the beads changed at {point:?}, orientation {orientation}",
+                        );
+                    }
                 }
+                capsules.reverse();
             }
-            capsules.reverse();
+            // Same set with every ring reversed: holes must stay holes.
+            for polygon in &mut material.0 {
+                polygon.exterior_mut(|ring| ring.0.reverse());
+                polygon.interiors_mut(|rings| rings.iter_mut().for_each(|ring| ring.0.reverse()));
+            }
         }
     }
 }
