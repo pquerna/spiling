@@ -744,6 +744,48 @@ fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() 
 }
 
 #[test]
+fn a_line_off_its_vertices_within_the_join_tolerance_is_read_and_reported() {
+    // ADR012's join tolerance (0.01 mm), not the file's 1e-6 mm, decides: a LINE 0.005 mm off
+    // its vertices is the edge's own, read as the segment between them and reported with how
+    // far it moved; 0.02 mm off is a different edge and refused.
+    let original = fixture("box-mm.step");
+    let text = std::str::from_utf8(&original).unwrap();
+    let moved = |dy: &str| {
+        let source = text.replace(
+            "#112 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));",
+            &format!("#112 = CARTESIAN_POINT('', (0.0, {dy}, 0.0));"),
+        );
+        assert_ne!(source, text, "the fixture's first LINE point");
+        source
+    };
+    let definition = from_step_bytes_with_cancel(moved("5.0E-3").as_bytes(), &cancelled()).unwrap();
+    let reading = definition
+        .provenance
+        .findings
+        .iter()
+        .find(|f| f.detail.contains("off their LINE"))
+        .expect("the moved edge is reported");
+    assert_eq!(
+        reading.code,
+        spiling_contracts::geometry::ImportFindingCode::SourceReading
+    );
+    assert!(reading.count >= 1, "{reading:?}");
+    assert_eq!(
+        reading.kind,
+        spiling_contracts::geometry::ImportFindingKind::Changed
+    );
+    assert!(
+        reading
+            .displacement_mm
+            .is_some_and(|d| (d - 5.0e-3).abs() < 1e-9),
+        "{reading:?}"
+    );
+    let failure =
+        from_step_bytes_with_cancel(moved("2.0E-2").as_bytes(), &cancelled()).unwrap_err();
+    assert!(failure.message.contains("off its LINE"), "{failure:?}");
+}
+
+#[test]
 fn a_true_rational_denominator_zero_refuses_before_geometric_consistency_sampling() {
     let err = from_step_bytes_with_cancel(crate::test_sources::DENOMINATOR_ZERO, &cancelled())
         .unwrap_err();

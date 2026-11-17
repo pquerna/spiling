@@ -54,16 +54,22 @@ fn unit_vector(v: [f64; 3]) -> Result<Vec3, GeometryError> {
     let scaled = Vec3::new(v[0] / scale, v[1] / scale, v[2] / scale);
     Ok(scaled / scaled.length())
 }
-/// Every original LINE edge curve passes through its edge's vertices within the import
-/// tolerance. The reader reads a straight edge whose vertices lie off its LINE as the segment
-/// between them, however far; that is a different edge from the one the file declares, so past
-/// the tolerance the import refuses rather than invent it.
+/// Every original LINE edge curve passes through its edge's vertices within the recorded join
+/// tolerance (ADR012: a gap that small is one point), or the reader's own tolerance where the
+/// file declares a larger one. The reader reads a straight edge whose vertices lie off its LINE
+/// as the segment between them, however far; past the tolerance that is a different edge from
+/// the one the file declares, so the import refuses rather than invent it. Within it the edge
+/// moves at most that far: the vertices past the reader's own tolerance are counted with the
+/// largest gap, and reported, never silent.
 fn lines_through_their_vertices(
     original: &crate::kernel::source::OriginalSourceTopology,
-    tolerance: f64,
+    reader_tolerance: f64,
+    join_tolerance: f64,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<Option<spiling_contracts::geometry::ImportFinding>, GeometryError> {
     use solidcore_step::geom::Curve;
+    let tolerance = reader_tolerance.max(join_tolerance);
+    let (mut moved, mut largest) = (0u32, 0.0f64);
     for coedge in &original.coedges {
         check_cancel(cancel)?;
         let mut curve = coedge.spatial_curve.as_ref();
@@ -94,15 +100,32 @@ fn lines_through_their_vertices(
                 w[2] - along * d[2],
             ];
             let gap = off.iter().map(|c| c * c).sum::<f64>().sqrt();
-            if gap.is_nan() || gap > tolerance {
+            if !gap.is_finite() || gap > tolerance {
                 return Err(invalid(&format!(
-                    "STEP edge #{}: a vertex lies {gap:.6} mm off its LINE, past the {tolerance} mm import tolerance",
+                    "STEP edge #{}: a vertex lies {gap:.6} mm off its LINE, past the {tolerance} mm join tolerance",
                     coedge.edge_curve_id.0
                 )));
             }
+            if gap > reader_tolerance {
+                moved = moved.saturating_add(1);
+                largest = largest.max(gap);
+            }
         }
     }
-    Ok(())
+    Ok((moved > 0).then(|| {
+        use spiling_contracts::geometry::{ImportFinding, ImportFindingCode, ImportFindingKind};
+        ImportFinding {
+            kind: ImportFindingKind::Changed,
+            code: ImportFindingCode::SourceReading,
+            count: moved,
+            label: "STEP reading".into(),
+            detail: format!(
+                "{moved} oriented edge endpoint uses lie up to {largest:.6} mm off their LINE; straight edges read as segments between their vertices (within the {tolerance} mm acceptance tolerance, including the {join_tolerance} mm join tolerance)"
+            ),
+            bounds_mm: None,
+            displacement_mm: Some(largest),
+        }
+    }))
 }
 
 /// Each note of the STEP reader (a construct it read another way: a twin edge made one, a seam
@@ -654,7 +677,14 @@ fn import_prepared(
         .ok_or_else(|| invalid("native solid has no shell"))?;
     let original_source =
         source::capture(&entities, &mut source_reader, &faces, &face_ids, cancel)?;
-    lines_through_their_vertices(&original_source, import_tolerance, cancel)?;
+    let line_reading = lines_through_their_vertices(
+        &original_source,
+        import_tolerance,
+        crate::tolerant::TolerantPolicy::default().join_mm,
+        cancel,
+    )?;
+    let mut findings = reader_findings(&solid.notes);
+    findings.extend(line_reading);
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
@@ -667,7 +697,7 @@ fn import_prepared(
             source_unit,
             uncertainty_mm,
             source_solid: selected.cloned(),
-            findings: reader_findings(&solid.notes),
+            findings,
         },
         faces,
         bounds,
