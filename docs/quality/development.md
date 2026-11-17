@@ -186,6 +186,16 @@ SPILING_CORPUS_JOBS=2 python3 tools/realistic-corpus/run.py OUT target/profiling
 SPILING_CORPUS_JOBS=1 python3 tools/realistic-corpus/run.py NEW_OUT target/profiling results.ndjson 18 28 --profile profiling
 ```
 
+For an exclusive slicing ledger, set `SPILING_TRACE_SLICE_PHASES=1` on the
+engine process. Its stderr emits JSON `slice_phase` events with `scope`, `phase`
+and elapsed `seconds`; successive marks partition each scope, and `total`
+includes its nested scopes. Do not sum parents with children. Pair these clocks
+with `SPILING_TRACE_SUPPORT_PROJECTION=1` and
+`SPILING_TRACE_SUPPORT_CLEARANCE=1` for nested construction/query counters.
+Retain the input, binary/source identity and complete create/save/return receipt;
+an interval CPU sample is not whole-job attribution. These opt-in diagnostics
+do not alter the normalized plan or replace fresh emitted-program replay.
+
 For assertion-led native feature recipes, named real-part canaries, single-axis
 scaling and same-input independent-slicer edge triage, use the existing runner's
 [layered corpus procedure](geometry-evidence.md#focused-families-canaries-and-scaling).

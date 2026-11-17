@@ -15,7 +15,8 @@ mod beads;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::strict_capsule_point;
 pub(crate) use anchors::{
-    AnchorCandidate, AnchorWorkspace, PreparedAnchorPaths, endpoint_bond, projected_edges,
+    AnchorCandidate, AnchorWorkspace, PreparedAnchorPaths, ProjectedAnchorPaths, endpoint_bond,
+    projected_edges,
 };
 pub(in crate::planner) mod strokes;
 pub(crate) use strokes::StrokeRuns;
@@ -232,6 +233,21 @@ fn establish_layer(
         retained_units,
         owned_bytes.saturating_add(vec_bytes(&valid)),
     )?);
+    let mut lower = strokes::LowerStrokes::new(
+        prior.last().into_iter().flat_map(|layer| {
+            layer
+                .paths
+                .iter()
+                .zip(&established[prior.len() - 1])
+                .filter_map(|(path, valid)| (support_role(path.kind) || *valid).then_some(path))
+        }),
+        contact_top.into_iter().flat_map(|top| {
+            prior[top]
+                .paths
+                .iter()
+                .filter(|path| support_role(path.kind))
+        }),
+    );
     for path in &layer.paths {
         check_cancel(cancel)?;
         let rooted = if !path.kind.is_model() {
@@ -239,22 +255,9 @@ fn establish_layer(
         } else if prior.is_empty() {
             true
         } else {
-            let below = prior.len() - 1;
-            raster::scan(
+            raster::scan_with_lower(
                 std::slice::from_ref(path),
-                prior[below]
-                    .paths
-                    .iter()
-                    .zip(&established[below])
-                    .filter_map(|(path, valid)| {
-                        (support_role(path.kind) || *valid).then_some(path)
-                    }),
-                contact_top.into_iter().flat_map(|top| {
-                    prior[top]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind))
-                }),
+                &mut lower,
                 recipe,
                 anchors,
                 work,
@@ -935,6 +938,7 @@ pub(super) fn realize(
         usize,
     ) -> Result<bool, ManufacturingError>,
 ) -> Result<SupportAdmission, ManufacturingError> {
+    let mut timing = crate::timing::Clock::new("support.realize");
     let trace = ProjectionTrace::new(
         input.schedule.len(),
         input.native_points,
@@ -1693,6 +1697,7 @@ pub(super) fn realize(
         let mut object_start = vec![0; layers.len()];
         let mut support_wall_paths = vec![0; layers.len()];
         trace.report("analysis_complete");
+        timing.mark("demand_and_void_analysis");
         let mut contact_tops = vec![None; layers.len()];
         let mut roots = Vec::new();
         let mut root_landings = Vec::new();
@@ -2524,6 +2529,7 @@ pub(super) fn realize(
         owned_bytes -= projection_receipt.1;
         drop(projected_columns);
         trace.report("corridors_complete");
+        timing.mark("roots_and_corridors");
         drop(nominal);
         // Recomputed for the raster stage below, which no longer charges these.
         drop(outside_beads);
@@ -2761,6 +2767,7 @@ pub(super) fn realize(
                         .chain(following.iter()),
                 );
         }
+        timing.mark("support_raster");
         // Restore original object roles before reevaluating the actual emitted
         // support/contact strokes. A supported contour is not a fake Bridge.
         support_metadata_bytes =
@@ -3123,6 +3130,7 @@ pub(super) fn realize(
         // Contact selection is only a proposal until actual final paths exist.
         // Check the same closed, physical-decimal bead enclosure used by the XY
         // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
+        timing.mark("regeneration_and_anchor_reconciliation");
         for (target, top) in contact_tops.iter().enumerate() {
             let Some(top) = *top else {
                 continue;
@@ -3179,6 +3187,7 @@ pub(super) fn realize(
         // Offset/overlay corridor masks only propose candidates. Certify every
         // final actual emitted support capsule against the unchanged raw all-Z C
         // and scoped positive void masks, after both raster/anchor alternatives.
+        timing.mark("contact_gap");
         let index_bytes = remaining_geometry_budget(
             retained,
             native_owned_bytes
@@ -3208,6 +3217,7 @@ pub(super) fn realize(
             &mut work,
             cancel,
         )?;
+        timing.mark("final_actual_clearance");
         Ok(SupportAdmission::Complete)
     })();
     if let Some(mut replay) = replay_new {

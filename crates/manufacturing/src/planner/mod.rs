@@ -88,7 +88,9 @@ pub(crate) fn plan(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
+    let mut timing = crate::timing::Clock::new("planner.plan");
     let mut plan = plan_with(input, cancel, geometry_work)?;
+    timing.mark("construction");
     // Walls follow the BREP's own circles.
     let sources: Vec<_> = input
         .occurrences
@@ -102,6 +104,7 @@ pub(crate) fn plan(
         .collect();
     arcs::attach(&mut plan, &sources, cancel)?;
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
+    timing.mark("arc_attachment_and_bed");
     Ok(plan)
 }
 
@@ -146,7 +149,9 @@ fn plan_with(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
+    let mut timing = crate::timing::Clock::new("planner.plan_with");
     let mut admission = preflight::admit(input, cancel, geometry_work)?;
+    timing.mark("preflight");
 
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
@@ -221,6 +226,7 @@ fn plan_with(
     let mut schedule = scheduled_layers(input, &mut admission, &process_captures, cancel)?;
     let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?
         .saturating_sub(schedule.capacity() * std::mem::size_of::<LayerElevation>());
+    timing.mark("events_captures_initial_schedule");
     slopes::split_for_slopes(
         input,
         &admission,
@@ -229,6 +235,7 @@ fn plan_with(
         &mut surface_work,
         cancel,
     )?;
+    timing.mark("slope_schedule");
     let mut support_work = support::SupportWork::default();
     let mut wall_memo = WallMemo::default();
     let mut void_memo = tolerant::VoidMemo::default();
@@ -286,6 +293,7 @@ fn plan_with(
             }
         }
     };
+    timing.mark("startup_probe");
     match admit_schedule(
         input,
         cancel,
@@ -383,6 +391,7 @@ fn admit_schedule<'model>(
     survival_memo: &mut neighborhood::SurvivalMemo,
     rooms_memo: &mut cathedral::RoomsMemo,
 ) -> Result<ScheduleAdmission, ManufacturingError> {
+    let mut timing = crate::timing::Clock::new("planner.admit_schedule");
     let recipe = &input.intent.recipe;
     for capture in process_captures.iter_mut() {
         capture.applied = false;
@@ -791,6 +800,7 @@ fn admit_schedule<'model>(
         }
         index = end;
     }
+    timing.mark("source_sections_and_domains");
     let native_retained_points = retained_points;
     let retained_support_native_bytes = void_memo.retained_bytes();
     drop(native_finished);
@@ -885,6 +895,7 @@ fn admit_schedule<'model>(
         let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
         let mut wall_cache = BTreeMap::<WallCacheKey, Arc<walls::WallPlan>>::new();
         let material_twin = material_twins(&sections, cancel)?;
+        timing.mark("neighborhood_and_wall_setup");
         prefill_walls(
             input,
             schedule,
@@ -897,6 +908,7 @@ fn admit_schedule<'model>(
             neighborhoods.work_mut(),
             cancel,
         )?;
+        timing.mark("wall_prefill");
         let mut first_wall_key = None;
         let mut retained_wall_bytes = 0usize;
         // Same conservative sparse-BTree node convention as native::output_bytes:
@@ -1719,6 +1731,7 @@ fn admit_schedule<'model>(
             });
         }
 
+        timing.mark("object_layers");
         drop(classified);
         drop(wall_layout);
         drop(templates);
@@ -1802,6 +1815,7 @@ fn admit_schedule<'model>(
         };
 
         support_work.planar = *neighborhoods.work_mut();
+        timing.mark("support_setup");
         let support_admission = support::realize(
             &mut layers,
             &support::SupportInput {
@@ -2247,6 +2261,7 @@ fn admit_schedule<'model>(
                 )
             },
         );
+        timing.mark("support_realization");
         *neighborhoods.work_mut() = support_work.planar;
         let support_admission = support_admission?;
         match support_admission {

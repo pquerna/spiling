@@ -409,6 +409,18 @@ fn run(
         let mut pending_records = BTreeMap::new();
         let report = |stage: String| *progress.lock() = Some((job, stage));
         let mut display_work = GeometryWorkBudget::query();
+        let phase = match &work {
+            Work::Import(_) => "import",
+            Work::Open(_) => "open",
+            Work::Save { .. } => "save",
+            Work::Compile(_) => "compile",
+            Work::Verify { .. } => "verify_or_export",
+            Work::PlaceOnBed { .. } => "place_on_bed",
+            _ => "other",
+        };
+        let started = std::env::var_os("SPILING_TRACE_SLICE_PHASES")
+            .is_some()
+            .then(std::time::Instant::now);
         let result = match work {
             Work::PrepareAnalysisFastener(request) => definitions
                 .get(&request.reference.definition_id)
@@ -742,6 +754,15 @@ fn run(
             .map(Product::Section)
             .map_err(JobError::from),
         };
+        if let Some(started) = started {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "slice_phase", "scope": "engine.worker",
+                    "phase": phase, "seconds": started.elapsed().as_secs_f64(),
+                })
+            );
+        }
         let succeeded = result.is_ok();
         if results
             .send(Event {
@@ -2003,6 +2024,7 @@ fn compile(
     residents: &BTreeMap<DefinitionId, Resident>,
     cancel: &AtomicBool,
 ) -> Result<Arc<ManufacturingAsset>, JobError> {
+    let started = std::time::Instant::now();
     let CompileRequest {
         project_id,
         revision,
@@ -2055,6 +2077,7 @@ fn compile(
     let mut writer = spiling_chunks::ChunkWriter::new(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES));
     serde_json::to_writer(&mut writer, &bundle).map_err(|_| exceeded())?;
     let encoded = writer.finish().map_err(|_| exceeded())?;
+    let encoded_at = std::time::Instant::now();
     if (encoded.retained_bytes() + program.retained_bytes()) as u64 > u64::from(byte_budget) {
         return Err(exceeded().into());
     }
@@ -2073,10 +2096,21 @@ fn compile(
         program: bundle.program.clone(),
     };
     drop(bundle);
-    ManufacturingAsset::new(record, encoded, program)
+    let result = ManufacturingAsset::new(record, encoded, program)
         .map(Arc::new)
         .map_err(super::manufacturing::project_error)
-        .map_err(JobError::from)
+        .map_err(JobError::from);
+    if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "slice_phase", "scope": "engine.compile",
+                "phase": "asset_construction", "seconds": encoded_at.elapsed().as_secs_f64(),
+                "total_seconds": started.elapsed().as_secs_f64(),
+            })
+        );
+    }
+    result
 }
 
 #[cfg(test)]

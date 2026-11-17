@@ -9,7 +9,9 @@ use std::sync::atomic::AtomicBool;
 
 mod batch;
 mod nominal;
+mod projected;
 pub(super) use nominal::{InventoryStats, LowerFloor, NominalAnchorPaths};
+pub(crate) use projected::ProjectedAnchorPaths;
 
 /// Exact centerline intersection with previous nominal deposited capsules plus
 /// separately certified positive-area overlap of actual candidate endpoint disks.

@@ -365,9 +365,17 @@ impl<'a> NominalAnchorPaths<'a> {
         candidate: AnchorCandidate,
         floor: LowerFloor,
     ) -> impl Iterator<Item = AnchorInput> + '_ {
+        self.inputs_filtered(candidate, move |direct, top| floor.admits(direct, top))
+    }
+
+    fn inputs_filtered<'borrow>(
+        &'borrow self,
+        candidate: AnchorCandidate,
+        admits: impl Fn(bool, f64) -> bool + 'borrow,
+    ) -> impl Iterator<Item = AnchorInput> + 'borrow {
         self.blocks
             .iter()
-            .filter(move |block| floor.admits(block.direct, block.top_z))
+            .filter(move |block| admits(block.direct, block.top_z))
             .flat_map(move |block| {
                 let rejected = rejects(candidate, block.bounds, block.radius);
                 rejected
@@ -413,6 +421,35 @@ fn growth_capacity(mut capacity: usize, needed: usize) -> usize {
 }
 
 impl AnchorWorkspace {
+    pub(in crate::planner::support) fn gaps_supplied_contacts(
+        &mut self,
+        candidate: AnchorCandidate,
+        lower_z: f64,
+        contacts: bool,
+        paths: &NominalAnchorPaths<'_>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
+        let limit = self.record_limit;
+        self.record_limit -= paths.reserved_records;
+        let result = self
+            .gaps_inputs(
+                candidate,
+                paths.inputs_filtered(
+                    candidate,
+                    move |direct, top| {
+                        if direct { top == lower_z } else { contacts }
+                    },
+                ),
+                work,
+                cancel,
+            )
+            .map(|_| ());
+        self.record_limit = limit;
+        result?;
+        Ok(&self.uncovered)
+    }
+
     pub(in crate::planner::support) fn gaps_nominal(
         &mut self,
         candidate: AnchorCandidate,

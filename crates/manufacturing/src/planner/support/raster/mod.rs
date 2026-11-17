@@ -628,23 +628,44 @@ pub(super) fn scan<'a>(
     cancel: &AtomicBool,
     first: bool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
+    scan_with_lower(
+        paths,
+        &mut strokes::LowerStrokes::new(previous, contacts),
+        recipe,
+        anchors,
+        work,
+        cancel,
+        first,
+    )
+}
+
+pub(super) fn scan_with_lower<'a>(
+    paths: &[DepositionPath],
+    lower: &mut strokes::LowerStrokes<
+        'a,
+        impl Iterator<Item = &'a DepositionPath> + Clone,
+        impl Iterator<Item = &'a DepositionPath> + Clone,
+    >,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    first: bool,
+) -> Result<Option<strokes::Failure>, ManufacturingError> {
     let mut worst: Option<strokes::Failure> = None;
     for (path_index, path) in paths.iter().enumerate() {
         for (first_point, last, width_mm) in StrokeRuns::for_path(path)? {
             let a = path.points_mm[first_point];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-            for gap in anchors.gaps(
+            for gap in lower.gaps_supplied_contacts(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
                     bead_width_mm: width_mm,
                 },
-                previous
-                    .clone()
-                    .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                contacts
-                    .clone()
-                    .filter(|_| path.kind != DepositionKind::Support),
+                path.physical_z_mm[0],
+                path.kind != DepositionKind::Support,
+                anchors,
                 work,
                 cancel,
             )? {

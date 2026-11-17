@@ -7,6 +7,7 @@ pub mod backend;
 pub mod delivery;
 mod material;
 mod selection;
+mod timing;
 pub use material::{
     create_default_intent, create_material_intent, create_requested_intent, filament_selection,
     generic_selection, resolve_material_profile, resolve_tool_material_profile, review_materials,
@@ -144,11 +145,13 @@ fn compile_exact(
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<ManufacturingResult, ManufacturingError> {
+    let mut timing = timing::Clock::new("manufacturing.compile");
     check_cancel(cancel)?;
     // Shared admission validates intent, native identity and the complete image
     // table before planning or provenance allocation. Do not hash/copy assets or
     // prepare the same native/field schedule through a second compile-only lane.
     let mut plan = planner::plan(&input, cancel, geometry_work)?;
+    timing.mark("planning");
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
     let occurrences = input.occurrences.to_vec();
@@ -188,9 +191,13 @@ fn compile_exact(
         emitter_version: EMITTER_VERSION.into(),
         verifier_version: VERIFIER_VERSION.into(),
     };
+    timing.mark("provenance");
     realization::canonicalize(&mut plan, input.intent, cancel)?;
+    timing.mark("realization");
     let program = backend::emit(&plan, input.intent, cancel)?;
+    timing.mark("emission");
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
+    timing.mark("independent_replay");
     let bundle = ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance,
@@ -199,6 +206,7 @@ fn compile_exact(
         verification,
     };
     bundle.validate()?;
+    timing.mark("bundle_validation");
     check_cancel(cancel)?;
     Ok(ManufacturingResult { bundle, program })
 }

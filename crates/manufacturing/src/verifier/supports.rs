@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::{cancelled, failed};
-use crate::planner::support::{AnchorCandidate, AnchorWorkspace, GapKind, StrokeRuns, gap_kind};
+use crate::planner::support::{
+    AnchorCandidate, AnchorWorkspace, GapKind, ProjectedAnchorPaths, StrokeRuns, gap_kind,
+};
 use spiling_contracts::manufacturing::{program_coordinates::*, *};
 use std::sync::atomic::AtomicBool;
 
@@ -28,10 +30,15 @@ fn height(path: &DepositionPath) -> Result<[f64; 2], ManufacturingError> {
     project_xyz6_bead_height_mm(path.physical_z_mm[1], path.height_mm())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Optional scope-local metadata preserves the supplied previous and contact iterators"
+)]
 fn anchored<'a>(
     path: &DepositionPath,
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
     contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+    prepared: Option<(&ProjectedAnchorPaths<'a>, bool)>,
     recipe: &PlanarPrintRecipe,
     work: &mut usize,
     anchors: &mut AnchorWorkspace,
@@ -45,18 +52,31 @@ fn anchored<'a>(
             project_xyz6_point_mm(endpoints[1])?,
         ];
         let length = (projected[1][0] - projected[0][0]).hypot(projected[1][1] - projected[0][1]);
-        for gap in anchors.gaps_projected(
-            AnchorCandidate {
-                endpoints_mm: projected,
-                bead_width_mm: width,
-            },
-            previous
-                .clone()
-                .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-            contacts.clone(),
-            work,
-            cancel,
-        )? {
+        let candidate = AnchorCandidate {
+            endpoints_mm: projected,
+            bead_width_mm: width,
+        };
+        let gaps = if let Some((prepared, with_contacts)) = prepared {
+            anchors.gaps_reused_projected(
+                candidate,
+                path.physical_z_mm[0],
+                with_contacts,
+                prepared,
+                work,
+                cancel,
+            )?
+        } else {
+            anchors.gaps_projected(
+                candidate,
+                previous
+                    .clone()
+                    .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                contacts.clone(),
+                work,
+                cancel,
+            )?
+        };
+        for gap in gaps {
             let kind = gap_kind(
                 gap,
                 (gap.end - gap.start) * length,
@@ -236,6 +256,34 @@ fn establish_until(
             *live + contact_bytes + anchors.retained_bytes(),
         )?;
         anchors.admit_beside(*live + valid.capacity() + contact_bytes)?;
+        let owned_bytes = *live + valid.capacity() + contact_bytes;
+        let prepared = if index == 0 {
+            None
+        } else {
+            ProjectedAnchorPaths::build(
+                layers[index - 1]
+                    .paths
+                    .iter()
+                    .zip(&established[index - 1])
+                    .filter_map(|(path, valid)| (support(path) || *valid).then_some(path)),
+                contact_top.into_iter().flat_map(|top| {
+                    layers[top]
+                        .paths
+                        .iter()
+                        .filter(|path| path.kind == DepositionKind::SupportInterface)
+                }),
+                anchors,
+                owned_bytes,
+                work,
+                cancel,
+            )?
+        };
+        anchors.admit_beside(
+            owned_bytes
+                + prepared
+                    .as_ref()
+                    .map_or(0, ProjectedAnchorPaths::retained_bytes),
+        )?;
         for path in &layer.paths {
             charge(work, cancel)?;
             let rooted = path.kind.is_model()
@@ -253,6 +301,7 @@ fn establish_until(
                                 .iter()
                                 .filter(|path| path.kind == DepositionKind::SupportInterface)
                         }),
+                        prepared.as_ref().map(|prepared| (prepared, true)),
                         recipe,
                         work,
                         anchors,
@@ -260,6 +309,7 @@ fn establish_until(
                     )?);
             valid.push(rooted);
         }
+        drop(prepared);
         *live += valid.capacity();
         established.push(valid);
     }
@@ -334,6 +384,8 @@ pub(super) fn verify(
     let mut contacts = Vec::new();
     for (index, layer) in plan.layers.iter().enumerate() {
         let mut contact_floor = None;
+        let mut prepared = None;
+        let mut prepared_attempted = false;
         for path in layer.paths.iter().filter(|path| support(path)) {
             charge(work, cancel)?;
             let support_height = height(path)?;
@@ -341,6 +393,26 @@ pub(super) fn verify(
             let (support_bounds, support_width) = path_bounds(path, work, cancel)?;
             anchors.admit_beside(
                 live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
+            )?;
+            if index != 0 && !prepared_attempted {
+                prepared = ProjectedAnchorPaths::build(
+                    plan.layers[index - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support(path)),
+                    contacts.iter().copied().filter(|_| contact_floor.is_some()),
+                    anchors,
+                    live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
+                    work,
+                    cancel,
+                )?;
+                prepared_attempted = true;
+            }
+            anchors.admit_beside(
+                live + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
+                    + prepared
+                        .as_ref()
+                        .map_or(0, ProjectedAnchorPaths::retained_bytes),
             )?;
             let continuing = index == 0
                 || anchored(
@@ -350,6 +422,7 @@ pub(super) fn verify(
                         .iter()
                         .filter(|path| support(path)),
                     std::iter::empty(),
+                    prepared.as_ref().map(|prepared| (prepared, false)),
                     recipe,
                     work,
                     anchors,
@@ -359,6 +432,8 @@ pub(super) fn verify(
                 && path.kind == DepositionKind::SupportInterface
                 && contact_floor != Some(support_height[0].to_bits())
             {
+                drop(prepared.take());
+                prepared_attempted = false;
                 establish_until(
                     &plan.layers[..index],
                     &mut established,
@@ -433,6 +508,26 @@ pub(super) fn verify(
             anchors.admit_beside(
                 live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
             )?;
+            if index != 0 && !prepared_attempted {
+                prepared = ProjectedAnchorPaths::build(
+                    plan.layers[index - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support(path)),
+                    contacts.iter().copied().filter(|_| contact_floor.is_some()),
+                    anchors,
+                    live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
+                    work,
+                    cancel,
+                )?;
+                prepared_attempted = true;
+            }
+            anchors.admit_beside(
+                live + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
+                    + prepared
+                        .as_ref()
+                        .map_or(0, ProjectedAnchorPaths::retained_bytes),
+            )?;
             if !continuing
                 && !anchored(
                     path,
@@ -444,6 +539,9 @@ pub(super) fn verify(
                         .iter()
                         .copied()
                         .filter(|_| path.kind == DepositionKind::SupportInterface),
+                    prepared
+                        .as_ref()
+                        .map(|prepared| (prepared, path.kind == DepositionKind::SupportInterface)),
                     recipe,
                     work,
                     anchors,
@@ -541,6 +639,7 @@ pub(super) fn verify(
                 }
             }
         }
+        drop(prepared);
         if index > last_support {
             break;
         }
@@ -621,6 +720,80 @@ mod tests {
             &mut AnchorWorkspace::default(),
             &AtomicBool::new(false),
         )
+    }
+
+    #[test]
+    fn projected_scope_matches_ordered_anchored_roles_and_malformed_errors() {
+        let (intent, plan) = fixture();
+        let cancel = AtomicBool::new(false);
+        for kind in [
+            DepositionKind::BottomSkin,
+            DepositionKind::SparseFill,
+            DepositionKind::Bridge,
+            DepositionKind::SupportInterface,
+        ] {
+            for malformed in [false, true] {
+                let mut candidate = plan.layers[0].paths[0].clone();
+                candidate.kind = kind;
+                candidate.physical_z_mm = [1.0, 2.0];
+                candidate.points_mm = vec![[1.0, 1.0, 2.0], [5.0, 1.0, 2.0]];
+                let mut left = plan.layers[0].paths[0].clone();
+                left.points_mm = vec![[1.0, 1.0, 1.0], [2.0, 1.0, 1.0]];
+                let mut right = left.clone();
+                right.points_mm = vec![[4.0, 1.0, 1.0], [5.0, 1.0, 1.0]];
+                let mut contact = right.clone();
+                contact.physical_z_mm = [2.0, 3.0];
+                contact.points_mm = vec![[4.0, 1.0, 3.0], [5.0, 1.0, 3.0]];
+                if malformed {
+                    right.width = WidthProfile::PerEdge { widths_mm: vec![] };
+                }
+                let previous = [left, right];
+                let contacts = [contact];
+                let mut scalar_workspace = AnchorWorkspace::default();
+                let mut cached_workspace = AnchorWorkspace::default();
+                let prepared = ProjectedAnchorPaths::build(
+                    previous.iter(),
+                    contacts.iter(),
+                    &cached_workspace,
+                    0,
+                    &mut 0,
+                    &cancel,
+                )
+                .unwrap()
+                .unwrap();
+                cached_workspace
+                    .admit_beside(prepared.retained_bytes())
+                    .unwrap();
+                let expected = anchored(
+                    &candidate,
+                    previous.iter(),
+                    contacts.iter(),
+                    None,
+                    &intent.recipe,
+                    &mut 0,
+                    &mut scalar_workspace,
+                    &cancel,
+                );
+                let actual = anchored(
+                    &candidate,
+                    previous.iter(),
+                    contacts.iter(),
+                    Some((&prepared, true)),
+                    &intent.recipe,
+                    &mut 0,
+                    &mut cached_workspace,
+                    &cancel,
+                );
+                match (expected, actual) {
+                    (Ok(expected), Ok(actual)) => assert_eq!(expected, actual),
+                    (Err(expected), Err(actual)) => {
+                        assert_eq!(expected.code, actual.code);
+                        assert_eq!(expected.message, actual.message);
+                    }
+                    _ => panic!("cached replay changed anchored acceptance"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -721,6 +894,7 @@ mod tests {
                 &path,
                 lower.iter(),
                 std::iter::empty(),
+                None,
                 &intent.recipe,
                 &mut work,
                 &mut anchors,
@@ -735,6 +909,7 @@ mod tests {
                 &path,
                 lower.iter(),
                 std::iter::empty(),
+                None,
                 &intent.recipe,
                 &mut work,
                 &mut anchors,
@@ -763,6 +938,7 @@ mod tests {
                 &connected,
                 under.iter(),
                 std::iter::empty(),
+                None,
                 &intent.recipe,
                 &mut work,
                 &mut anchors,
@@ -776,6 +952,7 @@ mod tests {
                 &connected,
                 under.iter(),
                 std::iter::empty(),
+                None,
                 &intent.recipe,
                 &mut work,
                 &mut anchors,
@@ -789,6 +966,7 @@ mod tests {
                 &path,
                 lower.iter(),
                 std::iter::empty(),
+                None,
                 &intent.recipe,
                 &mut work,
                 &mut anchors,

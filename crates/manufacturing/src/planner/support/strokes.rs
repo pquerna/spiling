@@ -192,6 +192,36 @@ where
         )
     }
 
+    pub(in crate::planner) fn gaps_supplied_contacts<'workspace>(
+        &mut self,
+        candidate: AnchorCandidate,
+        lower_z: f64,
+        contacts: bool,
+        anchors: &'workspace mut AnchorWorkspace,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&'workspace [super::anchors::AnchorGap], ManufacturingError> {
+        if self.admit_inventory(anchors, cancel)? {
+            return anchors.gaps_supplied_contacts(
+                candidate,
+                lower_z,
+                contacts,
+                self.inventory.as_ref().expect("admitted anchor inventory"),
+                work,
+                cancel,
+            );
+        }
+        anchors.gaps(
+            candidate,
+            self.previous
+                .clone()
+                .filter(move |lower| lower.physical_z_mm[1] == lower_z),
+            self.contacts.clone().filter(move |_| contacts),
+            work,
+            cancel,
+        )
+    }
+
     pub(in crate::planner) fn analyze(
         &mut self,
         paths: &[DepositionPath],
@@ -437,6 +467,94 @@ fn straight(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supplied_contact_inventory_matches_linear_queries_and_optional_decline() {
+        use spiling_contracts::manufacturing::{DepositionKind, WidthProfile};
+        let make_path = |index: usize, top: f64| DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::Perimeter,
+            width: WidthProfile::PerEdge {
+                widths_mm: vec![0.4, 0.8],
+            },
+            physical_z_mm: [top - 0.2, top],
+            owner: None,
+            points_mm: vec![
+                [index as f64 * 3.0, -2.0, top],
+                [index as f64 * 3.0, 0.0, top],
+                [index as f64 * 3.0, 2.0, top],
+            ],
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        };
+        let cancel = AtomicBool::new(false);
+        for malformed in [false, true] {
+            let mut previous = (0..1024)
+                .map(|index| make_path(index, if index % 2 == 0 { 0.2 } else { 0.4 }))
+                .collect::<Vec<_>>();
+            if malformed {
+                previous[40].width = WidthProfile::PerEdge {
+                    widths_mm: Vec::new(),
+                };
+            }
+            let contacts = (0..16)
+                .map(|index| make_path(index, 0.6))
+                .collect::<Vec<_>>();
+            for budget in [32, usize::MAX] {
+                let mut lower = LowerStrokes::new(previous.iter(), contacts.iter());
+                let mut scalar = AnchorWorkspace::default();
+                let mut prepared = AnchorWorkspace::default();
+                scalar.set_budget(budget);
+                prepared.set_budget(budget);
+                for floor in [0.2, 0.4] {
+                    for with_contacts in [false, true] {
+                        for offset in [-10.0, 0.0, 4.0, 10_000.0] {
+                            let candidate = AnchorCandidate {
+                                endpoints_mm: [[offset, -1.0, 0.8], [offset + 10.0, 1.0, 0.8]],
+                                bead_width_mm: 0.6,
+                            };
+                            let fields = |gaps: &[super::super::anchors::AnchorGap]| {
+                                gaps.iter()
+                                    .map(|gap| {
+                                        (gap.start, gap.end, gap.left, gap.right, gap.direct_ends)
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            let mut scalar_work = 0;
+                            let mut prepared_work = 0;
+                            let expected = scalar
+                                .gaps(
+                                    candidate,
+                                    previous
+                                        .iter()
+                                        .filter(|path| path.physical_z_mm[1] == floor),
+                                    contacts.iter().filter(|_| with_contacts),
+                                    &mut scalar_work,
+                                    &cancel,
+                                )
+                                .map(fields)
+                                .map_err(|error| (error.code, error.message));
+                            let actual = lower
+                                .gaps_supplied_contacts(
+                                    candidate,
+                                    floor,
+                                    with_contacts,
+                                    &mut prepared,
+                                    &mut prepared_work,
+                                    &cancel,
+                                )
+                                .map(fields)
+                                .map_err(|error| (error.code, error.message));
+                            assert_eq!(actual, expected);
+                            assert_eq!(prepared_work, scalar_work);
+                        }
+                    }
+                }
+                assert_eq!(lower.inventory.is_some(), budget == usize::MAX);
+            }
+        }
+    }
 
     #[test]
     fn final_unanchored_extent_is_independent_of_the_first_construction_failure() {
