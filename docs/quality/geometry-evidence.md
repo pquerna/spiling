@@ -838,10 +838,17 @@ passing conformance corpus and narrower native workflows.
 `tools/realistic-corpus/` measures what happens to real printed-part STEP
 exports, not authored fixtures. `manifest.json` pins 30 files from the
 VoronUsers community repository by commit and SHA-256; they are third-party
-GPL-3.0 parts, fetched into an ignored cache and never committed.
+GPL-3.0 parts, fetched into an ignored cache and never committed. Cohort 2,
+`manifest-cohort2.json`, pins 15 printed-part sources the same way from the
+VoronDesign Voron-0 and Voron-Stealthburner repositories (each part names its
+repository and commit); fetch and run it with `--manifest` into its own
+directory. `cargo run -p spiling-geometry --example mesh_health -- DIR` checks
+any STEP files' tolerant meshes without slicing (an open one refuses supports).
 
 ```sh
 python3 tools/realistic-corpus/fetch.py .cache/realistic-corpus
+python3 tools/realistic-corpus/fetch.py .cache/realistic-corpus-2 \
+  --manifest tools/realistic-corpus/manifest-cohort2.json
 cargo build --locked --profile profiling -p spiling-engine -p spiling-cli
 SPILING_CORPUS_PRUSA_INI=from-intent \
   python3 tools/realistic-corpus/run.py .cache/realistic-corpus target/profiling --profile profiling
