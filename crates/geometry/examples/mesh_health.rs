@@ -113,7 +113,7 @@ fn main() {
     println!(
         "# {} files, {bodies} bodies: {} closed, {open_bodies} open or voids refused, {refused} refused",
         files.len(),
-        bodies.saturating_sub(open_bodies + refused).max(0)
+        bodies.saturating_sub(open_bodies + refused)
     );
     if open_bodies + refused > 0 {
         std::process::exit(1);
