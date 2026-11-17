@@ -322,6 +322,103 @@ fn replay(program: &str) -> Result<VerificationReport, ManufacturingError> {
 }
 
 #[test]
+fn road_connection_preserves_orthogonal_sparse_bridge_anchors_and_role() {
+    let cancel = AtomicBool::new(false);
+    for (policy, refined) in [
+        (RectilinearAxisPolicy::AlternatingXY, false),
+        (RectilinearAxisPolicy::AlternatingYX, false),
+        (RectilinearAxisPolicy::AlternatingXY, true),
+        (RectilinearAxisPolicy::AlternatingYX, true),
+    ] {
+        let (mut intent, mut plan) = fixture();
+        intent.recipe.infill_fraction = 0.15;
+        intent.recipe.rectilinear_axis = policy;
+        let transpose = (policy == RectilinearAxisPolicy::AlternatingYX) != refined;
+        for layer in &mut plan.layers {
+            if refined {
+                layer.hatch_course = 0;
+                layer.z_mm *= 0.5;
+                layer.lower_z_mm *= 0.5;
+                layer.height_mm *= 0.5;
+                layer.section_z_mm *= 0.5;
+            }
+            layer.region_coverage.wall_area_mm2 = 15.0;
+            layer.region_coverage.sparse_interior_area_mm2 = 1.0;
+            layer.region_coverage.intentional_void_area_mm2 = 0.85;
+            layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+                material_domain: None,
+                functional_solid_zone: None,
+                area_mm2: 1.0,
+                fraction: 0.15,
+                contributions: Vec::new(),
+            }];
+        }
+        let row = |kind, points: &[[f64; 2]], layer: &PrintLayer| DepositionPath {
+            material_domain: None,
+            kind,
+            owner: Some(if kind == DepositionKind::Perimeter {
+                DepositionOwner::Wall
+            } else {
+                DepositionOwner::Regional { region_index: 0 }
+            }),
+            width: WidthProfile::Constant { width_mm: 1.0 },
+            physical_z_mm: [layer.lower_z_mm, layer.z_mm],
+            points_mm: points
+                .iter()
+                .map(|point| {
+                    let point = if transpose {
+                        [point[1], point[0]]
+                    } else {
+                        *point
+                    };
+                    [point[0], point[1], layer.z_mm]
+                })
+                .collect(),
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        };
+        plan.layers[0].paths = vec![
+            row(
+                DepositionKind::Perimeter,
+                &[[1.0, 1.0], [3.8, 1.0], [3.8, 5.0], [1.0, 5.0], [1.0, 1.0]],
+                &plan.layers[0],
+            ),
+            row(
+                DepositionKind::SparseFill,
+                &[[2.0, 2.0], [2.8, 2.0]],
+                &plan.layers[0],
+            ),
+            row(
+                DepositionKind::SparseFill,
+                &[[2.0, 3.8], [2.8, 3.8]],
+                &plan.layers[0],
+            ),
+        ];
+        plan.layers[1].paths = vec![row(
+            DepositionKind::Bridge,
+            &[[1.8, 2.9], [3.0, 2.9]],
+            &plan.layers[1],
+        )];
+        refresh_volumes(&intent, &mut plan);
+        plan.validate(&intent).unwrap();
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        plan.validate(&intent).unwrap();
+        assert!(
+            plan.layers[0]
+                .paths
+                .iter()
+                .all(|path| path.connectors.is_empty())
+        );
+        assert_eq!(plan.layers[1].paths[0].kind, DepositionKind::Bridge);
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+    }
+}
+
+#[test]
 fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
     let cancel = AtomicBool::new(false);
     for varying in [false, true] {

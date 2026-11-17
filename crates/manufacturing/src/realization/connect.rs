@@ -264,11 +264,12 @@ fn along(points: &[[f64; 3]], cumulative: &[f64], s: f64, offset: f64) -> [f64; 
 
 /// A sparse region's Bridge row spans the rows beneath it. Connectors on the
 /// layer below lie along the walls and may now support such a row
-/// throughout; it is then ordinary sparse fill, not a bridge, and keeps no
+/// throughout; an authored-axis row is then ordinary sparse fill and keeps no
 /// Bridge label (or bridge flow) it no longer earns.
 fn relabel_supported_sparse_bridges(
     plan: &mut NormalizedPrintPlan,
     index: usize,
+    course: u32,
     intent: &ManufacturingIntent,
     anchors: &mut crate::planner::support::AnchorWorkspace,
     work: &mut usize,
@@ -288,6 +289,7 @@ fn relabel_supported_sparse_bridges(
         let path = &layer.paths[path_index];
         if !speeds::is_sparse_region_bridge(layer, path.kind, path.owner)
             || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
+            || !on_sparse_axis(path, &intent.recipe, course)
         {
             continue;
         }
@@ -335,6 +337,28 @@ fn relabel_supported_sparse_bridges(
     Ok(())
 }
 
+fn on_sparse_axis(path: &DepositionPath, recipe: &PlanarPrintRecipe, course: u32) -> bool {
+    if matches!(
+        recipe.sparse_infill,
+        SparseInfillPolicy::Grid | SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
+    ) {
+        return true;
+    }
+    let fixed = match recipe.rectilinear_axis {
+        RectilinearAxisPolicy::X => 1,
+        RectilinearAxisPolicy::Y => 0,
+        RectilinearAxisPolicy::AlternatingXY => usize::from(course.is_multiple_of(2)),
+        RectilinearAxisPolicy::AlternatingYX => usize::from(!course.is_multiple_of(2)),
+    };
+    path.road_ranges().all(|(first, last)| {
+        project_xyz6_coordinate_mm(path.points_mm[first][fixed]).is_ok_and(|coordinate| {
+            path.points_mm[first + 1..=last].iter().all(|point| {
+                project_xyz6_coordinate_mm(point[fixed]).is_ok_and(|value| value == coordinate)
+            })
+        })
+    })
+}
+
 /// Join eligible roads on every single-tool layer whose rows no other
 /// construction names individually.
 pub(super) fn connect_roads(
@@ -347,12 +371,21 @@ pub(super) fn connect_roads(
         return Ok(());
     }
     let policy = intent.recipe.sparse_infill;
+    let alternation = hatch_alternation_keys(&plan.layers);
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut work = 0usize;
     for index in 0..plan.layers.len() {
         check_cancel(cancel)?;
         if index > 0 {
-            relabel_supported_sparse_bridges(plan, index, intent, &mut anchors, &mut work, cancel)?;
+            relabel_supported_sparse_bridges(
+                plan,
+                index,
+                alternation[index],
+                intent,
+                &mut anchors,
+                &mut work,
+                cancel,
+            )?;
         }
         let layer = &plan.layers[index];
         // Separators, diaphragms, process interfaces, skin-bridge domains and
@@ -383,7 +416,8 @@ pub(super) fn connect_roads(
             .flat_map(|above| &above.paths)
             .filter(|p| {
                 p.kind == DepositionKind::Bridge
-                    && !speeds::is_sparse_region_bridge(&plan.layers[index + 1], p.kind, p.owner)
+                    && (!speeds::is_sparse_region_bridge(&plan.layers[index + 1], p.kind, p.owner)
+                        || !on_sparse_axis(p, &intent.recipe, alternation[index + 1]))
                     || matches!(p.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
             })
             .map(|p| {
