@@ -37,7 +37,7 @@ elif args[1]=='open':
 
 @unittest.skipUnless(hasattr(os, "wait4") and Path("/proc").is_dir(), "Linux corpus process supervision")
 class RunnerBoundaryTests(unittest.TestCase):
-    def run_fixture(self, root, failure=False):
+    def run_fixture(self, root, failure=False, invalid_expectation=False):
         binaries = root / "bin"
         binaries.mkdir()
         cli = binaries / "spiling-cli"
@@ -49,7 +49,10 @@ class RunnerBoundaryTests(unittest.TestCase):
         source = corpus / "step/fixture.step"
         source.write_text("input fixture, not geometry acceptance")
         manifest = root / "manifest.json"
-        manifest.write_text(json.dumps({"parts": [{"file": source.name, "sha256": audit.digest(source)}]}))
+        case = {"file": source.name, "sha256": audit.digest(source)}
+        if invalid_expectation:
+            case["expectation"] = None
+        manifest.write_text(json.dumps({"parts": [case]}))
         environment = dict(os.environ, SPILING_CORPUS_JOBS="1")
         if failure:
             environment["CORPUS_DOUBLE_FAIL_RETURN"] = "1"
@@ -81,6 +84,14 @@ class RunnerBoundaryTests(unittest.TestCase):
             summary = json.loads((root / "results.ndjson.summary.json").read_text())
             self.assertFalse(summary["ok"])
             self.assertIn("source_absent_return", summary["outcomes"]["fixture.step"]["failures"])
+
+    def test_invalid_expectation_refuses_before_creating_native_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, root, _, _ = self.run_fixture(Path(directory), invalid_expectation=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid case expectation", result.stderr)
+            self.assertFalse((root / "work").exists())
+            self.assertFalse((root / "results.ndjson").exists())
 
 
 if __name__ == "__main__":

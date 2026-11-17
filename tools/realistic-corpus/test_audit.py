@@ -105,6 +105,24 @@ class CorpusAuditTests(unittest.TestCase):
             (root / "program.gcode").unlink()
             self.assertFalse(all(audit.export_checks(root).values()))
 
+    def test_invalid_expectations_are_rejected_before_native_work(self):
+        for expectation in (None, False, "complete", [], {}, {"kind": "unknown"},
+                            {"kind": "refusal"}, {"kind": "refusal", "code": "timeout", "domain": None}):
+            with self.subTest(expectation=expectation), self.assertRaises(ValueError):
+                audit.select_cases({"parts": [dict(self.case, expectation=expectation)]})
+
+    def test_cohort2_requires_complete_source_absent_journeys(self):
+        manifest = json.loads(Path(__file__).with_name("manifest-cohort2.json").read_text())
+        cases = audit.select_cases(manifest)
+        for case in cases:
+            with self.subTest(part=case["file"]):
+                self.assertEqual(case["expectation"], {"kind": "complete"})
+                record = dict(self.record, part=case["file"], sha256=case["sha256"])
+                self.assertEqual(audit.assess(case, record, self.intent)["status"], "complete")
+                for field in ("spiling_compile", "spiling_return"):
+                    failed = dict(record, **{field: {"ok": False}})
+                    self.assertEqual(audit.assess(case, failed, self.intent)["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

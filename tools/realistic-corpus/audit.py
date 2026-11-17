@@ -21,9 +21,18 @@ def select_cases(manifest, prefixes=(), cohort="full"):
     names = [case["file"] for case in cases]
     if not names or len(names) != len(set(names)):
         raise ValueError("manifest must contain unique, nonempty case inventory")
-    for name in names:
+    for case in cases:
+        name = case["file"]
         if Path(name).name != name or name in (".", ".."):
             raise ValueError(f"case is not a source basename: {name}")
+        expectation = case.get("expectation", {"kind": "complete"})
+        if not isinstance(expectation, dict) or expectation.get("kind") not in (
+                "complete", "refusal", "complete_or_envelope_refusal"):
+            raise ValueError(f"invalid case expectation: {name}")
+        if expectation["kind"] == "refusal" and any(
+                not isinstance(expectation.get(field), str) or not expectation[field]
+                for field in ("code", "domain")):
+            raise ValueError(f"refusal expectation requires code and domain: {name}")
     if cohort != "full":
         selected = manifest.get("cohorts", {}).get(cohort)
         if not selected or len(selected) != len(set(selected)) or set(selected) - set(names):
