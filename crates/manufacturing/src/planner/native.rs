@@ -12,6 +12,10 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
+mod clearance_index;
+#[cfg(test)]
+mod clearance_tests;
+
 pub(super) const MATERIAL_ARC_BYTES: usize =
     std::mem::size_of::<MultiPolygon<f64>>() + 2 * std::mem::size_of::<usize>();
 
@@ -20,6 +24,7 @@ pub(super) struct SupportClearanceGeometry<'a> {
     pub schedule: &'a [LayerElevation],
     pub protected: &'a MultiPolygon<f64>,
     pub scopes: &'a [spiling_geometry::ProtectedVoidHeightScope],
+    pub index_bytes: usize,
 }
 
 struct ForbiddenPolygonScope<'a> {
@@ -32,6 +37,66 @@ struct ActualDepositionScope<'a> {
     layers: &'a [PrintLayer],
     schedule: &'a [LayerElevation],
     vertical: [f64; 2],
+}
+
+struct PolygonDeposition<'a> {
+    layers: &'a [PrintLayer],
+    range: std::ops::Range<usize>,
+    index: Option<&'a clearance_index::ClearanceIndex>,
+}
+
+#[derive(Default)]
+struct ClearanceTrace {
+    enabled: bool,
+    polygons: std::cell::Cell<usize>,
+    layers: std::cell::Cell<usize>,
+    paths: std::cell::Cell<usize>,
+    support_paths: std::cell::Cell<usize>,
+    bounds_points: std::cell::Cell<usize>,
+    path_rejects: std::cell::Cell<usize>,
+    edges: std::cell::Cell<usize>,
+    height_rejects: std::cell::Cell<usize>,
+    polygon_tests: std::cell::Cell<usize>,
+    deposited_support_paths: std::cell::Cell<usize>,
+    deposited_object_paths: std::cell::Cell<usize>,
+    deposited_path_rejects: std::cell::Cell<usize>,
+    edge_pairs: std::cell::Cell<usize>,
+    edge_pair_rejects: std::cell::Cell<usize>,
+    height_pair_rejects: std::cell::Cell<usize>,
+    pair_tests: std::cell::Cell<usize>,
+    index_bytes: std::cell::Cell<usize>,
+    skipped_paths: std::cell::Cell<usize>,
+}
+
+impl ClearanceTrace {
+    fn add(&self, counter: &std::cell::Cell<usize>, amount: usize) {
+        if self.enabled {
+            counter.set(counter.get().saturating_add(amount));
+        }
+    }
+
+    fn report(&self, phase: &str, started: std::time::Instant) {
+        if self.enabled {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "support_clearance_trace", "phase": phase,
+                    "phase_seconds": started.elapsed().as_secs_f64(),
+                    "index_bytes": self.index_bytes.get(), "skipped_paths": self.skipped_paths.get(),
+                    "polygons": self.polygons.get(), "layers": self.layers.get(),
+                    "paths": self.paths.get(), "support_paths": self.support_paths.get(),
+                    "bounds_points": self.bounds_points.get(), "path_rejects": self.path_rejects.get(),
+                    "edges": self.edges.get(), "height_rejects": self.height_rejects.get(),
+                    "polygon_tests": self.polygon_tests.get(),
+                    "deposited_support_paths": self.deposited_support_paths.get(),
+                    "deposited_object_paths": self.deposited_object_paths.get(),
+                    "deposited_path_rejects": self.deposited_path_rejects.get(),
+                    "edge_pairs": self.edge_pairs.get(), "edge_pair_rejects": self.edge_pair_rejects.get(),
+                    "height_pair_rejects": self.height_pair_rejects.get(), "pair_tests": self.pair_tests.get(),
+                })
+            );
+        }
+    }
 }
 
 pub(super) struct NativeSpan {
@@ -474,6 +539,7 @@ pub(super) fn certify_support_clearance(
         schedule,
         protected,
         scopes,
+        index_bytes,
     } = *geometry;
     if protected.0.len() != scopes.len() {
         return Err(error(
@@ -501,6 +567,22 @@ pub(super) fn certify_support_clearance(
         // rather than trusting a generated-support flag or skipping a proof.
         return Ok(());
     };
+    let trace = ClearanceTrace {
+        enabled: std::env::var_os("SPILING_TRACE_SUPPORT_CLEARANCE").is_some(),
+        ..ClearanceTrace::default()
+    };
+    let index_started = std::time::Instant::now();
+    let index = clearance_index::ClearanceIndex::build(
+        layers.iter().map(|layer| layer.paths.as_slice()),
+        index_bytes,
+        support_work,
+        cancel,
+    )?;
+    trace
+        .index_bytes
+        .set(index.as_ref().map_or(0, |index| index.retained_bytes()));
+    trace.report("path_index", index_started);
+    let raw_started = std::time::Instant::now();
     for span in sections {
         let interval = [
             schedule[span.start as usize].lower_z,
@@ -517,10 +599,14 @@ pub(super) fn certify_support_clearance(
                 lower_mm: height[0],
                 upper_mm: height[1],
             };
-            let applicable =
-                scoped_support_layers(layers, schedule, scope, vertical, support_work, cancel)?;
+            let range =
+                scoped_support_layer_range(schedule, scope, vertical, support_work, cancel)?;
             certify_polygon_capsules(
-                applicable,
+                PolygonDeposition {
+                    layers,
+                    range,
+                    index: index.as_ref(),
+                },
                 &ForbiddenPolygonScope {
                     polygon,
                     height: scope,
@@ -529,16 +615,22 @@ pub(super) fn certify_support_clearance(
                 xy_clearance_mm,
                 native_work,
                 support_work,
+                &trace,
                 cancel,
             )?;
             Ok(true)
         })?;
     }
+    trace.report("raw_occupancy", raw_started);
+    let void_started = std::time::Instant::now();
     for (polygon, scope) in protected.0.iter().zip(scopes) {
-        let applicable =
-            scoped_support_layers(layers, schedule, *scope, vertical, support_work, cancel)?;
+        let range = scoped_support_layer_range(schedule, *scope, vertical, support_work, cancel)?;
         certify_polygon_capsules(
-            applicable,
+            PolygonDeposition {
+                layers,
+                range,
+                index: index.as_ref(),
+            },
             &ForbiddenPolygonScope {
                 polygon,
                 height: *scope,
@@ -547,9 +639,13 @@ pub(super) fn certify_support_clearance(
             xy_clearance_mm,
             native_work,
             support_work,
+            &trace,
             cancel,
         )?;
     }
+    trace.report("protected_voids", void_started);
+    drop(index);
+    let deposited_started = std::time::Instant::now();
     // A bounded-fidelity M/D prism or emitted bead can extend outside true T.
     // Native target exclusion therefore does not replace this distinct actual
     // nominal-program footprint proof.
@@ -563,8 +659,10 @@ pub(super) fn certify_support_clearance(
         z_gap_mm,
         native_work,
         support_work,
+        &trace,
         cancel,
     )?;
+    trace.report("deposited_pairs", deposited_started);
     Ok(())
 }
 
@@ -597,11 +695,12 @@ fn edge_xy_bounds(edge: &[[f64; 3]]) -> [[f64; 2]; 2] {
 }
 
 fn certify_polygon_capsules(
-    layers: &[PrintLayer],
+    deposition: PolygonDeposition<'_>,
     forbidden: &ForbiddenPolygonScope<'_>,
     clearance: f64,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
+    trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let ForbiddenPolygonScope {
@@ -609,54 +708,80 @@ fn certify_polygon_capsules(
         height: scope,
         label,
     } = *forbidden;
+    trace.add(&trace.polygons, 1);
     let forbidden_bounds = geo::BoundingRect::bounding_rect(polygon)
         .map(|b| [[b.min().x, b.min().y], [b.max().x, b.max().y]]);
     // Encode and validate the borrowed forbidden polygon lazily, once per scan.
     let encoded = std::cell::OnceCell::<Vec<spiling_geometry::SectionLoopMm>>::new();
     let mut prepared = None;
-    for layer in layers {
+    for ordinal in deposition.range {
+        let layer = &deposition.layers[ordinal];
+        trace.add(&trace.layers, 1);
         charge_support_clearance(support_work, cancel)?;
-        for path in &layer.paths {
-            charge_support_clearance(support_work, cancel)?;
-            if path.kind.is_model() {
-                continue;
-            }
-            let edges = path.checked_edges()?;
-            if forbidden_bounds.is_some_and(|forbidden| {
-                path_xy_bounds(path).is_some_and(|(bounds, width)| {
-                    spiling_geometry::planar_bounds_clear(
-                        bounds,
-                        forbidden,
-                        width * 0.5 + XYZ6_SCREEN_SLACK_MM,
-                        clearance,
-                    )
-                })
-            }) {
-                continue;
-            }
-            for local in edges {
-                let edge = local.points_mm;
+        let mut visit = |candidate| {
+            let range = match candidate {
+                clearance_index::Candidates::Charge(amount) => {
+                    return charge_support_clearance_range(support_work, amount, cancel);
+                }
+                clearance_index::Candidates::Visit(range) => range.paths,
+                clearance_index::Candidates::Skip { paths, .. } => {
+                    charge_support_clearance_range(support_work, paths, cancel)?;
+                    trace.add(&trace.skipped_paths, paths);
+                    return Ok(());
+                }
+            };
+            for path in &layer.paths[range] {
+                trace.add(&trace.paths, 1);
                 charge_support_clearance(support_work, cancel)?;
-                let [lower, upper] =
-                    project_xyz6_segment_bead_height_mm(edge[0][2], edge[1][2], path.height_mm())?;
-                let relevant = match scope {
-                    spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
-                        lower_mm <= upper && upper_mm >= lower
-                    }
-                    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
-                        upper_mm >= lower
-                    }
-                };
-                if !relevant {
+                if path.kind.is_model() {
                     continue;
                 }
-                let (segment, endpoint_error_mm) = emitted_xy_segment(edge)?;
-                if encoded.get().is_none() {
-                    let _ = encoded.set(encode_polygons(std::iter::once(polygon), 0.0, cancel)?);
+                trace.add(&trace.support_paths, 1);
+                trace.add(&trace.bounds_points, path.points_mm.len());
+                let edges = path.checked_edges()?;
+                if forbidden_bounds.is_some_and(|forbidden| {
+                    path_xy_bounds(path).is_some_and(|(bounds, width)| {
+                        spiling_geometry::planar_bounds_clear(
+                            bounds,
+                            forbidden,
+                            width * 0.5 + XYZ6_SCREEN_SLACK_MM,
+                            clearance,
+                        )
+                    })
+                }) {
+                    trace.add(&trace.path_rejects, 1);
+                    continue;
                 }
-                let loops = encoded.get().expect("encoded actual forbidden polygon");
-                if prepared.is_none() {
-                    prepared = Some(
+                for local in edges {
+                    trace.add(&trace.edges, 1);
+                    let edge = local.points_mm;
+                    charge_support_clearance(support_work, cancel)?;
+                    let [lower, upper] = project_xyz6_segment_bead_height_mm(
+                        edge[0][2],
+                        edge[1][2],
+                        path.height_mm(),
+                    )?;
+                    let relevant = match scope {
+                        spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                            lower_mm,
+                            upper_mm,
+                        } => lower_mm <= upper && upper_mm >= lower,
+                        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
+                            upper_mm >= lower
+                        }
+                    };
+                    if !relevant {
+                        trace.add(&trace.height_rejects, 1);
+                        continue;
+                    }
+                    let (segment, endpoint_error_mm) = emitted_xy_segment(edge)?;
+                    if encoded.get().is_none() {
+                        let _ =
+                            encoded.set(encode_polygons(std::iter::once(polygon), 0.0, cancel)?);
+                    }
+                    let loops = encoded.get().expect("encoded actual forbidden polygon");
+                    if prepared.is_none() {
+                        prepared = Some(
                         spiling_geometry::prepare_planar_forbidden(loops, native_work, cancel)
                             .map_err(|failure| {
                                 super::native_error(
@@ -668,8 +793,9 @@ fn certify_polygon_capsules(
                                 )
                             })?,
                     );
-                }
-                spiling_geometry::certify_planar_capsule_clearance_prepared(
+                    }
+                    trace.add(&trace.polygon_tests, 1);
+                    spiling_geometry::certify_planar_capsule_clearance_prepared(
                     segment,
                     prepared
                         .as_ref()
@@ -691,7 +817,22 @@ fn certify_polygon_capsules(
                         ),
                     )
                 })?;
+                }
             }
+            Ok(())
+        };
+        if let (Some(index), Some(bounds)) = (
+            deposition.index.and_then(|index| index.layer(ordinal)),
+            forbidden_bounds,
+        ) {
+            index.visit(bounds, clearance, XYZ6_SCREEN_SLACK_MM, cancel, &mut visit)?;
+        } else {
+            visit(clearance_index::Candidates::Visit(
+                clearance_index::PathRange {
+                    paths: 0..layer.paths.len(),
+                    nonmodel_paths: 0,
+                },
+            ))?;
         }
     }
     Ok(())
@@ -720,14 +861,25 @@ pub(super) fn charge_support_clearance(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    charge_support_clearance_range(work, 1, cancel)
+}
+
+fn charge_support_clearance_range(
+    work: &mut usize,
+    amount: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    *work = work.checked_add(1).ok_or_else(|| {
-        error(
+    if let Some(total) = work.checked_add(amount) {
+        *work = total;
+        Ok(())
+    } else {
+        *work = usize::MAX;
+        Err(error(
             ManufacturingErrorCode::ResourceLimit,
             "cumulative actual support-clearance scan work counter overflow",
-        )
-    })?;
-    Ok(())
+        ))
+    }
 }
 
 /// One linear scan derives two scalar vertical representation enclosures from
@@ -778,6 +930,17 @@ fn scoped_support_layers<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<&'a [PrintLayer], ManufacturingError> {
+    let range = scoped_support_layer_range(schedule, scope, extensions, work, cancel)?;
+    Ok(&layers[range])
+}
+
+fn scoped_support_layer_range(
+    schedule: &[LayerElevation],
+    scope: spiling_geometry::ProtectedVoidHeightScope,
+    extensions: [f64; 2],
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<std::ops::Range<usize>, ManufacturingError> {
     let (lower, upper) = match scope {
         spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
             (Some(lower_mm), upper_mm)
@@ -806,7 +969,7 @@ fn scoped_support_layers<'a>(
             "native support-clearance height scope is not ordered",
         ));
     }
-    Ok(&layers[first..end])
+    Ok(first..end)
 }
 
 fn partition_schedule(
@@ -835,6 +998,7 @@ fn certify_deposited_clearance(
     z_gap: f64,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     work: &mut usize,
+    trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let ActualDepositionScope {
@@ -850,6 +1014,7 @@ fn certify_deposited_clearance(
             if support.kind.is_model() || support.points_mm.len() < 2 {
                 continue;
             }
+            trace.add(&trace.deposited_support_paths, 1);
             if applicable.is_none() {
                 let lower = (schedule[index].lower_z - vertical[0]).next_down();
                 let upper = (schedule[index].z + vertical[1]).next_up();
@@ -878,6 +1043,7 @@ fn certify_deposited_clearance(
                     ) {
                         continue;
                     }
+                    trace.add(&trace.deposited_object_paths, 1);
                     let object_edges = object.checked_edges()?;
                     super::boolean::charge(work, object.points_mm.len())?;
                     if let (
@@ -891,6 +1057,7 @@ fn certify_deposited_clearance(
                             xy_gap,
                         )
                     {
+                        trace.add(&trace.deposited_path_rejects, 1);
                         continue;
                     }
                     for support_local in support_edges {
@@ -904,6 +1071,7 @@ fn certify_deposited_clearance(
                         let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
                         let support_bounds = edge_xy_bounds(support_edge);
                         for object_local in object_edges {
+                            trace.add(&trace.edge_pairs, 1);
                             let object_edge = object_local.points_mm;
                             charge_support_clearance(work, cancel)?;
                             if spiling_geometry::planar_bounds_clear(
@@ -913,6 +1081,7 @@ fn certify_deposited_clearance(
                                     + 2.0 * XYZ6_SCREEN_SLACK_MM,
                                 xy_gap,
                             ) {
+                                trace.add(&trace.edge_pair_rejects, 1);
                                 continue;
                             }
                             let object_height = project_xyz6_segment_bead_height_mm(
@@ -932,9 +1101,11 @@ fn certify_deposited_clearance(
                             // that overlap. Exact zero-gap touching is not an
                             // interior collision when the requested gap is zero.
                             if above >= z_gap || below >= z_gap {
+                                trace.add(&trace.height_pair_rejects, 1);
                                 continue;
                             }
                             let (object_xy, object_error) = emitted_xy_segment(object_edge)?;
+                            trace.add(&trace.pair_tests, 1);
                             spiling_geometry::certify_planar_capsule_pair_clearance([
                                 spiling_geometry::PlanarCapsuleMm {
                                     segment_xy_mm: support_xy, radius_mm: support_local.width_mm * 0.5,
@@ -1089,6 +1260,7 @@ mod actual_deposition_tests {
                 required,
                 &mut native_work,
                 &mut work,
+                &ClearanceTrace::default(),
                 &cancel,
             );
             assert_eq!(

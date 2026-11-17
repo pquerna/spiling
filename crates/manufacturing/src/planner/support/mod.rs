@@ -3179,6 +3179,21 @@ pub(super) fn realize(
         // Offset/overlay corridor masks only propose candidates. Certify every
         // final actual emitted support capsule against the unchanged raw all-Z C
         // and scoped positive void masks, after both raster/anchor alternatives.
+        let index_bytes = remaining_geometry_budget(
+            retained,
+            native_owned_bytes
+                .saturating_add(support_metadata_bytes)
+                .saturating_add(layer_payload_bytes(layers.iter()))
+                .saturating_add(anchors.retained_bytes())
+                .saturating_add(columns_bytes)
+                .saturating_add(replay_new.as_ref().map_or(0, |replay| replay.bytes)),
+            &support_regions,
+            &interfaces,
+            &[&protected],
+        )
+        .unwrap_or(0)
+        .saturating_mul(std::mem::size_of::<geo::Coord<f64>>())
+            / 8;
         super::native::certify_support_clearance(
             layers,
             &super::native::SupportClearanceGeometry {
@@ -3186,6 +3201,7 @@ pub(super) fn realize(
                 schedule,
                 protected: &protected,
                 scopes: &scopes,
+                index_bytes,
             },
             recipe,
             native_work,
