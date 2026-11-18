@@ -903,7 +903,10 @@ physical printing. Keep native refusals explicit rather than switching geometry.
 All output destinations must be new. Bed preparation precedes explicit pose Apply;
 Preflight is not manufacturing authority. Inspect/replay independently decode saved
 program bytes, never trust a stored `verified` flag. Export uses the common exclusive
-writer. [Manufacturing](manufacturing-evidence.md) maps the implementation and current
+writer. In a read-only workflow, adjacent `--verify --manufacturing-out` use one
+fresh verification for both receipts, in addition to open-time validation. A
+standalone, nonadjacent, or reversed `--verify` still replays separately.
+[Manufacturing](manufacturing-evidence.md) maps the implementation and current
 refusals; [authoring](authoring-evidence.md) maps transactions and recovery.
 
 ### Quantity and arrangement

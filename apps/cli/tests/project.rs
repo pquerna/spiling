@@ -1278,6 +1278,11 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
         created["manufacturing"]["intent"]
     );
     assert_eq!(reopened["manufacturing_export"]["artifact"], artifact);
+    let operations = reopened["operations"].as_array().unwrap();
+    assert_eq!(operations[2]["operation"], "verify");
+    assert_eq!(operations[2]["shared_replay_with"], "manufacturing_export");
+    assert_eq!(operations[3]["operation"], "manufacturing_export");
+    assert_eq!(operations[2]["manufacturing"]["artifact"], artifact);
     let display: spiling_contracts::manufacturing::ReplayDisplayDescriptor =
         serde_json::from_value(reopened["manufacturing_replay"]["replay_display"].clone()).unwrap();
     let record: spiling_contracts::manufacturing::ManufacturingArtifactRecord =
@@ -1509,6 +1514,122 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
         report(cli("inspect", &project).arg("--verify").output().unwrap())["manufacturing"]["artifact"],
         artifact
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual CLI verified package/ledger regression; requires SPILING_TEST_ENGINE"]
+fn read_only_grouped_manufacturing_export_uses_one_fresh_inspection() {
+    let root = root();
+    let project = root.join("package.spil");
+    let source = root.join("source.step");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .args([
+                "--printer",
+                "bambulab.a1-mini.04",
+                "--material",
+                "pla",
+                "--quality",
+                "draft",
+                "--supports",
+                "off",
+                "--center-all-on-bed",
+                "--compile",
+            ])
+            .output()
+            .unwrap(),
+    );
+    std::fs::remove_file(source).unwrap();
+    let stored = |store: &Path| {
+        rusqlite::Connection::open(store.join("operations.sqlite"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM native_operations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let grouped_store = root.join("grouped-store");
+    let grouped_output = root.join("grouped-output");
+    let grouped = report(
+        cli("inspect", &project)
+            .arg("--store")
+            .arg(&grouped_store)
+            .args(["--verify", "--manufacturing-out"])
+            .arg(&grouped_output)
+            .output()
+            .unwrap(),
+    );
+    let reversed_store = root.join("reversed-store");
+    let reversed_output = root.join("reversed-output");
+    let reversed = report(
+        cli("inspect", &project)
+            .arg("--store")
+            .arg(&reversed_store)
+            .arg("--manufacturing-out")
+            .arg(&reversed_output)
+            .arg("--verify")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stored(&grouped_store), 2);
+    assert_eq!(stored(&reversed_store), 3);
+    assert_eq!(grouped["operations"][1]["operation"], "verify");
+    assert_eq!(
+        grouped["operations"][1]["shared_replay_with"],
+        "manufacturing_export"
+    );
+    assert_eq!(
+        grouped["operations"][2]["operation"],
+        "manufacturing_export"
+    );
+    assert_eq!(
+        reversed["operations"][1]["operation"],
+        "manufacturing_export"
+    );
+    assert_eq!(reversed["operations"][2]["operation"], "verify");
+    let evidence = &grouped["manufacturing_export"];
+    assert_eq!(evidence, &reversed["manufacturing_export"]);
+    assert_eq!(evidence["artifact"], created["manufacturing"]["artifact"]);
+    assert_eq!(evidence["verification"]["verified"], true);
+    assert_eq!(evidence["delivery_package"]["file"], "program.gcode.3mf");
+    for file in [
+        "plan.json",
+        "program.gcode",
+        "verification.json",
+        "provenance.json",
+        "program.gcode.3mf",
+    ] {
+        assert_eq!(
+            std::fs::read(grouped_output.join(file)).unwrap(),
+            std::fs::read(reversed_output.join(file)).unwrap(),
+            "{file}"
+        );
+    }
+    let connection = rusqlite::Connection::open(&project).unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE chunks SET data=zeroblob(length(data)) WHERE chunk_id IN (
+                    SELECT chunk_id FROM object_chunks WHERE lower(hex(object_id))=?1)",
+                [evidence["artifact"]["hash"].as_str().unwrap()],
+            )
+            .unwrap()
+            > 0
+    );
+    drop(connection);
+    let corrupt_output = root.join("corrupt-output");
+    terminal_error(
+        cli("inspect", &project)
+            .args(["--verify", "--manufacturing-out"])
+            .arg(&corrupt_output)
+            .output()
+            .unwrap(),
+    );
+    assert!(!corrupt_output.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

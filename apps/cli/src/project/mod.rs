@@ -186,6 +186,7 @@ enum Operation {
     Compile,
     Verify,
     ExportManufacturing,
+    VerifyAndExportManufacturing,
     ExportReplay,
     Undo,
     Redo,
@@ -1037,6 +1038,14 @@ pub fn parse(
             "read-only inspection cannot contain authoring, compile or save operations".into(),
         );
     }
+    if read_only
+        && let Some(verify_index) = operations
+            .windows(2)
+            .position(|pair| matches!(pair, [Operation::Verify, Operation::ExportManufacturing]))
+    {
+        operations[verify_index + 1] = Operation::VerifyAndExportManufacturing;
+        operations.remove(verify_index);
+    }
     if mode == "create" {
         if operations
             .iter()
@@ -1496,7 +1505,8 @@ async fn execute(
         .iter()
         .any(|operation| matches!(operation, Operation::Defaults(..)));
     for operation in workflow.operations {
-        let operation_started = std::time::Instant::now();
+        let mut operation_started = std::time::Instant::now();
+        let mut grouped_verify_elapsed = None;
         let current_layout = info(client).await?.layout_id;
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
@@ -2930,8 +2940,10 @@ async fn execute(
                     _ => return Err("unexpected manufacturing compile response".into()),
                 }
             }
-            Operation::Verify | Operation::ExportManufacturing => {
-                let export = matches!(operation, Operation::ExportManufacturing);
+            Operation::Verify
+            | Operation::ExportManufacturing
+            | Operation::VerifyAndExportManufacturing => {
+                let export = !matches!(operation, Operation::Verify);
                 label = if export {
                     "manufacturing_export"
                 } else {
@@ -2955,6 +2967,11 @@ async fn execute(
                 } = inspection;
                 if !report.verified {
                     return Err("manufacturing replay did not verify the emitted program".into());
+                }
+                if matches!(operation, Operation::VerifyAndExportManufacturing) {
+                    let verified_at = std::time::Instant::now();
+                    grouped_verify_elapsed = Some((verified_at - operation_started).as_micros());
+                    operation_started = verified_at;
                 }
                 if export {
                     let bundle = client
@@ -3232,7 +3249,7 @@ async fn execute(
             verification = None;
         }
         let project = info(client).await?;
-        history.push(serde_json::json!({
+        let receipt = serde_json::json!({
             "operation": label, "elapsed_us": operation_started.elapsed().as_micros(), "project": project, "manufacturing": manufacturing,
             "storage_maintenance": storage_maintenance,
             "alternative": if label == "evaluate_alternative" { alternative_evaluation.as_ref().map(|evaluation| serde_json::json!({"context_hash":evaluation.context_hash,"captured_revision":evaluation.captured_revision,"record":evaluation.record,"report":evaluation.report,"changed_inputs":evaluation.changed_inputs,"changed_inputs_complete":evaluation.changed_inputs_complete,"duration_seconds":null})) } else { None },
@@ -3242,7 +3259,15 @@ async fn execute(
             "material_review": if label == "material_review" { material_review.as_ref() } else { None },
             "preflight_freshness": preflight_report.as_ref().map(|report|
                 if report.input_revision == project.revision { "current" } else { "stale" })
-        }));
+        });
+        if let Some(elapsed) = grouped_verify_elapsed {
+            let mut verify_receipt = receipt.clone();
+            verify_receipt["operation"] = serde_json::json!("verify");
+            verify_receipt["elapsed_us"] = serde_json::json!(elapsed);
+            verify_receipt["shared_replay_with"] = serde_json::json!("manufacturing_export");
+            history.push(verify_receipt);
+        }
+        history.push(receipt);
     }
     let summary = geometry::scene(client, &session).await?;
     let (_, occurrences) = geometry::records(client, &summary).await?;
@@ -4071,7 +4096,7 @@ mod tests {
         };
         assert!(matches!(
             workflow.operations.as_slice(),
-            [Operation::Verify, Operation::ExportManufacturing]
+            [Operation::VerifyAndExportManufacturing]
         ));
         assert_eq!(manufacturing_output.unwrap(), PathBuf::from("new-output"));
         assert!(parse_args(&["inspect", "project", "--compile"]).is_err());
@@ -4126,6 +4151,55 @@ mod tests {
             .is_err()
         );
         assert!(parse_args(&["edit", "project", "--replay-out", "motion.splr"]).is_err());
+    }
+
+    #[test]
+    fn only_adjacent_verify_before_read_only_export_shares_replay() {
+        use Operation::{ExportManufacturing, Preflight, Verify, VerifyAndExportManufacturing};
+
+        let operations = |args: &[&str]| {
+            let options = parse_args(args).unwrap().unwrap();
+            let Command::Project { workflow, .. } = options.command else {
+                panic!("expected project command");
+            };
+            workflow.operations
+        };
+        assert!(matches!(
+            operations(&["inspect", "p", "--manufacturing-out", "out", "--verify"]).as_slice(),
+            [ExportManufacturing, Verify]
+        ));
+        assert!(matches!(
+            operations(&[
+                "inspect",
+                "p",
+                "--verify",
+                "--preflight",
+                "--manufacturing-out",
+                "out"
+            ])
+            .as_slice(),
+            [Verify, Preflight, ExportManufacturing]
+        ));
+        assert!(matches!(
+            operations(&["open", "p", "--verify", "--manufacturing-out", "out"]).as_slice(),
+            [Verify, ExportManufacturing]
+        ));
+        assert!(matches!(
+            operations(&[
+                "inspect",
+                "p",
+                "--verify",
+                "--verify",
+                "--manufacturing-out",
+                "out"
+            ])
+            .as_slice(),
+            [Verify, VerifyAndExportManufacturing]
+        ));
+        assert!(matches!(
+            operations(&["inspect", "p", "--verify"]).as_slice(),
+            [Verify]
+        ));
     }
 
     #[test]

@@ -423,6 +423,9 @@ async fn main() -> ExitCode {
                 library::USAGE
             );
             println!(
+                "Read-only manufacturing: adjacent --verify --manufacturing-out NEW_DIRECTORY share one fresh independent replay. Standalone or separate --verify requests still replay independently."
+            );
+            println!(
                 "Portable hardware (ordered): project --library ABSOLUTE.spil --hardware-local MACHINE_UUID PLATE_UUID FACE | --hardware CAPTURE_JSON | --hardware-clear. The project captures public planning definitions; physical names and remembered device selections stay in My library. No network printing is supported."
             );
             println!(
