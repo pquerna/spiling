@@ -1337,6 +1337,18 @@ fn support_projection_cohort_size_preserves_native_plan_and_program() {
         let single = support::projection::with_single_column(|| {
             compile(scene.input(&enabled), &cancel).unwrap()
         });
+        let uncached = support::projection::without_batch_reuse(|| {
+            compile(scene.input(&enabled), &cancel).unwrap()
+        });
+        assert_eq!(
+            serde_json::to_vec(&shared.plan).unwrap(),
+            serde_json::to_vec(&uncached.plan).unwrap()
+        );
+        assert_eq!(
+            shared.program.to_vec().unwrap(),
+            uncached.program.to_vec().unwrap()
+        );
+        assert!(uncached.verification.verified);
         assert_eq!(
             serde_json::to_vec(&shared.plan).unwrap(),
             serde_json::to_vec(&single.plan).unwrap(),

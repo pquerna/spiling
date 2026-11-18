@@ -159,6 +159,280 @@ struct Column {
     material: Option<OwnedMaterial>,
 }
 
+struct PreparedBatch {
+    pieces: PieceBatch,
+    clearance: OwnedMaterial,
+}
+
+impl PreparedBatch {
+    fn receipt(&self) -> (usize, usize) {
+        (
+            self.pieces.points.saturating_add(self.clearance.units),
+            self.pieces
+                .owned_bytes()
+                .saturating_add(self.clearance.bytes),
+        )
+    }
+}
+
+struct BatchReuse<'a> {
+    enabled: bool,
+    frame: [u64; 5],
+    flush: usize,
+    entries: Vec<Option<PreparedBatch>>,
+    retained: (usize, usize),
+    pending: Option<PieceBatch>,
+    trace: &'a ProjectionTrace,
+}
+
+impl<'a> BatchReuse<'a> {
+    fn new(frame: &Frame, trace: &'a ProjectionTrace) -> Self {
+        let enabled = std::env::var_os("SPILING_SUPPORT_PROJECTION_NO_REUSE").is_none();
+        #[cfg(test)]
+        let enabled = enabled && !NO_BATCH_REUSE.with(std::cell::Cell::get);
+        Self {
+            enabled,
+            frame: frame.identity(),
+            flush: 0,
+            entries: Vec::new(),
+            retained: (0, 0),
+            pending: None,
+            trace,
+        }
+    }
+
+    fn receipt(&self) -> (usize, usize) {
+        let (units, bytes) = self
+            .pending
+            .as_ref()
+            .map_or((0, 0), |pieces| (pieces.points, pieces.owned_bytes()));
+        (
+            self.retained.0.saturating_add(units),
+            self.retained
+                .1
+                .saturating_add(bytes)
+                .saturating_add(vec_bytes(&self.entries)),
+        )
+    }
+
+    fn decline(&mut self) {
+        self.entries = Vec::new();
+        self.retained = (0, 0);
+        self.pending = None;
+        if self.enabled {
+            self.trace.add(&self.trace.batch_reuse_declines, 1);
+        }
+        self.enabled = false;
+    }
+
+    fn admit<T>(
+        &mut self,
+        mut operation: impl FnMut((usize, usize)) -> Result<T, ManufacturingError>,
+    ) -> Result<T, ManufacturingError> {
+        let receipt = self.receipt();
+        match operation(receipt) {
+            Err(failure)
+                if failure.code == ManufacturingErrorCode::ResourceLimit && receipt != (0, 0) =>
+            {
+                drop(failure);
+                self.decline();
+                operation((0, 0))
+            }
+            result => result,
+        }
+    }
+
+    fn take(
+        &mut self,
+        pieces: &PieceBatch,
+        frame: &Frame,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<OwnedMaterial>, ManufacturingError> {
+        let _clock = self.trace.measure(&self.trace.batch_reuse_time);
+        let previous = self.advance();
+        if let Some(previous) = previous
+            && self.frame == frame.identity()
+            && literal_pieces_equal(&previous.pieces.pieces, &pieces.pieces, work, cancel)?
+        {
+            self.trace.add(&self.trace.batch_reuse_hits, 1);
+            return Ok(Some(previous.clearance));
+        }
+        if self.enabled {
+            self.trace.add(&self.trace.batch_reuse_misses, 1);
+        }
+        Ok(None)
+    }
+
+    fn advance(&mut self) -> Option<PreparedBatch> {
+        let ordinal = self.flush;
+        self.flush = self.flush.saturating_add(1);
+        let previous = self.entries.get_mut(ordinal).and_then(Option::take);
+        if let Some(previous) = &previous {
+            let (units, bytes) = previous.receipt();
+            self.retained.0 -= units;
+            self.retained.1 -= bytes;
+        }
+        previous
+    }
+
+    fn required<T>(
+        &mut self,
+        cancel: &AtomicBool,
+        mut operation: impl FnMut(&mut Self) -> Result<T, ManufacturingError>,
+    ) -> Result<T, ManufacturingError> {
+        match operation(self) {
+            Err(failure)
+                if failure.code == ManufacturingErrorCode::ResourceLimit
+                    && self.receipt() != (0, 0) =>
+            {
+                drop(failure);
+                self.decline();
+                check_cancel(cancel)?;
+                operation(self)
+            }
+            result => result,
+        }
+    }
+
+    fn retain(
+        &mut self,
+        clearance: OwnedMaterial,
+        admission: &Admission<'_>,
+        live: (usize, usize),
+    ) {
+        let _clock = self.trace.measure(&self.trace.batch_reuse_time);
+        if !self.enabled || self.pending.is_none() {
+            return;
+        }
+        let needed = self.flush;
+        let capacity = if needed > self.entries.capacity() {
+            needed.max(self.entries.capacity().saturating_mul(2)).max(4)
+        } else {
+            self.entries.capacity()
+        };
+        let replacement = if capacity > self.entries.capacity() {
+            capacity.saturating_mul(std::mem::size_of::<Option<PreparedBatch>>())
+        } else {
+            0
+        };
+        let (units, bytes) = self.receipt();
+        if remaining_geometry_budget(
+            admission
+                .retained
+                .saturating_add(live.0)
+                .saturating_add(units),
+            admission
+                .owned_bytes
+                .saturating_add(live.1)
+                .saturating_add(bytes)
+                .saturating_add(replacement),
+            admission.support,
+            admission.interfaces,
+            &[admission.protected, &clearance],
+        )
+        .is_err()
+            || (capacity > self.entries.capacity()
+                && self
+                    .entries
+                    .try_reserve_exact(capacity - self.entries.len())
+                    .is_err())
+        {
+            self.decline();
+            return;
+        }
+        self.entries
+            .resize_with(needed.max(self.entries.len()), || None);
+        let (units, bytes) = self.receipt();
+        if remaining_geometry_budget(
+            admission
+                .retained
+                .saturating_add(live.0)
+                .saturating_add(units),
+            admission
+                .owned_bytes
+                .saturating_add(live.1)
+                .saturating_add(bytes),
+            admission.support,
+            admission.interfaces,
+            &[admission.protected, &clearance],
+        )
+        .is_err()
+        {
+            self.decline();
+            return;
+        }
+        let entry = PreparedBatch {
+            pieces: self.pending.take().expect("admitted batch key"),
+            clearance,
+        };
+        let (units, bytes) = entry.receipt();
+        self.retained.0 = self.retained.0.saturating_add(units);
+        self.retained.1 = self.retained.1.saturating_add(bytes);
+        self.entries[needed - 1] = Some(entry);
+        if self.trace.enabled {
+            self.trace.batch_reuse_peak_bytes.set(
+                self.trace
+                    .batch_reuse_peak_bytes
+                    .get()
+                    .max(self.receipt().1),
+            );
+        }
+    }
+}
+
+fn literal_pieces_equal(
+    left: &MultiPolygon<f64>,
+    right: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    if left.0.len() != right.0.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.0.iter().zip(&right.0) {
+        check_cancel(cancel)?;
+        if left.interiors().len() != right.interiors().len() {
+            return Ok(false);
+        }
+        for (left, right) in std::iter::once(left.exterior())
+            .chain(left.interiors())
+            .zip(std::iter::once(right.exterior()).chain(right.interiors()))
+        {
+            if left.0.len() != right.0.len() {
+                return Ok(false);
+            }
+            super::super::boolean::charge(work, left.0.len())?;
+            for (index, (left, right)) in left.0.iter().zip(&right.0).enumerate() {
+                if index % 4096 == 0 {
+                    check_cancel(cancel)?;
+                }
+                if left.x.to_bits() != right.x.to_bits() || left.y.to_bits() != right.y.to_bits() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+thread_local! {
+    static NO_BATCH_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in crate::planner) fn without_batch_reuse<T>(operation: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_BATCH_REUSE.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(NO_BATCH_REUSE.with(|flag| flag.replace(true)));
+    operation()
+}
+
 pub(super) struct Columns {
     frame: Frame,
     cursor: Cursor,
@@ -657,6 +931,7 @@ fn process(
                 .then(left.2.cmp(&right.2))
         });
         check_cancel(cancel)?;
+        let mut reuse = BatchReuse::new(frame, trace);
         let mut first = 0;
         while first < groups.len() {
             let mut end = first + 1;
@@ -667,6 +942,7 @@ fn process(
                 end += 1;
             }
             let scope = [groups[first].0, groups[first].1];
+            reuse.flush = 0;
             trace.add(&trace.section_builds, 1);
             let live_metadata = vec_bytes(columns).saturating_add(vec_bytes(&groups));
             let mut batch = PieceBatch::default();
@@ -692,19 +968,55 @@ fn process(
                         return Ok(true);
                     }
                     trace.add(&trace.built, 1);
-                    super::super::boolean::budget_polygon_accumulated(piece, work, cancel)?;
                     let (units, bytes) = live.get();
-                    batch.stage(
+                    super::super::boolean::budget_polygon_admitted(
                         piece,
-                        admission.retained.saturating_add(units),
-                        admission
-                            .owned_bytes
-                            .saturating_add(bytes)
-                            .saturating_add(live_metadata),
-                        admission.support,
-                        admission.interfaces,
-                        &[admission.protected],
+                        work,
+                        |scratch| {
+                            reuse.admit(|(cached_units, cached_bytes)| {
+                                remaining_geometry_budget(
+                                    admission
+                                        .retained
+                                        .saturating_add(units)
+                                        .saturating_add(batch.points)
+                                        .saturating_add(cached_units)
+                                        .saturating_add(
+                                            scratch
+                                                .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                                        ),
+                                    admission
+                                        .owned_bytes
+                                        .saturating_add(bytes)
+                                        .saturating_add(live_metadata)
+                                        .saturating_add(batch.owned_bytes())
+                                        .saturating_add(cached_bytes)
+                                        .saturating_add(scratch),
+                                    admission.support,
+                                    admission.interfaces,
+                                    &[admission.protected],
+                                )
+                            })?;
+                            Ok(())
+                        },
+                        cancel,
                     )?;
+                    reuse.admit(|(cached_units, cached_bytes)| {
+                        batch.stage(
+                            piece,
+                            admission
+                                .retained
+                                .saturating_add(units)
+                                .saturating_add(cached_units),
+                            admission
+                                .owned_bytes
+                                .saturating_add(bytes)
+                                .saturating_add(live_metadata)
+                                .saturating_add(cached_bytes),
+                            admission.support,
+                            admission.interfaces,
+                            &[admission.protected],
+                        )
+                    })?;
                     trace.add(&trace.staged, 1);
                     if batch.points >= PieceBatch::FLUSH_POINTS {
                         apply_batch(
@@ -717,6 +1029,8 @@ fn process(
                             work,
                             trace,
                             cancel,
+                            &mut reuse,
+                            end < groups.len(),
                         )?;
                         live.set(column_receipt(columns));
                         return Ok(groups[first..end].iter().any(|(_, _, index)| {
@@ -750,6 +1064,8 @@ fn process(
                 work,
                 trace,
                 cancel,
+                &mut reuse,
+                end < groups.len(),
             )?;
             first = end;
         }
@@ -771,6 +1087,8 @@ fn apply_batch(
     work: &mut usize,
     trace: &ProjectionTrace,
     cancel: &AtomicBool,
+    reuse: &mut BatchReuse<'_>,
+    retain: bool,
 ) -> Result<(), ManufacturingError> {
     if batch.pieces.0.is_empty() {
         return Ok(());
@@ -794,6 +1112,7 @@ fn apply_batch(
                     .rejects(bounds)
                 })
         }) {
+            drop(reuse.advance());
             return Ok(());
         }
     }
@@ -803,46 +1122,69 @@ fn apply_batch(
         .owned_bytes
         .saturating_add(bytes)
         .saturating_add(metadata);
-    remaining_geometry_budget(
-        retained.saturating_add(staged.points.saturating_mul(3)),
-        owned.saturating_add(staged.owned_bytes().saturating_mul(3)),
-        admission.support,
-        admission.interfaces,
-        &[admission.protected],
-    )?;
-    boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
-    let union_time = trace.measure(&trace.union_time);
-    let merged = OwnedMaterial::new(union_pieces_in_frame(&staged.pieces, Some(frame)));
-    drop(union_time);
-    region::check_size(&merged)?;
-    let offset_time = trace.measure(&trace.offset_time);
-    let clearance = OwnedMaterial::new(region::offset_admitted_in_frame(
-        &merged,
-        frame.distance,
-        frame,
-        |scratch, scratch_bytes, overlay| {
+    let prepared = reuse.take(&staged, frame, work, cancel)?;
+    let clearance = if let Some(clearance) = prepared {
+        if reuse.enabled && retain {
+            reuse.pending = Some(staged);
+        }
+        clearance
+    } else {
+        reuse.admit(|(cached_units, cached_bytes)| {
             remaining_geometry_budget(
                 retained
-                    .saturating_add(staged.points)
-                    .saturating_add(scratch),
+                    .saturating_add(staged.points.saturating_mul(3))
+                    .saturating_add(cached_units),
                 owned
-                    .saturating_add(staged.owned_bytes())
-                    .saturating_add(scratch_bytes),
+                    .saturating_add(staged.owned_bytes().saturating_mul(3))
+                    .saturating_add(cached_bytes),
                 admission.support,
                 admission.interfaces,
-                &[admission.protected, &merged],
-            )?;
-            if let Some((left, right)) = overlay {
-                boolean_budget(left, right, cancel)?;
-            }
-            Ok(())
-        },
-        cancel,
-    )?);
-    drop(offset_time);
-    region::check_size(&clearance)?;
-    drop(staged);
-    drop(merged);
+                &[admission.protected],
+            )
+        })?;
+        boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
+        let union_time = trace.measure(&trace.union_time);
+        let merged = OwnedMaterial::new(union_pieces_in_frame(&staged.pieces, Some(frame)));
+        drop(union_time);
+        region::check_size(&merged)?;
+        if reuse.enabled && retain {
+            reuse.pending = Some(staged);
+        } else {
+            drop(staged);
+        }
+        let offset_time = trace.measure(&trace.offset_time);
+        let clearance = OwnedMaterial::new(reuse.required(cancel, |reuse| {
+            region::offset_admitted_in_frame(
+                &merged,
+                frame.distance,
+                frame,
+                |scratch, scratch_bytes, overlay| {
+                    reuse.admit(|(cached_units, cached_bytes)| {
+                        remaining_geometry_budget(
+                            retained
+                                .saturating_add(cached_units)
+                                .saturating_add(scratch),
+                            owned
+                                .saturating_add(cached_bytes)
+                                .saturating_add(scratch_bytes),
+                            admission.support,
+                            admission.interfaces,
+                            &[admission.protected, &merged],
+                        )
+                    })?;
+                    if let Some((left, right)) = overlay {
+                        boolean_budget(left, right, cancel)?;
+                    }
+                    Ok(())
+                },
+                cancel,
+            )
+        })?);
+        drop(offset_time);
+        region::check_size(&clearance)?;
+        drop(merged);
+        clearance
+    };
     let bounds = material_bounds(&clearance);
     let mut live = column_receipt(columns);
     for &(_, _, index) in group {
@@ -872,39 +1214,52 @@ fn apply_batch(
             .owned_bytes
             .saturating_add(metadata)
             .saturating_add(live.1.saturating_sub(material.bytes));
-        remaining_geometry_budget(
-            outside_units.saturating_add(
-                material
-                    .units
-                    .saturating_add(clearance.units)
-                    .saturating_mul(3),
-            ),
-            outside_bytes.saturating_add(
-                material
-                    .bytes
-                    .saturating_add(clearance.bytes)
-                    .saturating_mul(3),
-            ),
-            admission.support,
-            admission.interfaces,
-            &[admission.protected, material, &clearance],
-        )?;
+        reuse.admit(|(cached_units, cached_bytes)| {
+            remaining_geometry_budget(
+                outside_units
+                    .saturating_add(
+                        material
+                            .units
+                            .saturating_add(clearance.units)
+                            .saturating_mul(3),
+                    )
+                    .saturating_add(cached_units),
+                outside_bytes
+                    .saturating_add(
+                        material
+                            .bytes
+                            .saturating_add(clearance.bytes)
+                            .saturating_mul(3),
+                    )
+                    .saturating_add(cached_bytes),
+                admission.support,
+                admission.interfaces,
+                &[admission.protected, material, &clearance],
+            )
+        })?;
         charge_boolean(material, &clearance, work, admission.foreign_work, cancel)?;
         let difference_time = trace.measure(&trace.difference_time);
         let next = OwnedMaterial::new(frame.difference(material, &clearance));
         drop(difference_time);
         region::check_size(&next)?;
-        remaining_geometry_budget(
-            outside_units,
-            outside_bytes,
-            admission.support,
-            admission.interfaces,
-            &[admission.protected, material, &clearance, &next],
-        )?;
+        reuse.admit(|(cached_units, cached_bytes)| {
+            remaining_geometry_budget(
+                outside_units.saturating_add(cached_units),
+                outside_bytes.saturating_add(cached_bytes),
+                admission.support,
+                admission.interfaces,
+                &[admission.protected, material, &clearance, &next],
+            )
+        })?;
         live.0 = live.0 - material.units + next.units;
         live.1 = live.1 - material.bytes + next.bytes;
         columns[index].material = Some(next);
     }
+    reuse.retain(
+        clearance,
+        admission,
+        (live.0, live.1.saturating_add(metadata)),
+    );
     Ok(())
 }
 
@@ -944,6 +1299,335 @@ mod tests {
 
     fn rectangle(left: f64, bottom: f64, right: f64, top: f64) -> Polygon<f64> {
         polygon![(x:left,y:bottom),(x:right,y:bottom),(x:right,y:top),(x:left,y:top)]
+    }
+
+    #[test]
+    fn batch_identity_keeps_literal_coordinates_topology_order_and_frame() {
+        let original = MultiPolygon(vec![rectangle(0.0, 0.0, 1.0, 1.0)]);
+        let cancel = AtomicBool::new(false);
+        assert!(literal_pieces_equal(&original, &original, &mut 0, &cancel).unwrap());
+        let mut changed = original.clone();
+        changed.0[0].exterior_mut(|ring| ring.0[0].x = -0.0);
+        assert!(!literal_pieces_equal(&original, &changed, &mut 0, &cancel).unwrap());
+        let mut changed = original.clone();
+        changed.0[0].exterior_mut(|ring| ring.0.rotate_left(1));
+        assert!(!literal_pieces_equal(&original, &changed, &mut 0, &cancel).unwrap());
+        let mut changed = original.clone();
+        changed.0[0].interiors_push(rectangle(0.2, 0.2, 0.3, 0.3).into_inner().0);
+        assert!(!literal_pieces_equal(&original, &changed, &mut 0, &cancel).unwrap());
+        let failure =
+            literal_pieces_equal(&original, &original, &mut 0, &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
+
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let trace = ProjectionTrace::new(0, 0, 0);
+        let mut reuse = BatchReuse::new(&frame, &trace);
+        let mut pieces = PieceBatch::default();
+        pieces.stage(&original.0[0], 0, 0, &[], &[], &[]).unwrap();
+        let mut previous = PieceBatch::default();
+        previous.stage(&original.0[0], 0, 0, &[], &[], &[]).unwrap();
+        reuse.entries.push(Some(PreparedBatch {
+            pieces: previous,
+            clearance: OwnedMaterial::new(original),
+        }));
+        reuse.retained = reuse.entries[0].as_ref().unwrap().receipt();
+        let other = Frame {
+            adapter: frame.adapter.clone(),
+            bounds: frame.bounds,
+            distance: frame.distance.next_up(),
+        };
+        assert!(
+            reuse
+                .take(&pieces, &other, &mut 0, &cancel)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_batch_reuse_declines_before_required_live_growth() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let protected = OwnedMaterial::new(MultiPolygon(Vec::new()));
+        let original = MultiPolygon(vec![rectangle(0.0, 0.0, 10.0, 10.0)]);
+        let query = Query {
+            target: 0,
+            root: 0,
+            first_section: 0,
+            last_section: 0,
+            bed: 0.0,
+            ceiling: 1.0,
+        };
+        let run = |enabled, constrained| {
+            let mut columns = [Column {
+                query,
+                material: Some(OwnedMaterial::new(original.clone())),
+            }];
+            let mut trace = ProjectionTrace::new(0, 0, 0);
+            trace.enabled = true;
+            let mut reuse = BatchReuse::new(&frame, &trace);
+            reuse.enabled = enabled;
+            let allowance = 512 * 1024;
+            crate::working_set::scope(
+                crate::working_set::WorkingSet::new(allowance).unwrap(),
+                || {
+                    for step in 0..3 {
+                        let mut admission = Admission {
+                            retained: 0,
+                            owned_bytes: 0,
+                            support: &[],
+                            interfaces: &[],
+                            protected: &protected,
+                            foreign_work: 0,
+                        };
+                        if constrained && step == 2 {
+                            admission.owned_bytes = allowance - 16 * 1024;
+                        }
+                        let mut polygon = rectangle(3.0, 3.0, 4.0, 4.0);
+                        if step < 2 {
+                            let corners = polygon.exterior().0.clone();
+                            polygon.exterior_mut(|ring| {
+                                ring.0 = corners
+                                    .windows(2)
+                                    .flat_map(|pair| {
+                                        (0..200).map(move |index| {
+                                            let fraction = index as f64 / 200.0;
+                                            geo::Coord {
+                                                x: pair[0].x + fraction * (pair[1].x - pair[0].x),
+                                                y: pair[0].y + fraction * (pair[1].y - pair[0].y),
+                                            }
+                                        })
+                                    })
+                                    .chain(std::iter::once(corners[0]))
+                                    .collect();
+                            });
+                        } else {
+                            polygon = rectangle(7.0, 7.0, 8.0, 8.0);
+                        }
+                        let mut batch = PieceBatch::default();
+                        batch.stage(&polygon, 0, 0, &[], &[], &[]).unwrap();
+                        reuse.flush = usize::from(step == 2);
+                        apply_batch(
+                            &mut batch,
+                            &mut columns,
+                            &[(0.0, 1.0, 0)],
+                            &frame,
+                            &admission,
+                            0,
+                            &mut 0,
+                            &trace,
+                            &cancel,
+                            &mut reuse,
+                            true,
+                        )
+                        .unwrap();
+                    }
+                },
+            );
+            (
+                columns[0].material.take().unwrap().material,
+                trace.batch_reuse_hits.get(),
+                trace.batch_reuse_declines.get(),
+            )
+        };
+        let plain = run(false, false);
+        let cached = run(true, false);
+        let tight = run(true, true);
+        assert_eq!(plain.0, cached.0);
+        assert_eq!(plain.0, tight.0);
+        assert_eq!(cached.1, 1);
+        assert_eq!(tight.1, 1);
+        assert_eq!(cached.2, 0);
+        assert_eq!(tight.2, 1);
+    }
+
+    #[test]
+    fn optional_reuse_never_swallows_cancellation_or_required_failure() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let mut trace = ProjectionTrace::new(0, 0, 0);
+        trace.enabled = true;
+        let mut reuse = BatchReuse::new(&frame, &trace);
+        reuse.entries.push(None);
+        let failure = reuse
+            .admit::<()>(|_| Err(error(ManufacturingErrorCode::Cancelled, "cancelled")))
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(reuse.entries.len(), 1);
+        let mut attempts = 0;
+        let failure = reuse
+            .admit::<()>(|_| {
+                attempts += 1;
+                Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required work does not fit",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert_eq!(attempts, 2);
+        assert_eq!(reuse.receipt(), (0, 0));
+        assert_eq!(trace.batch_reuse_declines.get(), 1);
+    }
+
+    #[test]
+    fn required_allocation_retries_only_after_optional_owners_drop() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let trace = ProjectionTrace::new(0, 0, 0);
+        let mut reuse = BatchReuse::new(&frame, &trace);
+        reuse.entries.push(None);
+        let mut attempts = 0;
+        let value = reuse
+            .required(&cancel, |reuse| {
+                attempts += 1;
+                reuse.admit(|_| Ok(()))?;
+                if reuse.receipt() != (0, 0) {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "required allocation failed after admission",
+                    ));
+                }
+                Ok(23)
+            })
+            .unwrap();
+        assert_eq!(value, 23);
+        assert_eq!(attempts, 2);
+        assert_eq!(reuse.receipt(), (0, 0));
+        reuse.entries.push(None);
+        attempts = 0;
+        let failure = reuse
+            .required::<()>(&cancel, |_| {
+                attempts += 1;
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "allocation failed",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(attempts, 1);
+        assert_eq!(reuse.receipt(), (0, 0));
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        reuse.entries.push(None);
+        attempts = 0;
+        let failure = reuse
+            .required::<()>(&cancel, |_| {
+                attempts += 1;
+                Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required allocation still does not fit",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn polygon_audit_evicts_optional_bytes_before_allocating_scratch() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let mut trace = ProjectionTrace::new(0, 0, 0);
+        trace.enabled = true;
+        let mut reuse = BatchReuse::new(&frame, &trace);
+        let polygon = Polygon::new(
+            geo::LineString::new(
+                (0..=1024)
+                    .map(|index| {
+                        let angle = (index % 1024) as f64 * std::f64::consts::TAU / 1024.0;
+                        geo::Coord {
+                            x: angle.cos(),
+                            y: angle.sin(),
+                        }
+                    })
+                    .collect(),
+            ),
+            Vec::new(),
+        );
+        let mut key = PieceBatch::default();
+        key.stage(&polygon, 0, 0, &[], &[], &[]).unwrap();
+        reuse.pending = Some(key);
+        let allowance = 64 * 1024;
+        let mut audited = false;
+        crate::working_set::scope(
+            crate::working_set::WorkingSet::new(allowance).unwrap(),
+            || {
+                super::super::super::boolean::budget_polygon_admitted(
+                    &polygon,
+                    &mut 0,
+                    |scratch| {
+                        assert!(scratch > 0 && scratch <= allowance);
+                        reuse.admit(|(_, cached_bytes)| {
+                            super::super::super::remaining_geometry_units(
+                                0,
+                                allowance - scratch + cached_bytes + scratch,
+                            )
+                        })?;
+                        assert_eq!(reuse.receipt(), (0, 0));
+                        audited = true;
+                        Ok(())
+                    },
+                    &cancel,
+                )
+                .unwrap();
+            },
+        );
+        assert!(audited);
+        assert_eq!(trace.batch_reuse_declines.get(), 1);
+    }
+
+    #[test]
+    fn ordinal_metadata_grows_geometrically_under_admission() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(1.0);
+        let support = support_input(&[], &[], &recipe);
+        let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
+        let trace = ProjectionTrace::new(0, 0, 0);
+        let mut reuse = BatchReuse::new(&frame, &trace);
+        let protected = OwnedMaterial::new(MultiPolygon(Vec::new()));
+        let admission = Admission {
+            retained: 0,
+            owned_bytes: 0,
+            support: &[],
+            interfaces: &[],
+            protected: &protected,
+            foreign_work: 0,
+        };
+        let mut previous = 0;
+        let mut allocations = 0;
+        for ordinal in 0..33 {
+            let mut key = PieceBatch::default();
+            key.stage(&rectangle(0.0, 0.0, 1.0, 1.0), 0, 0, &[], &[], &[])
+                .unwrap();
+            reuse.pending = Some(key);
+            reuse.flush = ordinal + 1;
+            reuse.retain(
+                OwnedMaterial::new(MultiPolygon(Vec::new())),
+                &admission,
+                (0, 0),
+            );
+            let capacity = reuse.entries.capacity();
+            if capacity != previous {
+                assert!(capacity >= previous * 2);
+                allocations += 1;
+                previous = capacity;
+            }
+        }
+        assert!(allocations < reuse.entries.len());
+        assert_eq!(reuse.entries.len(), 33);
+        assert!(reuse.entries.iter().all(Option::is_some));
     }
 
     fn support_input<'a>(
@@ -1329,6 +2013,19 @@ mod tests {
                         .unwrap();
                 }
                 assert!(batch.points < PieceBatch::FLUSH_POINTS);
+                let mut reuse = BatchReuse::new(&frame, &trace);
+                let mut key = PieceBatch::default();
+                key.stage(&rectangle(0.0, 0.0, 1.0, 1.0), 0, 0, &[], &[], &[])
+                    .unwrap();
+                reuse.pending = Some(key);
+                reuse.flush = 1;
+                reuse.retain(
+                    OwnedMaterial::new(original.clone()),
+                    &admission,
+                    column_receipt(&columns),
+                );
+                assert!(reuse.entries[0].is_some());
+                reuse.flush = 0;
                 apply_batch(
                     &mut batch,
                     &mut columns,
@@ -1339,9 +2036,14 @@ mod tests {
                     &mut 0,
                     &trace,
                     &cancel,
+                    &mut reuse,
+                    false,
                 )
                 .unwrap();
                 assert!(batch.pieces.0.is_empty());
+                assert_eq!(reuse.flush, 1);
+                assert!(reuse.entries[0].is_none());
+                assert_eq!(reuse.retained, (0, 0));
             },
         );
         assert_eq!(columns[0].material.as_ref().unwrap().material, original);
