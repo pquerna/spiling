@@ -56,8 +56,9 @@ stream accumulation. Every tile synchronously drains, and completion/cancellatio
 drains resource release before the next batch. CPU launches have one cube/unit,
 no barriers and no pool-growth requirement. CubeCL's independent LLVM runner
 still creates its initial worker pool from OS-active cores, not Rayon settings;
-these kernels queue at most one unit at a time. Vulkan launches have one cube of
-64 units. Cancellation is checked during validation/encoding, while waiting for
+these kernels queue at most one unit at a time. Vulkan launches use one 64-unit
+cube per 64 output words, up to 64 cubes in the same bounded tile. Cancellation
+is checked during validation/encoding, while waiting for
 admission, between tiles and before result publication, not inside a running tile.
 Only three predicate specializations are compiled; initialization exercises the
 crossing specialization.

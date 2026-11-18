@@ -127,7 +127,7 @@ fn masks<N: Size>(
 /// The sole unsafe adapter. All handles are allocated from these exact u32 slices;
 /// lengths are scalar element counts, four-lane inputs are padded, and checked launches
 /// retain bounds checks. CPU launches have one unit and one cube, with no barriers;
-/// Vulkan launches have at most 64 units. Readback drains every bounded tile.
+/// Vulkan tiles use up to 64 cubes of 64 units. Readback drains every bounded tile.
 pub(crate) struct UploadedBatch {
     client: Client,
     cpu: bool,
@@ -209,7 +209,15 @@ impl UploadedBatch {
         unsafe {
             masks::launch(
                 &self.client,
-                CubeCount::Static(1, 1, 1),
+                CubeCount::Static(
+                    if self.cpu {
+                        1
+                    } else {
+                        word_count.div_ceil(64) as u32
+                    },
+                    1,
+                    1,
+                ),
                 CubeDim::new_1d(if self.cpu { 1 } else { 64 }),
                 4,
                 BufferArg::from_raw_parts(self.input.clone(), self.input_length),
