@@ -25,7 +25,9 @@ mod exact;
 mod support;
 pub use conform::Conformed;
 pub use exact::SectionCircle;
-pub use support::{TolerantSupportPiece, TolerantSupportProjection, TolerantVoidProjection};
+pub use support::{
+    TolerantSupportPiece, TolerantSupportProjection, TolerantVoidProjection, TolerantVoidRoof,
+};
 
 use crate::{GeometryError, GeometryErrorCode, kernel::Definition};
 use solidcore_tess::MeshTolerance;

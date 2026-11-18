@@ -15,6 +15,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 mod clearance_index;
 #[cfg(test)]
 mod clearance_tests;
+mod withdrawal;
+pub(super) use withdrawal::Sweep as SupportWithdrawal;
 
 pub(super) const MATERIAL_ARC_BYTES: usize =
     std::mem::size_of::<MultiPolygon<f64>>() + 2 * std::mem::size_of::<usize>();
@@ -23,7 +25,7 @@ pub(super) struct SupportClearanceGeometry<'a> {
     pub sections: &'a [super::SectionSpan],
     pub schedule: &'a [LayerElevation],
     pub protected: &'a MultiPolygon<f64>,
-    pub scopes: &'a [spiling_geometry::ProtectedVoidHeightScope],
+    pub scopes: &'a [super::support::VoidScope],
     pub index_bytes: usize,
 }
 
@@ -529,11 +531,11 @@ pub(super) fn split_resolved_layer_admitted(
 pub(super) fn certify_support_clearance(
     layers: &[PrintLayer],
     geometry: &SupportClearanceGeometry<'_>,
-    recipe: &PlanarPrintRecipe,
+    policy: &SupportPolicy,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
+) -> Result<Option<SupportWithdrawal>, ManufacturingError> {
     let SupportClearanceGeometry {
         sections,
         schedule,
@@ -557,15 +559,15 @@ pub(super) fn certify_support_clearance(
         xy_clearance_mm,
         z_gap_mm,
         ..
-    } = recipe.supports
+    } = *policy
     else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(vertical) = deposition_vertical_extensions(layers, schedule, support_work, cancel)?
     else {
         // Exhausted the actual paths: there are no emitted support segments,
         // rather than trusting a generated-support flag or skipping a proof.
-        return Ok(());
+        return Ok(None);
     };
     let trace = ClearanceTrace {
         enabled: std::env::var_os("SPILING_TRACE_SUPPORT_CLEARANCE").is_some(),
@@ -616,6 +618,7 @@ pub(super) fn certify_support_clearance(
                 native_work,
                 support_work,
                 &trace,
+                None,
                 cancel,
             )?;
             Ok(true)
@@ -623,8 +626,12 @@ pub(super) fn certify_support_clearance(
     }
     trace.report("raw_occupancy", raw_started);
     let void_started = std::time::Instant::now();
+    let mut sweep = withdrawal::Sweep::new(
+        index_bytes.saturating_sub(index.as_ref().map_or(0, |index| index.retained_bytes())),
+    );
     for (polygon, scope) in protected.0.iter().zip(scopes) {
-        let range = scoped_support_layer_range(schedule, *scope, vertical, support_work, cancel)?;
+        let range =
+            scoped_support_layer_range(schedule, scope.height, vertical, support_work, cancel)?;
         certify_polygon_capsules(
             PolygonDeposition {
                 layers,
@@ -633,18 +640,29 @@ pub(super) fn certify_support_clearance(
             },
             &ForbiddenPolygonScope {
                 polygon,
-                height: *scope,
+                height: scope.height,
                 label: "projected protected native void",
             },
             xy_clearance_mm,
             native_work,
             support_work,
             &trace,
+            scope.has_access().then_some((&mut sweep, scope)),
             cancel,
         )?;
     }
     trace.report("protected_voids", void_started);
     drop(index);
+    let withdrawal_started = std::time::Instant::now();
+    let sweep = sweep.certify_source(
+        schedule,
+        sections,
+        xy_clearance_mm,
+        native_work,
+        support_work,
+        cancel,
+    )?;
+    trace.report("withdrawal", withdrawal_started);
     let deposited_started = std::time::Instant::now();
     // A bounded-fidelity M/D prism or emitted bead can extend outside true T.
     // Native target exclusion therefore does not replace this distinct actual
@@ -663,7 +681,7 @@ pub(super) fn certify_support_clearance(
         cancel,
     )?;
     trace.report("deposited_pairs", deposited_started);
-    Ok(())
+    Ok(sweep)
 }
 
 /// Outward enclosure of an emitted XYZ6 centerline point's displacement from
@@ -694,6 +712,7 @@ fn edge_xy_bounds(edge: &[[f64; 3]]) -> [[f64; 2]; 2] {
     ]
 }
 
+#[expect(clippy::too_many_arguments)]
 fn certify_polygon_capsules(
     deposition: PolygonDeposition<'_>,
     forbidden: &ForbiddenPolygonScope<'_>,
@@ -701,6 +720,7 @@ fn certify_polygon_capsules(
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
     trace: &ClearanceTrace,
+    mut withdrawal: Option<(&mut withdrawal::Sweep, &super::support::VoidScope)>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let ForbiddenPolygonScope {
@@ -795,28 +815,34 @@ fn certify_polygon_capsules(
                     );
                     }
                     trace.add(&trace.polygon_tests, 1);
-                    spiling_geometry::certify_planar_capsule_clearance_prepared(
-                    segment,
-                    prepared
-                        .as_ref()
-                        .expect("prepared actual forbidden polygon"),
-                    spiling_geometry::PlanarCapsuleClearancePolicy {
+                    let policy = spiling_geometry::PlanarCapsuleClearancePolicy {
                         radius_mm: local.width_mm * 0.5,
                         required_gap_mm: clearance,
                         endpoint_error_mm,
-                    },
-                    native_work,
-                    cancel,
-                )
-                .map_err(|failure| {
-                    super::native_error(
-                        failure,
-                        &format!(
+                    };
+                    if let Err(failure) =
+                        spiling_geometry::certify_planar_capsule_clearance_prepared(
+                            segment,
+                            prepared
+                                .as_ref()
+                                .expect("prepared actual forbidden polygon"),
+                            policy,
+                            native_work,
+                            cancel,
+                        )
+                    {
+                        if let Some((sweep, access)) = &mut withdrawal
+                            && failure.code == spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate
+                            && access.covers_bead(ordinal, upper, segment, support_work, cancel)?
+                        {
+                            sweep.record(segment, policy, upper, native_work, cancel)?;
+                        } else {
+                            return Err(super::native_error(failure, &format!(
                             "actual emitted support layer {} against {label}, scope {scope:?}, segment {segment:?}, width {} mm, XY gap {clearance} mm",
                             layer.index, local.width_mm
-                        ),
-                    )
-                })?;
+                            )));
+                        }
+                    }
                 }
             }
             Ok(())

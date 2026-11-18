@@ -349,7 +349,8 @@ pub(super) fn polygon(points: Vec<[f64; 2]>) -> Polygon<f64> {
 struct ProjectedVoid {
     outer: Polygon<f64>,
     bounds: geo::Rect<f64>,
-    scope: spiling_geometry::ProtectedVoidHeightScope,
+    height: spiling_geometry::ProtectedVoidHeightScope,
+    roof: Option<Arc<spiling_geometry::tolerant::TolerantVoidRoof>>,
 }
 
 /// Each occurrence's all-height void projections, independent of demand.
@@ -371,12 +372,13 @@ impl VoidMemo {
 
 fn project_model(
     model: &TolerantModel,
+    roof_budget_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<ProjectedVoid>, ManufacturingError> {
     use geo::{Area, BoundingRect};
     let mut projected = Vec::new();
     for void in model
-        .support_voids(cancel)
+        .support_voids_with_roof_budget(roof_budget_bytes, cancel)
         .map_err(|e| super::native_error(e, "tolerant all-height void projection"))?
     {
         check_cancel(cancel)?;
@@ -384,15 +386,18 @@ fn project_model(
         let Some(bounds) = outer.bounding_rect() else {
             continue;
         };
-        let bottom = polygon(void.bottom);
+        let bottom = MultiPolygon(vec![polygon(void.bottom)]);
         let floor_parts: Vec<_> = void
             .floor
             .into_iter()
             .map(|triangle| polygon(triangle.to_vec()))
             .collect();
         let floor = geo::unary_union(&floor_parts);
-        let closed = bottom.unsigned_area() == 0.0
-            || MultiPolygon(vec![bottom]).difference(&floor).0.is_empty();
+        let closed = bottom.unsigned_area() == 0.0 || bottom.difference(&floor).0.is_empty();
+        let roof = void
+            .roof
+            .filter(|_| !closed && (floor.0.is_empty() || bottom.intersection(&floor).0.is_empty()))
+            .map(Arc::new);
         let scope = if closed {
             spiling_geometry::ProtectedVoidHeightScope::Bounded {
                 lower_mm: void.height_mm[0],
@@ -406,7 +411,8 @@ fn project_model(
         projected.push(ProjectedVoid {
             outer,
             bounds,
-            scope,
+            height: scope,
+            roof,
         });
     }
     Ok(projected)
@@ -433,13 +439,37 @@ pub(super) fn project_protected_voids(
             continue;
         }
         if !memo.models.contains_key(occurrence_id) {
-            let projected = project_model(model, cancel)?;
+            let roof_budget_bytes = crate::working_set::bytes().saturating_sub(
+                live_bytes
+                    .saturating_add(memo.bytes)
+                    .saturating_add(points.saturating_mul(std::mem::size_of::<geo::Coord<f64>>()))
+                    .saturating_add(
+                        regions
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<Polygon<f64>>()),
+                    )
+                    .saturating_add(
+                        scopes
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<super::support::VoidScope>()),
+                    ),
+            );
+            let projected = project_model(model, roof_budget_bytes, cancel)?;
             let added_points = projected
                 .iter()
                 .map(|void| void.outer.exterior().0.len())
                 .sum::<usize>();
             let added_bytes = projected.capacity() * std::mem::size_of::<ProjectedVoid>()
-                + added_points * std::mem::size_of::<geo::Coord<f64>>();
+                + added_points * std::mem::size_of::<geo::Coord<f64>>()
+                + projected
+                    .iter()
+                    .filter_map(|void| void.roof.as_ref())
+                    .map(|roof| {
+                        std::mem::size_of::<spiling_geometry::tolerant::TolerantVoidRoof>()
+                            + 2 * std::mem::size_of::<usize>()
+                            + roof.facets.capacity() * std::mem::size_of::<[[f64; 2]; 3]>()
+                    })
+                    .sum::<usize>();
             let memo_points = memo.points.saturating_add(added_points);
             let memo_bytes = memo.bytes.saturating_add(added_bytes);
             super::remaining_geometry_units(
@@ -475,10 +505,16 @@ pub(super) fn project_protected_voids(
                 retained_units + points,
                 live_bytes
                     .saturating_add(memo.bytes)
-                    .saturating_add(points * std::mem::size_of::<geo::Coord<f64>>()),
+                    .saturating_add(points * std::mem::size_of::<geo::Coord<f64>>())
+                    .saturating_add(
+                        scopes.len().max(2) * 2 * std::mem::size_of::<super::support::VoidScope>(),
+                    ),
             )?;
             regions.push(void.outer.clone());
-            scopes.push(void.scope);
+            scopes.push(super::support::VoidScope::new(
+                void.height,
+                void.roof.clone(),
+            ));
         }
     }
     Ok(super::support::ProtectedVoidSet {

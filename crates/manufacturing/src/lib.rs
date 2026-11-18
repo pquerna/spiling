@@ -33,7 +33,7 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "124";
+pub const PLANNER_VERSION: &str = "125";
 pub const EMITTER_VERSION: &str = "22";
 pub const VERIFIER_VERSION: &str = "53";
 
@@ -150,7 +150,7 @@ fn compile_exact(
     // Shared admission validates intent, native identity and the complete image
     // table before planning or provenance allocation. Do not hash/copy assets or
     // prepare the same native/field schedule through a second compile-only lane.
-    let mut plan = planner::plan(&input, cancel, geometry_work)?;
+    let plan = planner::plan(&input, cancel, geometry_work)?;
     timing.mark("planning");
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
@@ -192,8 +192,6 @@ fn compile_exact(
         verifier_version: VERIFIER_VERSION.into(),
     };
     timing.mark("provenance");
-    realization::canonicalize(&mut plan, input.intent, cancel)?;
-    timing.mark("realization");
     let program = backend::emit(&plan, input.intent, cancel)?;
     timing.mark("emission");
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;

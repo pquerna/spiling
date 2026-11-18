@@ -89,7 +89,7 @@ pub(crate) fn plan(
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
     let mut timing = crate::timing::Clock::new("planner.plan");
-    let mut plan = plan_with(input, cancel, geometry_work)?;
+    let (mut plan, withdrawal) = plan_with(input, cancel, geometry_work)?;
     timing.mark("construction");
     // Walls follow the BREP's own circles.
     let sources: Vec<_> = input
@@ -105,6 +105,18 @@ pub(crate) fn plan(
     arcs::attach(&mut plan, &sources, cancel)?;
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     timing.mark("arc_attachment_and_bed");
+    crate::realization::canonicalize(&mut plan, input.intent, cancel)?;
+    timing.mark("realization");
+    if let Some(withdrawal) = withdrawal {
+        withdrawal.certify_realized(
+            &plan.layers,
+            &input.intent.recipe.supports,
+            geometry_work,
+            cancel,
+        )?;
+        plan.native_geometry.geometry_work = geometry_work.consumed();
+        timing.mark("withdrawal_realized");
+    }
     Ok(plan)
 }
 
@@ -148,7 +160,7 @@ fn plan_with(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<NormalizedPrintPlan, ManufacturingError> {
+) -> Result<(NormalizedPrintPlan, Option<native::SupportWithdrawal>), ManufacturingError> {
     let mut timing = crate::timing::Clock::new("planner.plan_with");
     let mut admission = preflight::admit(input, cancel, geometry_work)?;
     timing.mark("preflight");
@@ -288,7 +300,7 @@ fn plan_with(
             ScheduleAdmission::RefineUnreachableLayer { index, failure } => {
                 refine_deposition_pair(&mut schedule, index, input, failure)?;
             }
-            ScheduleAdmission::Complete(_) => {
+            ScheduleAdmission::Complete(..) => {
                 unreachable!("tentative prefix cannot publish a plan")
             }
         }
@@ -309,7 +321,7 @@ fn plan_with(
         &mut survival_memo,
         &mut rooms_memo,
     )? {
-        ScheduleAdmission::Complete(plan) => Ok(plan),
+        ScheduleAdmission::Complete(plan, withdrawal) => Ok((plan, withdrawal)),
         // A complete pass never re-plans; a split it would need is a defect
         // of the schedule decided above, reported as such.
         ScheduleAdmission::RefineUnreachableLayer { failure, .. } => Err(failure),
@@ -349,7 +361,7 @@ enum ScheduleAdmission {
         index: usize,
         failure: ManufacturingError,
     },
-    Complete(NormalizedPrintPlan),
+    Complete(NormalizedPrintPlan, Option<native::SupportWithdrawal>),
 }
 
 struct OrdinaryTemplate {
@@ -2264,11 +2276,11 @@ fn admit_schedule<'model>(
         timing.mark("support_realization");
         *neighborhoods.work_mut() = support_work.planar;
         let support_admission = support_admission?;
-        match support_admission {
+        let withdrawal = match support_admission {
             support::SupportAdmission::RefineUnreachableLayer { index, failure } => {
                 return Ok(ScheduleAdmission::RefineUnreachableLayer { index, failure });
             }
-            support::SupportAdmission::Complete if probe.is_some() => {
+            support::SupportAdmission::Complete(None) if probe.is_some() => {
                 let startup_key = first_wall_key
                     .filter(|_| StartupWall::permits(input))
                     .filter(|_| {
@@ -2295,8 +2307,14 @@ fn admit_schedule<'model>(
                     startup_wall,
                 }));
             }
-            support::SupportAdmission::Complete => {}
-        }
+            support::SupportAdmission::Complete(withdrawal) => withdrawal,
+        };
+        let support_outside_bytes = geometry_bytes(&[
+            support_outside_bytes,
+            withdrawal
+                .as_ref()
+                .map_or(0, native::SupportWithdrawal::retained_bytes),
+        ])?;
 
         let coordinate_scratch = skin_retained_points(retained_points, &neighborhoods, &[])?;
         let coordinate_owned_bytes = skin_retained_bytes(
@@ -2441,7 +2459,7 @@ fn admit_schedule<'model>(
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
         result.validate(input.intent)?;
 
-        Ok(ScheduleAdmission::Complete(result))
+        Ok(ScheduleAdmission::Complete(result, withdrawal))
     })();
     *surface_work = *neighborhoods.work_mut();
     drop(neighborhoods);

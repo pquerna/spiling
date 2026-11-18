@@ -4,7 +4,7 @@
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
-use geo::{BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
+use geo::{BooleanOps, BoundingRect, Buffer, Contains, Distance, Euclidean, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::{
     rc::{Rc, Weak},
@@ -715,7 +715,124 @@ fn reserve_component_record<T>(
 
 pub(super) struct ProtectedVoidSet {
     pub regions: MultiPolygon<f64>,
-    pub scopes: Vec<spiling_geometry::ProtectedVoidHeightScope>,
+    pub scopes: Vec<VoidScope>,
+}
+
+pub(super) struct VoidScope {
+    pub height: spiling_geometry::ProtectedVoidHeightScope,
+    roof: Option<Arc<spiling_geometry::tolerant::TolerantVoidRoof>>,
+    access: Vec<RoofAccess>,
+}
+
+struct RoofAccess {
+    layers: std::ops::Range<usize>,
+    column: Rc<OwnedMaterial>,
+}
+
+impl VoidScope {
+    pub(super) fn new(
+        height: spiling_geometry::ProtectedVoidHeightScope,
+        roof: Option<Arc<spiling_geometry::tolerant::TolerantVoidRoof>>,
+    ) -> Self {
+        Self {
+            height,
+            roof,
+            access: Vec::new(),
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn allows_roof_access(
+        &self,
+        root: Root,
+        target: &PrintLayer,
+        top: &PrintLayer,
+        path: &DepositionPath,
+        failure: &strokes::Failure,
+        support_width: f64,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        let Some(roof) = &self.roof else {
+            return Ok(false);
+        };
+        let [lower, upper] = roof.height_mm;
+        if !matches!(root, Root::Bed)
+            || !matches!(
+                self.height,
+                spiling_geometry::ProtectedVoidHeightScope::OpenBelow { .. }
+            )
+            || top.z_mm > lower
+            || target.lower_z_mm > upper
+            || target.z_mm < lower
+        {
+            return Ok(false);
+        }
+        let start = path.points_mm[failure.first];
+        let end = path.points_mm[failure.last];
+        let [from, to] = [failure.start, failure.end].map(|at| geo::Coord {
+            x: start[0] + (end[0] - start[0]) * at,
+            y: start[1] + (end[1] - start[1]) * at,
+        });
+        let Some(edge) = path.checked_edges()?.edge(failure.first) else {
+            return Ok(false);
+        };
+        let reach = (edge.width_mm + support_width) * 0.5;
+        let segment = geo::Line::new(from, to);
+        for &facet in &roof.facets {
+            super::native::charge_support_clearance(work, cancel)?;
+            let contour = geo::Triangle::new(facet[0].into(), facet[1].into(), facet[2].into());
+            if contour.contains(&geo::Point::from(from))
+                || contour.contains(&geo::Point::from(to))
+                || (0..3).any(|index| {
+                    Euclidean.distance(
+                        &segment,
+                        &geo::Line::new(facet[index], facet[(index + 1) % 3]),
+                    ) < reach
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(super) fn has_access(&self) -> bool {
+        !self.access.is_empty()
+    }
+
+    pub(super) fn covers_bead(
+        &self,
+        ordinal: usize,
+        upper: f64,
+        segment: [[f64; 2]; 2],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        if self
+            .roof
+            .as_ref()
+            .is_none_or(|roof| upper > roof.height_mm[1])
+        {
+            return Ok(false);
+        }
+        let line = geo::Line::new(segment[0], segment[1]);
+        for access in &self.access {
+            super::native::charge_support_clearance(work, cancel)?;
+            if access.layers.contains(&ordinal) && access.column.contains(&line) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn allow_test_bead(&mut self, ordinal: usize, column: MultiPolygon<f64>) {
+        self.access.push(RoofAccess {
+            layers: ordinal..ordinal + 1,
+            column: OwnedMaterial::new(column).into_shared(),
+        });
+    }
 }
 
 /// Admission inputs shared by whole-row ownership and deposited-anchor proof.
@@ -902,7 +1019,7 @@ fn exclude_object_raster_work(
 }
 
 pub(super) enum SupportAdmission {
-    Complete,
+    Complete(Option<super::native::SupportWithdrawal>),
     /// Explicit Off's startup pair asks for a thinner first interval.
     RefineUnreachableLayer {
         index: usize,
@@ -1586,7 +1703,7 @@ pub(super) fn realize(
             });
         }
         if demands.is_empty() {
-            return Ok(SupportAdmission::Complete);
+            return Ok(SupportAdmission::Complete(None));
         }
         anchors.set_budget(0);
         let SupportPolicy::Breakaway {
@@ -1681,7 +1798,7 @@ pub(super) fn realize(
         super::remaining_geometry_units(retained, owned_bytes)?;
         let ProtectedVoidSet {
             regions: protected,
-            scopes,
+            mut scopes,
         } = projected;
         let protected = OwnedMaterial::new(protected);
         if protected.0.len() != scopes.len() {
@@ -2048,7 +2165,8 @@ pub(super) fn realize(
                         columns_bytes = 0;
                     }
                 }
-                for (mask, scope) in protected.0.iter().zip(&scopes) {
+                let mut relieved = None;
+                for (ordinal, (mask, scope)) in protected.0.iter().zip(&scopes).enumerate() {
                     if column.0.is_empty() {
                         break;
                     }
@@ -2059,7 +2177,7 @@ pub(super) fn realize(
                             "cumulative protected-void scope work counter overflow",
                         )
                     })?;
-                    if !void_reaches_corridor(scope, corridor_floor, layers[top].z_mm) {
+                    if !void_reaches_corridor(&scope.height, corridor_floor, layers[top].z_mm) {
                         continue;
                     }
                     super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
@@ -2068,6 +2186,21 @@ pub(super) fn realize(
                     else {
                         continue;
                     };
+                    if relieved.is_none()
+                        && scope.allows_roof_access(
+                            root,
+                            &layers[demand.target],
+                            &layers[top],
+                            demanded_path,
+                            &demand.failure,
+                            width,
+                            &mut work,
+                            cancel,
+                        )?
+                    {
+                        relieved = Some(ordinal);
+                        continue;
+                    }
                     let clearance = OwnedMaterial::new(offset_polygon_owned(
                         mask,
                         distance,
@@ -2499,6 +2632,46 @@ pub(super) fn realize(
                         }
                     }
                     contact_tops[demand.target] = Some(top);
+                    if let Some(ordinal) = relieved {
+                        let access = &mut scopes[ordinal].access;
+                        if let Some(last) = access.last_mut().filter(|last| {
+                            last.layers.end == i && Rc::ptr_eq(&last.column, &column)
+                        }) {
+                            last.layers.end += 1;
+                        } else {
+                            let growth = if access.capacity() == access.len() {
+                                access.len().max(4) * std::mem::size_of::<RoofAccess>()
+                            } else {
+                                0
+                            };
+                            let payload = column.bytes.saturating_add(column.header_bytes);
+                            remaining_geometry_budget(
+                                retained,
+                                owned_bytes
+                                    .saturating_add(payload)
+                                    .saturating_add(growth)
+                                    .saturating_add(vec_bytes(access)),
+                                &support_regions,
+                                &interfaces,
+                                &[&protected, &column],
+                            )?;
+                            if growth != 0 {
+                                access.try_reserve_exact(access.len().max(4)).map_err(|_| {
+                                    error(
+                                        ManufacturingErrorCode::ResourceLimit,
+                                        "cannot allocate rooted roof access records",
+                                    )
+                                })?;
+                            }
+                            let added = payload.saturating_add(growth);
+                            support_metadata_bytes = support_metadata_bytes.saturating_add(added);
+                            owned_bytes = owned_bytes.saturating_add(added);
+                            access.push(RoofAccess {
+                                layers: i..i + 1,
+                                column: Rc::clone(&column),
+                            });
+                        }
+                    }
                     let (live_units, live_bytes) =
                         geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
                     merge_shared(
@@ -3218,7 +3391,7 @@ pub(super) fn realize(
         .unwrap_or(0)
         .saturating_mul(std::mem::size_of::<geo::Coord<f64>>())
             / 8;
-        super::native::certify_support_clearance(
+        let withdrawal = super::native::certify_support_clearance(
             layers,
             &super::native::SupportClearanceGeometry {
                 sections,
@@ -3227,13 +3400,13 @@ pub(super) fn realize(
                 scopes: &scopes,
                 index_bytes,
             },
-            recipe,
+            &recipe.supports,
             native_work,
             &mut work,
             cancel,
         )?;
         timing.mark("final_actual_clearance");
-        Ok(SupportAdmission::Complete)
+        Ok(SupportAdmission::Complete(withdrawal))
     })();
     if let Some(mut replay) = replay_new {
         replay.columns = columns_new;
@@ -5343,7 +5516,7 @@ mod tests {
                     |_, _, _, _, _| Ok(true),
                 )
                 .unwrap();
-                assert!(matches!(result, SupportAdmission::Complete));
+                assert!(matches!(result, SupportAdmission::Complete(None)));
                 let has_support = layers
                     .iter()
                     .flat_map(|layer| &layer.paths)
