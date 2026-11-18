@@ -4673,6 +4673,7 @@ fn union_pieces_in_frame(
     }
     let mut overlay = if let Some(frame) = frame {
         FloatOverlay::with_adapter(frame.adapter.clone(), paths.iter().map(Vec::len).sum())
+            .with_exact_y_screen()
             .unsafe_add_source(&paths, i_overlay::core::overlay::ShapeType::Subject)
     } else {
         FloatOverlay::with_subj(&paths)

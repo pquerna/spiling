@@ -1302,6 +1302,43 @@ mod tests {
     }
 
     #[test]
+    fn tree_y_screen_preserves_closed_contacts_and_rounded_crossings() {
+        let mut paths = Vec::new();
+        for row in 0..64 {
+            for column in 0..20 {
+                let left = f64::from(column) * 64.0;
+                let bottom = f64::from(row) * 0.125;
+                paths.push(vec![
+                    [left, bottom],
+                    [left + 62.0, bottom],
+                    [left + 62.0, bottom + 0.0625],
+                    [left, bottom + 0.0625],
+                ]);
+            }
+        }
+        paths.extend([
+            vec![[3.0, 0.0625], [59.0, 0.0625], [31.0, 0.125]],
+            vec![[2.0, -1.0], [47.0, 2.1], [4.0, 2.4]],
+            vec![[61.0, 2.2], [0.0, 1.9], [2.0, 0.01]],
+        ]);
+        let frame = FloatPointAdapter::new(FloatRect {
+            min_x: -1.0,
+            min_y: -2.0,
+            max_x: 1281.0,
+            max_y: 10.0,
+        });
+        let capacity = paths.iter().map(Vec::len).sum();
+        let unscreened = FloatOverlay::with_adapter(frame.clone(), capacity)
+            .unsafe_add_source(&paths, ShapeType::Subject)
+            .overlay(OverlayRule::Subject, FillRule::Positive);
+        let screened = FloatOverlay::with_adapter(frame, capacity)
+            .with_exact_y_screen()
+            .unsafe_add_source(&paths, ShapeType::Subject)
+            .overlay(OverlayRule::Subject, FillRule::Positive);
+        assert_eq!(screened, unscreened);
+    }
+
+    #[test]
     fn batch_identity_keeps_literal_coordinates_topology_order_and_frame() {
         let original = MultiPolygon(vec![rectangle(0.0, 0.0, 1.0, 1.0)]);
         let cancel = AtomicBool::new(false);

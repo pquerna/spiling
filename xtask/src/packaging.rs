@@ -280,6 +280,7 @@ pub fn provenance(context: &Context) -> Result<PathBuf> {
         ("cpp_map", "cpp_map-0.2.0"),
         ("tracel-llvm-bundler", "tracel-llvm-bundler"),
         ("boolmesh", "boolmesh"),
+        ("i_overlay", "i_overlay-4.0.7"),
     ] {
         let origin = context.root.join("vendor").join(path);
         let target = source.join(name);
