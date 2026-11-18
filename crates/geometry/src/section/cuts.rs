@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{Admission, indeterminate, roots};
+use super::{Admission, atlas, indeterminate, roots};
 use crate::{
     GeometryError, GeometryWorkBudget, PlaneMm,
     parametric::{self as p, Interval},
@@ -149,18 +149,10 @@ impl<'a> CutInventory<'a> {
                 &mut |range, work, cancel| {
                     let mut uv = line;
                     uv[other] = range;
-                    let jet = p::surface_piecewise_first_enclosure(self.surface, uv, work, cancel)?;
-                    let position = jet.position.map(|v| v.mul(Interval::point(self.scale)));
-                    let derivative = if other == 0 { jet.du } else { jet.dv }
-                        .map(|v| v.mul(Interval::point(self.scale)));
+                    let jet = atlas::first_jet(self.surface, uv, self.scale, self.plane, work, cancel)?;
                     Ok(roots::ScalarJet {
-                        value: dot(
-                            std::array::from_fn(|i| {
-                                position[i].sub(Interval::point(self.plane.origin_mm[i]))
-                            }),
-                            self.plane.normal,
-                        ),
-                        derivative: dot(derivative, self.plane.normal),
+                        value: jet.position,
+                        derivative: if other == 0 { jet.du } else { jet.dv },
                     })
                 },
                 parameter_accuracy,
@@ -277,12 +269,6 @@ impl<'a> CutInventory<'a> {
     pub(super) fn cuts(&self) -> &[Cut] {
         &self.cuts
     }
-}
-
-fn dot(values: [Interval; 3], direction: [f64; 3]) -> Interval {
-    (0..3).fold(Interval::point(0.0), |sum, i| {
-        sum.add(values[i].mul(Interval::point(direction[i])))
-    })
 }
 
 fn norm(values: [Interval; 3]) -> Result<f64, GeometryError> {
