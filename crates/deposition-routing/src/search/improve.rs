@@ -9,6 +9,11 @@
 //! cancellation and reporting only; output stays deterministic.
 use super::*;
 
+#[allow(unsafe_code)]
+mod simd;
+#[cfg(test)]
+mod simd_tests;
+
 /// Kicks every group receives, however small.
 const MIN_KICKS: usize = 48;
 
@@ -55,6 +60,7 @@ pub(super) struct Order<'a, 't> {
     incoming: Vec<f64>,
     prerequisites: Vec<Vec<u32>>,
     dependents: Vec<Vec<u32>>,
+    simd: Option<simd::Backend>,
 }
 impl<'a, 't> Order<'a, 't> {
     pub fn new(
@@ -81,9 +87,32 @@ impl<'a, 't> Order<'a, 't> {
             incoming: vec![0.; n],
             prerequisites,
             dependents,
+            simd: None,
         };
         order.refresh();
         order
+    }
+    pub(super) fn enable_simd(&mut self, cancel: &AtomicBool) -> bool {
+        if self.visits.len() < simd::BLOCK {
+            return false;
+        }
+        let Some(backend) = simd::Backend::detect(self.pricing) else {
+            return false;
+        };
+        let eligible = |point| !cancel.load(Ordering::Relaxed) && simd::point_ok(point);
+        if !self.start.is_none_or(eligible)
+            || !self
+                .members
+                .iter()
+                .all(|&index| match self.tasks[index as usize].ends {
+                    Ends::Open { first, last, .. } => eligible(first) && eligible(last),
+                    Ends::Loop { seams } => seams.iter().copied().all(eligible),
+                })
+        {
+            return false;
+        }
+        self.simd = Some(backend);
+        true
     }
     fn task(&self, position: usize) -> &Task<'t> {
         &self.tasks[self.members[self.visits[position].0 as usize] as usize]
@@ -156,6 +185,12 @@ impl<'a, 't> Order<'a, 't> {
     #[inline(always)]
     fn price_from(&self, from: [&[f64]; 3], point: PointMm, out: &mut [f64]) {
         let pricing = self.pricing;
+        if let Some(backend) = self.simd
+            && out.len() >= simd::BLOCK
+        {
+            backend.price(pricing, from, point, out);
+            return;
+        }
         for (((o, x), y), z) in out.iter_mut().zip(from[0]).zip(from[1]).zip(from[2]) {
             *o = pricing.seconds([*x, *y, *z], point);
         }
@@ -244,6 +279,30 @@ impl<'a, 't> Order<'a, 't> {
             }
         };
         let mut j = range.start;
+        if let Some(backend) = self.simd
+            && range.len() >= simd::BLOCK
+        {
+            while range.end - j >= simd::BLOCK {
+                let window = j..j + simd::BLOCK;
+                let mut lanes = backend.mask(
+                    self.incoming[window.clone()].try_into().unwrap(),
+                    scratch.left[window.clone()].try_into().unwrap(),
+                    scratch.flipped[window].try_into().unwrap(),
+                    removed,
+                    best.0,
+                    may_flip,
+                );
+                while lanes != 0 {
+                    process(j + lanes.trailing_zeros() as usize, best);
+                    lanes &= lanes - 1;
+                }
+                j += simd::BLOCK;
+            }
+            for ordinal in j..range.end {
+                process(ordinal, best);
+            }
+            return;
+        }
         while j + LANES <= range.end {
             let window = j..j + LANES;
             let base: &[f64; LANES] = self.incoming[window.clone()].try_into().unwrap();

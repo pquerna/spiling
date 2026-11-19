@@ -91,6 +91,7 @@ fn present(context: &Context<'_, '_>, tools: &[Vec<u32>]) -> Vec<u32> {
 }
 
 pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups), Error> {
+    let avx2 = std::env::var_os("SPILING_ROUTING_AVX2").is_none_or(|value| value == "1");
     let buckets = buckets(context);
     let orders = sequence::plan(context, &buckets.barriers, &buckets.members)?;
     let total: usize = orders.iter().map(Vec::len).sum();
@@ -115,6 +116,9 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
                     local[*index as usize] = l as u32;
                 }
                 let mut order = construct::nearest(context, members, &local, start)?;
+                if avx2 {
+                    order.enable_simd(context.cancel);
+                }
                 improve::improve(context, &mut order)?;
                 position = order.end().or(start);
                 visits.extend(order.into_visits(members));

@@ -3,7 +3,7 @@
 //! Deposition scheduling: the order of admitted deposition tasks, their entry
 //! direction or seam, and the tool sequence. It adds, removes and alters no
 //! deposition, and holds no material, command or machine authority.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod check;
 mod cost;
