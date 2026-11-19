@@ -881,6 +881,8 @@ impl Capacity {
         source: &spiling_geometry::PreparedStepSource<'_>,
         solid: Option<&SourceSolidId>,
         cancel: &AtomicBool,
+        session: Option<&mut spiling_geometry::StepImportSession<'_, '_>>,
+        retain_for_next: bool,
     ) -> Result<Definition, GeometryError> {
         check_cancel(cancel)?;
         if self.definitions == 0 {
@@ -898,7 +900,16 @@ impl Capacity {
                     "prepared STEP source exceeds coexisting admission",
                 )
             })?;
-        let definition = source.read_solid(solid, cancel, self.faces, query_bytes)?;
+        let definition = match session {
+            Some(session) => session.read_solid_with_reuse(
+                solid,
+                cancel,
+                self.faces,
+                query_bytes,
+                retain_for_next,
+            ),
+            None => source.read_solid(solid, cancel, self.faces, query_bytes),
+        }?;
         self.retain_definition(definition.into(), cancel)
     }
     fn retain_definition(
@@ -1144,7 +1155,6 @@ fn import(
         let _span = crate::performance::span("import_capture");
         source::capture(source, capacity.source_bytes, cancel)?
     };
-    let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
     // A source that places one solid keeps its whole-source identity; each
     // solid of a multi-solid source is its own definition of the same bytes.
     if captured.mesh_format.is_some() {
@@ -1167,8 +1177,15 @@ fn import(
     }
     let bytes = Arc::new(captured.bytes);
     capacity.charge_source(&bytes)?;
-    let prepared =
-        spiling_geometry::PreparedStepSource::new(&bytes, capacity.source_bytes, cancel)?;
+    let (prepared, measurements) = {
+        let _span = crate::performance::span("import_step_prepare");
+        spiling_geometry::PreparedStepSource::new_metered(&bytes, capacity.source_bytes, cancel)?
+    };
+    let mut session = prepared.try_session(capacity.source_bytes, measurements);
+    let digest = session.as_ref().map_or_else(
+        || Sha256::digest(bytes.as_slice()).into(),
+        spiling_geometry::StepImportSession::digest,
+    );
     let bodies = prepared.bodies();
     if bodies.is_empty() {
         return Err(error(
@@ -1180,7 +1197,7 @@ fn import(
     let selects = bodies.len() > 1;
     let mut parts = Vec::with_capacity(bodies.len());
     let mut residents = Vec::new();
-    for body in bodies {
+    for (index, body) in bodies.iter().enumerate() {
         check_cancel(cancel)?;
         let solid = selects.then(|| body.solid.clone());
         let id = DefinitionId::for_source(&digest, solid.as_ref());
@@ -1189,7 +1206,10 @@ fn import(
         {
             // Share the captured allocation, but preserve the first admitted
             // source's label and immutable record on an exact-byte reimport.
-            let source = Arc::new(SourceAsset::shared(resident.record.clone(), bytes.clone())?);
+            let source = {
+                let _span = crate::performance::span("import_step_asset_validate");
+                Arc::new(SourceAsset::shared(resident.record.clone(), bytes.clone())?)
+            };
             validate_provenance(&resident.definition, &source)?;
             let (display, replacement) =
                 capacity.reuse_display(resident, &source, cancel, work, progress)?;
@@ -1201,16 +1221,28 @@ fn import(
             continue;
         }
         progress("preparing_native_geometry".into());
-        let definition = capacity.admit(&prepared, solid.as_ref(), cancel)?;
+        let definition = {
+            let _span = crate::performance::span("import_step_solid");
+            capacity.admit(
+                &prepared,
+                solid.as_ref(),
+                cancel,
+                session.as_mut(),
+                index + 1 < bodies.len(),
+            )?
+        };
         let mut provenance = definition.provenance().clone();
         provenance.source_name = captured.label.clone();
-        let source = Arc::new(SourceAsset::shared(
-            StoredDefinition {
-                definition_id: definition.id().clone(),
-                provenance,
-            },
-            bytes.clone(),
-        )?);
+        let source = {
+            let _span = crate::performance::span("import_step_asset_validate");
+            Arc::new(SourceAsset::shared(
+                StoredDefinition {
+                    definition_id: definition.id().clone(),
+                    provenance,
+                },
+                bytes.clone(),
+            )?)
+        };
         let display = capacity.display(&definition, cancel, work, progress)?;
         let resident = resident(definition, &source, &display);
         parts.push((
@@ -1220,6 +1252,9 @@ fn import(
         residents.push(resident);
     }
     check_cancel(cancel)?;
+    if let Some(session) = session {
+        crate::performance::step_import(session.measurements(), bytes.len(), bodies.len());
+    }
     Ok((parts, residents))
 }
 fn import_mesh(
@@ -1491,6 +1526,8 @@ fn open(
                         prepared_step.as_ref().expect("source prepared above"),
                         source.record.provenance.source_solid.as_ref(),
                         cancel,
+                        None,
+                        false,
                     )?
                 }
             };
@@ -2163,6 +2200,52 @@ mod image_import_tests {
 mod geometry_only_tests {
     use super::*;
     use spiling_geometry::{BoundsPolicy, GeometryWorkBudget};
+
+    #[test]
+    fn step_session_declines_at_prepared_source_boundary_without_changing_first_refusal() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
+        let source = std::fs::read_to_string(path).unwrap().replace(
+            "#10 = SHAPE_REPRESENTATION('', (#16), #11);",
+            "#10 = SHAPE_REPRESENTATION('', (#16,#9500), #11);",
+        );
+        let end = source.rfind("ENDSEC;").unwrap();
+        let source = format!(
+            "{}#9500=MANIFOLD_SOLID_BREP('broken',#999999);\n{}",
+            &source[..end],
+            &source[end..]
+        );
+        let cancel = AtomicBool::new(false);
+        let (prepared, measurements) = spiling_geometry::PreparedStepSource::new_metered(
+            source.as_bytes(),
+            usize::MAX,
+            &cancel,
+        )
+        .unwrap();
+        let malformed = SourceSolidId::parse("step:9500").unwrap();
+        let expected = prepared
+            .read_solid(Some(&malformed), &cancel, MAX_NATIVE_FACES, 0)
+            .unwrap_err();
+        assert_eq!(expected.code, GeometryErrorCode::InvalidGeometry);
+        let mut capacity = Capacity::new(
+            &BTreeMap::new(),
+            MeshBudget {
+                vertices: 0,
+                triangles: 0,
+                bytes: 0,
+            },
+            prepared.retained_bytes(),
+            SourceDisplayDemand::None,
+        );
+        let mut session = prepared.try_session(capacity.source_bytes, measurements);
+        assert!(session.is_none());
+        let actual =
+            match capacity.admit(&prepared, Some(&malformed), &cancel, session.as_mut(), true) {
+                Ok(_) => panic!("malformed STEP solid admitted"),
+                Err(error) => error,
+            };
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn headless_import_avoids_display_and_later_preview_reuses_the_source() {

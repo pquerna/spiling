@@ -12,7 +12,7 @@ mod tests;
 #[cfg(test)]
 mod topology_tests;
 mod units;
-pub use prepared::PreparedStepSource;
+pub use prepared::{PreparedStepSource, StepImportMeasurements, StepImportSession};
 
 use crate::{check_cancel, kernel::Definition};
 use ast::*;
@@ -530,12 +530,20 @@ fn import_prepared(
     cancel: &AtomicBool,
     face_limit: u32,
     query_proof_byte_limit: usize,
+    mut session: Option<&mut StepImportSession<'_, '_>>,
+    retain_for_next: bool,
 ) -> Result<Definition, GeometryError> {
     check_cancel(cancel)?;
     validate_face_limit(face_limit)?;
-    let bytes = prepared.bytes;
-    let text = std::str::from_utf8(bytes).map_err(|_| invalid("STEP source is not UTF-8"))?;
-    let entities = Entities::new(&prepared.data, cancel)?;
+    let text = prepared.text;
+    let entities = if let Some(session) = session.as_deref_mut() {
+        let started = std::time::Instant::now();
+        let entities = prepared.entities(cancel);
+        session.record_index(started.elapsed());
+        entities?
+    } else {
+        prepared.entities(cancel)?
+    };
     // Product structure must be coherent even when one solid is imported; its
     // placements belong to the caller's occurrences, not to this definition.
     let bodies = &prepared.bodies;
@@ -600,8 +608,10 @@ fn import_prepared(
         });
     }
     check_cancel(cancel)?;
-    let ex = solidcore_step::p21::parse(text)
-        .map_err(|e| invalid(&format!("invalid ISO-10303-21 exchange: {e}")))?;
+    let (ex, exchange_bytes) = match session.as_deref_mut() {
+        Some(session) => session.native_exchange()?,
+        None => (prepared::parse_native(text)?, None),
+    };
     check_cancel(cancel)?;
     // The exact single root was validated above. Read it once, directly in
     // authoritative mm units, rather than building an unscaled BREP first.
@@ -686,7 +696,10 @@ fn import_prepared(
     let mut findings = reader_findings(&solid.notes);
     findings.extend(line_reading);
 
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let digest = session.as_ref().map_or_else(
+        || Sha256::digest(text.as_bytes()).into(),
+        |session| session.digest(),
+    );
     let definition = Definition {
         preparation: Default::default(),
         id: DefinitionId::for_source(&digest, selected),
@@ -701,7 +714,7 @@ fn import_prepared(
         },
         faces,
         bounds,
-        source_bytes: bytes.len() as u32,
+        source_bytes: text.len() as u32,
         brep,
         shell_id,
         face_ids,
@@ -713,13 +726,21 @@ fn import_prepared(
         record_order: order,
     };
 
-    if definition.retained_query_proof_bytes() > query_proof_byte_limit {
+    let Some(remaining) =
+        query_proof_byte_limit.checked_sub(definition.retained_query_proof_bytes())
+    else {
         return Err(error(
             GeometryErrorCode::ResourceLimit,
             "retained query proof capacity exhausted",
         ));
+    };
+    check_cancel(cancel)?;
+    if retain_for_next
+        && remaining > 0
+        && let Some(session) = session
+    {
+        session.retain_exchange(ex, exchange_bytes, remaining, cancel)?;
     }
-
     Ok(definition)
 }
 

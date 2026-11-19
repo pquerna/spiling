@@ -23,6 +23,35 @@ fn emit(stage: &str, at_us: u128, elapsed_us: u128) {
         "stage": stage, "at_us": at_us, "elapsed_us": elapsed_us,
         "kernel": spiling_geometry::KERNEL_REVISION
     });
+    write_record(&record);
+}
+
+pub(crate) fn step_import(
+    metrics: spiling_geometry::StepImportMeasurements,
+    bytes: usize,
+    solids: usize,
+) {
+    let Some(origin) = clock() else {
+        return;
+    };
+    let record = serde_json::json!({
+        "schema": 1, "process": "engine", "pid": std::process::id(),
+        "stage": "import_step_source_work", "at_us": origin.elapsed().as_micros(),
+        "elapsed_us": 0, "kernel": spiling_geometry::KERNEL_REVISION,
+        "source_reads": 1, "source_bytes": bytes, "solids": solids,
+        "structure_parses": 1, "structure_parse_us": metrics.structure_parse_time.as_micros(),
+        "entity_indexes": metrics.entity_indexes, "entity_index_us": metrics.entity_index_time.as_micros(),
+        "native_parses": metrics.native_parses, "native_parse_us": metrics.native_parse_time.as_micros(),
+        "native_parse_reuses": metrics.native_parse_reuses,
+        "exchange_admission_us": metrics.exchange_admission_time.as_micros(),
+        "peak_exchange_retained_bytes": metrics.peak_exchange_retained_bytes,
+        "import_source_hashes": 1, "import_source_hash_us": metrics.source_hash_time.as_micros(),
+        "source_asset_validations": solids
+    });
+    write_record(&record);
+}
+
+fn write_record(record: &serde_json::Value) {
     // These processes share a pipe. Serialize before writing, so a bounded record
     // is one write below PIPE_BUF rather than many interleaved Display fragments.
     let line = format!("SPILING_OPEN_TRACE {record}\n");

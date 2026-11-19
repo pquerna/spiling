@@ -1576,20 +1576,35 @@ fn assembly_usages_place_one_solid_without_changing_its_identity() {
 
 #[test]
 fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
-    let source = String::from_utf8(fixture("box-mm.step")).unwrap();
-    let source = with_entities(
-        &source.replace(
-            "#10 = SHAPE_REPRESENTATION('', (#16), #11);",
-            "#10 = SHAPE_REPRESENTATION('', (#16,#9500), #11);",
-        ),
-        "#9500=MANIFOLD_SOLID_BREP('second',#17);",
-    );
+    let source = two_placed_boxes(17, "");
     let bodies = structure::source_bodies(source.as_bytes(), &cancelled()).unwrap();
-    let prepared = PreparedStepSource::new(source.as_bytes(), usize::MAX, &cancelled()).unwrap();
+    let (prepared, measurements) =
+        PreparedStepSource::new_metered(source.as_bytes(), usize::MAX, &cancelled()).unwrap();
     assert_eq!(prepared.bodies(), bodies);
     assert!(prepared.matches_bytes(source.as_bytes()));
     assert!(!prepared.matches_bytes(&fixture("box-mm.step")));
     assert!(prepared.retained_bytes() > size_of::<PreparedStepSource<'_>>());
+    assert_placed_box_replay(&source, &bodies, &prepared, measurements);
+}
+
+fn two_placed_boxes(second_shell: u64, extra_entities: &str) -> String {
+    let source = String::from_utf8(fixture("box-mm.step")).unwrap();
+    with_entities(
+        &source.replace(
+            "#10 = SHAPE_REPRESENTATION('', (#16), #11);",
+            "#10 = SHAPE_REPRESENTATION('', (#16,#9500), #11);",
+        ),
+        &format!("#9500=MANIFOLD_SOLID_BREP('second',#{second_shell});\n{extra_entities}"),
+    )
+}
+
+fn assert_placed_box_replay(
+    source: &str,
+    bodies: &[structure::SourceBody],
+    prepared: &PreparedStepSource<'_>,
+    measurements: StepImportMeasurements,
+) {
+    let mut session = prepared.try_session(usize::MAX, measurements).unwrap();
     assert_eq!(
         bodies
             .iter()
@@ -1605,16 +1620,17 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
     );
     let digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
     let mut ids = BTreeSet::new();
-    for body in bodies.iter().rev() {
+    for (index, body) in bodies.iter().rev().enumerate() {
         let definition =
             crate::from_step_solid_with_cancel(source.as_bytes(), &body.solid, &cancelled())
                 .unwrap();
-        let shared = prepared
-            .read_solid(
+        let shared = session
+            .read_solid_with_reuse(
                 Some(&body.solid),
                 &cancelled(),
                 MAX_NATIVE_FACES,
                 MAX_QUERY_PROOF_BYTES,
+                index == 0,
             )
             .unwrap();
         assert_eq!(shared.id(), definition.id());
@@ -1645,6 +1661,13 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
         ids.insert(definition.id().clone());
     }
     assert_eq!(ids.len(), 2);
+    let measurements = session.measurements();
+    assert_eq!(session.digest(), digest);
+    assert_eq!(measurements.entity_indexes, 3);
+    assert_eq!(measurements.native_parses, 1);
+    assert_eq!(measurements.native_parse_reuses, 1);
+    assert!(measurements.peak_exchange_retained_bytes > 0);
+    assert_eq!(measurements.exchange_retained_bytes, 0);
     assert_eq!(
         prepared
             .read_solid(
@@ -1681,6 +1704,123 @@ fn several_solids_require_an_explicit_selector_and_get_distinct_identities() {
             GeometryErrorCode::InvalidGeometry
         );
     }
+}
+
+#[test]
+fn prepared_step_reuse_preserves_selected_solid_first_failure() {
+    type PreparedWithoutSession<'a> = (
+        &'a [u8],
+        step_p21::ast::DataSection,
+        Vec<structure::SourceBody>,
+        usize,
+    );
+    assert_eq!(
+        size_of::<PreparedStepSource<'_>>(),
+        size_of::<PreparedWithoutSession<'_>>()
+    );
+    let source = two_placed_boxes(999999, "");
+    let cancel = cancelled();
+    let prepared = PreparedStepSource::new(source.as_bytes(), usize::MAX, &cancel).unwrap();
+    let fresh = PreparedStepSource::new(source.as_bytes(), usize::MAX, &cancel).unwrap();
+    let mut session = prepared
+        .try_session(usize::MAX, Default::default())
+        .unwrap();
+    let first = &prepared.bodies()[0].solid;
+    let malformed = &prepared.bodies()[1].solid;
+    session
+        .read_solid_with_reuse(
+            Some(first),
+            &cancel,
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+            true,
+        )
+        .unwrap();
+    assert!(session.measurements().exchange_retained_bytes > 0);
+    let expected = fresh
+        .read_solid(
+            Some(malformed),
+            &cancel,
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+        )
+        .unwrap_err();
+    assert_eq!(expected.code, GeometryErrorCode::InvalidGeometry);
+    let actual = session
+        .read_solid_with_reuse(
+            Some(malformed),
+            &cancel,
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+            false,
+        )
+        .unwrap_err();
+    assert_eq!(actual, expected);
+    assert_eq!(session.measurements().native_parse_reuses, 0);
+    assert_eq!(session.measurements().exchange_retained_bytes, 0);
+    session
+        .read_solid_with_reuse(
+            Some(first),
+            &cancel,
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+            true,
+        )
+        .unwrap();
+    assert!(session.measurements().exchange_retained_bytes > 0);
+    let cancelled_read = session
+        .read_solid_with_reuse(
+            Some(first),
+            &AtomicBool::new(true),
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(cancelled_read.code, GeometryErrorCode::Cancelled);
+    assert_eq!(session.measurements().exchange_retained_bytes, 0);
+}
+
+#[test]
+fn prepared_step_reuse_declines_and_evicts_under_byte_pressure() {
+    let source = two_placed_boxes(
+        17,
+        &format!(
+            "#9600=DESCRIPTIVE_REPRESENTATION_ITEM('{}','');",
+            "a".repeat(128 * 1024)
+        ),
+    );
+    let cancel = cancelled();
+    let prepared = PreparedStepSource::new(source.as_bytes(), usize::MAX, &cancel).unwrap();
+    let mut session = prepared
+        .try_session(usize::MAX, Default::default())
+        .unwrap();
+    let first = &prepared.bodies()[0].solid;
+    let last = &prepared.bodies()[1].solid;
+    let unbounded = session
+        .read_solid_with_reuse(
+            Some(first),
+            &cancel,
+            MAX_NATIVE_FACES,
+            MAX_QUERY_PROOF_BYTES,
+            true,
+        )
+        .unwrap();
+    let cache_bytes = session.measurements().exchange_retained_bytes;
+    let proof_bytes = unbounded.retained_query_proof_bytes();
+    assert!(cache_bytes > proof_bytes);
+    let evicted = session
+        .read_solid_with_reuse(Some(last), &cancel, MAX_NATIVE_FACES, cache_bytes - 1, true)
+        .unwrap();
+    assert_eq!(session.measurements().native_parses, 2);
+    assert_eq!(session.measurements().native_parse_reuses, 0);
+    assert_eq!(session.measurements().exchange_retained_bytes, 0);
+    let fresh = prepared
+        .read_solid(Some(last), &cancel, MAX_NATIVE_FACES, cache_bytes - 1)
+        .unwrap();
+    assert_eq!(evicted.provenance(), fresh.provenance());
+    assert_eq!(evicted.faces(), fresh.faces());
+    assert_eq!(evicted.bounds_mm(), fresh.bounds_mm());
 }
 
 /// An authored torus cusp. Four quadrant faces of one torus about Z run from a

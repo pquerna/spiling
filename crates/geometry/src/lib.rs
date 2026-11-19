@@ -55,8 +55,9 @@ pub use compute::{
     MAX_PREPARED_SECTION_SOURCE_BYTES, MAX_QUERY_PROOF_BYTES,
 };
 pub use import::{
-    PreparedStepSource, from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits,
-    from_step_file, from_step_solid_with_cancel, from_step_solid_with_limits,
+    PreparedStepSource, StepImportMeasurements, StepImportSession, from_step_bytes,
+    from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
+    from_step_solid_with_cancel, from_step_solid_with_limits,
     structure::{SourceBody, source_bodies},
 };
 pub use kernel::{
