@@ -16,6 +16,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 mod clearance_index;
 #[cfg(test)]
 mod clearance_tests;
+mod protected_proof_memo;
 mod withdrawal;
 pub(super) use withdrawal::Sweep as SupportWithdrawal;
 
@@ -34,6 +35,7 @@ struct ForbiddenPolygonScope<'a> {
     polygon: &'a geo::Polygon<f64>,
     height: spiling_geometry::ProtectedVoidHeightScope,
     label: &'a str,
+    memo_bytes: usize,
 }
 
 struct ActualDepositionScope<'a> {
@@ -69,6 +71,7 @@ struct PolygonDeposition<'a> {
 #[derive(Default)]
 struct ClearanceTrace {
     enabled: bool,
+    memo_enabled: bool,
     polygons: std::cell::Cell<usize>,
     layers: std::cell::Cell<usize>,
     paths: std::cell::Cell<usize>,
@@ -78,6 +81,7 @@ struct ClearanceTrace {
     edges: std::cell::Cell<usize>,
     height_rejects: std::cell::Cell<usize>,
     polygon_tests: std::cell::Cell<usize>,
+    protected_memo_hits: std::cell::Cell<usize>,
     deposited_support_paths: std::cell::Cell<usize>,
     deposited_object_paths: std::cell::Cell<usize>,
     deposited_path_rejects: std::cell::Cell<usize>,
@@ -111,6 +115,7 @@ impl ClearanceTrace {
                     "paths": self.paths.get(), "support_paths": self.support_paths.get(),
                     "bounds_points": self.bounds_points.get(), "path_rejects": self.path_rejects.get(),
                     "edges": self.edges.get(), "height_rejects": self.height_rejects.get(),
+                    "protected_memo_hits": self.protected_memo_hits.get(),
                     "polygon_tests": self.polygon_tests.get(),
                     "deposited_support_paths": self.deposited_support_paths.get(),
                     "deposited_object_paths": self.deposited_object_paths.get(),
@@ -561,6 +566,30 @@ pub(super) fn certify_support_clearance(
     support_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<SupportWithdrawal>, ManufacturingError> {
+    certify_support_clearance_traced(
+        layers,
+        geometry,
+        policy,
+        native_work,
+        support_work,
+        &ClearanceTrace {
+            enabled: std::env::var_os("SPILING_TRACE_SUPPORT_CLEARANCE").is_some(),
+            memo_enabled: true,
+            ..ClearanceTrace::default()
+        },
+        cancel,
+    )
+}
+
+fn certify_support_clearance_traced(
+    layers: &[PrintLayer],
+    geometry: &SupportClearanceGeometry<'_>,
+    policy: &SupportPolicy,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
+    support_work: &mut usize,
+    trace: &ClearanceTrace,
+    cancel: &AtomicBool,
+) -> Result<Option<SupportWithdrawal>, ManufacturingError> {
     let SupportClearanceGeometry {
         sections,
         schedule,
@@ -595,10 +624,6 @@ pub(super) fn certify_support_clearance(
         return Ok(None);
     };
     let vertical = deposition.vertical;
-    let trace = ClearanceTrace {
-        enabled: std::env::var_os("SPILING_TRACE_SUPPORT_CLEARANCE").is_some(),
-        ..ClearanceTrace::default()
-    };
     let index_started = std::time::Instant::now();
     let index = clearance_index::ClearanceIndex::build(
         layers.iter().map(|layer| layer.paths.as_slice()),
@@ -639,11 +664,12 @@ pub(super) fn certify_support_clearance(
                     polygon,
                     height: scope,
                     label: "continuous native/finish outer occupancy",
+                    memo_bytes: 0,
                 },
                 xy_clearance_mm,
                 native_work,
                 support_work,
-                &trace,
+                trace,
                 None,
                 cancel,
             )?;
@@ -652,10 +678,11 @@ pub(super) fn certify_support_clearance(
     }
     trace.report("raw_occupancy", raw_started);
     let void_started = std::time::Instant::now();
-    let mut sweep = withdrawal::Sweep::new(
-        index_bytes.saturating_sub(index.as_ref().map_or(0, |index| index.retained_bytes())),
-    );
+    let sweep_bytes =
+        index_bytes.saturating_sub(index.as_ref().map_or(0, |index| index.retained_bytes()));
+    let mut sweep = withdrawal::Sweep::new(sweep_bytes);
     for (polygon, scope) in protected.0.iter().zip(scopes) {
+        let leased = scope.has_access();
         let range =
             scoped_support_layer_range(schedule, scope.height, vertical, support_work, cancel)?;
         certify_polygon_capsules(
@@ -668,12 +695,17 @@ pub(super) fn certify_support_clearance(
                 polygon,
                 height: scope.height,
                 label: "projected protected native void",
+                memo_bytes: if trace.memo_enabled && !leased {
+                    sweep_bytes.saturating_sub(sweep.retained_bytes())
+                } else {
+                    0
+                },
             },
             xy_clearance_mm,
             native_work,
             support_work,
-            &trace,
-            scope.has_access().then_some((&mut sweep, scope)),
+            trace,
+            leased.then_some((&mut sweep, scope)),
             cancel,
         )?;
     }
@@ -717,7 +749,7 @@ pub(super) fn certify_support_clearance(
         z_gap_mm,
         native_work,
         support_work,
-        &trace,
+        trace,
         cancel,
     )?;
     trace.report("deposited_pairs", deposited_started);
@@ -767,6 +799,7 @@ fn certify_polygon_capsules(
         polygon,
         height: scope,
         label,
+        memo_bytes,
     } = *forbidden;
     trace.add(&trace.polygons, 1);
     let forbidden_bounds = geo::BoundingRect::bounding_rect(polygon)
@@ -841,8 +874,8 @@ fn certify_polygon_capsules(
                     }
                     let loops = encoded.get().expect("encoded actual forbidden polygon");
                     if prepared.is_none() {
-                        prepared = Some(
-                        spiling_geometry::prepare_planar_forbidden(loops, native_work, cancel)
+                        let forbidden =
+                            spiling_geometry::prepare_planar_forbidden(loops, native_work, cancel)
                             .map_err(|failure| {
                                 super::native_error(
                                     failure,
@@ -851,26 +884,44 @@ fn certify_polygon_capsules(
                             layer.index, local.width_mm
                                     ),
                                 )
-                            })?,
-                    );
+                            })?;
+                        let allowance =
+                            if memo_bytes >= protected_proof_memo::MemoizedForbidden::MEMO_BYTES {
+                                memo_bytes.saturating_sub(loops.iter().fold(
+                                    loops.capacity().saturating_mul(std::mem::size_of::<
+                                        spiling_geometry::SectionLoopMm,
+                                    >(
+                                    )),
+                                    |bytes, ring| {
+                                        bytes.saturating_add(
+                                            ring.points_mm
+                                                .capacity()
+                                                .saturating_mul(std::mem::size_of::<[f64; 3]>()),
+                                        )
+                                    },
+                                ))
+                            } else {
+                                0
+                            };
+                        prepared = Some(protected_proof_memo::MemoizedForbidden::new(
+                            forbidden, allowance,
+                        ));
                     }
-                    trace.add(&trace.polygon_tests, 1);
                     let policy = spiling_geometry::PlanarCapsuleClearancePolicy {
                         radius_mm: local.width_mm * 0.5,
                         required_gap_mm: clearance,
                         endpoint_error_mm,
                     };
-                    if let Err(failure) =
-                        spiling_geometry::certify_planar_capsule_clearance_prepared(
-                            segment,
-                            prepared
-                                .as_ref()
-                                .expect("prepared actual forbidden polygon"),
-                            policy,
-                            native_work,
-                            cancel,
-                        )
-                    {
+                    let proof = prepared
+                        .as_mut()
+                        .expect("prepared actual forbidden polygon")
+                        .certify(segment, policy, native_work, cancel);
+                    if proof.as_ref().is_ok_and(|&cached| cached) {
+                        trace.add(&trace.protected_memo_hits, 1);
+                    } else {
+                        trace.add(&trace.polygon_tests, 1);
+                    }
+                    if let Err(failure) = proof {
                         if let Some((sweep, access)) = &mut withdrawal
                             && failure.code == spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate
                             && access.covers_bead(ordinal, upper, segment, support_work, cancel)?

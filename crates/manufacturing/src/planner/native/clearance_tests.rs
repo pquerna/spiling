@@ -87,6 +87,7 @@ fn evaluate(
             polygon: &polygon,
             height,
             label: "ordered-index regression",
+            memo_bytes: 0,
         },
         0.2,
         &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
@@ -96,6 +97,241 @@ fn evaluate(
         &cancel,
     );
     (result, trace)
+}
+
+fn repeated_emitted_chord() -> [DepositionPath; 2] {
+    [0.0000001, 0.0000002].map(|drift| {
+        let mut bead = path(1.5);
+        bead.points_mm = vec![[1.500001 + drift, 3.0, 0.2], [4.000001 + drift, 3.0, 0.2]];
+        assert_eq!(
+            emitted_xy_segment(&bead.points_mm).unwrap().0,
+            [[1.500001, 3.0], [4.000001, 3.0]],
+        );
+        bead
+    })
+}
+
+fn protected_ring() -> geo::Polygon<f64> {
+    geo::Polygon::new(
+        geo::Rect::new([0.0, 0.0], [6.0, 6.0])
+            .to_polygon()
+            .into_inner()
+            .0,
+        vec![
+            geo::Rect::new([1.0, 1.0], [5.0, 5.0])
+                .to_polygon()
+                .into_inner()
+                .0,
+        ],
+    )
+}
+
+const MEMO_TEST_POLICY: SupportPolicy = SupportPolicy::Breakaway {
+    density: 0.3,
+    xy_clearance_mm: 0.2,
+    z_gap_mm: 0.1,
+    interface_thickness_mm: 0.4,
+};
+
+const MEMO_TEST_SCHEDULE: [LayerElevation; 1] = [LayerElevation {
+    lower_z: 0.0,
+    z: 0.2,
+    sample: 0.1,
+    height: 0.2,
+    course: 0,
+}];
+
+const MEMO_TEST_HEIGHT: spiling_geometry::ProtectedVoidHeightScope =
+    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 1.0 };
+
+#[test]
+fn protected_memo_keeps_first_width_and_mask_refusals() {
+    let repeated = repeated_emitted_chord();
+    let mut wider = repeated[0].clone();
+    wider.width = WidthProfile::Constant { width_mm: 0.8 };
+    let width_layers = [layer(repeated.iter().cloned().chain([wider]).collect())];
+    let mask_layers = [layer(repeated.to_vec())];
+    let ring = protected_ring();
+    let filled = geo::Polygon::new(ring.exterior().clone(), Vec::new());
+    let cancel = AtomicBool::new(false);
+    for (layers, protected, expected_width) in [
+        (&width_layers, MultiPolygon(vec![ring.clone()]), "0.8"),
+        (&mask_layers, MultiPolygon(vec![ring, filled]), "0.4"),
+    ] {
+        let scopes = protected
+            .0
+            .iter()
+            .map(|_| crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None))
+            .collect::<Vec<_>>();
+        let geometry = SupportClearanceGeometry {
+            sections: &[],
+            schedule: &MEMO_TEST_SCHEDULE,
+            protected: &protected,
+            scopes: &scopes,
+            index_bytes: 128 * 1024,
+        };
+        let compare = |memo_enabled| {
+            let mut work = spiling_geometry::GeometryWorkBudget::compile();
+            let mut support_work = 0;
+            let trace = ClearanceTrace {
+                enabled: true,
+                memo_enabled,
+                ..ClearanceTrace::default()
+            };
+            let failure = certify_support_clearance_traced(
+                layers,
+                &geometry,
+                &MEMO_TEST_POLICY,
+                &mut work,
+                &mut support_work,
+                &trace,
+                &cancel,
+            )
+            .err()
+            .expect("first protected clearance refusal");
+            assert_eq!(
+                failure.code,
+                ManufacturingErrorCode::NativeAnalysisIndeterminate
+            );
+            assert!(
+                failure
+                    .message
+                    .contains(&format!("width {expected_width} mm"))
+            );
+            assert_eq!(trace.protected_memo_hits.get(), usize::from(memo_enabled));
+            assert_eq!(trace.polygon_tests.get(), 3 - usize::from(memo_enabled));
+            (failure, work.consumed(), support_work)
+        };
+        assert_eq!(compare(false), compare(true));
+    }
+}
+
+#[test]
+fn protected_memo_admits_beside_index_encoding_and_retained_withdrawal() {
+    let cancel = AtomicBool::new(false);
+    let mut distant = path(8.0);
+    distant
+        .points_mm
+        .iter_mut()
+        .for_each(|point| point[1] = 3.0);
+    let layers = [layer(
+        repeated_emitted_chord()
+            .into_iter()
+            .chain([distant])
+            .collect(),
+    )];
+    let first = geo::Rect::new([1.4, 2.5], [4.2, 3.5]).to_polygon();
+    let last = geo::Rect::new([7.5, 2.5], [9.5, 3.5]).to_polygon();
+    let ring = protected_ring();
+    let encoded = encode_polygons(std::iter::once(&ring), 0.0, &cancel).unwrap();
+    let encoded_bytes = encoded.capacity() * std::mem::size_of::<spiling_geometry::SectionLoopMm>()
+        + encoded
+            .iter()
+            .map(|ring| ring.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
+            .sum::<usize>();
+    let protected = MultiPolygon(vec![first.clone(), ring, last.clone()]);
+    let lease = |polygon| {
+        let mut scope = crate::planner::support::VoidScope::new(
+            MEMO_TEST_HEIGHT,
+            Some(Arc::new(spiling_geometry::tolerant::TolerantVoidRoof {
+                height_mm: [0.9, 1.0],
+                facets: Vec::new(),
+            })),
+        );
+        scope.allow_test_bead(0, MultiPolygon(vec![polygon]));
+        scope
+    };
+    let index = clearance_index::ClearanceIndex::build(
+        layers.iter().map(|layer| layer.paths.as_slice()),
+        128 * 1024,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap()
+    .unwrap();
+    let index_bytes = index.retained_bytes();
+    let mut initial = withdrawal::Sweep::new(128 * 1024);
+    let (segment, endpoint_error_mm) = emitted_xy_segment(&layers[0].paths[0].points_mm).unwrap();
+    initial
+        .record(
+            segment,
+            spiling_geometry::PlanarCapsuleClearancePolicy {
+                radius_mm: 0.2,
+                required_gap_mm: 0.2,
+                endpoint_error_mm,
+            },
+            0.2,
+            &spiling_geometry::GeometryWorkBudget::compile(),
+            &cancel,
+        )
+        .unwrap();
+    let exact = index_bytes
+        + initial.retained_bytes()
+        + encoded_bytes
+        + protected_proof_memo::MemoizedForbidden::MEMO_BYTES;
+    drop((initial, index, encoded));
+
+    for last_leased in [true, false] {
+        let scopes = [
+            lease(first.clone()),
+            crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None),
+            if last_leased {
+                lease(last.clone())
+            } else {
+                crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None)
+            },
+        ];
+        let run = |allowance, memo_enabled, hits| {
+            let mut work = spiling_geometry::GeometryWorkBudget::compile();
+            let mut support_work = 0;
+            let trace = ClearanceTrace {
+                enabled: true,
+                memo_enabled,
+                ..ClearanceTrace::default()
+            };
+            let proof = certify_support_clearance_traced(
+                &layers,
+                &SupportClearanceGeometry {
+                    sections: &[],
+                    schedule: &MEMO_TEST_SCHEDULE,
+                    protected: &protected,
+                    scopes: &scopes,
+                    index_bytes: allowance,
+                },
+                &MEMO_TEST_POLICY,
+                &mut work,
+                &mut support_work,
+                &trace,
+                &cancel,
+            );
+            assert_eq!(trace.index_bytes.get(), index_bytes);
+            assert_eq!(trace.protected_memo_hits.get(), hits);
+            let outcome = proof.map(|sweep| {
+                let sweep = sweep.expect("leased beads survive as a withdrawal sweep");
+                sweep
+                    .certify_realized(&layers, &MEMO_TEST_POLICY, &mut work, &cancel)
+                    .unwrap();
+                for chord in [0, 2] {
+                    let mut object = layers[0].paths[chord].clone();
+                    object.kind = DepositionKind::Perimeter;
+                    let failure = sweep
+                        .certify_realized(
+                            &[layer(vec![object])],
+                            &MEMO_TEST_POLICY,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap_err();
+                    assert!(failure.message.contains("against deposited object"));
+                }
+                sweep.retained_bytes()
+            });
+            assert_eq!(outcome.is_ok(), last_leased);
+            (outcome, work.consumed(), support_work)
+        };
+        assert_eq!(run(exact - 1, true, 0), run(exact, false, 0));
+        assert_eq!(run(exact, true, 1), run(exact, false, 0));
+    }
 }
 
 #[test]
