@@ -45,6 +45,7 @@ fn short_role_piece(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
+    before_cut_growth: impl FnMut(),
 ) -> Result<bool, ManufacturingError> {
     charge(work, 1, foreign_work, cancel)?;
     if let Some(short) = *cached {
@@ -59,6 +60,7 @@ fn short_role_piece(
         work,
         foreign_work,
         cancel,
+        before_cut_growth,
     )?;
     let mut start = origin;
     let mut owned_start = origin;
@@ -138,6 +140,7 @@ fn find_ear(
                             work,
                             foreign_work,
                             cancel,
+                            || {},
                         )? {
                             constrained = true;
                             break;
@@ -412,6 +415,7 @@ mod tests {
                     &mut work,
                     0,
                     &cancel,
+                    || {},
                 )
                 .unwrap(),
                 expected,
@@ -430,6 +434,7 @@ mod tests {
                         &mut work,
                         0,
                         &cancel,
+                        || {},
                     )
                     .unwrap(),
                     expected,
@@ -451,6 +456,7 @@ mod tests {
                         &mut work,
                         0,
                         &AtomicBool::new(cancel),
+                        || {},
                     )
                     .unwrap_err()
                     .code,
@@ -579,6 +585,7 @@ mod tests {
                     &mut 0,
                     0,
                     &cancel,
+                    || {},
                 )
                 .unwrap()
             );

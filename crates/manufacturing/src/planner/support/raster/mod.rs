@@ -345,6 +345,7 @@ fn role_cuts(
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
+    mut before_cut_growth: impl FnMut(),
 ) -> Result<(), ManufacturingError> {
     cuts.clear();
     let delta = Coord {
@@ -367,6 +368,9 @@ fn role_cuts(
                 ));
             }
             let live = owned_bytes.saturating_add(super::vec_bytes(cuts));
+            if cuts.len() == cuts.capacity() {
+                before_cut_growth();
+            }
             super::reserve_owned(cuts, 1, live)?;
             cuts.push((parameter, point));
         }
@@ -441,6 +445,7 @@ fn walls(
                     work,
                     foreign_work,
                     cancel,
+                    || {},
                 )?;
                 let mut start = a;
                 let mut owned_start = a;

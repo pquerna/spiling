@@ -4,6 +4,7 @@
 
 use super::*;
 use geo::algorithm::coordinate_position::{CoordPos, coord_pos_relative_to_ring};
+use geo::{BoundingRect, LineString, Rect};
 use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
 
 #[cfg(test)]
@@ -12,6 +13,88 @@ mod tests;
 pub(super) struct Inward {
     pub(super) address: Ear,
     pub(super) point: Coord<f64>,
+}
+
+const OPTIONAL_RING_BOUNDS: usize = 96;
+const SKIPPED_EDGES_PER_CHECK: usize = 1024;
+
+#[cfg_attr(test, derive(Clone))]
+struct RingBounds {
+    entries: Vec<Option<Rect<f64>>>,
+    current_len: usize,
+}
+
+enum RingBook {
+    Unprepared,
+    Declined,
+    Ready(RingBounds),
+}
+
+impl RingBounds {
+    fn prepare(
+        current: &MultiPolygon<f64>,
+        original: &MultiPolygon<f64>,
+        retained: usize,
+        owned_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Option<Self> {
+        let owned_bytes = owned_bytes.checked_add(std::mem::size_of::<RingBook>())?;
+        super::super::super::super::remaining_geometry_units(retained, owned_bytes).ok()?;
+        let mut bounds = Self {
+            entries: Vec::new(),
+            current_len: 0,
+        };
+        super::super::super::reserve_owned(&mut bounds.entries, OPTIONAL_RING_BOUNDS, owned_bytes)
+            .ok()?;
+        super::super::super::super::remaining_geometry_units(
+            retained,
+            owned_bytes.checked_add(super::super::super::vec_bytes(&bounds.entries))?,
+        )
+        .ok()?;
+        bounds.append(current, cancel)?;
+        bounds.current_len = bounds.entries.len();
+        if !std::ptr::eq(current, original) {
+            bounds.append(original, cancel)?;
+        }
+        Some(bounds)
+    }
+
+    fn append(&mut self, domain: &MultiPolygon<f64>, cancel: &AtomicBool) -> Option<()> {
+        for ring in rings(domain) {
+            if self.entries.len() == OPTIONAL_RING_BOUNDS {
+                return None;
+            }
+            let entry = finite_ring_bounds(ring, cancel);
+            check_cancel(cancel).ok()?;
+            self.entries.push(entry);
+        }
+        Some(())
+    }
+}
+
+fn rings(domain: &MultiPolygon<f64>) -> impl Iterator<Item = &LineString<f64>> {
+    domain
+        .0
+        .iter()
+        .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+}
+
+fn finite_ring_bounds(ring: &LineString<f64>, cancel: &AtomicBool) -> Option<Rect<f64>> {
+    let mut min = *ring.0.first()?;
+    let mut max = min;
+    for chunk in ring.0.chunks(64) {
+        check_cancel(cancel).ok()?;
+        for &point in chunk {
+            if !point.x.is_finite() || !point.y.is_finite() {
+                return None;
+            }
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+        }
+    }
+    Some(Rect::new(min, max))
 }
 
 struct Search<'a> {
@@ -25,6 +108,7 @@ struct Search<'a> {
     cancel: &'a AtomicBool,
     cuts: Vec<(f64, Coord<f64>)>,
     pocket: geo::LineString<f64>,
+    ring_book: RingBook,
 }
 
 impl Search<'_> {
@@ -52,6 +136,11 @@ impl Search<'_> {
                 self.work,
                 self.foreign_work,
                 self.cancel,
+                || {
+                    if matches!(self.ring_book, RingBook::Ready(_)) {
+                        self.ring_book = RingBook::Unprepared;
+                    }
+                },
             ),
             None => Ok(false),
         }
@@ -69,16 +158,58 @@ impl Search<'_> {
         )) {
             return Ok(false);
         }
-        for polygon in &domain.0 {
-            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-                for edge in ring.0.windows(2) {
-                    self.charge(1)?;
-                    match line_intersection(Line::new(first, last), Line::new(edge[0], edge[1])) {
-                        None => {}
-                        Some(LineIntersection::SinglePoint { intersection, .. })
-                            if intersection == first || intersection == last => {}
-                        _ => return Ok(false),
-                    }
+        if matches!(self.ring_book, RingBook::Unprepared) {
+            let live = self
+                .owned_bytes
+                .saturating_add(super::super::super::vec_bytes(&self.cuts));
+            self.ring_book = RingBounds::prepare(
+                self.current,
+                self.original,
+                self.retained,
+                live,
+                self.cancel,
+            )
+            .map_or(RingBook::Declined, RingBook::Ready);
+        }
+        let bounds = match &self.ring_book {
+            RingBook::Ready(bounds) if std::ptr::eq(domain, self.current) => {
+                &bounds.entries[..bounds.current_len]
+            }
+            RingBook::Ready(bounds) if std::ptr::eq(domain, self.original) => {
+                &bounds.entries[bounds.current_len..]
+            }
+            _ => &[],
+        };
+        let segment = Line::new(first, last);
+        let query = (!bounds.is_empty()
+            && [first.x, first.y, last.x, last.y]
+                .into_iter()
+                .all(f64::is_finite))
+        .then(|| segment.bounding_rect());
+        for (ordinal, ring) in rings(domain).enumerate() {
+            let lanes = ring.0.len().saturating_sub(1);
+            if lanes != 0
+                && query
+                    .zip(bounds.get(ordinal).copied().flatten())
+                    .is_some_and(|(query, ring)| !query.intersects(&ring))
+                && *self.work >= self.foreign_work
+                && self.work.checked_add(lanes).is_some()
+            {
+                let mut remaining = lanes;
+                while remaining != 0 {
+                    let amount = remaining.min(SKIPPED_EDGES_PER_CHECK);
+                    charge(self.work, amount, self.foreign_work, self.cancel)?;
+                    remaining -= amount;
+                }
+                continue;
+            }
+            for edge in ring.0.windows(2) {
+                charge(self.work, 1, self.foreign_work, self.cancel)?;
+                match line_intersection(segment, Line::new(edge[0], edge[1])) {
+                    None => {}
+                    Some(LineIntersection::SinglePoint { intersection, .. })
+                        if intersection == first || intersection == last => {}
+                    _ => return Ok(false),
                 }
             }
         }
@@ -177,6 +308,7 @@ pub(super) fn find(
         cancel,
         cuts: Vec::new(),
         pocket,
+        ring_book: RingBook::Unprepared,
     };
     for priority in [2, 1] {
         let mut ring_start = 0;

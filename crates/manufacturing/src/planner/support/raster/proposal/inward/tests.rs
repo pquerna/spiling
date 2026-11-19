@@ -70,6 +70,7 @@ fn candidate_admissible(
         cancel: &cancel,
         cuts: Vec::new(),
         pocket: LineString::new(Vec::with_capacity(5)),
+        ring_book: RingBook::Declined,
     };
     let ring = &domain.0[0].exterior().0;
     search
@@ -85,6 +86,190 @@ fn candidate_admissible(
             point,
         )
         .unwrap()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The differential witness controls both domain owners and the original work and cancellation state"
+)]
+fn run_segment(
+    current: &MultiPolygon<f64>,
+    original: &MultiPolygon<f64>,
+    domain: &MultiPolygon<f64>,
+    edge: [Coord<f64>; 2],
+    book: Option<&RingBounds>,
+    mut work: usize,
+    foreign_work: usize,
+    cancelled: bool,
+) -> (Result<bool, ManufacturingError>, usize) {
+    let mut search = Search {
+        current,
+        original,
+        interface: None,
+        retained: 0,
+        owned_bytes: 0,
+        work: &mut work,
+        foreign_work,
+        cancel: &AtomicBool::new(cancelled),
+        cuts: Vec::new(),
+        pocket: LineString::new(Vec::new()),
+        ring_book: book.cloned().map_or(RingBook::Declined, RingBook::Ready),
+    };
+    let result = search.segment_inside(domain, edge);
+    (result, work)
+}
+
+#[test]
+fn inward_segment_screen_preserves_current_and_original_closed_ring_queries() {
+    let remote = Rect::new((10.0, 10.0), (12.0, 12.0)).to_polygon();
+    let mut current = wide_concave(false);
+    current.0.insert(0, remote.clone());
+    let mut original = wide_concave(true);
+    original.0.insert(0, remote);
+    let cancel = AtomicBool::new(false);
+    let book = RingBounds::prepare(&current, &original, 0, 0, &cancel).unwrap();
+    assert_eq!((book.current_len, book.entries.len()), (2, 5));
+    for (height, expected_original) in [(0.3, false), (0.29, false), (0.28, true)] {
+        let edge = [Coord { x: 0.4, y: height }, Coord { x: 0.8, y: height }];
+        for (domain, expected) in [(&current, true), (&original, expected_original)] {
+            let exhaustive = run_segment(&current, &original, domain, edge, None, 0, 0, false);
+            assert_eq!(exhaustive.0, Ok(expected));
+            assert_eq!(
+                run_segment(&current, &original, domain, edge, Some(&book), 0, 0, false),
+                exhaustive
+            );
+        }
+    }
+}
+
+#[test]
+fn inward_segment_screen_falls_through_for_an_unknown_original_hole() {
+    let mut current = wide_concave(false);
+    current.0[0].interiors_push(LineString::from(vec![
+        (1.29, 0.29),
+        (1.29, 0.31),
+        (1.31, 0.31),
+        (1.31, 0.29),
+        (1.29, 0.29),
+    ]));
+    let original = wide_concave(true);
+    let edge = [Coord { x: 0.4, y: 0.3 }, Coord { x: 0.8, y: 0.3 }];
+    let cancel = AtomicBool::new(false);
+    let mut book = RingBounds::prepare(&current, &original, 0, 0, &cancel).unwrap();
+    let exhaustive = run_segment(&current, &original, &original, edge, None, 0, 0, false);
+    assert_eq!(exhaustive.0, Ok(false));
+    assert_eq!(
+        run_segment(
+            &current,
+            &original,
+            &original,
+            edge,
+            Some(&book),
+            0,
+            0,
+            false
+        ),
+        exhaustive
+    );
+    book.entries[book.current_len + 1] = None;
+    assert_eq!(
+        run_segment(
+            &current,
+            &original,
+            &original,
+            edge,
+            Some(&book),
+            0,
+            0,
+            false
+        ),
+        exhaustive
+    );
+}
+
+#[test]
+fn inward_segment_book_releases_bytes_before_role_cut_growth() {
+    let domain = wide_concave(false);
+    let interface = MultiPolygon(vec![Rect::new((0.6, 0.2), (0.65, 0.4)).to_polygon()]);
+    let cancel = AtomicBool::new(false);
+    let book = RingBounds::prepare(&domain, &domain, 0, 0, &cancel).unwrap();
+    let book_bytes =
+        std::mem::size_of::<RingBook>() + super::super::super::super::vec_bytes(&book.entries);
+    let owned_bytes = crate::working_set::bytes() - book_bytes;
+    let edge = [Coord { x: 0.4, y: 0.3 }, Coord { x: 0.8, y: 0.3 }];
+    let run = |ring_book| {
+        let mut work = 0;
+        let can_rebuild = matches!(ring_book, RingBook::Unprepared);
+        let mut search = Search {
+            current: &domain,
+            original: &domain,
+            interface: Some(&interface),
+            retained: 0,
+            owned_bytes,
+            work: &mut work,
+            foreign_work: 0,
+            cancel: &cancel,
+            cuts: Vec::new(),
+            pocket: LineString::new(Vec::new()),
+            ring_book,
+        };
+        let inside = search.segment_inside(&domain, edge).unwrap();
+        assert_eq!(matches!(search.ring_book, RingBook::Ready(_)), can_rebuild);
+        let short = search.short(edge, &mut None);
+        assert_eq!(search.cuts.len(), 2);
+        assert!(!matches!(search.ring_book, RingBook::Ready(_)));
+        let after = search.segment_inside(&domain, edge).unwrap();
+        assert!(matches!(search.ring_book, RingBook::Declined));
+        (inside, short, after, work)
+    };
+    let exhaustive = run(RingBook::Declined);
+    assert!(exhaustive.1.is_ok());
+    assert_eq!(run(RingBook::Unprepared), exhaustive);
+}
+
+#[test]
+fn inward_segment_screen_descends_on_overflow_and_declines_under_pressure() {
+    let mut domain = wide_concave(false);
+    domain
+        .0
+        .insert(0, Rect::new((10.0, 10.0), (12.0, 12.0)).to_polygon());
+    let cancel = AtomicBool::new(false);
+    let book = RingBounds::prepare(&domain, &domain, 0, 0, &cancel).unwrap();
+    assert!(
+        RingBounds::prepare(&domain, &domain, 0, crate::working_set::bytes(), &cancel).is_none()
+    );
+    let invalid = LineString::from(vec![(0.0, 0.0), (f64::NAN, 1.0)]);
+    assert!(finite_ring_bounds(&invalid, &cancel).is_none());
+    let edge = [Coord { x: 0.4, y: 0.3 }, Coord { x: 0.8, y: 0.3 }];
+    let near_overflow = usize::MAX - region::point_count(&domain) - 2;
+    for (work, foreign, cancelled, expected) in [
+        (
+            near_overflow,
+            0,
+            false,
+            ManufacturingErrorCode::ResourceLimit,
+        ),
+        (0, 1, false, ManufacturingErrorCode::ResourceLimit),
+        (near_overflow, 0, true, ManufacturingErrorCode::Cancelled),
+    ] {
+        let exhaustive = run_segment(
+            &domain, &domain, &domain, edge, None, work, foreign, cancelled,
+        );
+        assert_eq!(exhaustive.0.as_ref().unwrap_err().code, expected);
+        assert_eq!(
+            run_segment(
+                &domain,
+                &domain,
+                &domain,
+                edge,
+                Some(&book),
+                work,
+                foreign,
+                cancelled
+            ),
+            exhaustive
+        );
+    }
 }
 
 #[test]
