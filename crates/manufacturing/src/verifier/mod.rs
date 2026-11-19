@@ -1660,8 +1660,7 @@ pub(crate) fn verify_actual(
     }
     adhesion::verify(plan, recipe, cancel)?;
     let mut geometry_work = 0usize;
-    let mut anchors = crate::planner::support::AnchorWorkspace::default();
-    supports::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    let mut anchors = supports::verify(plan, recipe, &mut geometry_work, cancel)?;
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
