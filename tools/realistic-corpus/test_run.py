@@ -16,6 +16,7 @@ CLI_DOUBLE = """#!/usr/bin/env python3
 import json, os, pathlib, sys
 args=sys.argv[1:]
 intent={"printer":{"build_envelope":{"min":[0,0,0],"max":[20,20,20]}},"recipe":{}}
+print(json.dumps(["instrumented_phase", "trace", 1]),file=sys.stderr)
 if args[0]=='diagnose':
     print(json.dumps({"command":"diagnose","hello":{"fixture":True}}))
 elif args[1]=='create':
@@ -24,6 +25,7 @@ elif args[1]=='create':
 elif args[1]=='open':
     if os.environ.get('CORPUS_DOUBLE_FAIL_RETURN'):
         print(json.dumps({"level":"error","domain":"manufacturing","error":{"code":"verification_failed"}}),file=sys.stderr)
+        print(json.dumps(["instrumented_phase", "trace_end", 1]),file=sys.stderr)
         sys.exit(1)
     root=pathlib.Path('out');root.mkdir()
     (root/'manifest.json').write_text('{}')
@@ -84,6 +86,8 @@ class RunnerBoundaryTests(unittest.TestCase):
             summary = json.loads((root / "results.ndjson.summary.json").read_text())
             self.assertFalse(summary["ok"])
             self.assertIn("source_absent_return", summary["outcomes"]["fixture.step"]["failures"])
+            record = json.loads((root / "results.ndjson").read_text())
+            self.assertEqual(record["spiling_return"]["error"]["code"], "verification_failed")
 
     def test_invalid_expectation_refuses_before_creating_native_work(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -165,7 +165,7 @@ def run_cli(args, cwd):
             record = json.loads(line)
         except ValueError:
             continue
-        if record.get("level") == "error":
+        if isinstance(record, dict) and record.get("level") == "error":
             failure = {"code": (record.get("error") or {}).get("code") or record.get("event"),
                        "domain": record.get("domain"),
                        "message": (record.get("error") or {}).get("message") or record.get("message"),
