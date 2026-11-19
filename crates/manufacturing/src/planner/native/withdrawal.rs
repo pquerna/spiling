@@ -14,8 +14,8 @@ use spiling_contracts::manufacturing::{
 };
 use spiling_geometry::{
     GeometryWorkBudget, PlanarCapsuleClearancePolicy, PlanarCapsuleMm,
-    certify_planar_capsule_clearance_prepared, certify_planar_capsule_pair_clearance,
-    planar_bounds_clear, prepare_planar_forbidden,
+    certify_planar_capsule_pair_clearance, planar_bounds_clear, prepare_planar_forbidden,
+    prove_planar_capsule_clearance_prepared,
 };
 use std::{ops::Range, sync::atomic::AtomicBool};
 
@@ -244,7 +244,7 @@ impl Sweep {
                                 .map_err(|failure| native_error(failure, "support withdrawal: prepare continuous occupancy"))?);
                         }
                         let capsule = bead.capsule;
-                        certify_planar_capsule_clearance_prepared(capsule.segment_xy_mm, prepared.as_ref().expect("withdrawal polygon proof"),
+                        prove_planar_capsule_clearance_prepared(capsule.segment_xy_mm, prepared.as_ref().expect("withdrawal polygon proof"),
                             PlanarCapsuleClearancePolicy { radius_mm: capsule.radius_mm, endpoint_error_mm: capsule.endpoint_error_mm, required_gap_mm: xy_gap }, native_work, cancel)
                             .map_err(|failure| native_error(failure, "support withdrawal: actual bead against continuous occupied geometry"))?;
                         Ok(())

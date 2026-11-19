@@ -281,7 +281,7 @@ pub fn certify_planar_capsule_clearance(
         });
     }
     validate_forbidden(forbidden, work, cancel)?;
-    capsule_clearance_core(segment_xy_mm, forbidden, policy, required, work, cancel)
+    capsule_clearance_core::<false>(segment_xy_mm, forbidden, policy, required, work, cancel)
 }
 
 /// True when every point within `reserve_mm` of box `a` is at least
@@ -359,6 +359,29 @@ pub fn certify_planar_capsule_clearance_prepared(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<PlanarCapsuleClearance, GeometryError> {
+    capsule_clearance_prepared::<false>(segment_xy_mm, forbidden, policy, work, cancel)
+}
+
+/// Prove the requested separation without measuring a minimum gap. A distant
+/// boundary edge only needs a directed lower bound meeting the requested gap.
+/// Close edges and filled membership still receive the complete predicates.
+pub fn prove_planar_capsule_clearance_prepared(
+    segment_xy_mm: [[f64; 2]; 2],
+    forbidden: &PreparedPlanarForbidden<'_>,
+    policy: PlanarCapsuleClearancePolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    capsule_clearance_prepared::<true>(segment_xy_mm, forbidden, policy, work, cancel).map(|_| ())
+}
+
+fn capsule_clearance_prepared<const THRESHOLD_ONLY: bool>(
+    segment_xy_mm: [[f64; 2]; 2],
+    forbidden: &PreparedPlanarForbidden<'_>,
+    policy: PlanarCapsuleClearancePolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PlanarCapsuleClearance, GeometryError> {
     let required = capsule_requirement(segment_xy_mm, policy, work, cancel)?;
     let Some([lo, hi]) = forbidden.bounds else {
         return Ok(PlanarCapsuleClearance {
@@ -385,7 +408,7 @@ pub fn certify_planar_capsule_clearance_prepared(
             });
         }
     }
-    capsule_clearance_core(
+    capsule_clearance_core::<THRESHOLD_ONLY>(
         segment_xy_mm,
         forbidden.loops,
         policy,
@@ -455,7 +478,7 @@ fn validate_forbidden(
     Ok(())
 }
 
-fn capsule_clearance_core(
+fn capsule_clearance_core<const THRESHOLD_ONLY: bool>(
     segment_xy_mm: [[f64; 2]; 2],
     forbidden: &[SectionLoopMm],
     policy: PlanarCapsuleClearancePolicy,
@@ -464,16 +487,35 @@ fn capsule_clearance_core(
     cancel: &AtomicBool,
 ) -> Result<PlanarCapsuleClearance, GeometryError> {
     let reserve = Interval::point(policy.radius_mm).add(Interval::point(policy.endpoint_error_mm));
+    let [start, end] = segment_xy_mm;
+    let center_min = [start[0].min(end[0]), start[1].min(end[1])];
+    let center_max = [start[0].max(end[0]), start[1].max(end[1])];
     let mut lower = f64::INFINITY;
     for ring in forbidden {
         for edge in ring.points_mm.windows(2) {
             work.charge(1, cancel)?;
-            lower = lower.min(segment_distance_lower(
-                segment_xy_mm[0],
-                segment_xy_mm[1],
-                [edge[0][0], edge[0][1]],
-                [edge[1][0], edge[1][1]],
-            )?);
+            let first = [edge[0][0], edge[0][1]];
+            let second = [edge[1][0], edge[1][1]];
+            if THRESHOLD_ONLY {
+                let nominal = (0..2)
+                    .flat_map(|axis| {
+                        [
+                            first[axis].min(second[axis]) - center_max[axis],
+                            center_min[axis] - first[axis].max(second[axis]),
+                        ]
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let separation = nominal.next_down();
+                if nominal.is_finite()
+                    && separation > 0.0
+                    && separation >= required.hi
+                    && Interval::point(separation).sub(reserve).lo >= policy.required_gap_mm
+                {
+                    lower = lower.min(separation);
+                    continue;
+                }
+            }
+            lower = lower.min(segment_distance_lower(start, end, first, second)?);
             if lower < required.hi || lower == 0.0 {
                 return Err(unresolved(
                     "actual emitted capsule clearance from a filled forbidden boundary is unproved",
@@ -560,6 +602,14 @@ mod tests {
                         &cancel,
                     );
                     assert_eq!(full.is_ok(), fast.is_ok(), "{segment:?}");
+                    let threshold = prove_planar_capsule_clearance_prepared(
+                        segment,
+                        &prepared,
+                        policy(),
+                        &mut work,
+                        &cancel,
+                    );
+                    assert_eq!(full.is_ok(), threshold.is_ok(), "{segment:?}");
                     if let (Ok(full), Ok(fast)) = (full, fast) {
                         let (full, fast) = (
                             full.minimum_gap_mm().unwrap(),
@@ -603,6 +653,147 @@ mod tests {
             .is_none()
         );
     }
+    #[test]
+    fn threshold_proof_retains_filled_membership_and_close_boundary_checks() {
+        let mask = [
+            rectangle([[0.0, 10.0], [0.0, 10.0]], false),
+            rectangle([[3.0, 7.0], [3.0, 7.0]], true),
+        ];
+        let cancel = AtomicBool::new(false);
+        let work = &mut GeometryWorkBudget::query();
+        let prepared = prepare_planar_forbidden(&mask, work, &cancel).unwrap();
+        let mut policy = policy();
+        policy.endpoint_error_mm = 0.03125;
+        let near = 3.0 + policy.radius_mm + policy.endpoint_error_mm + policy.required_gap_mm;
+        for (segment, clear) in [
+            ([[4.0, 4.0], [6.0, 6.0]], true),
+            ([[4.0, 4.0], [4.0, 4.0]], true),
+            ([[0.5, 0.5], [2.0, 2.0]], false),
+            ([[-1.0, 5.0], [11.0, 5.0]], false),
+            ([[near.next_down(), 4.0], [near.next_down(), 6.0]], false),
+            ([[near + 1e-8, 4.0], [near + 1e-8, 6.0]], true),
+        ] {
+            let full = certify_planar_capsule_clearance_prepared(
+                segment, &prepared, policy, work, &cancel,
+            );
+            let proof =
+                prove_planar_capsule_clearance_prepared(segment, &prepared, policy, work, &cancel);
+            assert_eq!(proof.is_ok(), clear, "{segment:?}");
+            assert_eq!(
+                proof.err().map(|error| error.code),
+                full.err().map(|error| error.code),
+                "{segment:?}"
+            );
+        }
+        let err = prove_planar_capsule_clearance_prepared(
+            [[4.0, 4.0], [6.0, 6.0]],
+            &prepared,
+            policy,
+            &mut GeometryWorkBudget::new(1),
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, GeometryErrorCode::ResourceLimit);
+        let err = prove_planar_capsule_clearance_prepared(
+            [[4.0, 4.0], [6.0, 6.0]],
+            &prepared,
+            policy,
+            work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, GeometryErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn threshold_axis_proof_can_resolve_a_gap_the_norm_rounds_below_requirement() {
+        let mask = [
+            rectangle([[-1.0, 4.0], [-1.0, 4.0]], false),
+            rectangle([[0.125, 3.0], [0.0, 3.0]], true),
+        ];
+        let cancel = AtomicBool::new(false);
+        let work = &mut GeometryWorkBudget::query();
+        let prepared = prepare_planar_forbidden(&mask, work, &cancel).unwrap();
+        let policy = PlanarCapsuleClearancePolicy {
+            radius_mm: 0.125,
+            endpoint_error_mm: 0.125,
+            required_gap_mm: 0.25,
+        };
+        let contact = 0.625_f64;
+        let segment = |x| [[x, 1.0], [x, 2.0]];
+        assert!(
+            prove_planar_capsule_clearance_prepared(
+                segment(contact.next_down()),
+                &prepared,
+                policy,
+                work,
+                &cancel,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            prove_planar_capsule_clearance_prepared(
+                segment(contact),
+                &prepared,
+                policy,
+                work,
+                &cancel
+            )
+            .is_ok(),
+            certify_planar_capsule_clearance_prepared(
+                segment(contact),
+                &prepared,
+                policy,
+                work,
+                &cancel
+            )
+            .is_ok(),
+        );
+        let above = segment(contact.next_up());
+        assert_eq!(
+            certify_planar_capsule_clearance_prepared(above, &prepared, policy, work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+        let bounded = &mut GeometryWorkBudget::new(17);
+        prove_planar_capsule_clearance_prepared(above, &prepared, policy, bounded, &cancel)
+            .unwrap();
+        assert_eq!(bounded.consumed(), 17);
+        assert_eq!(
+            prove_planar_capsule_clearance_prepared(
+                above,
+                &prepared,
+                policy,
+                &mut GeometryWorkBudget::new(9),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+
+        let zero = PlanarCapsuleClearancePolicy {
+            radius_mm: 0.0,
+            endpoint_error_mm: 0.0,
+            required_gap_mm: 0.0,
+        };
+        assert!(
+            prove_planar_capsule_clearance_prepared(segment(0.125), &prepared, zero, work, &cancel)
+                .is_err()
+        );
+        let overlap = [
+            rectangle([[-1.0, 4.0], [-1.0, 4.0]], false),
+            rectangle([[-1.0, 4.0], [-1.0, 4.0]], false),
+            rectangle([[0.125, 3.0], [0.0, 3.0]], true),
+        ];
+        let filled = prepare_planar_forbidden(&overlap, work, &cancel).unwrap();
+        let failure =
+            prove_planar_capsule_clearance_prepared(above, &filled, policy, work, &cancel)
+                .unwrap_err();
+        assert!(failure.message.contains("forbidden material"));
+    }
+
     #[test]
     fn filled_material_and_thin_crossings_are_not_boundary_only_clearance() {
         let mask = [rectangle([[0.0, 10.0], [0.0, 10.0]], false)];

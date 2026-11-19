@@ -48,6 +48,7 @@ pub use analysis::{
     certify_planar_capsule_pair_clearance, material_projected_bounds, placed_bounds,
     placed_material_bounds, placed_native_support, planar_bounds_clear, prepare_planar_forbidden,
     prepare_solid, projected_bounds, projected_protected_void_envelopes,
+    prove_planar_capsule_clearance_prepared,
 };
 pub use compute::{
     DISPLAY_PROOF_BYTES, MAX_DIRECTIONAL_SCRATCH_BYTES, MAX_PREPARED_SECTION_BYTES,
