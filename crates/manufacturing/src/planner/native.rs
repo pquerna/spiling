@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::{LayerElevation, preflight};
+use crate::clearance_screen::{BLOCK_PATHS, ObjectClearanceIndex};
 use crate::{check_cancel, error};
 use geo::MultiPolygon;
 use spiling_contracts::geometry::OccurrenceId;
@@ -39,6 +40,24 @@ struct ActualDepositionScope<'a> {
     layers: &'a [PrintLayer],
     schedule: &'a [LayerElevation],
     vertical: [f64; 2],
+    screen: Option<&'a ObjectClearanceIndex>,
+}
+
+struct DepositionEnvelope {
+    vertical: [f64; 2],
+    inventory: usize,
+}
+
+impl DepositionEnvelope {
+    /// Each preparation and scan charge is bounded by four ordered traversals
+    /// of the Cartesian inventory of layers, path slots, and point slots.
+    /// Leave the exhaustive diagnostic order in authority near counter overflow.
+    fn screen_work_fits(&self, work: usize) -> bool {
+        self.inventory
+            .checked_mul(self.inventory)
+            .and_then(|pairs| pairs.checked_mul(4))
+            .is_some_and(|bound| bound <= usize::MAX - work)
+    }
 }
 
 struct PolygonDeposition<'a> {
@@ -62,6 +81,9 @@ struct ClearanceTrace {
     deposited_support_paths: std::cell::Cell<usize>,
     deposited_object_paths: std::cell::Cell<usize>,
     deposited_path_rejects: std::cell::Cell<usize>,
+    deposited_block_queries: std::cell::Cell<usize>,
+    deposited_block_skipped_slots: std::cell::Cell<usize>,
+    deposited_index_bytes: std::cell::Cell<usize>,
     edge_pairs: std::cell::Cell<usize>,
     edge_pair_rejects: std::cell::Cell<usize>,
     height_pair_rejects: std::cell::Cell<usize>,
@@ -93,6 +115,9 @@ impl ClearanceTrace {
                     "deposited_support_paths": self.deposited_support_paths.get(),
                     "deposited_object_paths": self.deposited_object_paths.get(),
                     "deposited_path_rejects": self.deposited_path_rejects.get(),
+                    "deposited_block_queries": self.deposited_block_queries.get(),
+                    "deposited_block_skipped_slots": self.deposited_block_skipped_slots.get(),
+                    "deposited_index_bytes": self.deposited_index_bytes.get(),
                     "edge_pairs": self.edge_pairs.get(), "edge_pair_rejects": self.edge_pair_rejects.get(),
                     "height_pair_rejects": self.height_pair_rejects.get(), "pair_tests": self.pair_tests.get(),
                 })
@@ -563,12 +588,13 @@ pub(super) fn certify_support_clearance(
     else {
         return Ok(None);
     };
-    let Some(vertical) = deposition_vertical_extensions(layers, schedule, support_work, cancel)?
+    let Some(deposition) = deposition_vertical_extensions(layers, schedule, support_work, cancel)?
     else {
         // Exhausted the actual paths: there are no emitted support segments,
         // rather than trusting a generated-support flag or skipping a proof.
         return Ok(None);
     };
+    let vertical = deposition.vertical;
     let trace = ClearanceTrace {
         enabled: std::env::var_os("SPILING_TRACE_SUPPORT_CLEARANCE").is_some(),
         ..ClearanceTrace::default()
@@ -664,6 +690,19 @@ pub(super) fn certify_support_clearance(
     )?;
     trace.report("withdrawal", withdrawal_started);
     let deposited_started = std::time::Instant::now();
+    let deposited_screen = prepare_deposited_screen(
+        layers,
+        &deposition,
+        index_bytes,
+        sweep.as_ref().map_or(0, withdrawal::Sweep::retained_bytes),
+        support_work,
+        cancel,
+    )?;
+    trace.deposited_index_bytes.set(
+        deposited_screen
+            .as_ref()
+            .map_or(0, ObjectClearanceIndex::retained_bytes),
+    );
     // A bounded-fidelity M/D prism or emitted bead can extend outside true T.
     // Native target exclusion therefore does not replace this distinct actual
     // nominal-program footprint proof.
@@ -672,6 +711,7 @@ pub(super) fn certify_support_clearance(
             layers,
             schedule,
             vertical,
+            screen: deposited_screen.as_ref(),
         },
         xy_clearance_mm,
         z_gap_mm,
@@ -917,13 +957,16 @@ fn deposition_vertical_extensions(
     schedule: &[LayerElevation],
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<Option<[f64; 2]>, ManufacturingError> {
+) -> Result<Option<DepositionEnvelope>, ManufacturingError> {
     let mut extensions = [0.0f64; 2];
+    let mut inventory = layers.len().saturating_add(1);
     let mut any = false;
     for (layer, elevation) in layers.iter().zip(schedule) {
         charge_support_clearance(work, cancel)?;
+        inventory = inventory.saturating_add(layer.paths.len());
         for path in &layer.paths {
             charge_support_clearance(work, cancel)?;
+            inventory = inventory.saturating_add(path.points_mm.len());
             if path.points_mm.len() < 2 {
                 continue;
             }
@@ -945,9 +988,34 @@ fn deposition_vertical_extensions(
             "actual emitted deposition vertical representation cannot be enclosed",
         ));
     }
-    Ok(any.then_some(extensions))
+    Ok(any.then_some(DepositionEnvelope {
+        vertical: extensions,
+        inventory,
+    }))
 }
 
+fn prepare_deposited_screen(
+    layers: &[PrintLayer],
+    deposition: &DepositionEnvelope,
+    available: usize,
+    retained_sweep_bytes: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<ObjectClearanceIndex>, ManufacturingError> {
+    check_cancel(cancel)?;
+    let allowance = available.saturating_sub(retained_sweep_bytes);
+    if allowance == 0 || !deposition.screen_work_fits(*work) {
+        return Ok(None);
+    }
+    ObjectClearanceIndex::build(
+        layers,
+        allowance,
+        |kind| !kind.is_support(),
+        || charge_support_clearance(work, cancel),
+    )
+}
+
+#[cfg(test)]
 fn scoped_support_layers<'a>(
     layers: &'a [PrintLayer],
     schedule: &[LayerElevation],
@@ -1031,6 +1099,7 @@ fn certify_deposited_clearance(
         layers,
         schedule,
         vertical,
+        screen,
     } = *deposition;
     for (index, support_layer) in layers.iter().enumerate() {
         charge_support_clearance(work, cancel)?;
@@ -1050,89 +1119,105 @@ fn certify_deposited_clearance(
                     lower_mm: program_coordinates::enclosed_vertical_gap_mm(lower, z_gap)?,
                     upper_mm: -program_coordinates::enclosed_vertical_gap_mm(-upper, z_gap)?,
                 };
-                applicable = Some(scoped_support_layers(
-                    layers, schedule, scope, vertical, work, cancel,
+                applicable = Some(scoped_support_layer_range(
+                    schedule, scope, vertical, work, cancel,
                 )?);
             }
-            let objects =
-                applicable.expect("actual support selected a complete applicable layer slice");
+            let objects = applicable
+                .as_ref()
+                .expect("actual support selected a complete applicable layer range")
+                .clone();
             let support_edges = support.checked_edges()?;
             super::boolean::charge(work, support.points_mm.len())?;
             let support_frame = path_xy_bounds(support);
-            for object_layer in objects {
+            for object_ordinal in objects {
+                let object_layer = &layers[object_ordinal];
                 charge_support_clearance(work, cancel)?;
-                for object in &object_layer.paths {
-                    charge_support_clearance(work, cancel)?;
-                    if matches!(
-                        object.kind,
-                        DepositionKind::Support | DepositionKind::SupportInterface
-                    ) {
-                        continue;
-                    }
-                    trace.add(&trace.deposited_object_paths, 1);
-                    let object_edges = object.checked_edges()?;
-                    super::boolean::charge(work, object.points_mm.len())?;
-                    if let (
-                        Some((support_bounds, support_width)),
-                        Some((object_bounds, object_width)),
-                    ) = (support_frame, path_xy_bounds(object))
-                        && spiling_geometry::planar_bounds_clear(
-                            support_bounds,
-                            object_bounds,
-                            (support_width + object_width) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM,
-                            xy_gap,
-                        )
-                    {
-                        trace.add(&trace.deposited_path_rejects, 1);
-                        continue;
-                    }
-                    for support_local in support_edges {
-                        let support_edge = support_local.points_mm;
+                let blocks = screen
+                    .filter(|_| support_frame.is_some())
+                    .map(|screen| screen.layer(object_ordinal));
+                let span = blocks.map_or(object_layer.paths.len().max(1), |_| BLOCK_PATHS);
+                for (block_ordinal, paths) in object_layer.paths.chunks(span).enumerate() {
+                    if let (Some(blocks), Some((bounds, width))) = (blocks, support_frame) {
                         charge_support_clearance(work, cancel)?;
-                        let support_height = project_xyz6_segment_bead_height_mm(
-                            support_edge[0][2],
-                            support_edge[1][2],
-                            support.height_mm(),
-                        )?;
-                        let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
-                        let support_bounds = edge_xy_bounds(support_edge);
-                        for object_local in object_edges {
-                            trace.add(&trace.edge_pairs, 1);
-                            let object_edge = object_local.points_mm;
-                            charge_support_clearance(work, cancel)?;
-                            if spiling_geometry::planar_bounds_clear(
+                        trace.add(&trace.deposited_block_queries, 1);
+                        if blocks[block_ordinal].clear(bounds, width, xy_gap) {
+                            trace.add(&trace.deposited_block_skipped_slots, paths.len());
+                            continue;
+                        }
+                    }
+                    for object in paths {
+                        charge_support_clearance(work, cancel)?;
+                        if matches!(
+                            object.kind,
+                            DepositionKind::Support | DepositionKind::SupportInterface
+                        ) {
+                            continue;
+                        }
+                        trace.add(&trace.deposited_object_paths, 1);
+                        let object_edges = object.checked_edges()?;
+                        super::boolean::charge(work, object.points_mm.len())?;
+                        if let (
+                            Some((support_bounds, support_width)),
+                            Some((object_bounds, object_width)),
+                        ) = (support_frame, path_xy_bounds(object))
+                            && spiling_geometry::planar_bounds_clear(
                                 support_bounds,
-                                edge_xy_bounds(object_edge),
-                                (support_local.width_mm + object_local.width_mm) * 0.5
-                                    + 2.0 * XYZ6_SCREEN_SLACK_MM,
+                                object_bounds,
+                                (support_width + object_width) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM,
                                 xy_gap,
-                            ) {
-                                trace.add(&trace.edge_pair_rejects, 1);
-                                continue;
-                            }
-                            let object_height = project_xyz6_segment_bead_height_mm(
-                                object_edge[0][2],
-                                object_edge[1][2],
-                                object.height_mm(),
+                            )
+                        {
+                            trace.add(&trace.deposited_path_rejects, 1);
+                            continue;
+                        }
+                        for support_local in support_edges {
+                            let support_edge = support_local.points_mm;
+                            charge_support_clearance(work, cancel)?;
+                            let support_height = project_xyz6_segment_bead_height_mm(
+                                support_edge[0][2],
+                                support_edge[1][2],
+                                support.height_mm(),
                             )?;
-                            let above = program_coordinates::enclosed_vertical_gap_mm(
-                                object_height[0],
-                                support_height[1],
-                            )?;
-                            let below = program_coordinates::enclosed_vertical_gap_mm(
-                                support_height[0],
-                                object_height[1],
-                            )?;
-                            // All actual D matters, not only C or intervals
-                            // that overlap. Exact zero-gap touching is not an
-                            // interior collision when the requested gap is zero.
-                            if above >= z_gap || below >= z_gap {
-                                trace.add(&trace.height_pair_rejects, 1);
-                                continue;
-                            }
-                            let (object_xy, object_error) = emitted_xy_segment(object_edge)?;
-                            trace.add(&trace.pair_tests, 1);
-                            spiling_geometry::certify_planar_capsule_pair_clearance([
+                            let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
+                            let support_bounds = edge_xy_bounds(support_edge);
+                            for object_local in object_edges {
+                                trace.add(&trace.edge_pairs, 1);
+                                let object_edge = object_local.points_mm;
+                                charge_support_clearance(work, cancel)?;
+                                if spiling_geometry::planar_bounds_clear(
+                                    support_bounds,
+                                    edge_xy_bounds(object_edge),
+                                    (support_local.width_mm + object_local.width_mm) * 0.5
+                                        + 2.0 * XYZ6_SCREEN_SLACK_MM,
+                                    xy_gap,
+                                ) {
+                                    trace.add(&trace.edge_pair_rejects, 1);
+                                    continue;
+                                }
+                                let object_height = project_xyz6_segment_bead_height_mm(
+                                    object_edge[0][2],
+                                    object_edge[1][2],
+                                    object.height_mm(),
+                                )?;
+                                let above = program_coordinates::enclosed_vertical_gap_mm(
+                                    object_height[0],
+                                    support_height[1],
+                                )?;
+                                let below = program_coordinates::enclosed_vertical_gap_mm(
+                                    support_height[0],
+                                    object_height[1],
+                                )?;
+                                // All actual D matters, not only C or intervals
+                                // that overlap. Exact zero-gap touching is not an
+                                // interior collision when the requested gap is zero.
+                                if above >= z_gap || below >= z_gap {
+                                    trace.add(&trace.height_pair_rejects, 1);
+                                    continue;
+                                }
+                                let (object_xy, object_error) = emitted_xy_segment(object_edge)?;
+                                trace.add(&trace.pair_tests, 1);
+                                spiling_geometry::certify_planar_capsule_pair_clearance([
                                 spiling_geometry::PlanarCapsuleMm {
                                     segment_xy_mm: support_xy, radius_mm: support_local.width_mm * 0.5,
                                     endpoint_error_mm: support_error,
@@ -1144,6 +1229,7 @@ fn certify_deposited_clearance(
                             ], xy_gap, native_work, cancel).map_err(|failure| super::native_error(failure,
                                 &format!("actual emitted support layer {} versus deposited object/bridge layer {}",
                                     support_layer.index, object_layer.index)))?;
+                            }
                         }
                     }
                 }
@@ -1273,32 +1359,44 @@ mod actual_deposition_tests {
             let mut native_work = spiling_geometry::GeometryWorkBudget::new(10_000);
             let vertical = deposition_vertical_extensions(&layers, &schedule, &mut work, &cancel)
                 .unwrap()
-                .unwrap();
+                .unwrap()
+                .vertical;
             // Exercise the actual-deposition consumer and real native capsule
             // proof, independently of C or contact-anchor authority.
-            let result = certify_deposited_clearance(
-                &ActualDepositionScope {
-                    layers: &layers,
-                    schedule: &schedule,
-                    vertical,
-                },
-                0.2,
-                required,
-                &mut native_work,
-                &mut work,
-                &ClearanceTrace::default(),
-                &cancel,
-            );
-            assert_eq!(
-                result.is_ok(),
-                accepted,
-                "actual Z gap={gap}, required={required}, object X={object_x}, support above={support_above}: {result:?}"
-            );
-            if !accepted {
-                assert_eq!(
-                    result.unwrap_err().code,
-                    ManufacturingErrorCode::NativeAnalysisIndeterminate
+            let screen = ObjectClearanceIndex::build(
+                &layers,
+                64 * 1024,
+                |kind| !kind.is_support(),
+                || charge_support_clearance(&mut work, &cancel),
+            )
+            .unwrap()
+            .unwrap();
+            for screen in [None, Some(&screen)] {
+                let result = certify_deposited_clearance(
+                    &ActualDepositionScope {
+                        layers: &layers,
+                        schedule: &schedule,
+                        vertical,
+                        screen,
+                    },
+                    0.2,
+                    required,
+                    &mut native_work,
+                    &mut work,
+                    &ClearanceTrace::default(),
+                    &cancel,
                 );
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "actual Z gap={gap}, required={required}, object X={object_x}, support above={support_above}: {result:?}"
+                );
+                if !accepted {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate
+                    );
+                }
             }
         }
     }

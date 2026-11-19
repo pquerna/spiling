@@ -4,6 +4,7 @@
 
 //! Software-only native-section manufacturing, with mandatory independent replay.
 pub mod backend;
+mod clearance_screen;
 pub mod delivery;
 mod material;
 mod selection;

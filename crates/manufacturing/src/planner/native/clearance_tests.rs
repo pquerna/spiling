@@ -173,6 +173,253 @@ fn indexed_native_clearance_matches_exhaustive_first_error_and_narrow_tests() {
 }
 
 #[test]
+fn deposited_blocks_preserve_ordered_errors_and_narrow_proofs() {
+    let cancel = AtomicBool::new(false);
+    let sweep = withdrawal_test_sweep(
+        0.625,
+        &mut spiling_geometry::GeometryWorkBudget::compile(),
+        &cancel,
+    );
+    let sweep_bytes = sweep.retained_bytes();
+    assert_ne!(sweep_bytes, 0);
+    let schedule = [LayerElevation {
+        lower_z: 0.0,
+        z: 0.2,
+        sample: 0.1,
+        height: 0.2,
+        course: 0,
+    }];
+    let mut distant = path(100.0);
+    distant.kind = DepositionKind::Perimeter;
+    let mut collision = path(0.0);
+    collision.kind = DepositionKind::Bridge;
+    let mut malformed = distant.clone();
+    malformed.width = WidthProfile::PerEdge {
+        widths_mm: Vec::new(),
+    };
+    let mut brim = collision.clone();
+    brim.kind = DepositionKind::Brim;
+    for (tail, expected, narrow_tests) in [
+        (Vec::new(), None, 0),
+        (
+            vec![collision.clone(), malformed.clone()],
+            Some(ManufacturingErrorCode::NativeAnalysisIndeterminate),
+            1,
+        ),
+        (
+            vec![malformed, collision],
+            Some(ManufacturingErrorCode::InvalidSpecification),
+            0,
+        ),
+        (
+            vec![brim],
+            Some(ManufacturingErrorCode::NativeAnalysisIndeterminate),
+            1,
+        ),
+    ] {
+        let mut paths = vec![path(0.0)];
+        paths.extend(std::iter::repeat_n(distant.clone(), BLOCK_PATHS * 2 - 1));
+        paths.extend(tail);
+        let layers = [layer(paths)];
+        let mut scan_work = 0;
+        let deposition =
+            deposition_vertical_extensions(&layers, &schedule, &mut scan_work, &cancel)
+                .unwrap()
+                .unwrap();
+        let build = |bytes, work: &mut usize, cancel: &AtomicBool| {
+            prepare_deposited_screen(&layers, &deposition, bytes, sweep_bytes, work, cancel)
+        };
+        let index = build(usize::MAX, &mut scan_work, &cancel).unwrap().unwrap();
+        let exact = index.retained_bytes() + sweep_bytes;
+        assert!(build(exact - 1, &mut scan_work, &cancel).unwrap().is_none());
+        assert!(build(exact, &mut scan_work, &cancel).unwrap().is_some());
+        assert_eq!(
+            build(usize::MAX, &mut scan_work, &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .code,
+            ManufacturingErrorCode::Cancelled
+        );
+        let run = |screen, mut work| {
+            let trace = ClearanceTrace {
+                enabled: true,
+                ..Default::default()
+            };
+            let result = certify_deposited_clearance(
+                &ActualDepositionScope {
+                    layers: &layers,
+                    schedule: &schedule,
+                    vertical: deposition.vertical,
+                    screen,
+                },
+                0.2,
+                0.1,
+                &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
+                &mut work,
+                &trace,
+                &cancel,
+            );
+            (result.err(), trace)
+        };
+        let (exhaustive, exhaustive_trace) = run(None, 0);
+        let (screened, screened_trace) = run(Some(&index), scan_work);
+        assert_eq!(exhaustive.as_ref().map(|error| error.code), expected);
+        assert_eq!(format!("{screened:?}"), format!("{exhaustive:?}"));
+        assert_eq!(exhaustive_trace.pair_tests.get(), narrow_tests);
+        assert_eq!(screened_trace.pair_tests.get(), narrow_tests);
+        assert!(screened_trace.deposited_block_skipped_slots.get() >= BLOCK_PATHS);
+    }
+}
+
+#[test]
+fn near_work_overflow_leaves_the_first_collision_in_authority() {
+    let cancel = AtomicBool::new(false);
+    let schedule = [LayerElevation {
+        lower_z: 0.0,
+        z: 0.2,
+        sample: 0.1,
+        height: 0.2,
+        course: 0,
+    }];
+    let mut collision = path(0.0);
+    collision.kind = DepositionKind::Bridge;
+    let mut distant = path(100.0);
+    distant.kind = DepositionKind::Perimeter;
+    let mut paths = vec![path(0.0), collision];
+    paths.extend(std::iter::repeat_n(distant, 64));
+    let layers = [layer(paths)];
+    let deposition = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
+        .unwrap()
+        .unwrap();
+    let before = usize::MAX - 64;
+    let mut work = before;
+    let screen =
+        prepare_deposited_screen(&layers, &deposition, usize::MAX, 0, &mut work, &cancel).unwrap();
+    assert!(screen.is_none());
+    assert_eq!(work, before);
+    let failure = certify_deposited_clearance(
+        &ActualDepositionScope {
+            layers: &layers,
+            schedule: &schedule,
+            vertical: deposition.vertical,
+            screen: screen.as_ref(),
+        },
+        0.2,
+        0.1,
+        &mut spiling_geometry::GeometryWorkBudget::new(1024),
+        &mut work,
+        &ClearanceTrace::default(),
+        &cancel,
+    )
+    .unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::NativeAnalysisIndeterminate
+    );
+}
+
+#[test]
+fn deposited_screen_keeps_widest_last_edge_at_threshold_in_both_z_directions() {
+    let cancel = AtomicBool::new(false);
+    let mut schedule = [0.0, 0.2].map(|lower_z| LayerElevation {
+        lower_z,
+        z: lower_z + 0.2,
+        sample: lower_z + 0.1,
+        height: 0.2,
+        course: 0,
+    });
+    schedule[1].course = 1;
+    let xy_gap = 0.2;
+    let threshold = 0.5 + (0.4 + 0.6) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM + xy_gap;
+    for support_layer in 0..schedule.len() {
+        for ordinate in [threshold.next_down(), threshold, threshold.next_up()] {
+            let object_z = schedule[1 - support_layer].z;
+            let mut object = path(0.0);
+            object.kind = DepositionKind::Bridge;
+            object.physical_z_mm = [schedule[1 - support_layer].lower_z, object_z];
+            object.width = WidthProfile::PerEdge {
+                widths_mm: vec![0.25, 0.6],
+            };
+            object.points_mm = vec![
+                [-1.0, ordinate, object_z],
+                [0.0, ordinate, object_z],
+                [1.0, ordinate, object_z + 0.025],
+            ];
+            let mut support = path(0.0);
+            support.physical_z_mm = [schedule[support_layer].lower_z, schedule[support_layer].z];
+            for point in &mut support.points_mm {
+                point[2] = schedule[support_layer].z;
+            }
+            let mut layers = [layer(vec![object]), layer(Vec::new())];
+            if support_layer == 0 {
+                layers.swap(0, 1);
+            }
+            layers[support_layer].paths.push(support);
+            for (ordinal, current) in layers.iter_mut().enumerate() {
+                current.index = ordinal as u32;
+                current.lower_z_mm = schedule[ordinal].lower_z;
+                current.z_mm = schedule[ordinal].z;
+            }
+            let deposition = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
+                .unwrap()
+                .unwrap();
+            let index =
+                prepare_deposited_screen(&layers, &deposition, usize::MAX, 0, &mut 0, &cancel)
+                    .unwrap()
+                    .unwrap();
+            let evaluate = |screen| {
+                let trace = ClearanceTrace {
+                    enabled: true,
+                    ..Default::default()
+                };
+                let result = certify_deposited_clearance(
+                    &ActualDepositionScope {
+                        layers: &layers,
+                        schedule: &schedule,
+                        vertical: deposition.vertical,
+                        screen,
+                    },
+                    xy_gap,
+                    0.2,
+                    &mut spiling_geometry::GeometryWorkBudget::compile(),
+                    &mut 0,
+                    &trace,
+                    &cancel,
+                );
+                (format!("{result:?}"), trace.pair_tests.get())
+            };
+            assert_eq!(evaluate(Some(&index)), evaluate(None));
+        }
+    }
+}
+
+#[test]
+fn cancellation_inside_deposited_index_build_is_fatal() {
+    use std::sync::atomic::Ordering;
+
+    let cancel = AtomicBool::new(false);
+    let mut object = path(10.0);
+    object.kind = DepositionKind::Perimeter;
+    let layers = [layer(vec![object; 32])];
+    let mut work = 0;
+    let error = ObjectClearanceIndex::build(
+        &layers,
+        usize::MAX,
+        |kind| !kind.is_support(),
+        || {
+            if work == 8 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            charge_support_clearance(&mut work, &cancel)
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(work, 8);
+    assert_eq!(error.code, ManufacturingErrorCode::Cancelled);
+}
+
+#[test]
 fn pocket_relief_requires_the_full_actual_bead_to_clear_lower_geometry() {
     let cancel = AtomicBool::new(false);
     let schedule = [

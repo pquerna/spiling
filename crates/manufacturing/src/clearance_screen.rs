@@ -1,9 +1,8 @@
-use super::charge;
 use spiling_contracts::manufacturing::{
-    DepositionPath, MAX_PLAN_COUNT, ManufacturingError, PrintLayer, WidthProfile,
+    DepositionKind, DepositionPath, MAX_PLAN_COUNT, ManufacturingError, PrintLayer, WidthProfile,
     program_coordinates::{MAX_XYZ6_COORDINATE_MM, XYZ6_PROJECTION_SCREEN_MM},
 };
-use std::{mem::size_of, sync::atomic::AtomicBool};
+use std::mem::size_of;
 
 pub(super) const BLOCK_PATHS: usize = 16;
 
@@ -13,7 +12,7 @@ pub(super) struct ObjectClearanceIndex {
 }
 
 pub(super) struct Block {
-    model_paths: usize,
+    eligible_paths: usize,
     screen: Option<Screen>,
 }
 
@@ -27,7 +26,7 @@ fn bounded_xyz6(value: f64) -> bool {
 
 impl Block {
     pub(super) fn clear(&self, support: [[f64; 2]; 2], width: f64, gap: f64) -> bool {
-        self.model_paths == 0
+        self.eligible_paths == 0
             || self.screen.is_some_and(|(object, max_width)| {
                 let reserve = (width + max_width) * 0.5 + 2.0 * XYZ6_PROJECTION_SCREEN_MM;
                 let required_upper = (reserve + gap).next_up();
@@ -50,8 +49,7 @@ type Screen = ([[f64; 2]; 2], f64);
 
 fn screenable_path(
     path: &DepositionPath,
-    work: &mut usize,
-    cancel: &AtomicBool,
+    charge: &mut impl FnMut() -> Result<(), ManufacturingError>,
 ) -> Result<Option<Screen>, ManufacturingError> {
     let height = path.height_mm();
     if !path.physical_z_mm.iter().all(|z| z.is_finite())
@@ -72,7 +70,7 @@ fn screenable_path(
     };
     let mut max_width = 0.0f64;
     for &width in widths {
-        charge(work, cancel)?;
+        charge()?;
         if !width.is_finite() || width < height {
             return Ok(None);
         }
@@ -80,7 +78,7 @@ fn screenable_path(
     }
     let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
     for point in &path.points_mm {
-        charge(work, cancel)?;
+        charge()?;
         if !point.iter().copied().all(bounded_xyz6) {
             return Ok(None);
         }
@@ -95,13 +93,13 @@ fn screenable_path(
 impl ObjectClearanceIndex {
     pub(super) fn build(
         layers: &[PrintLayer],
-        live: usize,
-        work: &mut usize,
-        cancel: &AtomicBool,
+        allowance: usize,
+        eligible: impl Fn(DepositionKind) -> bool,
+        mut charge: impl FnMut() -> Result<(), ManufacturingError>,
     ) -> Result<Option<Self>, ManufacturingError> {
         let mut block_count = 0usize;
         for layer in layers {
-            charge(work, cancel)?;
+            charge()?;
             let Some(next) = block_count.checked_add(layer.paths.len().div_ceil(BLOCK_PATHS))
             else {
                 return Ok(None);
@@ -111,7 +109,6 @@ impl ObjectClearanceIndex {
         let Some(start_count) = layers.len().checked_add(1) else {
             return Ok(None);
         };
-        let allowance = crate::working_set::bytes().saturating_sub(live);
         let Some(bytes) = block_count
             .checked_mul(size_of::<Block>())
             .and_then(|bytes| {
@@ -139,18 +136,18 @@ impl ObjectClearanceIndex {
         for layer in layers {
             index.layer_starts.push(index.blocks.len());
             for paths in layer.paths.chunks(BLOCK_PATHS) {
-                charge(work, cancel)?;
+                charge()?;
                 let mut envelope = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
                 let mut width = 0.0f64;
                 let mut known = true;
-                let mut model_paths = 0usize;
-                for path in paths.iter().filter(|path| path.kind.is_model()) {
-                    charge(work, cancel)?;
-                    model_paths += 1;
+                let mut eligible_paths = 0usize;
+                for path in paths.iter().filter(|path| eligible(path.kind)) {
+                    charge()?;
+                    eligible_paths += 1;
                     if !known {
                         continue;
                     }
-                    let Some((bounds, path_width)) = screenable_path(path, work, cancel)? else {
+                    let Some((bounds, path_width)) = screenable_path(path, &mut charge)? else {
                         known = false;
                         continue;
                     };
@@ -161,7 +158,7 @@ impl ObjectClearanceIndex {
                     width = width.max(path_width);
                 }
                 index.blocks.push(Block {
-                    model_paths,
+                    eligible_paths,
                     screen: known.then_some((envelope, width)),
                 });
             }
@@ -199,7 +196,7 @@ mod tests {
             support, member, reserve, 0.25
         ));
         let block = Block {
-            model_paths: 2,
+            eligible_paths: 2,
             screen: Some((envelope, 1.0)),
         };
         assert!(!block.clear(support, 1.0, 0.25));

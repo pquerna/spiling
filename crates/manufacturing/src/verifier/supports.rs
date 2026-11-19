@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::{cancelled, failed};
+use crate::clearance_screen::{BLOCK_PATHS, ObjectClearanceIndex, bounded_height};
 use crate::planner::support::{
     AnchorCandidate, AnchorWorkspace, GapKind, ProjectedAnchorPaths, StrokeRuns, gap_kind,
 };
 use spiling_contracts::manufacturing::{program_coordinates::*, *};
 use std::sync::atomic::AtomicBool;
-
-mod clearance;
-use clearance::{BLOCK_PATHS, ObjectClearanceIndex, bounded_height};
 
 fn charge(work: &mut usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
     cancelled(cancel)?;
@@ -20,6 +18,20 @@ fn charge(work: &mut usize, cancel: &AtomicBool) -> Result<(), ManufacturingErro
         )
     })?;
     Ok(())
+}
+
+fn build_object_clearance_index(
+    layers: &[PrintLayer],
+    live: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<ObjectClearanceIndex>, ManufacturingError> {
+    ObjectClearanceIndex::build(
+        layers,
+        crate::working_set::bytes().saturating_sub(live),
+        DepositionKind::is_model,
+        || charge(work, cancel),
+    )
 }
 
 fn support(path: &DepositionPath) -> bool {
@@ -452,7 +464,7 @@ fn verify_inner(
     )?;
     live += established.capacity() * std::mem::size_of::<Vec<bool>>();
     let screen = if enabled {
-        ObjectClearanceIndex::build(&plan.layers, live + anchors.retained_bytes(), work, cancel)?
+        build_object_clearance_index(&plan.layers, live + anchors.retained_bytes(), work, cancel)?
     } else {
         None
     };
@@ -900,10 +912,11 @@ mod tests {
         ] {
             plan.layers[4].paths = vec![clear.clone(); BLOCK_PATHS * 16];
             plan.layers[4].paths.extend(faults);
-            let index_bytes = ObjectClearanceIndex::build(&plan.layers, mandatory, &mut 0, &cancel)
-                .unwrap()
-                .unwrap()
-                .retained_bytes();
+            let index_bytes =
+                build_object_clearance_index(&plan.layers, mandatory, &mut 0, &cancel)
+                    .unwrap()
+                    .unwrap()
+                    .retained_bytes();
             let mut mask = Vec::<bool>::new();
             reserve(&mut mask, root_count, 0).unwrap();
             let mut contact_capacity = Vec::<&DepositionPath>::new();
@@ -1029,7 +1042,7 @@ mod tests {
             widths_mm: vec![1.0, 2.0],
         };
         let cancel = AtomicBool::new(false);
-        let index = ObjectClearanceIndex::build(&plan.layers, 0, &mut 0, &cancel)
+        let index = build_object_clearance_index(&plan.layers, 0, &mut 0, &cancel)
             .unwrap()
             .unwrap();
         let block = &index.layer(4)[0];
@@ -1038,13 +1051,13 @@ mod tests {
         let tight = crate::WorkingSet::new(index.retained_bytes() - 1).unwrap();
         crate::working_set::scope(tight, || {
             assert!(
-                ObjectClearanceIndex::build(&plan.layers, 0, &mut 0, &cancel)
+                build_object_clearance_index(&plan.layers, 0, &mut 0, &cancel)
                     .unwrap()
                     .is_none()
             );
         });
         assert!(
-            ObjectClearanceIndex::build(&plan.layers, 0, &mut 0, &AtomicBool::new(true)).is_err()
+            build_object_clearance_index(&plan.layers, 0, &mut 0, &AtomicBool::new(true)).is_err()
         );
     }
 
