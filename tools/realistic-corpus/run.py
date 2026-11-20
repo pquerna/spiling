@@ -27,6 +27,11 @@ configuration (`--load`; for example a vendor printer+print+filament preset
 flattened to one file) instead of command-line overrides; `from-intent`
 derives one from the intent's printer, material and recipe. Each record keeps
 both slicers' estimated print time and filament length and their ratio.
+
+--prusa-off-results OFF.ndjson estimates Prusa support filament from a matched
+supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS fails a
+candidate with new/increased reported spans, using fresh control exports from
+CONTROL_CORPUS/work. A support filament drop above 5% requests review only.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import audit
 import features
+import panel_coverage
 import reference
 
 PARSER = argparse.ArgumentParser(description=__doc__)
@@ -46,6 +52,8 @@ PARSER.add_argument("--manifest", default=str(Path(__file__).with_name("manifest
 PARSER.add_argument("--cohort", default="full")
 PARSER.add_argument("--profile", choices=("dev", "profiling", "release"), required=True)
 PARSER.add_argument("--reference", choices=("prusa", "none"), default="prusa")
+PARSER.add_argument("--prusa-off-results")
+PARSER.add_argument("--coverage-control", nargs=2, metavar=("RESULTS", "CORPUS_DIR"))
 PARSER.add_argument("--list", action="store_true")
 ARGS = PARSER.parse_intermixed_args()
 INTENT_SRC = os.path.abspath(ARGS.intent) if ARGS.intent else None
@@ -336,12 +344,9 @@ def prusa(step, cwd, brimmed=False):
     return info
 
 
-def spiling_report(stdout):
-    """Verification totals and the estimate from the open/verify output."""
-    def number(key):
-        m = re.search(r'"%s":\s*(-?[0-9.eE+-]+)' % key, stdout)
-        return float(m.group(1)) if m else None
-    report = {k: number(k) for k in ("filament_length_mm", "support_filament_length_mm",
+def spiling_report(verification):
+    """Verification totals and estimate from the fresh exported report."""
+    report = {k: verification.get(k) for k in ("filament_length_mm", "support_filament_length_mm",
                                      "adhesion_filament_length_mm", "priming_filament_length_mm",
                                      "estimated_seconds")}
     parts = [report[k] for k in ("filament_length_mm", "support_filament_length_mm",
@@ -377,9 +382,10 @@ def part(case, intent, results):
         if ret["ok"]:
             record["export_checks"] = audit.export_checks(os.path.join(returned, "out"))
             plan = json.load(open(os.path.join(returned, "out", "plan.json")))
+            verification = json.load(open(os.path.join(returned, "out", "verification.json")))
             if "oracle" in case:
                 record["oracle_checks"] = features.check(
-                    case, plan, json.load(open(os.path.join(returned, "out", "verification.json"))),
+                    case, plan, verification,
                     INTENT, json.load(open(os.path.join(cwd, "create.stdout.json"))))
     # PrusaSlicer slices the original source after Spiling, so its brim can
     # follow the brim Spiling planned.
@@ -391,7 +397,7 @@ def part(case, intent, results):
         record["deposition_segments"] = int(m.group(1)) if m else None
         m = re.search(r'"filament_length_mm":\s*([0-9.]+)', stdout)
         record["filament_mm"] = float(m.group(1)) if m else None
-        report = spiling_report(stdout)
+        report = spiling_report(verification)
         record["spiling"] = report
         reference = record["prusa"]
         if reference.get("filament_mm") and report["total_filament_mm"]:
@@ -433,6 +439,13 @@ def main():
     for path in (OUT, OUT + ".run.json", OUT + ".summary.json", WORK):
         if os.path.exists(path):
             raise ValueError(f"refusing to overwrite prior run: {path}; use a new corpus run directory")
+    comparisons = {}
+    if ARGS.coverage_control:
+        path, corpus = ARGS.coverage_control
+        comparisons["coverage_control"] = dict(panel_coverage.evidence_identity(path),
+                                               corpus=str(Path(corpus).resolve()))
+    if ARGS.prusa_off_results:
+        comparisons["prusa_off"] = panel_coverage.evidence_identity(ARGS.prusa_off_results)
     os.mkdir(WORK)
     started = time.monotonic()
     receipt = {
@@ -443,6 +456,8 @@ def main():
         "runner_sha256": audit.digest(__file__), "audit_sha256": audit.digest(audit.__file__),
         "features_sha256": audit.digest(features.__file__),
         "reference_sha256": audit.digest(reference.__file__),
+        "panel_coverage_sha256": audit.digest(panel_coverage.__file__),
+        "comparisons": comparisons,
         "manifest_sha256": audit.digest(ARGS.manifest),
         "cohort": ARGS.cohort, "cases": cases,
         "settings": {"supports": SUPPORTS, "infill": INFILL, "fraction": FRACTION,
@@ -495,6 +510,9 @@ def main():
                             "sliced": sum(row.get("prusa", {}).get("ok") is True for row in records),
                             "refused": sum(row.get("prusa", {}).get("ok") is False for row in records)}
     summary["scaling"] = audit.scaling_observations(cases, records, summary["outcomes"])
+    summary["coverage"] = panel_coverage.summary(
+        cases, records, receipt, ROOT, ARGS.coverage_control, ARGS.prusa_off_results)
+    summary["ok"] = summary["ok"] and summary["coverage"]["ok"]
     with open(OUT + ".summary.json", "x") as output:
         json.dump(summary, output, indent=2)
     print(json.dumps(summary, indent=2))
