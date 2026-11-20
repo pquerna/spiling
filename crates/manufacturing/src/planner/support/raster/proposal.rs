@@ -711,6 +711,7 @@ mod tests {
                     retained: 0,
                     owned_bytes: 0,
                     anchor_owned_bytes: 0,
+                    base_bytes: 0,
                 };
                 let kind = if all_interface {
                     DepositionKind::SupportInterface
@@ -779,6 +780,7 @@ mod tests {
             retained: 0,
             owned_bytes: 0,
             anchor_owned_bytes: 0,
+            base_bytes: 0,
         };
         let recipe = crate::planner::tests::recipe(1.0);
         for axis in [region::HatchAxis::X, region::HatchAxis::Y] {

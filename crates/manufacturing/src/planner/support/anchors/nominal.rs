@@ -38,11 +38,13 @@ struct NominalPath<'a> {
 }
 
 /// Query floor: direct previous strokes ending exactly at `z`, plus contact
-/// strokes ending at or below it unless the query is direct-only.
+/// strokes ending at or below it unless the query is direct-only. A caller
+/// that already selected its contacts (`supplied`) admits every one of them.
 #[derive(Clone, Copy)]
 pub(in crate::planner::support) struct LowerFloor {
     pub(in crate::planner::support) z: f64,
     pub(in crate::planner::support) contacts: bool,
+    pub(in crate::planner::support) supplied: bool,
 }
 
 impl LowerFloor {
@@ -50,7 +52,7 @@ impl LowerFloor {
         if direct {
             top == self.z
         } else {
-            self.contacts && top <= self.z
+            self.contacts && (self.supplied || top <= self.z)
         }
     }
 }
@@ -426,28 +428,16 @@ impl AnchorWorkspace {
         candidate: AnchorCandidate,
         lower_z: f64,
         contacts: bool,
-        paths: &NominalAnchorPaths<'_>,
+        paths: &mut NominalAnchorPaths<'_>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
-        let limit = self.record_limit;
-        self.record_limit -= paths.reserved_records;
-        let result = self
-            .gaps_inputs(
-                candidate,
-                paths.inputs_filtered(
-                    candidate,
-                    move |direct, top| {
-                        if direct { top == lower_z } else { contacts }
-                    },
-                ),
-                work,
-                cancel,
-            )
-            .map(|_| ());
-        self.record_limit = limit;
-        result?;
-        Ok(&self.uncovered)
+        let floor = LowerFloor {
+            z: lower_z,
+            contacts,
+            supplied: true,
+        };
+        self.gaps_floor(candidate, floor, paths, work, cancel)
     }
 
     pub(in crate::planner::support) fn gaps_nominal(
@@ -461,6 +451,7 @@ impl AnchorWorkspace {
         let floor = LowerFloor {
             z: lower_z,
             contacts: true,
+            supplied: false,
         };
         self.gaps_floor(candidate, floor, paths, work, cancel)
     }
@@ -655,6 +646,7 @@ mod tests {
                 LowerFloor {
                     z: 0.2,
                     contacts: true,
+                    supplied: false,
                 },
             )
             .map(|input| match input {
@@ -928,6 +920,7 @@ mod tests {
                 let floor = LowerFloor {
                     z: lower_z,
                     contacts: with_contacts,
+                    supplied: false,
                 };
                 let actual = screened
                     .gaps_floor(candidate, floor, &mut prepared, &mut actual_work, &cancel)

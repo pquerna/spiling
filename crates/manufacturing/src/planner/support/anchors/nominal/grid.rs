@@ -40,7 +40,7 @@ pub(super) struct EdgeGrid {
     stamp: Vec<u32>,
     query: u32,
     pub(super) hits: Vec<u32>,
-    prefixes: Vec<((u64, bool), Vec<usize>)>,
+    prefixes: Vec<((u64, bool, bool), Vec<usize>)>,
 }
 
 impl EdgeGrid {
@@ -235,7 +235,7 @@ impl EdgeGrid {
         floor: super::LowerFloor,
         nominal: &[super::NominalPath<'_>],
     ) -> usize {
-        let key = (floor.z.to_bits(), floor.contacts);
+        let key = (floor.z.to_bits(), floor.contacts, floor.supplied);
         if let Some(position) = self.prefixes.iter().position(|(bits, _)| *bits == key) {
             return position;
         }

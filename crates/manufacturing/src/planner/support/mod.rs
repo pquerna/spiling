@@ -2078,6 +2078,65 @@ pub(super) fn realize(
         support_metadata_bytes += vec_bytes(&established);
         // Support centers stay half a bead inside the clipped support region. This
         // gives the nominal bead, not only its centerline, the declared XY clearance.
+        // A layer's centerline domains depend only on its own support and
+        // interface regions, so they are built in parallel and admitted together;
+        // anchoring to lower layers stays in layer order below.
+        let mut prebuilt = {
+            use rayon::prelude::*;
+            let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
+            let base_retained = retained + geometry.0;
+            let base_owned =
+                (native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes)
+                    .saturating_add(geometry.1);
+            let operands: Vec<(&MultiPolygon<f64>, &MultiPolygon<f64>, bool)> = support_regions
+                .iter()
+                .zip(&interfaces)
+                .map(|(region, interface)| {
+                    (
+                        &region.material,
+                        &interface.material,
+                        Rc::ptr_eq(region, interface),
+                    )
+                })
+                .collect();
+            let working_set = crate::working_set::current();
+            let built: Vec<Result<(raster::Domains, usize), ManufacturingError>> = operands
+                .par_iter()
+                .map(|&(region, interface, all_interface)| {
+                    crate::working_set::scope(working_set, || {
+                        let mut local = 0usize;
+                        raster::Domains::new(
+                            region,
+                            interface,
+                            all_interface,
+                            width,
+                            base_retained,
+                            base_owned,
+                            0,
+                            &mut local,
+                            0,
+                            cancel,
+                        )
+                        .map(|domains| (domains, local))
+                    })
+                })
+                .collect();
+            drop(operands);
+            let mut prebuilt = Vec::new();
+            reserve_owned(&mut prebuilt, layers.len(), base_owned)?;
+            let mut domain_bytes = 0usize;
+            for result in built {
+                let (domains, local) = result?;
+                charge_owned_work(&mut work, foreign_work, local, cancel)?;
+                domain_bytes = domain_bytes.saturating_add(domains.domain_bytes());
+                prebuilt.push(Some(domains));
+            }
+            super::remaining_geometry_units(
+                base_retained,
+                base_owned.saturating_add(domain_bytes),
+            )?;
+            prebuilt
+        };
         for i in 0..layers.len() {
             owned_bytes =
                 native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
@@ -2087,19 +2146,13 @@ pub(super) fn realize(
             let interface = interfaces[i].as_ref();
             let retained_domains =
                 retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-            let mut domains = raster::Domains::new(
-                &support_regions[i],
-                interface,
-                Rc::ptr_eq(&support_regions[i], &interfaces[i]),
-                width,
+            let mut domains = prebuilt[i].take().expect("prebuilt support domains");
+            domains.rebase(
                 retained_domains,
                 owned_bytes.saturating_add(
                     geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
                 ),
                 anchors.retained_bytes(),
-                &mut work,
-                foreign_work,
-                cancel,
             )?;
             let preferred = region::HatchAxis::for_policy(
                 RectilinearAxisPolicy::AlternatingXY,
@@ -3734,15 +3787,30 @@ fn offset_polygon_owned(
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     let (units, bytes) = geometry_receipt(support, interfaces, temporary);
+    offset_polygon_admitted_in(
+        polygon,
+        distance,
+        retained.saturating_add(units),
+        owned_bytes.saturating_add(bytes),
+        cancel,
+    )
+}
+
+/// Offset one polygon against an already summed live inventory.
+fn offset_polygon_admitted_in(
+    polygon: &Polygon<f64>,
+    distance: f64,
+    retained: usize,
+    owned_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     region::offset_polygon_admitted(
         polygon,
         distance,
         |scratch, scratch_bytes, overlay| {
             super::remaining_geometry_units(
-                retained.saturating_add(units).saturating_add(scratch),
-                owned_bytes
-                    .saturating_add(bytes)
-                    .saturating_add(scratch_bytes),
+                retained.saturating_add(scratch),
+                owned_bytes.saturating_add(scratch_bytes),
             )?;
             if let Some((a, b)) = overlay {
                 boolean_budget(a, b, cancel)?;

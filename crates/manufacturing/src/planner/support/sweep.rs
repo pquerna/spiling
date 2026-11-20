@@ -80,6 +80,36 @@ fn drop_micro_edges(material: &mut MultiPolygon<f64>) {
     }
 }
 
+/// Union disjoint-or-overlapping parts pairwise in a fixed index order, in
+/// parallel, so the result does not depend on scheduling.
+fn merge_pairwise(
+    frame: &projection::Frame,
+    mut parts: Vec<MultiPolygon<f64>>,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    use rayon::prelude::*;
+    while parts.len() > 1 {
+        check_cancel(cancel)?;
+        parts = parts
+            .par_chunks(2)
+            .map(|pair| match pair {
+                [left, right] => {
+                    if left.0.is_empty() {
+                        right.clone()
+                    } else if right.0.is_empty() {
+                        left.clone()
+                    } else {
+                        frame.union(left, right)
+                    }
+                }
+                [single] => single.clone(),
+                _ => unreachable!("chunks of at most two"),
+            })
+            .collect();
+    }
+    Ok(parts.pop().unwrap_or_else(|| MultiPolygon(Vec::new())))
+}
+
 /// Occupied pieces of the spans the down pass is currently inside, each
 /// collected once. A bead slab may touch an adjacent span's pieces.
 #[derive(Default)]
@@ -118,6 +148,7 @@ impl Sweep<'_> {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<SweepOutput, ManufacturingError> {
+        let mut timing = crate::timing::Clock::new("support.sweep");
         let layers = self.layers;
         let width = self.recipe.bead_width_mm;
         let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
@@ -225,6 +256,7 @@ impl Sweep<'_> {
             });
         };
 
+        timing.mark("seeds");
         let mut span_pieces = SpanPieces::default();
         // Down pass: carry every channel's candidate through occupancy and voids.
         let mut carried: Vec<MultiPolygon<f64>> =
@@ -290,6 +322,7 @@ impl Sweep<'_> {
             }
         }
         drop(carried);
+        timing.mark("down_pass");
 
         // Up pass: keep only grounded support, clipped by nominal clearance.
         let mut outside: Vec<Option<Vec<beads::BeadEdge>>> = vec![None; self.nominal.len()];
@@ -435,6 +468,7 @@ impl Sweep<'_> {
                 }
             }
         }
+        timing.mark("up_pass");
         // A layer that is interface throughout shares one owner with its
         // support region: raster hatches it as whole interface.
         for (region, interface) in support.iter().zip(&mut interfaces) {
@@ -629,7 +663,7 @@ impl Sweep<'_> {
                     .0
             })
             .collect();
-        let mut parts: Vec<MultiPolygon<f64>> = pieces
+        let parts: Vec<MultiPolygon<f64>> = pieces
             .par_chunks(1 << 10)
             .map(|chunk| {
                 let batch = MultiPolygon(chunk.iter().map(|piece| (*piece).clone()).collect());
@@ -637,26 +671,7 @@ impl Sweep<'_> {
             })
             .collect();
         drop(pieces);
-        while parts.len() > 1 {
-            check_cancel(cancel)?;
-            parts = parts
-                .par_chunks(2)
-                .map(|pair| match pair {
-                    [left, right] => {
-                        if left.0.is_empty() {
-                            right.clone()
-                        } else if right.0.is_empty() {
-                            left.clone()
-                        } else {
-                            frame.union(left, right)
-                        }
-                    }
-                    [single] => single.clone(),
-                    _ => unreachable!("chunks of at most two"),
-                })
-                .collect();
-        }
-        let mut merged = parts.pop().unwrap_or_else(|| MultiPolygon(Vec::new()));
+        let mut merged = merge_pairwise(frame, parts, cancel)?;
         // Unions of many padded facet pieces carry the same near-collinear
         // noise as chained differences; a convolution offset of it is
         // pathologically slow.
@@ -703,30 +718,48 @@ impl Sweep<'_> {
                 continue;
             }
             if offsets[at].is_none() {
-                let mut built = Vec::new();
-                for polygon in &self.sections[scope.index].material.0 {
-                    let rect = polygon.bounding_rect().ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                            "native outer operand has no finite bounds",
+                use rayon::prelude::*;
+                let polygons = &self.sections[scope.index].material.0;
+                let distances = polygons
+                    .iter()
+                    .map(|polygon| {
+                        let rect = polygon.bounding_rect().ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                                "native outer operand has no finite bounds",
+                            )
+                        })?;
+                        clearance_distance_in_frame(
+                            [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]],
+                            self.frame.bounds,
+                            self.requested,
                         )
-                    })?;
-                    let distance = clearance_distance_in_frame(
-                        [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]],
-                        self.frame.bounds,
-                        self.requested,
-                    )?;
-                    built.push(offset_polygon_owned(
-                        polygon,
-                        distance,
-                        self.retained,
-                        self.owned_bytes,
-                        support,
-                        interfaces,
-                        &[self.protected, &column],
-                        cancel,
-                    )?);
-                }
+                    })
+                    .collect::<Result<Vec<f64>, ManufacturingError>>()?;
+                // Each polygon's clearance is independent; offsets run in
+                // parallel against one inventory and are kept in input order.
+                let (units, bytes) =
+                    geometry_receipt(support, interfaces, &[self.protected, &column]);
+                let retained = self.retained.saturating_add(units);
+                let owned_bytes = self.owned_bytes.saturating_add(bytes);
+                let working_set = crate::working_set::current();
+                let built = polygons
+                    .par_iter()
+                    .zip(&distances)
+                    .map(|(polygon, &distance)| {
+                        crate::working_set::scope(working_set, || {
+                            offset_polygon_admitted_in(
+                                polygon,
+                                distance,
+                                retained,
+                                owned_bytes,
+                                cancel,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .collect::<Result<Vec<MultiPolygon<f64>>, ManufacturingError>>()?;
                 offsets[at] = Some(built);
             }
             let column_bounds = material_bounds(&column);

@@ -354,6 +354,7 @@ fn inward_chain_fixes_concave_commands_without_changing_original_domain_or_hatch
         retained: 0,
         owned_bytes: 0,
         anchor_owned_bytes: 0,
+        base_bytes: 0,
     };
     for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
         let layer = region::HatchLayer {
@@ -463,6 +464,7 @@ fn inward_chain_preserves_hole_topology_and_original_interface_roles() {
         retained: 0,
         owned_bytes: 0,
         anchor_owned_bytes: 0,
+        base_bytes: 0,
     };
     let recipe = crate::planner::tests::recipe(1.0);
     for axis in [region::HatchAxis::X, region::HatchAxis::Y] {

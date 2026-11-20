@@ -176,6 +176,7 @@ where
             let floor = LowerFloor {
                 z: lower_z,
                 contacts,
+                supplied: false,
             };
             return anchors.gaps_floor(candidate, floor, inventory, work, cancel);
         }
@@ -202,14 +203,10 @@ where
         cancel: &AtomicBool,
     ) -> Result<&'workspace [super::anchors::AnchorGap], ManufacturingError> {
         if self.admit_inventory(anchors, cancel)? {
-            return anchors.gaps_supplied_contacts(
-                candidate,
-                lower_z,
-                contacts,
-                self.inventory.as_ref().expect("admitted anchor inventory"),
-                work,
-                cancel,
-            );
+            let inventory = self.inventory.as_mut().expect("admitted anchor inventory");
+            inventory.index_for(1, cancel)?;
+            return anchors
+                .gaps_supplied_contacts(candidate, lower_z, contacts, inventory, work, cancel);
         }
         anchors.gaps(
             candidate,

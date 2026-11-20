@@ -24,6 +24,8 @@ pub(super) struct Domains {
     retained: usize,
     owned_bytes: usize,
     anchor_owned_bytes: usize,
+    /// Caller-owned bytes included in `owned_bytes` at construction.
+    base_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +78,7 @@ impl Domains {
             retained,
             owned_bytes: owned_bytes.saturating_add(center_bytes),
             anchor_owned_bytes,
+            base_bytes: owned_bytes,
         };
         result.admit()?;
         result.wall_centers = proposal::construct(
@@ -140,6 +143,27 @@ impl Domains {
         self.owned_bytes
     }
 
+    /// Bytes owned by these domains alone, excluding the caller's inventory.
+    pub(super) fn domain_bytes(&self) -> usize {
+        self.owned_bytes.saturating_sub(self.base_bytes)
+    }
+
+    /// Re-admit domains built ahead of their layer against the caller's
+    /// inventory at the point they are consumed.
+    pub(super) fn rebase(
+        &mut self,
+        retained: usize,
+        owned_bytes: usize,
+        anchor_owned_bytes: usize,
+    ) -> Result<(), ManufacturingError> {
+        let base = owned_bytes.saturating_add(anchor_owned_bytes);
+        self.owned_bytes = self.domain_bytes().saturating_add(base);
+        self.base_bytes = base;
+        self.anchor_owned_bytes = anchor_owned_bytes;
+        self.retained = retained;
+        self.admit().map(|_| ())
+    }
+
     pub(super) fn retain_bytes(&mut self, bytes: usize) -> Result<(), ManufacturingError> {
         self.owned_bytes = self.owned_bytes.saturating_add(bytes);
         self.admit().map(|_| ())
@@ -148,6 +172,10 @@ impl Domains {
     pub(super) fn set_anchor_owned_bytes(&mut self, bytes: usize) {
         self.owned_bytes = self
             .owned_bytes
+            .saturating_sub(self.anchor_owned_bytes)
+            .saturating_add(bytes);
+        self.base_bytes = self
+            .base_bytes
             .saturating_sub(self.anchor_owned_bytes)
             .saturating_add(bytes);
         self.anchor_owned_bytes = bytes;
