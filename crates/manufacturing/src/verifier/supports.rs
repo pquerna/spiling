@@ -119,6 +119,9 @@ fn anchored<'a>(
     Ok(true)
 }
 
+/// Consecutive object edges screened together against one support edge.
+const EDGE_BLOCK: usize = 32;
+
 struct LayerBounds {
     index: usize,
     interval: [f64; 2],
@@ -695,52 +698,98 @@ fn verify_inner(
                         ) {
                             continue;
                         }
+                        // Consecutive object edges are screened in blocks: a
+                        // block whose joint bounds and widest bead clear this
+                        // support edge clears each of its edges by the same
+                        // test, so only the per-edge charge remains.
+                        let edge_count = object.points_mm.len().saturating_sub(1);
+                        let mut blocks: Vec<([[f64; 2]; 2], f64)> = Vec::new();
+                        reserve(
+                            &mut blocks,
+                            edge_count.div_ceil(EDGE_BLOCK),
+                            live + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
+                                + anchors.retained_bytes(),
+                        )?;
+                        for start in (0..edge_count).step_by(EDGE_BLOCK) {
+                            let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+                            let mut width = 0.0f64;
+                            for index in start..(start + EDGE_BLOCK).min(edge_count) {
+                                let edge = object_edges.edge(index).expect("object edge in range");
+                                let edge_box = edge_bounds(edge.points_mm);
+                                for axis in 0..2 {
+                                    bounds[0][axis] = bounds[0][axis].min(edge_box[0][axis]);
+                                    bounds[1][axis] = bounds[1][axis].max(edge_box[1][axis]);
+                                }
+                                width = width.max(edge.width_mm);
+                            }
+                            blocks.push((bounds, width));
+                        }
                         for support_edge in support_edges {
                             let support_capsule =
                                 capsule(support_edge.points_mm, support_edge.width_mm)?;
-                            for object_edge in object_edges {
-                                charge(work, cancel)?;
+                            let support_box = edge_bounds(support_edge.points_mm);
+                            for (block, &(block_bounds, block_width)) in blocks.iter().enumerate() {
+                                let start = block * EDGE_BLOCK;
+                                let end = (start + EDGE_BLOCK).min(edge_count);
                                 if spiling_geometry::planar_bounds_clear(
-                                    edge_bounds(support_edge.points_mm),
-                                    edge_bounds(object_edge.points_mm),
-                                    (support_edge.width_mm + object_edge.width_mm) * 0.5
+                                    support_box,
+                                    block_bounds,
+                                    (support_edge.width_mm + block_width) * 0.5
                                         + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
                                     xy_clearance_mm,
                                 ) {
+                                    for _ in start..end {
+                                        charge(work, cancel)?;
+                                    }
                                     continue;
                                 }
-                                let object_capsule =
-                                    capsule(object_edge.points_mm, object_edge.width_mm)?;
-                                let bounds = |segment: [[f64; 2]; 2]| {
-                                    [
+                                for object_edge in (start..end).map(|index| {
+                                    object_edges.edge(index).expect("object edge in range")
+                                }) {
+                                    charge(work, cancel)?;
+                                    if spiling_geometry::planar_bounds_clear(
+                                        edge_bounds(support_edge.points_mm),
+                                        edge_bounds(object_edge.points_mm),
+                                        (support_edge.width_mm + object_edge.width_mm) * 0.5
+                                            + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
+                                        xy_clearance_mm,
+                                    ) {
+                                        continue;
+                                    }
+                                    let object_capsule =
+                                        capsule(object_edge.points_mm, object_edge.width_mm)?;
+                                    let bounds = |segment: [[f64; 2]; 2]| {
                                         [
-                                            segment[0][0].min(segment[1][0]),
-                                            segment[0][1].min(segment[1][1]),
-                                        ],
-                                        [
-                                            segment[0][0].max(segment[1][0]),
-                                            segment[0][1].max(segment[1][1]),
-                                        ],
-                                    ]
-                                };
-                                let reach = ((support_capsule.radius_mm
-                                    + object_capsule.radius_mm)
-                                    .next_up()
-                                    + support_capsule.endpoint_error_mm)
-                                    .next_up();
-                                let reach = (reach + object_capsule.endpoint_error_mm).next_up();
-                                if spiling_geometry::planar_bounds_clear(
-                                    bounds(support_capsule.segment_xy_mm),
-                                    bounds(object_capsule.segment_xy_mm),
-                                    reach,
-                                    xy_clearance_mm,
-                                ) {
-                                    continue;
-                                }
-                                spiling_geometry::certify_planar_capsule_pair_clearance([
+                                            [
+                                                segment[0][0].min(segment[1][0]),
+                                                segment[0][1].min(segment[1][1]),
+                                            ],
+                                            [
+                                                segment[0][0].max(segment[1][0]),
+                                                segment[0][1].max(segment[1][1]),
+                                            ],
+                                        ]
+                                    };
+                                    let reach = ((support_capsule.radius_mm
+                                        + object_capsule.radius_mm)
+                                        .next_up()
+                                        + support_capsule.endpoint_error_mm)
+                                        .next_up();
+                                    let reach =
+                                        (reach + object_capsule.endpoint_error_mm).next_up();
+                                    if spiling_geometry::planar_bounds_clear(
+                                        bounds(support_capsule.segment_xy_mm),
+                                        bounds(object_capsule.segment_xy_mm),
+                                        reach,
+                                        xy_clearance_mm,
+                                    ) {
+                                        continue;
+                                    }
+                                    spiling_geometry::certify_planar_capsule_pair_clearance([
                                 support_capsule,
                                 object_capsule,
                             ], xy_clearance_mm, native_work, cancel).map_err(|failure| failed(format!("actual support layer {index} violates object XY/Z clearance: {failure:?}")))?;
+                                }
                             }
                         }
                     }

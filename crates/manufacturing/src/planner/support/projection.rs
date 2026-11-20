@@ -128,12 +128,48 @@ impl Frame {
         self.overlay(column, clearance, OverlayRule::Union)
     }
 
-    pub(super) fn intersection(
+    /// `difference`, overlaying only the subject polygons whose bounds meet a
+    /// clip polygon's bounds; the rest are disjoint from the clip and pass
+    /// through unchanged.
+    pub(super) fn difference_local(
         &self,
-        column: &MultiPolygon<f64>,
-        clearance: &MultiPolygon<f64>,
+        subject: &MultiPolygon<f64>,
+        clip: &MultiPolygon<f64>,
     ) -> MultiPolygon<f64> {
-        self.overlay(column, clearance, OverlayRule::Intersect)
+        let (touched, mut kept) = split_by_bounds(subject, clip);
+        if touched.0.is_empty() {
+            return subject.clone();
+        }
+        let mut result = self.overlay(&touched, clip, OverlayRule::Difference);
+        result.0.append(&mut kept.0);
+        result
+    }
+
+    /// `union` of two disjoint-polygon sets, overlaying only the polygons of
+    /// `a` whose bounds meet `b`; the rest are disjoint from `b`.
+    pub(super) fn union_local(
+        &self,
+        a: &MultiPolygon<f64>,
+        b: &MultiPolygon<f64>,
+    ) -> MultiPolygon<f64> {
+        let (touched, mut kept) = split_by_bounds(a, b);
+        let mut result = self.overlay(&touched, b, OverlayRule::Union);
+        result.0.append(&mut kept.0);
+        result
+    }
+
+    /// `intersection`, dropping subject polygons whose bounds meet no clip
+    /// polygon's bounds: their intersection is empty.
+    pub(super) fn intersection_local(
+        &self,
+        subject: &MultiPolygon<f64>,
+        clip: &MultiPolygon<f64>,
+    ) -> MultiPolygon<f64> {
+        let (touched, _) = split_by_bounds(subject, clip);
+        if touched.0.is_empty() {
+            return MultiPolygon(Vec::new());
+        }
+        self.overlay(&touched, clip, OverlayRule::Intersect)
     }
 
     fn overlay(
@@ -151,6 +187,45 @@ impl Frame {
             .overlay(rule, FillRule::EvenOdd);
         unpack(shapes)
     }
+}
+
+/// Split `subject` into polygons whose closed bounds meet some polygon of
+/// `clip` and polygons whose bounds meet none, each in input order.
+fn split_by_bounds(
+    subject: &MultiPolygon<f64>,
+    clip: &MultiPolygon<f64>,
+) -> (MultiPolygon<f64>, MultiPolygon<f64>) {
+    use geo::BoundingRect;
+    let mut boxes: Vec<[[f64; 2]; 2]> = clip
+        .0
+        .iter()
+        .filter_map(|polygon| polygon.bounding_rect())
+        .map(|rect| [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]])
+        .collect();
+    boxes.sort_unstable_by(|a, b| a[0][0].total_cmp(&b[0][0]));
+    let widest = boxes
+        .iter()
+        .map(|b| b[1][0] - b[0][0])
+        .fold(0.0f64, f64::max);
+    let mut touched = MultiPolygon(Vec::new());
+    let mut kept = MultiPolygon(Vec::new());
+    for polygon in &subject.0 {
+        let meets = polygon.bounding_rect().is_none_or(|rect| {
+            let lo = [rect.min().x, rect.min().y];
+            let hi = [rect.max().x, rect.max().y];
+            let from = boxes.partition_point(|b| b[0][0] < lo[0] - widest);
+            boxes[from..]
+                .iter()
+                .take_while(|b| b[0][0] <= hi[0])
+                .any(|b| b[1][0] >= lo[0] && b[0][1] <= hi[1] && b[1][1] >= lo[1])
+        });
+        if meets {
+            touched.0.push(polygon.clone());
+        } else {
+            kept.0.push(polygon.clone());
+        }
+    }
+    (touched, kept)
 }
 
 fn packed(material: &MultiPolygon<f64>) -> Vec<Vec<[f64; 2]>> {

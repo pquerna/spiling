@@ -51,9 +51,45 @@ pub(super) struct SweepOutput {
 struct Channel {
     relieved: Option<usize>,
     seeds: Vec<Option<MultiPolygon<f64>>>,
-    interface_seeds: Vec<(usize, usize, MultiPolygon<f64>)>,
+    /// Per demand target, in first-seen order: its contact tops in demand
+    /// order, its seed and the seed's bounds. Every demand on one target
+    /// shares that target's buffered section as its seed.
+    interface_seeds: Vec<InterfaceSeed>,
     tops: Vec<(usize, usize)>,
     active: Vec<Option<Rc<OwnedMaterial>>>,
+}
+
+struct InterfaceSeed {
+    target: usize,
+    tops: Vec<usize>,
+    seed: MultiPolygon<f64>,
+    bounds: Option<[[f64; 2]; 2]>,
+}
+
+impl Channel {
+    fn add_interface_seed(&mut self, top: usize, target: usize, seed: &MultiPolygon<f64>) {
+        if let Some(entry) = self.interface_seeds.iter_mut().find(|e| e.target == target) {
+            if !entry.tops.contains(&top) {
+                entry.tops.push(top);
+            }
+            return;
+        }
+        self.interface_seeds.push(InterfaceSeed {
+            target,
+            tops: vec![top],
+            seed: seed.clone(),
+            bounds: material_bounds(seed),
+        });
+    }
+}
+
+fn bounds_meet(a: Option<[[f64; 2]; 2]>, b: Option<[[f64; 2]; 2]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            a[0][0] <= b[1][0] && b[0][0] <= a[1][0] && a[0][1] <= b[1][1] && b[0][1] <= a[1][1]
+        }
+        _ => false,
+    }
 }
 
 /// Chained fixed-frame differences leave runs of nearly collinear vertices
@@ -132,7 +168,7 @@ impl Sweep<'_> {
         if b.0.is_empty() {
             return a.clone();
         }
-        self.frame.union(a, b)
+        self.frame.union_local(a, b)
     }
 
     #[expect(
@@ -227,9 +263,7 @@ impl Sweep<'_> {
                 slot.take()
                     .map_or_else(|| seed.clone(), |old| self.union(&old, seed)),
             );
-            channel
-                .interface_seeds
-                .push((top, demand.target, seed.clone()));
+            channel.add_interface_seed(top, demand.target, seed);
             channel.tops.push((top, demand.target));
             max_top = Some(max_top.map_or(top, |m| m.max(top)));
             if relieved.is_some() {
@@ -241,9 +275,7 @@ impl Sweep<'_> {
                         .map_or_else(|| seed.clone(), |old| self.union(&old, seed)),
                 );
                 ordinary.tops.push((top, demand.target));
-                ordinary
-                    .interface_seeds
-                    .push((top, demand.target, seed.clone()));
+                ordinary.add_interface_seed(top, demand.target, seed);
             }
         }
         drop(buffered);
@@ -263,6 +295,8 @@ impl Sweep<'_> {
             channels.iter().map(|_| MultiPolygon(Vec::new())).collect();
         let mut applied: Vec<std::collections::BTreeSet<PieceKey>> =
             channels.iter().map(|_| Default::default()).collect();
+        let mut void_clearance: Vec<Option<(u64, MultiPolygon<f64>)>> =
+            vec![None; self.protected.0.len()];
         for l in (0..=max_top).rev() {
             check_cancel(cancel)?;
             let seeds: Vec<Option<MultiPolygon<f64>>> = channels
@@ -298,18 +332,30 @@ impl Sweep<'_> {
                     else {
                         continue;
                     };
-                    let clearance = offset_polygon_owned(
-                        mask,
-                        distance,
-                        self.retained,
-                        self.owned_bytes,
-                        &support,
-                        &interfaces,
-                        &[self.protected],
-                        cancel,
-                    )?;
-                    charge_boolean(carry, &clearance, work, self.foreign_work, cancel)?;
-                    *carry = self.frame.difference(carry, &clearance);
+                    // A void's clearance depends only on the void and the
+                    // distance; most layers reuse the previous one.
+                    let cached = &mut void_clearance[ordinal];
+                    if cached
+                        .as_ref()
+                        .is_none_or(|(bits, _)| *bits != distance.to_bits())
+                    {
+                        *cached = Some((
+                            distance.to_bits(),
+                            offset_polygon_owned(
+                                mask,
+                                distance,
+                                self.retained,
+                                self.owned_bytes,
+                                &support,
+                                &interfaces,
+                                &[self.protected],
+                                cancel,
+                            )?,
+                        ));
+                    }
+                    let clearance = &cached.as_ref().expect("cached void clearance").1;
+                    charge_boolean(carry, clearance, work, self.foreign_work, cancel)?;
+                    *carry = self.frame.difference_local(carry, clearance);
                 }
             }
             for carry in &mut carried {
@@ -326,7 +372,7 @@ impl Sweep<'_> {
 
         // Up pass: keep only grounded support, clipped by nominal clearance.
         let mut outside: Vec<Option<Vec<beads::BeadEdge>>> = vec![None; self.nominal.len()];
-        let mut offsets: Vec<Option<Vec<MultiPolygon<f64>>>> = vec![None; self.nominal.len()];
+        let mut offsets: Vec<Option<MultiPolygon<f64>>> = vec![None; self.nominal.len()];
         for channel in &mut channels {
             let mut grounded = MultiPolygon(Vec::new());
             let mut part_bands: Vec<(f64, MultiPolygon<f64>)> = Vec::new();
@@ -357,7 +403,7 @@ impl Sweep<'_> {
                         }
                         let landing = &self.landings[landing];
                         charge_boolean(&active, landing, work, self.foreign_work, cancel)?;
-                        let candidate = self.frame.intersection(&active, landing);
+                        let candidate = self.frame.intersection_local(&active, landing);
                         if candidate.0.is_empty() {
                             continue;
                         }
@@ -381,7 +427,7 @@ impl Sweep<'_> {
                 }
                 let base = self.union(&grounded, &ground);
                 charge_boolean(&active, &base, work, self.foreign_work, cancel)?;
-                let mut column = OwnedMaterial::new(self.frame.intersection(&active, &base));
+                let mut column = OwnedMaterial::new(self.frame.intersection_local(&active, &base));
                 drop(active);
                 if !column.0.is_empty() {
                     column = self.subtract_nominal(
@@ -413,28 +459,43 @@ impl Sweep<'_> {
                 }
                 region::canonicalize(&mut column.material);
                 let column = OwnedMaterial::new(column.material).into_shared();
-                // As for a legacy column: a demand has its contact top once
-                // any kept layer up to it reaches the demand's seed.
-                for (top, target, seed) in &channel.interface_seeds {
-                    if *top >= l
-                        && contact_tops[*target].is_none()
-                        && !self.frame.intersection(&column.material, seed).0.is_empty()
-                    {
-                        contact_tops[*target] = Some(*top);
-                    }
-                }
+                // A target's seed is the same for all its demands, so one
+                // intersection per target serves its contact top and its
+                // interface band; disjoint bounds mean an empty intersection.
+                let column_bounds = material_bounds(&column.material);
                 let mut interface = MultiPolygon(Vec::new());
-                for (top, _, seed) in &channel.interface_seeds {
-                    if *top >= l && layers[l].z_mm > layers[*top].z_mm - self.interface_thickness {
-                        interface = self
-                            .union(&interface, &self.frame.intersection(&column.material, seed));
+                for entry in &channel.interface_seeds {
+                    let contact = if contact_tops[entry.target].is_none() {
+                        entry.tops.iter().copied().find(|top| *top >= l)
+                    } else {
+                        None
+                    };
+                    let band = entry.tops.iter().any(|top| {
+                        *top >= l && layers[l].z_mm > layers[*top].z_mm - self.interface_thickness
+                    });
+                    if (contact.is_none() && !band) || !bounds_meet(entry.bounds, column_bounds) {
+                        continue;
+                    }
+                    let meet = self.frame.intersection_local(&column.material, &entry.seed);
+                    if meet.0.is_empty() {
+                        continue;
+                    }
+                    // As for a legacy column: a demand has its contact top once
+                    // any kept layer up to it reaches the demand's seed.
+                    if let Some(top) = contact {
+                        contact_tops[entry.target] = Some(top);
+                    }
+                    if band {
+                        interface = self.union(&interface, &meet);
                     }
                 }
                 part_bands
                     .retain(|(floor, _)| layers[l].lower_z_mm < floor + self.interface_thickness);
                 for (_, band) in &part_bands {
-                    interface =
-                        self.union(&interface, &self.frame.intersection(&column.material, band));
+                    interface = self.union(
+                        &interface,
+                        &self.frame.intersection_local(&column.material, band),
+                    );
                 }
                 let mut cache = None;
                 let (units, bytes) = geometry_receipt(&support, &interfaces, &[&column]);
@@ -566,7 +627,7 @@ impl Sweep<'_> {
                 if !fresh.is_empty() {
                     let clearance = self.clearance(cache, &fresh, cancel)?;
                     charge_boolean(carry, &clearance, work, self.foreign_work, cancel)?;
-                    *carry = self.frame.difference(carry, &clearance);
+                    *carry = self.frame.difference_local(carry, &clearance);
                     applied.extend(fresh);
                 }
             }
@@ -576,7 +637,7 @@ impl Sweep<'_> {
                 // it; screening against that band keeps the piece set local.
                 let material = &self.sections[span_at(self.sections, l as u32)].material;
                 charge_boolean(&seed, material, work, self.foreign_work, cancel)?;
-                let seed = self.frame.difference(&seed, material);
+                let seed = self.frame.difference_local(&seed, material);
                 let near = self.screen(&seed);
                 let mut full: Vec<PieceKey> = touching
                     .iter()
@@ -597,7 +658,7 @@ impl Sweep<'_> {
                         clearance
                     };
                     charge_boolean(&seed, &clearance, work, self.foreign_work, cancel)?;
-                    self.frame.difference(&seed, &clearance)
+                    self.frame.difference_local(&seed, &clearance)
                 };
                 applied.extend(full);
                 charge_boolean(carry, &entered, work, self.foreign_work, cancel)?;
@@ -664,7 +725,7 @@ impl Sweep<'_> {
             })
             .collect();
         let parts: Vec<MultiPolygon<f64>> = pieces
-            .par_chunks(1 << 10)
+            .par_chunks(1 << 7)
             .map(|chunk| {
                 let batch = MultiPolygon(chunk.iter().map(|piece| (*piece).clone()).collect());
                 union_pieces_in_frame(&batch, Some(frame))
@@ -691,7 +752,7 @@ impl Sweep<'_> {
         l: usize,
         mut column: OwnedMaterial,
         outside: &mut [Option<Vec<beads::BeadEdge>>],
-        offsets: &mut [Option<Vec<MultiPolygon<f64>>>],
+        offsets: &mut [Option<MultiPolygon<f64>>],
         support: &[Rc<OwnedMaterial>],
         interfaces: &[Rc<OwnedMaterial>],
         work: &mut usize,
@@ -760,23 +821,21 @@ impl Sweep<'_> {
                     .collect::<Vec<_>>()
                     .into_iter()
                     .collect::<Result<Vec<MultiPolygon<f64>>, ManufacturingError>>()?;
-                offsets[at] = Some(built);
+                // One clearance per scope: every layer it reaches subtracts it
+                // with a single overlay instead of one per section polygon.
+                offsets[at] = Some(merge_pairwise(self.frame, built, cancel)?);
             }
-            let column_bounds = material_bounds(&column);
-            for clearance in offsets[at].as_deref().expect("cached nominal clearance") {
-                let (Some(a), Some(b)) = (material_bounds(clearance), column_bounds) else {
-                    continue;
-                };
-                if a[1][0] < b[0][0] || a[0][0] > b[1][0] || a[1][1] < b[0][1] || a[0][1] > b[1][1]
-                {
-                    continue;
-                }
+            let clearance = offsets[at].as_ref().expect("cached nominal clearance");
+            if let (Some(a), Some(b)) = (material_bounds(clearance), material_bounds(&column))
+                && !(a[1][0] < b[0][0]
+                    || a[0][0] > b[1][0]
+                    || a[1][1] < b[0][1]
+                    || a[0][1] > b[1][1])
+            {
                 charge_boolean(&column, clearance, work, self.foreign_work, cancel)?;
-                column = OwnedMaterial::new(self.frame.difference(&column.material, clearance));
+                column =
+                    OwnedMaterial::new(self.frame.difference_local(&column.material, clearance));
                 region::check_size(&column)?;
-                if column.0.is_empty() {
-                    break;
-                }
             }
             if let Some(beads) = scope.beads
                 && !column.0.is_empty()
