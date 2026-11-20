@@ -206,6 +206,27 @@ impl TolerantModel {
         self.support_enclosure_mm
     }
 
+    /// Inclusive lower Z bound on every piece from `visit_support_projection`
+    /// for this interval. `None` grants no exclusion for an invalid scope.
+    pub fn support_projection_z_floor(&self, interval: [f64; 2]) -> Option<f64> {
+        let midpoint = (interval[0] + interval[1]) * 0.5;
+        let margin = self.support_margin();
+        if !interval.into_iter().all(f64::is_finite)
+            || interval[0] > interval[1]
+            || !midpoint.is_finite()
+            || !self.z_min.is_finite()
+            || !margin.is_finite()
+            || margin < 0.0
+        {
+            return None;
+        }
+        if midpoint >= self.z_min {
+            Some(interval[0])
+        } else {
+            Some(interval[0].max((self.z_min - margin).next_down()))
+        }
+    }
+
     /// Projection of boundary facets clipped to the entire slab, plus one raw
     /// interior section. A vertical line intersecting solid in the slab either
     /// meets a boundary there or remains inside at the section. This is not a
@@ -1356,6 +1377,37 @@ mod tests {
             0.01,
             0,
         )
+    }
+
+    #[test]
+    fn support_projection_z_floor_includes_clipped_facets_and_full_midpoint_slab() {
+        let model = rectangular_recess(true, false);
+        let cancel = AtomicBool::new(false);
+        let bottom = model.z_min;
+        let margin = model.support_margin();
+        let facet = [bottom - 2.0 * margin, bottom + 0.5 * margin];
+        let material = [bottom - 2.0 * margin, bottom + 4.0 * margin];
+        assert_eq!(
+            model.support_projection_z_floor(facet),
+            Some((bottom - margin).next_down())
+        );
+        assert_eq!(
+            model.support_projection_z_floor(material),
+            Some(material[0])
+        );
+        for interval in [facet, material] {
+            let floor = model.support_projection_z_floor(interval).unwrap();
+            let actual = model.support_projection(interval, &cancel).unwrap();
+            assert!(!actual.pieces.is_empty());
+            assert!(
+                actual
+                    .pieces
+                    .iter()
+                    .all(|piece| piece.height_mm[0] >= floor)
+            );
+        }
+        assert_eq!(model.support_projection_z_floor([1.0, 0.0]), None);
+        assert_eq!(model.support_projection_z_floor([f64::MAX; 2]), None);
     }
 
     #[test]

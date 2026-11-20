@@ -23,6 +23,10 @@ pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
+#[cfg(test)]
+mod direct_bed_test;
+#[cfg(test)]
+pub(super) use direct_bed_test::with_arm as with_direct_bed_arm;
 pub(in crate::planner) mod projection;
 mod proximity;
 mod raster;
@@ -32,6 +36,7 @@ struct ProjectionTrace {
     started: std::time::Instant,
     section_pieces: Vec<std::cell::Cell<usize>>,
     bed: std::cell::Cell<usize>,
+    direct_bed: std::cell::Cell<usize>,
     part: std::cell::Cell<usize>,
     visits: std::cell::Cell<usize>,
     screened: std::cell::Cell<usize>,
@@ -75,6 +80,7 @@ impl ProjectionTrace {
             started: std::time::Instant::now(),
             section_pieces,
             bed: Default::default(),
+            direct_bed: Default::default(),
             part: Default::default(),
             visits: Default::default(),
             screened: Default::default(),
@@ -121,7 +127,7 @@ impl ProjectionTrace {
                 serde_json::json!({
                     "event": "support_projection", "phase": phase,
                     "elapsed_seconds": self.started.elapsed().as_secs_f64(),
-                    "bed_columns": self.bed.get(),
+                    "bed_columns": self.bed.get(), "direct_bed_columns": self.direct_bed.get(),
                     "part_columns": self.part.get(), "section_visits": self.visits.get(),
                     "piece_visits": self.screened.get(), "distinct_pieces": self.section_pieces.iter().map(std::cell::Cell::get).sum::<usize>(),
                     "pieces_built": self.built.get(), "pieces_staged": self.staged.get(),

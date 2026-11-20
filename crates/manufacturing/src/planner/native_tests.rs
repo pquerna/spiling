@@ -7,6 +7,8 @@ use spiling_contracts::geometry::{AabbMm, DefinitionId, OccurrenceId, Occurrence
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
 use std::collections::BTreeMap;
 
+mod direct_bed;
+
 /// Bundle document bytes as persisted beside the program artifact.
 fn encode(result: &ManufacturingResult) -> Vec<u8> {
     serde_json::to_vec(&result.bundle).unwrap()

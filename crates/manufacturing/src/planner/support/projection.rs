@@ -8,6 +8,7 @@ pub(in crate::planner) struct Frame {
     pub(in crate::planner) adapter: FloatPointAdapter<[f64; 2], f64>,
     bounds: [[f64; 2]; 2],
     distance: f64,
+    occupied_floor: f64,
 }
 
 impl Frame {
@@ -20,6 +21,7 @@ impl Frame {
         check_cancel(cancel)?;
         let mut bounds = input.build_bounds;
         let mut seen = Vec::new();
+        let mut occupied_floor = f64::INFINITY;
         for section in input.sections {
             check_cancel(cancel)?;
             if let Some(material) = material_bounds(&section.material) {
@@ -27,6 +29,13 @@ impl Frame {
             }
             if let Some(occupied) = &section.occupied {
                 for piece in &occupied.pieces {
+                    let [lower, upper] = piece.height_mm;
+                    let floor = if lower.is_finite() && upper.is_finite() && lower <= upper {
+                        lower
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    occupied_floor = occupied_floor.min(floor);
                     if let Some(rect) = piece.polygon.bounding_rect() {
                         bounds = union_frame(
                             Some(bounds),
@@ -35,6 +44,12 @@ impl Frame {
                     }
                 }
                 for source in &occupied.tolerant {
+                    occupied_floor = occupied_floor.min(
+                        source
+                            .model
+                            .support_projection_z_floor(source.interval)
+                            .unwrap_or(f64::NEG_INFINITY),
+                    );
                     let identity = std::sync::Arc::as_ptr(&source.model) as usize;
                     if seen.contains(&identity) {
                         continue;
@@ -55,6 +70,16 @@ impl Frame {
                         ],
                     );
                 }
+            } else if !section.material.0.is_empty() {
+                let floor = input
+                    .schedule
+                    .get(section.start as usize)
+                    .map_or(f64::NEG_INFINITY, |layer| layer.lower_z);
+                occupied_floor = occupied_floor.min(if floor.is_finite() {
+                    floor
+                } else {
+                    f64::NEG_INFINITY
+                });
             }
         }
         let clearance_envelope = (clearance_distance_in_frame(bounds, bounds, requested)?
@@ -98,7 +123,15 @@ impl Frame {
             adapter,
             bounds,
             distance,
+            occupied_floor,
         })
+    }
+
+    fn excludes_raw_bed_projection(&self, query: Query) -> bool {
+        let excluded = query.root == 0 && query.ceiling < self.occupied_floor;
+        #[cfg(test)]
+        let excluded = excluded && direct_bed_test::enabled();
+        excluded
     }
 
     pub(super) fn identity(&self) -> [u64; 5] {
@@ -670,6 +703,15 @@ impl Columns {
                 continue;
             }
             result?;
+            if trace.enabled {
+                trace.add(
+                    &trace.direct_bed,
+                    self.ready
+                        .iter()
+                        .filter(|column| self.frame.excludes_raw_bed_projection(column.query))
+                        .count(),
+                );
+            }
             trace.add(&trace.cohorts, 1);
             return Ok(());
         }
@@ -908,6 +950,7 @@ fn process(
                 .is_none_or(|material| material.0.is_empty())
                 || section_index < column.query.first_section
                 || section_index > column.query.last_section
+                || frame.excludes_raw_bed_projection(column.query)
             {
                 continue;
             }
@@ -953,6 +996,11 @@ fn process(
                     [height[0].max(interval[0]), height[1].min(interval[1])]
                 })
             };
+            #[cfg(test)]
+            for &(_, _, column_index) in &groups[first..end] {
+                let query = columns[column_index].query;
+                direct_bed_test::record_raw_dispatch(section_index, (query.target, query.root));
+            }
             let result = section.visit_occupied_screened(
                 cancel,
                 |_, height| {
@@ -1374,6 +1422,7 @@ mod tests {
             adapter: frame.adapter.clone(),
             bounds: frame.bounds,
             distance: frame.distance.next_up(),
+            occupied_floor: frame.occupied_floor,
         };
         assert!(
             reuse
