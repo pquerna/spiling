@@ -612,27 +612,51 @@ impl Sweep<'_> {
         keys: &[PieceKey],
         cancel: &AtomicBool,
     ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-        let mut merged = MultiPolygon(Vec::new());
-        for chunk in keys.chunks(1 << 10) {
-            check_cancel(cancel)?;
-            let batch = MultiPolygon(
-                chunk
+        // Union bounded chunks in parallel, then merge results pairwise in a
+        // fixed index order, so output does not depend on scheduling.
+        use rayon::prelude::*;
+        check_cancel(cancel)?;
+        let frame = self.frame;
+        let pieces: Vec<&Polygon<f64>> = keys
+            .iter()
+            .map(|&(span, index)| {
+                &cache
+                    .spans
                     .iter()
-                    .map(|&(span, index)| {
-                        cache
-                            .spans
-                            .iter()
-                            .find(|(cached, _)| *cached == span)
-                            .expect("cached span pieces")
-                            .1[index]
-                            .0
-                            .clone()
-                    })
-                    .collect(),
-            );
-            let part = union_pieces_in_frame(&batch, Some(self.frame));
-            merged = self.union(&merged, &part);
+                    .find(|(cached, _)| *cached == span)
+                    .expect("cached span pieces")
+                    .1[index]
+                    .0
+            })
+            .collect();
+        let mut parts: Vec<MultiPolygon<f64>> = pieces
+            .par_chunks(1 << 10)
+            .map(|chunk| {
+                let batch = MultiPolygon(chunk.iter().map(|piece| (*piece).clone()).collect());
+                union_pieces_in_frame(&batch, Some(frame))
+            })
+            .collect();
+        drop(pieces);
+        while parts.len() > 1 {
+            check_cancel(cancel)?;
+            parts = parts
+                .par_chunks(2)
+                .map(|pair| match pair {
+                    [left, right] => {
+                        if left.0.is_empty() {
+                            right.clone()
+                        } else if right.0.is_empty() {
+                            left.clone()
+                        } else {
+                            frame.union(left, right)
+                        }
+                    }
+                    [single] => single.clone(),
+                    _ => unreachable!("chunks of at most two"),
+                })
+                .collect();
         }
+        let mut merged = parts.pop().unwrap_or_else(|| MultiPolygon(Vec::new()));
         // Unions of many padded facet pieces carry the same near-collinear
         // noise as chained differences; a convolution offset of it is
         // pathologically slow.
