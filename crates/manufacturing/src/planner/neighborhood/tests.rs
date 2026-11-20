@@ -81,6 +81,118 @@ fn annulus(outer: f64, hole: f64) -> MultiPolygon<f64> {
 }
 
 #[test]
+fn parallel_prefetch_preserves_aligned_and_partial_group_intersections() {
+    let cancel = AtomicBool::new(false);
+    let spans = sections((0..8).map(|index| {
+        let mut material = annulus(7.1 + index as f64 * 0.061, 1.3 + index as f64 * 0.013);
+        material
+            .0
+            .push(rectangle(20.0 + index as f64 * 0.17, 23.2).0.remove(0));
+        material
+    }));
+    let courses = [0, 1, 1, 2, 3, 4, 4, 5];
+    let requests = [
+        (4, Some(1)),
+        (1, Some(5)),
+        (2, Some(6)),
+        (1, Some(4)),
+        (0, None),
+        (5, Some(7)),
+    ];
+    let points = source_points(&spans);
+    let bytes = source_bytes(&spans);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(3)
+        .build()
+        .unwrap();
+    let identities = (0..8).map(|index| [index, 0, 0, 0]).collect::<Vec<_>>();
+    pool.install(|| {
+        let mut memo = SurvivalMemo::default();
+        let mut actual = SkinNeighborhoods::with_courses(&spans, &courses, 0.42, 0).unwrap();
+        let mut control = SkinNeighborhoods::with_courses(&spans, &courses, 0.42, 0).unwrap();
+        actual.attach_memo(&mut memo, identities, true);
+        let work = *actual.work_mut();
+        actual
+            .prefetch(requests.into_iter(), requests.len(), points, bytes, &cancel)
+            .unwrap();
+        assert!(actual.has_prefetch());
+        assert!(*actual.work_mut() > work);
+        assert!(actual.memo.as_ref().unwrap().entries.is_empty());
+        for (current, neighbor) in requests.into_iter().take(5) {
+            let expected = control
+                .survival(current, neighbor, points, bytes, &cancel)
+                .unwrap();
+            let observed = actual
+                .survival(current, neighbor, points, bytes, &cancel)
+                .unwrap();
+            assert_eq!(
+                compare_material(&expected, &observed, &mut 0, &cancel).unwrap(),
+                std::cmp::Ordering::Equal
+            );
+        }
+        assert!(actual.has_prefetch());
+        assert_eq!(actual.memo.as_ref().unwrap().entries.len(), 3);
+        actual.freeze_retained_capacity();
+        assert!(!actual.has_prefetch());
+        assert_eq!(actual.memo.as_ref().unwrap().entries.len(), 3);
+    });
+}
+
+#[test]
+fn speculative_prefetch_pressure_leaves_serial_query_authoritative() {
+    use crate::working_set::{WorkingSet, scope};
+
+    let cancel = AtomicBool::new(false);
+    let spans = sections((0..10).map(|index| rectangle(index as f64 * 0.15, 12.0)));
+    let requests = (0..7).map(|index| (index, Some(index + 3)));
+    let points = source_points(&spans);
+    let bytes = source_bytes(&spans);
+    let working_set = WorkingSet::new(1024 * 1024).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        scope(working_set, || {
+            let mut actual = SkinNeighborhoods::new(&spans, 0.2, 0).unwrap();
+            let mut control = SkinNeighborhoods::new(&spans, 0.2, 0).unwrap();
+            let roomy = working_set.bytes() - actual.retained_bytes();
+            actual
+                .prefetch(requests.clone(), requests.len(), points, roomy, &cancel)
+                .unwrap();
+            assert!(!actual.has_prefetch());
+            cancel.store(true, Ordering::Relaxed);
+            assert_eq!(
+                actual
+                    .prefetch(requests.clone(), requests.len(), points, bytes, &cancel)
+                    .unwrap_err()
+                    .code,
+                ManufacturingErrorCode::Cancelled
+            );
+            assert_eq!(*actual.work_mut(), *control.work_mut());
+            cancel.store(false, Ordering::Relaxed);
+            actual
+                .prefetch(requests.clone(), requests.len(), points, bytes, &cancel)
+                .unwrap();
+            assert!(actual.has_prefetch());
+            let outside = working_set.bytes() - actual.retained_bytes() + 1;
+            let (mut admit, _) = actual.fixed_budget_and_work(points, outside).unwrap();
+            admit(0, 0).unwrap();
+            drop(admit);
+            assert!(!actual.has_prefetch());
+            let observed = actual.survival(2, Some(5), points, bytes, &cancel).unwrap();
+            let expected = control
+                .survival(2, Some(5), points, bytes, &cancel)
+                .unwrap();
+            assert_eq!(
+                compare_material(&expected, &observed, &mut 0, &cancel).unwrap(),
+                std::cmp::Ordering::Equal
+            );
+        })
+    });
+}
+
+#[test]
 fn growing_shrinking_and_sliding_horizons_intersect_every_realized_span() {
     let spans = sections(
         [

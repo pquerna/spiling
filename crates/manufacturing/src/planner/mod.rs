@@ -1004,18 +1004,7 @@ fn admit_schedule<'model>(
         let mut surface_resolution = Vec::new();
         let mut resolution_allocated_bytes = 0usize;
         let mut diagnostic_work = 0usize;
-        for index in 0..count {
-            check_cancel(cancel)?;
-            let wall_static_bytes =
-                geometry_bytes(&[wall_static_base_bytes, phase_anchors.retained_bytes()])?;
-            let elevation = &schedule[index as usize];
-            let z = elevation.z;
-            let sample = elevation.sample;
-            let height = elevation.height;
-            let top_axis = region::HatchAxis::for_policy(
-                recipe.top_skin_axis,
-                hatch_key(schedule, index as usize),
-            );
+        let skin_horizons = |index| {
             let current = span_at(&sections, index);
             let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
                 .map(|i| span_at(&sections, i));
@@ -1031,6 +1020,60 @@ fn admit_schedule<'model>(
                     recipe.top_skin_thickness_mm,
                 )
             });
+            (current, below, above, landing)
+        };
+        if probe.is_none()
+            && let Some(request_count) = (count as usize).checked_mul(3)
+        {
+            let outside = skin_external_owned_bytes(
+                wall_static_base_bytes,
+                retained_plan_bytes,
+                retained_wall_bytes,
+                wall_cache.len(),
+                wall_index_entry_bytes,
+                resolution_allocated_bytes,
+                &templates,
+            );
+            if let Ok(outside) = outside.and_then(|bytes| {
+                geometry_bytes(&[
+                    bytes,
+                    wall_memo.payload_bytes(),
+                    material_twin.capacity() * std::mem::size_of::<usize>(),
+                ])
+            }) {
+                let requests = (0..count)
+                    .filter_map(|index| {
+                        let (current, below, above, landing) = skin_horizons(index);
+                        (!sections[current].material.0.is_empty()).then_some([
+                            (current, below),
+                            (current, above),
+                            landing.unwrap_or((current, None)),
+                        ])
+                    })
+                    .flatten();
+                neighborhoods.prefetch(
+                    requests,
+                    request_count,
+                    retained_points,
+                    outside,
+                    cancel,
+                )?;
+            }
+        }
+        timing.mark("skin_prefetch");
+        for index in 0..count {
+            check_cancel(cancel)?;
+            let wall_static_bytes =
+                geometry_bytes(&[wall_static_base_bytes, phase_anchors.retained_bytes()])?;
+            let elevation = &schedule[index as usize];
+            let z = elevation.z;
+            let sample = elevation.sample;
+            let height = elevation.height;
+            let top_axis = region::HatchAxis::for_policy(
+                recipe.top_skin_axis,
+                hatch_key(schedule, index as usize),
+            );
+            let (current, below, above, landing) = skin_horizons(index);
             if sections[current].material.0.is_empty() {
                 layers.push(PrintLayer {
                     skin_command_fits: Vec::new(),
@@ -1104,6 +1147,15 @@ fn admit_schedule<'model>(
                     if let Some(cached) = wall_cache.get(&layout_key) {
                         wall_layout = Some(Arc::clone(cached));
                     } else {
+                        let memo_key = (required_owner.is_none()
+                            && construction_phase.is_none()
+                            && construction.domains.is_empty())
+                        .then_some(envelope_key);
+                        let remembered = memo_key
+                            .and_then(|key| wall_memo.find(&sections[current].material, key));
+                        if remembered.is_none() {
+                            neighborhoods.clear_prefetch();
+                        }
                         let required_material = required_material(
                             &sections[current].material,
                             native_span,
@@ -1133,12 +1185,6 @@ fn admit_schedule<'model>(
 
                         // Retries of the schedule (support refinement) replan every
                         // layer; identical material at the same envelope reuses its walls.
-                        let memo_key = (required_owner.is_none()
-                            && construction_phase.is_none()
-                            && construction.domains.is_empty())
-                        .then_some(envelope_key);
-                        let remembered = memo_key
-                            .and_then(|key| wall_memo.find(&sections[current].material, key));
                         let layout = match remembered {
                             Some(plan) => plan,
                             None => {
@@ -1266,75 +1312,40 @@ fn admit_schedule<'model>(
                     )?),
                     None => None,
                 };
-                classified = Some(
-                    fresh
-                        .snap_roof_to_cells(
-                            web_roof.as_ref().map(|field| field.roof()),
-                            landed.as_deref(),
-                            recipe,
-                            classification::fixed_owned_budget(
-                                skin_retained_points(
-                                    retained_points,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                                skin_retained_bytes(
-                                    skin_owned_bytes,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                            ),
-                            cancel,
-                        )?
-                        .with_process(
-                            &sections[current].process_domains,
-                            input.intent,
-                            classification::fixed_owned_budget(
-                                skin_retained_points(
-                                    retained_points,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                                skin_retained_bytes(
-                                    skin_owned_bytes,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                            ),
-                            neighborhoods.work_mut(),
-                            cancel,
-                        )?,
-                );
+                let class_points = skin_query_retained_points(retained_points, &[&lower, &upper])?;
+                let class_bytes = skin_query_retained_bytes(skin_owned_bytes, &[&lower, &upper])?;
+                let (admit, _) = neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                let snapped = fresh.snap_roof_to_cells(
+                    web_roof.as_ref().map(|field| field.roof()),
+                    landed.as_deref(),
+                    recipe,
+                    admit,
+                    cancel,
+                )?;
+                let (admit, work) =
+                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                classified = Some(snapped.with_process(
+                    &sections[current].process_domains,
+                    input.intent,
+                    admit,
+                    work,
+                    cancel,
+                )?);
+                let (admit, work) =
+                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
                 construction.classify(
                     classified.as_mut().expect("classified material regions"),
                     [elevation.lower_z, z],
-                    classification::fixed_owned_budget(
-                        skin_retained_points(retained_points, &neighborhoods, &[&lower, &upper])?,
-                        skin_retained_bytes(skin_owned_bytes, &neighborhoods, &[&lower, &upper])?,
-                    ),
-                    neighborhoods.work_mut(),
+                    admit,
+                    work,
                     cancel,
                 )?;
+                let (admit, work) =
+                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
                 classified
                     .as_mut()
                     .expect("classified material")
-                    .with_tool_widths(
-                        input.intent,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                skin_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        neighborhoods.work_mut(),
-                        cancel,
-                    )?;
+                    .with_tool_widths(input.intent, admit, work, cancel)?;
                 classified_owned_bytes = classified
                     .as_mut()
                     .expect("classified process regions")
@@ -1504,34 +1515,46 @@ fn admit_schedule<'model>(
                 top_axis,
                 recipe,
             };
-            let phase = classified
-                .as_ref()
-                .expect("region classification initialized")
-                .choose_initial_ordinary_phase(
-                    &hatch_layer,
-                    layers
-                        .last()
-                        .into_iter()
-                        .flat_map(|layer| layer.paths.iter()),
-                    &mut phase_anchors,
-                    &mut support_work.anchors,
-                    classified_owned_bytes,
-                    skin_retained_points(retained_points, &neighborhoods, &[])?,
-                    skin_retained_bytes(guide_outside_bytes, &neighborhoods, &[])?,
-                    |scratch, scratch_bytes, work| {
-                        boolean::charge(neighborhoods.work_mut(), work)?;
-                        admit_skin_scratch(
-                            retained_points,
-                            guide_outside_bytes,
-                            &mut neighborhoods,
-                            &[],
-                            scratch,
-                            scratch_bytes,
-                            cancel,
-                        )
-                    },
-                    cancel,
-                )?;
+            let phase = loop {
+                let revocable = neighborhoods.has_prefetch();
+                let proposed = classified
+                    .as_ref()
+                    .expect("region classification initialized")
+                    .choose_initial_ordinary_phase(
+                        &hatch_layer,
+                        layers
+                            .last()
+                            .into_iter()
+                            .flat_map(|layer| layer.paths.iter()),
+                        &mut phase_anchors,
+                        &mut support_work.anchors,
+                        classified_owned_bytes,
+                        skin_retained_points(retained_points, &neighborhoods, &[])?,
+                        skin_retained_bytes(guide_outside_bytes, &neighborhoods, &[])?,
+                        |scratch, scratch_bytes, work| {
+                            boolean::charge(neighborhoods.work_mut(), work)?;
+                            admit_skin_scratch(
+                                retained_points,
+                                guide_outside_bytes,
+                                &mut neighborhoods,
+                                &[],
+                                scratch,
+                                scratch_bytes,
+                                cancel,
+                            )
+                        },
+                        cancel,
+                    );
+                match proposed {
+                    Err(failure)
+                        if revocable && failure.code == ManufacturingErrorCode::ResourceLimit =>
+                    {
+                        neighborhoods.clear_prefetch();
+                        phase_anchors.set_budget(0);
+                    }
+                    result => break result?,
+                }
+            };
             phase_by_layer[index as usize] = phase;
             if templates[axis_slot]
                 .as_ref()
@@ -1580,17 +1603,17 @@ fn admit_schedule<'model>(
                     },
                     cancel,
                 )?;
-                let base = skin_retained_points(retained_points, &neighborhoods, &[])?
+                let base = retained_points
                     + classified.retained_points()
                     + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
                     + bonds::skin_command_fit_points(&fits);
                 let live_bytes = geometry_bytes(&[
-                    skin_retained_bytes(outside_skin_bytes, &neighborhoods, &[])?,
+                    outside_skin_bytes,
                     classified_owned_bytes,
                     bonds::path_bytes(&paths),
                     bonds::skin_command_fit_bytes(&fits),
                 ])?;
-                let mut admit = classification::fixed_owned_budget(base, live_bytes);
+                let (mut admit, _) = neighborhoods.fixed_budget_and_work(base, live_bytes)?;
                 admit(
                     bonds::coverage_owned_bytes(proposed)
                         .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
@@ -1744,6 +1767,7 @@ fn admit_schedule<'model>(
         }
 
         timing.mark("object_layers");
+        neighborhoods.clear_prefetch();
         drop(classified);
         drop(wall_layout);
         drop(templates);
@@ -3768,6 +3792,12 @@ pub(super) struct WallMemo {
 }
 
 impl WallMemo {
+    fn payload_bytes(&self) -> usize {
+        self.plans.values().flatten().fold(0usize, |total, entry| {
+            total.saturating_add(entry.2.retained_bytes)
+        })
+    }
+
     fn find(
         &self,
         material: &Arc<MultiPolygon<f64>>,

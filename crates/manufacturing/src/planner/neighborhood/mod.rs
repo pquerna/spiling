@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+mod prefetch;
 #[cfg(test)]
 mod tests;
 
@@ -26,6 +27,7 @@ enum Cached {
 enum Storage<'a> {
     Borrowed(&'a MultiPolygon<f64>),
     Cached(Arc<MultiPolygon<f64>>),
+    Detached(Arc<MultiPolygon<f64>>),
     Temporary(MultiPolygon<f64>),
 }
 
@@ -47,6 +49,10 @@ impl Usage {
                 .ok_or_else(|| resource("skin neighborhood live byte overflow"))?,
         })
     }
+
+    fn fits(self) -> bool {
+        self.points <= crate::working_set::units() && self.bytes <= crate::working_set::bytes()
+    }
 }
 
 /// Source lifetime, not a borrow of the mutable index: lower and upper may coexist.
@@ -58,13 +64,13 @@ pub(super) struct Material<'a> {
 impl Material<'_> {
     pub(super) fn temporary_points(&self) -> usize {
         match self.storage {
-            Storage::Temporary(_) => self.points,
+            Storage::Temporary(_) | Storage::Detached(_) => self.points,
             _ => 0,
         }
     }
     pub(super) fn temporary_bytes(&self) -> usize {
         match self.storage {
-            Storage::Temporary(_) => self.owned_bytes,
+            Storage::Temporary(_) | Storage::Detached(_) => self.owned_bytes,
             _ => 0,
         }
     }
@@ -95,7 +101,7 @@ impl Deref for Material<'_> {
     fn deref(&self) -> &Self::Target {
         match &self.storage {
             Storage::Borrowed(material) => material,
-            Storage::Cached(material) => material,
+            Storage::Cached(material) | Storage::Detached(material) => material,
             Storage::Temporary(material) => material,
         }
     }
@@ -190,6 +196,8 @@ pub(super) struct SkinNeighborhoods<'a> {
     retained_owned_bytes: usize,
     retained_owned_byte_capacity: usize,
     work: usize,
+    prefetch: prefetch::Table<'a>,
+    measure_peak: Option<prefetch::Peak>,
 }
 impl<'a> SkinNeighborhoods<'a> {
     /// Every span at its own tree position.
@@ -291,6 +299,8 @@ impl<'a> SkinNeighborhoods<'a> {
             retained_owned_bytes: 0,
             retained_owned_byte_capacity: crate::working_set::bytes(),
             work,
+            prefetch: prefetch::Table::default(),
+            measure_peak: None,
         })
     }
     /// Reuse survival results of earlier passes whose ranges are unchanged.
@@ -352,9 +362,13 @@ impl<'a> SkinNeighborhoods<'a> {
         &mut self.work
     }
     pub(super) fn retained_points(&self) -> usize {
-        self.retained
+        self.retained.saturating_add(self.prefetch.usage().points)
     }
     pub(super) fn retained_bytes(&self) -> usize {
+        self.tree_bytes()
+            .saturating_add(self.prefetch.usage().bytes)
+    }
+    fn tree_bytes(&self) -> usize {
         self.nodes
             .capacity()
             .saturating_mul(std::mem::size_of::<Cached>())
@@ -366,6 +380,7 @@ impl<'a> SkinNeighborhoods<'a> {
             }))
     }
     pub(super) fn freeze_retained_capacity(&mut self) -> usize {
+        self.clear_prefetch();
         self.retained_capacity = self.retained;
         self.retained_owned_byte_capacity = self.retained_owned_bytes;
         self.retained_capacity
@@ -397,15 +412,7 @@ impl<'a> SkinNeighborhoods<'a> {
     ) -> Result<Material<'a>, ManufacturingError> {
         check_cancel(cancel)?;
 
-        let external = Usage {
-            points: retained_points,
-            bytes: external_owned_bytes
-                .checked_add(self.memo.as_ref().map_or(0, |memo| memo.bytes))
-                .and_then(|bytes| {
-                    bytes.checked_add(self.identities.capacity() * std::mem::size_of::<[u64; 4]>())
-                })
-                .ok_or_else(|| resource("skin neighborhood live byte overflow"))?,
-        };
+        let external = self.query_external(retained_points, external_owned_bytes)?;
         self.admit(external, Usage::default(), cancel)?;
         let Some(neighbor) = neighbor else {
             return Ok(Material::empty());
@@ -425,11 +432,27 @@ impl<'a> SkinNeighborhoods<'a> {
                 owned_bytes: 0,
             });
         }
-        let result = self.survival_range(current, neighbor, external, cancel)?;
+        let mut pair = [current, neighbor];
+        pair.sort_unstable();
+        let result = match self.take_prefetched(pair, external) {
+            Some(result) => result,
+            None => self.survival_range(current, neighbor, external, cancel)?,
+        };
         match key {
             Some(key) => self.remember(key, result, external, cancel),
             None => Ok(result),
         }
+    }
+    fn query_external(&self, points: usize, bytes: usize) -> Result<Usage, ManufacturingError> {
+        Ok(Usage {
+            points,
+            bytes: bytes
+                .checked_add(self.memo.as_ref().map_or(0, |memo| memo.bytes))
+                .and_then(|bytes| {
+                    bytes.checked_add(self.identities.capacity() * std::mem::size_of::<[u64; 4]>())
+                })
+                .ok_or_else(|| resource("skin neighborhood live byte overflow"))?,
+        })
     }
     /// Keep a computed range result when it fits beside the live working set.
     fn remember(
@@ -443,8 +466,9 @@ impl<'a> SkinNeighborhoods<'a> {
             return Ok(result);
         }
         let points = result.points;
+        let detached = matches!(result.storage, Storage::Detached(_));
         let shared = match result.storage {
-            Storage::Cached(material) => material,
+            Storage::Cached(material) | Storage::Detached(material) => material,
             Storage::Temporary(material) => Arc::new(material),
             Storage::Borrowed(_) => unreachable!("borrowed leaves are returned above"),
         };
@@ -471,9 +495,17 @@ impl<'a> SkinNeighborhoods<'a> {
                 owned_bytes,
             },
             Err(shared) => Material {
-                storage: Storage::Cached(shared),
+                storage: if detached {
+                    Storage::Detached(shared)
+                } else {
+                    Storage::Cached(shared)
+                },
                 points,
-                owned_bytes: 0,
+                owned_bytes: if detached {
+                    owned_bytes + super::native::MATERIAL_ARC_BYTES
+                } else {
+                    0
+                },
             },
         })
     }
@@ -647,9 +679,7 @@ impl<'a> SkinNeighborhoods<'a> {
             return Ok(());
         }
         let operands = previous.temporary_usage().add(next.temporary_usage())?;
-        self.admit(external, operands, cancel)?;
-        let material =
-            classification::intersection_accumulated(previous, &next, &mut self.work, cancel)?;
+        let material = self.intersect(previous, &next, external, operands, cancel)?;
         let points = checked_points(&material, &mut self.work, cancel)?;
         let material = Material::owned(material, points);
         self.admit(external, operands.add(material.temporary_usage())?, cancel)?;
@@ -674,9 +704,10 @@ impl<'a> SkinNeighborhoods<'a> {
     ) -> Result<Option<usize>, ManufacturingError> {
         check_cancel(cancel)?;
         let live = external.add(temporary)?;
-        if live.points > crate::working_set::units() || live.bytes > crate::working_set::bytes() {
+        if !live.fits() {
             return Ok(None);
         }
+        self.revoke_prefetch_for(live);
         loop {
             let total = live
                 .points
@@ -687,6 +718,9 @@ impl<'a> SkinNeighborhoods<'a> {
                 .checked_add(self.retained_bytes())
                 .ok_or_else(|| resource("skin neighborhood retained byte overflow"))?;
             if total <= crate::working_set::units() && bytes <= crate::working_set::bytes() {
+                if let Some(peak) = &mut self.measure_peak {
+                    peak.record(total, bytes);
+                }
                 return Ok(Some(total));
             }
             if !self.evict_oldest(cancel)? {
@@ -946,12 +980,12 @@ impl<'a> SkinNeighborhoods<'a> {
                 });
             }
             Cached::Empty => return Ok(Material::empty()),
-            Cached::Geometry(material, points, last_use, _) => {
+            Cached::Geometry(material, points, last_use, owned_bytes) => {
                 *last_use = used;
                 return Ok(Material {
                     storage: Storage::Cached(Arc::clone(material)),
                     points: *points,
-                    owned_bytes: 0,
+                    owned_bytes: *owned_bytes,
                 });
             }
             Cached::Missing => {}
@@ -1047,9 +1081,7 @@ impl<'a> SkinNeighborhoods<'a> {
         // A frozen pool or pinned nodes may leave either recursive operand owned.
         // Keep both inputs and the query accumulator live through output admission.
         let operands = lower_live.add(upper.temporary_usage())?;
-        self.admit(external, operands, cancel)?;
-        let material =
-            classification::intersection_accumulated(&lower, &upper, &mut self.work, cancel)?;
+        let material = self.intersect(&lower, &upper, external, operands, cancel)?;
         let points = checked_points(&material, &mut self.work, cancel)?;
         let material = Material::owned(material, points);
         self.admit(external, operands.add(material.temporary_usage())?, cancel)?;
@@ -1062,6 +1094,30 @@ impl<'a> SkinNeighborhoods<'a> {
         drop(upper);
         self.cache_material(cache_node, material, external, temporary, cancel)
     }
+    fn intersect(
+        &mut self,
+        lower: &MultiPolygon<f64>,
+        upper: &MultiPolygon<f64>,
+        external: Usage,
+        operands: Usage,
+        cancel: &AtomicBool,
+    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
+        let points = self.admit(external, operands, cancel)?;
+        if self.measure_peak.is_some() {
+            let live = external.add(operands)?.add(Usage {
+                points: 0,
+                bytes: self.retained_bytes(),
+            })?;
+            let remaining = super::remaining_geometry_units(points, live.bytes)?;
+            let scratch =
+                crate::working_set::WorkingSet::new(remaining * std::mem::size_of::<Coord<f64>>())?;
+            return crate::working_set::scope(scratch, || {
+                classification::intersection_accumulated(lower, upper, &mut self.work, cancel)
+            });
+        }
+        classification::intersection_accumulated(lower, upper, &mut self.work, cancel)
+    }
+
     fn cache_material(
         &mut self,
         node: usize,
@@ -1116,7 +1172,7 @@ impl<'a> SkinNeighborhoods<'a> {
         Ok(Material {
             storage: Storage::Cached(material),
             points,
-            owned_bytes: 0,
+            owned_bytes,
         })
     }
     #[allow(clippy::too_many_arguments)]
