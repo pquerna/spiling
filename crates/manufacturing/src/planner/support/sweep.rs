@@ -353,19 +353,28 @@ impl Sweep<'_> {
                         cancel,
                     )?;
                 }
-                if !column.0.is_empty() && channel.tops.iter().any(|(top, _)| *top == l) {
-                    column = self.subtract_sheet(l, column, &support, &interfaces, work, cancel)?;
-                }
                 drop_micro_edges(&mut column.material);
+                // Higher support stands on this layer before the touching
+                // sheet trims a column ending here: the sheet sits on that
+                // column's top only, as in its own fixed-XY prism.
                 grounded = column.material.clone();
                 if column.0.is_empty() {
                     part_bands.clear();
                     continue;
                 }
+                if channel.tops.iter().any(|(top, _)| *top == l) {
+                    column = self.subtract_sheet(l, column, &support, &interfaces, work, cancel)?;
+                    drop_micro_edges(&mut column.material);
+                    if column.0.is_empty() {
+                        continue;
+                    }
+                }
                 region::canonicalize(&mut column.material);
                 let column = OwnedMaterial::new(column.material).into_shared();
+                // As for a legacy column: a demand has its contact top once
+                // any kept layer up to it reaches the demand's seed.
                 for (top, target, seed) in &channel.interface_seeds {
-                    if *top == l
+                    if *top >= l
                         && contact_tops[*target].is_none()
                         && !self.frame.intersection(&column.material, seed).0.is_empty()
                     {
@@ -415,6 +424,18 @@ impl Sweep<'_> {
                 if let Some(ordinal) = channel.relieved {
                     access.push((ordinal, l, Rc::clone(&column)));
                 }
+            }
+        }
+        // A layer that is interface throughout shares one owner with its
+        // support region: raster hatches it as whole interface.
+        for (region, interface) in support.iter().zip(&mut interfaces) {
+            check_cancel(cancel)?;
+            if interface.0.is_empty() || Rc::ptr_eq(region, interface) {
+                continue;
+            }
+            charge_boolean(region, interface, work, self.foreign_work, cancel)?;
+            if self.frame.difference(region, interface).0.is_empty() {
+                *interface = Rc::clone(region);
             }
         }
         Ok(SweepOutput {
