@@ -95,6 +95,10 @@ impl GeometryWorkBudget {
     pub fn consumed(&self) -> u64 {
         self.consumed.load(Ordering::Acquire)
     }
+    /// Whether accounting has no cumulative refusal threshold.
+    pub fn is_monitored(&self) -> bool {
+        self.maximum.is_none()
+    }
     pub fn remaining(&self) -> u64 {
         self.maximum
             .map_or(u64::MAX, |maximum| maximum.saturating_sub(self.consumed()))

@@ -5,6 +5,7 @@ use super::{LayerElevation, preflight};
 use crate::clearance_screen::{BLOCK_PATHS, ObjectClearanceIndex};
 use crate::{check_cancel, error};
 use geo::MultiPolygon;
+use rayon::prelude::*;
 use spiling_contracts::geometry::OccurrenceId;
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_bead_height_mm, project_xyz6_coordinate_mm, project_xyz6_segment_bead_height_mm,
@@ -80,6 +81,8 @@ struct ClearanceTrace {
     path_rejects: std::cell::Cell<usize>,
     edges: std::cell::Cell<usize>,
     height_rejects: std::cell::Cell<usize>,
+    polygon_edge_block_queries: std::cell::Cell<usize>,
+    polygon_edge_block_clears: std::cell::Cell<usize>,
     polygon_tests: std::cell::Cell<usize>,
     protected_memo_hits: std::cell::Cell<usize>,
     deposited_support_paths: std::cell::Cell<usize>,
@@ -103,6 +106,31 @@ impl ClearanceTrace {
         }
     }
 
+    fn merge_deposited_layer(&self, layer: &Self) {
+        for (total, local) in [
+            (
+                &self.deposited_support_paths,
+                &layer.deposited_support_paths,
+            ),
+            (&self.deposited_object_paths, &layer.deposited_object_paths),
+            (&self.deposited_path_rejects, &layer.deposited_path_rejects),
+            (
+                &self.deposited_block_queries,
+                &layer.deposited_block_queries,
+            ),
+            (
+                &self.deposited_block_skipped_slots,
+                &layer.deposited_block_skipped_slots,
+            ),
+            (&self.edge_pairs, &layer.edge_pairs),
+            (&self.edge_pair_rejects, &layer.edge_pair_rejects),
+            (&self.height_pair_rejects, &layer.height_pair_rejects),
+            (&self.pair_tests, &layer.pair_tests),
+        ] {
+            self.add(total, local.get());
+        }
+    }
+
     fn report(&self, phase: &str, started: std::time::Instant) {
         if self.enabled {
             eprintln!(
@@ -115,6 +143,8 @@ impl ClearanceTrace {
                     "paths": self.paths.get(), "support_paths": self.support_paths.get(),
                     "bounds_points": self.bounds_points.get(), "path_rejects": self.path_rejects.get(),
                     "edges": self.edges.get(), "height_rejects": self.height_rejects.get(),
+                    "polygon_edge_block_queries": self.polygon_edge_block_queries.get(),
+                    "polygon_edge_block_clears": self.polygon_edge_block_clears.get(),
                     "protected_memo_hits": self.protected_memo_hits.get(),
                     "polygon_tests": self.polygon_tests.get(),
                     "deposited_support_paths": self.deposited_support_paths.get(),
@@ -738,13 +768,17 @@ fn certify_support_clearance_traced(
     // A bounded-fidelity M/D prism or emitted bead can extend outside true T.
     // Native target exclusion therefore does not replace this distinct actual
     // nominal-program footprint proof.
-    certify_deposited_clearance(
+    certify_deposited_layers(
         &ActualDepositionScope {
             layers,
             schedule,
             vertical,
             screen: deposited_screen.as_ref(),
         },
+        &deposition,
+        index_bytes
+            .saturating_sub(sweep.as_ref().map_or(0, withdrawal::Sweep::retained_bytes))
+            .saturating_sub(trace.deposited_index_bytes.get()),
         xy_clearance_mm,
         z_gap_mm,
         native_work,
@@ -782,6 +816,37 @@ fn edge_xy_bounds(edge: &[[f64; 3]]) -> [[f64; 2]; 2] {
         [edge[0][0].min(edge[1][0]), edge[0][1].min(edge[1][1])],
         [edge[0][0].max(edge[1][0]), edge[0][1].max(edge[1][1])],
     ]
+}
+
+const CLEARANCE_EDGE_BLOCK: usize = 32;
+
+/// A bounded, allocation-free envelope of consecutive checked edges. No
+/// block verdict can depend on a malformed endpoint or a narrower width.
+fn edge_block_clear<'a>(
+    edges: impl Iterator<Item = DepositionEdge<'a>>,
+    forbidden: [[f64; 2]; 2],
+    clearance: f64,
+) -> bool {
+    let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+    let mut width: f64 = 0.0;
+    for edge in edges {
+        width = width.max(edge.width_mm);
+        for point in edge.points_mm {
+            for (axis, &value) in point[..2].iter().enumerate() {
+                if !value.is_finite() {
+                    return false;
+                }
+                bounds[0][axis] = bounds[0][axis].min(value);
+                bounds[1][axis] = bounds[1][axis].max(value);
+            }
+        }
+    }
+    spiling_geometry::planar_bounds_clear(
+        bounds,
+        forbidden,
+        (width * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up(),
+        clearance,
+    )
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -845,7 +910,29 @@ fn certify_polygon_capsules(
                     trace.add(&trace.path_rejects, 1);
                     continue;
                 }
-                for local in edges {
+                let mut clear_until = 0;
+                for (edge_ordinal, local) in edges.enumerate() {
+                    // Establish polygon validity via the original ordered proof
+                    // before screening. Limited native budgets and protected
+                    // memo/withdrawal keep their original proof order.
+                    if edge_ordinal > 0
+                        && (edge_ordinal - 1).is_multiple_of(CLEARANCE_EDGE_BLOCK)
+                        && edges.len() - edge_ordinal >= CLEARANCE_EDGE_BLOCK
+                        && prepared.is_some()
+                        && native_work.is_monitored()
+                        && memo_bytes == 0
+                        && withdrawal.is_none()
+                        && let Some(bounds) = forbidden_bounds
+                    {
+                        trace.add(&trace.polygon_edge_block_queries, 1);
+                        if edge_block_clear(
+                            edges.skip(edge_ordinal).take(CLEARANCE_EDGE_BLOCK),
+                            bounds,
+                            clearance,
+                        ) {
+                            clear_until = edge_ordinal + CLEARANCE_EDGE_BLOCK;
+                        }
+                    }
                     trace.add(&trace.edges, 1);
                     let edge = local.points_mm;
                     charge_support_clearance(support_work, cancel)?;
@@ -868,6 +955,17 @@ fn certify_polygon_capsules(
                         continue;
                     }
                     let (segment, endpoint_error_mm) = emitted_xy_segment(edge)?;
+                    if edge_ordinal < clear_until {
+                        // The raw XY envelope includes the command displacement
+                        // and physical decimal error. Keep the original height,
+                        // representation and logical edge checks above, and the
+                        // accounting of a successful prepared bounds proof.
+                        native_work.charge(1, cancel).map_err(|failure| {
+                            super::native_error(failure, "screen actual emitted support edge")
+                        })?;
+                        trace.add(&trace.polygon_edge_block_clears, 1);
+                        continue;
+                    }
                     if encoded.get().is_none() {
                         let _ =
                             encoded.set(encode_polygons(std::iter::once(polygon), 0.0, cancel)?);
@@ -1146,13 +1244,126 @@ fn certify_deposited_clearance(
     trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    certify_deposited_layer_range(
+        deposition,
+        0..deposition.layers.len(),
+        xy_gap,
+        z_gap,
+        native_work,
+        work,
+        trace,
+        cancel,
+    )
+}
+
+struct DepositedLayerResult {
+    result: Result<(), ManufacturingError>,
+    geometry_work: u64,
+    scan_work: usize,
+    trace: ClearanceTrace,
+}
+
+/// Each job borrows the immutable actual-deposition inventory and uses the
+/// allocation-free capsule-pair predicate. Only one wave's result records
+/// are admitted. Reduce in original layer order, including on refusal.
+#[expect(clippy::too_many_arguments)]
+fn certify_deposited_layers(
+    deposition: &ActualDepositionScope<'_>,
+    envelope: &DepositionEnvelope,
+    available: usize,
+    xy_gap: f64,
+    z_gap: f64,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
+    work: &mut usize,
+    trace: &ClearanceTrace,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let wave = rayon::current_num_threads()
+        .min(deposition.layers.len())
+        .min(available / std::mem::size_of::<DepositedLayerResult>());
+    let mut results = Vec::new();
+    if wave < 2
+        || !native_work.is_monitored()
+        || !envelope.screen_work_fits(*work)
+        || results.try_reserve_exact(wave).is_err()
+    {
+        return certify_deposited_clearance(
+            deposition,
+            xy_gap,
+            z_gap,
+            native_work,
+            work,
+            trace,
+            cancel,
+        );
+    }
+    let working_set = crate::working_set::current();
+    let trace_enabled = trace.enabled;
+    for start in (0..deposition.layers.len()).step_by(wave) {
+        check_cancel(cancel)?;
+        let end = start.saturating_add(wave).min(deposition.layers.len());
+        (start..end)
+            .into_par_iter()
+            .map(|index| {
+                crate::working_set::scope(working_set, || {
+                    let mut native = spiling_geometry::GeometryWorkBudget::monitored();
+                    let mut scan_work = 0;
+                    let local_trace = ClearanceTrace {
+                        enabled: trace_enabled,
+                        ..Default::default()
+                    };
+                    let result = certify_deposited_layer_range(
+                        deposition,
+                        index..index + 1,
+                        xy_gap,
+                        z_gap,
+                        &mut native,
+                        &mut scan_work,
+                        &local_trace,
+                        cancel,
+                    );
+                    DepositedLayerResult {
+                        result,
+                        geometry_work: native.consumed(),
+                        scan_work,
+                        trace: local_trace,
+                    }
+                })
+            })
+            .collect_into_vec(&mut results);
+        for local in results.drain(..) {
+            super::boolean::charge(work, local.scan_work)?;
+            native_work
+                .charge(local.geometry_work, cancel)
+                .map_err(|failure| {
+                    super::native_error(failure, "account actual deposited support clearance")
+                })?;
+            trace.merge_deposited_layer(&local.trace);
+            local.result?;
+        }
+    }
+    Ok(())
+}
+
+#[expect(clippy::too_many_arguments)]
+fn certify_deposited_layer_range(
+    deposition: &ActualDepositionScope<'_>,
+    range: std::ops::Range<usize>,
+    xy_gap: f64,
+    z_gap: f64,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
+    work: &mut usize,
+    trace: &ClearanceTrace,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     let ActualDepositionScope {
         layers,
         schedule,
         vertical,
         screen,
     } = *deposition;
-    for (index, support_layer) in layers.iter().enumerate() {
+    for index in range {
+        let support_layer = &layers[index];
         charge_support_clearance(work, cancel)?;
         let mut applicable = None;
         for support in &support_layer.paths {

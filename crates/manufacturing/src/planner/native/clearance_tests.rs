@@ -61,6 +61,21 @@ fn evaluate(
     height: spiling_geometry::ProtectedVoidHeightScope,
     allowance: usize,
 ) -> (Result<(), ManufacturingError>, ClearanceTrace) {
+    let (result, trace, _) = evaluate_with_budget(
+        layers,
+        height,
+        allowance,
+        &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
+    );
+    (result, trace)
+}
+
+fn evaluate_with_budget(
+    layers: &[PrintLayer],
+    height: spiling_geometry::ProtectedVoidHeightScope,
+    allowance: usize,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
+) -> (Result<(), ManufacturingError>, ClearanceTrace, usize) {
     let cancel = AtomicBool::new(false);
     let mut work = 0;
     let index = clearance_index::ClearanceIndex::build(
@@ -90,13 +105,52 @@ fn evaluate(
             memo_bytes: 0,
         },
         0.2,
-        &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
+        native_work,
         &mut work,
         &trace,
         None,
         &cancel,
     );
-    (result, trace)
+    (result, trace, work)
+}
+
+#[test]
+fn polygon_edge_blocks_keep_the_first_refusal_and_charge_logical_edges() {
+    let height = spiling_geometry::ProtectedVoidHeightScope::Bounded {
+        lower_mm: 0.0,
+        upper_mm: 0.2,
+    };
+    for refuses in [false, true] {
+        let mut road = path(0.5);
+        // The diagonal is clear but its bounds overlap the square in both
+        // axes, so path screening cannot hide the later edge block.
+        road.points_mm = vec![[0.5, 3.0, 0.2], [3.0, 0.5, 0.2]];
+        road.points_mm
+            .extend((1..=CLEARANCE_EDGE_BLOCK).map(|i| [3.0 + i as f64 * 0.1, 0.5, 0.2]));
+        if refuses {
+            road.points_mm.push([0.5, 0.5, 0.2]);
+        }
+        road.width = WidthProfile::PerEdge {
+            widths_mm: (1..road.points_mm.len())
+                .map(|i| if i % 2 == 0 { 0.4 } else { 0.6 })
+                .collect(),
+        };
+        let layers = [layer(vec![road])];
+        let mut baseline = spiling_geometry::GeometryWorkBudget::new(u64::MAX - 1);
+        let mut screened = spiling_geometry::GeometryWorkBudget::monitored();
+        let (expected, old, old_work) = evaluate_with_budget(&layers, height, 0, &mut baseline);
+        let (actual, new, new_work) = evaluate_with_budget(&layers, height, 0, &mut screened);
+        assert_eq!(expected.is_err(), refuses);
+        assert_eq!(
+            expected.err().map(|e| (e.code, e.message)),
+            actual.err().map(|e| (e.code, e.message)),
+        );
+        assert_eq!(new.polygon_edge_block_queries.get(), 1);
+        assert_eq!(new.polygon_edge_block_clears.get(), CLEARANCE_EDGE_BLOCK);
+        assert_eq!(new.edges.get(), old.edges.get());
+        assert_eq!(new_work, old_work);
+        assert_eq!(screened.consumed(), baseline.consumed());
+    }
 }
 
 fn repeated_emitted_chord() -> [DepositionPath; 2] {
@@ -504,6 +558,82 @@ fn deposited_blocks_preserve_ordered_errors_and_narrow_proofs() {
         assert_eq!(exhaustive_trace.pair_tests.get(), narrow_tests);
         assert_eq!(screened_trace.pair_tests.get(), narrow_tests);
         assert!(screened_trace.deposited_block_skipped_slots.get() >= BLOCK_PATHS);
+    }
+}
+
+#[test]
+fn deposited_layer_waves_reduce_the_same_work_and_first_refusal() {
+    let cancel = AtomicBool::new(false);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    let schedule = [0.0, 0.2, 0.4, 0.6].map(|lower_z| LayerElevation {
+        lower_z,
+        z: lower_z + 0.2,
+        sample: lower_z + 0.1,
+        height: 0.2,
+        course: 0,
+    });
+    for refuses in [false, true] {
+        let layers: Vec<_> = schedule
+            .iter()
+            .enumerate()
+            .map(|(i, elevation)| {
+                let mut support = path(0.0);
+                let mut object = path(if refuses && i >= 1 { 0.0 } else { 100.0 });
+                object.kind = DepositionKind::Perimeter;
+                for path in [&mut support, &mut object] {
+                    path.physical_z_mm = [elevation.lower_z, elevation.z];
+                    for point in &mut path.points_mm {
+                        point[2] = elevation.z;
+                    }
+                }
+                let mut current = layer(vec![support, object]);
+                current.index = i as u32;
+                current.z_mm = elevation.z;
+                current.lower_z_mm = elevation.lower_z;
+                current
+            })
+            .collect();
+        let envelope = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
+            .unwrap()
+            .unwrap();
+        let scope = ActualDepositionScope {
+            layers: &layers,
+            schedule: &schedule,
+            vertical: envelope.vertical,
+            screen: None,
+        };
+        let evaluate = |available| {
+            let trace = ClearanceTrace {
+                enabled: true,
+                ..Default::default()
+            };
+            let mut native = spiling_geometry::GeometryWorkBudget::monitored();
+            let mut work = 11;
+            let result = certify_deposited_layers(
+                &scope,
+                &envelope,
+                available,
+                0.2,
+                0.1,
+                &mut native,
+                &mut work,
+                &trace,
+                &cancel,
+            );
+            (
+                result.err().map(|e| (e.code, e.message)),
+                work,
+                native.consumed(),
+                trace.deposited_support_paths.get(),
+                trace.pair_tests.get(),
+            )
+        };
+        let (serial, parallel) = pool.install(|| (evaluate(0), evaluate(usize::MAX)));
+        assert_eq!(serial.0.is_some(), refuses);
+        assert_eq!(parallel, serial);
     }
 }
 
