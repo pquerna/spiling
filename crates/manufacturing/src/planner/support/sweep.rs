@@ -229,22 +229,31 @@ impl Sweep<'_> {
         // Down pass: carry every channel's candidate through occupancy and voids.
         let mut carried: Vec<MultiPolygon<f64>> =
             channels.iter().map(|_| MultiPolygon(Vec::new())).collect();
+        let mut applied: Vec<std::collections::BTreeSet<PieceKey>> =
+            channels.iter().map(|_| Default::default()).collect();
         for l in (0..=max_top).rev() {
             check_cancel(cancel)?;
-            for (channel, carry) in channels.iter_mut().zip(&mut carried) {
-                if let Some(seed) = channel.seeds[l].take() {
-                    charge_boolean(carry, &seed, work, self.foreign_work, cancel)?;
-                    *carry = self.union(carry, &seed);
-                }
-            }
-            if carried.iter().all(|carry| carry.0.is_empty()) {
+            let seeds: Vec<Option<MultiPolygon<f64>>> = channels
+                .iter_mut()
+                .map(|channel| channel.seeds[l].take())
+                .collect();
+            if carried.iter().all(|carry| carry.0.is_empty()) && seeds.iter().all(Option::is_none) {
                 continue;
             }
             let slab = program_coordinates::project_xyz6_bead_height_mm(
                 layers[l].z_mm,
                 layers[l].height_mm,
             )?;
-            self.subtract_occupancy(l, slab, &mut span_pieces, &mut carried, work, cancel)?;
+            self.subtract_occupancy(
+                l,
+                slab,
+                &mut span_pieces,
+                &mut carried,
+                seeds,
+                &mut applied,
+                work,
+                cancel,
+            )?;
             for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
                 if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
                     continue;
@@ -446,15 +455,22 @@ impl Sweep<'_> {
         })
     }
 
-    /// Subtract every raw occupied piece touching this layer's bead slab from
-    /// each carried candidate. A span's pieces are collected once; a layer
-    /// whose piece set equals the previous layer's reuses its clearance.
+    /// Subtract every raw occupied piece touching this layer's bead slab.
+    ///
+    /// A carried region already excludes every piece applied at a higher
+    /// layer, and a piece's height scope is contiguous, so only pieces newly
+    /// touching this slab can change it. A seed entering here takes the full
+    /// set. A span's pieces are collected once; adjacent spans may touch a
+    /// slab. Pieces whose clearance cannot reach the operand are skipped.
+    #[expect(clippy::too_many_arguments, reason = "per-channel down-pass state")]
     fn subtract_occupancy(
         &self,
         l: usize,
         slab: [f64; 2],
         cache: &mut SpanPieces,
         carried: &mut [MultiPolygon<f64>],
+        seeds: Vec<Option<MultiPolygon<f64>>>,
+        applied: &mut [std::collections::BTreeSet<PieceKey>],
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
@@ -490,11 +506,83 @@ impl Sweep<'_> {
             *work = work.saturating_add(pieces.len());
             cache.spans.push((span, pieces));
         }
-        // Only pieces whose clearance can reach a carried polygon matter.
-        let reach = separation_reach(self.frame.distance);
-        let mut boxes: Vec<[[f64; 2]; 2]> = carried
+        for set in applied.iter_mut() {
+            set.retain(|(span, _)| window.contains(span));
+        }
+        let touching: Vec<(PieceKey, [[f64; 2]; 2])> = cache
+            .spans
             .iter()
-            .flat_map(|carry| carry.0.iter())
+            .filter(|(span, _)| window.contains(span))
+            .flat_map(|(span, pieces)| {
+                pieces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, scope, _))| scope[0] <= slab[1] && scope[1] >= slab[0])
+                    .map(move |(index, (_, _, bounds))| ((*span, index), *bounds))
+            })
+            .collect();
+        for ((carry, seed), applied) in carried.iter_mut().zip(seeds).zip(applied.iter_mut()) {
+            if !carry.0.is_empty() {
+                let near = self.screen(carry);
+                let fresh: Vec<PieceKey> = touching
+                    .iter()
+                    .filter(|(key, bounds)| !applied.contains(key) && near(bounds))
+                    .map(|(key, _)| *key)
+                    .collect();
+                if !fresh.is_empty() {
+                    let clearance = self.clearance(cache, &fresh, cancel)?;
+                    charge_boolean(carry, &clearance, work, self.foreign_work, cancel)?;
+                    *carry = self.frame.difference(carry, &clearance);
+                    applied.extend(fresh);
+                }
+            }
+            if let Some(seed) = seed {
+                // The top layer's own material lies inside its occupancy
+                // clearance, so only the overhang band of a seed can survive
+                // it; screening against that band keeps the piece set local.
+                let material = &self.sections[span_at(self.sections, l as u32)].material;
+                charge_boolean(&seed, material, work, self.foreign_work, cancel)?;
+                let seed = self.frame.difference(&seed, material);
+                let near = self.screen(&seed);
+                let mut full: Vec<PieceKey> = touching
+                    .iter()
+                    .filter(|(_, bounds)| near(bounds))
+                    .map(|(key, _)| *key)
+                    .collect();
+                full.sort_unstable();
+                let entered = if full.is_empty() {
+                    seed
+                } else {
+                    let clearance = if let Some((last, clearance)) = &cache.last
+                        && *last == full
+                    {
+                        clearance.clone()
+                    } else {
+                        let clearance = self.clearance(cache, &full, cancel)?;
+                        cache.last = Some((full.clone(), clearance.clone()));
+                        clearance
+                    };
+                    charge_boolean(&seed, &clearance, work, self.foreign_work, cancel)?;
+                    self.frame.difference(&seed, &clearance)
+                };
+                applied.extend(full);
+                charge_boolean(carry, &entered, work, self.foreign_work, cancel)?;
+                *carry = self.union(carry, &entered);
+            }
+            if carry.0.is_empty() {
+                applied.clear();
+            }
+        }
+        *work = work.saturating_add(touching.len());
+        Ok(())
+    }
+
+    /// Bounds screen: whether a piece's clearance can reach `material`.
+    fn screen(&self, material: &MultiPolygon<f64>) -> impl Fn(&[[f64; 2]; 2]) -> bool + use<> {
+        let reach = separation_reach(self.frame.distance);
+        let mut boxes: Vec<[[f64; 2]; 2]> = material
+            .0
+            .iter()
             .filter_map(|polygon| material_bounds(&MultiPolygon(vec![polygon.clone()])))
             .map(|b| {
                 [
@@ -508,72 +596,54 @@ impl Sweep<'_> {
             .iter()
             .map(|b| b[1][0] - b[0][0])
             .fold(0.0f64, f64::max);
-        let touches = |piece: &[[f64; 2]; 2]| {
+        move |piece: &[[f64; 2]; 2]| {
             let from = boxes.partition_point(|b| b[0][0] < piece[0][0] - widest);
             boxes[from..]
                 .iter()
                 .take_while(|b| b[0][0] <= piece[1][0])
                 .any(|b| b[1][0] >= piece[0][0] && b[0][1] <= piece[1][1] && b[1][1] >= piece[0][1])
-        };
-        let mut selected: Vec<PieceKey> = Vec::new();
-        for (span, pieces) in &cache.spans {
-            if !window.contains(span) {
-                continue;
-            }
-            for (index, (_, scope, bounds)) in pieces.iter().enumerate() {
-                if scope[0] <= slab[1] && scope[1] >= slab[0] && touches(bounds) {
-                    selected.push((*span, index));
-                }
-            }
         }
-        selected.sort_unstable();
-        if selected.is_empty() {
-            cache.last = None;
-            return Ok(());
+    }
+
+    /// Offset union of the given cached pieces at the shared clearance reach.
+    fn clearance(
+        &self,
+        cache: &SpanPieces,
+        keys: &[PieceKey],
+        cancel: &AtomicBool,
+    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
+        let mut merged = MultiPolygon(Vec::new());
+        for chunk in keys.chunks(1 << 10) {
+            check_cancel(cancel)?;
+            let batch = MultiPolygon(
+                chunk
+                    .iter()
+                    .map(|&(span, index)| {
+                        cache
+                            .spans
+                            .iter()
+                            .find(|(cached, _)| *cached == span)
+                            .expect("cached span pieces")
+                            .1[index]
+                            .0
+                            .clone()
+                    })
+                    .collect(),
+            );
+            let part = union_pieces_in_frame(&batch, Some(self.frame));
+            merged = self.union(&merged, &part);
         }
-        let clearance = if let Some((last, clearance)) = &cache.last
-            && *last == selected
-        {
-            clearance.clone()
-        } else {
-            let mut merged = MultiPolygon(Vec::new());
-            for chunk in selected.chunks(1 << 10) {
-                check_cancel(cancel)?;
-                let batch = MultiPolygon(
-                    chunk
-                        .iter()
-                        .map(|&(span, index)| {
-                            let pieces = &cache
-                                .spans
-                                .iter()
-                                .find(|(cached, _)| *cached == span)
-                                .expect("cached span pieces")
-                                .1;
-                            pieces[index].0.clone()
-                        })
-                        .collect(),
-                );
-                let part = union_pieces_in_frame(&batch, Some(self.frame));
-                merged = self.union(&merged, &part);
-            }
-            let clearance = region::offset_admitted_in_frame(
-                &merged,
-                self.frame.distance,
-                self.frame,
-                |_, _, _| Ok(()),
-                cancel,
-            )?;
-            cache.last = Some((selected, clearance.clone()));
-            clearance
-        };
-        for carry in carried.iter_mut() {
-            if carry.0.is_empty() {
-                continue;
-            }
-            charge_boolean(carry, &clearance, work, self.foreign_work, cancel)?;
-            *carry = self.frame.difference(carry, &clearance);
-        }
-        Ok(())
+        // Unions of many padded facet pieces carry the same near-collinear
+        // noise as chained differences; a convolution offset of it is
+        // pathologically slow.
+        drop_micro_edges(&mut merged);
+        region::offset_admitted_in_frame(
+            &merged,
+            self.frame.distance,
+            self.frame,
+            |_, _, _| Ok(()),
+            cancel,
+        )
     }
 
     #[expect(clippy::too_many_arguments, reason = "shared admission owners")]
