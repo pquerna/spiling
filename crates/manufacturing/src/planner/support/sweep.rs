@@ -371,76 +371,144 @@ impl Sweep<'_> {
         timing.mark("down_pass");
 
         // Up pass: keep only grounded support, clipped by nominal clearance.
+        // Part-root acceptance and the per-scope clearance caches come first.
+        // Nominal clearance distributes over the grounded intersection, so it
+        // runs on every active layer in parallel; the grounded chain then
+        // stays in layer order.
+        let live = Live::of(&support, &interfaces, &[self.protected]);
         let mut outside: Vec<Option<Vec<beads::BeadEdge>>> = vec![None; self.nominal.len()];
         let mut offsets: Vec<Option<MultiPolygon<f64>>> = vec![None; self.nominal.len()];
-        for channel in &mut channels {
+        let mut landed: Vec<Vec<Vec<MultiPolygon<f64>>>> = Vec::new();
+        for channel in &channels {
+            let mut per_layer = vec![Vec::new(); layers.len()];
+            for (l, active) in channel.active.iter().enumerate() {
+                let Some(active) = active.as_ref().filter(|_| channel.relieved.is_none()) else {
+                    continue;
+                };
+                for root in self.roots {
+                    let Root::Part {
+                        object_layer,
+                        first_support_layer,
+                        landing,
+                    } = *root
+                    else {
+                        continue;
+                    };
+                    if first_support_layer != l {
+                        continue;
+                    }
+                    check_cancel(cancel)?;
+                    let landing = &self.landings[landing];
+                    charge_boolean(active, landing, work, self.foreign_work, cancel)?;
+                    let candidate = self.frame.intersection_local(active, landing);
+                    if candidate.0.is_empty() {
+                        continue;
+                    }
+                    let accepted = self.anchored_on(
+                        &candidate,
+                        l,
+                        object_layer,
+                        &support,
+                        &interfaces,
+                        segments,
+                        anchors,
+                        anchor_work,
+                        work,
+                        cancel,
+                    )?;
+                    if !accepted.0.is_empty() {
+                        per_layer[l].push(accepted);
+                    }
+                }
+            }
+            landed.push(per_layer);
+        }
+        for l in 0..=max_top {
+            if channels.iter().any(|channel| channel.active[l].is_some()) {
+                self.prepare_nominal(l, &mut outside, &mut offsets, live, work, cancel)?;
+            }
+        }
+        let mut cleared: Vec<Vec<Option<MultiPolygon<f64>>>> = {
+            use rayon::prelude::*;
+            let mut tasks: Vec<(usize, usize, MultiPolygon<f64>)> = Vec::new();
+            for (c, channel) in channels.iter_mut().enumerate() {
+                for (l, slot) in channel.active.iter_mut().enumerate() {
+                    if let Some(active) = slot.take() {
+                        let material = match Rc::try_unwrap(active) {
+                            Ok(owned) => owned.material,
+                            Err(shared) => shared.material.clone(),
+                        };
+                        tasks.push((c, l, material));
+                    }
+                }
+            }
+            let clearance = NominalClearance {
+                layers,
+                nominal: self.nominal,
+                frame: self.frame,
+                offsets: &offsets,
+                outside: &outside,
+                gap: self.gap,
+                requested: self.requested,
+                retained: self.retained,
+                owned_bytes: self.owned_bytes,
+                // Each task counts from zero; its total is charged in order below.
+                foreign_work: 0,
+                live,
+            };
+            let working_set = crate::working_set::current();
+            type Cleared = (usize, usize, MultiPolygon<f64>, usize);
+            let results: Vec<Result<Cleared, ManufacturingError>> = tasks
+                .into_par_iter()
+                .map(|(c, l, material)| {
+                    crate::working_set::scope(working_set, || {
+                        let mut local = 0usize;
+                        clearance
+                            .apply(l, OwnedMaterial::new(material), &mut local, cancel)
+                            .map(|kept| (c, l, kept.material, local))
+                    })
+                })
+                .collect();
+            let mut cleared = vec![vec![None; layers.len()]; channels.len()];
+            let (mut units, mut bytes) = (0usize, 0usize);
+            for result in results {
+                let (c, l, kept, local) = result?;
+                charge_owned_work(work, self.foreign_work, local, cancel)?;
+                let owned = OwnedMaterial::new(kept);
+                units = units.saturating_add(owned.units);
+                bytes = bytes.saturating_add(owned.bytes);
+                cleared[c][l] = Some(owned.material);
+            }
+            live.budget(
+                self.retained.saturating_add(units),
+                self.owned_bytes.saturating_add(bytes),
+                &[],
+            )?;
+            cleared
+        };
+        for (c, channel) in channels.iter_mut().enumerate() {
             let mut grounded = MultiPolygon(Vec::new());
             let mut part_bands: Vec<(f64, MultiPolygon<f64>)> = Vec::new();
             for l in 0..=max_top {
                 check_cancel(cancel)?;
-                let Some(active) = channel.active[l].take() else {
+                let Some(kept) = cleared[c][l].take() else {
                     grounded = MultiPolygon(Vec::new());
                     part_bands.clear();
                     continue;
                 };
-                let mut ground = if l == 0 {
-                    active.material.clone()
+                let mut ground = MultiPolygon(Vec::new());
+                for accepted in std::mem::take(&mut landed[c][l]) {
+                    ground = self.union(&ground, &accepted);
+                    part_bands.push((layers[l].lower_z_mm, accepted));
+                }
+                // The bed grounds all of layer 0.
+                let mut column = OwnedMaterial::new(if l == 0 {
+                    kept
                 } else {
-                    MultiPolygon(Vec::new())
-                };
-                if channel.relieved.is_none() {
-                    for root in self.roots {
-                        let Root::Part {
-                            object_layer,
-                            first_support_layer,
-                            landing,
-                        } = *root
-                        else {
-                            continue;
-                        };
-                        if first_support_layer != l {
-                            continue;
-                        }
-                        let landing = &self.landings[landing];
-                        charge_boolean(&active, landing, work, self.foreign_work, cancel)?;
-                        let candidate = self.frame.intersection_local(&active, landing);
-                        if candidate.0.is_empty() {
-                            continue;
-                        }
-                        let accepted = self.anchored_on(
-                            &candidate,
-                            l,
-                            object_layer,
-                            &support,
-                            &interfaces,
-                            segments,
-                            anchors,
-                            anchor_work,
-                            work,
-                            cancel,
-                        )?;
-                        if !accepted.0.is_empty() {
-                            part_bands.push((layers[l].lower_z_mm, accepted.clone()));
-                            ground = self.union(&ground, &accepted);
-                        }
-                    }
-                }
-                let base = self.union(&grounded, &ground);
-                charge_boolean(&active, &base, work, self.foreign_work, cancel)?;
-                let mut column = OwnedMaterial::new(self.frame.intersection_local(&active, &base));
-                drop(active);
-                if !column.0.is_empty() {
-                    column = self.subtract_nominal(
-                        l,
-                        column,
-                        &mut outside,
-                        &mut offsets,
-                        &support,
-                        &interfaces,
-                        work,
-                        cancel,
-                    )?;
-                }
+                    let base = self.union(&grounded, &ground);
+                    charge_boolean(&kept, &base, work, self.foreign_work, cancel)?;
+                    self.frame.intersection_local(&kept, &base)
+                });
                 drop_micro_edges(&mut column.material);
                 // Higher support stands on this layer before the touching
                 // sheet trims a column ending here: the sheet sits on that
@@ -451,7 +519,8 @@ impl Sweep<'_> {
                     continue;
                 }
                 if channel.tops.iter().any(|(top, _)| *top == l) {
-                    column = self.subtract_sheet(l, column, &support, &interfaces, work, cancel)?;
+                    let live = Live::of(&support, &interfaces, &[self.protected]);
+                    column = self.subtract_sheet(l, column, live, work, cancel)?;
                     drop_micro_edges(&mut column.material);
                     if column.0.is_empty() {
                         continue;
@@ -746,32 +815,21 @@ impl Sweep<'_> {
         )
     }
 
-    #[expect(clippy::too_many_arguments, reason = "shared admission owners")]
-    fn subtract_nominal(
+    /// Build the per-scope clearance and outside-bead caches every scope
+    /// reaching layer `l` needs, so `NominalClearance::apply` only reads them.
+    fn prepare_nominal(
         &self,
         l: usize,
-        mut column: OwnedMaterial,
         outside: &mut [Option<Vec<beads::BeadEdge>>],
         offsets: &mut [Option<MultiPolygon<f64>>],
-        support: &[Rc<OwnedMaterial>],
-        interfaces: &[Rc<OwnedMaterial>],
+        live: Live,
         work: &mut usize,
         cancel: &AtomicBool,
-    ) -> Result<OwnedMaterial, ManufacturingError> {
+    ) -> Result<(), ManufacturingError> {
         let layers = self.layers;
-        let lower =
-            program_coordinates::project_xyz6_bead_height_mm(layers[l].z_mm, layers[l].height_mm)?
-                [0];
-        let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
-            layers[l].z_mm,
-            layers[l].z_mm,
-            layers[l].z_mm - layers[l].lower_z_mm,
-        )?[1];
+        let [lower, upper] = nominal_band(layers, l)?;
         for (at, scope) in self.nominal.iter().enumerate() {
             check_cancel(cancel)?;
-            if column.0.is_empty() {
-                break;
-            }
             if program_coordinates::enclosed_vertical_gap_mm(scope.floor, upper)? >= self.gap {
                 break;
             }
@@ -799,10 +857,8 @@ impl Sweep<'_> {
                     .collect::<Result<Vec<f64>, ManufacturingError>>()?;
                 // Each polygon's clearance is independent; offsets run in
                 // parallel against one inventory and are kept in input order.
-                let (units, bytes) =
-                    geometry_receipt(support, interfaces, &[self.protected, &column]);
-                let retained = self.retained.saturating_add(units);
-                let owned_bytes = self.owned_bytes.saturating_add(bytes);
+                let retained = self.retained.saturating_add(live.units);
+                let owned_bytes = self.owned_bytes.saturating_add(live.bytes);
                 let working_set = crate::working_set::current();
                 let built = polygons
                     .par_iter()
@@ -825,106 +881,36 @@ impl Sweep<'_> {
                 // with a single overlay instead of one per section polygon.
                 offsets[at] = Some(merge_pairwise(self.frame, built, cancel)?);
             }
-            let clearance = offsets[at].as_ref().expect("cached nominal clearance");
-            if let (Some(a), Some(b)) = (material_bounds(clearance), material_bounds(&column))
-                && !(a[1][0] < b[0][0]
-                    || a[0][0] > b[1][0]
-                    || a[1][1] < b[0][1]
-                    || a[0][1] > b[1][1])
-            {
-                charge_boolean(&column, clearance, work, self.foreign_work, cancel)?;
-                column =
-                    OwnedMaterial::new(self.frame.difference_local(&column.material, clearance));
-                region::check_size(&column)?;
-            }
-            if let Some(beads) = scope.beads
-                && !column.0.is_empty()
-                && !ColumnScreen::new(&column, self.requested)?
-                    .is_some_and(|screen| screen.rejects(beads))
-            {
-                if outside[at].is_none() {
-                    let section = &self.sections[scope.index];
-                    let objects = layers
-                        .get(section.start as usize..(section.end as usize).min(layers.len()))
-                        .unwrap_or(&[]);
-                    outside[at] = Some(beads::outside_material(
-                        &section.material,
-                        objects.iter().flat_map(|layer| &layer.paths),
-                        BEAD_OUTSIDE_ALLOWANCE_MM,
-                        work,
-                        cancel,
-                    )?);
-                }
-                let edges = outside[at].as_deref().expect("cached outside bead edges");
-                let proximity = index_column(
-                    &column,
-                    self.retained,
-                    self.owned_bytes,
-                    support,
-                    interfaces,
-                    &[self.protected, &column],
-                )?;
-                let mut batch = stage_object_beads(
-                    edges,
-                    &column,
-                    &proximity,
-                    self.requested,
-                    &BeadStaging {
-                        retained: self.retained,
-                        owned_bytes: self.owned_bytes,
-                        support,
-                        interfaces,
-                        protected: self.protected,
-                    },
+            if scope.beads.is_some() && outside[at].is_none() {
+                let section = &self.sections[scope.index];
+                let objects = layers
+                    .get(section.start as usize..(section.end as usize).min(layers.len()))
+                    .unwrap_or(&[]);
+                outside[at] = Some(beads::outside_material(
+                    &section.material,
+                    objects.iter().flat_map(|layer| &layer.paths),
+                    BEAD_OUTSIDE_ALLOWANCE_MM,
                     work,
                     cancel,
-                )?;
-                if !batch.pieces.0.is_empty()
-                    && let Some(next) = subtract_staged(
-                        &mut batch,
-                        &column,
-                        self.requested,
-                        self.retained,
-                        self.owned_bytes,
-                        support,
-                        interfaces,
-                        self.protected,
-                        work,
-                        self.foreign_work,
-                        cancel,
-                        None,
-                    )?
-                {
-                    column = next;
-                }
+                )?);
             }
         }
-        Ok(column)
+        Ok(())
     }
 
     fn subtract_sheet(
         &self,
         top: usize,
         column: OwnedMaterial,
-        support: &[Rc<OwnedMaterial>],
-        interfaces: &[Rc<OwnedMaterial>],
+        live: Live,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<OwnedMaterial, ManufacturingError> {
-        let proximity = index_column(
-            &column,
-            self.retained,
-            self.owned_bytes,
-            support,
-            interfaces,
-            &[self.protected, &column],
-        )?;
+        let proximity = index_column(&column, self.retained, self.owned_bytes, live, &[&column])?;
         let admission = BeadStaging {
             retained: self.retained,
             owned_bytes: self.owned_bytes,
-            support,
-            interfaces,
-            protected: self.protected,
+            live,
         };
         let mut batch = stage_touching_sheet(
             self.layers,
@@ -943,9 +929,7 @@ impl Sweep<'_> {
             self.requested,
             self.retained,
             self.owned_bytes,
-            support,
-            interfaces,
-            self.protected,
+            live,
             work,
             self.foreign_work,
             cancel,
@@ -1037,5 +1021,120 @@ impl Sweep<'_> {
             anchors.set_budget(0);
         }
         Ok(accepted)
+    }
+}
+
+/// Lower bead floor and upper segment ceiling of layer `l`'s physical slab.
+fn nominal_band(layers: &[PrintLayer], l: usize) -> Result<[f64; 2], ManufacturingError> {
+    let lower =
+        program_coordinates::project_xyz6_bead_height_mm(layers[l].z_mm, layers[l].height_mm)?[0];
+    let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
+        layers[l].z_mm,
+        layers[l].z_mm,
+        layers[l].z_mm - layers[l].lower_z_mm,
+    )?[1];
+    Ok([lower, upper])
+}
+
+/// Read-only inputs of nominal clearance, shareable across worker threads.
+struct NominalClearance<'a> {
+    layers: &'a [PrintLayer],
+    nominal: &'a [NominalScope],
+    frame: &'a projection::Frame,
+    offsets: &'a [Option<MultiPolygon<f64>>],
+    outside: &'a [Option<Vec<beads::BeadEdge>>],
+    gap: f64,
+    requested: f64,
+    retained: usize,
+    owned_bytes: usize,
+    foreign_work: usize,
+    live: Live,
+}
+
+impl NominalClearance<'_> {
+    /// Remove every reaching nominal scope's clearance and its actual
+    /// outside-bead clearance from `column`. Clearance distributes over
+    /// intersection, so applying it before the grounded intersection keeps
+    /// the same set.
+    fn apply(
+        &self,
+        l: usize,
+        mut column: OwnedMaterial,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<OwnedMaterial, ManufacturingError> {
+        let [lower, upper] = nominal_band(self.layers, l)?;
+        for (at, scope) in self.nominal.iter().enumerate() {
+            check_cancel(cancel)?;
+            if column.0.is_empty() {
+                break;
+            }
+            if program_coordinates::enclosed_vertical_gap_mm(scope.floor, upper)? >= self.gap {
+                break;
+            }
+            if program_coordinates::enclosed_vertical_gap_mm(lower, scope.ceiling)? >= self.gap {
+                continue;
+            }
+            let clearance = self.offsets[at]
+                .as_ref()
+                .expect("prepared nominal clearance");
+            if let (Some(a), Some(b)) = (material_bounds(clearance), material_bounds(&column))
+                && !(a[1][0] < b[0][0]
+                    || a[0][0] > b[1][0]
+                    || a[1][1] < b[0][1]
+                    || a[0][1] > b[1][1])
+            {
+                charge_boolean(&column, clearance, work, self.foreign_work, cancel)?;
+                column =
+                    OwnedMaterial::new(self.frame.difference_local(&column.material, clearance));
+                region::check_size(&column)?;
+            }
+            if let Some(beads) = scope.beads
+                && !column.0.is_empty()
+                && !ColumnScreen::new(&column, self.requested)?
+                    .is_some_and(|screen| screen.rejects(beads))
+            {
+                let edges = self.outside[at]
+                    .as_deref()
+                    .expect("prepared outside bead edges");
+                let proximity = index_column(
+                    &column,
+                    self.retained,
+                    self.owned_bytes,
+                    self.live,
+                    &[&column],
+                )?;
+                let mut batch = stage_object_beads(
+                    edges,
+                    &column,
+                    &proximity,
+                    self.requested,
+                    &BeadStaging {
+                        retained: self.retained,
+                        owned_bytes: self.owned_bytes,
+                        live: self.live,
+                    },
+                    work,
+                    cancel,
+                )?;
+                if !batch.pieces.0.is_empty()
+                    && let Some(next) = subtract_staged(
+                        &mut batch,
+                        &column,
+                        self.requested,
+                        self.retained,
+                        self.owned_bytes,
+                        self.live,
+                        work,
+                        self.foreign_work,
+                        cancel,
+                        None,
+                    )?
+                {
+                    column = next;
+                }
+            }
+        }
+        Ok(column)
     }
 }

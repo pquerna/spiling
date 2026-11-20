@@ -3825,21 +3825,16 @@ fn offset_polygon_admitted_in(
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Offset admission inventories shared support, interfaces and temporary material without retaining them"
-)]
 fn offset_owned(
     region: &MultiPolygon<f64>,
     distance: f64,
     retained: usize,
     owned_bytes: usize,
-    support: &[Rc<OwnedMaterial>],
-    interfaces: &[Rc<OwnedMaterial>],
+    live: Live,
     temporary: &[&OwnedMaterial],
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let (units, bytes) = geometry_receipt(support, interfaces, temporary);
+    let (units, bytes) = live.with(temporary);
     region::offset_admitted(
         region,
         distance,
@@ -3937,6 +3932,48 @@ fn remaining_geometry_budget(
     )
 }
 
+/// The live shared support, interface and protected owners, counted once.
+/// Transient admissions add their own temporaries to it; it holds no
+/// borrow, so admissions on worker threads see the same inventory.
+#[derive(Clone, Copy, Default)]
+struct Live {
+    units: usize,
+    bytes: usize,
+}
+
+impl Live {
+    fn of(
+        support: &[Rc<OwnedMaterial>],
+        interfaces: &[Rc<OwnedMaterial>],
+        shared: &[&OwnedMaterial],
+    ) -> Self {
+        let (units, bytes) = geometry_receipt(support, interfaces, shared);
+        Self { units, bytes }
+    }
+
+    /// This inventory plus distinct transient owners.
+    fn with(self, temporary: &[&OwnedMaterial]) -> (usize, usize) {
+        let (units, bytes) = geometry_receipt(&[], &[], temporary);
+        (
+            self.units.saturating_add(units),
+            self.bytes.saturating_add(bytes),
+        )
+    }
+
+    fn budget(
+        self,
+        retained: usize,
+        owned_bytes: usize,
+        temporary: &[&OwnedMaterial],
+    ) -> Result<usize, ManufacturingError> {
+        let (units, bytes) = self.with(temporary);
+        super::remaining_geometry_units(
+            retained.saturating_add(units),
+            owned_bytes.saturating_add(bytes),
+        )
+    }
+}
+
 /// Column bounds and one clearance distance bounding every per-piece distance
 /// for pieces inside `frame` (overlay padding is monotone in the work frame).
 #[derive(Clone, Copy)]
@@ -4009,8 +4046,7 @@ impl PieceBatch {
         piece: &Polygon<f64>,
         retained: usize,
         owned_bytes: usize,
-        support: &[Rc<OwnedMaterial>],
-        interfaces: &[Rc<OwnedMaterial>],
+        live: Live,
         temporary: &[&OwnedMaterial],
     ) -> Result<(), ManufacturingError> {
         let points =
@@ -4021,14 +4057,12 @@ impl PieceBatch {
         let records = (self.pieces.0.len() + 1)
             .max(self.pieces.0.capacity())
             .saturating_mul(2 * std::mem::size_of::<Polygon<f64>>());
-        remaining_geometry_budget(
+        live.budget(
             retained.saturating_add(self.points).saturating_add(points),
             owned_bytes
                 .saturating_add(self.bytes)
                 .saturating_add(bytes)
                 .saturating_add(records),
-            support,
-            interfaces,
             temporary,
         )?;
         let b = piece.bounding_rect().ok_or_else(|| {
@@ -4141,9 +4175,7 @@ fn subtract_batch(
     xy_clearance_mm: f64,
     retained: usize,
     owned_bytes: usize,
-    support: &[Rc<OwnedMaterial>],
-    interfaces: &[Rc<OwnedMaterial>],
-    protected: &OwnedMaterial,
+    live: Live,
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
@@ -4156,9 +4188,7 @@ fn subtract_batch(
         xy_clearance_mm,
         retained,
         owned,
-        support,
-        interfaces,
-        protected,
+        live,
         work,
         foreign_work,
         cancel,
@@ -4168,14 +4198,7 @@ fn subtract_batch(
         return Ok(());
     };
     *column = next;
-    *proximity = index_column(
-        column,
-        retained,
-        owned,
-        support,
-        interfaces,
-        &[protected, column],
-    )?;
+    *proximity = index_column(column, retained, owned, live, &[column])?;
     Ok(())
 }
 
@@ -4191,9 +4214,7 @@ fn subtract_staged(
     xy_clearance_mm: f64,
     retained: usize,
     owned_bytes: usize,
-    support: &[Rc<OwnedMaterial>],
-    interfaces: &[Rc<OwnedMaterial>],
-    protected: &OwnedMaterial,
+    live: Live,
     work: &mut usize,
     foreign_work: usize,
     cancel: &AtomicBool,
@@ -4212,7 +4233,7 @@ fn subtract_staged(
     // facet hulls then cross only their few own edges, not offset cycles.
     let merged = if staged.pieces.0.len() > 1 {
         let _union_time = trace.map(|trace| trace.measure(&trace.union_time));
-        let (units, bytes) = geometry_receipt(support, interfaces, &[protected, column]);
+        let (units, bytes) = live.with(&[column]);
         // Packed overlay input and output each hold at most twice the staged
         // coordinates before the merged pieces replace the staged copy.
         super::remaining_geometry_units(
@@ -4240,32 +4261,19 @@ fn subtract_staged(
         owned_bytes
             .saturating_add(staged.owned_bytes())
             .saturating_add(merged.bytes),
-        support,
-        interfaces,
-        &[protected, column],
+        live,
+        &[column],
         cancel,
     )?);
     drop(offset_time);
     drop(staged);
     drop(merged);
-    remaining_geometry_budget(
-        retained,
-        owned_bytes,
-        support,
-        interfaces,
-        &[protected, column, &clearance],
-    )?;
+    live.budget(retained, owned_bytes, &[column, &clearance])?;
     charge_boolean(column, &clearance, work, foreign_work, cancel)?;
     let difference_time = trace.map(|trace| trace.measure(&trace.difference_time));
     let next = OwnedMaterial::new(column.material.difference(&clearance.material));
     drop(difference_time);
-    remaining_geometry_budget(
-        retained,
-        owned_bytes,
-        support,
-        interfaces,
-        &[protected, column, &clearance, &next],
-    )?;
+    live.budget(retained, owned_bytes, &[column, &clearance, &next])?;
     region::check_size(&next)?;
     Ok(Some(next))
 }
@@ -4275,12 +4283,10 @@ fn subtract_staged(
 const BEAD_OUTSIDE_ALLOWANCE_MM: f64 = super::OFFSET_TOLERANCE_MM * 0.4;
 
 /// Admission context for staging actual object bead capsules.
-struct BeadStaging<'a> {
+struct BeadStaging {
     retained: usize,
     owned_bytes: usize,
-    support: &'a [Rc<OwnedMaterial>],
-    interfaces: &'a [Rc<OwnedMaterial>],
-    protected: &'a OwnedMaterial,
+    live: Live,
 }
 
 /// One section's admitted object floor and the outward XY bounds of its
@@ -4360,7 +4366,7 @@ fn stage_touching_sheet(
     column: &MultiPolygon<f64>,
     proximity: &proximity::ColumnProximity,
     xy_clearance_mm: f64,
-    admission: &BeadStaging<'_>,
+    admission: &BeadStaging,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<PieceBatch, ManufacturingError> {
@@ -4412,9 +4418,8 @@ fn stage_touching_sheet(
                 piece,
                 admission.retained,
                 admission.owned_bytes,
-                admission.support,
-                admission.interfaces,
-                &[admission.protected],
+                admission.live,
+                &[],
             ) {
                 failure = Some(error);
                 return Ok(false);
@@ -4442,7 +4447,7 @@ fn stage_object_beads(
     column: &MultiPolygon<f64>,
     proximity: &proximity::ColumnProximity,
     xy_clearance_mm: f64,
-    admission: &BeadStaging<'_>,
+    admission: &BeadStaging,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<PieceBatch, ManufacturingError> {
@@ -4483,9 +4488,8 @@ fn stage_object_beads(
             &capsule,
             admission.retained,
             admission.owned_bytes,
-            admission.support,
-            admission.interfaces,
-            &[admission.protected],
+            admission.live,
+            &[],
         )?;
     }
     Ok(batch)
@@ -4502,18 +4506,11 @@ fn index_column(
     column: &MultiPolygon<f64>,
     retained: usize,
     owned_bytes: usize,
-    support: &[Rc<OwnedMaterial>],
-    interfaces: &[Rc<OwnedMaterial>],
+    live: Live,
     temporary: &[&OwnedMaterial],
 ) -> Result<proximity::ColumnProximity, ManufacturingError> {
     let estimate = proximity::ColumnProximity::bytes_for(column);
-    remaining_geometry_budget(
-        retained,
-        owned_bytes.saturating_add(estimate),
-        support,
-        interfaces,
-        temporary,
-    )?;
+    live.budget(retained, owned_bytes.saturating_add(estimate), temporary)?;
     Ok(proximity::ColumnProximity::new(column))
 }
 
@@ -4782,7 +4779,9 @@ mod tests {
             (x: -1.0, y: -1.0), (x: 4.0, y: -1.0),
             (x: 4.0, y: 11.0), (x: -1.0, y: 11.0),
         ];
-        batch.stage(&mask, 0, 0, &[], &[], &[&column]).unwrap();
+        batch
+            .stage(&mask, 0, 0, Live::default(), &[&column])
+            .unwrap();
         let before = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
         subtract_batch(
             &mut batch,
@@ -4791,9 +4790,7 @@ mod tests {
             0.2,
             0,
             0,
-            &[],
-            &[],
-            &protected,
+            Live::of(&[], &[], &[&protected]),
             &mut 0,
             0,
             &cancel,
