@@ -91,6 +91,7 @@ impl ColumnProximity {
             + column.0.len().saturating_mul(std::mem::size_of::<Bounds>())
     }
 
+    #[cfg(test)]
     pub(super) fn bytes(&self) -> usize {
         self.edges.capacity() * std::mem::size_of::<Edge>()
             + self.components.capacity() * std::mem::size_of::<Bounds>()

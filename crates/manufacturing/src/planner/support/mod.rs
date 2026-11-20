@@ -23,13 +23,10 @@ pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
-#[cfg(test)]
-mod direct_bed_test;
-#[cfg(test)]
-pub(super) use direct_bed_test::with_arm as with_direct_bed_arm;
 pub(in crate::planner) mod projection;
 mod proximity;
 mod raster;
+mod sweep;
 
 struct ProjectionTrace {
     enabled: bool,
@@ -104,12 +101,6 @@ impl ProjectionTrace {
             union_time: Default::default(),
             offset_time: Default::default(),
             difference_time: Default::default(),
-        }
-    }
-
-    fn add(&self, counter: &std::cell::Cell<usize>, count: usize) {
-        if self.enabled {
-            counter.set(counter.get().saturating_add(count));
         }
     }
 
@@ -427,8 +418,6 @@ pub(super) struct SupportReplay {
     /// Ascending schedule identity. A truncated pass keeps earlier entries
     /// above its last layer.
     entries: Vec<ReplayEntry>,
-    columns: std::collections::BTreeMap<usize, (usize, usize, MultiPolygon<f64>)>,
-    column_frame: Option<[u64; 5]>,
     bytes: usize,
 }
 
@@ -1092,8 +1081,6 @@ pub(super) fn realize(
         SupportReplay::default()
     };
     let mut replay_new = None;
-    let mut columns_new = std::collections::BTreeMap::new();
-    let mut columns_bytes = 0usize;
     let outcome = (|| {
         let SupportInput {
             build_bounds: _,
@@ -1128,7 +1115,6 @@ pub(super) fn realize(
             .into_iter()
             .map(Some)
             .collect::<Vec<_>>();
-        let column_replay = std::mem::take(&mut replay_old.columns);
         // Earlier entry with each output layer's schedule identity.
         let mut cursor = 0usize;
         let mut entry_at = |identity: [u64; 4], entries: &[Option<ReplayEntry>]| {
@@ -1682,8 +1668,6 @@ pub(super) fn realize(
                 }
             }
         }
-        let column_valid = replay_limit.min(layers.len());
-        let mut recording_columns = recording;
         if recording {
             // A truncated pass saw only a prefix; earlier entries above it
             // remain exact records of their own inputs.
@@ -1701,8 +1685,6 @@ pub(super) fn realize(
                 .map(ReplayEntry::bytes)
                 .fold(0usize, usize::saturating_add);
             replay_new = Some(SupportReplay {
-                columns: Default::default(),
-                column_frame: None,
                 schedule: schedule.iter().map(elevation_bits).collect(),
                 entries: recorded,
                 bytes,
@@ -2019,7 +2001,7 @@ pub(super) fn realize(
         nominal.sort_unstable_by(|a, b| a.floor.total_cmp(&b.floor).then(a.index.cmp(&b.index)));
         check_cancel(cancel)?;
         let base_retained = retained;
-        let mut retained = retained
+        let retained = retained
             .checked_add(nominal.capacity())
             .filter(|n| *n <= crate::working_set::units())
             .ok_or_else(|| {
@@ -2035,12 +2017,6 @@ pub(super) fn realize(
             &interfaces,
             &[&protected],
         )?;
-        // Object bead edges reaching outside each section's D, found once per
-        // section on first need and shared by every later demand.
-        let mut outside_beads: Vec<Option<Vec<beads::BeadEdge>>> = Vec::new();
-        reserve_owned(&mut outside_beads, nominal.len(), owned_bytes)?;
-        outside_beads.resize_with(nominal.len(), || None);
-        owned_bytes = owned_bytes.saturating_add(vec_bytes(&outside_beads));
         let frame = projection::Frame::new(
             input,
             xy_clearance_mm,
@@ -2048,685 +2024,54 @@ pub(super) fn realize(
                 .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1),
             cancel,
         )?;
-        let column_valid = if replay_old.column_frame == Some(frame.identity()) {
-            column_valid
-        } else {
-            0
-        };
-        if let Some(replay) = &mut replay_new {
-            replay.column_frame = Some(frame.identity());
-        }
-        let projection_input = projection::Input {
-            support: input,
+        let output = sweep::Sweep {
             layers,
+            sections,
+            schedule,
+            recipe,
+            frame: &frame,
             demands: &demands,
             roots: &roots,
             landings: &root_landings,
-            replay: &column_replay,
-            valid: column_valid,
+            protected: &protected,
+            nominal: &nominal,
             gap: selection_gap_mm,
             requested: xy_clearance_mm,
-        };
-        let mut projected_columns = projection::Columns::new(frame);
-        let projection_receipt = projected_columns.receipt();
-        retained = retained.saturating_add(projection_receipt.0);
-        owned_bytes = owned_bytes.saturating_add(projection_receipt.1);
-        for demand in &demands {
-            check_cancel(cancel)?;
-            let demanded_path = &layers[demand.target].paths[demand.failure.path];
-            let Some(top) = contact_layer(
-                layers,
-                demand.target,
-                demanded_path,
-                selection_gap_mm,
-                &mut work,
-                cancel,
-            )?
-            else {
-                // No support layer fits below the Z gap this close to the
-                // bed; the stroke prints as a reported overhang.
-                continue;
-            };
-            let interface_bottom = layers[top].z_mm - interface_thickness_mm;
-            // Realized object D supplies a conservative support candidate only
-            // AFTER actual deposited strokes prove demand; it is never an anchor map.
-            // The half-bead search expansion permits a real support bead under an
-            // outer edge; subsequent C/nominal-D clipping and actual proofs own it.
-            // A replayed demand's layer and every section below it are bit-identical
-            // to the recorded pass, so its corridor clipped by all occupied sections
-            // is too; protected voids are still applied below.
-            for (root_index, root) in std::iter::once(Root::Bed)
-                .chain(roots.iter().copied())
-                .enumerate()
-            {
-                let first = root.first_layer();
-                if first > top {
-                    continue;
-                }
-                trace.add(
-                    if matches!(root, Root::Bed) {
-                        &trace.bed
-                    } else {
-                        &trace.part
-                    },
-                    1,
-                );
-                let corridor_floor = layers[first].lower_z_mm;
-                let replayed_column = column_replay
-                    .get(&demand.target)
-                    .filter(|(path, recorded_top, _)| {
-                        matches!(root, Root::Bed)
-                            && demand.target < column_valid
-                            && *path == demand.failure.path
-                            && *recorded_top == top
-                    })
-                    .map(|(_, _, material)| material.clone());
-                let mut column = if let Some(material) = replayed_column {
-                    OwnedMaterial::new(material)
-                } else {
-                    let before = projected_columns.receipt();
-                    let admission = projection::Admission {
-                        retained: retained.saturating_sub(before.0),
-                        owned_bytes: owned_bytes.saturating_sub(before.1),
-                        support: &support_regions,
-                        interfaces: &interfaces,
-                        protected: &protected,
-                        foreign_work,
-                    };
-                    let result = projected_columns.take(
-                        (demand.target, root_index),
-                        &projection_input,
-                        &admission,
-                        &mut work,
-                        &trace,
-                        cancel,
-                    );
-                    let after = projected_columns.receipt();
-                    retained = retained - before.0 + after.0;
-                    owned_bytes = owned_bytes - before.1 + after.1;
-                    result?
-                };
-                if recording_columns && matches!(root, Root::Bed) {
-                    let bytes = column.bytes.saturating_add(std::mem::size_of::<(
-                        usize,
-                        usize,
-                        MultiPolygon<f64>,
-                    )>());
-                    if super::remaining_geometry_units(
-                        retained,
-                        owned_bytes
-                            .saturating_add(columns_bytes)
-                            .saturating_add(bytes),
-                    )
-                    .is_ok()
-                    {
-                        columns_bytes += bytes;
-                        columns_new.insert(
-                            demand.target,
-                            (demand.failure.path, top, column.material.clone()),
-                        );
-                    } else {
-                        recording_columns = false;
-                        columns_new.clear();
-                        columns_bytes = 0;
-                    }
-                }
-                let mut relieved = None;
-                for (ordinal, (mask, scope)) in protected.0.iter().zip(&scopes).enumerate() {
-                    if column.0.is_empty() {
-                        break;
-                    }
-                    check_cancel(cancel)?;
-                    work = work.checked_add(1).ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "cumulative protected-void scope work counter overflow",
-                        )
-                    })?;
-                    if !void_reaches_corridor(&scope.height, corridor_floor, layers[top].z_mm) {
-                        continue;
-                    }
-                    super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
-                    let Some(distance) =
-                        candidate_clearance_distance(mask, &column, xy_clearance_mm)?
-                    else {
-                        continue;
-                    };
-                    if relieved.is_none()
-                        && scope.allows_roof_access(
-                            root,
-                            &layers[demand.target],
-                            &layers[top],
-                            demanded_path,
-                            &demand.failure,
-                            width,
-                            &mut work,
-                            cancel,
-                        )?
-                    {
-                        relieved = Some(ordinal);
-                        continue;
-                    }
-                    let clearance = OwnedMaterial::new(offset_polygon_owned(
-                        mask,
-                        distance,
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                        cancel,
-                    )?);
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance],
-                    )?;
-                    charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)?;
-                    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance, &next],
-                    )?;
-                    column = next;
-                    region::check_size(&column)?;
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column, &clearance],
-                    )?;
-                }
-                region::check_size(&column)?;
-                if column.0.is_empty() {
-                    continue;
-                }
-                region::canonicalize(&mut column.material);
-                column.bytes = super::native::material_bytes(&mut column.material);
-                column.units = material_units(&column.material);
-                remaining_geometry_budget(
-                    retained,
-                    owned_bytes.saturating_add(
-                        std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
-                    ),
-                    &support_regions,
-                    &interfaces,
-                    &[&protected, &column],
-                )?;
-                let mut column = column.into_shared();
-                let mut proximity = index_column(
-                    &column,
-                    retained,
-                    owned_bytes,
-                    &support_regions,
-                    &interfaces,
-                    &[&protected, &column],
-                )?;
-                let mut shared_union = None;
-                let mut next_nominal = 0;
-                // A weak source can outlive its last strong geometry owner. Reserve
-                // old/new Rc header records across cache replacement, including offsets
-                // performed while the previous cache entry is still live.
-                let weak_header_reservation =
-                    2 * (std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>());
-                owned_bytes = owned_bytes.saturating_add(weak_header_reservation);
-                let startup_floor = program_coordinates::project_xyz6_bead_height_mm(
-                    layers[first].z_mm,
-                    layers[first].height_mm,
-                )?[0];
-                for i in first..=top {
-                    check_cancel(cancel)?;
-                    let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
-                        layers[i].z_mm,
-                        layers[i].z_mm,
-                        layers[i].z_mm - layers[i].lower_z_mm,
-                    )?[1];
-                    // Higher portions are subsets of the already bed-anchored lower
-                    // column. Do not lower/remap its original eligible contact top.
-                    while let Some(&NominalScope {
-                        index,
-                        floor,
-                        ceiling,
-                        beads,
-                    }) = nominal.get(next_nominal)
-                    {
-                        super::native::charge_support_clearance(&mut work, cancel)?;
-                        if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm
-                        {
-                            break;
-                        }
-                        if program_coordinates::enclosed_vertical_gap_mm(startup_floor, ceiling)?
-                            >= z_gap_mm
-                        {
-                            next_nominal += 1;
-                            continue;
-                        }
-                        for polygon in &sections[index].material.0 {
-                            check_cancel(cancel)?;
-                            if column.0.is_empty() {
-                                break;
-                            }
-                            super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
-                            let Some(distance) =
-                                candidate_clearance_distance(polygon, &column, xy_clearance_mm)?
-                            else {
-                                continue;
-                            };
-                            if proximity.separated(polygon, separation_reach(distance)) {
-                                continue;
-                            }
-                            let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
-                            let clearance = OwnedMaterial::new(offset_polygon_owned(
-                                polygon,
-                                distance,
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column],
-                                cancel,
-                            )?);
-                            remaining_geometry_budget(
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column, &clearance],
-                            )?;
-                            charge_boolean(&column, &clearance, &mut work, foreign_work, cancel)
-                                .map_err(|mut e| {
-                                    e.message = format!(
-                                        "support layer {i}, nominal object owner {index}: {}",
-                                        e.message,
-                                    );
-                                    e
-                                })?;
-                            let next =
-                                OwnedMaterial::new(column.material.difference(&clearance.material));
-                            region::check_size(&next)?;
-                            remaining_geometry_budget(
-                                retained,
-                                owned_bytes.saturating_add(
-                                    std::mem::size_of::<OwnedMaterial>()
-                                        + 2 * std::mem::size_of::<usize>(),
-                                ),
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column, &clearance, &next],
-                            )?;
-                            column = next.into_shared();
-                            shared_union = None;
-                            drop(clearance);
-                            proximity = index_column(
-                                &column,
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column],
-                            )?;
-                        }
-                        // Actual object beads can extend outside D (variable-width
-                        // walls, Bridge construction). Exclude their nominal
-                        // capsules at the same clearance so final actual support
-                        // capsules meet the unchanged pair proof by construction.
-                        if let Some(beads) = beads
-                            && !column.0.is_empty()
-                            && !ColumnScreen::new(&column, xy_clearance_mm)?
-                                .is_some_and(|screen| screen.rejects(beads))
-                        {
-                            if outside_beads[next_nominal].is_none() {
-                                let section = &sections[index];
-                                let objects = layers
-                                    .get(
-                                        section.start as usize
-                                            ..(section.end as usize).min(layers.len()),
-                                    )
-                                    .unwrap_or(&[]);
-                                let edges = beads::outside_material(
-                                    &section.material,
-                                    objects.iter().flat_map(|layer| &layer.paths),
-                                    BEAD_OUTSIDE_ALLOWANCE_MM,
-                                    &mut work,
-                                    cancel,
-                                )?;
-                                owned_bytes = owned_bytes.saturating_add(vec_bytes(&edges));
-                                remaining_geometry_budget(
-                                    retained,
-                                    owned_bytes,
-                                    &support_regions,
-                                    &interfaces,
-                                    &[&protected, &column],
-                                )?;
-                                outside_beads[next_nominal] = Some(edges);
-                            }
-                            let edges = outside_beads[next_nominal]
-                                .as_deref()
-                                .expect("cached outside bead edges");
-                            let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
-                            let _bead_time = trace.measure(&trace.bead_time);
-                            let mut batch = stage_object_beads(
-                                edges,
-                                &column,
-                                &proximity,
-                                xy_clearance_mm,
-                                &BeadStaging {
-                                    retained,
-                                    owned_bytes,
-                                    support: &support_regions,
-                                    interfaces: &interfaces,
-                                    protected: &protected,
-                                },
-                                &mut work,
-                                cancel,
-                            )?;
-                            if !batch.pieces.0.is_empty() {
-                                let next = subtract_staged(
-                                &mut batch,
-                                &column,
-                                xy_clearance_mm,
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &protected,
-                                &mut work,
-                                foreign_work,
-                                cancel,
-                                Some(&trace),
-                            )
-                            .map_err(|mut e| {
-                                e.message = format!(
-                                    "support layer {i}, actual object beads of owner {index}: {}",
-                                    e.message,
-                                );
-                                e
-                            })?;
-                                if let Some(next) = next {
-                                    column = next.into_shared();
-                                    shared_union = None;
-                                    proximity = index_column(
-                                        &column,
-                                        retained,
-                                        owned_bytes,
-                                        &support_regions,
-                                        &interfaces,
-                                        &[&protected, &column],
-                                    )?;
-                                }
-                            }
-                        }
-                        next_nominal += 1;
-                    }
-                    // The top bead's actual upper height touches the next section's
-                    // closed occupancy sheet; final proof keeps such equal sheets.
-                    // Clip only this top layer, never the lower corridor.
-                    if i == top && !column.0.is_empty() {
-                        let _sheet_time = trace.measure(&trace.sheet_time);
-                        let owned_bytes = owned_bytes.saturating_add(proximity.bytes());
-                        let mut batch = stage_touching_sheet(
-                            layers,
-                            sections,
-                            top,
-                            &column,
-                            &proximity,
-                            xy_clearance_mm,
-                            &BeadStaging {
-                                retained,
-                                owned_bytes,
-                                support: &support_regions,
-                                interfaces: &interfaces,
-                                protected: &protected,
-                            },
-                            &mut work,
-                            cancel,
-                        )?;
-                        if let Some(next) = subtract_staged(
-                            &mut batch,
-                            &column,
-                            xy_clearance_mm,
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &protected,
-                            &mut work,
-                            foreign_work,
-                            cancel,
-                            Some(&trace),
-                        )? {
-                            column = next.into_shared();
-                            shared_union = None;
-                            proximity = index_column(
-                                &column,
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column],
-                            )?;
-                        }
-                    }
-                    if column.0.is_empty() {
-                        break;
-                    }
-                    if i == first
-                        && let Root::Part { object_layer, .. } = root
-                    {
-                        remaining_geometry_budget(
-                            retained.saturating_add(column.units.saturating_mul(2)),
-                            owned_bytes.saturating_add(column.bytes.saturating_mul(2)),
-                            &support_regions,
-                            &interfaces,
-                            &[&protected, &column],
-                        )?;
-                        let mut accepted = OwnedMaterial::new(MultiPolygon(Vec::new()));
-                        for polygon in &column.material.0 {
-                            remaining_geometry_budget(
-                                retained,
-                                owned_bytes,
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column, &accepted],
-                            )?;
-                            let candidate = OwnedMaterial::new(MultiPolygon(vec![polygon.clone()]));
-                            let domains = raster::Domains::new(
-                                &candidate,
-                                &candidate,
-                                true,
-                                width,
-                                retained
-                                    + geometry_receipt(
-                                        &support_regions,
-                                        &interfaces,
-                                        &[&protected, &column, &candidate, &accepted],
-                                    )
-                                    .0,
-                                owned_bytes
-                                    + geometry_receipt(
-                                        &support_regions,
-                                        &interfaces,
-                                        &[&protected, &column, &candidate, &accepted],
-                                    )
-                                    .1,
-                                anchors.retained_bytes(),
-                                &mut work,
-                                foreign_work,
-                                cancel,
-                            )?;
-                            let preferred = region::HatchAxis::for_policy(
-                                RectilinearAxisPolicy::AlternatingXY,
-                                super::hatch_key(schedule, i),
-                            );
-                            for axis in [preferred, preferred.orthogonal()] {
-                                let hatch = region::HatchLayer {
-                                    roof: None,
-                                    width_mm: width,
-                                    z: layers[i].z_mm,
-                                    lower_z: layers[i].lower_z_mm,
-                                    height: layers[i].height_mm,
-                                    axis,
-                                    top_axis: axis,
-                                    recipe,
-                                };
-                                let (mut paths, receipt) = domains.paths(
-                                    &candidate,
-                                    1.0,
-                                    &hatch,
-                                    *segments,
-                                    &mut work,
-                                    foreign_work,
-                                    cancel,
-                                )?;
-                                anchors.set_budget(domains.anchor_budget(&paths)?);
-                                raster::retain_anchored(
-                                    &mut paths,
-                                    receipt.paths,
-                                    std::iter::empty(),
-                                    layers[object_layer]
-                                        .paths
-                                        .iter()
-                                        .filter(|path| path.kind.is_model()),
-                                    recipe,
-                                    retained
-                                        + geometry_receipt(
-                                            &support_regions,
-                                            &interfaces,
-                                            &[&protected, &column, &candidate, &accepted],
-                                        )
-                                        .0,
-                                    domains.owned_bytes(),
-                                    &mut anchors,
-                                    &mut anchor_work,
-                                    cancel,
-                                )?;
-                                if !paths.is_empty() {
-                                    accepted.material.0.push(polygon.clone());
-                                    accepted.bytes =
-                                        super::native::material_bytes(&mut accepted.material);
-                                    accepted.units = material_units(&accepted.material);
-                                    remaining_geometry_budget(
-                                        retained,
-                                        owned_bytes,
-                                        &support_regions,
-                                        &interfaces,
-                                        &[&protected, &column, &candidate, &accepted],
-                                    )?;
-                                    break;
-                                }
-                            }
-                            anchors.set_budget(0);
-                        }
-                        column = accepted.into_shared();
-                        shared_union = None;
-                        proximity = index_column(
-                            &column,
-                            retained,
-                            owned_bytes,
-                            &support_regions,
-                            &interfaces,
-                            &[&protected, &column],
-                        )?;
-                        if column.0.is_empty() {
-                            break;
-                        }
-                    }
-                    contact_tops[demand.target] = Some(top);
-                    if let Some(ordinal) = relieved {
-                        let access = &mut scopes[ordinal].access;
-                        if let Some(last) = access.last_mut().filter(|last| {
-                            last.layers.end == i && Rc::ptr_eq(&last.column, &column)
-                        }) {
-                            last.layers.end += 1;
-                        } else {
-                            let growth = if access.capacity() == access.len() {
-                                access.len().max(4) * std::mem::size_of::<RoofAccess>()
-                            } else {
-                                0
-                            };
-                            let payload = column.bytes.saturating_add(column.header_bytes);
-                            remaining_geometry_budget(
-                                retained,
-                                owned_bytes
-                                    .saturating_add(payload)
-                                    .saturating_add(growth)
-                                    .saturating_add(vec_bytes(access)),
-                                &support_regions,
-                                &interfaces,
-                                &[&protected, &column],
-                            )?;
-                            if growth != 0 {
-                                access.try_reserve_exact(access.len().max(4)).map_err(|_| {
-                                    error(
-                                        ManufacturingErrorCode::ResourceLimit,
-                                        "cannot allocate rooted roof access records",
-                                    )
-                                })?;
-                            }
-                            let added = payload.saturating_add(growth);
-                            support_metadata_bytes = support_metadata_bytes.saturating_add(added);
-                            owned_bytes = owned_bytes.saturating_add(added);
-                            access.push(RoofAccess {
-                                layers: i..i + 1,
-                                column: Rc::clone(&column),
-                            });
-                        }
-                    }
-                    let (live_units, live_bytes) =
-                        geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
-                    merge_shared(
-                        &mut support_regions[i],
-                        &column,
-                        &mut shared_union,
-                        retained.saturating_add(live_units),
-                        owned_bytes.saturating_add(live_bytes),
-                        &mut work,
-                        foreign_work,
-                        cancel,
-                    )?;
-                    if layers[i].z_mm > interface_bottom
-                        || (matches!(root, Root::Part { .. })
-                            && layers[i].lower_z_mm
-                                < layers[first].lower_z_mm + interface_thickness_mm)
-                    {
-                        let (live_units, live_bytes) =
-                            geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
-                        merge_shared(
-                            &mut interfaces[i],
-                            &column,
-                            &mut shared_union,
-                            retained.saturating_add(live_units),
-                            owned_bytes.saturating_add(live_bytes),
-                            &mut work,
-                            foreign_work,
-                            cancel,
-                        )?;
-                    }
-                    remaining_geometry_budget(
-                        retained,
-                        owned_bytes,
-                        &support_regions,
-                        &interfaces,
-                        &[&protected, &column],
-                    )?;
-                }
-                owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
+            interface_thickness: interface_thickness_mm,
+            retained,
+            owned_bytes,
+            foreign_work,
+        }
+        .run(
+            &scopes,
+            segments,
+            &mut anchors,
+            &mut anchor_work,
+            &mut work,
+            cancel,
+        )?;
+        support_regions = output.support;
+        interfaces = output.interfaces;
+        for (target, top) in output.contact_tops.into_iter().enumerate() {
+            if top.is_some() {
+                contact_tops[target] = top;
             }
         }
-        let projection_receipt = projected_columns.receipt();
-        owned_bytes -= projection_receipt.1;
-        drop(projected_columns);
+        for (ordinal, layer, column) in output.access {
+            let access = &mut scopes[ordinal].access;
+            if let Some(last) = access.last_mut().filter(|last| last.layers.end == layer) {
+                last.layers.end += 1;
+                last.column = column;
+            } else {
+                access.push(RoofAccess {
+                    layers: layer..layer + 1,
+                    column,
+                });
+            }
+        }
         trace.report("corridors_complete");
         timing.mark("roots_and_corridors");
         drop(nominal);
-        // Recomputed for the raster stage below, which no longer charges these.
-        drop(outside_beads);
         let mut retained = base_retained;
         let mut established = Vec::new();
         reserve_owned(&mut established, layers.len(), owned_bytes)?;
@@ -3388,7 +2733,6 @@ pub(super) fn realize(
                 .saturating_add(support_metadata_bytes)
                 .saturating_add(layer_payload_bytes(layers.iter()))
                 .saturating_add(anchors.retained_bytes())
-                .saturating_add(columns_bytes)
                 .saturating_add(replay_new.as_ref().map_or(0, |replay| replay.bytes)),
             &support_regions,
             &interfaces,
@@ -3414,9 +2758,7 @@ pub(super) fn realize(
         timing.mark("final_actual_clearance");
         Ok(SupportAdmission::Complete(withdrawal))
     })();
-    if let Some(mut replay) = replay_new {
-        replay.columns = columns_new;
-        replay.bytes = replay.bytes.saturating_add(columns_bytes);
+    if let Some(replay) = replay_new {
         work_bank.replay = replay;
     }
     work_bank.finish(work, foreign_work, anchor_work)?;
@@ -4590,9 +3932,6 @@ impl Default for PieceBatch {
 }
 
 impl PieceBatch {
-    /// Flush granularity bounds the staged copy, not total work.
-    const FLUSH_POINTS: usize = 1 << 14;
-
     fn stage(
         &mut self,
         piece: &Polygon<f64>,

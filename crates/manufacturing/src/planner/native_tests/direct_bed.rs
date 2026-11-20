@@ -187,27 +187,8 @@ fn part_launch(layers: &[PrintLayer], top: usize, cancel: &AtomicBool) -> (usize
     (launch, donor)
 }
 
-fn noneligible_plan_bytes(plan: &NormalizedPrintPlan, top: usize) -> Vec<u8> {
-    let mut plan = plan.clone();
-    plan.native_geometry.geometry_work = 0;
-    for layer in &mut plan.layers[..=top] {
-        for path in layer.paths.iter().filter(|path| path.kind.is_support()) {
-            assert!(
-                inside(path, EXCLUSIVE) || inside(path, WEST) || inside(path, EAST),
-                "support path crosses or escapes an ownership partition"
-            );
-        }
-        layer
-            .paths
-            .retain(|path| !(path.kind.is_support() && inside(path, EXCLUSIVE)));
-        layer.region_coverage.support_area_mm2 = 0.0;
-        layer.region_coverage.support_nominal_deposition_volume_mm3 = 0.0;
-    }
-    serde_json::to_vec(&plan).unwrap()
-}
-
 #[test]
-fn exclusive_direct_bed_query_preserves_mixed_native_roots_and_replay() {
+fn support_sweep_installs_mixed_native_roots_and_replays() {
     let mut scene = NativeScene::new(HOLE, &[translated(0.0, 0.0, BLOCKER_BIRTH)]);
     scene.add(
         BOX,
@@ -219,77 +200,31 @@ fn exclusive_direct_bed_query_preserves_mixed_native_roots_and_replay() {
     );
     let intent = intent(true);
     let cancel = AtomicBool::new(false);
-    let run = |enabled| {
-        support::with_direct_bed_arm(enabled, || compile(scene.input(&intent), &cancel).unwrap())
-    };
-    let (control, old) = run(false);
-    let (treatment, new) = run(true);
+    let result = compile(scene.input(&intent), &cancel).unwrap();
     drop(scene);
-
-    let layers = &control.plan.layers;
+    // One shared sweep serves an exclusive bed demand, a later bed demand and
+    // an on-part landing over a bed-blocking slab, each with its real contact.
+    let returned = reload(&encode(&result), &result.program);
+    let report = crate::verify_bundle(&returned, &cancel).unwrap();
+    assert!(report.verified, "{report:#?}");
+    let layers = &returned.plan.layers;
     let target = roof_index(layers, EXCLUSIVE_BIRTH, EXCLUSIVE);
-    let legacy_target = roof_index(layers, LEGACY_BIRTH, WEST);
-    assert_eq!(roof_index(layers, LEGACY_BIRTH, EAST), legacy_target);
-    assert_ne!(target, legacy_target);
-    let key = (target, 0);
-    assert!(
-        old.raw_dispatch
-            .iter()
-            .any(|&(_, identity)| identity == key)
-    );
-    assert!(
-        new.raw_dispatch
-            .iter()
-            .all(|&(_, identity)| identity != key)
-    );
-    assert_eq!(
-        old.raw_dispatch
-            .iter()
-            .copied()
-            .filter(|&(_, identity)| identity != key)
-            .collect::<Vec<_>>(),
-        new.raw_dispatch
-    );
-    assert!(
-        new.raw_dispatch
-            .iter()
-            .any(|&(_, identity)| identity == (legacy_target, 0))
-    );
-    assert!(
-        new.raw_dispatch
-            .iter()
-            .any(|&(_, (target, root))| target == legacy_target && root > 0)
-    );
-
-    let mut old_witness = None;
-    for result in [&control, &treatment] {
-        let returned = reload(&encode(result), &result.program);
-        let report = crate::verify_bundle(&returned, &cancel).unwrap();
-        assert!(report.verified, "{report:#?}");
-        let plan = &returned.plan;
-        let layers = &plan.layers;
-        assert_eq!(roof_index(layers, EXCLUSIVE_BIRTH, EXCLUSIVE), target);
-        let direct_top = roof_contact(layers, target, EXCLUSIVE, &intent, &cancel);
-        let legacy_bed = roof_contact(layers, legacy_target, EAST, &intent, &cancel);
-        let legacy_part = roof_contact(layers, legacy_target, WEST, &intent, &cancel);
-        assert!(direct_top < legacy_bed && direct_top < legacy_part);
-        assert_bed_lifetime(layers, direct_top, EXCLUSIVE);
-        assert_bed_lifetime(layers, legacy_bed, EAST);
-        let west = part_launch(layers, legacy_part, &cancel);
-        let witness = (direct_top, legacy_bed, legacy_part, west);
-        if let Some(expected) = old_witness {
-            assert_eq!(expected, witness, "installed root or contact changed");
-        } else {
-            old_witness = Some(witness);
+    let later = roof_index(layers, LEGACY_BIRTH, WEST);
+    assert_eq!(roof_index(layers, LEGACY_BIRTH, EAST), later);
+    assert_ne!(target, later);
+    let direct_top = roof_contact(layers, target, EXCLUSIVE, &intent, &cancel);
+    let bed_top = roof_contact(layers, later, EAST, &intent, &cancel);
+    let part_top = roof_contact(layers, later, WEST, &intent, &cancel);
+    assert!(direct_top < bed_top && direct_top < part_top);
+    assert_bed_lifetime(layers, direct_top, EXCLUSIVE);
+    assert_bed_lifetime(layers, bed_top, EAST);
+    part_launch(layers, part_top, &cancel);
+    for layer in layers {
+        for path in layer.paths.iter().filter(|path| path.kind.is_support()) {
+            assert!(
+                inside(path, EXCLUSIVE) || inside(path, WEST) || inside(path, EAST),
+                "support path crosses or escapes an ownership partition"
+            );
         }
     }
-    let (top, ..) = old_witness.unwrap();
-    assert_eq!(
-        noneligible_plan_bytes(&control.plan, top),
-        noneligible_plan_bytes(&treatment.plan, top)
-    );
-    assert_eq!(
-        crate::program_descriptor(&control.program),
-        crate::program_descriptor(&treatment.program)
-    );
 }

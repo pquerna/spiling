@@ -269,28 +269,6 @@ pub(super) fn budget_polygon_accumulated(
     polygon_budget(std::iter::once(polygon), work, 256, cancel)
 }
 
-pub(super) fn budget_polygon_admitted(
-    polygon: &Polygon<f64>,
-    work: &mut usize,
-    mut admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    let mut count = 0usize;
-    for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-        check_cancel(cancel)?;
-        count = count
-            .checked_add(ring.0.len().saturating_sub(1))
-            .ok_or_else(|| resource("Boolean caller edge count overflow"))?;
-    }
-    if count.checked_mul(count).is_none_or(|pairs| pairs > 256) {
-        let bytes = count
-            .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
-            .ok_or_else(|| resource("Boolean caller scratch byte overflow"))?;
-        admit(bytes)?;
-    }
-    polygon_budget(std::iter::once(polygon), work, 256, cancel)
-}
-
 /// Borrowed required-material pieces share the ordinary Boolean admission proof.
 pub(super) fn budget_parts_accumulated(
     parts: &[&Polygon<f64>],
