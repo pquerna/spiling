@@ -6,6 +6,7 @@ use crate::clearance_screen::{BLOCK_PATHS, ObjectClearanceIndex, bounded_height}
 use crate::planner::support::{
     AnchorCandidate, AnchorWorkspace, GapKind, ProjectedAnchorPaths, StrokeRuns, gap_kind,
 };
+use rayon::prelude::*;
 use spiling_contracts::manufacturing::{program_coordinates::*, *};
 use std::sync::atomic::AtomicBool;
 
@@ -340,6 +341,36 @@ pub(super) fn verify(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<AnchorWorkspace, ManufacturingError> {
+    verify_with_waves(plan, recipe, work, cancel, rayon::current_num_threads())
+}
+
+fn verify_with_waves(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    workers: usize,
+) -> Result<AnchorWorkspace, ManufacturingError> {
+    if workers > 1 && plan.layers.len() > 1 {
+        let mut trial_work = *work;
+        let mut anchors = AnchorWorkspace::default();
+        if verify_inner(
+            plan,
+            recipe,
+            &mut trial_work,
+            &mut spiling_geometry::GeometryWorkBudget::monitored(),
+            &mut anchors,
+            cancel,
+            true,
+            &mut false,
+            Some(workers),
+        )
+        .is_ok()
+        {
+            *work = trial_work;
+            return Ok(anchors);
+        }
+    }
     verify_with_screen(plan, recipe, work, cancel, true)
 }
 
@@ -362,6 +393,7 @@ fn verify_with_screen(
         cancel,
         enabled,
         &mut admitted,
+        None,
     );
     if admitted && result.as_ref().is_err_and(retry_for_clearance_pressure) {
         anchors = AnchorWorkspace::default();
@@ -374,6 +406,7 @@ fn verify_with_screen(
             cancel,
             false,
             &mut false,
+            None,
         );
     }
     result?;
@@ -397,7 +430,7 @@ fn retry_for_clearance_pressure(error: &ManufacturingError) -> bool {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Order-preserving retry resets scratch and retains both work counters"
+    reason = "Serial retry retains both work counters; the speculative pass uses private counters"
 )]
 fn verify_inner(
     plan: &NormalizedPrintPlan,
@@ -408,6 +441,7 @@ fn verify_inner(
     cancel: &AtomicBool,
     enabled: bool,
     admitted: &mut bool,
+    wave_workers: Option<usize>,
 ) -> Result<(), ManufacturingError> {
     if !plan
         .layers
@@ -476,7 +510,15 @@ fn verify_inner(
         .map_or(0, ObjectClearanceIndex::retained_bytes);
     *admitted = screen.is_some();
     live += index_bytes;
+    let clearance = ObjectClearance {
+        plan,
+        bounds: &bounds,
+        screen: screen.as_ref(),
+        z_gap_mm,
+        xy_clearance_mm,
+    };
     let mut contacts = Vec::new();
+    let mut max_clearance_live = 0;
     for (index, layer) in plan.layers.iter().enumerate() {
         let mut contact_floor = None;
         let mut prepared = None;
@@ -484,8 +526,10 @@ fn verify_inner(
         for path in layer.paths.iter().filter(|path| support(path)) {
             charge(work, cancel)?;
             let support_height = height(path)?;
-            let support_edges = path.checked_edges()?;
-            let (support_bounds, support_width) = path_bounds(path, work, cancel)?;
+            let candidate = wave_workers
+                .is_none()
+                .then(|| ClearancePath::new(path, support_height, work, cancel))
+                .transpose()?;
             anchors.admit_beside(
                 live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
             )?;
@@ -647,153 +691,13 @@ fn verify_inner(
                     "actual support layer {index} has no established bed, continuing support or earlier-part contact"
                 )));
             }
-            let end = bounds.partition_point(|bound| {
-                bound.interval[0] <= (support_height[1] + z_gap_mm).next_up()
-            });
-            let start = bounds[..end].partition_point(|bound| {
-                bound.prefix_upper < (support_height[0] - z_gap_mm).next_down()
-            });
-            for bound in &bounds[start..end] {
-                charge(work, cancel)?;
-                if enclosed_vertical_gap_mm(bound.interval[0], support_height[1])? >= z_gap_mm
-                    || enclosed_vertical_gap_mm(support_height[0], bound.interval[1])? >= z_gap_mm
-                {
-                    continue;
-                }
-                let object_layer = &plan.layers[bound.index];
-                let screen_blocks = screen
-                    .as_ref()
-                    .filter(|_| bounded_height(bound.interval) && bounded_height(support_height))
-                    .map(|screen| screen.layer(bound.index));
-                let span = if screen_blocks.is_some() {
-                    BLOCK_PATHS
-                } else {
-                    object_layer.paths.len().max(1)
-                };
-                for (block_ordinal, paths) in object_layer.paths.chunks(span).enumerate() {
-                    if let Some(blocks) = screen_blocks {
-                        charge(work, cancel)?;
-                        let block = &blocks[block_ordinal];
-                        if block.clear(support_bounds, support_width, xy_clearance_mm) {
-                            continue;
-                        }
-                    }
-                    for object in paths.iter().filter(|path| path.kind.is_model()) {
-                        charge(work, cancel)?;
-                        let object_height = height(object)?;
-                        if enclosed_vertical_gap_mm(object_height[0], support_height[1])?
-                            >= z_gap_mm
-                            || enclosed_vertical_gap_mm(support_height[0], object_height[1])?
-                                >= z_gap_mm
-                        {
-                            continue;
-                        }
-                        let object_edges = object.checked_edges()?;
-                        let (object_bounds, object_width) = path_bounds(object, work, cancel)?;
-                        if spiling_geometry::planar_bounds_clear(
-                            support_bounds,
-                            object_bounds,
-                            (support_width + object_width) * 0.5 + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
-                            xy_clearance_mm,
-                        ) {
-                            continue;
-                        }
-                        // Consecutive object edges are screened in blocks: a
-                        // block whose joint bounds and widest bead clear this
-                        // support edge clears each of its edges by the same
-                        // test, so only the per-edge charge remains.
-                        let edge_count = object.points_mm.len().saturating_sub(1);
-                        let mut blocks: Vec<([[f64; 2]; 2], f64)> = Vec::new();
-                        reserve(
-                            &mut blocks,
-                            edge_count.div_ceil(EDGE_BLOCK),
-                            live + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
-                                + anchors.retained_bytes(),
-                        )?;
-                        for start in (0..edge_count).step_by(EDGE_BLOCK) {
-                            let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
-                            let mut width = 0.0f64;
-                            for index in start..(start + EDGE_BLOCK).min(edge_count) {
-                                let edge = object_edges.edge(index).expect("object edge in range");
-                                let edge_box = edge_bounds(edge.points_mm);
-                                for axis in 0..2 {
-                                    bounds[0][axis] = bounds[0][axis].min(edge_box[0][axis]);
-                                    bounds[1][axis] = bounds[1][axis].max(edge_box[1][axis]);
-                                }
-                                width = width.max(edge.width_mm);
-                            }
-                            blocks.push((bounds, width));
-                        }
-                        for support_edge in support_edges {
-                            let support_capsule =
-                                capsule(support_edge.points_mm, support_edge.width_mm)?;
-                            let support_box = edge_bounds(support_edge.points_mm);
-                            for (block, &(block_bounds, block_width)) in blocks.iter().enumerate() {
-                                let start = block * EDGE_BLOCK;
-                                let end = (start + EDGE_BLOCK).min(edge_count);
-                                if spiling_geometry::planar_bounds_clear(
-                                    support_box,
-                                    block_bounds,
-                                    (support_edge.width_mm + block_width) * 0.5
-                                        + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
-                                    xy_clearance_mm,
-                                ) {
-                                    for _ in start..end {
-                                        charge(work, cancel)?;
-                                    }
-                                    continue;
-                                }
-                                for object_edge in (start..end).map(|index| {
-                                    object_edges.edge(index).expect("object edge in range")
-                                }) {
-                                    charge(work, cancel)?;
-                                    if spiling_geometry::planar_bounds_clear(
-                                        edge_bounds(support_edge.points_mm),
-                                        edge_bounds(object_edge.points_mm),
-                                        (support_edge.width_mm + object_edge.width_mm) * 0.5
-                                            + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
-                                        xy_clearance_mm,
-                                    ) {
-                                        continue;
-                                    }
-                                    let object_capsule =
-                                        capsule(object_edge.points_mm, object_edge.width_mm)?;
-                                    let bounds = |segment: [[f64; 2]; 2]| {
-                                        [
-                                            [
-                                                segment[0][0].min(segment[1][0]),
-                                                segment[0][1].min(segment[1][1]),
-                                            ],
-                                            [
-                                                segment[0][0].max(segment[1][0]),
-                                                segment[0][1].max(segment[1][1]),
-                                            ],
-                                        ]
-                                    };
-                                    let reach = ((support_capsule.radius_mm
-                                        + object_capsule.radius_mm)
-                                        .next_up()
-                                        + support_capsule.endpoint_error_mm)
-                                        .next_up();
-                                    let reach =
-                                        (reach + object_capsule.endpoint_error_mm).next_up();
-                                    if spiling_geometry::planar_bounds_clear(
-                                        bounds(support_capsule.segment_xy_mm),
-                                        bounds(object_capsule.segment_xy_mm),
-                                        reach,
-                                        xy_clearance_mm,
-                                    ) {
-                                        continue;
-                                    }
-                                    spiling_geometry::certify_planar_capsule_pair_clearance([
-                                support_capsule,
-                                object_capsule,
-                            ], xy_clearance_mm, native_work, cancel).map_err(|failure| failed(format!("actual support layer {index} violates object XY/Z clearance: {failure:?}")))?;
-                                }
-                            }
-                        }
-                    }
-                }
+            let clearance_live = live
+                + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
+                + anchors.retained_bytes();
+            if let Some(candidate) = candidate {
+                clearance.check(index, candidate, clearance_live, work, native_work, cancel)?;
+            } else {
+                max_clearance_live = max_clearance_live.max(clearance_live);
             }
         }
         drop(prepared);
@@ -801,9 +705,308 @@ fn verify_inner(
             break;
         }
     }
+    drop((established, contacts));
+    if let Some(workers) = wave_workers {
+        let shared = bounds.capacity() * std::mem::size_of::<LayerBounds>()
+            + index_bytes
+            + anchors.retained_bytes();
+        let Some(totals) =
+            clearance.waves(last_support, workers, shared, max_clearance_live, cancel)
+        else {
+            return Err(wave_unavailable());
+        };
+        *work = work
+            .checked_add(totals.replay)
+            .ok_or_else(wave_unavailable)?;
+        native_work
+            .charge(totals.native, cancel)
+            .map_err(|_| wave_unavailable())?;
+    }
     drop(screen);
     anchors.set_budget(crate::working_set::units());
     Ok(())
+}
+
+struct ClearancePath<'a> {
+    height: [f64; 2],
+    edges: DepositionEdges<'a>,
+    bounds: [[f64; 2]; 2],
+    width: f64,
+}
+
+impl<'a> ClearancePath<'a> {
+    fn new(
+        path: &'a DepositionPath,
+        height: [f64; 2],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        let edges = path.checked_edges()?;
+        let (bounds, width) = path_bounds(path, work, cancel)?;
+        Ok(Self {
+            height,
+            edges,
+            bounds,
+            width,
+        })
+    }
+}
+
+struct ObjectClearance<'a> {
+    plan: &'a NormalizedPrintPlan,
+    bounds: &'a [LayerBounds],
+    screen: Option<&'a ObjectClearanceIndex>,
+    z_gap_mm: f64,
+    xy_clearance_mm: f64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ClearanceWork {
+    replay: usize,
+    native: u64,
+}
+
+fn wave_unavailable() -> ManufacturingError {
+    ManufacturingError::new(
+        ManufacturingErrorCode::ResourceLimit,
+        "speculative support clearance must replay in order",
+    )
+}
+
+impl ObjectClearance<'_> {
+    fn waves(
+        &self,
+        last_support: usize,
+        workers: usize,
+        shared: usize,
+        max_clearance_live: usize,
+        cancel: &AtomicBool,
+    ) -> Option<ClearanceWork> {
+        let layers = &self.plan.layers[..=last_support];
+        let wave_width = layers.len().min(workers.saturating_mul(4));
+        let spare = crate::working_set::bytes().checked_sub(shared)?;
+        let receipt_bytes = wave_width.checked_mul(std::mem::size_of::<Option<ClearanceWork>>())?;
+        if receipt_bytes >= spare {
+            return None;
+        }
+        let mut receipts = Vec::new();
+        receipts.try_reserve_exact(wave_width).ok()?;
+        let receipt_bytes = receipts
+            .capacity()
+            .checked_mul(std::mem::size_of::<Option<ClearanceWork>>())?;
+        let per_worker = (spare.checked_sub(receipt_bytes)? / workers)
+            .min(crate::working_set::bytes().checked_sub(max_clearance_live)?);
+        let allowance = crate::working_set::WorkingSet::new(per_worker).ok()?;
+        let mut totals = ClearanceWork::default();
+        for (wave, layers) in layers.chunks(wave_width).enumerate() {
+            cancelled(cancel).ok()?;
+            layers
+                .par_iter()
+                .enumerate()
+                .map(|(offset, layer)| {
+                    crate::working_set::scope(allowance, || {
+                        self.check_layer(wave * wave_width + offset, layer, cancel)
+                            .ok()
+                    })
+                })
+                .collect_into_vec(&mut receipts);
+            for receipt in &receipts {
+                let receipt = (*receipt)?;
+                totals.replay = totals.replay.checked_add(receipt.replay)?;
+                totals.native = totals.native.saturating_add(receipt.native);
+            }
+        }
+        Some(totals)
+    }
+
+    fn check_layer(
+        &self,
+        index: usize,
+        layer: &PrintLayer,
+        cancel: &AtomicBool,
+    ) -> Result<ClearanceWork, ManufacturingError> {
+        let mut work = 0;
+        let mut native_work = spiling_geometry::GeometryWorkBudget::monitored();
+        for path in layer.paths.iter().filter(|path| support(path)) {
+            let candidate = ClearancePath::new(path, height(path)?, &mut work, cancel)?;
+            self.check(index, candidate, 0, &mut work, &mut native_work, cancel)?;
+        }
+        Ok(ClearanceWork {
+            replay: work,
+            native: native_work.consumed(),
+        })
+    }
+
+    fn check(
+        &self,
+        index: usize,
+        candidate: ClearancePath<'_>,
+        live: usize,
+        work: &mut usize,
+        native_work: &mut spiling_geometry::GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let ClearancePath {
+            height: support_height,
+            edges: support_edges,
+            bounds: support_bounds,
+            width: support_width,
+        } = candidate;
+        let Self {
+            plan,
+            bounds,
+            screen,
+            z_gap_mm,
+            xy_clearance_mm,
+        } = *self;
+        let end = bounds
+            .partition_point(|bound| bound.interval[0] <= (support_height[1] + z_gap_mm).next_up());
+        let start = bounds[..end].partition_point(|bound| {
+            bound.prefix_upper < (support_height[0] - z_gap_mm).next_down()
+        });
+        for bound in &bounds[start..end] {
+            charge(work, cancel)?;
+            if enclosed_vertical_gap_mm(bound.interval[0], support_height[1])? >= z_gap_mm
+                || enclosed_vertical_gap_mm(support_height[0], bound.interval[1])? >= z_gap_mm
+            {
+                continue;
+            }
+            let object_layer = &plan.layers[bound.index];
+            let screen_blocks = screen
+                .filter(|_| bounded_height(bound.interval) && bounded_height(support_height))
+                .map(|screen| screen.layer(bound.index));
+            let span = if screen_blocks.is_some() {
+                BLOCK_PATHS
+            } else {
+                object_layer.paths.len().max(1)
+            };
+            for (block_ordinal, paths) in object_layer.paths.chunks(span).enumerate() {
+                if let Some(blocks) = screen_blocks {
+                    charge(work, cancel)?;
+                    let block = &blocks[block_ordinal];
+                    if block.clear(support_bounds, support_width, xy_clearance_mm) {
+                        continue;
+                    }
+                }
+                for object in paths.iter().filter(|path| path.kind.is_model()) {
+                    charge(work, cancel)?;
+                    let object_height = height(object)?;
+                    if enclosed_vertical_gap_mm(object_height[0], support_height[1])? >= z_gap_mm
+                        || enclosed_vertical_gap_mm(support_height[0], object_height[1])?
+                            >= z_gap_mm
+                    {
+                        continue;
+                    }
+                    let object_edges = object.checked_edges()?;
+                    let (object_bounds, object_width) = path_bounds(object, work, cancel)?;
+                    if spiling_geometry::planar_bounds_clear(
+                        support_bounds,
+                        object_bounds,
+                        (support_width + object_width) * 0.5 + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
+                        xy_clearance_mm,
+                    ) {
+                        continue;
+                    }
+                    // Consecutive object edges are screened in blocks: a
+                    // block whose joint bounds and widest bead clear this
+                    // support edge clears each of its edges by the same
+                    // test, so only the per-edge charge remains.
+                    let edge_count = object.points_mm.len().saturating_sub(1);
+                    let mut blocks: Vec<([[f64; 2]; 2], f64)> = Vec::new();
+                    reserve(&mut blocks, edge_count.div_ceil(EDGE_BLOCK), live)?;
+                    for start in (0..edge_count).step_by(EDGE_BLOCK) {
+                        let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+                        let mut width = 0.0f64;
+                        for index in start..(start + EDGE_BLOCK).min(edge_count) {
+                            let edge = object_edges.edge(index).expect("object edge in range");
+                            let edge_box = edge_bounds(edge.points_mm);
+                            for axis in 0..2 {
+                                bounds[0][axis] = bounds[0][axis].min(edge_box[0][axis]);
+                                bounds[1][axis] = bounds[1][axis].max(edge_box[1][axis]);
+                            }
+                            width = width.max(edge.width_mm);
+                        }
+                        blocks.push((bounds, width));
+                    }
+                    for support_edge in support_edges {
+                        let support_capsule =
+                            capsule(support_edge.points_mm, support_edge.width_mm)?;
+                        let support_box = edge_bounds(support_edge.points_mm);
+                        for (block, &(block_bounds, block_width)) in blocks.iter().enumerate() {
+                            let start = block * EDGE_BLOCK;
+                            let end = (start + EDGE_BLOCK).min(edge_count);
+                            if spiling_geometry::planar_bounds_clear(
+                                support_box,
+                                block_bounds,
+                                (support_edge.width_mm + block_width) * 0.5
+                                    + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
+                                xy_clearance_mm,
+                            ) {
+                                for _ in start..end {
+                                    charge(work, cancel)?;
+                                }
+                                continue;
+                            }
+                            for object_edge in (start..end).map(|index| {
+                                object_edges.edge(index).expect("object edge in range")
+                            }) {
+                                charge(work, cancel)?;
+                                if spiling_geometry::planar_bounds_clear(
+                                    edge_bounds(support_edge.points_mm),
+                                    edge_bounds(object_edge.points_mm),
+                                    (support_edge.width_mm + object_edge.width_mm) * 0.5
+                                        + 2.0 * XYZ6_PROJECTION_SCREEN_MM,
+                                    xy_clearance_mm,
+                                ) {
+                                    continue;
+                                }
+                                let object_capsule =
+                                    capsule(object_edge.points_mm, object_edge.width_mm)?;
+                                let bounds = |segment: [[f64; 2]; 2]| {
+                                    [
+                                        [
+                                            segment[0][0].min(segment[1][0]),
+                                            segment[0][1].min(segment[1][1]),
+                                        ],
+                                        [
+                                            segment[0][0].max(segment[1][0]),
+                                            segment[0][1].max(segment[1][1]),
+                                        ],
+                                    ]
+                                };
+                                let reach = ((support_capsule.radius_mm
+                                    + object_capsule.radius_mm)
+                                    .next_up()
+                                    + support_capsule.endpoint_error_mm)
+                                    .next_up();
+                                let reach = (reach + object_capsule.endpoint_error_mm).next_up();
+                                if spiling_geometry::planar_bounds_clear(
+                                    bounds(support_capsule.segment_xy_mm),
+                                    bounds(object_capsule.segment_xy_mm),
+                                    reach,
+                                    xy_clearance_mm,
+                                ) {
+                                    continue;
+                                }
+                                spiling_geometry::certify_planar_capsule_pair_clearance(
+                                    [support_capsule, object_capsule],
+                                    xy_clearance_mm,
+                                    native_work,
+                                    cancel,
+                                )
+                                .map_err(|failure| {
+                                    failed(format!(
+                                        "actual support layer {index} violates object XY/Z clearance: {failure:?}"
+                                    ))
+                                })?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -872,6 +1075,162 @@ mod tests {
         plan: &NormalizedPrintPlan,
     ) -> Result<(), ManufacturingError> {
         verify(plan, &intent.recipe, &mut 0, &AtomicBool::new(false)).map(|_| ())
+    }
+
+    #[test]
+    fn clearance_waves_keep_work_and_legacy_first_refusal() {
+        let (intent, mut plan) = fixture();
+        let cancel = AtomicBool::new(false);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let support_path = plan.layers[2].paths[0].clone();
+        let mut continuing = support_path.clone();
+        continuing.physical_z_mm = [3.0, 4.0];
+        for point in &mut continuing.points_mm {
+            point[2] = 4.0;
+        }
+        plan.layers[3].paths.push(continuing);
+        let object = &mut plan.layers[4].paths[0];
+        object.physical_z_mm = support_path.physical_z_mm;
+        object.points_mm = vec![[5.9, 1.9, 3.0], [6.9, 2.9, 3.0]];
+
+        let inner = |plan: &NormalizedPrintPlan, wave_workers, initial| {
+            pool.install(|| {
+                let mut work = initial;
+                let mut native_work = spiling_geometry::GeometryWorkBudget::monitored();
+                let mut anchors = AnchorWorkspace::default();
+                let mut admitted = false;
+                let result = verify_inner(
+                    plan,
+                    &intent.recipe,
+                    &mut work,
+                    &mut native_work,
+                    &mut anchors,
+                    &cancel,
+                    true,
+                    &mut admitted,
+                    wave_workers,
+                );
+                assert!(admitted);
+                (
+                    result,
+                    work,
+                    native_work.consumed(),
+                    anchors.retained_bytes(),
+                )
+            })
+        };
+        let run = |plan: &NormalizedPrintPlan, waves, initial| {
+            pool.install(|| {
+                let mut work = initial;
+                let result = if waves {
+                    verify(plan, &intent.recipe, &mut work, &cancel)
+                } else {
+                    verify_with_screen(plan, &intent.recipe, &mut work, &cancel, true)
+                };
+                (result.map(|_| ()), work)
+            })
+        };
+        let serial = inner(&plan, None, 0);
+        assert_eq!(serial.0, Ok(()));
+        assert!(serial.2 > 0, "fixture must reach the native capsule proof");
+        assert_eq!(inner(&plan, Some(2), 0), serial);
+
+        let initial = usize::MAX - serial.1 + 1;
+        let overflow = run(&plan, false, initial);
+        assert_eq!(
+            overflow.0.as_ref().unwrap_err().code,
+            ManufacturingErrorCode::ResourceLimit
+        );
+        assert_eq!(run(&plan, true, initial), overflow);
+
+        let mut invalid = plan;
+        let mut collision = invalid.layers[4].paths[0].clone();
+        collision.points_mm = support_path.points_mm;
+        invalid.layers[4].paths.push(collision);
+        assert_eq!(inner(&invalid, Some(2), 19).0, Err(wave_unavailable()));
+        let serial = run(&invalid, false, 19);
+        assert!(
+            serial
+                .0
+                .as_ref()
+                .unwrap_err()
+                .message
+                .contains("layer 2 violates object XY/Z clearance")
+        );
+        assert_eq!(run(&invalid, true, 19), serial);
+
+        invalid.layers[3].paths[0].kind = DepositionKind::Support;
+        for point in &mut invalid.layers[3].paths[0].points_mm {
+            point[1] += 30.0;
+        }
+        let serial = run(&invalid, false, 19);
+        assert!(
+            serial
+                .0
+                .as_ref()
+                .unwrap_err()
+                .message
+                .contains("layer 2 violates object XY/Z clearance")
+        );
+        let speculative = inner(&invalid, Some(2), 19);
+        assert!(
+            speculative
+                .0
+                .unwrap_err()
+                .message
+                .contains("layer 3 has no established")
+        );
+        assert_eq!(run(&invalid, true, 19), serial);
+
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = run(&invalid, false, 19);
+        assert_eq!(
+            cancelled.0.as_ref().unwrap_err().code,
+            ManufacturingErrorCode::Cancelled
+        );
+        assert_eq!(run(&invalid, true, 19), cancelled);
+    }
+
+    #[test]
+    fn clearance_waves_admit_receipts_and_simultaneous_scratch() {
+        let (_, mut plan) = fixture();
+        let object = &mut plan.layers[4].paths[0];
+        object.physical_z_mm = [2.0, 3.0];
+        object.points_mm = vec![[5.9, 1.9, 3.0], [6.9, 2.9, 3.0]];
+        let bounds = [LayerBounds {
+            index: 4,
+            interval: height(object).unwrap(),
+            prefix_upper: height(object).unwrap()[1],
+        }];
+        let shared = std::mem::size_of_val(&bounds);
+        let clearance = ObjectClearance {
+            plan: &plan,
+            bounds: &bounds,
+            screen: None,
+            z_gap_mm: 0.5,
+            xy_clearance_mm: 0.25,
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        let scratch = std::mem::size_of::<([[f64; 2]; 2], f64)>();
+        let receipts = 3 * std::mem::size_of::<Option<ClearanceWork>>();
+        let exact = shared + receipts + 2 * scratch;
+        let run = |bytes, legacy_live| {
+            pool.install(|| {
+                crate::working_set::scope(crate::WorkingSet::new(bytes).unwrap(), || {
+                    clearance.waves(2, 2, shared, legacy_live, &cancel)
+                })
+            })
+        };
+        assert!(run(exact - 1, shared).is_none());
+        assert!(run(exact, exact - scratch + 1).is_none());
+        assert!(run(exact, exact - scratch).unwrap().native > 0);
     }
 
     #[test]
@@ -992,6 +1351,7 @@ mod tests {
                     &cancel,
                     true,
                     &mut admitted,
+                    None,
                 );
                 assert!(admitted);
                 let error = attempted.unwrap_err();
@@ -1017,6 +1377,10 @@ mod tests {
                 let screened = run(true);
                 assert_eq!(screened.0, exhaustive.0);
                 assert_eq!(screened.1, attempt_work + exhaustive.1 - 73);
+                let mut work = 73;
+                let waves =
+                    verify_with_waves(&plan, &intent.recipe, &mut work, &cancel, 2).map(|_| ());
+                assert_eq!((waves, work), screened);
             });
         }
     }
