@@ -752,13 +752,16 @@ pub(super) fn retain_anchored<'a>(
     });
     let original_bytes = owned_bytes.saturating_add(super::super::bonds::path_bytes(paths));
     let original = std::mem::take(paths);
+    // One lower inventory serves every candidate: it is re-admitted against
+    // each candidate's budget and falls back to the linear scan when it no
+    // longer fits, so verdicts equal a fresh per-candidate scan.
+    let mut lower = strokes::LowerStrokes::new(previous, contacts);
     for (path_index, path) in original.into_iter().enumerate() {
         anchors.set_budget(candidate_budget(paths, original_units, original_bytes)?);
         if !super::support_role(path.kind)
-            || scan(
+            || scan_with_lower(
                 std::slice::from_ref(&path),
-                previous.clone(),
-                contacts.clone(),
+                &mut lower,
                 recipe,
                 anchors,
                 work,
@@ -827,10 +830,9 @@ pub(super) fn retain_anchored<'a>(
                         .saturating_mul(std::mem::size_of::<[f64; 3]>()),
                 ),
             )?);
-            if scan(
+            if scan_with_lower(
                 std::slice::from_ref(&fragment),
-                previous.clone(),
-                contacts.clone(),
+                &mut lower,
                 recipe,
                 anchors,
                 work,

@@ -2861,14 +2861,18 @@ fn reconcile_layer_roots(
         let (layer, following) = remaining.split_first_mut().expect("final support layer");
         let mut continuing = true;
         if index > 0 {
+            // One lower inventory for every path on this layer.
+            let mut lower = strokes::LowerStrokes::new(
+                prior[index - 1]
+                    .paths
+                    .iter()
+                    .filter(|path| support_role(path.kind)),
+                std::iter::empty(),
+            );
             for path in layer.paths.iter().filter(|path| support_role(path.kind)) {
-                if raster::scan(
+                if raster::scan_with_lower(
                     std::slice::from_ref(path),
-                    prior[index - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind)),
-                    std::iter::empty(),
+                    &mut lower,
                     recipe,
                     anchors,
                     work,
