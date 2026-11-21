@@ -103,6 +103,7 @@ pub(super) fn validate_wall_seams(
 
 #[derive(Clone, Copy)]
 pub(super) struct Association {
+    pub path: usize,
     pub width: f64,
     pub physical_z: [f64; 2],
     pub owner: Option<DepositionOwner>,
@@ -402,6 +403,7 @@ impl Iterator for Expected<'_> {
                         path.owner,
                     ),
                     association: Some(Association {
+                        path: self.path,
                         width: edge.width_mm,
                         physical_z: path.physical_z_mm,
                         owner,

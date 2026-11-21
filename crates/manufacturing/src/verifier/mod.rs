@@ -32,6 +32,7 @@ mod joins;
 mod lifecycle;
 pub(crate) mod package;
 mod replay;
+#[cfg(test)]
 mod supports;
 pub(crate) use replay::ReplaySink;
 
@@ -1616,6 +1617,7 @@ pub(crate) fn verify_actual(
                     grid.record(grid::RoadInput {
                         layer: layer_index,
                         line: line_index + 1,
+                        path: association.path,
                         role: deposition_kind,
                         from: prior_grid_position.ok_or_else(|| {
                             failed("no decoded starting XYZ6 coordinates for deposition")
@@ -1625,6 +1627,8 @@ pub(crate) fn verify_actual(
                         })?,
                         physical_z: association.physical_z,
                         maximum_width_mm: bounds[1].max(association.width),
+                        minimum_width_mm: bounds[0].min(association.width),
+                        length_upper_mm: (length + length_error).next_up(),
                         arc_deviation_mm: arc_segment
                             .map_or(0.0, |segment| segment.grid_deviation_mm),
                     })?;
@@ -1761,11 +1765,7 @@ pub(crate) fn verify_actual(
     adhesion::verify(plan, recipe, cancel)?;
     let mut geometry_work = 0usize;
     let clearance_receipt = if let Some(grid) = support_grid {
-        let remaining = crate::working_set::bytes().saturating_sub(grid.retained_bytes());
-        let allowance = crate::working_set::WorkingSet::new(remaining)?;
-        crate::working_set::scope(allowance, || {
-            supports::verify_ancestry(plan, recipe, &mut geometry_work, cancel)
-        })?;
+        grid.verify_ancestry(plan, recipe, &mut geometry_work, cancel)?;
         Some(grid.verify(&mut geometry_work, cancel)?)
     } else {
         None

@@ -340,15 +340,6 @@ fn establish_until(
     Ok(())
 }
 
-pub(super) fn verify_ancestry(
-    plan: &NormalizedPrintPlan,
-    recipe: &PlanarPrintRecipe,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    verify_roots(plan, recipe, work, &mut AnchorWorkspace::default(), cancel).map(|_| ())
-}
-
 #[cfg(test)]
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,

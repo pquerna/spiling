@@ -9,8 +9,10 @@ use std::sync::atomic::AtomicBool;
 
 mod batch;
 mod nominal;
+#[cfg(test)]
 mod projected;
 pub(super) use nominal::{InventoryStats, LowerFloor, NominalAnchorPaths};
+#[cfg(test)]
 pub(crate) use projected::ProjectedAnchorPaths;
 
 /// Exact centerline intersection with previous nominal deposited capsules plus
@@ -304,6 +306,7 @@ impl AnchorWorkspace {
         self.record_limit = remaining_records.min(crate::working_set::units());
     }
 
+    #[cfg(test)]
     pub(crate) fn admit_beside(&mut self, owned_bytes: usize) -> Result<(), ManufacturingError> {
         let remaining = crate::working_set::bytes()
             .checked_sub(owned_bytes)
@@ -369,6 +372,7 @@ impl AnchorWorkspace {
     ) -> Result<&[AnchorGap], ManufacturingError> {
         self.gaps_inputs(candidate, edges.map(AnchorInput::Edge), work, cancel)
     }
+    #[cfg(test)]
     pub(crate) fn gaps_projected<'a>(
         &mut self,
         candidate: AnchorCandidate,

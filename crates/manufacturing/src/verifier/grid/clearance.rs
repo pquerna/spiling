@@ -1,7 +1,8 @@
 use super::{Chord, MAX_XYZ6_TICKS, cancelled, failed, overflow, validate_cell_size};
 use spiling_contracts::geometry::GeometryErrorCode;
 use spiling_contracts::manufacturing::{
-    DepositionKind, ManufacturingError, ManufacturingErrorCode, SupportPolicy,
+    DepositionKind, ManufacturingError, ManufacturingErrorCode, NormalizedPrintPlan,
+    PlanarPrintRecipe, SupportPolicy,
     program_coordinates::{enclosed_vertical_gap_mm, xyz6_coordinate_error_mm},
 };
 use std::{mem::size_of, ops::Range, sync::atomic::AtomicBool};
@@ -9,35 +10,46 @@ use std::{mem::size_of, ops::Range, sync::atomic::AtomicBool};
 pub(in crate::verifier) struct RoadInput {
     pub layer: u32,
     pub line: usize,
+    pub path: usize,
     pub role: DepositionKind,
     pub from: [i64; 3],
     pub to: [i64; 3],
     pub physical_z: [f64; 2],
     pub maximum_width_mm: f64,
+    pub minimum_width_mm: f64,
+    pub length_upper_mm: f64,
     pub arc_deviation_mm: f64,
 }
 
 #[derive(Clone, Copy)]
-struct Road {
-    chord: Chord,
-    height: [f64; 2],
+pub(super) struct Road {
+    pub(super) chord: Chord,
+    pub(super) height: [f64; 2],
     radius_mm: f64,
-    arc_deviation_mm: f64,
-    layer: u32,
-    line: usize,
+    pub(super) inner_radius_mm: f64,
+    pub(super) length_upper_mm: f64,
+    pub(super) arc_deviation_mm: f64,
+    pub(super) floor: f64,
+    pub(super) layer: u32,
+    pub(super) line: usize,
+    pub(super) path: usize,
+    pub(super) role: DepositionKind,
     support: bool,
 }
 
 impl Road {
-    fn new(input: RoadInput) -> Result<Self, ManufacturingError> {
+    pub(super) fn new(input: RoadInput) -> Result<Self, ManufacturingError> {
         let RoadInput {
             layer,
             line,
+            path,
             role,
             from,
             to,
             physical_z,
             maximum_width_mm,
+            minimum_width_mm,
+            length_upper_mm,
             arc_deviation_mm,
         } = input;
         let chord = Chord::new([from[0], from[1]], [to[0], to[1]])?;
@@ -56,9 +68,14 @@ impl Road {
             chord,
             height: [lower, upper],
             radius_mm: maximum_width_mm * 0.5,
+            inner_radius_mm: minimum_width_mm * 0.5,
+            length_upper_mm,
             arc_deviation_mm,
+            floor: physical_z[0],
             layer,
             line,
+            path,
+            role,
             support: !role.is_model(),
         })
     }
@@ -74,18 +91,18 @@ impl Road {
     }
 }
 
-fn exhausted() -> ManufacturingError {
+pub(super) fn exhausted() -> ManufacturingError {
     ManufacturingError::new(
         ManufacturingErrorCode::ResourceLimit,
-        "decoded support clearance exceeds live byte allowance",
+        "decoded support replay exceeds live byte allowance",
     )
 }
 
 #[derive(Default)]
-struct Admission(usize);
+pub(super) struct Admission(pub(super) usize);
 
 impl Admission {
-    fn reserve<T>(
+    pub(super) fn reserve<T>(
         &mut self,
         values: &mut Vec<T>,
         required: usize,
@@ -119,19 +136,27 @@ impl Admission {
         Ok(())
     }
 
-    fn push<T>(&mut self, values: &mut Vec<T>, value: T) -> Result<(), ManufacturingError> {
+    pub(super) fn push<T>(
+        &mut self,
+        values: &mut Vec<T>,
+        value: T,
+    ) -> Result<(), ManufacturingError> {
         self.reserve(values, values.len().checked_add(1).ok_or_else(exhausted)?)?;
         values.push(value);
         Ok(())
     }
 
-    fn release<T>(&mut self, values: Vec<T>) {
+    pub(super) fn release<T>(&mut self, values: Vec<T>) {
         self.0 -= values.capacity() * size_of::<T>();
         drop(values);
     }
 }
 
-fn debit(counter: &mut usize, count: usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
+pub(super) fn debit(
+    counter: &mut usize,
+    count: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     cancelled(cancel)?;
     *counter = counter.checked_add(count).ok_or_else(overflow)?;
     Ok(())
@@ -192,8 +217,22 @@ impl Clearance {
         Ok(())
     }
 
-    pub(in crate::verifier) fn retained_bytes(&self) -> usize {
-        self.admission.0
+    pub(in crate::verifier) fn verify_ancestry(
+        &self,
+        plan: &NormalizedPrintPlan,
+        recipe: &PlanarPrintRecipe,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        super::ancestry::verify(
+            &self.roads,
+            &plan.layers,
+            recipe,
+            self.z_gap,
+            Admission(self.admission.0),
+            work,
+            cancel,
+        )
     }
 
     pub(in crate::verifier) fn verify(
@@ -366,15 +405,15 @@ struct Band {
     rows: Option<Rows>,
 }
 
-struct Incidence {
+pub(super) struct Incidence {
     row: i64,
     left: i64,
-    right: i64,
+    pub(super) right: i64,
     prefix_right: i64,
-    road: usize,
+    pub(super) road: usize,
 }
 
-struct Rows(Vec<Incidence>);
+pub(super) struct Rows(pub(super) Vec<Incidence>);
 
 impl Rows {
     fn build(
@@ -385,39 +424,62 @@ impl Rows {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
-        let mut entries = Vec::new();
+        let mut entries = Self(Vec::new());
         for index in span {
             debit(work, 1, cancel)?;
             let road = roads[index];
             if !road.support {
-                road.chord.outer_rows(
+                entries.insert(
+                    index,
+                    road.chord,
                     road.outer_radius(clearance_mm)?,
+                    admission,
                     work,
                     cancel,
-                    |row, left, right| {
-                        admission.push(
-                            &mut entries,
-                            Incidence {
-                                row,
-                                left,
-                                right,
-                                prefix_right: right,
-                                road: index,
-                            },
-                        )
-                    },
                 )?;
             }
         }
+        entries.finish(work, cancel)?;
+        Ok(entries)
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        road: usize,
+        chord: Chord,
+        radius: i64,
+        admission: &mut Admission,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        chord.outer_rows(radius, work, cancel, |row, left, right| {
+            admission.push(
+                &mut self.0,
+                Incidence {
+                    row,
+                    left,
+                    right,
+                    prefix_right: right,
+                    road,
+                },
+            )
+        })
+    }
+
+    pub(super) fn finish(
+        &mut self,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
         sort_by_key(
-            &mut entries,
+            &mut self.0,
             |entry| (entry.row, entry.left, entry.road),
             work,
             cancel,
         )?;
         let mut previous = i64::MIN;
         let mut prefix = i64::MIN;
-        for entry in &mut entries {
+        for entry in &mut self.0 {
             debit(work, 1, cancel)?;
             if entry.row != previous {
                 previous = entry.row;
@@ -426,10 +488,10 @@ impl Rows {
             prefix = prefix.max(entry.right);
             entry.prefix_right = prefix;
         }
-        Ok(Self(entries))
+        Ok(())
     }
 
-    fn intersect(&self, row: i64, first: i64, last: i64) -> &[Incidence] {
+    pub(super) fn intersect(&self, row: i64, first: i64, last: i64) -> &[Incidence] {
         let start = self
             .0
             .partition_point(|entry| (entry.row, entry.prefix_right) < (row, first));
@@ -497,11 +559,14 @@ mod tests {
         RoadInput {
             layer,
             line: layer as usize + 1,
+            path: 0,
             role,
             from: [0, y, z],
             to: [1_000_000, y, z],
             physical_z: [0.0, 0.25],
             maximum_width_mm: 0.25,
+            minimum_width_mm: 0.25,
+            length_upper_mm: 1.0,
             arc_deviation_mm: 0.0,
         }
     }

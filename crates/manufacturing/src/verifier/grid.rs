@@ -4,10 +4,10 @@ use spiling_contracts::manufacturing::{
     program_coordinates::xyz6_coordinate_error_mm,
 };
 use spiling_geometry::PlanarCapsuleMm;
-#[cfg(test)]
 use std::cmp::Ordering;
 use std::sync::atomic::AtomicBool;
 
+mod ancestry;
 mod clearance;
 pub(super) use clearance::{Clearance, RoadInput};
 
@@ -56,7 +56,6 @@ pub(super) fn virtual_xyz6(point: [f64; 3]) -> [i64; 3] {
 struct Cell(Point);
 
 impl Cell {
-    #[cfg(test)]
     fn containing(point: Point) -> Self {
         Self(point.map(|value| value.div_euclid(CELL_TICKS)))
     }
@@ -100,14 +99,12 @@ struct Chord {
     length_squared: i128,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct Parameter {
     numerator: u64,
     denominator: u64,
 }
 
-#[cfg(test)]
 impl Parameter {
     const START: Self = Self {
         numerator: 0,
@@ -207,7 +204,6 @@ impl Chord {
             .all(|corner| self.point_within(corner, radius_squared))
     }
 
-    #[cfg(test)]
     fn cell_within_span(
         self,
         cell: Cell,
@@ -224,13 +220,12 @@ impl Chord {
         })
     }
 
-    #[cfg(test)]
-    fn walk(
+    fn walk_while(
         self,
         work: &mut usize,
         cancel: &AtomicBool,
-        mut visit: impl FnMut(Cell, [Parameter; 2]) -> Result<(), ManufacturingError>,
-    ) -> Result<(), ManufacturingError> {
+        mut visit: impl FnMut(Cell, [Parameter; 2], &mut usize) -> Result<bool, ManufacturingError>,
+    ) -> Result<bool, ManufacturingError> {
         let step = self.vector.map(|component| component.signum() as i64);
         let mut cell = Cell::containing(self.start);
         for (axis, direction) in step.into_iter().enumerate() {
@@ -256,9 +251,11 @@ impl Chord {
             let end = crossings.into_iter().fold(Parameter::END, |end, next| {
                 if next.cmp(end).is_lt() { next } else { end }
             });
-            visit(cell, [start, end])?;
+            if !visit(cell, [start, end], work)? {
+                return Ok(false);
+            }
             if end.cmp(Parameter::END).is_eq() {
-                return Ok(());
+                return Ok(true);
             }
             for (axis, next) in crossings.into_iter().enumerate() {
                 if next.cmp(end).is_eq() {
@@ -267,6 +264,20 @@ impl Chord {
             }
             start = end;
         }
+    }
+
+    #[cfg(test)]
+    fn walk(
+        self,
+        work: &mut usize,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(Cell, [Parameter; 2]) -> Result<(), ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        self.walk_while(work, cancel, |cell, range, _| {
+            visit(cell, range)?;
+            Ok(true)
+        })?;
+        Ok(())
     }
 
     #[cfg(test)]
