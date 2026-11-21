@@ -1563,15 +1563,22 @@ fn open(
     }
     drop(prepared_step);
     check_cancel(cancel)?;
-    for asset in loaded
-        .layouts
-        .iter()
-        .filter_map(|l| l.manufacturing_artifact.as_ref())
-    {
+    let project = Project::from_loaded_with_manufacturing_check(loaded, |asset, bundle| {
         let _replay = crate::performance::span("open_replay");
-        inspect_asset(asset, VerificationOutput::ReportOnly, None, cancel)?;
-    }
-    let project = crate::resources::observed_project(Project::from_loaded(loaded)?);
+        let working_set = crate::resources::manufacturing_working_set()?;
+        let inspection = spiling_manufacturing::working_set::scope(working_set, || {
+            spiling_manufacturing::inspect_decoded_bundle(
+                bundle,
+                &asset.program,
+                &asset.record.hash,
+                VerificationOutput::ReportOnly,
+                cancel,
+            )
+        })?;
+        assess_inspection(inspection, &bundle.provenance.occurrences, cancel)?;
+        Ok::<_, JobError>(())
+    })?;
+    let project = crate::resources::observed_project(project);
     check_cancel(cancel)?;
     crate::performance::mark("open_prepared");
     Ok(Opened {

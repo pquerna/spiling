@@ -626,6 +626,14 @@ impl Project {
         self.retained_growth = observer;
     }
     pub fn from_loaded(loaded: LoadedProject) -> Result<Self, ProjectError> {
+        Self::from_loaded_with_manufacturing_check(loaded, |_, _| Ok(()))
+    }
+    /// Check each admitted manufacturing bundle before publishing the project.
+    /// The callback borrows the decoded bundle bound to the exact asset bytes.
+    pub fn from_loaded_with_manufacturing_check<Failure: From<ProjectError>>(
+        loaded: LoadedProject,
+        check: impl FnMut(&ManufacturingAsset, &ManufacturingBundle) -> Result<(), Failure>,
+    ) -> Result<Self, Failure> {
         loaded.manifest.validate()?;
         let mut snapshot = Snapshot {
             sources: loaded.sources,
@@ -640,7 +648,7 @@ impl Project {
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
         };
-        validate_snapshot(&snapshot, &loaded.manifest)?;
+        validate_snapshot_with_manufacturing_check(&snapshot, &loaded.manifest, check)?;
         hardware::share_capture(&mut snapshot);
         let mut project = Self::new();
         project.project_id = loaded.manifest.project_id.clone();
@@ -2475,17 +2483,21 @@ pub(crate) fn validate_snapshot(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
 ) -> Result<(), ProjectError> {
+    validate_snapshot_with_manufacturing_check(snapshot, manifest, |_, _| Ok(()))
+}
+
+fn validate_snapshot_with_manufacturing_check<Failure: From<ProjectError>>(
+    snapshot: &Snapshot,
+    manifest: &ProjectManifest,
+    mut check: impl FnMut(&ManufacturingAsset, &ManufacturingBundle) -> Result<(), Failure>,
+) -> Result<(), Failure> {
     if manifest.materials.as_ref() != snapshot.materials.as_ref().map(|a| a.record()) {
-        return Err(invalid(
-            "project material descriptor and captured asset disagree",
-        ));
+        return Err(invalid("project material descriptor and captured asset disagree").into());
     }
 
     manifest.validate()?;
     if snapshot.analysis_results.len() != manifest.analysis.results.len() {
-        return Err(invalid(
-            "retained analysis object closure differs from manifest",
-        ));
+        return Err(invalid("retained analysis object closure differs from manifest").into());
     }
     for record in &manifest.analysis.results {
         let asset = snapshot
@@ -2504,11 +2516,11 @@ pub(crate) fn validate_snapshot(
                 .map(|l| l.occurrences.len())
                 .sum::<usize>()
     {
-        return Err(invalid("captured snapshot does not match manifest"));
+        return Err(invalid("captured snapshot does not match manifest").into());
     }
     for (id, source) in &snapshot.sources {
         if *id != source.record.definition_id {
-            return Err(invalid("source map key differs from identity"));
+            return Err(invalid("source map key differs from identity").into());
         }
         source.validate()?;
     }
@@ -2523,9 +2535,11 @@ pub(crate) fn validate_snapshot(
                 &manifest.project_id,
                 manifest.revision,
             )?;
+            drop(scoped);
+            check(asset, &bundle)?;
         }
     }
-    validate_pins(std::iter::once(snapshot))
+    validate_pins(std::iter::once(snapshot)).map_err(Failure::from)
 }
 fn validate_manufacturing_input(
     bundle: &ManufacturingBundle,

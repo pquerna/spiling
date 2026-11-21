@@ -71,23 +71,8 @@ impl ManufacturingResult {
         bundle: ManufacturingBundle,
         program: ChunkSource,
     ) -> Result<Self, ManufacturingError> {
-        let result = Self { bundle, program };
-        result.check_program()?;
-        Ok(result)
-    }
-    fn check_program(&self) -> Result<(), ManufacturingError> {
-        self.bundle.program.validate()?;
-        if !self
-            .bundle
-            .program
-            .matches(self.program.len(), self.program.digest())
-        {
-            return Err(error(
-                ManufacturingErrorCode::CorruptArtifact,
-                "program bytes differ from the bundle's program descriptor",
-            ));
-        }
-        Ok(())
+        check_program(&bundle.program, &program)?;
+        Ok(Self { bundle, program })
     }
     /// Materialized program text for small diagnostics and tests.
     pub fn program_text(&self) -> Result<String, ManufacturingError> {
@@ -376,11 +361,22 @@ pub fn inspect_bundle(
     output: VerificationOutput,
     cancel: &AtomicBool,
 ) -> Result<ManufacturingInspection, ManufacturingError> {
-    validate_inspection_bundle(result, cancel)?;
-    let bundle = &result.bundle;
+    inspect_decoded_bundle(&result.bundle, &result.program, bundle_hash, output, cancel)
+}
+
+/// Freshly replay a previously decoded bundle whose envelope and hash binding
+/// were checked by the caller. No saved verification report is reused.
+pub fn inspect_decoded_bundle(
+    bundle: &ManufacturingBundle,
+    program: &ChunkSource,
+    bundle_hash: &SourceHash,
+    output: VerificationOutput,
+    cancel: &AtomicBool,
+) -> Result<ManufacturingInspection, ManufacturingError> {
+    validate_inspection_bundle(bundle, program, cancel)?;
     let mut sink = None;
     let report = verifier::verify_actual(
-        &result.program,
+        program,
         &bundle.plan,
         &bundle.provenance.intent,
         cancel,
@@ -508,7 +504,7 @@ fn inspect_report(
     result: &ManufacturingResult,
     cancel: &AtomicBool,
 ) -> Result<VerificationReport, ManufacturingError> {
-    validate_inspection_bundle(result, cancel)?;
+    validate_inspection_bundle(&result.bundle, &result.program, cancel)?;
     verifier::verify(
         &result.program,
         &result.plan,
@@ -518,15 +514,15 @@ fn inspect_report(
 }
 
 fn validate_inspection_bundle(
-    result: &ManufacturingResult,
+    bundle: &ManufacturingBundle,
+    program: &ChunkSource,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    let bundle = &result.bundle;
     // Decoding binds the bundle envelope; inspection binds provenance and
     // the current program, and replay independently validates plan semantics.
     bundle.provenance.validate()?;
-    result.check_program()?;
+    check_program(&bundle.program, program)?;
     let p = &bundle.provenance;
     if p.planner_version != PLANNER_VERSION
         || p.emitter_version != EMITTER_VERSION
@@ -538,6 +534,20 @@ fn validate_inspection_bundle(
         return Err(error(
             ManufacturingErrorCode::UnsupportedCapability,
             "bundle algorithm/kernel version is not supported",
+        ));
+    }
+    Ok(())
+}
+
+fn check_program(
+    descriptor: &ProgramDescriptor,
+    program: &ChunkSource,
+) -> Result<(), ManufacturingError> {
+    descriptor.validate()?;
+    if !descriptor.matches(program.len(), program.digest()) {
+        return Err(error(
+            ManufacturingErrorCode::CorruptArtifact,
+            "program bytes differ from the bundle's program descriptor",
         ));
     }
     Ok(())

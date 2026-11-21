@@ -349,8 +349,30 @@ fn manufacturing_fresh_reopen_ignores_deleted_original_and_readonly_rejects_edit
     save_project(&mut project, Some(sandbox.target()));
     fs::remove_file(external).unwrap();
     drop(project);
-    let mut reopened =
-        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    let expected = capture.snapshot.manufacturing_artifact.as_ref().unwrap();
+    let mut checks = 0;
+    let mut reopened = Project::from_loaded_with_manufacturing_check(
+        open(&sandbox.target(), true, false, &flag()).unwrap(),
+        |asset, bundle| {
+            checks += 1;
+            assert_eq!(asset.record, expected.record);
+            assert_eq!(bundle.program, expected.record.program);
+            assert_eq!(bundle.provenance.input_hash, expected.record.input_hash);
+            Ok::<_, ProjectError>(())
+        },
+    )
+    .unwrap();
+    assert_eq!(checks, 1);
+    let declined = Project::from_loaded_with_manufacturing_check(
+        open(&sandbox.target(), true, false, &flag()).unwrap(),
+        |_, _| {
+            Err(error(
+                ProjectErrorCode::Cancelled,
+                "manufacturing check cancelled",
+            ))
+        },
+    );
+    assert_eq!(declined.err().unwrap().code, ProjectErrorCode::Cancelled);
     assert_eq!(reopened.capture().manifest, capture.manifest);
     assert_eq!(
         reopened
