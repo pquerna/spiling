@@ -1,10 +1,11 @@
-"""Compare native reported spans, not physical printability or located gaps."""
+"""Gate native reported spans; report separate cross-slicer road observations."""
 
 import json
 import math
 from pathlib import Path
 
 import audit
+import located_spans
 
 
 def nonnegative(value):
@@ -122,6 +123,25 @@ def prusa_support_estimate(on_row, off_row):
     return on - off, "matched_on_minus_off"
 
 
+def prusa_span_comparison(corpus, part, row, receipt):
+    settings = receipt["settings"]
+    if settings["reference"] != "prusa" or settings["supports"] != "breakaway":
+        return {"status": "not_requested"}
+    if row.get("prusa", {}).get("ok") is not True:
+        return {"status": "reference_unavailable"}
+    if not fresh(row):
+        return {"status": "fresh_spiling_unavailable"}
+    work = Path(corpus) / "work" / part
+    try:
+        recipe = receipt["effective_intent"]["recipe"]
+        supports = recipe["supports"]
+        return located_spans.compare(work / "prusa.gcode", work / "return/out/plan.json",
+                                     work / "located-spans.ndjson", supports["z_gap_mm"],
+                                     recipe["process"]["max_bridge_span_mm"])
+    except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+        return {"status": "unresolved", "detail": str(error)}
+
+
 def summary(cases, records, receipt, corpus, control_results=None, off_results=None):
     current = {row["part"]: row for row in records}
     control, control_corpus = None, None
@@ -146,6 +166,7 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
         baseline = control.get(name) if control is not None else None
         if row is None or not fresh(row):
             results.append({"part": name, "status": "no_fresh_candidate",
+                            "prusa_span_comparison": {"status": "fresh_spiling_unavailable"},
                             "failures": ["missing_candidate_coverage"]
                             if baseline is not None and fresh(baseline) else []})
             continue
@@ -161,6 +182,7 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                  "max_span_mm": row.get("max_overhang_mm"), "support_filament_mm": material,
                  "prusa_support_estimate_mm": prusa_support,
                  "prusa_support_status": prusa_status,
+                 "prusa_span_comparison": prusa_span_comparison(corpus, name, row, receipt),
                  "support_vs_prusa": material / prusa_support if material is not None and prusa_support else None,
                  "control_support_filament_mm": None, "support_drop_review": False,
                  "failures": []}

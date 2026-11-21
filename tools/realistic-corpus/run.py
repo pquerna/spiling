@@ -32,6 +32,12 @@ both slicers' estimated print time and filament length and their ratio.
 supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS fails a
 candidate with new/increased reported spans, using fresh control exports from
 CONTROL_CORPUS/work. A support filament drop above 5% requests review only.
+For breakaway runs the Prusa reference summary compares nominal spans and
+retains their layer, physical Z, XY extents and roles in each work directory's
+located-spans.ndjson. The observer uses a common lower-bead capsule model and
+support gap bound; it is outside slice/reopen timings and is not a local parity
+gate. Different upper road inventories and unregistered build frames prevent
+the part maximum or span count from qualifying printability.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
@@ -457,6 +463,7 @@ def main():
         "features_sha256": audit.digest(features.__file__),
         "reference_sha256": audit.digest(reference.__file__),
         "panel_coverage_sha256": audit.digest(panel_coverage.__file__),
+        "located_spans_sha256": audit.digest(panel_coverage.located_spans.__file__),
         "comparisons": comparisons,
         "manifest_sha256": audit.digest(ARGS.manifest),
         "cohort": ARGS.cohort, "cases": cases,
