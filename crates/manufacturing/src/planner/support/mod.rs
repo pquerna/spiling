@@ -792,6 +792,25 @@ impl VoidScope {
         Ok(false)
     }
 
+    /// Records the relieved support one layer may deposit inside this void.
+    /// Adjacent layers share a record only when they share the same region;
+    /// each layer is otherwise checked against its own region, never a
+    /// neighbour's.
+    fn record_access(&mut self, layer: usize, column: Rc<OwnedMaterial>) {
+        if let Some(last) = self
+            .access
+            .last_mut()
+            .filter(|last| last.layers.end == layer && Rc::ptr_eq(&last.column, &column))
+        {
+            last.layers.end += 1;
+        } else {
+            self.access.push(RoofAccess {
+                layers: layer..layer + 1,
+                column,
+            });
+        }
+    }
+
     pub(super) fn has_access(&self) -> bool {
         !self.access.is_empty()
     }
@@ -2058,16 +2077,7 @@ pub(super) fn realize(
             }
         }
         for (ordinal, layer, column) in output.access {
-            let access = &mut scopes[ordinal].access;
-            if let Some(last) = access.last_mut().filter(|last| last.layers.end == layer) {
-                last.layers.end += 1;
-                last.column = column;
-            } else {
-                access.push(RoofAccess {
-                    layers: layer..layer + 1,
-                    column,
-                });
-            }
+            scopes[ordinal].record_access(layer, column);
         }
         trace.report("corridors_complete");
         timing.mark("roots_and_corridors");
@@ -4653,6 +4663,40 @@ fn landing_output(mut material: MultiPolygon<f64>) -> Result<OwnedMaterial, Manu
 mod tests {
     use super::*;
     use geo::{line_string, polygon};
+
+    #[test]
+    fn roof_access_checks_each_layer_against_its_own_region() {
+        // A relieved bed column widens toward the bed: layer 0 may deposit a
+        // road that the narrower region at layer 1 would not contain.
+        let wide = OwnedMaterial::new(MultiPolygon(vec![
+            polygon![(x: 0., y: 0.), (x: 30., y: 0.), (x: 30., y: 4.), (x: 0., y: 4.)],
+        ]))
+        .into_shared();
+        let narrow = OwnedMaterial::new(MultiPolygon(vec![
+            polygon![(x: 10., y: 0.), (x: 20., y: 0.), (x: 20., y: 4.), (x: 10., y: 4.)],
+        ]))
+        .into_shared();
+        let mut scope = VoidScope::new(
+            spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 5.0 },
+            Some(Arc::new(spiling_geometry::tolerant::TolerantVoidRoof {
+                height_mm: [4.0, 5.0],
+                facets: Vec::new(),
+            })),
+        );
+        scope.record_access(0, Rc::clone(&wide));
+        scope.record_access(1, Rc::clone(&narrow));
+        scope.record_access(2, Rc::clone(&narrow));
+        assert_eq!(scope.access.len(), 2, "same region shares one record");
+        let cancel = AtomicBool::new(false);
+        let road = [[1.0, 2.0], [29.0, 2.0]];
+        assert!(scope.covers_bead(0, 0.2, road, &mut 0, &cancel).unwrap());
+        assert!(!scope.covers_bead(1, 0.4, road, &mut 0, &cancel).unwrap());
+        assert!(
+            scope
+                .covers_bead(2, 0.6, [[11.0, 2.0], [19.0, 2.0]], &mut 0, &cancel)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn landing_difference_discards_only_zero_area_output() {
