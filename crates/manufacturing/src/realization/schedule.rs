@@ -266,30 +266,14 @@ fn attachment_dependencies(
     plan: &NormalizedPrintPlan,
     cancel: &AtomicBool,
 ) -> Result<Vec<Vec<u32>>, ManufacturingError> {
-    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
-    fn contains(
-        path: &DepositionPath,
-        line: [[f64; 2]; 2],
-        z: f64,
-    ) -> Result<bool, ManufacturingError> {
-        let expected = [
-            project_xyz6_point_mm([line[0][0], line[0][1], z])?,
-            project_xyz6_point_mm([line[1][0], line[1][1], z])?,
-        ];
-        for edge in path.checked_edges()? {
-            let actual = [
-                project_xyz6_point_mm(edge.points_mm[0])?,
-                project_xyz6_point_mm(edge.points_mm[1])?,
-            ];
-            if actual == expected || actual == [expected[1], expected[0]] {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
     let mut graph = vec![Vec::new(); plan.layers.iter().map(|l| l.paths.len()).sum()];
     let mut base = 0;
     for layer in &plan.layers {
+        if layer.region_coverage.process_interfaces.is_empty() {
+            base += layer.paths.len();
+            continue;
+        }
+        let edges = LayerEdges::new(layer, cancel)?;
         for interface in &layer.region_coverage.process_interfaces {
             for (line, bonds) in interface
                 .centerlines_mm
@@ -297,14 +281,12 @@ fn attachment_dependencies(
                 .zip(&interface.endpoint_bonds)
             {
                 check_cancel(cancel)?;
-                let mut separators = Vec::new();
-                for (index, path) in layer.paths.iter().enumerate() {
-                    if path.kind == DepositionKind::SeparatorWall
-                        && contains(path, *line, layer.z_mm)?
-                    {
-                        separators.push(index);
-                    }
-                }
+                let separators: Vec<usize> = edges
+                    .paths_on(*line, layer.z_mm)?
+                    .iter()
+                    .map(|p| *p as usize)
+                    .filter(|p| layer.paths[*p].kind == DepositionKind::SeparatorWall)
+                    .collect();
                 for bond in bonds {
                     let wall = match *bond {
                         ProcessEndpointBond::Wall { wall_segment_mm }
@@ -312,14 +294,12 @@ fn attachment_dependencies(
                             wall_segment_mm, ..
                         } => wall_segment_mm,
                     };
-                    let mut walls = Vec::new();
-                    for (index, path) in layer.paths.iter().enumerate() {
-                        if path.owner == Some(DepositionOwner::Wall)
-                            && contains(path, wall, layer.z_mm)?
-                        {
-                            walls.push(index);
-                        }
-                    }
+                    let walls: Vec<usize> = edges
+                        .paths_on(wall, layer.z_mm)?
+                        .iter()
+                        .map(|p| *p as usize)
+                        .filter(|p| layer.paths[*p].owner == Some(DepositionOwner::Wall))
+                        .collect();
                     match *bond {
                         ProcessEndpointBond::Wall { .. } => {
                             for &separator in &separators {
@@ -333,11 +313,12 @@ fn attachment_dependencies(
                             skin_segment_mm,
                             ..
                         } => {
-                            for (index, path) in layer.paths.iter().enumerate() {
+                            for index in edges.paths_on(skin_segment_mm, layer.z_mm)? {
+                                let index = *index as usize;
+                                let path = &layer.paths[index];
                                 if path.kind == process_kind
                                     && path.owner
                                         == Some(DepositionOwner::MandatorySkin { skin: skin_kind })
-                                    && contains(path, skin_segment_mm, layer.z_mm)?
                                 {
                                     graph[base + index]
                                         .extend(walls.iter().map(|p| (base + p) as u32));
@@ -358,4 +339,54 @@ fn attachment_dependencies(
         edges.dedup();
     }
     Ok(graph)
+}
+
+/// One projected, undirected XYZ6 edge; equal keys are equal command edges.
+type EdgeKey = [[u64; 3]; 2];
+
+/// A layer's receipt-eligible paths by projected edge, projected once.
+struct LayerEdges {
+    paths: std::collections::HashMap<EdgeKey, Vec<u32>>,
+}
+impl LayerEdges {
+    fn new(layer: &PrintLayer, cancel: &AtomicBool) -> Result<Self, ManufacturingError> {
+        let mut paths = std::collections::HashMap::<EdgeKey, Vec<u32>>::new();
+        for (index, path) in layer.paths.iter().enumerate() {
+            check_cancel(cancel)?;
+            let eligible = path.kind == DepositionKind::SeparatorWall
+                || matches!(
+                    path.owner,
+                    Some(DepositionOwner::Wall | DepositionOwner::MandatorySkin { .. })
+                );
+            if !eligible {
+                continue;
+            }
+            for edge in path.checked_edges()? {
+                let list = paths
+                    .entry(key(edge.points_mm[0], edge.points_mm[1])?)
+                    .or_default();
+                // Paths arrive in ascending order; keep each once.
+                if list.last() != Some(&(index as u32)) {
+                    list.push(index as u32);
+                }
+            }
+        }
+        Ok(Self { paths })
+    }
+    /// Eligible paths, ascending, holding this segment as one command edge.
+    fn paths_on(&self, line: [[f64; 2]; 2], z: f64) -> Result<&[u32], ManufacturingError> {
+        let key = key([line[0][0], line[0][1], z], [line[1][0], line[1][1], z])?;
+        Ok(self.paths.get(&key).map_or(&[], Vec::as_slice))
+    }
+}
+
+fn key(a: [f64; 3], b: [f64; 3]) -> Result<EdgeKey, ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    // Signed zeros compare equal, so they share one key.
+    let bits = |p: [f64; 3]| p.map(|v| (v + 0.0).to_bits());
+    let (a, b) = (
+        bits(project_xyz6_point_mm(a)?),
+        bits(project_xyz6_point_mm(b)?),
+    );
+    Ok(if a <= b { [a, b] } else { [b, a] })
 }

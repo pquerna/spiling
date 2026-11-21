@@ -25,6 +25,55 @@ pub fn check(
     schedule: &Schedule,
 ) -> Result<Cost, CheckError> {
     validate(tasks, machine).map_err(|_| CheckError::Input)?;
+    structure(tasks, machine, order, schedule)?;
+    let groups: Vec<_> = schedule
+        .groups
+        .iter()
+        .map(|g| (g.barrier, g.tool, g.visits.clone()))
+        .collect();
+    let mut authored = schedule.visits.clone();
+    crate::seam::apply(tasks, machine, &mut authored, &groups, None)
+        .map_err(|_| CheckError::Permission)?;
+    if authored != schedule.visits {
+        return Err(CheckError::Permission);
+    }
+    let fresh = cost::annotate(tasks, machine, schedule.visits.clone(), groups);
+    if fresh.groups != schedule.groups || fresh.cost != schedule.cost {
+        return Err(CheckError::Annotation);
+    }
+    finite_cost(&fresh.cost)?;
+    Ok(fresh.cost)
+}
+
+fn finite_cost(cost: &Cost) -> Result<(), CheckError> {
+    if cost.total_s.is_finite() && cost.travel_mm.is_finite() {
+        Ok(())
+    } else {
+        Err(CheckError::Annotation)
+    }
+}
+
+/// The scheduler's own admission. Its input was validated, its wall seams were
+/// authored and its annotation computed by the same frozen functions [`check`]
+/// would re-run, so only the search's order and grouping remain to admit.
+pub(crate) fn admit(
+    tasks: &[Task<'_>],
+    machine: &Machine,
+    order: ToolOrder,
+    schedule: &Schedule,
+) -> Result<Cost, CheckError> {
+    structure(tasks, machine, order, schedule)?;
+    finite_cost(&schedule.cost)?;
+    Ok(schedule.cost)
+}
+
+/// Inventory, permitted entries, prerequisites, barriers and grouping.
+fn structure(
+    tasks: &[Task<'_>],
+    machine: &Machine,
+    order: ToolOrder,
+    schedule: &Schedule,
+) -> Result<(), CheckError> {
     if schedule.visits.len() != tasks.len() {
         return Err(CheckError::Inventory);
     }
@@ -108,33 +157,5 @@ pub fn check(
             return Err(CheckError::Grouping);
         }
     }
-    let groups: Vec<_> = schedule
-        .groups
-        .iter()
-        .map(|g| (g.barrier, g.tool, g.visits.clone()))
-        .collect();
-    let mut authored = schedule.visits.clone();
-    crate::seam::apply(tasks, machine, &mut authored, &groups, None)
-        .map_err(|_| CheckError::Permission)?;
-    if authored != schedule.visits {
-        return Err(CheckError::Permission);
-    }
-    let fresh = cost::annotate(
-        tasks,
-        machine,
-        schedule.visits.clone(),
-        schedule
-            .groups
-            .iter()
-            .map(|g| (g.barrier, g.tool, g.visits.clone()))
-            .collect(),
-    );
-    if !fresh.cost.total_s.is_finite()
-        || !fresh.cost.travel_mm.is_finite()
-        || fresh.groups != schedule.groups
-        || fresh.cost != schedule.cost
-    {
-        return Err(CheckError::Annotation);
-    }
-    Ok(fresh.cost)
+    Ok(())
 }

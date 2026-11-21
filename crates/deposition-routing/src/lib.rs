@@ -238,7 +238,8 @@ fn validate(tasks: &[Task<'_>], machine: &Machine) -> Result<(), Error> {
     Ok(())
 }
 
-/// Schedule every task exactly once. The result has passed the frozen checker.
+/// Schedule every task exactly once. The result has passed the frozen checks;
+/// [`check`] re-derives its seams and annotation for an outside caller.
 pub fn schedule(
     tasks: &[Task<'_>],
     machine: &Machine,
@@ -308,7 +309,7 @@ fn finish(
     seam::apply(tasks, machine, &mut visits, &groups, Some(cancel))?;
     let mut schedule = cost::annotate(tasks, machine, visits, groups);
     schedule.work = work;
-    let checked = check(tasks, machine, order, &schedule);
+    let checked = check::admit(tasks, machine, order, &schedule);
     cancelled(cancel)?;
     match checked {
         Ok(_) => Ok(schedule),
