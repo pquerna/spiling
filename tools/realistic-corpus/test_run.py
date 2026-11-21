@@ -16,7 +16,8 @@ RUNNER = Path(__file__).with_name("run.py")
 CLI_DOUBLE = """#!/usr/bin/env python3
 import json, os, pathlib, sys
 args=sys.argv[1:]
-intent={"printer":{"build_envelope":{"min":[0,0,0],"max":[20,20,20]}},"recipe":{}}
+intent={"printer":{"build_envelope":{"min":[0,0,0],"max":[30,30,30]}},
+        "recipe":{"supports":{"kind":"disabled"},"process":{"max_bridge_span_mm":10}}}
 print(json.dumps(["instrumented_phase", "trace", 1]),file=sys.stderr)
 if args[0]=='diagnose':
     print(json.dumps({"command":"diagnose","hello":{"fixture":True}}))
@@ -31,8 +32,14 @@ elif args[1]=='open':
     root=pathlib.Path('out');root.mkdir()
     (root/'manifest.json').write_text('{}')
     (root/'program.gcode').write_text('test program')
-    spans=json.loads(os.environ.get('CORPUS_DOUBLE_SPANS','[0, 0]'))
-    layers=[{"lower_z_mm":index,"z_mm":index+1,"region_coverage":{"unsupported_overhang_mm":span,"web_roof_domains":[]}} for index,span in enumerate(spans)]
+    reported=json.loads(os.environ['CORPUS_DOUBLE_SPANS'])
+    lengths=(1, 20, float(os.environ['CORPUS_DOUBLE_LOCAL_LENGTH']))
+    layers=[{"index":index,"lower_z_mm":index,"z_mm":index+1,
+             "region_coverage":{"unsupported_overhang_mm":span,"web_roof_domains":[]},
+             "paths":[{"kind":"top_skin","physical_z_mm":[index,index+1],
+                       "points_mm":[[0,10*index,index+1],[length,10*index,index+1]],
+                       "width":{"kind":"constant","width_mm":0.4}}]}
+            for index,(length,span) in enumerate(zip(lengths,reported))]
     (root/'plan.json').write_text(json.dumps({"layers":layers,"adhesion":{"brim_paths":0}}))
     report={"verified":True,"deposition_segments":1,"filament_length_mm":1,"support_filament_length_mm":float(os.environ.get('CORPUS_DOUBLE_SUPPORT','100'))}
     (root/'verification.json').write_text(json.dumps(report))
@@ -43,7 +50,7 @@ elif args[1]=='open':
 @unittest.skipUnless(hasattr(os, "wait4") and Path("/proc").is_dir(), "Linux corpus process supervision")
 class RunnerBoundaryTests(unittest.TestCase):
     def run_fixture(self, root, failure=False, invalid_expectation=False, control=None,
-                    spans=(0, 0), support=100):
+                    spans=(0, 20, 2), local_length=2, support=100):
         binaries = root / "bin"
         binaries.mkdir(parents=True)
         cli = binaries / "spiling-cli"
@@ -59,8 +66,9 @@ class RunnerBoundaryTests(unittest.TestCase):
         if invalid_expectation:
             case["expectation"] = None
         manifest.write_text(json.dumps({"parts": [case]}))
-        environment = dict(os.environ, SPILING_CORPUS_JOBS="1", CORPUS_DOUBLE_SPANS=json.dumps(spans),
-                           CORPUS_DOUBLE_SUPPORT=str(support))
+        environment = dict(os.environ, SPILING_CORPUS_JOBS="1", SPILING_CORPUS_SUPPORTS="disabled",
+                           CORPUS_DOUBLE_SPANS=json.dumps(spans), CORPUS_DOUBLE_SUPPORT=str(support),
+                           CORPUS_DOUBLE_LOCAL_LENGTH=str(local_length))
         if failure:
             environment["CORPUS_DOUBLE_FAIL_RETURN"] = "1"
         command = [sys.executable, str(RUNNER), str(corpus), str(binaries), "--manifest", str(manifest),
@@ -107,33 +115,42 @@ class RunnerBoundaryTests(unittest.TestCase):
     def test_control_gate_rejects_local_regression_with_equal_global_max_and_count(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
-            result, control, _, _ = self.run_fixture(path / "control", spans=(20, 2))
+            result, control, _, _ = self.run_fixture(path / "control")
             self.assertEqual(result.returncode, 0, result.stderr)
-            result, candidate, _, _ = self.run_fixture(path / "worse", control=control, spans=(20, 2.0001))
+            result, candidate, _, _ = self.run_fixture(path / "worse", control=control, local_length=2.0001)
             self.assertEqual(result.returncode, 1, result.stderr)
             receipt = json.loads((candidate / "results.ndjson.summary.json").read_text())
             self.assertFalse(receipt["ok"])
             coverage = receipt["coverage"]["cases"][0]
             self.assertEqual(coverage["failures"], ["new_or_increased_local_spans"])
-            self.assertEqual(coverage["local_span_losses"], [{"physical_z_mm": [1, 2],
-                "control_span_mm": 2, "candidate_span_mm": 2.0001}])
+            self.assertEqual(coverage["control_max_span_mm"], coverage["max_span_mm"])
+            self.assertEqual(coverage["control_unsupported_layers"], coverage["unsupported_layers"])
+            self.assertEqual(coverage["located_spans_with_losses"], 1)
+            loss, = coverage["local_span_losses"]
+            self.assertEqual(loss["physical_z_mm"], [2, 3])
+            self.assertEqual(loss["uncovered_points_mm"], [[2, 20], [2.0001, 20]])
+            self.assertAlmostEqual(loss["uncovered_span_mm"], 0.0001)
             meta = json.loads((candidate / "results.ndjson.run.json").read_text())
             self.assertEqual(meta["comparisons"]["coverage_control"]["results_sha256"],
                              audit.digest(control / "results.ndjson"))
 
-    def test_support_drop_requests_review_without_refusing_span_parity(self):
+    def test_report_disagreement_and_support_drop_warn_without_refusing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
-            result, control, _, _ = self.run_fixture(path / "control", spans=(20, 2))
+            result, control, _, _ = self.run_fixture(path / "control", spans=(0, 20, 0))
             self.assertEqual(result.returncode, 0, result.stderr)
             for support, review in ((95, False), (94, True)):
                 result, candidate, _, _ = self.run_fixture(
-                    path / str(support), control=control, spans=(20, 2), support=support)
+                    path / str(support), control=control, support=support)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 coverage = json.loads((candidate / "results.ndjson.summary.json").read_text())["coverage"]
                 self.assertEqual(coverage["cases"][0]["control_support_filament_mm"], 100.0)
                 self.assertIs(coverage["cases"][0]["support_drop_review"], review)
                 self.assertIsNone(coverage["cases"][0]["support_vs_prusa"])
+                self.assertEqual(coverage["cases"][0]["located_spans_with_losses"], 0)
+                warnings = coverage["cases"][0]["span_report_warnings"]
+                self.assertIsNone(warnings["candidate"])
+                self.assertEqual(warnings["control"]["largest"]["located_span_mm"], 2)
 
 
 class ReferenceCoverageTests(unittest.TestCase):

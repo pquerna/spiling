@@ -30,14 +30,15 @@ both slicers' estimated print time and filament length and their ratio.
 
 --prusa-off-results OFF.ndjson estimates Prusa support filament from a matched
 supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS fails a
-candidate with new/increased reported spans, using fresh control exports from
-CONTROL_CORPUS/work. A support filament drop above 5% requests review only.
+candidate with new or extended observer-measured unsupported spans at matched
+physical Z and XY, using fresh exports from both runs. Plan-to-observer
+disagreements and support filament drops above 5% request review only.
 For breakaway runs the Prusa reference summary compares nominal spans and
 retains their layer, physical Z, XY extents and roles in each work directory's
 located-spans.ndjson. The observer uses a common lower-bead capsule model and
-support gap bound; it is outside slice/reopen timings and is not a local parity
-gate. Different upper road inventories and unregistered build frames prevent
-the part maximum or span count from qualifying printability.
+support gap bound and runs outside slice/reopen timings. The unregistered
+Prusa comparison is not a local parity gate; the part maximum and span count
+do not qualify printability.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor

@@ -1,5 +1,6 @@
-"""Gate native reported spans; report separate cross-slicer road observations."""
+"""Gate native located spans; report separate cross-slicer road observations."""
 
+from collections import defaultdict
 import json
 import math
 from pathlib import Path
@@ -77,20 +78,113 @@ def fresh(row):
             and row.get("export_checks", {}).get("fresh_verified") is True)
 
 
-def reported_losses(before, after):
-    failures = []
-    if max(after.values()) > max(before.values()):
-        failures.append("max_span_increased")
-    if sum(span > 0 for span in after.values()) > sum(span > 0 for span in before.values()):
-        failures.append("unsupported_layers_increased")
-    changes = []
-    for interval, span in after.items():
-        if span > 0 and (interval not in before or span > before[interval]):
-            changes.append({"physical_z_mm": interval, "control_span_mm": before.get(interval),
-                            "candidate_span_mm": span})
-    if changes:
-        failures.append("new_or_increased_local_spans")
-    return failures, changes
+def native_coverage(corpus, part, receipt):
+    work = Path(corpus) / "work" / part
+    plan_path = work / "return/out/plan.json"
+    with plan_path.open(encoding="utf-8") as source:
+        plan = json.load(source)
+    recipe = receipt["effective_intent"]["recipe"]
+    supports = recipe["supports"]
+    gap = 0.0 if supports["kind"] == "disabled" else supports["z_gap_mm"]
+    spans, measured = located_spans.native_observation(
+        plan, plan_path, work / "located-spans.ndjson", gap, recipe["process"]["max_bridge_span_mm"])
+    return spans, measured, report_warning(span_layers(plan), spans)
+
+
+def report_warning(reported, spans):
+    worst = {}
+    for span in spans:
+        interval = tuple(span["physical_z_mm"])
+        if interval not in worst or span["length_mm"] > worst[interval]["length_mm"]:
+            worst[interval] = span
+    count, largest = 0, None
+    for interval in sorted(reported.keys() | worst.keys()):
+        located = worst.get(interval)
+        declared = reported.get(interval, 0.0)
+        observed = located["length_mm"] if located else 0.0
+        difference = abs(declared - observed)
+        if difference > located_spans.EPS:
+            count += 1
+            if largest is None or difference > largest["absolute_delta_mm"]:
+                largest = {"physical_z_mm": interval, "reported_span_mm": declared,
+                           "located_span_mm": observed, "absolute_delta_mm": difference,
+                           "located_witness": located}
+    return {"intervals_disagreeing": count, "largest": largest} if count else None
+
+
+def segment_key(points):
+    return tuple(sorted(map(tuple, points)))
+
+
+class GapIndex:
+    def __init__(self):
+        self.segments = []
+        self.exact = set()
+        self.buckets = defaultdict(list)
+        self.large = set()
+
+    def add(self, points):
+        segment = segment_key(points)
+        if segment in self.exact:
+            return
+        self.exact.add(segment)
+        ordinal = len(self.segments)
+        self.segments.append(segment)
+        footprint = located_spans.cells(located_spans.footprint_box(*segment, located_spans.EPS))
+        if footprint is None:
+            self.large.add(ordinal)
+        else:
+            for cell in footprint:
+                self.buckets[cell].append(ordinal)
+
+    def overlap(self, start, end, unit, length):
+        footprint = located_spans.cells(located_spans.footprint_box(start, end, located_spans.EPS))
+        if footprint is None:
+            candidates = range(len(self.segments))
+        else:
+            candidates = self.large.copy()
+            for cell in footprint:
+                candidates.update(self.buckets.get(cell, ()))
+        for ordinal in candidates:
+            offsets = [(point[0] - start[0], point[1] - start[1]) for point in self.segments[ordinal]]
+            if any(abs(dx * unit[1] - dy * unit[0]) > located_spans.EPS for dx, dy in offsets):
+                continue
+            left, right = sorted(dx * unit[0] + dy * unit[1] for dx, dy in offsets)
+            if max(left, 0.0) < min(right, length):
+                yield max(left, 0.0), min(right, length)
+
+
+def located_losses(before, after):
+    controls = defaultdict(GapIndex)
+    for span in before:
+        controls[tuple(span["physical_z_mm"])].add(span["points_mm"])
+    changes = {}
+    lost_spans = 0
+    for span in after:
+        interval = tuple(span["physical_z_mm"])
+        control = controls.get(interval)
+        if control is not None and segment_key(span["points_mm"]) in control.exact:
+            continue
+        start, end = span["points_mm"]
+        length = math.dist(start, end)
+        if length <= located_spans.EPS:
+            continue
+        unit = tuple((finish - begin) / length for begin, finish in zip(start, end))
+        covered = control.overlap(start, end, unit, length) if control is not None else ()
+        missing = max(located_spans.missing_intervals(covered, length),
+                      key=lambda pair: pair[1] - pair[0], default=None)
+        if missing is None:
+            continue
+        lost_spans += 1
+        uncovered = missing[1] - missing[0]
+        if interval not in changes or uncovered > changes[interval]["uncovered_span_mm"]:
+            changes[interval] = {"physical_z_mm": interval, "candidate_span_mm": span["length_mm"],
+                                 "candidate_layer": span["layer"], "candidate_road": span["road"],
+                                 "candidate_role": span["role"], "uncovered_span_mm": uncovered,
+                                 "uncovered_points_mm": [tuple(axis + distance * step
+                                                                for axis, step in zip(start, unit))
+                                                         for distance in missing]}
+    return lost_spans, [changes[interval] for interval in sorted(changes)]
 
 
 def support_mm(row):
@@ -155,10 +249,6 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
         control, control_receipt = load_results(control_path)
         issues = distinct_settings(control_receipt, receipt, prusa_off=False)
 
-    def read_spans(root, part):
-        plan = Path(root) / "work" / part / "return/out/plan.json"
-        return span_layers(json.loads(plan.read_text()))
-
     results = []
     for case in cases:
         name = case["file"]
@@ -198,17 +288,23 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                     entry["support_vs_control"] = material / baseline_support
                     entry["support_drop_review"] = entry["support_vs_control"] < 0.95
                 try:
-                    before, after = read_spans(control_corpus, name), read_spans(corpus, name)
-                except (OSError, ValueError, TypeError, KeyError, OverflowError):
-                    entry["failures"].append("missing_native_span_evidence")
+                    before, control_observed, control_warning = native_coverage(control_corpus, name, control_receipt)
+                    after, candidate_observed, candidate_warning = native_coverage(corpus, name, receipt)
+                    lost, local = located_losses(before, after)
+                except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+                    entry["failures"].append("missing_located_span_evidence")
+                    entry["located_span_error"] = str(error)
                 else:
-                    losses, local = reported_losses(before, after)
-                    entry["failures"].extend(losses)
+                    if lost:
+                        entry["failures"].append("new_or_increased_local_spans")
+                    entry["span_metric"] = located_spans.METRIC
+                    entry["located_spans_with_losses"] = lost
                     entry["local_span_losses"] = local
-                    entry["control_unsupported_layers"] = sum(span > 0 for span in before.values())
-                    entry["unsupported_layers"] = sum(span > 0 for span in after.values())
-                    entry["control_max_span_mm"] = max(before.values())
-                    entry["max_span_mm"] = max(after.values())
+                    entry["span_report_warnings"] = {"control": control_warning, "candidate": candidate_warning}
+                    for field in ("unsupported_layers", "max_span_mm"):
+                        entry[f"reported_{field}"] = entry[field]
+                        entry[f"control_{field}"] = control_observed[field]
+                        entry[field] = candidate_observed[field]
         results.append(entry)
     return {"checked_against_control": control is not None,
             "ok": not issues and not any(row["failures"] for row in results),

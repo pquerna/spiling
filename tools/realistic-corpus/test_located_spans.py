@@ -73,6 +73,20 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(summary["tagged_bounded_bridges"], 0)
         self.assertEqual(summary["max_span_mm"], 10)
 
+    def test_located_gate_accepts_reversed_and_split_gaps_but_not_a_different_locus(self):
+        def gap(start, end, layer=2, interval=(0.2, 0.4)):
+            road = spans.Road(layer, 0, "top_skin", False, False, interval, [start, end], [0.4])
+            return spans.describe_gap(road, road.points, abs(end[0] - start[0]), False, 10)
+
+        before = [gap((0, 0), (2, 0)), gap((2, 0), (4, 0))]
+        reversed_gap = gap((4, 0), (0, 0))
+        self.assertEqual(panel_coverage.located_losses(before, [reversed_gap]), (0, []))
+        shifted = gap((0, 1), (4, 1))
+        same_xy_new_z = gap((0, 0), (4, 0), layer=3, interval=(0.4, 0.6))
+        lost, changes = panel_coverage.located_losses(before, [shifted, same_xy_new_z])
+        self.assertEqual(lost, 2)
+        self.assertEqual([change["uncovered_span_mm"] for change in changes], [4, 4])
+
     def test_panel_binds_complete_comparison_to_both_inputs(self):
         with TemporaryDirectory() as directory:
             corpus = Path(directory)
@@ -101,3 +115,13 @@ class LocatedSpanTests(unittest.TestCase):
             self.assertEqual(comparison["evidence_sha256"], panel_coverage.audit.digest(evidence))
             self.assertEqual(panel_coverage.prusa_span_comparison(corpus, "part.step", row, receipt)["status"],
                              "unresolved")
+            plan_path = export / "plan.json"
+            plan = json.loads(plan_path.read_text())
+            native, measured = spans.native_observation(plan, plan_path, evidence, 0.2, 8)
+            self.assertEqual(len(native), 1)
+            self.assertEqual(measured["max_span_mm"], 10)
+            with self.assertRaisesRegex(ValueError, "bind"):
+                spans.native_observation(plan, plan_path, evidence, 0.2, 9)
+            evidence.write_text("\n".join(evidence.read_text().splitlines()[:-1]) + "\n")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                spans.native_observation(plan, plan_path, evidence, 0.2, 8)

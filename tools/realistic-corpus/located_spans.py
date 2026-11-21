@@ -364,3 +364,55 @@ def compare(prusa_path, plan_path, output, support_gap, bridge_limit):
     return {"status": "observed_unregistered", "metric": METRIC, **results,
             "part_max_span_delta_mm": results["spiling"]["max_span_mm"] - results["prusa"]["max_span_mm"],
             "evidence": str(output.resolve()), "evidence_sha256": audit.digest(output)}
+
+
+def native_observation(plan, plan_path, evidence, support_gap, bridge_limit):
+    if not all(math.isfinite(value) and value >= 0 for value in (support_gap, bridge_limit)):
+        raise ValueError("invalid common span policy")
+    spans = []
+    if not evidence.exists():
+        observed = observe(native_roads(plan), support_gap, bridge_limit,
+                           lambda span: None if span["bridge_within_limit"] else spans.append(span))
+        return spans, observed
+
+    with evidence.open(encoding="utf-8") as stream:
+        header = json.loads(next(stream, "null"))
+        if (not isinstance(header, dict) or header.get("event") != "header"
+                or header.get("metric") != METRIC or header.get("z_epsilon_mm") != Z_EPSILON_MM
+                or header.get("support_gap_mm") != support_gap or header.get("bridge_limit_mm") != bridge_limit
+                or header["inputs_sha256"]["spiling"] != audit.digest(plan_path)):
+            raise ValueError("located evidence does not bind the current native observation")
+        observed = None
+        bounded = 0
+        for line in stream:
+            row = json.loads(line)
+            if observed is not None:
+                raise ValueError("data after located evidence completion")
+            if row["event"] == "complete":
+                observed = row["spiling"]
+                if not isinstance(observed, dict):
+                    raise ValueError("invalid native located evidence footer")
+            elif row["event"] != "span" or row["slicer"] not in {"spiling", "prusa"}:
+                raise ValueError("unexpected located evidence row")
+            elif row["slicer"] == "spiling":
+                lower, upper = row["physical_z_mm"]
+                physical(lower, upper)
+                (from_x, from_y), (to_x, to_y) = row["points_mm"]
+                length = row["length_mm"]
+                if (not all(math.isfinite(value) for value in (from_x, from_y, to_x, to_y, length))
+                        or length <= EPS
+                        or abs(math.hypot(to_x - from_x, to_y - from_y) - length) > EPS
+                        or type(row["bridge_within_limit"]) is not bool):
+                    raise ValueError("invalid located span")
+                if row["bridge_within_limit"]:
+                    bounded += 1
+                else:
+                    row.pop("event")
+                    row.pop("slicer")
+                    spans.append(row)
+        if (observed is None or observed["unsupported_spans"] != len(spans)
+                or observed["tagged_bounded_bridges"] != bounded
+                or observed["unsupported_layers"] != len({span["layer"] for span in spans})
+                or observed["max_span_mm"] != max((span["length_mm"] for span in spans), default=0)):
+            raise ValueError("incomplete native located evidence")
+    return spans, observed
