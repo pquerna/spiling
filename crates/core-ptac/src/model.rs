@@ -10,7 +10,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub const CHUNK_BYTES: usize = 256 * 1024;
+pub const CHUNK_BYTES: usize = spiling_chunks::FRAME_BYTES;
 pub const MAX_OBJECT_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_OBJECT_CHUNKS: usize = MAX_OBJECT_BYTES.div_ceil(CHUNK_BYTES);
 pub const MAX_ROOT_BYTES: usize = 16 * 1024 * 1024;
@@ -170,6 +170,17 @@ impl<'a> From<&'a spiling_chunks::ChunkSource> for ObjectBytes<'a> {
         Self::Chunks(source)
     }
 }
+/// An unsealed slice still needs compression; a sealed source carries its
+/// original PTAC-profile payload.
+pub(crate) enum ChunkPayload<'a> {
+    Raw(&'a [u8]),
+    Encoded {
+        raw_length: usize,
+        codec: u8,
+        data: &'a [u8],
+    },
+}
+
 impl<'a> ObjectBytes<'a> {
     pub fn len(&self) -> Result<usize> {
         match self {
@@ -192,43 +203,32 @@ impl<'a> ObjectBytes<'a> {
             Self::Chunks(source) => ObjectId(*source.digest()),
         }
     }
-    pub(crate) fn reader(&self) -> Box<dyn std::io::Read + 'a> {
-        match *self {
-            Self::Slice(bytes) => Box::new(bytes),
-            Self::Chunks(source) => Box::new(source.reader()),
-        }
-    }
-    /// Visit raw content in container chunk order with one reusable buffer.
+    /// Visit canonical chunk boundaries and raw identities.
     pub(crate) fn for_each_chunk(
         &self,
         cancel: &AtomicBool,
-        mut visit: impl FnMut(&[u8]) -> Result<()>,
+        mut visit: impl FnMut([u8; 32], ChunkPayload<'_>) -> Result<()>,
     ) -> Result<()> {
-        if let Self::Slice(bytes) = self {
-            for raw in bytes.chunks(CHUNK_BYTES) {
-                cancelled(cancel)?;
-                visit(raw)?;
-            }
-            return Ok(());
-        }
-        let mut reader = self.reader();
-        let mut buffer = vec![0u8; CHUNK_BYTES];
-        loop {
-            cancelled(cancel)?;
-            let mut filled = 0;
-            while filled < CHUNK_BYTES {
-                let read = reader.read(&mut buffer[filled..])?;
-                if read == 0 {
-                    break;
+        match self {
+            Self::Slice(bytes) => {
+                for raw in bytes.chunks(CHUNK_BYTES) {
+                    cancelled(cancel)?;
+                    visit(hash(raw), ChunkPayload::Raw(raw))?;
                 }
-                filled += read;
+                Ok(())
             }
-            if filled == 0 {
-                return Ok(());
-            }
-            visit(&buffer[..filled])?;
-            if filled < CHUNK_BYTES {
-                return Ok(());
+            Self::Chunks(source) => {
+                source.visit_encoded_frames(|digest, raw_length, compressed, data| {
+                    cancelled(cancel)?;
+                    visit(
+                        *digest,
+                        ChunkPayload::Encoded {
+                            raw_length,
+                            codec: u8::from(compressed),
+                            data,
+                        },
+                    )
+                })
             }
         }
     }

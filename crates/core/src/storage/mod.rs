@@ -745,9 +745,7 @@ fn validate_other_root(
     cancelled(cancel)
 }
 
-/// Raw object bytes for every member. Programs are materialized from their
-/// compressed frames for the duration of a save or reconciliation.
-/// Exact object content retained in memory: whole bytes, or a program's frames.
+/// Exact object content: whole bytes or sealed manufacturing frames.
 #[derive(Clone)]
 enum StoredBytes {
     Bytes(Arc<Vec<u8>>),
@@ -1049,10 +1047,10 @@ pub fn save(
                 "durable guard changed without its bound publication",
             ));
         }
-        capture.verify_all(cancel).map_err(ptac_error)?;
         guard.merge(&durable_guard)?;
         base = Some((binding.heads, binding.selection));
         if same.is_none() {
+            capture.verify_all(cancel).map_err(ptac_error)?;
             let mut available = BTreeMap::new();
             for state in &snapshot.retained {
                 available.extend(snapshot_objects(state)?);

@@ -8,8 +8,8 @@
 //! sequentially and then retained. [`ChunkWriter`] compresses each full
 //! 256 KiB frame as it is produced and hashes the raw stream; the sealed
 //! [`ChunkSource`] is cheap to clone and decodes one frame at a time. The frame
-//! size and zstd level match PTAC's stored chunk profile. Frames never leave
-//! the process in this form: storage and transfer receive the raw bytes.
+//! size and zstd level match PTAC's stored chunk profile. PTAC may borrow
+//! the sealed frames directly; ordinary readers and transfers see raw bytes.
 
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -34,11 +34,27 @@ impl Spool {
 }
 
 struct Frame {
+    digest: [u8; 32],
     raw_len: u32,
     compressed: bool,
     data: Box<[u8]>,
     offset: u64,
     stored_len: usize,
+}
+
+impl Frame {
+    fn read_encoded(&self, spool: &Spool, buffer: &mut Vec<u8>) -> io::Result<()> {
+        buffer
+            .try_reserve(self.stored_len.saturating_sub(buffer.len()))
+            .map_err(io::Error::other)?;
+        buffer.resize(self.stored_len, 0);
+        let mut file = spool
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
+        file.seek(SeekFrom::Start(self.offset))?;
+        file.read_exact(buffer)
+    }
 }
 
 struct Content {
@@ -92,6 +108,30 @@ impl ChunkSource {
             pos: 0,
         }
     }
+    /// Visit the original PTAC-profile frames in order: raw SHA-256, raw
+    /// length, codec, and encoded bytes. A spool needs just one frame buffer.
+    pub fn visit_encoded_frames<E: From<io::Error>>(
+        &self,
+        mut visit: impl FnMut(&[u8; 32], usize, bool, &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut buffer = Vec::new();
+        for frame in &self.0.frames {
+            let data = if let Some(spool) = &self.0.spool {
+                frame.read_encoded(spool, &mut buffer)?;
+                &buffer
+            } else {
+                &frame.data[..]
+            };
+            visit(
+                &frame.digest,
+                frame.raw_len as usize,
+                frame.compressed,
+                data,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Copy raw content, refusing anything longer than `limit`.
     pub fn from_slice(bytes: &[u8], limit: u64) -> io::Result<Self> {
         let mut writer = ChunkWriter::new(limit);
@@ -194,6 +234,7 @@ impl ChunkWriter {
         };
         self.frames.try_reserve(1).map_err(io::Error::other)?;
         self.frames.push(Frame {
+            digest: Sha256::digest(&self.pending).into(),
             raw_len,
             compressed,
             data,
@@ -264,20 +305,9 @@ impl ChunkReader {
         self.pos = 0;
         self.buf.clear();
         let raw_len = frame.raw_len as usize;
-        let disk_data;
+        let mut disk_data = Vec::new();
         let data = if let Some(spool) = &self.source.0.spool {
-            let mut file = spool
-                .0
-                .lock()
-                .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
-            file.seek(SeekFrom::Start(frame.offset))?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(frame.stored_len)
-                .map_err(io::Error::other)?;
-            bytes.resize(frame.stored_len, 0);
-            file.read_exact(&mut bytes)?;
-            disk_data = bytes;
+            frame.read_encoded(spool, &mut disk_data)?;
             &disk_data[..]
         } else {
             &frame.data

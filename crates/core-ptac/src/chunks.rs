@@ -5,8 +5,6 @@
 use crate::{CHUNK_BYTES, Result, invalid, limit, model::hash};
 
 pub(crate) struct Encoded {
-    pub hash: [u8; 32],
-    pub raw_length: usize,
     pub codec: u8,
     pub data: Vec<u8>,
 }
@@ -25,12 +23,7 @@ pub(crate) fn encode(raw: &[u8]) -> Result<Encoded> {
     } else {
         (0, raw.to_vec())
     };
-    Ok(Encoded {
-        hash: hash(raw),
-        raw_length: raw.len(),
-        codec,
-        data,
-    })
+    Ok(Encoded { codec, data })
 }
 
 pub(crate) fn decode(

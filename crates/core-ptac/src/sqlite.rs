@@ -5,7 +5,7 @@
 use crate::{
     chunks,
     execution::Execution,
-    model::{Candidate, cancelled, digest_bytes, hash, snapshot_id},
+    model::{Candidate, ChunkPayload, cancelled, digest_bytes, hash, snapshot_id},
     schema,
     storage_os::{Location, Parent, Spool, Stage},
     vfs::Guard,
@@ -460,7 +460,7 @@ impl Container {
         let database = Database::open(stage.location.clone(), false, true, profile)?;
         let mut execution = Execution::new(&database.connection, cancel);
         database.connection.execute_batch("BEGIN IMMEDIATE")?;
-        insert(&database.connection, &candidate, &mut staged, cancel)?;
+        let mut new_objects = insert(&database.connection, &candidate, &mut staged, cancel)?;
         drop(staged);
         let previous_id = previous
             .as_ref()
@@ -468,7 +468,12 @@ impl Container {
             .filter(|id| *id != candidate.id);
         if let Some(previous) = &previous {
             let mut staged_previous = Staged::new(previous, &stage.location.parent, cancel)?;
-            insert(&database.connection, previous, &mut staged_previous, cancel)?;
+            new_objects.extend(insert(
+                &database.connection,
+                previous,
+                &mut staged_previous,
+                cancel,
+            )?);
         }
         database.connection.execute(
             "INSERT INTO container VALUES(1,?1,1,?2,?3,?4,?5)",
@@ -493,10 +498,11 @@ impl Container {
         drop(database);
         let checker = Database::open(stage.location.clone(), true, false, profile)?;
         let verification = Execution::new(&checker.connection, cancel);
-        verify_snapshot(&checker.connection, candidate.id, cancel)?;
+        graph(&checker.connection, candidate.id)?;
         if let Some(previous) = previous_id {
-            verify_snapshot(&checker.connection, previous, cancel)?;
+            graph(&checker.connection, previous)?;
         }
+        verify_objects(&checker.connection, new_objects, cancel)?;
         drop(verification);
         drop(checker);
         let heads = Heads {
@@ -582,16 +588,31 @@ impl Container {
                 Selection::Current => base.current,
                 Selection::Previous => base.previous.ok_or(Error::NoPrevious)?,
             };
-            verify_snapshot(connection, retained, cancel)?;
-            insert(connection, &candidate, &mut staged, cancel)?;
             let previous = if candidate.id == retained {
                 base.previous.filter(|id| *id != candidate.id)
             } else {
                 Some(retained)
             };
-            if let Some(previous) = previous.filter(|id| *id != retained) {
-                verify_snapshot(connection, previous, cancel)?;
+            // Prior-only objects have no incoming frames to compare. Check
+            // them before insert so new chunks cannot hide a missing chunk.
+            let mut unchecked = BTreeSet::new();
+            for id in [Some(retained), previous.filter(|id| *id != retained)]
+                .into_iter()
+                .flatten()
+            {
+                let (root, members) = graph(connection, id)?;
+                if object_length(connection, root)? > MAX_ROOT_BYTES {
+                    return Err(limit("retained root byte limit"));
+                }
+                unchecked.extend(
+                    std::iter::once(root)
+                        .chain(members.into_iter().map(|member| member.object))
+                        .filter(|object| !candidate.objects.contains_key(object)),
+                );
             }
+            verify_objects(connection, unchecked, cancel)?;
+            let new_objects = insert(connection, &candidate, &mut staged, cancel)?;
+            verify_objects(connection, new_objects, cancel)?;
             let generation = base
                 .generation
                 .checked_add(1)
@@ -1165,6 +1186,17 @@ fn stream_object(
     Ok(())
 }
 
+fn verify_objects(
+    connection: &Connection,
+    objects: BTreeSet<ObjectId>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    for object in objects {
+        stream_object(connection, object, MAX_OBJECT_BYTES, cancel, |_| Ok(()))?;
+    }
+    Ok(())
+}
+
 fn verify_snapshot(connection: &Connection, id: SnapshotId, cancel: &AtomicBool) -> Result<()> {
     let (root, members) = graph(connection, id)?;
     stream_object(connection, root, MAX_ROOT_BYTES, cancel, |_| Ok(()))?;
@@ -1200,27 +1232,37 @@ impl Staged {
         let mut offset = 0u64;
         for (id, bytes) in &candidate.objects {
             let mut mapping = Vec::new();
-            bytes.for_each_chunk(cancel, |raw| {
-                let id = hash(raw);
+            bytes.for_each_chunk(cancel, |id, payload| {
                 mapping.push(id);
                 if staged.chunks.contains_key(&id) {
                     return Ok(());
                 }
-                let encoded = chunks::encode(raw)?;
-                if offset + encoded.data.len() as u64 > MAX_SCRATCH_BYTES {
+                let encoded;
+                let (raw_length, codec, data) = match payload {
+                    ChunkPayload::Raw(raw) => {
+                        encoded = chunks::encode(raw)?;
+                        (raw.len(), encoded.codec, encoded.data.as_slice())
+                    }
+                    ChunkPayload::Encoded {
+                        raw_length,
+                        codec,
+                        data,
+                    } => (raw_length, codec, data),
+                };
+                if offset + data.len() as u64 > MAX_SCRATCH_BYTES {
                     return Err(limit("staged encoded bytes"));
                 }
-                staged.spool.append(&encoded.data)?;
+                staged.spool.append(data)?;
                 staged.chunks.insert(
-                    encoded.hash,
+                    id,
                     ChunkPosition {
                         offset,
-                        length: encoded.data.len(),
-                        raw_length: encoded.raw_length,
-                        codec: encoded.codec,
+                        length: data.len(),
+                        raw_length,
+                        codec,
                     },
                 );
-                offset += encoded.data.len() as u64;
+                offset += data.len() as u64;
                 Ok(())
             })?;
             staged.objects.insert(*id, mapping);
@@ -1229,73 +1271,101 @@ impl Staged {
     }
 }
 
+/// Every reused chunk either matches its sealed encoded bytes or passes one
+/// full decode (valid PTAC files may use another encoding of the same bytes).
+/// Comparing the ordered mapping then proves exact reuse without decoding an
+/// object or its incoming source again.
 fn insert(
     connection: &Connection,
     candidate: &Candidate<'_>,
     staged: &mut Staged,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<BTreeSet<ObjectId>> {
+    let mut chunk =
+        connection.prepare("SELECT raw_length,codec,data FROM chunks WHERE chunk_id=?1")?;
+    let mut add_chunk = connection.prepare("INSERT INTO chunks VALUES(?1,?2,?3,?4)")?;
+    let mut data = Vec::new();
+    let mut new_chunks = BTreeSet::new();
     for (id, position) in &staged.chunks {
         cancelled(cancel)?;
-        let mut query =
-            connection.prepare("SELECT raw_length,codec,data FROM chunks WHERE chunk_id=?1")?;
-        let mut rows = query.query([&id[..]])?;
-        if let Some(row) = rows.next()? {
-            let length = usize::try_from(row.get::<_, i64>(0)?)
-                .map_err(|_| invalid("negative chunk length"))?;
-            chunks::decode(
-                row.get(1)?,
-                length,
-                row.get_ref(2)?
-                    .as_blob()
-                    .map_err(|_| invalid("chunk data type"))?,
-                id,
-            )?;
-            continue;
-        }
-        let mut data = vec![0u8; position.length];
+        data.resize(position.length, 0);
         staged.spool.file.seek(SeekFrom::Start(position.offset))?;
         staged.spool.file.read_exact(&mut data)?;
-        connection.execute(
-            "INSERT INTO chunks VALUES(?1,?2,?3,?4)",
-            params![&id[..], position.raw_length as i64, position.codec, data],
-        )?;
+        let mut rows = chunk.query([&id[..]])?;
+        if let Some(row) = rows.next()? {
+            let length: usize = usize::try_from(row.get::<_, i64>(0)?)
+                .map_err(|_| invalid("negative chunk length"))?;
+            let codec: i64 = row.get(1)?;
+            let stored = row
+                .get_ref(2)?
+                .as_blob()
+                .map_err(|_| invalid("chunk data type"))?;
+            if length != position.raw_length {
+                return Err(invalid("existing chunk length differs from incoming bytes"));
+            }
+            if codec != i64::from(position.codec) || stored != data {
+                chunks::decode(codec, length, stored, id)?;
+            }
+        } else {
+            new_chunks.insert(*id);
+            add_chunk.execute(params![
+                &id[..],
+                position.raw_length as i64,
+                position.codec,
+                &data
+            ])?;
+        }
     }
+    let mut new_objects = BTreeSet::new();
+    let mut object =
+        connection.prepare("SELECT raw_length,chunk_count FROM objects WHERE object_id=?1")?;
+    let mut stored_mapping = connection.prepare(
+        "SELECT ordinal,chunk_id FROM object_chunks WHERE object_id=?1 ORDER BY ordinal",
+    )?;
+    let mut add_mapping = connection.prepare("INSERT INTO object_chunks VALUES(?1,?2,?3)")?;
     for (id, mapping) in &staged.objects {
-        let bytes = candidate.objects[id];
-        let length = bytes.len()?;
-        if connection
-            .query_row(
-                "SELECT 1 FROM objects WHERE object_id=?1",
-                [&id.as_bytes()[..]],
-                |_| Ok(()),
-            )
+        cancelled(cancel)?;
+        let length = candidate.objects[id].len()?;
+        if let Some(metadata) = object
+            .query_row([&id.as_bytes()[..]], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
             .optional()?
-            .is_some()
         {
-            let mut incoming = bytes.reader();
-            let mut expected = vec![0u8; CHUNK_BYTES];
-            stream_object(connection, *id, length, cancel, |raw| {
-                let expected = &mut expected[..raw.len()];
-                incoming
-                    .read_exact(expected)
-                    .map_err(|_| invalid("existing object disagrees with incoming bytes"))?;
-                if expected != raw {
-                    return Err(invalid("existing object disagrees with incoming bytes"));
+            if metadata != (length as i64, mapping.len() as i64) {
+                return Err(invalid("existing object size differs from incoming bytes"));
+            }
+            let mut rows = stored_mapping.query([&id.as_bytes()[..]])?;
+            for (ordinal, expected) in mapping.iter().enumerate() {
+                cancelled(cancel)?;
+                let row = rows
+                    .next()?
+                    .ok_or_else(|| invalid("incomplete reused object mapping"))?;
+                if new_chunks.contains(expected)
+                    || row.get::<_, i64>(0)? != ordinal as i64
+                    || row
+                        .get_ref(1)?
+                        .as_blob()
+                        .map_err(|_| invalid("chunk ID type"))?
+                        != expected
+                {
+                    return Err(invalid(
+                        "existing object mapping differs from incoming bytes",
+                    ));
                 }
-                Ok(())
-            })?;
+            }
+            if rows.next()?.is_some() {
+                return Err(invalid("reused object mapping has an extra row"));
+            }
         } else {
             connection.execute(
                 "INSERT INTO objects VALUES(?1,?2,?3)",
                 params![&id.as_bytes()[..], length as i64, mapping.len() as i64],
             )?;
             for (ordinal, chunk) in mapping.iter().enumerate() {
-                connection.execute(
-                    "INSERT INTO object_chunks VALUES(?1,?2,?3)",
-                    params![&id.as_bytes()[..], ordinal as i64, &chunk[..]],
-                )?;
+                add_mapping.execute(params![&id.as_bytes()[..], ordinal as i64, &chunk[..]])?;
             }
+            new_objects.insert(*id);
         }
     }
     if connection
@@ -1326,5 +1396,5 @@ fn insert(
             )?;
         }
     }
-    Ok(())
+    Ok(new_objects)
 }
