@@ -368,3 +368,38 @@ fn first_prewarm_cannot_claim_an_unavailable_lead_time() {
     assert_eq!(result.groups[0].prewarm_at_s, Some(0.));
     assert_eq!(result.groups[0].begins_at_s, 27.);
 }
+
+#[test]
+fn preferred_build_direction_walls_are_searched_only_at_their_policy_seams() {
+    // Squares whose +Y edge is the preferred side; their seam must be one of
+    // that edge's two vertices whatever order the search picks.
+    let squares: Vec<[PointMm; 4]> = (0..12)
+        .map(|i| {
+            let (x, y) = (f64::from(i % 4) * 3., f64::from(i / 4) * 3.);
+            [
+                [x, y, 0.2],
+                [x + 1., y, 0.2],
+                [x + 1., y + 1., 0.2],
+                [x, y + 1., 0.2],
+            ]
+        })
+        .collect();
+    let tasks: Vec<Task<'_>> = squares
+        .iter()
+        .map(|seams| Task {
+            ends: Ends::Loop { seams },
+            tool: 0,
+            barrier: 0,
+            prerequisites: &[],
+            duration_s: 1.,
+            seam_policy: Some(SeamPolicy::PreferredBuildDirection { xy: [0., 1.] }),
+            physical_z_mm: [0., 0.2],
+        })
+        .collect();
+    let routed = run(&tasks, &machine(1, Service::WhenUsed), ToolOrder::Fixed);
+    for visit in &routed.visits {
+        assert!(matches!(visit.seam, 2 | 3), "{visit:?}");
+    }
+    let again = run(&tasks, &machine(1, Service::WhenUsed), ToolOrder::Fixed);
+    assert_eq!(routed, again);
+}

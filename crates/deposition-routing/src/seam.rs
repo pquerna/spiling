@@ -93,3 +93,32 @@ pub(crate) fn apply(
     }
     Ok(())
 }
+
+/// The seams a [`SeamPolicy::PreferredBuildDirection`] wall can receive: every
+/// vertex tied at the policy's best score, ascending. [`apply`] chooses among
+/// exactly these by proximity, so the search need rank no other entry. `None`
+/// for other tasks, whose entry depends on the order, and for coordinates
+/// [`apply`] itself refuses.
+pub(crate) fn preferred(task: &Task<'_>) -> Option<Box<[u32]>> {
+    let (Some(SeamPolicy::PreferredBuildDirection { xy }), Ends::Loop { seams }) =
+        (task.seam_policy, task.ends)
+    else {
+        return None;
+    };
+    let mut best = f64::NEG_INFINITY;
+    let mut tied = Vec::new();
+    for (index, raw) in seams.iter().enumerate() {
+        let p = project(*raw).ok()?;
+        let score = zero(p[0] * xy[0] + p[1] * xy[1]);
+        match score.total_cmp(&best) {
+            std::cmp::Ordering::Greater => {
+                best = score;
+                tied.clear();
+                tied.push(index as u32);
+            }
+            std::cmp::Ordering::Equal => tied.push(index as u32),
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    Some(tied.into_boxed_slice())
+}

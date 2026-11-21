@@ -5,8 +5,9 @@
 //! iterated kicks. Every move has an O(1) cost delta on modelled gap seconds
 //! and respects prerequisites. Effort follows the group: descent always runs to
 //! a local optimum, longer groups relocate longer segments, and kicks continue
-//! until they have spent at least the descent's own work. Work is counted for
-//! cancellation and reporting only; output stays deterministic.
+//! while they keep shortening the order: they stop after a fixed run of kicks
+//! without improvement. Work is counted for cancellation and reporting only;
+//! output stays deterministic.
 use super::*;
 
 #[allow(unsafe_code)]
@@ -14,8 +15,9 @@ mod simd;
 #[cfg(test)]
 mod simd_tests;
 
-/// Kicks every group receives, however small.
-const MIN_KICKS: usize = 48;
+/// Consecutive kicks that fail to shorten the order before kicking stops.
+/// A stall rule on measured benefit, not a work limit.
+const STALL_KICKS: usize = 48;
 
 /// Longest relocated segment: Or-opt's 3, growing with the group's size so a
 /// large layer is not searched with a small layer's neighbourhood.
@@ -61,6 +63,27 @@ pub(super) struct Order<'a, 't> {
     prerequisites: Vec<Vec<u32>>,
     dependents: Vec<Vec<u32>>,
     simd: Option<simd::Backend>,
+    /// Visit positions refreshed since the last [`Order::take_dirty`].
+    dirty: (usize, usize),
+    /// By local task: the only seams a loop may take, when its policy fixes
+    /// them before the search; otherwise every vertex.
+    permitted: Vec<Option<Box<[u32]>>>,
+}
+
+/// Descent buffers reused across kicks.
+struct Workspace {
+    queued: Vec<bool>,
+    scratch: Scratch,
+    queue: std::collections::VecDeque<u32>,
+}
+impl Workspace {
+    fn new(n: usize) -> Self {
+        Self {
+            queued: vec![false; n],
+            scratch: Scratch::new(n),
+            queue: std::collections::VecDeque::new(),
+        }
+    }
 }
 impl<'a, 't> Order<'a, 't> {
     pub fn new(
@@ -88,9 +111,21 @@ impl<'a, 't> Order<'a, 't> {
             prerequisites,
             dependents,
             simd: None,
+            dirty: (0, 0),
+            permitted: Vec::new(),
         };
         order.refresh();
         order
+    }
+    /// Restrict loops to the seams their policy leaves open, by local task.
+    pub(super) fn with_seams(mut self, permitted: Vec<Option<Box<[u32]>>>) -> Self {
+        self.permitted = permitted;
+        self
+    }
+    fn seams_of(&self, local: u32) -> Option<&[u32]> {
+        self.permitted
+            .get(local as usize)
+            .and_then(Option::as_deref)
     }
     pub(super) fn enable_simd(&mut self, cancel: &AtomicBool) -> bool {
         if self.visits.len() < simd::BLOCK {
@@ -123,6 +158,13 @@ impl<'a, 't> Order<'a, 't> {
     /// Only moved visits change endpoints/positions. Their following gap also
     /// changes, even when that following visit itself stays in place.
     fn refresh_range(&mut self, range: Range<usize>) {
+        if !range.is_empty() {
+            self.dirty = if self.dirty.0 >= self.dirty.1 {
+                (range.start, range.end)
+            } else {
+                (self.dirty.0.min(range.start), self.dirty.1.max(range.end))
+            };
+        }
         for i in range.clone() {
             let (local, reverse, seam) = self.visits[i];
             self.at[local as usize] = i;
@@ -142,6 +184,13 @@ impl<'a, 't> Order<'a, 't> {
         for i in range.start..range.end.saturating_add(1).min(self.visits.len()) {
             self.incoming[i] = self.gap(i.checked_sub(1), i);
         }
+    }
+    /// Positions whose visit may have changed since the previous call. Every
+    /// mutation is a permutation or entry change inside a refreshed range, so
+    /// positions outside it, and their incoming gaps, are untouched.
+    fn take_dirty(&mut self) -> Range<usize> {
+        let (a, b) = std::mem::take(&mut self.dirty);
+        a..b.max(a)
     }
     pub fn end(&self) -> Option<PointMm> {
         self.exit.last().copied()
@@ -165,6 +214,7 @@ impl<'a, 't> Order<'a, 't> {
     fn gap(&self, a: Option<usize>, b: usize) -> f64 {
         self.between(self.leaving(a), self.entry[b])
     }
+    #[cfg(test)]
     fn cost(&self) -> f64 {
         self.incoming.iter().sum()
     }
@@ -431,11 +481,20 @@ impl<'a, 't> Order<'a, 't> {
             Ends::Open {
                 reversible: true, ..
             } => (1, !original.1),
-            Ends::Loop { seams } if seams.len() > 1 => (seams.len(), false),
+            Ends::Loop { seams } => (
+                self.seams_of(original.0).map_or(seams.len(), <[u32]>::len),
+                false,
+            ),
             _ => return false,
         };
-        for seam in 0..count {
-            let candidate = (original.0, reverse, seam as u32);
+        if count < 2 && reverse == original.1 {
+            return false;
+        }
+        for choice in 0..count {
+            let seam = self
+                .seams_of(original.0)
+                .map_or(choice as u32, |only| only[choice]);
+            let candidate = (original.0, reverse, seam);
             if candidate == original {
                 continue;
             }
@@ -596,13 +655,27 @@ impl<'a, 't> Order<'a, 't> {
         self.refresh_range(i.min(j)..i.max(j) + 1);
         [i, j]
     }
-    /// Don't-look-bit descent: only visits near a change are re-examined.
-    /// Returns false when the allowance ran out.
+    #[cfg(test)]
     fn descend(&mut self, context: &mut Context<'_, '_>, seeds: &[usize]) -> Result<(), Error> {
+        self.descend_with(context, seeds, &mut Workspace::new(self.visits.len()))
+    }
+    /// Don't-look-bit descent: only visits near a change are re-examined.
+    fn descend_with(
+        &mut self,
+        context: &mut Context<'_, '_>,
+        seeds: &[usize],
+        workspace: &mut Workspace,
+    ) -> Result<(), Error> {
         let n = self.visits.len();
-        let mut queued = vec![false; n];
-        let mut scratch = Scratch::new(n);
-        let mut queue = std::collections::VecDeque::new();
+        let Workspace {
+            queued,
+            scratch,
+            queue,
+        } = workspace;
+        // Cancellation can leave a previous descent's queue behind.
+        for l in queue.drain(..) {
+            queued[l as usize] = false;
+        }
         let wake = |order: &Self,
                     around: usize,
                     queued: &mut Vec<bool>,
@@ -621,7 +694,7 @@ impl<'a, 't> Order<'a, 't> {
             }
         };
         for &k in seeds {
-            wake(self, k, &mut queued, &mut queue);
+            wake(self, k, queued, queue);
         }
         while let Some(l) = queue.pop_front() {
             context.charge(n as u64)?;
@@ -629,7 +702,7 @@ impl<'a, 't> Order<'a, 't> {
             let mut changed = None;
             scratch.covered = (0, 0);
             for len in 1..=segment(n).min(n - i) {
-                if let Some(t) = self.try_move(i, len, &mut scratch) {
+                if let Some(t) = self.try_move(i, len, scratch) {
                     changed = Some([t, t + len]);
                     break;
                 }
@@ -638,14 +711,14 @@ impl<'a, 't> Order<'a, 't> {
                 changed = Some([i, i]);
             }
             if changed.is_none()
-                && let Some(k) = self.try_reverse(i, &mut scratch)
+                && let Some(k) = self.try_reverse(i, scratch)
             {
                 changed = Some([i, k]);
             }
             queued[l as usize] = false;
             if let Some(places) = changed {
                 for k in [i, places[0], places[1]] {
-                    wake(self, k.min(n - 1), &mut queued, &mut queue);
+                    wake(self, k.min(n - 1), queued, queue);
                 }
             }
         }
@@ -653,7 +726,9 @@ impl<'a, 't> Order<'a, 't> {
     }
 }
 
-/// Descent, then iterated kicks keeping the best order. Cancellation aborts.
+/// Descent, then iterated kicks keeping the best order until a run of kicks
+/// fails to shorten it. Only the positions a kick touched are compared,
+/// snapshotted or restored. Cancellation aborts.
 pub(super) fn improve(
     context: &mut Context<'_, '_>,
     order: &mut Order<'_, '_>,
@@ -662,31 +737,36 @@ pub(super) fn improve(
     if n < 2 {
         return Ok(());
     }
+    let mut workspace = Workspace::new(n);
     let all: Vec<usize> = (0..n).collect();
-    let mut best = (order.cost(), order.visits.clone());
-    let started = context.work;
-    order.descend(context, &all)?;
-    let descent = context.work - started;
-    let kicking = context.work;
+    order.descend_with(context, &all, &mut workspace)?;
+    order.take_dirty();
+    let mut best_visits = order.visits.clone();
+    let mut best_incoming = order.incoming.clone();
     let mut random = 0x2545_F491_4F6C_DD1D_u64;
-    let mut kicks = 0;
-    while kicks < MIN_KICKS || context.work - kicking < descent {
-        if order.cost() < best.0 - 1e-9 {
-            best = (order.cost(), order.visits.clone());
-        } else {
-            order.visits.clone_from(&best.1);
-            order.refresh();
-        }
-        let mut seeds = Vec::new();
+    let mut seeds = Vec::with_capacity(6);
+    let mut stalled = 0;
+    while stalled < STALL_KICKS {
+        seeds.clear();
         for _ in 0..3 {
             seeds.extend(order.kick(&mut random));
         }
-        order.descend(context, &seeds)?;
-        kicks += 1;
-    }
-    if order.cost() >= best.0 - 1e-9 {
-        order.visits = best.1;
-        order.refresh();
+        order.descend_with(context, &seeds, &mut workspace)?;
+        let changed = order.take_dirty();
+        // Incoming gaps that can differ: the changed visits and the one after.
+        let gaps = changed.start..(changed.end + 1).min(n);
+        let now: f64 = order.incoming[gaps.clone()].iter().sum();
+        let before: f64 = best_incoming[gaps.clone()].iter().sum();
+        if now < before - 1e-9 {
+            best_visits[changed.clone()].copy_from_slice(&order.visits[changed]);
+            best_incoming[gaps.clone()].copy_from_slice(&order.incoming[gaps]);
+            stalled = 0;
+        } else {
+            order.visits[changed.clone()].copy_from_slice(&best_visits[changed.clone()]);
+            order.refresh_range(changed);
+            order.take_dirty();
+            stalled += 1;
+        }
     }
     Ok(())
 }
