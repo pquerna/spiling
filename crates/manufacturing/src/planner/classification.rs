@@ -39,83 +39,6 @@ pub(super) struct InteriorRegion {
     pub(super) frame_origin_mm: Option<[f64; 2]>,
 }
 
-fn ordinary_row_alignment(
-    rows: &region::HatchRows,
-    polygon: &Polygon<f64>,
-    layer: &region::HatchLayer<'_>,
-    lower: &[DepositionPath],
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<f64, ManufacturingError> {
-    let Some(bounds) = polygon.bounding_rect() else {
-        return Ok(0.0);
-    };
-    let along = usize::from(layer.axis == region::HatchAxis::Y);
-    let cross = 1 - along;
-    let min = [bounds.min().x, bounds.min().y];
-    let max = [bounds.max().x, bounds.max().y];
-    let boundary_size = polygon.exterior().0.len()
-        + polygon
-            .interiors()
-            .iter()
-            .map(|ring| ring.0.len())
-            .sum::<usize>();
-    let mut score = 0.0;
-    let mut vote = |at: f64, coordinate: f64, span: f64, reach: f64, work: &mut usize| {
-        let Some(row) = rows.nearest(coordinate) else {
-            return Ok::<_, ManufacturingError>(());
-        };
-        let distance = (row - coordinate).abs();
-        if distance < reach && (min[along]..=max[along]).contains(&at) {
-            let mut point = [0.0; 2];
-            point[along] = at;
-            point[cross] = row;
-            super::boolean::charge(work, boundary_size)?;
-            if polygon.intersects(&Point::from(point)) {
-                score += span * (1.0 - distance / reach);
-            }
-        }
-        Ok(())
-    };
-    for path in lower {
-        check_cancel(cancel)?;
-        super::boolean::charge(work, path.points_mm.len().max(1))?;
-        if path.physical_z_mm[1] != layer.lower_z
-            || !path.arcs.is_empty()
-            || !matches!(
-                path.kind,
-                DepositionKind::SparseFill
-                    | DepositionKind::SolidFill
-                    | DepositionKind::TopSkin
-                    | DepositionKind::BottomSkin
-            )
-        {
-            continue;
-        }
-        let Some(width) = path.width.constant_width_mm() else {
-            continue;
-        };
-        let reach = width.min(layer.width_mm) * 0.5;
-        for edge in path.points_mm.windows(2) {
-            check_cancel(cancel)?;
-            let [start, end] = [edge[0], edge[1]];
-            let lo = start[along].min(end[along]).max(min[along]);
-            let hi = start[along].max(end[along]).min(max[along]);
-            if start[cross] == end[cross] && lo < hi {
-                vote(lo.midpoint(hi), start[cross], hi - lo, reach, work)?;
-            }
-        }
-        if let (Some(first), Some(last)) = (path.points_mm.first(), path.points_mm.last())
-            && first != last
-        {
-            for point in [first, last] {
-                vote(point[along], point[cross], reach, reach, work)?;
-            }
-        }
-    }
-    Ok(score)
-}
-
 pub(super) struct ComponentAnchorAdmission {
     pub(super) supported: bool,
     /// Strictly ascending indices into this exact component proposal.
@@ -1194,74 +1117,228 @@ impl ClassifiedRegions {
 
     /// Propose one shared ordinary phase without granting final stroke support
     /// or changing any source-framed or mandatory-skin construction.
-    pub(super) fn ordinary_phase(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Phase selection borrows prior strokes and separately accounts classified, external and anchor ownership"
+    )]
+    pub(super) fn choose_initial_ordinary_phase<'a>(
         &self,
         layer: &region::HatchLayer<'_>,
-        lower: &[DepositionPath],
-        work: &mut usize,
+        previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+        anchors: &mut super::support::AnchorWorkspace,
+        anchor_work: &mut usize,
+        classified_owned_bytes: usize,
+        outside_retained_points: usize,
+        outside_owned_bytes: usize,
+        mut admit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
         cancel: &AtomicBool,
     ) -> Result<region::OrdinaryHatchPhase, ManufacturingError> {
-        use region::OrdinaryHatchPhase;
         check_cancel(cancel)?;
+        // Grid families retain the same centered X/Y lattices on every fine
+        // interval. A single-family phase proposal cannot guide this pattern.
         if matches!(
             layer.recipe.sparse_infill,
             SparseInfillPolicy::Grid
                 | SparseInfillPolicy::Gyroid
                 | SparseInfillPolicy::WebRoof { .. }
         ) {
-            return Ok(OrdinaryHatchPhase::Centered);
+            return Ok(region::OrdinaryHatchPhase::Centered);
         }
-        let mut best = (OrdinaryHatchPhase::Centered, f64::NEG_INFINITY);
-        'phase: for phase in OrdinaryHatchPhase::CANDIDATES {
-            let mut score = 0.0;
-            for interior in &self.interiors {
-                if interior.frame_origin_mm.is_some() || interior.coverage.fraction == 0.0 {
-                    continue;
-                }
-                let interior_layer = region::HatchLayer {
+        let class_points = self.retained_points();
+        admit(
+            point_sum(class_points, anchors.retained_records())?,
+            byte_sum(classified_owned_bytes, anchors.retained_bytes())?,
+            0,
+        )?;
+        if !self
+            .interiors
+            .iter()
+            .any(|interior| interior.frame_origin_mm.is_none() && !interior.domain.0.is_empty())
+        {
+            return Ok(region::OrdinaryHatchPhase::Centered);
+        }
+        let mut eligible_previous = false;
+        for path in previous.clone() {
+            check_cancel(cancel)?;
+            if path.physical_z_mm[1] == layer.lower_z && path.checked_edges()?.len() != 0 {
+                eligible_previous = true;
+                break;
+            }
+        }
+        if !eligible_previous {
+            return Ok(region::OrdinaryHatchPhase::Centered);
+        }
+        'proposal: for phase in region::OrdinaryHatchPhase::CANDIDATES {
+            check_cancel(cancel)?;
+            let mut candidate = super::support::RasterCandidate {
+                paths: Vec::new(),
+                whole_rows: Vec::new(),
+                process_interfaces: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                skin_command_fits: Vec::new(),
+            };
+            let mut segments = 0;
+            let mut candidate_points = 0;
+            for (index, interior) in self.interiors.iter().enumerate() {
+                let layer = &region::HatchLayer {
                     width_mm: interior.bead_width_mm.unwrap_or(layer.width_mm),
                     ..*layer
                 };
+                if interior.frame_origin_mm.is_some() {
+                    continue;
+                }
+                let fraction = interior.coverage.fraction;
+                let kind = if fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                };
                 for polygon in &interior.domain.0 {
                     check_cancel(cancel)?;
-                    super::boolean::charge(
-                        work,
-                        polygon.exterior().0.len()
-                            + polygon
-                                .interiors()
-                                .iter()
-                                .map(|ring| ring.0.len())
-                                .sum::<usize>(),
-                    )?;
-                    let Some(rows) = region::HatchRows::centered_phase(
-                        polygon,
-                        interior.coverage.fraction,
-                        &interior_layer,
-                        phase,
-                    )?
+                    let Some(rows) =
+                        region::HatchRows::centered_phase(polygon, fraction, layer, phase)?
                     else {
-                        continue 'phase;
+                        continue 'proposal;
                     };
-                    if rows.meets_vertex(polygon, layer.axis, cancel)? {
-                        continue 'phase;
+                    let bound = rows.point_bound()?;
+                    let live = point_sum(class_points, candidate_points)?;
+                    let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+                    // Work is a delta consumed by the caller's cumulative
+                    // ledger, including rows from subsequently refused trials.
+                    admit(
+                        point_sum(point_sum(live, anchors.retained_records())?, bound)?,
+                        byte_sum(
+                            byte_sum(live_bytes, anchors.retained_bytes())?,
+                            hatch_storage_bound(bound)?,
+                        )?,
+                        bound,
+                    )?;
+                    let mut paths = Vec::new();
+                    match region::hatch_polygon(
+                        polygon,
+                        kind,
+                        &rows,
+                        layer,
+                        &mut paths,
+                        &mut segments,
+                        cancel,
+                    ) {
+                        Ok(()) => {}
+                        // A speculative phase may clip a degenerate row even
+                        // when a later phase or ordinary recovery is usable.
+                        Err(failure)
+                            if failure.code == ManufacturingErrorCode::UnsupportedGeometry =>
+                        {
+                            continue 'proposal;
+                        }
+                        Err(failure) => return Err(failure),
                     }
-                    if interior.coverage.fraction < 1.0 {
-                        score += ordinary_row_alignment(
-                            &rows,
-                            polygon,
-                            &interior_layer,
-                            lower,
-                            work,
-                            cancel,
-                        )?;
+                    if paths.is_empty() {
+                        continue 'proposal;
                     }
+                    for path in &mut paths {
+                        path.owner = Some(DepositionOwner::Regional {
+                            region_index: index as u16,
+                        });
+                    }
+                    let points = path_points(&paths);
+                    let target = record_target(&candidate.paths, paths.len());
+                    let replacement_bytes = if target > candidate.paths.capacity() {
+                        target.checked_mul(std::mem::size_of::<DepositionPath>())
+                    } else {
+                        Some(0)
+                    }
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "ordinary phase path reservation overflow",
+                        )
+                    })?;
+                    admit(
+                        point_sum(point_sum(live, points)?, anchors.retained_records())?,
+                        byte_sum(
+                            byte_sum(
+                                byte_sum(live_bytes, super::bonds::path_bytes(&paths))?,
+                                anchors.retained_bytes(),
+                            )?,
+                            replacement_bytes,
+                        )?,
+                        0,
+                    )?;
+                    candidate
+                        .paths
+                        .try_reserve_exact(target - candidate.paths.len())
+                        .map_err(|_| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "ordinary phase candidate allocation refused",
+                            )
+                        })?;
+                    candidate.paths.append(&mut paths);
+                    candidate_points = point_sum(candidate_points, points)?;
+                    // The emptied polygon record buffer remains live here.
+                    admit(
+                        point_sum(
+                            point_sum(class_points, candidate_points)?,
+                            anchors.retained_records(),
+                        )?,
+                        byte_sum(
+                            byte_sum(
+                                byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?,
+                                super::bonds::path_bytes(&paths),
+                            )?,
+                            anchors.retained_bytes(),
+                        )?,
+                        0,
+                    )?;
                 }
             }
-            if score > best.1 {
-                best = (phase, score);
+            let live = point_sum(class_points, candidate_points)?;
+            let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+            // The outside baseline excludes this classifier and workspace.
+            // The existing component allowance owns query/proof growth; only
+            // actual capacities, not that unallocated allowance, enter admit.
+            admit(
+                point_sum(live, anchors.retained_records())?,
+                byte_sum(live_bytes, anchors.retained_bytes())?,
+                0,
+            )?;
+            let budget = super::support::component_budget(
+                outside_retained_points,
+                outside_owned_bytes,
+                live,
+                live_bytes,
+            )?;
+            let proof = super::support::component_admission(
+                (&mut candidate, layer.axis, budget, false),
+                previous.clone(),
+                std::iter::empty(),
+                layer.recipe,
+                anchors,
+                anchor_work,
+                cancel,
+            )?;
+            admit(
+                point_sum(
+                    point_sum(live, anchors.retained_records())?,
+                    proof.retained_points(),
+                )?,
+                byte_sum(
+                    byte_sum(live_bytes, anchors.retained_bytes())?,
+                    proof.retained_bytes(),
+                )?,
+                0,
+            )?;
+            let supported = proof.supported;
+            drop(proof);
+            drop(candidate);
+            if supported {
+                return Ok(phase);
             }
         }
-        Ok(best.0)
+        // A guide refusal never substitutes for the actual ordinary/support
+        // pipeline's honest result, including an empty centered polygon.
+        Ok(region::OrdinaryHatchPhase::Centered)
     }
 
     #[expect(
@@ -4392,7 +4469,7 @@ mod ownership_tests {
     }
 
     #[test]
-    fn ordinary_phase_aligns_actual_lower_rows_without_trial_hatches() {
+    fn degenerate_phase_does_not_hide_later_anchored_ordinary_rows() {
         let cancel = AtomicBool::new(false);
         let mut recipe = crate::planner::tests::recipe(0.20);
         let h = recipe.layer_height_mm;
@@ -4416,6 +4493,7 @@ mod ownership_tests {
         });
         let mut classified =
             ClassifiedRegions::new(layout, &fill, &fill, |_, _| Ok(()), &recipe, &cancel).unwrap();
+        let owned_bytes = classified.retained_bytes();
         let layer = region::HatchLayer {
             roof: None,
             width_mm: recipe.bead_width_mm,
@@ -4426,6 +4504,8 @@ mod ownership_tests {
             top_axis: region::HatchAxis::Y,
             recipe: &recipe,
         };
+        // Only rows y=1 and y=5 have actual lower strokes. The earlier Half
+        // proposal touches the minimum vertex and cannot construct its row.
         let previous = [1.0, 5.0].map(|y| DepositionPath {
             material_domain: None,
             kind: DepositionKind::SparseFill,
@@ -4441,106 +4521,77 @@ mod ownership_tests {
         });
         let mut workspace = super::super::support::AnchorWorkspace::default();
         let mut work = 0;
-        let selected = classified
-            .ordinary_phase(&layer, &previous, &mut work, &cancel)
-            .unwrap();
-        assert_eq!(selected, region::OrdinaryHatchPhase::ThreeQuarters);
-        let missing = classified
-            .ordinary_phase(&layer, &[], &mut work, &cancel)
-            .unwrap();
-        assert_eq!(missing, region::OrdinaryHatchPhase::Centered);
-        let end_crossings = previous.clone().map(|mut path| {
-            let row = path.points_mm[0][1];
-            path.points_mm = vec![[0.5, row - 0.5, h], [0.5, row, h]];
-            path
-        });
-        assert_eq!(
-            classified
-                .ordinary_phase(&layer, &end_crossings, &mut work, &cancel)
-                .unwrap(),
-            selected,
-        );
-        for (phase, lower, anchor_failure) in [
-            (missing, previous.as_slice(), true),
-            (selected, previous.as_slice(), false),
-            (selected, &[], true),
-        ] {
-            let mut paths = Vec::new();
-            region::hatch_with_phase(
-                &fill,
-                DepositionKind::SparseFill,
-                recipe.infill_fraction,
+        let phase = classified
+            .choose_initial_ordinary_phase(
                 &layer,
-                None,
-                phase,
-                &mut paths,
-                &mut 0,
-                &cancel,
-            )
-            .unwrap();
-            let outcome = super::super::support::strokes::analyze(
-                &paths,
-                lower.iter(),
-                std::iter::empty(),
-                &recipe,
+                previous.iter(),
                 &mut workspace,
                 &mut work,
-                &cancel,
-            )
-            .unwrap();
-            assert_eq!(outcome.failure.is_some(), anchor_failure);
-        }
-        let classified_bytes = classified.retained_bytes();
-        let mut check =
-            |candidate: &mut super::super::support::RasterCandidate, axis, points, bytes| {
-                super::super::support::component_admission(
-                    (
-                        candidate,
-                        axis,
-                        super::super::support::component_budget(0, 0, points, bytes)?,
-                        false,
-                    ),
-                    previous.iter(),
-                    std::iter::empty(),
-                    &recipe,
-                    &mut workspace,
-                    &mut work,
-                    &cancel,
-                )
-            };
-        let recovered = classified
-            .paths_with_bridge_recovery(
-                &layer,
-                selected,
-                &[],
-                classified_bytes,
+                owned_bytes,
                 0,
-                &mut 0,
+                0,
                 |_, _, _| Ok(()),
-                &mut check,
-                &mut Vec::new(),
-                &mut Vec::new(),
                 &cancel,
             )
             .unwrap();
-        let final_admission = super::super::support::strokes::analyze(
-            &recovered,
-            previous.iter(),
-            std::iter::empty(),
-            &recipe,
-            &mut workspace,
-            &mut work,
+        let mut paths = Vec::new();
+        let mut segments = 0;
+        region::hatch_with_phase(
+            &fill,
+            DepositionKind::SparseFill,
+            recipe.infill_fraction,
+            &layer,
+            None,
+            phase,
+            &mut paths,
+            &mut segments,
             &cancel,
         )
         .unwrap();
-        assert!(
-            final_admission.failure.is_none(),
-            "aligned phase leaves a {} mm unsupported span after recovery",
-            final_admission.worst_unanchored_mm
-        );
+        let mut rows: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let [a, b] = path.points_mm.as_slice() else {
+                    panic!("ordinary row must be a segment")
+                };
+                (a[1], a[0].min(b[0]), a[0].max(b[0]))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(rows, [(1.0, 0.0, 2.0), (5.0, 0.0, 10.0)]);
+
+        let failure = classified
+            .choose_initial_ordinary_phase(
+                &layer,
+                previous.iter(),
+                &mut workspace,
+                &mut work,
+                owned_bytes,
+                0,
+                0,
+                |_, _, _| {
+                    Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "test capacity",
+                    ))
+                },
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         let failure = classified
-            .ordinary_phase(&layer, &previous, &mut work, &cancel)
+            .choose_initial_ordinary_phase(
+                &layer,
+                previous.iter(),
+                &mut workspace,
+                &mut work,
+                owned_bytes,
+                0,
+                0,
+                |_, _, _| Ok(()),
+                &cancel,
+            )
             .unwrap_err();
         assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
     }
