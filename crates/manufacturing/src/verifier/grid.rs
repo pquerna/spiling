@@ -415,39 +415,144 @@ impl Chord {
         cancel: &AtomicBool,
         mut visit: impl FnMut(i64, i64, i64) -> Result<(), ManufacturingError>,
     ) -> Result<(), ManufacturingError> {
+        if !(0..=MAX_XYZ6_TICKS).contains(&radius) {
+            return Err(overflow());
+        }
         let square = i128::from(radius).pow(2);
-        self.row_candidates(radius, cancel, |row, mut left, mut right, seed| {
+        let [min_x, max_x] = [
+            self.start[0].min(self.end[0]),
+            self.start[0].max(self.end[0]),
+        ];
+        let [min_y, max_y] = [
+            self.start[1].min(self.end[1]),
+            self.start[1].max(self.end[1]),
+        ];
+        if min_x == max_x || min_y == max_y {
+            let bottom = (min_y - radius - 1).div_euclid(CELL_TICKS);
+            let top = (max_y + radius).div_euclid(CELL_TICKS);
+            for row in bottom..=top {
+                clearance::debit(work, 1, cancel)?;
+                let distance = (min_y - (row + 1) * CELL_TICKS)
+                    .max(row * CELL_TICKS - max_y)
+                    .max(0);
+                let reach = if distance == 0 {
+                    radius
+                } else {
+                    (square - i128::from(distance).pow(2)).isqrt() as i64
+                };
+                visit(
+                    row,
+                    (min_x - reach - 1).div_euclid(CELL_TICKS),
+                    (max_x + reach).div_euclid(CELL_TICKS),
+                )?;
+            }
+            return Ok(());
+        }
+
+        let hints = CapsuleRowHints::new(self, radius);
+        self.row_candidates(radius, cancel, |row, left, right, seed| {
+            clearance::debit(work, 1, cancel)?;
             let mut hit = |column| {
-                cancelled(cancel)?;
-                *work = work.checked_add(1).ok_or_else(overflow)?;
+                clearance::debit(work, 1, cancel)?;
                 Ok::<_, ManufacturingError>(self.cell_intersects(Cell([column, row]), square))
             };
-            if !hit(seed)? {
-                return Err(failed(
-                    "decoded support grid lost a closed capsule row seed",
-                ));
-            }
-            let mut last = seed;
-            while left < last {
-                let middle = left + (last - left) / 2;
-                if hit(middle)? {
-                    last = middle;
-                } else {
-                    left = middle + 1;
-                }
-            }
-            let mut first = seed;
-            while first < right {
-                let middle = first + (right - first + 1) / 2;
-                if hit(middle)? {
-                    first = middle;
-                } else {
-                    right = middle - 1;
-                }
-            }
-            visit(row, left, right)
+            let [left_hint, right_hint] = hints.for_row(row).unwrap_or([seed, seed]);
+            let first = first_intersecting_column(left, seed, left_hint, &mut hit)?;
+            let last =
+                -first_intersecting_column(-right, -seed, -right_hint, |column| hit(-column))?;
+            visit(row, first, last)
         })
     }
+}
+
+struct CapsuleRowHints {
+    start: [f64; 2],
+    end: [f64; 2],
+    offset: [f64; 2],
+    slope: f64,
+    radius: f64,
+}
+
+impl CapsuleRowHints {
+    fn new(chord: Chord, radius: i64) -> Self {
+        let [start, end] = if chord.start[1] < chord.end[1] {
+            [chord.start, chord.end]
+        } else {
+            [chord.end, chord.start]
+        };
+        let [run, rise] = delta(start, end).map(|component| component as f64);
+        let radius = radius as f64;
+        let norm = radius / run.hypot(rise);
+        Self {
+            start: start.map(|value| value as f64),
+            end: end.map(|value| value as f64),
+            offset: [norm * rise, -norm * run],
+            slope: run / rise,
+            radius,
+        }
+    }
+
+    fn for_row(&self, row: i64) -> Option<[i64; 2]> {
+        let bottom = (row * CELL_TICKS) as f64;
+        let top = ((row + 1) * CELL_TICKS) as f64;
+        let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
+        for [x, y] in [self.start, self.end] {
+            let distance = (y - top).max(bottom - y).max(0.0);
+            if distance <= self.radius {
+                let reach = ((self.radius - distance) * (self.radius + distance)).sqrt();
+                left = left.min(x - reach);
+                right = right.max(x + reach);
+            }
+        }
+        for side in [-1.0, 1.0] {
+            let [shift_x, shift_y] = self.offset.map(|component| side * component);
+            let y_start = self.start[1] + shift_y;
+            let y_end = self.end[1] + shift_y;
+            let lower = bottom.max(y_start);
+            let upper = top.min(y_end);
+            if lower <= upper {
+                let x = |y| self.start[0] + shift_x + self.slope * (y - y_start);
+                let [first, last] = [x(lower), x(upper)];
+                left = left.min(first.min(last));
+                right = right.max(first.max(last));
+            }
+        }
+        (left <= right).then(|| {
+            [
+                ((left - 1.0) / CELL_TICKS as f64).floor() as i64,
+                (right / CELL_TICKS as f64).floor() as i64,
+            ]
+        })
+    }
+}
+
+fn first_intersecting_column(
+    mut lower: i64,
+    mut inside: i64,
+    hint: i64,
+    mut hit: impl FnMut(i64) -> Result<bool, ManufacturingError>,
+) -> Result<i64, ManufacturingError> {
+    let hint = hint.clamp(lower, inside);
+    if hint == inside || hit(hint)? {
+        if hint == lower || !hit(hint - 1)? {
+            return Ok(hint);
+        }
+        inside = hint - 1;
+    } else {
+        if hint + 1 == inside || hit(hint + 1)? {
+            return Ok(hint + 1);
+        }
+        lower = hint + 2;
+    }
+    while lower < inside {
+        let middle = lower + (inside - lower) / 2;
+        if hit(middle)? {
+            inside = middle;
+        } else {
+            lower = middle + 1;
+        }
+    }
+    Ok(inside)
 }
 
 fn wide_product(left: u128, right: u128) -> [u128; 2] {
@@ -601,6 +706,40 @@ mod tests {
                         .unwrap();
                     assert_eq!(compact, reference, "{first:?}, {last:?}, {radius}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_row_boundaries_match_cells_at_signed_and_large_offsets() {
+        let cancel = AtomicBool::new(false);
+        let local = [-50_001, -50_000, -49_999, -1, 0, 1, 49_999, 50_000, 50_001];
+        let mut state = 17_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            local[(state >> 32) as usize % local.len()]
+        };
+        for origin in [0, MAX_XYZ6_TICKS - 1_000_000, -MAX_XYZ6_TICKS + 1_000_000] {
+            for _ in 0..384 {
+                let start = [origin + next(), origin + next()];
+                let end = [origin + next(), origin + next()];
+                let radius = next().abs();
+                let chord = Chord::new(start, end).unwrap();
+                let mut reference = Vec::new();
+                let mut compact = Vec::new();
+                chord
+                    .raster_cells(radius, None, &mut 0, &cancel, |cell, _| {
+                        reference.push(cell);
+                        Ok(())
+                    })
+                    .unwrap();
+                chord
+                    .outer_rows(radius, &mut 0, &cancel, |row, left, right| {
+                        compact.extend((left..=right).map(|column| Cell([column, row])));
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(compact, reference, "{start:?}, {end:?}, r={radius}");
             }
         }
     }

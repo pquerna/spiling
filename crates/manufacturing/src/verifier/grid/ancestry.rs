@@ -376,12 +376,11 @@ impl Replay<'_> {
         let query_id = *self.work;
         let radius = radius_ticks(receiver.inner_radius_mm, 0.0).max(0.0);
         let allowance = radius_ticks(allowance_mm, 0.0).max(0.0);
-        let mut raster_work = 0;
-        receiver.chord.outer_rows(
+        receiver.chord.row_candidates(
             outside_ticks(receiver.inner_radius_mm.max(allowance_mm))?,
-            &mut raster_work,
             self.cancel,
-            |row, left, right| {
+            |row, left, right, _| {
+                debit(self.work, 1, self.cancel)?;
                 window.for_each(receiver, |inventory, bond| {
                     for entry in inventory.rows.intersect(row, left, right) {
                         debit(self.work, 1, self.cancel)?;
@@ -409,7 +408,6 @@ impl Replay<'_> {
                 Ok(())
             },
         )?;
-        debit(self.work, raster_work, self.cancel)?;
         sort_coverage(&mut self.covered, self.work, self.cancel)?;
         Ok(ends)
     }
