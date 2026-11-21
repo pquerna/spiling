@@ -1135,6 +1135,7 @@ impl Sweep<'_> {
     /// Cells lying entirely inside the nominal footprint of the object layer's
     /// model roads: each road's centreline dilated by half its bead width,
     /// unioned, then rasterized inward. Support may stand only over them.
+    /// A bridge road is itself held only at its ends, so it never donates.
     fn road_footprint(
         &self,
         raster: &Raster<'_>,
@@ -1146,7 +1147,7 @@ impl Sweep<'_> {
         for path in self.layers[object_layer]
             .paths
             .iter()
-            .filter(|path| path.kind.is_model())
+            .filter(|path| path.kind.is_model() && path.kind != DepositionKind::Bridge)
         {
             check_cancel(raster.cancel)?;
             let Ok(edges) = path.checked_edges() else {
