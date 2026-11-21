@@ -23,16 +23,13 @@ fn charge(work: &mut usize, cancel: &AtomicBool) -> Result<(), ManufacturingErro
 
 fn build_object_clearance_index(
     layers: &[PrintLayer],
-    live: usize,
+    allowance: usize,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<ObjectClearanceIndex>, ManufacturingError> {
-    ObjectClearanceIndex::build(
-        layers,
-        crate::working_set::bytes().saturating_sub(live),
-        DepositionKind::is_model,
-        || charge(work, cancel),
-    )
+    ObjectClearanceIndex::build(layers, allowance, DepositionKind::is_model, || {
+        charge(work, cancel)
+    })
 }
 
 fn support(path: &DepositionPath) -> bool {
@@ -341,107 +338,33 @@ pub(super) fn verify(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<AnchorWorkspace, ManufacturingError> {
-    verify_with_waves(plan, recipe, work, cancel, rayon::current_num_threads())
-}
-
-fn verify_with_waves(
-    plan: &NormalizedPrintPlan,
-    recipe: &PlanarPrintRecipe,
-    work: &mut usize,
-    cancel: &AtomicBool,
-    workers: usize,
-) -> Result<AnchorWorkspace, ManufacturingError> {
-    if workers > 1 && plan.layers.len() > 1 {
-        let mut trial_work = *work;
-        let mut anchors = AnchorWorkspace::default();
-        if verify_inner(
-            plan,
-            recipe,
-            &mut trial_work,
-            &mut spiling_geometry::GeometryWorkBudget::monitored(),
-            &mut anchors,
-            cancel,
-            true,
-            &mut false,
-            Some(workers),
-        )
-        .is_ok()
-        {
-            *work = trial_work;
-            return Ok(anchors);
-        }
-    }
-    verify_with_screen(plan, recipe, work, cancel, true)
-}
-
-fn verify_with_screen(
-    plan: &NormalizedPrintPlan,
-    recipe: &PlanarPrintRecipe,
-    work: &mut usize,
-    cancel: &AtomicBool,
-    enabled: bool,
-) -> Result<AnchorWorkspace, ManufacturingError> {
     let mut anchors = AnchorWorkspace::default();
-    let mut native_work = spiling_geometry::GeometryWorkBudget::monitored();
-    let mut admitted = false;
-    let mut result = verify_inner(
+    verify_once(
         plan,
         recipe,
         work,
-        &mut native_work,
         &mut anchors,
         cancel,
-        enabled,
-        &mut admitted,
-        None,
-    );
-    if admitted && result.as_ref().is_err_and(retry_for_clearance_pressure) {
-        anchors = AnchorWorkspace::default();
-        result = verify_inner(
-            plan,
-            recipe,
-            work,
-            &mut native_work,
-            &mut anchors,
-            cancel,
-            false,
-            &mut false,
-            None,
-        );
-    }
-    result?;
+        ClearanceOptions {
+            workers: rayon::current_num_threads(),
+            screen: true,
+        },
+    )?;
     Ok(anchors)
 }
 
-fn retry_for_clearance_pressure(error: &ManufacturingError) -> bool {
-    error.code == ManufacturingErrorCode::ResourceLimit
-        && matches!(
-            error.message.as_str(),
-            "support replay working set exceeds live byte allowance"
-                | "support replay allocation refused"
-                | "support replay contacts exceed live byte allowance"
-                | "deposited-anchor owners exceed live byte allowance"
-                | "retained deposited-anchor interval budget exceeded"
-                | "combined retained anchor interval budget exceeded"
-                | "component anchor witness retention exceeded"
-                | "component anchor witness allocation refused"
-        )
+struct ClearanceOptions {
+    workers: usize,
+    screen: bool,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Serial retry retains both work counters; the speculative pass uses private counters"
-)]
-fn verify_inner(
+fn verify_once(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
     work: &mut usize,
-    native_work: &mut spiling_geometry::GeometryWorkBudget,
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
-    enabled: bool,
-    admitted: &mut bool,
-    wave_workers: Option<usize>,
+    options: ClearanceOptions,
 ) -> Result<(), ManufacturingError> {
     if !plan
         .layers
@@ -464,72 +387,17 @@ fn verify_inner(
         .iter()
         .rposition(|layer| layer.paths.iter().any(support))
         .unwrap_or(0);
-    let mut bounds = Vec::new();
-    reserve(&mut bounds, plan.layers.len(), anchors.retained_bytes())?;
-    for (index, layer) in plan.layers.iter().enumerate() {
-        let mut interval = [f64::INFINITY, f64::NEG_INFINITY];
-        for path in layer.paths.iter().filter(|path| path.kind.is_model()) {
-            charge(work, cancel)?;
-            let actual = height(path)?;
-            interval[0] = interval[0].min(actual[0]);
-            interval[1] = interval[1].max(actual[1]);
-        }
-        if interval[0].is_finite() {
-            bounds.push(LayerBounds {
-                index,
-                interval,
-                prefix_upper: interval[1],
-            });
-        }
-    }
-    bounds.sort_unstable_by(|a, b| {
-        a.interval[0]
-            .total_cmp(&b.interval[0])
-            .then(a.index.cmp(&b.index))
-    });
-    let mut upper = f64::NEG_INFINITY;
-    for bound in &mut bounds {
-        upper = upper.max(bound.interval[1]);
-        bound.prefix_upper = upper;
-    }
     let mut established: Vec<Vec<bool>> = Vec::new();
-    let mut live = bounds.capacity() * std::mem::size_of::<LayerBounds>();
-    reserve(
-        &mut established,
-        last_support + 1,
-        live + anchors.retained_bytes(),
-    )?;
-    live += established.capacity() * std::mem::size_of::<Vec<bool>>();
-    let screen = if enabled {
-        build_object_clearance_index(&plan.layers, live + anchors.retained_bytes(), work, cancel)?
-    } else {
-        None
-    };
-    let index_bytes = screen
-        .as_ref()
-        .map_or(0, ObjectClearanceIndex::retained_bytes);
-    *admitted = screen.is_some();
-    live += index_bytes;
-    let clearance = ObjectClearance {
-        plan,
-        bounds: &bounds,
-        screen: screen.as_ref(),
-        z_gap_mm,
-        xy_clearance_mm,
-    };
+    reserve(&mut established, last_support + 1, anchors.retained_bytes())?;
+    let mut live = established.capacity() * std::mem::size_of::<Vec<bool>>();
     let mut contacts = Vec::new();
-    let mut max_clearance_live = 0;
-    for (index, layer) in plan.layers.iter().enumerate() {
+    for (index, layer) in plan.layers[..=last_support].iter().enumerate() {
         let mut contact_floor = None;
         let mut prepared = None;
         let mut prepared_attempted = false;
         for path in layer.paths.iter().filter(|path| support(path)) {
             charge(work, cancel)?;
             let support_height = height(path)?;
-            let candidate = wave_workers
-                .is_none()
-                .then(|| ClearancePath::new(path, support_height, work, cancel))
-                .transpose()?;
             anchors.admit_beside(
                 live + contacts.capacity() * std::mem::size_of::<&DepositionPath>(),
             )?;
@@ -691,40 +559,102 @@ fn verify_inner(
                     "actual support layer {index} has no established bed, continuing support or earlier-part contact"
                 )));
             }
-            let clearance_live = live
-                + contacts.capacity() * std::mem::size_of::<&DepositionPath>()
-                + anchors.retained_bytes();
-            if let Some(candidate) = candidate {
-                clearance.check(index, candidate, clearance_live, work, native_work, cancel)?;
-            } else {
-                max_clearance_live = max_clearance_live.max(clearance_live);
-            }
-        }
-        drop(prepared);
-        if index > last_support {
-            break;
         }
     }
     drop((established, contacts));
-    if let Some(workers) = wave_workers {
-        let shared = bounds.capacity() * std::mem::size_of::<LayerBounds>()
-            + index_bytes
-            + anchors.retained_bytes();
-        let Some(totals) =
-            clearance.waves(last_support, workers, shared, max_clearance_live, cancel)
-        else {
-            return Err(wave_unavailable());
-        };
-        *work = work
-            .checked_add(totals.replay)
-            .ok_or_else(wave_unavailable)?;
-        native_work
-            .charge(totals.native, cancel)
-            .map_err(|_| wave_unavailable())?;
-    }
-    drop(screen);
+    verify_clearance(
+        plan,
+        last_support,
+        anchors,
+        work,
+        cancel,
+        options,
+        [z_gap_mm, xy_clearance_mm],
+    )?;
     anchors.set_budget(crate::working_set::units());
     Ok(())
+}
+
+fn verify_clearance(
+    plan: &NormalizedPrintPlan,
+    last_support: usize,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    options: ClearanceOptions,
+    [z_gap_mm, xy_clearance_mm]: [f64; 2],
+) -> Result<(), ManufacturingError> {
+    let mut bounds = Vec::new();
+    anchors.admit_beside(
+        plan.layers
+            .len()
+            .saturating_mul(std::mem::size_of::<LayerBounds>()),
+    )?;
+    reserve(&mut bounds, plan.layers.len(), anchors.retained_bytes())?;
+    let mut max_blocks = 0;
+    for (index, layer) in plan.layers.iter().enumerate() {
+        let mut interval = [f64::INFINITY, f64::NEG_INFINITY];
+        for path in layer.paths.iter().filter(|path| path.kind.is_model()) {
+            charge(work, cancel)?;
+            let actual = height(path)?;
+            interval[0] = interval[0].min(actual[0]);
+            interval[1] = interval[1].max(actual[1]);
+            max_blocks =
+                max_blocks.max(path.points_mm.len().saturating_sub(1).div_ceil(EDGE_BLOCK));
+        }
+        if interval[0].is_finite() {
+            bounds.push(LayerBounds {
+                index,
+                interval,
+                prefix_upper: interval[1],
+            });
+        }
+    }
+    bounds.sort_unstable_by(|a, b| {
+        a.interval[0]
+            .total_cmp(&b.interval[0])
+            .then(a.index.cmp(&b.index))
+    });
+    let mut upper = f64::NEG_INFINITY;
+    for bound in &mut bounds {
+        upper = upper.max(bound.interval[1]);
+        bound.prefix_upper = upper;
+    }
+    let scratch = max_blocks
+        .saturating_mul(std::mem::size_of::<EdgeBlock>())
+        .max(1);
+    let bounds_bytes = bounds.capacity() * std::mem::size_of::<LayerBounds>();
+    let minimum = bounds_bytes.saturating_add(scratch);
+    if minimum <= crate::working_set::bytes()
+        && minimum.saturating_add(anchors.retained_bytes()) > crate::working_set::bytes()
+    {
+        anchors.admit_beside(minimum)?;
+    }
+    let shared = bounds_bytes + anchors.retained_bytes();
+    let spare = crate::working_set::bytes().saturating_sub(shared);
+    let screen = if options.screen {
+        let lanes = clearance_lanes(last_support + 1, options.workers, spare, scratch);
+        let reserved = if lanes > 1 {
+            lanes.saturating_mul(scratch.saturating_add(std::mem::size_of::<ClearanceReceipt>()))
+        } else {
+            scratch
+        };
+        build_object_clearance_index(&plan.layers, spare.saturating_sub(reserved), work, cancel)?
+    } else {
+        None
+    };
+    let shared = shared
+        + screen
+            .as_ref()
+            .map_or(0, ObjectClearanceIndex::retained_bytes);
+    ObjectClearance {
+        plan,
+        bounds: &bounds,
+        screen: screen.as_ref(),
+        z_gap_mm,
+        xy_clearance_mm,
+    }
+    .prove(last_support, options.workers, shared, scratch, work, cancel)
 }
 
 struct ClearancePath<'a> {
@@ -760,81 +690,90 @@ struct ObjectClearance<'a> {
     xy_clearance_mm: f64,
 }
 
-#[derive(Clone, Copy, Default)]
-struct ClearanceWork {
-    replay: usize,
-    native: u64,
-}
+type ClearanceReceipt = Result<usize, ManufacturingError>;
+type EdgeBlock = ([[f64; 2]; 2], f64);
 
-fn wave_unavailable() -> ManufacturingError {
-    ManufacturingError::new(
-        ManufacturingErrorCode::ResourceLimit,
-        "speculative support clearance must replay in order",
-    )
+fn clearance_lanes(layers: usize, workers: usize, spare: usize, scratch: usize) -> usize {
+    layers
+        .min(workers)
+        .min(spare / scratch.saturating_add(std::mem::size_of::<ClearanceReceipt>()))
+        .max(1)
 }
 
 impl ObjectClearance<'_> {
-    fn waves(
+    fn prove(
         &self,
         last_support: usize,
         workers: usize,
         shared: usize,
-        max_clearance_live: usize,
+        scratch: usize,
+        work: &mut usize,
         cancel: &AtomicBool,
-    ) -> Option<ClearanceWork> {
+    ) -> Result<(), ManufacturingError> {
         let layers = &self.plan.layers[..=last_support];
-        let wave_width = layers.len().min(workers.saturating_mul(4));
-        let spare = crate::working_set::bytes().checked_sub(shared)?;
-        let receipt_bytes = wave_width.checked_mul(std::mem::size_of::<Option<ClearanceWork>>())?;
-        if receipt_bytes >= spare {
-            return None;
+        let wave_width = clearance_lanes(
+            layers.len(),
+            workers,
+            crate::working_set::bytes().saturating_sub(shared),
+            scratch,
+        );
+        let debit = |receipt: ClearanceReceipt, work: &mut usize| {
+            *work = work.checked_add(receipt?).ok_or_else(|| {
+                ManufacturingError::new(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "support replay work overflow",
+                )
+            })?;
+            Ok(())
+        };
+        if wave_width == 1 {
+            for (index, layer) in layers.iter().enumerate() {
+                debit(self.check_layer(index, layer, shared, cancel), work)?;
+            }
+            return Ok(());
         }
         let mut receipts = Vec::new();
-        receipts.try_reserve_exact(wave_width).ok()?;
-        let receipt_bytes = receipts
-            .capacity()
-            .checked_mul(std::mem::size_of::<Option<ClearanceWork>>())?;
-        let per_worker = (spare.checked_sub(receipt_bytes)? / workers)
-            .min(crate::working_set::bytes().checked_sub(max_clearance_live)?);
-        let allowance = crate::working_set::WorkingSet::new(per_worker).ok()?;
-        let mut totals = ClearanceWork::default();
+        reserve(&mut receipts, wave_width, shared + wave_width * scratch)?;
+        let allowance = crate::working_set::WorkingSet::new(scratch)?;
         for (wave, layers) in layers.chunks(wave_width).enumerate() {
-            cancelled(cancel).ok()?;
+            cancelled(cancel)?;
             layers
                 .par_iter()
                 .enumerate()
                 .map(|(offset, layer)| {
                     crate::working_set::scope(allowance, || {
-                        self.check_layer(wave * wave_width + offset, layer, cancel)
-                            .ok()
+                        self.check_layer(wave * wave_width + offset, layer, 0, cancel)
                     })
                 })
                 .collect_into_vec(&mut receipts);
-            for receipt in &receipts {
-                let receipt = (*receipt)?;
-                totals.replay = totals.replay.checked_add(receipt.replay)?;
-                totals.native = totals.native.saturating_add(receipt.native);
+            for receipt in receipts.drain(..) {
+                debit(receipt, work)?;
             }
         }
-        Some(totals)
+        Ok(())
     }
 
     fn check_layer(
         &self,
         index: usize,
         layer: &PrintLayer,
+        shared: usize,
         cancel: &AtomicBool,
-    ) -> Result<ClearanceWork, ManufacturingError> {
+    ) -> ClearanceReceipt {
         let mut work = 0;
         let mut native_work = spiling_geometry::GeometryWorkBudget::monitored();
         for path in layer.paths.iter().filter(|path| support(path)) {
             let candidate = ClearancePath::new(path, height(path)?, &mut work, cancel)?;
-            self.check(index, candidate, 0, &mut work, &mut native_work, cancel)?;
+            self.check(
+                index,
+                candidate,
+                shared,
+                &mut work,
+                &mut native_work,
+                cancel,
+            )?;
         }
-        Ok(ClearanceWork {
-            replay: work,
-            native: native_work.consumed(),
-        })
+        Ok(work)
     }
 
     fn check(
@@ -1078,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn clearance_waves_keep_work_and_legacy_first_refusal() {
+    fn single_pass_clearance_keeps_order_and_debits_once() {
         let (intent, mut plan) = fixture();
         let cancel = AtomicBool::new(false);
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1095,63 +1034,34 @@ mod tests {
         let object = &mut plan.layers[4].paths[0];
         object.physical_z_mm = support_path.physical_z_mm;
         object.points_mm = vec![[5.9, 1.9, 3.0], [6.9, 2.9, 3.0]];
-
-        let inner = |plan: &NormalizedPrintPlan, wave_workers, initial| {
-            pool.install(|| {
-                let mut work = initial;
-                let mut native_work = spiling_geometry::GeometryWorkBudget::monitored();
-                let mut anchors = AnchorWorkspace::default();
-                let mut admitted = false;
-                let result = verify_inner(
+        let run = |plan: &NormalizedPrintPlan, workers, screen, mut work| {
+            let result = pool.install(|| {
+                verify_once(
                     plan,
                     &intent.recipe,
                     &mut work,
-                    &mut native_work,
-                    &mut anchors,
+                    &mut AnchorWorkspace::default(),
                     &cancel,
-                    true,
-                    &mut admitted,
-                    wave_workers,
-                );
-                assert!(admitted);
-                (
-                    result,
-                    work,
-                    native_work.consumed(),
-                    anchors.retained_bytes(),
+                    ClearanceOptions { workers, screen },
                 )
-            })
+            });
+            (result, work)
         };
-        let run = |plan: &NormalizedPrintPlan, waves, initial| {
-            pool.install(|| {
-                let mut work = initial;
-                let result = if waves {
-                    verify(plan, &intent.recipe, &mut work, &cancel)
-                } else {
-                    verify_with_screen(plan, &intent.recipe, &mut work, &cancel, true)
-                };
-                (result.map(|_| ()), work)
-            })
-        };
-        let serial = inner(&plan, None, 0);
+        let serial = run(&plan, 1, true, 0);
         assert_eq!(serial.0, Ok(()));
-        assert!(serial.2 > 0, "fixture must reach the native capsule proof");
-        assert_eq!(inner(&plan, Some(2), 0), serial);
-
+        assert_eq!(run(&plan, 2, true, 0), serial);
         let initial = usize::MAX - serial.1 + 1;
-        let overflow = run(&plan, false, initial);
+        let overflow = run(&plan, 1, true, initial);
         assert_eq!(
             overflow.0.as_ref().unwrap_err().code,
             ManufacturingErrorCode::ResourceLimit
         );
-        assert_eq!(run(&plan, true, initial), overflow);
+        assert_eq!(run(&plan, 2, true, initial), overflow);
 
-        let mut invalid = plan;
-        let mut collision = invalid.layers[4].paths[0].clone();
+        let mut collision = plan.layers[4].paths[0].clone();
         collision.points_mm = support_path.points_mm;
-        invalid.layers[4].paths.push(collision);
-        assert_eq!(inner(&invalid, Some(2), 19).0, Err(wave_unavailable()));
-        let serial = run(&invalid, false, 19);
+        plan.layers[4].paths.push(collision);
+        let serial = run(&plan, 1, true, 19);
         assert!(
             serial
                 .0
@@ -1160,42 +1070,34 @@ mod tests {
                 .message
                 .contains("layer 2 violates object XY/Z clearance")
         );
-        assert_eq!(run(&invalid, true, 19), serial);
+        assert_eq!(run(&plan, 2, true, 19), serial);
 
-        invalid.layers[3].paths[0].kind = DepositionKind::Support;
-        for point in &mut invalid.layers[3].paths[0].points_mm {
+        plan.layers[3].paths[0].kind = DepositionKind::Support;
+        for point in &mut plan.layers[3].paths[0].points_mm {
             point[1] += 30.0;
         }
-        let serial = run(&invalid, false, 19);
+        let ancestry = run(&plan, 1, false, 19);
         assert!(
-            serial
+            ancestry
                 .0
                 .as_ref()
-                .unwrap_err()
-                .message
-                .contains("layer 2 violates object XY/Z clearance")
-        );
-        let speculative = inner(&invalid, Some(2), 19);
-        assert!(
-            speculative
-                .0
                 .unwrap_err()
                 .message
                 .contains("layer 3 has no established")
         );
-        assert_eq!(run(&invalid, true, 19), serial);
+        assert_eq!(run(&plan, 2, true, 19), ancestry);
 
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        let cancelled = run(&invalid, false, 19);
+        let cancelled = run(&plan, 1, true, 19);
         assert_eq!(
             cancelled.0.as_ref().unwrap_err().code,
             ManufacturingErrorCode::Cancelled
         );
-        assert_eq!(run(&invalid, true, 19), cancelled);
+        assert_eq!(run(&plan, 2, true, 19), cancelled);
     }
 
     #[test]
-    fn clearance_waves_admit_receipts_and_simultaneous_scratch() {
+    fn single_pass_clearance_admits_simultaneous_scratch_before_launch() {
         let (_, mut plan) = fixture();
         let object = &mut plan.layers[4].paths[0];
         object.physical_z_mm = [2.0, 3.0];
@@ -1218,19 +1120,41 @@ mod tests {
             .build()
             .unwrap();
         let cancel = AtomicBool::new(false);
-        let scratch = std::mem::size_of::<([[f64; 2]; 2], f64)>();
-        let receipts = 3 * std::mem::size_of::<Option<ClearanceWork>>();
-        let exact = shared + receipts + 2 * scratch;
-        let run = |bytes, legacy_live| {
+        let scratch = std::mem::size_of::<EdgeBlock>();
+        let exact = 2 * (scratch + std::mem::size_of::<ClearanceReceipt>());
+        let run = |spare| {
             pool.install(|| {
-                crate::working_set::scope(crate::WorkingSet::new(bytes).unwrap(), || {
-                    clearance.waves(2, 2, shared, legacy_live, &cancel)
+                crate::working_set::scope(crate::WorkingSet::new(shared + spare).unwrap(), || {
+                    let mut work = 0;
+                    clearance.prove(2, 2, shared, scratch, &mut work, &cancel)?;
+                    Ok::<_, ManufacturingError>(work)
                 })
             })
         };
-        assert!(run(exact - 1, shared).is_none());
-        assert!(run(exact, exact - scratch + 1).is_none());
-        assert!(run(exact, exact - scratch).unwrap().native > 0);
+        assert_eq!(clearance_lanes(3, 2, exact - 1, scratch), 1);
+        assert_eq!(clearance_lanes(3, 2, exact, scratch), 2);
+        assert_eq!(
+            run(scratch - 1).unwrap_err().code,
+            ManufacturingErrorCode::ResourceLimit
+        );
+        let serial = run(scratch).unwrap();
+        assert!(serial > 0);
+        assert_eq!(run(exact), Ok(serial));
+    }
+
+    fn replay_with_screen(
+        plan: &NormalizedPrintPlan,
+        recipe: &PlanarPrintRecipe,
+        screen: bool,
+    ) -> Result<(), ManufacturingError> {
+        verify_once(
+            plan,
+            recipe,
+            &mut 0,
+            &mut AnchorWorkspace::default(),
+            &AtomicBool::new(false),
+            ClearanceOptions { workers: 1, screen },
+        )
     }
 
     #[test]
@@ -1246,16 +1170,8 @@ mod tests {
         }
         let mut malformed = clear.clone();
         malformed.width = WidthProfile::PerEdge { widths_mm: vec![] };
-        let run = |plan: &NormalizedPrintPlan, enabled| {
-            verify_with_screen(
-                plan,
-                &intent.recipe,
-                &mut 0,
-                &AtomicBool::new(false),
-                enabled,
-            )
-            .map(|_| ())
-        };
+        let run =
+            |plan: &NormalizedPrintPlan, enabled| replay_with_screen(plan, &intent.recipe, enabled);
         let mut changed = plan;
         changed.layers[4].paths = vec![clear; BLOCK_PATHS * 2];
         assert_eq!(run(&changed, true), Ok(()));
@@ -1279,139 +1195,6 @@ mod tests {
     }
 
     #[test]
-    fn admitted_index_pressure_restarts_exhaustive_replay_from_the_first_check() {
-        use std::mem::size_of;
-
-        let (intent, mut plan) = fixture();
-        let cancel = AtomicBool::new(false);
-        let root_count = 128;
-        let mut distant = plan.layers[0].paths[0].clone();
-        for point in &mut distant.points_mm {
-            point[1] += 20.0;
-        }
-        plan.layers[0].paths.resize(root_count, distant);
-        let support = &plan.layers[2].paths[0];
-        let mut collision = plan.layers[4].paths[0].clone();
-        collision.physical_z_mm = support.physical_z_mm;
-        collision.points_mm = support.points_mm.clone();
-        let mut clear = collision.clone();
-        for point in &mut clear.points_mm {
-            point[1] += 20.0;
-        }
-        let mut malformed = clear.clone();
-        malformed.width = WidthProfile::PerEdge { widths_mm: vec![] };
-        let mut layer_bounds: Vec<LayerBounds> = Vec::new();
-        reserve(&mut layer_bounds, plan.layers.len(), 0).unwrap();
-        let mut ancestry: Vec<Vec<bool>> = Vec::new();
-        reserve(&mut ancestry, 3, 0).unwrap();
-        let mandatory = layer_bounds.capacity() * size_of::<LayerBounds>()
-            + ancestry.capacity() * size_of::<Vec<bool>>();
-        drop((layer_bounds, ancestry));
-        for (faults, expected_message) in [
-            (vec![], None),
-            (
-                vec![collision.clone(), malformed.clone()],
-                Some("violates object XY/Z clearance"),
-            ),
-            (
-                vec![malformed.clone(), collision.clone()],
-                Some("exactly one width"),
-            ),
-        ] {
-            plan.layers[4].paths = vec![clear.clone(); BLOCK_PATHS * 16];
-            plan.layers[4].paths.extend(faults);
-            let index_bytes =
-                build_object_clearance_index(&plan.layers, mandatory, &mut 0, &cancel)
-                    .unwrap()
-                    .unwrap()
-                    .retained_bytes();
-            let mut mask = Vec::<bool>::new();
-            reserve(&mut mask, root_count, 0).unwrap();
-            let mut contact_capacity = Vec::<&DepositionPath>::new();
-            reserve(&mut contact_capacity, root_count / 2, 0).unwrap();
-            let old_capacity = contact_capacity.capacity();
-            contact_capacity.resize(old_capacity, &plan.layers[0].paths[0]);
-            reserve(&mut contact_capacity, 1, 0).unwrap();
-            let contact_peak =
-                (old_capacity + contact_capacity.capacity()) * size_of::<&DepositionPath>();
-            let tight = crate::WorkingSet::new(
-                mandatory + index_bytes + mask.capacity() + contact_peak - 1,
-            )
-            .unwrap();
-            drop((mask, contact_capacity));
-            crate::working_set::scope(tight, || {
-                let mut admitted = false;
-                let mut attempt_work = 73;
-                let attempted = verify_inner(
-                    &plan,
-                    &intent.recipe,
-                    &mut attempt_work,
-                    &mut spiling_geometry::GeometryWorkBudget::monitored(),
-                    &mut AnchorWorkspace::default(),
-                    &cancel,
-                    true,
-                    &mut admitted,
-                    None,
-                );
-                assert!(admitted);
-                let error = attempted.unwrap_err();
-                assert!(retry_for_clearance_pressure(&error));
-                assert_eq!(
-                    error.message,
-                    "support replay working set exceeds live byte allowance"
-                );
-                assert!(attempt_work > 73 + root_count);
-                let run = |enabled| {
-                    let mut work = 73;
-                    let result =
-                        verify_with_screen(&plan, &intent.recipe, &mut work, &cancel, enabled)
-                            .map(|_| ());
-                    (result, work)
-                };
-                let exhaustive = run(false);
-                if let Some(message) = expected_message {
-                    assert!(exhaustive.0.as_ref().unwrap_err().message.contains(message));
-                } else {
-                    assert_eq!(exhaustive.0, Ok(()));
-                }
-                let screened = run(true);
-                assert_eq!(screened.0, exhaustive.0);
-                assert_eq!(screened.1, attempt_work + exhaustive.1 - 73);
-                let mut work = 73;
-                let waves =
-                    verify_with_waves(&plan, &intent.recipe, &mut work, &cancel, 2).map(|_| ());
-                assert_eq!((waves, work), screened);
-            });
-        }
-    }
-
-    #[test]
-    fn clearance_retry_does_not_mask_counter_overflow_or_cancellation() {
-        for (code, message) in [
-            (
-                ManufacturingErrorCode::ResourceLimit,
-                "support replay work overflow",
-            ),
-            (
-                ManufacturingErrorCode::ResourceLimit,
-                "cumulative deposited-stroke anchor work counter overflow",
-            ),
-            (
-                ManufacturingErrorCode::ResourceLimit,
-                "deposition width allocation limit exceeded",
-            ),
-            (
-                ManufacturingErrorCode::Cancelled,
-                "support replay allocation refused",
-            ),
-        ] {
-            assert!(!retry_for_clearance_pressure(&ManufacturingError::new(
-                code, message
-            )));
-        }
-    }
-
-    #[test]
     fn ordered_object_screen_preserves_both_closed_vertical_gaps() {
         let (intent, mut plan) = fixture();
         let support = plan.layers[2].paths[0].clone();
@@ -1427,16 +1210,7 @@ mod tests {
             for (point, support_point) in object.points_mm.iter_mut().zip(&support.points_mm) {
                 *point = [support_point[0], support_point[1], interval[1]];
             }
-            let run = |enabled| {
-                verify_with_screen(
-                    &plan,
-                    &intent.recipe,
-                    &mut 0,
-                    &AtomicBool::new(false),
-                    enabled,
-                )
-                .map(|_| ())
-            };
+            let run = |enabled| replay_with_screen(&plan, &intent.recipe, enabled);
             let exhaustive = run(false);
             assert_eq!(exhaustive.is_ok(), clears, "{interval:?}");
             if let Err(error) = &exhaustive {
@@ -1455,20 +1229,17 @@ mod tests {
             widths_mm: vec![1.0, 2.0],
         };
         let cancel = AtomicBool::new(false);
-        let index = build_object_clearance_index(&plan.layers, 0, &mut 0, &cancel)
+        let index = build_object_clearance_index(&plan.layers, usize::MAX, &mut 0, &cancel)
             .unwrap()
             .unwrap();
         let block = &index.layer(4)[0];
         assert!(!block.clear([[0.0, 0.0], [2.0, 0.0]], 1.0, 0.5));
         assert!(block.clear([[0.0, -0.001], [2.0, -0.001]], 1.0, 0.5));
-        let tight = crate::WorkingSet::new(index.retained_bytes() - 1).unwrap();
-        crate::working_set::scope(tight, || {
-            assert!(
-                build_object_clearance_index(&plan.layers, 0, &mut 0, &cancel)
-                    .unwrap()
-                    .is_none()
-            );
-        });
+        assert!(
+            build_object_clearance_index(&plan.layers, index.retained_bytes() - 1, &mut 0, &cancel)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             build_object_clearance_index(&plan.layers, 0, &mut 0, &AtomicBool::new(true)).is_err()
         );
