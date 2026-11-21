@@ -969,6 +969,136 @@ impl Raster<'_> {
         Ok(result)
     }
 
+    /// Whether the point lies in a closed set cell. A point within
+    /// [`RUN_CLIP_MM`] of a cell line belongs to every cell it lies on, so a
+    /// projected point stays with the closed cells it came from.
+    pub(super) fn holds_point(&self, bits: &Bits, point: [f64; 2]) -> bool {
+        let [cols, rows] = [0, 1].map(|axis| {
+            let u = (point[axis] - self.frame.origin[axis]) / self.frame.cell;
+            let near = u.round();
+            if (u - near).abs() <= RUN_CLIP_MM / self.frame.cell {
+                [near - 1.0, near]
+            } else {
+                [u.floor(), u.floor()]
+            }
+        });
+        cols.iter().any(|&col| {
+            rows.iter().any(|&row| {
+                col.is_finite()
+                    && row.is_finite()
+                    && col >= 0.0
+                    && row >= 0.0
+                    && bits.word(row as usize, col as usize / 64) >> (col as usize % 64) & 1 == 1
+            })
+        })
+    }
+
+    /// Cells every point of which lies within `radius` of the closed set
+    /// cells, rounded inward: a cell is kept when its centre is within
+    /// `radius − cell·√2/2` of a set cell's centre, so the farthest point of
+    /// the kept cell is still within `radius` of that set cell's centre. The
+    /// set's own cells are always kept. The result stays inside the frame.
+    pub(super) fn dilate_inward(
+        &self,
+        bits: &Bits,
+        radius: f64,
+    ) -> Result<Bits, ManufacturingError> {
+        if bits.is_empty() {
+            return Ok(Bits::default());
+        }
+        if !radius.is_finite() {
+            return Err(error(
+                ManufacturingErrorCode::NativeConditioningFailure,
+                "support grid dilation radius is not finite",
+            ));
+        }
+        let reach = (radius / self.frame.cell - std::f64::consts::FRAC_1_SQRT_2).max(0.0);
+        // Horizontal reach in cells for each row offset of the centre disk.
+        let mut extents = Vec::new();
+        self.reserve(&mut extents, reach.floor() as usize + 1)?;
+        for k in 0..=reach.floor() as usize {
+            let k = k as f64;
+            extents.push((reach * reach - k * k).max(0.0).sqrt().floor() as usize);
+        }
+        let rows_limit = self.frame.rows;
+        let words_limit = self.frame.cols.div_ceil(64);
+        let grow_rows = extents.len() - 1;
+        let grow_words = extents[0].div_ceil(64);
+        let row0 = bits.row0.saturating_sub(grow_rows);
+        let row1 = (bits.row0 + bits.rows() + grow_rows).min(rows_limit);
+        let word0 = bits.word0.saturating_sub(grow_words);
+        let word1 = (bits.word0 + bits.width + grow_words).min(words_limit);
+        if row1 <= row0 || word1 <= word0 {
+            return Ok(Bits::default());
+        }
+        let width = word1 - word0;
+        // Horizontal dilation of every source row at each distinct extent,
+        // in the output word window.
+        let mut distinct = extents.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let mut horizontal: Vec<Vec<u64>> = Vec::new();
+        self.reserve(&mut horizontal, distinct.len())?;
+        let source_rows = bits.rows();
+        for &extent in &distinct {
+            check_cancel(self.cancel)?;
+            let mut dilated = self.zeroed(source_rows * width)?;
+            for r in 0..source_rows {
+                let source = &bits.data[r * bits.width..(r + 1) * bits.width];
+                for (w, slot) in dilated[r * width..(r + 1) * width].iter_mut().enumerate() {
+                    // Output word `word0 + w` in source-local bits.
+                    let base = (word0 + w) as i64 * 64 - bits.word0 as i64 * 64;
+                    let mut word = 0u64;
+                    for shift in -(extent as i64)..=extent as i64 {
+                        word |= shifted(source, 0, base + shift);
+                    }
+                    *slot = word;
+                }
+            }
+            self.charge(source_rows * width * (2 * extent + 1));
+            horizontal.push(dilated);
+        }
+        let mut data = self.zeroed((row1 - row0) * width)?;
+        for row in row0..row1 {
+            check_cancel(self.cancel)?;
+            let out = &mut data[(row - row0) * width..(row - row0 + 1) * width];
+            for (k, extent) in extents.iter().enumerate() {
+                let at = distinct.binary_search(extent).unwrap_or(0);
+                let dilated = &horizontal[at];
+                for source in [row.checked_sub(k), (k > 0).then_some(row + k)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(local) = source.checked_sub(bits.row0) else {
+                        continue;
+                    };
+                    if local >= source_rows {
+                        continue;
+                    }
+                    for (o, s) in out
+                        .iter_mut()
+                        .zip(&dilated[local * width..(local + 1) * width])
+                    {
+                        *o |= s;
+                    }
+                }
+            }
+            if word1 == words_limit && !self.frame.cols.is_multiple_of(64) {
+                out[width - 1] &= !0u64 >> (64 - self.frame.cols % 64);
+            }
+            self.charge(width * (2 * extents.len()));
+        }
+        drop(horizontal);
+        let mut result = Bits {
+            row0,
+            word0,
+            width,
+            data,
+        };
+        result.shrink();
+        Ok(result)
+    }
+
     /// Polygons inside the cell set with few vertices: erode by one cell,
     /// trace cell-edge boundaries, Douglas–Peucker at one cell, and resolve
     /// any simplification crossing by even-odd overlay. Every output point is

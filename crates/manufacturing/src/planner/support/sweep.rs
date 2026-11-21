@@ -708,8 +708,11 @@ impl Sweep<'_> {
         let mut part_bands: Vec<Vec<(f64, Bits)>> = channels.iter().map(|_| Vec::new()).collect();
         let mut clearance: Vec<Option<Bits>> = vec![None; self.nominal.len()];
         let mut records: Vec<NominalRecord> = Vec::new();
-        let mut footprint: Option<(usize, Bits)> = None;
         let mut relieved: Vec<(usize, usize, Bits)> = Vec::new();
+        // Part landings stand only on established cells, built bottom-up
+        // with the kept support below standing in for deposited support.
+        let mut establishment = established::Establishment::new(&live);
+        let mut anchors = AnchorWorkspace::default();
         for l in 0..=max_top {
             check_cancel(cancel)?;
             if channels.iter().all(|channel| channel.active[l].is_none()) {
@@ -726,6 +729,17 @@ impl Sweep<'_> {
                 &release,
                 work,
             )?;
+            let landings = self.part_landings(
+                l,
+                &raster,
+                &channels,
+                &grids,
+                &contact_tops,
+                &mut establishment,
+                &mut anchors,
+                &hold,
+                work,
+            )?;
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
             for (c, channel) in channels.iter_mut().enumerate() {
@@ -737,30 +751,9 @@ impl Sweep<'_> {
                 release(&active);
                 let mut ground = Bits::default();
                 if channel.relieved.is_none() {
-                    for root in self.roots {
-                        let Root::Part {
-                            object_layer,
-                            first_support_layer,
-                            landing,
-                        } = *root
-                        else {
-                            continue;
-                        };
-                        if first_support_layer != l {
-                            continue;
-                        }
+                    for landing in &landings {
                         check_cancel(cancel)?;
-                        let landing = raster.inward(&self.landings[landing].0)?;
-                        let mut accepted = raster.intersection(&active, &landing)?;
-                        if accepted.is_empty() {
-                            continue;
-                        }
-                        if footprint.as_ref().is_none_or(|(at, _)| *at != object_layer) {
-                            footprint =
-                                Some((object_layer, self.road_footprint(&raster, object_layer)?));
-                        }
-                        let roads = &footprint.as_ref().expect("road footprint").1;
-                        accepted = raster.intersection(&accepted, roads)?;
+                        let accepted = raster.intersection(&active, landing)?;
                         if accepted.is_empty() {
                             continue;
                         }
@@ -840,10 +833,14 @@ impl Sweep<'_> {
                     interface: layer_interface,
                 });
             }
+            for landing in &landings {
+                release(landing);
+            }
+            drop(landings);
             charge(work)?;
         }
+        drop(establishment);
         drop(clearance);
-        drop(footprint);
         drop(channels);
         timing.mark("up_pass");
 
@@ -913,6 +910,78 @@ impl Sweep<'_> {
             access,
             kept,
         })
+    }
+
+    /// Per part root first supported at layer `l`, the cells support may
+    /// land on: the inward landing that some ordinary channel reaches, met
+    /// with the established cells of its object layer. Roots are taken in
+    /// ascending object layer so the bottom-up establishment only advances.
+    #[expect(clippy::too_many_arguments)]
+    fn part_landings(
+        &self,
+        l: usize,
+        raster: &Raster<'_>,
+        channels: &[Channel],
+        grids: &[Option<LayerGrid>],
+        contact_tops: &[Option<usize>],
+        establishment: &mut established::Establishment<'_>,
+        anchors: &mut AnchorWorkspace,
+        hold: &dyn Fn(&Bits) -> Result<(), ManufacturingError>,
+        work: &mut usize,
+    ) -> Result<Vec<Bits>, ManufacturingError> {
+        let mut landings = Vec::new();
+        for root in self.roots.iter().rev() {
+            let Root::Part {
+                object_layer,
+                first_support_layer,
+                landing,
+            } = *root
+            else {
+                continue;
+            };
+            if first_support_layer != l {
+                continue;
+            }
+            check_cancel(raster.cancel)?;
+            let landing = raster.inward(&self.landings[landing].0)?;
+            let reached = channels.iter().any(|channel| {
+                channel.relieved.is_none()
+                    && channel.active[l]
+                        .as_ref()
+                        .is_some_and(|active| active.intersects(&landing))
+            });
+            if !reached {
+                continue;
+            }
+            anchors.set_budget(workspace_budget(self.retained, self.owned_bytes)?);
+            let mut step = established::Step {
+                raster,
+                layers: self.layers,
+                contact_tops,
+                recipe: self.recipe,
+                anchors,
+                work,
+                owned_bytes: self.owned_bytes,
+            };
+            let cells = establishment.landing(&mut step, object_layer, &mut |_, k| {
+                Ok(grids[k]
+                    .as_ref()
+                    .map_or_else(established::LowerSupport::none, |grid| {
+                        established::LowerSupport {
+                            cells: std::borrow::Cow::Borrowed(&grid.support),
+                            paths: Vec::new(),
+                        }
+                    }))
+            })?;
+            let accepted = raster.intersection(&landing, &cells)?;
+            if accepted.is_empty() {
+                continue;
+            }
+            hold(&accepted)?;
+            reserve_owned(&mut landings, 1, self.owned_bytes)?;
+            landings.push(accepted);
+        }
+        Ok(landings)
     }
 
     /// Keep the raw occupied pieces of the spans a bead slab at layer `l` can
@@ -1131,108 +1200,6 @@ impl Sweep<'_> {
         }
         raster.outward(&pieces, distance)
     }
-
-    /// Cells lying entirely inside the nominal footprint of the object layer's
-    /// model roads: each road's centreline dilated by half its bead width,
-    /// unioned, then rasterized inward. Support may stand only over them.
-    /// A bridge road is itself held only at its ends, so it never donates.
-    fn road_footprint(
-        &self,
-        raster: &Raster<'_>,
-        object_layer: usize,
-    ) -> Result<Bits, ManufacturingError> {
-        let bounds = raster.frame.bounds();
-        let mut capsules: Vec<Vec<[f64; 2]>> = Vec::new();
-        let mut extent = bounds;
-        for path in self.layers[object_layer]
-            .paths
-            .iter()
-            .filter(|path| path.kind.is_model() && path.kind != DepositionKind::Bridge)
-        {
-            check_cancel(raster.cancel)?;
-            let Ok(edges) = path.checked_edges() else {
-                continue;
-            };
-            for edge in edges {
-                let &[p, q] = edge.points_mm else {
-                    continue;
-                };
-                let half = edge.width_mm * 0.5 + FOOTPRINT_JOIN_MM;
-                let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
-                let reach = [
-                    [a[0].min(b[0]) - half, a[1].min(b[1]) - half],
-                    [a[0].max(b[0]) + half, a[1].max(b[1]) + half],
-                ];
-                if !rects_meet(reach, bounds) || half.is_nan() || half <= 0.0 {
-                    continue;
-                }
-                extent = union_frame(Some(extent), reach);
-                reserve_owned(&mut capsules, 1, self.owned_bytes)?;
-                capsules.push(inscribed_capsule(a, b, half));
-            }
-        }
-        if capsules.is_empty() {
-            return Ok(Bits::default());
-        }
-        use i_overlay::core::overlay::ShapeType;
-        use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
-        use i_overlay::float::overlay::FloatOverlay;
-        use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
-        let points: usize = capsules.iter().map(Vec::len).sum();
-        (raster.admit)(points.saturating_mul(64))?;
-        let adapter = FloatPointAdapter::new(FloatRect {
-            min_x: extent[0][0],
-            min_y: extent[0][1],
-            max_x: extent[1][0],
-            max_y: extent[1][1],
-        });
-        let shapes = FloatOverlay::with_adapter(adapter, points)
-            .unsafe_add_source(&capsules, ShapeType::Subject)
-            .overlay(OverlayRule::Subject, FillRule::NonZero);
-        drop(capsules);
-        let union: Vec<Polygon<f64>> = shapes
-            .into_iter()
-            .map(|shape| {
-                let mut rings = shape.into_iter().map(|ring| {
-                    let mut line =
-                        geo::LineString(ring.into_iter().map(geo::Coord::from).collect());
-                    line.close();
-                    line
-                });
-                Polygon::new(
-                    rings.next().unwrap_or_else(geo::LineString::empty),
-                    rings.collect(),
-                )
-            })
-            .collect();
-        raster.inward(&union)
-    }
-}
-
-/// Adjacent roads planned tangent (row spacing equal to bead width) share
-/// only a line; inflating each footprint by this much joins them so the
-/// shared line is not mistaken for a boundary. It is far below a grid cell.
-const FOOTPRINT_JOIN_MM: f64 = 1.0e-3;
-
-/// A polygon inside the round capsule of `ab` and `radius`: the straight
-/// sides and caps whose vertices lie on the circles.
-fn inscribed_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[f64; 2]> {
-    const STEPS: usize = 8;
-    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    let length = dx.hypot(dy);
-    let angle = if length > 0.0 { dy.atan2(dx) } else { 0.0 };
-    let mut points = Vec::with_capacity(2 * STEPS + 2);
-    // Around b from +normal through +direction to −normal, then around a.
-    for (centre, start) in [
-        (b, angle + std::f64::consts::FRAC_PI_2),
-        (a, angle - std::f64::consts::FRAC_PI_2),
-    ] {
-        for i in 0..=STEPS {
-            let t = start - std::f64::consts::PI * i as f64 / STEPS as f64;
-            points.push([centre[0] + radius * t.cos(), centre[1] + radius * t.sin()]);
-        }
-    }
-    points
 }
 
 /// The closed full-bead slab of a layer's beads. A road's height is its

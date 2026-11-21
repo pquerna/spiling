@@ -35,7 +35,7 @@ use std::sync::{
 };
 
 /// Binds native material authority and physical per-occurrence material events.
-pub const PLANNER_VERSION: &str = "139";
+pub const PLANNER_VERSION: &str = "140";
 pub const EMITTER_VERSION: &str = "22";
 pub const VERIFIER_VERSION: &str = "58";
 

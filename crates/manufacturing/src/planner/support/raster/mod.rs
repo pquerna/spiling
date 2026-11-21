@@ -458,6 +458,7 @@ pub(super) fn scan<'a>(
     scan_with_lower(
         paths,
         &mut strokes::LowerStrokes::new(previous, contacts),
+        None,
         recipe,
         anchors,
         work,
@@ -466,6 +467,10 @@ pub(super) fn scan<'a>(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Deposited support and established part cells retain distinct anchor provenance"
+)]
 pub(super) fn scan_with_lower<'a>(
     paths: &[DepositionPath],
     lower: &mut strokes::LowerStrokes<
@@ -473,6 +478,7 @@ pub(super) fn scan_with_lower<'a>(
         impl Iterator<Item = &'a DepositionPath> + Clone,
         impl Iterator<Item = &'a DepositionPath> + Clone,
     >,
+    cells: Option<&super::established::CellContacts<'_, '_>>,
     recipe: &PlanarPrintRecipe,
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
@@ -480,11 +486,26 @@ pub(super) fn scan_with_lower<'a>(
     first: bool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
     let mut worst: Option<strokes::Failure> = None;
+    let mut pieces = Vec::new();
     for (path_index, path) in paths.iter().enumerate() {
+        // Only interface lands on the part, as for separated contacts.
+        let cells = cells.filter(|_| path.kind != DepositionKind::Support);
         for (first_point, last, width_mm) in StrokeRuns::for_path(path)? {
             let a = path.points_mm[first_point];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            if let Some(contacts) = cells {
+                contacts.raster.along(
+                    contacts.cells,
+                    contacts.cells,
+                    [a[0], a[1]],
+                    [b[0], b[1]],
+                    &mut pieces,
+                )?;
+            } else {
+                pieces.clear();
+                pieces.push((1.0, false));
+            }
             for gap in lower.gaps_supplied_contacts(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
@@ -496,26 +517,44 @@ pub(super) fn scan_with_lower<'a>(
                 work,
                 cancel,
             )? {
-                let span = (gap.end - gap.start) * length;
-                let kind =
-                    strokes::gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm);
-                if (matches!(kind, strokes::GapKind::Demand)
-                    || (matches!(kind, strokes::GapKind::Bridge)
-                        && path.kind.is_model()
-                        && path.kind != DepositionKind::Bridge))
-                    && worst.as_ref().is_none_or(|worst| span > worst.span)
-                {
-                    worst = Some(strokes::Failure {
-                        path: path_index,
-                        first: first_point,
-                        last,
-                        start: gap.start,
-                        end: gap.end,
-                        span,
-                    });
-                    if first {
-                        return Ok(worst);
-                    }
+                super::established::CellContacts::refine(
+                    &pieces,
+                    gap,
+                    |start, end, left, right, direct_ends| {
+                        let span = (end - start) * length;
+                        let piece = super::anchors::AnchorGap {
+                            start,
+                            end,
+                            left,
+                            right,
+                            direct_ends,
+                        };
+                        let kind = strokes::gap_kind(
+                            &piece,
+                            span,
+                            width_mm,
+                            recipe.process.max_bridge_span_mm,
+                        );
+                        if (matches!(kind, strokes::GapKind::Demand)
+                            || (matches!(kind, strokes::GapKind::Bridge)
+                                && path.kind.is_model()
+                                && path.kind != DepositionKind::Bridge))
+                            && worst.as_ref().is_none_or(|worst| span > worst.span)
+                        {
+                            worst = Some(strokes::Failure {
+                                path: path_index,
+                                first: first_point,
+                                last,
+                                start,
+                                end,
+                                span,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?;
+                if first && worst.is_some() {
+                    return Ok(worst);
                 }
             }
         }
@@ -535,6 +574,7 @@ pub(super) fn retain_anchored<'a>(
         impl Iterator<Item = &'a DepositionPath> + Clone,
         impl Iterator<Item = &'a DepositionPath> + Clone,
     >,
+    cells: Option<&super::established::CellContacts<'_, '_>>,
     recipe: &PlanarPrintRecipe,
     retained: usize,
     owned_bytes: usize,
@@ -559,6 +599,7 @@ pub(super) fn retain_anchored<'a>(
             || scan_with_lower(
                 std::slice::from_ref(&path),
                 lower,
+                cells,
                 recipe,
                 anchors,
                 work,
@@ -630,6 +671,7 @@ pub(super) fn retain_anchored<'a>(
             if scan_with_lower(
                 std::slice::from_ref(&fragment),
                 lower,
+                cells,
                 recipe,
                 anchors,
                 work,
