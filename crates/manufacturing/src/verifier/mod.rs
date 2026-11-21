@@ -26,6 +26,7 @@ pub(crate) fn connectors_for_tests(plan: &NormalizedPrintPlan) -> Result<(), Man
 mod construction;
 mod cost;
 mod expected;
+mod grid;
 mod gyroid;
 mod joins;
 mod lifecycle;
@@ -229,6 +230,8 @@ struct ArcReplay {
     edges: Option<u32>,
     consumed: u32,
     angle: f64,
+    firmware_deviation_mm: f64,
+    last_deviation_mm: f64,
     /// Nominal filament before the arc; each edge's nominal total is taken
     /// from here along the swept length, as the emitter computes it once.
     expected_start: Option<f64>,
@@ -243,6 +246,7 @@ struct ArcSegment {
     sagitta: f64,
     /// Distance of the planned point from the decoded circle.
     deviation: f64,
+    grid_deviation_mm: f64,
     /// Arc length swept from the start through this edge.
     swept: f64,
 }
@@ -278,9 +282,9 @@ impl ArcReplay {
         }
         // Declared firmware segmentation, recomputed from the decoded move:
         // this checks the printer declaration is honoured, not the machine.
+        let firmware_deviation_mm = firmware.deviation_mm(arc.radius_mm, arc.sweep_radians);
         if (start[0] - end[0]).hypot(start[1] - end[1]) < MIN_ARC_CHORD_MM - 2.0 * XYZ_HALF_STEP
-            || firmware.deviation_mm(arc.radius_mm, arc.sweep_radians)
-                > MAX_FIRMWARE_ARC_DEVIATION_MM + 4.0 * XYZ_HALF_STEP
+            || firmware_deviation_mm > MAX_FIRMWARE_ARC_DEVIATION_MM + 4.0 * XYZ_HALF_STEP
         {
             return Err(failed(
                 "decoded arc is too short or segmented beyond tolerance by its firmware",
@@ -301,6 +305,8 @@ impl ArcReplay {
             edges: None,
             consumed: 0,
             angle: 0.0,
+            firmware_deviation_mm,
+            last_deviation_mm: 0.0,
             expected_start: None,
         })
     }
@@ -360,7 +366,15 @@ impl ArcReplay {
             ));
         }
         let step = angle - self.angle;
+        let sagitta = radius * (1.0 - (step * 0.5).cos());
+        let numeric_allowance = 4.0 * XYZ_HALF_STEP
+            + 8.0 * arithmetic_slack(radius.max(point[0].abs()).max(point[1].abs()));
+        let grid_deviation_mm = ((sagitta.next_up() + self.last_deviation_mm.max(deviation))
+            .next_up()
+            + (self.firmware_deviation_mm.next_up() + numeric_allowance).next_up())
+        .next_up();
         self.angle = angle;
+        self.last_deviation_mm = deviation;
         let e = if last {
             self.end_e
         } else {
@@ -381,8 +395,9 @@ impl ArcReplay {
             },
             ArcSegment {
                 length: radius * step,
-                sagitta: radius * (1.0 - (step * 0.5).cos()),
+                sagitta,
                 deviation,
+                grid_deviation_mm,
                 swept: if last {
                     self.arc.length_mm
                 } else {
@@ -402,6 +417,14 @@ struct Decoded {
 // Deliberately not a general firmware parser. Only the declared inert dialect
 // has meaning here; omitted axes/feeds, checksums and firmware extensions do not.
 fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
+    decode_with_xyz6(line, routed, |_, _| Ok(()))
+}
+
+fn decode_with_xyz6(
+    line: &str,
+    routed: bool,
+    mut xyz6: impl FnMut(usize, &str) -> Result<(), &'static str>,
+) -> Result<Option<Decoded>, &'static str> {
     let code = line.split_once(';').map_or(line, |(code, _)| code);
     if !code.is_ascii()
         || code
@@ -454,6 +477,7 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
         }));
     }
     let mut fields = [None; 11];
+    let mut coordinates = [None; 3];
     for word in words {
         let (index, precision) = match word.as_bytes().first() {
             Some(b'X') => (0, 6),
@@ -472,7 +496,11 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
         if fields[index].is_some() {
             return Err("duplicate command field");
         }
-        fields[index] = Some(decimal(&word[1..], precision)?);
+        let number = &word[1..];
+        fields[index] = Some(decimal(number, precision)?);
+        if index < coordinates.len() {
+            coordinates[index] = Some(number);
+        }
     }
     let command = if command == Command::Deposit && fields[0..3].iter().all(Option::is_none) {
         Command::Recovery
@@ -529,6 +557,11 @@ fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
     }
     if matches!(command, Command::SelectTool(_)) && fields[5] != Some(1.0) {
         return Err("tool selection requires the no-move S1 contract");
+    }
+    for (axis, number) in coordinates.into_iter().enumerate() {
+        if let Some(number) = number {
+            xyz6(axis, number)?;
+        }
     }
     Ok(Some(Decoded { command, fields }))
 }
@@ -752,6 +785,20 @@ pub(crate) fn verify_actual(
 
     let recipe = &intent.recipe;
     let printer = &intent.printer;
+    let mut support_grid = plan
+        .layers
+        .iter()
+        .any(|layer| {
+            layer.paths.iter().any(|path| {
+                matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            })
+        })
+        .then(|| grid::Clearance::new(plan.support_grid_cell_xyz6, &recipe.supports))
+        .transpose()?;
+    let mut prior_grid_position = None;
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2);
     if !filament_area.is_finite() || filament_area <= 0.0 {
         return Err(failed("filament area is not finite and positive"));
@@ -893,8 +940,20 @@ pub(crate) fn verify_actual(
                 )));
             }
         }
-        let decoded = decode(line, route.is_some())
-            .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
+        let mut coordinate_ticks = [None; 3];
+        let decoded = if support_grid.is_some() {
+            decode_with_xyz6(line, route.is_some(), |axis, word| {
+                coordinate_ticks[axis] = Some(grid::xyz6_ticks(word)?);
+                Ok(())
+            })
+        } else {
+            decode(line, route.is_some())
+        }
+        .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
+        let command_ticks = match coordinate_ticks {
+            [Some(x), Some(y), Some(z)] => Some([x, y, z]),
+            _ => None,
+        };
         let Some(mut decoded) = decoded else { continue };
         if relative
             && matches!(
@@ -1036,6 +1095,9 @@ pub(crate) fn verify_actual(
                 if kind == 1 {
                     priming_filament_length_mm = state.extrusion;
                     expected_e = job.prime_filament_length_mm;
+                }
+                if command_ticks.is_some() {
+                    prior_grid_position = command_ticks;
                 }
                 continue;
             }
@@ -1195,6 +1257,12 @@ pub(crate) fn verify_actual(
                 }
                 None => (decoded, None),
             };
+            let grid_position =
+                if support_grid.is_some() && arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
+                    Some(grid::virtual_xyz6(target))
+                } else {
+                    command_ticks
+                };
             if let Some(markers) = &bambu {
                 markers.before_layer_motion(layer_index)?;
             }
@@ -1544,6 +1612,23 @@ pub(crate) fn verify_actual(
                         "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure",
                     ));
                 }
+                if let Some(grid) = &mut support_grid {
+                    grid.record(grid::RoadInput {
+                        layer: layer_index,
+                        line: line_index + 1,
+                        role: deposition_kind,
+                        from: prior_grid_position.ok_or_else(|| {
+                            failed("no decoded starting XYZ6 coordinates for deposition")
+                        })?,
+                        to: grid_position.ok_or_else(|| {
+                            failed("no decoded ending XYZ6 coordinates for deposition")
+                        })?,
+                        physical_z: association.physical_z,
+                        maximum_width_mm: bounds[1].max(association.width),
+                        arc_deviation_mm: arc_segment
+                            .map_or(0.0, |segment| segment.grid_deviation_mm),
+                    })?;
+                }
                 if association.owner == Some(DepositionOwner::Wall) {
                     let edge = CommandedWallEdge {
                         width: bounds,
@@ -1642,6 +1727,7 @@ pub(crate) fn verify_actual(
                 )?;
             }
             state.position = Some(position);
+            prior_grid_position = grid_position;
             if arc_replay.as_ref().is_none_or(ArcReplay::done) {
                 break;
             }
@@ -1674,7 +1760,17 @@ pub(crate) fn verify_actual(
     }
     adhesion::verify(plan, recipe, cancel)?;
     let mut geometry_work = 0usize;
-    let mut anchors = supports::verify(plan, recipe, &mut geometry_work, cancel)?;
+    let clearance_receipt = if let Some(grid) = support_grid {
+        let remaining = crate::working_set::bytes().saturating_sub(grid.retained_bytes());
+        let allowance = crate::working_set::WorkingSet::new(remaining)?;
+        crate::working_set::scope(allowance, || {
+            supports::verify_ancestry(plan, recipe, &mut geometry_work, cancel)
+        })?;
+        Some(grid.verify(&mut geometry_work, cancel)?)
+    } else {
+        None
+    };
+    let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut plate_contacts = Vec::new();
     interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
@@ -1763,7 +1859,7 @@ pub(crate) fn verify_actual(
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
             "Actual XYZ6 minimum deposition length and independently inverted XYZ6/E8 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
-            "Support roots (when present): matched actual XYZ6 bed, preceding support or established earlier-part capsules; separated lower contacts, symmetric object Z gaps and complete nominal capsule XY clearance without source requery".into(),
+            "Support roots (when present): matched actual XYZ6 bed, preceding support or established earlier-part capsules; separated lower contacts without source requery".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
             "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
             "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
@@ -1810,6 +1906,9 @@ pub(crate) fn verify_actual(
         minimum_cooling_scale,
         estimated_seconds: estimate.map(cost::PrintTimeEstimate::finish).transpose()?,
     };
+    if let Some(clearance) = clearance_receipt {
+        report.coverage.push(format!("Independent decoded support clearance: conservative 0.05 mm XYZ6 cells and symmetric Z gaps; {} shared support-edge cells, {} distinct local capsule pairs", clearance.shared_edge_cells, clearance.checked_pairs));
+    }
     let mut unsupported_layers = 0usize;
     let mut largest_recorded_span = 0.0_f64;
     let mut omitted_wall_layers = 0usize;

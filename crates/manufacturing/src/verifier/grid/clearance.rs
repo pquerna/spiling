@@ -1,0 +1,575 @@
+use super::{Chord, MAX_XYZ6_TICKS, cancelled, failed, overflow, validate_cell_size};
+use spiling_contracts::geometry::GeometryErrorCode;
+use spiling_contracts::manufacturing::{
+    DepositionKind, ManufacturingError, ManufacturingErrorCode, SupportPolicy,
+    program_coordinates::{enclosed_vertical_gap_mm, xyz6_coordinate_error_mm},
+};
+use std::{mem::size_of, ops::Range, sync::atomic::AtomicBool};
+
+pub(in crate::verifier) struct RoadInput {
+    pub layer: u32,
+    pub line: usize,
+    pub role: DepositionKind,
+    pub from: [i64; 3],
+    pub to: [i64; 3],
+    pub physical_z: [f64; 2],
+    pub maximum_width_mm: f64,
+    pub arc_deviation_mm: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Road {
+    chord: Chord,
+    height: [f64; 2],
+    radius_mm: f64,
+    arc_deviation_mm: f64,
+    layer: u32,
+    line: usize,
+    support: bool,
+}
+
+impl Road {
+    fn new(input: RoadInput) -> Result<Self, ManufacturingError> {
+        let RoadInput {
+            layer,
+            line,
+            role,
+            from,
+            to,
+            physical_z,
+            maximum_width_mm,
+            arc_deviation_mm,
+        } = input;
+        let chord = Chord::new([from[0], from[1]], [to[0], to[1]])?;
+        let bead_height = -enclosed_vertical_gap_mm(physical_z[0], physical_z[1])?;
+        let [mut lower, mut upper] = [f64::INFINITY, f64::NEG_INFINITY];
+        for tick in [from[2], to[2]] {
+            let top = tick as f64 / 1_000_000.0;
+            let error = xyz6_coordinate_error_mm(top)?;
+            lower = lower.min(enclosed_vertical_gap_mm(
+                enclosed_vertical_gap_mm(top, bead_height)?,
+                error,
+            )?);
+            upper = upper.max(-enclosed_vertical_gap_mm(-top, error)?);
+        }
+        Ok(Self {
+            chord,
+            height: [lower, upper],
+            radius_mm: maximum_width_mm * 0.5,
+            arc_deviation_mm,
+            layer,
+            line,
+            support: !role.is_model(),
+        })
+    }
+
+    fn outer_radius(self, clearance_mm: f64) -> Result<i64, ManufacturingError> {
+        let with_arc = self.radius_mm + self.arc_deviation_mm;
+        let total = (with_arc.next_up() + clearance_mm).next_up();
+        let ticks = (total * 1_000_000.0).next_up().ceil();
+        if !ticks.is_finite() || !(0.0..=MAX_XYZ6_TICKS as f64).contains(&ticks) {
+            return Err(overflow());
+        }
+        Ok(ticks as i64)
+    }
+}
+
+fn exhausted() -> ManufacturingError {
+    ManufacturingError::new(
+        ManufacturingErrorCode::ResourceLimit,
+        "decoded support clearance exceeds live byte allowance",
+    )
+}
+
+#[derive(Default)]
+struct Admission(usize);
+
+impl Admission {
+    fn reserve<T>(
+        &mut self,
+        values: &mut Vec<T>,
+        required: usize,
+    ) -> Result<(), ManufacturingError> {
+        let old = values.capacity();
+        if required <= old {
+            return Ok(());
+        }
+        let requested = required.max(old.checked_mul(2).ok_or_else(exhausted)?);
+        let permitted = crate::working_set::bytes();
+        self.0
+            .checked_add(
+                requested
+                    .checked_mul(size_of::<T>())
+                    .ok_or_else(exhausted)?,
+            )
+            .filter(|peak| *peak <= permitted)
+            .ok_or_else(exhausted)?;
+        values
+            .try_reserve_exact(requested - values.len())
+            .map_err(|_| exhausted())?;
+        self.0 = self
+            .0
+            .checked_add(
+                (values.capacity() - old)
+                    .checked_mul(size_of::<T>())
+                    .ok_or_else(exhausted)?,
+            )
+            .filter(|live| *live <= permitted)
+            .ok_or_else(exhausted)?;
+        Ok(())
+    }
+
+    fn push<T>(&mut self, values: &mut Vec<T>, value: T) -> Result<(), ManufacturingError> {
+        self.reserve(values, values.len().checked_add(1).ok_or_else(exhausted)?)?;
+        values.push(value);
+        Ok(())
+    }
+
+    fn release<T>(&mut self, values: Vec<T>) {
+        self.0 -= values.capacity() * size_of::<T>();
+        drop(values);
+    }
+}
+
+fn debit(counter: &mut usize, count: usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
+    cancelled(cancel)?;
+    *counter = counter.checked_add(count).ok_or_else(overflow)?;
+    Ok(())
+}
+
+fn separated(first: [f64; 2], second: [f64; 2], gap: f64) -> Result<bool, ManufacturingError> {
+    Ok(enclosed_vertical_gap_mm(first[0], second[1])? >= gap
+        || enclosed_vertical_gap_mm(second[0], first[1])? >= gap)
+}
+
+#[derive(Default)]
+pub(in crate::verifier) struct ClearanceReceipt {
+    pub shared_edge_cells: usize,
+    pub checked_pairs: usize,
+}
+
+pub(in crate::verifier) struct Clearance {
+    roads: Vec<Road>,
+    admission: Admission,
+    z_gap: f64,
+    xy_gap: f64,
+}
+
+impl Clearance {
+    pub(in crate::verifier) fn new(
+        cell_size: u32,
+        policy: &SupportPolicy,
+    ) -> Result<Self, ManufacturingError> {
+        validate_cell_size(cell_size)?;
+        let SupportPolicy::Breakaway {
+            z_gap_mm,
+            xy_clearance_mm,
+            ..
+        } = *policy
+        else {
+            return Err(failed("actual support requires breakaway policy"));
+        };
+        Ok(Self {
+            roads: Vec::new(),
+            admission: Admission::default(),
+            z_gap: z_gap_mm,
+            xy_gap: xy_clearance_mm,
+        })
+    }
+
+    pub(in crate::verifier) fn record(
+        &mut self,
+        input: RoadInput,
+    ) -> Result<(), ManufacturingError> {
+        if input.role.is_model()
+            || matches!(
+                input.role,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            )
+        {
+            self.admission.push(&mut self.roads, Road::new(input)?)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::verifier) fn retained_bytes(&self) -> usize {
+        self.admission.0
+    }
+
+    pub(in crate::verifier) fn verify(
+        mut self,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<ClearanceReceipt, ManufacturingError> {
+        let mut bands = Vec::new();
+        let mut start = 0;
+        let mut prefix_high = f64::NEG_INFINITY;
+        for roads in self.roads.chunk_by(|one, next| one.layer == next.layer) {
+            let mut model = [f64::INFINITY, f64::NEG_INFINITY];
+            let mut support = model;
+            for road in roads {
+                debit(work, 1, cancel)?;
+                let bounds = if road.support {
+                    &mut support
+                } else {
+                    &mut model
+                };
+                bounds[0] = bounds[0].min(road.height[0]);
+                bounds[1] = bounds[1].max(road.height[1]);
+            }
+            prefix_high = prefix_high.max(model[1]);
+            let end = start + roads.len();
+            self.admission.push(
+                &mut bands,
+                Band {
+                    roads: start..end,
+                    model,
+                    support,
+                    prefix_high,
+                    suffix_model_low: model[0],
+                    future_support_low: f64::INFINITY,
+                    rows: None,
+                },
+            )?;
+            start = end;
+        }
+        let mut future_support_low = f64::INFINITY;
+        let mut suffix_model_low = f64::INFINITY;
+        for band in bands.iter_mut().rev() {
+            debit(work, 1, cancel)?;
+            band.future_support_low = future_support_low;
+            future_support_low = future_support_low.min(band.support[0]);
+            suffix_model_low = suffix_model_low.min(band.model[0]);
+            band.suffix_model_low = suffix_model_low;
+        }
+        let mut marks = Vec::new();
+        self.admission.reserve(&mut marks, self.roads.len())?;
+        marks.resize(self.roads.len(), usize::MAX);
+        let mut selected = Vec::new();
+        let mut overlaps = Vec::new();
+        let mut receipt = ClearanceReceipt::default();
+        let mut native_work = spiling_geometry::GeometryWorkBudget::compile();
+        let mut discard_before = 0;
+        for ordinal in 0..bands.len() {
+            debit(work, 1, cancel)?;
+            let [floor, top] = bands[ordinal].support;
+            if !floor.is_finite() {
+                continue;
+            }
+            let low_bound = (floor - self.z_gap).next_down();
+            let high_bound = (top + self.z_gap).next_up();
+            let first = bands.partition_point(|band| band.prefix_high < low_bound);
+            let end = bands.partition_point(|band| band.suffix_model_low <= high_bound);
+            let windows = &mut bands[first..end.max(first)];
+            for band in &mut *windows {
+                debit(work, 1, cancel)?;
+                if band.rows.is_none()
+                    && band.model[0].is_finite()
+                    && !separated([floor, top], band.model, self.z_gap)?
+                {
+                    band.rows = Some(Rows::build(
+                        &self.roads,
+                        band.roads.clone(),
+                        self.xy_gap,
+                        &mut self.admission,
+                        work,
+                        cancel,
+                    )?);
+                }
+            }
+            let roads = bands[ordinal].roads.clone();
+            let windows = &bands[first..end.max(first)];
+            for support_index in roads.filter(|index| self.roads[*index].support) {
+                debit(work, 1, cancel)?;
+                let support = self.roads[support_index];
+                selected.clear();
+                let mut raster_work = 0;
+                support.chord.outer_rows(
+                    support.outer_radius(0.0)?,
+                    &mut raster_work,
+                    cancel,
+                    |row, left, right| {
+                        overlaps.clear();
+                        for band in windows {
+                            debit(work, 1, cancel)?;
+                            if let Some(rows) = &band.rows {
+                                for entry in rows.intersect(row, left, right) {
+                                    debit(work, 1, cancel)?;
+                                    if entry.right < left
+                                        || separated(
+                                            support.height,
+                                            self.roads[entry.road].height,
+                                            self.z_gap,
+                                        )?
+                                    {
+                                        continue;
+                                    }
+                                    self.admission.push(
+                                        &mut overlaps,
+                                        (left.max(entry.left), right.min(entry.right)),
+                                    )?;
+                                    if marks[entry.road] != support_index {
+                                        marks[entry.road] = support_index;
+                                        self.admission.push(&mut selected, entry.road)?;
+                                    }
+                                }
+                            }
+                        }
+                        count_union(&mut overlaps, &mut receipt.shared_edge_cells, work, cancel)
+                    },
+                )?;
+                debit(work, raster_work, cancel)?;
+                sort_by_key(&mut selected, |index| *index, work, cancel)?;
+                let capsule = support
+                    .chord
+                    .clearance_capsule(support.radius_mm, support.arc_deviation_mm)?;
+                for &index in &selected {
+                    debit(work, 1, cancel)?;
+                    debit(&mut receipt.checked_pairs, 1, cancel)?;
+                    let model = self.roads[index];
+                    let model_capsule = model
+                        .chord
+                        .clearance_capsule(model.radius_mm, model.arc_deviation_mm)?;
+                    spiling_geometry::certify_planar_capsule_pair_clearance([capsule, model_capsule], self.xy_gap, &mut native_work, cancel)
+                        .map_err(|error| {
+                            match error.code {
+                                GeometryErrorCode::Cancelled => return ManufacturingError::new(ManufacturingErrorCode::Cancelled, error.message),
+                                GeometryErrorCode::ResourceLimit => return ManufacturingError::new(ManufacturingErrorCode::ResourceLimit, error.message),
+                                _ => {}
+                            }
+                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}", support.layer, support.line, model.layer, model.line))
+                        })?;
+                }
+            }
+            let future_low = bands[ordinal].future_support_low;
+            let next = bands
+                .partition_point(|band| band.prefix_high < (future_low - self.z_gap).next_down());
+            for band in &mut bands[discard_before..next] {
+                debit(work, 1, cancel)?;
+                if let Some(rows) = band.rows.take() {
+                    self.admission.release(rows.0);
+                }
+            }
+            discard_before = next;
+        }
+        Ok(receipt)
+    }
+}
+
+struct Band {
+    roads: Range<usize>,
+    model: [f64; 2],
+    support: [f64; 2],
+    prefix_high: f64,
+    suffix_model_low: f64,
+    future_support_low: f64,
+    rows: Option<Rows>,
+}
+
+struct Incidence {
+    row: i64,
+    left: i64,
+    right: i64,
+    prefix_right: i64,
+    road: usize,
+}
+
+struct Rows(Vec<Incidence>);
+
+impl Rows {
+    fn build(
+        roads: &[Road],
+        span: Range<usize>,
+        clearance_mm: f64,
+        admission: &mut Admission,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        let mut entries = Vec::new();
+        for index in span {
+            debit(work, 1, cancel)?;
+            let road = roads[index];
+            if !road.support {
+                road.chord.outer_rows(
+                    road.outer_radius(clearance_mm)?,
+                    work,
+                    cancel,
+                    |row, left, right| {
+                        admission.push(
+                            &mut entries,
+                            Incidence {
+                                row,
+                                left,
+                                right,
+                                prefix_right: right,
+                                road: index,
+                            },
+                        )
+                    },
+                )?;
+            }
+        }
+        sort_by_key(
+            &mut entries,
+            |entry| (entry.row, entry.left, entry.road),
+            work,
+            cancel,
+        )?;
+        let mut previous = i64::MIN;
+        let mut prefix = i64::MIN;
+        for entry in &mut entries {
+            debit(work, 1, cancel)?;
+            if entry.row != previous {
+                previous = entry.row;
+                prefix = i64::MIN;
+            }
+            prefix = prefix.max(entry.right);
+            entry.prefix_right = prefix;
+        }
+        Ok(Self(entries))
+    }
+
+    fn intersect(&self, row: i64, first: i64, last: i64) -> &[Incidence] {
+        let start = self
+            .0
+            .partition_point(|entry| (entry.row, entry.prefix_right) < (row, first));
+        let end = self
+            .0
+            .partition_point(|entry| (entry.row, entry.left) <= (row, last));
+        &self.0[start..end.max(start)]
+    }
+}
+
+fn sort_by_key<T, K: Ord>(
+    values: &mut [T],
+    mut key: impl FnMut(&T) -> K,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let mut comparisons = 0usize;
+    values.sort_unstable_by(|first, second| {
+        comparisons = comparisons.saturating_add(1);
+        key(first).cmp(&key(second))
+    });
+    debit(work, comparisons, cancel)
+}
+
+fn count_union(
+    ranges: &mut [(i64, i64)],
+    count: &mut usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    sort_by_key(ranges, |range| *range, work, cancel)?;
+    let mut previous_end = i64::MIN;
+    for &(start, end) in ranges.iter() {
+        let first = start.max(previous_end.saturating_add(1));
+        if first <= end {
+            debit(
+                count,
+                usize::try_from(end - first + 1).map_err(|_| overflow())?,
+                cancel,
+            )?;
+        }
+        previous_end = previous_end.max(end);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clearance() -> Clearance {
+        Clearance::new(
+            50_000,
+            &SupportPolicy::Breakaway {
+                density: 0.2,
+                xy_clearance_mm: 0.25,
+                z_gap_mm: 0.5,
+                interface_thickness_mm: 0.25,
+            },
+        )
+        .unwrap()
+    }
+
+    fn road(layer: u32, role: DepositionKind, y: i64, z: i64) -> RoadInput {
+        RoadInput {
+            layer,
+            line: layer as usize + 1,
+            role,
+            from: [0, y, z],
+            to: [1_000_000, y, z],
+            physical_z: [0.0, 0.25],
+            maximum_width_mm: 0.25,
+            arc_deviation_mm: 0.0,
+        }
+    }
+
+    #[test]
+    fn shared_cells_resolve_locally_and_count_each_pair_once() {
+        let cancel = AtomicBool::new(false);
+        for lateral in [499_999, 500_000, 500_001, 600_000] {
+            let mut grid = clearance();
+            grid.record(road(0, DepositionKind::Perimeter, lateral, 250_000))
+                .unwrap();
+            grid.record(road(0, DepositionKind::Support, 0, 250_000))
+                .unwrap();
+            let result = grid.verify(&mut 0, &cancel);
+            if lateral == 499_999 {
+                assert!(result.err().unwrap().message.contains("line 1"));
+            } else {
+                let receipt = result.unwrap();
+                assert_eq!(receipt.checked_pairs, usize::from(lateral < 600_000));
+                assert_eq!(receipt.shared_edge_cells > 0, lateral < 600_000);
+            }
+        }
+    }
+
+    #[test]
+    fn z_window_reaches_both_nonadjacent_sides_and_keeps_closed_ties() {
+        let cancel = AtomicBool::new(false);
+        for above in [false, true] {
+            for overlap in [false, true] {
+                let mut grid = clearance();
+                let model_top = if above {
+                    2_250_000 - i64::from(overlap)
+                } else {
+                    750_000 + i64::from(overlap)
+                };
+                let model = road(
+                    if above { 4 } else { 0 },
+                    DepositionKind::Perimeter,
+                    0,
+                    model_top,
+                );
+                if !above {
+                    grid.record(model).unwrap();
+                }
+                grid.record(road(1, DepositionKind::Perimeter, 2_000_000, 875_000))
+                    .unwrap();
+                grid.record(road(2, DepositionKind::Support, 0, 1_500_000))
+                    .unwrap();
+                grid.record(road(3, DepositionKind::Perimeter, 2_000_000, 1_625_000))
+                    .unwrap();
+                if above {
+                    grid.record(road(4, DepositionKind::Perimeter, 0, model_top))
+                        .unwrap();
+                }
+                let result = grid.verify(&mut 0, &cancel);
+                assert_eq!(result.is_err(), overlap, "above={above} overlap={overlap}");
+            }
+        }
+    }
+
+    #[test]
+    fn capture_admits_the_live_edge_capacity_before_allocating() {
+        let allowance = crate::working_set::WorkingSet::new(size_of::<Road>() - 1).unwrap();
+        let refusal = crate::working_set::scope(allowance, || {
+            clearance()
+                .record(road(0, DepositionKind::Support, 0, 250_000))
+                .unwrap_err()
+        });
+        assert_eq!(refusal.code, ManufacturingErrorCode::ResourceLimit);
+    }
+}

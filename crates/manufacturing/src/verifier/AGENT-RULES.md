@@ -27,7 +27,7 @@ Skirt and brim (`adhesion.rs`) are checked from the matched first-layer paths, n
 
 Bed exclusions are checked on decoded positions with the verifier's own segment/rectangle distance (`bed_exclusion.rs`), each deposit's planned edge width plus its decoded arc sagitta, and the widest admitted bead for the prime; never call the contract predicate the planner uses.
 
-Support ancestry stays serial and runs once, before clearance. Release its masks and contacts before admitting the optional clearance index and aggregated wave receipts/edge-block scratch. Pick wave width from the byte allowance before starting clearance (one lane under pressure); reduce in layer order and return a refusal without rerunning either proof.
+Support ancestry stays serial and runs once, before clearance. Independent clearance uses exact XYZ6 tokens and conservative virtual arc chords, not the planner's kept cells. Admit the live road inventory beside ancestry; release ancestry scratch before constructing row incidence for the two-sided physical-Z window. Only shared closed outer cells request the exact local capsule predicate, with pair deduplication and diagnostics in decoded road order. Neither proof retries on failure.
 
 Gyroid verification uses the implicit physical-height field independently of analytic generation and checks actual XYZ6 chord samples. Accumulate unsupported length across adjoining chord edges so subdividing a curve cannot create short-overhang credit. A matched polyline is not permission for unsupported curved bridging or a strength claim.
 

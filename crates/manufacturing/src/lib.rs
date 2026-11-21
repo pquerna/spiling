@@ -4,6 +4,7 @@
 
 //! Software-only native-section manufacturing, with mandatory independent replay.
 mod backend;
+#[cfg(test)]
 mod clearance_screen;
 pub mod delivery;
 mod material;
@@ -36,7 +37,7 @@ use std::sync::{
 /// Binds native material authority and physical per-occurrence material events.
 pub const PLANNER_VERSION: &str = "138";
 pub const EMITTER_VERSION: &str = "22";
-pub const VERIFIER_VERSION: &str = "56";
+pub const VERIFIER_VERSION: &str = "57";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

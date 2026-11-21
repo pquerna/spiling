@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::{cancelled, failed};
+#[cfg(test)]
 use crate::clearance_screen::{BLOCK_PATHS, ObjectClearanceIndex, bounded_height};
 use crate::planner::support::{
     AnchorCandidate, AnchorWorkspace, GapKind, ProjectedAnchorPaths, StrokeRuns, gap_kind,
 };
+#[cfg(test)]
 use rayon::prelude::*;
 use spiling_contracts::manufacturing::{program_coordinates::*, *};
 use std::sync::atomic::AtomicBool;
@@ -21,6 +23,7 @@ fn charge(work: &mut usize, cancel: &AtomicBool) -> Result<(), ManufacturingErro
     Ok(())
 }
 
+#[cfg(test)]
 fn build_object_clearance_index(
     layers: &[PrintLayer],
     allowance: usize,
@@ -118,14 +121,17 @@ fn anchored<'a>(
 }
 
 /// Consecutive object edges screened together against one support edge.
+#[cfg(test)]
 const EDGE_BLOCK: usize = 32;
 
+#[cfg(test)]
 struct LayerBounds {
     index: usize,
     interval: [f64; 2],
     prefix_upper: f64,
 }
 
+#[cfg(test)]
 fn edge_bounds(points: &[[f64; 3]]) -> [[f64; 2]; 2] {
     [
         [
@@ -139,6 +145,7 @@ fn edge_bounds(points: &[[f64; 3]]) -> [[f64; 2]; 2] {
     ]
 }
 
+#[cfg(test)]
 fn path_bounds(
     path: &DepositionPath,
     work: &mut usize,
@@ -217,6 +224,7 @@ fn first_unseparated(
     Ok(start)
 }
 
+#[cfg(test)]
 fn capsule(
     edge: &[[f64; 3]],
     width: f64,
@@ -332,6 +340,16 @@ fn establish_until(
     Ok(())
 }
 
+pub(super) fn verify_ancestry(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    verify_roots(plan, recipe, work, &mut AnchorWorkspace::default(), cancel).map(|_| ())
+}
+
+#[cfg(test)]
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
@@ -353,11 +371,13 @@ pub(super) fn verify(
     Ok(anchors)
 }
 
+#[cfg(test)]
 struct ClearanceOptions {
     workers: usize,
     screen: bool,
 }
 
+#[cfg(test)]
 fn verify_once(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
@@ -366,14 +386,28 @@ fn verify_once(
     cancel: &AtomicBool,
     options: ClearanceOptions,
 ) -> Result<(), ManufacturingError> {
-    if !plan
+    let Some((last_support, gaps)) = verify_roots(plan, recipe, work, anchors, cancel)? else {
+        return Ok(());
+    };
+    verify_clearance(plan, last_support, anchors, work, cancel, options, gaps)?;
+    anchors.set_budget(crate::working_set::units());
+    Ok(())
+}
+
+fn verify_roots(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    work: &mut usize,
+    anchors: &mut AnchorWorkspace,
+    cancel: &AtomicBool,
+) -> Result<Option<(usize, [f64; 2])>, ManufacturingError> {
+    let Some(last_support) = plan
         .layers
         .iter()
-        .flat_map(|layer| &layer.paths)
-        .any(support)
-    {
-        return Ok(());
-    }
+        .rposition(|layer| layer.paths.iter().any(support))
+    else {
+        return Ok(None);
+    };
     let SupportPolicy::Breakaway {
         z_gap_mm,
         xy_clearance_mm,
@@ -382,11 +416,6 @@ fn verify_once(
     else {
         return Err(failed("actual support requires breakaway policy"));
     };
-    let last_support = plan
-        .layers
-        .iter()
-        .rposition(|layer| layer.paths.iter().any(support))
-        .unwrap_or(0);
     let mut established: Vec<Vec<bool>> = Vec::new();
     reserve(&mut established, last_support + 1, anchors.retained_bytes())?;
     let mut live = established.capacity() * std::mem::size_of::<Vec<bool>>();
@@ -561,20 +590,10 @@ fn verify_once(
             }
         }
     }
-    drop((established, contacts));
-    verify_clearance(
-        plan,
-        last_support,
-        anchors,
-        work,
-        cancel,
-        options,
-        [z_gap_mm, xy_clearance_mm],
-    )?;
-    anchors.set_budget(crate::working_set::units());
-    Ok(())
+    Ok(Some((last_support, [z_gap_mm, xy_clearance_mm])))
 }
 
+#[cfg(test)]
 fn verify_clearance(
     plan: &NormalizedPrintPlan,
     last_support: usize,
@@ -657,6 +676,7 @@ fn verify_clearance(
     .prove(last_support, options.workers, shared, scratch, work, cancel)
 }
 
+#[cfg(test)]
 struct ClearancePath<'a> {
     height: [f64; 2],
     edges: DepositionEdges<'a>,
@@ -664,6 +684,7 @@ struct ClearancePath<'a> {
     width: f64,
 }
 
+#[cfg(test)]
 impl<'a> ClearancePath<'a> {
     fn new(
         path: &'a DepositionPath,
@@ -682,6 +703,7 @@ impl<'a> ClearancePath<'a> {
     }
 }
 
+#[cfg(test)]
 struct ObjectClearance<'a> {
     plan: &'a NormalizedPrintPlan,
     bounds: &'a [LayerBounds],
@@ -690,9 +712,12 @@ struct ObjectClearance<'a> {
     xy_clearance_mm: f64,
 }
 
+#[cfg(test)]
 type ClearanceReceipt = Result<usize, ManufacturingError>;
+#[cfg(test)]
 type EdgeBlock = ([[f64; 2]; 2], f64);
 
+#[cfg(test)]
 fn clearance_lanes(layers: usize, workers: usize, spare: usize, scratch: usize) -> usize {
     layers
         .min(workers)
@@ -700,6 +725,7 @@ fn clearance_lanes(layers: usize, workers: usize, spare: usize, scratch: usize) 
         .max(1)
 }
 
+#[cfg(test)]
 impl ObjectClearance<'_> {
     fn prove(
         &self,
