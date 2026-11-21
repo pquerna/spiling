@@ -717,12 +717,18 @@ pub fn verify(
     verify_actual(program, plan, intent, cancel, None)
 }
 
+pub(crate) enum ReplayTarget<'a> {
+    Capture(&'a mut Option<ReplaySink>),
+    #[cfg(test)]
+    Existing(&'a mut ReplaySink),
+}
+
 pub(crate) fn verify_actual(
     program: &ChunkSource,
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
-    mut replay: Option<&mut ReplaySink>,
+    replay: Option<ReplayTarget<'_>>,
 ) -> Result<VerificationReport, ManufacturingError> {
     cancelled(cancel)?;
     if program.len() > u64::from(MAX_MANUFACTURING_PROGRAM_BYTES) {
@@ -731,10 +737,18 @@ pub(crate) fn verify_actual(
             "emitted program exceeds manufacturing byte limit",
         ));
     }
-    let prime_exclusion = plan.validate_and_prime_exclusion(intent)?;
-    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
-    let execution = plan.execution_intent(intent)?;
+    let ReplayPlanFacts {
+        prime_exclusion,
+        alternation,
+        execution,
+    } = plan.validate_for_replay(intent)?;
     let intent = execution.as_ref();
+    let mut replay = match replay {
+        Some(ReplayTarget::Capture(slot)) => Some(slot.insert(ReplaySink::new(plan.layers.len())?)),
+        #[cfg(test)]
+        Some(ReplayTarget::Existing(sink)) => Some(sink),
+        None => None,
+    };
 
     let recipe = &intent.recipe;
     let printer = &intent.printer;
@@ -1682,10 +1696,24 @@ pub(crate) fn verify_actual(
         cancel,
     )?;
     drop(plate_contacts);
-    skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    skin_bridges::verify(
+        plan,
+        recipe,
+        &alternation,
+        &mut geometry_work,
+        &mut anchors,
+        cancel,
+    )?;
+    skin_commands::verify(
+        plan,
+        recipe,
+        &alternation,
+        &mut geometry_work,
+        &mut anchors,
+        cancel,
+    )?;
     construction::verify(plan, &mut geometry_work, cancel)?;
-    joins::verify(plan, intent, &mut geometry_work, cancel)?;
+    joins::verify(plan, intent, &alternation, &mut geometry_work, cancel)?;
     // After row construction, so a missing or shifted row reports as such.
     bridge_split::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let routing = if let Some(routed) = &mut route {

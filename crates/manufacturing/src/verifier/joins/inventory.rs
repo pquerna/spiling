@@ -241,6 +241,7 @@ pub(super) fn verify(
     intent: &ManufacturingIntent,
     frame: &FunctionalMaterialFrame,
     request: &FunctionalMaterialConstruction,
+    alternation: &[u32],
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -269,7 +270,6 @@ pub(super) fn verify(
     let retained = retained_bytes(plan)?;
     let mut residuals: Vec<Option<Residual<'_>>> =
         (0..plan.material_domains.len()).map(|_| None).collect();
-    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (layer_index, layer) in plan.layers.iter().enumerate() {
         cancelled(cancel)?;
         let mut demands = Vec::new();

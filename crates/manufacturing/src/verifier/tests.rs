@@ -27,7 +27,13 @@ fn verify_actual(
     cancel: &AtomicBool,
     replay: Option<&mut ReplaySink>,
 ) -> Result<VerificationReport, ManufacturingError> {
-    super::verify_actual(&chunks(program), plan, intent, cancel, replay)
+    super::verify_actual(
+        &chunks(program),
+        plan,
+        intent,
+        cancel,
+        replay.map(ReplayTarget::Existing),
+    )
 }
 fn emit_text(
     plan: &NormalizedPrintPlan,
@@ -451,7 +457,7 @@ fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
             "Realization must not invent a closing edge or relabel an open wall Bridge"
         );
         let program = emit_text(&plan, &intent, &cancel).unwrap();
-        let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+        let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
         let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
         assert!(report.verified);
         assert_eq!(report.deposition_segments, 5);
@@ -1157,7 +1163,7 @@ fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.deposition_segments, 220_000);
     assert_eq!(report.travel_segments, 220_000);
@@ -1202,7 +1208,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report_only = verify(&program, &plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report, report_only);
     assert_eq!(report.deposition_segments, 40_000);
@@ -1250,7 +1256,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.travel_segments, 100_000);
     assert_eq!(report.retraction_count, 0);
@@ -1509,7 +1515,7 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.filament_length_mm, 6.0);
     assert_eq!(report.priming_filament_length_mm, 1.0);
@@ -1961,7 +1967,7 @@ fn packed_process_descriptor(
 fn independent_process_golden_separates_support_object_and_stationary_recovery() {
     let (intent, plan) = process_fixture();
     let cancel = AtomicBool::new(false);
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(PROCESS_GOLDEN, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.support_deposition_segments, 2);
     assert_eq!(report.deposition_segments, 2);
@@ -2068,7 +2074,7 @@ G1 X11 Y1 Z1 E1800000 F300
     assert_eq!(baseline.retraction_count, 2);
     let mutated = program.replacen("G1 E1200000 F900", "G1 E1200000.00000001 F900", 1);
     assert!(verify(&mutated, &plan, &intent, &cancel).is_err());
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     assert!(verify_actual(&mutated, &plan, &intent, &cancel, Some(&mut sink)).is_err());
 }
 
@@ -2132,7 +2138,7 @@ fn preferred_seam_rejects_a_matching_policy_ignoring_plan_and_program() {
     assert_ne!(policy_ignoring_program, canonical_program);
     let error = verify(&policy_ignoring_program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     assert_eq!(
         verify_actual(
             &policy_ignoring_program,
@@ -2358,7 +2364,7 @@ fn distributed_seams_have_hand_derived_xy_history_and_evict_after_eight_starts()
         assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
     }
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.deposition_segments, 48);
     assert!(report.verified);
@@ -2566,7 +2572,7 @@ fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
     plan.validate(&intent).unwrap();
     let altered = emit_text(&plan, &intent, &cancel).unwrap();
     assert_ne!(altered, program);
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let error = verify_actual(&altered, &plan, &intent, &cancel, Some(&mut sink)).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
     assert!(error.message.contains("seam policy"));
@@ -2661,7 +2667,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
@@ -2702,7 +2708,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
         };
         refresh_volumes(&intent, &mut plan);
         let emitted = emit_text(&plan, &intent, &cancel).unwrap();
-        let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+        let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
         let report = verify_actual(&emitted, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
         let (bytes, bounds) = sink.finish().unwrap();
         let bytes = bytes.to_vec().unwrap();
@@ -2739,7 +2745,7 @@ fn complete_prime_to_first_body_can_retract_at_known_stationary_position() {
     };
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
@@ -2830,7 +2836,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     // Independently calculated capsule areas: three fine rows, one double-height row.
     let fine_area = 0.35 * 0.1 + std::f64::consts::PI * 0.05f64.powi(2);
@@ -4061,7 +4067,7 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
         }
     }
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert!(report.verified);
     plan.layers[6].paths[1].rotate_closed(1).unwrap();
@@ -4113,7 +4119,7 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
     }
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     report.validate().unwrap();
     let routing = report.routing.as_ref().unwrap();
@@ -4292,7 +4298,7 @@ fn physical_cycles_route_same_z_occurrences_independently_in_actual_commands() {
     let (intent, plan) = fixed_dual_cycle_fixture();
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let mut sink = ReplaySink::new(plan.layers.len()).unwrap();
     verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     let (bytes, _) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
@@ -4460,13 +4466,38 @@ fn per_tool_profiles_drive_actual_feed_flow_cooling_and_reject_swapped_feed() {
 }
 
 #[test]
+fn malformed_plan_has_same_replay_refusal_with_or_without_motion() {
+    let (intent, mut plan) = fixture();
+    let cancel = AtomicBool::new(false);
+    let program = emit_text(&plan, &intent, &cancel).unwrap();
+    plan.schema_version = 0;
+    let report_only = verify(&program, &plan, &intent, &cancel).unwrap_err();
+    let mut sink = None;
+    let with_motion = super::verify_actual(
+        &chunks(&program),
+        &plan,
+        &intent,
+        &cancel,
+        Some(ReplayTarget::Capture(&mut sink)),
+    )
+    .unwrap_err();
+    assert!(sink.is_none());
+    assert_eq!(report_only, with_motion);
+    assert_eq!(
+        with_motion.code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    assert_eq!(with_motion.message, "unsupported plan schema");
+}
+
+#[test]
 fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
     let (intent, plan) = fixture();
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report_only = verify(&program, &plan, &intent, &cancel).unwrap();
     // Too small to hold the actual stream: recording stops, replay continues.
-    let mut small = ReplaySink::with_capacity(&plan, &intent, 3).unwrap();
+    let mut small = ReplaySink::with_capacity(plan.layers.len(), 3).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut small)).unwrap();
     assert_eq!(report, report_only);
     assert!(report.verified);
@@ -4477,10 +4508,10 @@ fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
     );
     // Omission never hides a real defect: tampered bytes still fail.
     let tampered = program.replacen("G1 ", "G0 ", 1);
-    let mut small = ReplaySink::with_capacity(&plan, &intent, 3).unwrap();
+    let mut small = ReplaySink::with_capacity(plan.layers.len(), 3).unwrap();
     assert!(verify_actual(&tampered, &plan, &intent, &cancel, Some(&mut small)).is_err());
     // A sufficient capacity still yields a complete, valid display.
-    let mut full = ReplaySink::new(&plan, &intent).unwrap();
+    let mut full = ReplaySink::new(plan.layers.len()).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut full)).unwrap();
     assert!(!full.omitted());
     let (bytes, bounds) = full.finish().unwrap();

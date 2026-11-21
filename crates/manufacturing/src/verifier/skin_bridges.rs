@@ -104,12 +104,12 @@ fn contains_portion(
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
+    alternation: &[u32],
     work: &mut usize,
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let mut hits = Vec::new();
-    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (index, layer) in plan.layers.iter().enumerate() {
         for path in &layer.paths {
             let Some(DepositionOwner::RegionalSkinBridge {

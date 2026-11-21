@@ -117,6 +117,7 @@ fn core_radius(edge: &DepositionEdge<'_>, height: f64) -> Result<f64, Manufactur
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
+    alternation: &[u32],
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -206,7 +207,7 @@ pub(super) fn verify(
             cancel,
         )?;
     }
-    inventory::verify(plan, intent, frame, request, work, cancel)?;
+    inventory::verify(plan, intent, frame, request, alternation, work, cancel)?;
     for (layer_index, layer) in plan.layers.iter().enumerate() {
         cancelled(cancel)?;
         let middle =

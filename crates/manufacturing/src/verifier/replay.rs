@@ -26,19 +26,20 @@ pub(crate) struct ReplaySink {
     omitted: bool,
 }
 impl ReplaySink {
-    pub(crate) fn new(
-        plan: &NormalizedPrintPlan,
-        intent: &ManufacturingIntent,
-    ) -> Result<Self, ManufacturingError> {
-        Self::with_capacity(plan, intent, MAX_REPLAY_EVENTS as usize)
+    pub(crate) fn new(layer_count: usize) -> Result<Self, ManufacturingError> {
+        Self::with_capacity(layer_count, MAX_REPLAY_EVENTS as usize)
     }
     /// A sink admitting at most `capacity` display events.
     pub(crate) fn with_capacity(
-        plan: &NormalizedPrintPlan,
-        intent: &ManufacturingIntent,
+        layer_count: usize,
         capacity: usize,
     ) -> Result<Self, ManufacturingError> {
-        plan.validate(intent)?;
+        let layers = u32::try_from(layer_count).map_err(|_| {
+            ManufacturingError::new(
+                ManufacturingErrorCode::ResourceLimit,
+                "replay layer count exceeds its u32 representation",
+            )
+        })?;
         let events = capacity.min(MAX_REPLAY_EVENTS as usize);
         let buffer = spiling_chunks::ChunkWriter::spooled(u64::from(MAX_REPLAY_DISPLAY_BYTES))
             .map_err(|e| super::failed(format!("replay spool: {e}")))?;
@@ -49,7 +50,7 @@ impl ReplaySink {
             events: 0,
             depositions: 0,
             travels: 0,
-            layers: plan.layers.len() as u32,
+            layers,
             lifecycle: 0,
             process: 0,
             epochs: 0,

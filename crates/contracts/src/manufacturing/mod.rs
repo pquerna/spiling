@@ -10,7 +10,7 @@ use crate::surface::{
 use crate::{geometry::*, project::*};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{borrow::Cow, collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
 mod interior;
@@ -3613,6 +3613,13 @@ pub struct AdhesionSummary {
 /// Conservative object XY ownership envelope, padded for command serialization.
 pub type PrimeExclusionBoundsMm = [[f64; 2]; 2]; // [minimum XY, maximum XY]
 
+/// Replay facts from the same independent plan validation pass.
+pub struct ReplayPlanFacts<'intent> {
+    pub prime_exclusion: Option<PrimeExclusionBoundsMm>,
+    pub alternation: Vec<u32>,
+    pub execution: Cow<'intent, ManufacturingIntent>,
+}
+
 fn prime_intersects_bounds(start: [f64; 3], end: [f64; 3], bounds: PrimeExclusionBoundsMm) -> bool {
     let mut enter = 0.0_f64;
     let mut leave = 1.0_f64;
@@ -3675,13 +3682,13 @@ impl NormalizedPrintPlan {
     }
 
     pub fn validate(&self, intent: &ManufacturingIntent) -> Result<(), ManufacturingError> {
-        self.validate_and_prime_exclusion(intent).map(|_| ())
+        self.validate_for_replay(intent).map(|_| ())
     }
-    /// Validate once and expose the same bounded ownership obligation to replay.
-    pub fn validate_and_prime_exclusion(
+    /// Validate once and carry the derived state into actual-program replay.
+    pub fn validate_for_replay<'intent>(
         &self,
-        intent: &ManufacturingIntent,
-    ) -> Result<Option<PrimeExclusionBoundsMm>, ManufacturingError> {
+        intent: &'intent ManufacturingIntent,
+    ) -> Result<ReplayPlanFacts<'intent>, ManufacturingError> {
         intent.validate()?;
         if let Some(selection) = &self.interior_selection {
             selection.validate_for(intent)?;
@@ -4655,7 +4662,11 @@ impl NormalizedPrintPlan {
                 "adhesion summary disagrees with the first layer's skirt and brim paths",
             ));
         }
-        Ok(if complete { Some(object_xy) } else { None })
+        Ok(ReplayPlanFacts {
+            prime_exclusion: complete.then_some(object_xy),
+            alternation,
+            execution,
+        })
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

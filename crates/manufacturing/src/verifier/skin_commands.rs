@@ -419,6 +419,7 @@ fn check_masks(
 pub(super) fn verify(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
+    alternation: &[u32],
     work: &mut usize,
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
@@ -434,7 +435,6 @@ pub(super) fn verify(
     let retained = retained_bytes(plan)?;
     let mut rows = Rows::default();
     let mut claimed = Vec::<bool>::new();
-    let alternation = spiling_contracts::manufacturing::hatch_alternation_keys(&plan.layers);
     for (index, layer) in plan.layers.iter().enumerate() {
         if layer.skin_command_fits.is_empty() {
             continue;

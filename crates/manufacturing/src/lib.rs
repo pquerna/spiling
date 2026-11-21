@@ -36,7 +36,7 @@ use std::sync::{
 /// Binds native material authority and physical per-occurrence material events.
 pub const PLANNER_VERSION: &str = "136";
 pub const EMITTER_VERSION: &str = "22";
-pub const VERIFIER_VERSION: &str = "55";
+pub const VERIFIER_VERSION: &str = "56";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -228,12 +228,13 @@ fn verify_compiled(
     cancel: &AtomicBool,
     replay: Option<&mut Option<verifier::ReplaySink>>,
 ) -> Result<VerificationReport, ManufacturingError> {
-    let sink = if let Some(slot) = replay {
-        Some(slot.insert(verifier::ReplaySink::new(plan, intent)?))
-    } else {
-        None
-    };
-    verifier::verify_actual(program, plan, intent, cancel, sink)
+    verifier::verify_actual(
+        program,
+        plan,
+        intent,
+        cancel,
+        replay.map(verifier::ReplayTarget::Capture),
+    )
 }
 
 /// Recompute replay; the persisted report is descriptive, never trusted authority.
@@ -376,19 +377,15 @@ pub fn inspect_bundle(
 ) -> Result<ManufacturingInspection, ManufacturingError> {
     validate_inspection_bundle(result, cancel)?;
     let bundle = &result.bundle;
-    let mut sink = match output.motion() {
-        false => None,
-        true => Some(verifier::ReplaySink::new(
-            &bundle.plan,
-            &bundle.provenance.intent,
-        )?),
-    };
+    let mut sink = None;
     let report = verifier::verify_actual(
         &result.program,
         &bundle.plan,
         &bundle.provenance.intent,
         cancel,
-        sink.as_mut(),
+        output
+            .motion()
+            .then_some(verifier::ReplayTarget::Capture(&mut sink)),
     )?;
     finish_inspection(bundle, bundle_hash, report, sink, cancel)
 }
