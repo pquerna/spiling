@@ -902,6 +902,9 @@ fn admit_schedule<'model>(
         let mut key = None;
         let mut classified = None;
         let mut classified_owned_bytes = 0usize;
+        let mut classification_start = 0;
+        let mut classifications = Vec::new();
+        let mut classification_points = 0usize;
         let mut layout_span = None;
         let mut wall_layout = None;
         let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
@@ -946,6 +949,20 @@ fn admit_schedule<'model>(
                         "wall caller retained-byte overflow",
                     )
                 })?;
+        let classification_metadata_bytes = schedule
+            .len()
+            .checked_mul(std::mem::size_of::<(
+                usize,
+                classification::ClassifiedRegions,
+                usize,
+                usize,
+            )>())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "classification metadata overflow",
+                )
+            })?;
         let phase_bytes = schedule
             .len()
             .checked_mul(std::mem::size_of::<region::OrdinaryHatchPhase>())
@@ -961,11 +978,22 @@ fn admit_schedule<'model>(
                 wall_static_base_bytes,
                 retained_plan_bytes,
                 phase_bytes,
+                classification_metadata_bytes,
                 startup_wall.as_ref().map_or(0, |wall| {
                     wall.layout_bytes().saturating_add(wall_index_entry_bytes)
                 }),
             ])?,
         )?;
+        classifications
+            .try_reserve_exact(schedule.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "classification metadata allocation refused",
+                )
+            })?;
+        let mut classification_bytes = classifications.capacity()
+            * std::mem::size_of::<(usize, classification::ClassifiedRegions, usize, usize)>();
         if let Some(startup) = startup_wall.take() {
             retained_wall_bytes = startup.layout_bytes();
             wall_cache.insert(startup.key, startup.layout);
@@ -997,6 +1025,7 @@ fn admit_schedule<'model>(
                 retained_plan_bytes,
                 retained_wall_bytes,
                 wall_cache.len() * wall_index_entry_bytes,
+                classification_bytes,
             ])?,
         )?;
         let mut phase_anchors = support::AnchorWorkspace::default();
@@ -1026,7 +1055,7 @@ fn admit_schedule<'model>(
             && let Some(request_count) = (count as usize).checked_mul(3)
         {
             let outside = skin_external_owned_bytes(
-                wall_static_base_bytes,
+                geometry_bytes(&[wall_static_base_bytes, classification_bytes])?,
                 retained_plan_bytes,
                 retained_wall_bytes,
                 wall_cache.len(),
@@ -1063,8 +1092,6 @@ fn admit_schedule<'model>(
         timing.mark("skin_prefetch");
         for index in 0..count {
             check_cancel(cancel)?;
-            let wall_static_bytes =
-                geometry_bytes(&[wall_static_base_bytes, phase_anchors.retained_bytes()])?;
             let elevation = &schedule[index as usize];
             let z = elevation.z;
             let sample = elevation.sample;
@@ -1117,10 +1144,26 @@ fn admit_schedule<'model>(
                 }),
             );
             if key != Some(next_key) {
-                // Drop the prior classification before allocating its replacement.
-                // The current wall layout survives skin-key changes, not span changes.
-                drop(classified.take());
+                if let Some(regions) = classified.take() {
+                    let points = classification::ClassifiedRegions::retained_points(&regions);
+                    classifications.push((
+                        classification_start,
+                        regions,
+                        points,
+                        classified_owned_bytes,
+                    ));
+                    classification_points = geometry_bytes(&[classification_points, points])?;
+                    retained_points = geometry_bytes(&[retained_points, points])?;
+                    classification_bytes =
+                        geometry_bytes(&[classification_bytes, classified_owned_bytes])?;
+                }
+                classification_start = index as usize;
                 templates = [None, None];
+                let wall_static_bytes = geometry_bytes(&[
+                    wall_static_base_bytes,
+                    classification_bytes,
+                    phase_anchors.retained_bytes(),
+                ])?;
                 let actual_height = z - elevation.lower_z;
                 let limits = input.intent.effective_deposition_limits();
                 let envelope = walls::width_envelope(&limits, actual_height)?;
@@ -1497,7 +1540,7 @@ fn admit_schedule<'model>(
             // receipt. It is recomputed against this layer's earlier initial paths,
             // then frozen for every reconstruction of these required normal rows.
             let guide_outside_bytes = skin_external_owned_bytes(
-                wall_static_base_bytes,
+                geometry_bytes(&[wall_static_base_bytes, classification_bytes])?,
                 retained_plan_bytes,
                 retained_wall_bytes,
                 wall_cache.len(),
@@ -1562,8 +1605,11 @@ fn admit_schedule<'model>(
             {
                 templates[axis_slot] = None;
             }
-            let wall_static_bytes =
-                geometry_bytes(&[wall_static_base_bytes, phase_anchors.retained_bytes()])?;
+            let wall_static_bytes = geometry_bytes(&[
+                wall_static_base_bytes,
+                classification_bytes,
+                phase_anchors.retained_bytes(),
+            ])?;
             let outside_skin_bytes = skin_external_owned_bytes(
                 wall_static_bytes,
                 retained_plan_bytes,
@@ -1768,7 +1814,18 @@ fn admit_schedule<'model>(
 
         timing.mark("object_layers");
         neighborhoods.clear_prefetch();
-        drop(classified);
+        if let Some(regions) = classified.take() {
+            let points = regions.retained_points();
+            classifications.push((
+                classification_start,
+                regions,
+                points,
+                classified_owned_bytes,
+            ));
+            classification_points = geometry_bytes(&[classification_points, points])?;
+            retained_points = geometry_bytes(&[retained_points, points])?;
+            classification_bytes = geometry_bytes(&[classification_bytes, classified_owned_bytes])?;
+        }
         drop(wall_layout);
         drop(templates);
         drop(phase_anchors);
@@ -1815,8 +1872,10 @@ fn admit_schedule<'model>(
             resolution_allocated_bytes,
             &[None, None],
         )?;
+        let support_classified_bytes =
+            geometry_bytes(&[support_outside_bytes, classification_bytes])?;
         let support_native_owned_bytes =
-            skin_retained_bytes(support_outside_bytes, &neighborhoods, &[])?;
+            skin_retained_bytes(support_classified_bytes, &neighborhoods, &[])?;
 
         if let Some(field) = &web_roof {
             field.stabilize(&mut layers, recipe, &mut segments, rooms_memo, cancel)?;
@@ -1894,7 +1953,13 @@ fn admit_schedule<'model>(
              recovery| {
                 *neighborhoods.work_mut() = *planar_work;
                 let outcome = (|| {
-                    let live_retained_points = retained_points
+                    let entry = classifications.partition_point(|entry| entry.0 <= index);
+                    let (_, classified, classified_points, classified_bytes) = classifications
+                        .get(entry.wrapping_sub(1))
+                        .expect("support reconstructs only classified object layers");
+                    let classified_bytes = *classified_bytes;
+                    let classified_points = *classified_points;
+                    let live_retained_points = (retained_points - classified_points)
                         .checked_add(retained_support_points)
                         .filter(|total| *total <= crate::working_set::units())
                         .ok_or_else(|| {
@@ -1903,165 +1968,15 @@ fn admit_schedule<'model>(
                                 "support raster retained point limit exceeded",
                             )
                         })?;
-                    let outside_owned_bytes =
-                        geometry_bytes(&[support_outside_bytes, retained_support_bytes])?;
+                    let outside_owned_bytes = geometry_bytes(&[
+                        support_classified_bytes - classified_bytes,
+                        retained_support_bytes,
+                    ])?;
                     let mut live_owned_bytes =
                         geometry_bytes(&[outside_owned_bytes, anchor_owned_bytes])?;
                     let anchor_capacity = std::cell::Cell::new(anchor_owned_bytes);
                     let elevation = &schedule[index];
                     let current = span_at(&sections, index as u32);
-                    let below = physical_neighbor(
-                        schedule,
-                        index as u32,
-                        recipe.bottom_skin_thickness_mm,
-                        false,
-                    )
-                    .map(|i| span_at(&sections, i));
-                    let above = physical_neighbor(
-                        schedule,
-                        index as u32,
-                        recipe.top_skin_thickness_mm,
-                        true,
-                    )
-                    .map(|i| span_at(&sections, i));
-                    let lower = neighborhoods.survival(
-                        current,
-                        below,
-                        live_retained_points,
-                        live_owned_bytes,
-                        cancel,
-                    )?;
-                    let upper = neighborhoods.survival(
-                        current,
-                        above,
-                        skin_query_retained_points(live_retained_points, &[&lower])?,
-                        skin_query_retained_bytes(live_owned_bytes, &[&lower])?,
-                        cancel,
-                    )?;
-                    let wall = Arc::clone(
-                        wall_layouts[index]
-                            .as_ref()
-                            .expect("physical-height wall construction already admitted"),
-                    );
-                    let mut fresh = classification::ClassifiedRegions::new(
-                        wall,
-                        &lower,
-                        &upper,
-                        |scratch, scratch_bytes| {
-                            admit_skin_scratch(
-                                live_retained_points,
-                                live_owned_bytes,
-                                &mut neighborhoods,
-                                &[&lower, &upper],
-                                scratch,
-                                scratch_bytes,
-                                cancel,
-                            )
-                        },
-                        recipe,
-                        cancel,
-                    )?;
-                    let landed = match web_roof
-                        .as_ref()
-                        .filter(|_| !fresh.top.0.is_empty())
-                        .and_then(|_| {
-                            roof_landing(
-                                schedule,
-                                &sections,
-                                index as u32,
-                                current,
-                                above,
-                                recipe.top_skin_thickness_mm,
-                            )
-                        }) {
-                        Some((span, horizon)) => Some(neighborhoods.survival(
-                            span,
-                            horizon,
-                            skin_query_retained_points(
-                                live_retained_points + fresh.retained_points(),
-                                &[&lower, &upper],
-                            )?,
-                            skin_query_retained_bytes(
-                                geometry_bytes(&[live_owned_bytes, fresh.retained_bytes()])?,
-                                &[&lower, &upper],
-                            )?,
-                            cancel,
-                        )?),
-                        None => None,
-                    };
-                    let mut classified = fresh
-                        .snap_roof_to_cells(
-                            web_roof.as_ref().map(|field| field.roof()),
-                            landed.as_deref(),
-                            recipe,
-                            classification::fixed_owned_budget(
-                                skin_retained_points(
-                                    live_retained_points,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                                skin_retained_bytes(
-                                    live_owned_bytes,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                            ),
-                            cancel,
-                        )?
-                        .with_process(
-                            &sections[current].process_domains,
-                            input.intent,
-                            classification::fixed_owned_budget(
-                                skin_retained_points(
-                                    live_retained_points,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                                skin_retained_bytes(
-                                    live_owned_bytes,
-                                    &neighborhoods,
-                                    &[&lower, &upper],
-                                )?,
-                            ),
-                            neighborhoods.work_mut(),
-                            cancel,
-                        )?;
-                    construction.classify(
-                        &mut classified,
-                        [elevation.lower_z, elevation.z],
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                live_retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                live_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        neighborhoods.work_mut(),
-                        cancel,
-                    )?;
-                    classified.with_tool_widths(
-                        input.intent,
-                        classification::fixed_owned_budget(
-                            skin_retained_points(
-                                live_retained_points,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                            skin_retained_bytes(
-                                live_owned_bytes,
-                                &neighborhoods,
-                                &[&lower, &upper],
-                            )?,
-                        ),
-                        neighborhoods.work_mut(),
-                        cancel,
-                    )?;
-                    let classified_bytes = classified.retained_bytes();
                     let hatch_layer = region::HatchLayer {
                         roof: web_roof.as_ref().map(|field| {
                             if cathedral_roads.get(index).is_some() {
@@ -2085,24 +2000,28 @@ fn admit_schedule<'model>(
                     let mut skin_bridge_domains = Vec::new();
                     let mut skin_command_fits = Vec::new();
                     let paths = if let Some(anchors) = recovery {
-                        let query_points = skin_query_retained_points(0, &[&lower, &upper])?;
-                        let query_owned_bytes = skin_query_retained_bytes(0, &[&lower, &upper])?;
                         let mut check_component =
                             |candidate: &mut support::RasterCandidate,
                              axis,
                              scratch: usize,
                              scratch_owned_bytes: usize| {
-                                let live = scratch.checked_add(query_points).ok_or_else(|| {
-                                    error(
-                                        ManufacturingErrorCode::ResourceLimit,
-                                        "component and query scratch overflow",
-                                    )
-                                })?;
+                                let live =
+                                    scratch.checked_sub(classified_points).ok_or_else(|| {
+                                        error(
+                                            ManufacturingErrorCode::ResourceLimit,
+                                            "component scratch omits retained classification",
+                                        )
+                                    })?;
                                 let receipt = anchors(
                                     candidate,
                                     axis,
                                     live,
-                                    geometry_bytes(&[scratch_owned_bytes, query_owned_bytes])?,
+                                    scratch_owned_bytes.checked_sub(classified_bytes).ok_or_else(|| {
+                                        error(
+                                            ManufacturingErrorCode::ResourceLimit,
+                                            "component scratch omits retained classification bytes",
+                                        )
+                                    })?,
                                 )?;
                                 anchor_capacity.set(receipt.workspace_bytes);
                                 Ok(receipt)
@@ -2120,7 +2039,7 @@ fn admit_schedule<'model>(
                                     live_retained_points,
                                     outside_owned_bytes,
                                     &mut neighborhoods,
-                                    &[&lower, &upper],
+                                    &[],
                                     scratch,
                                     scratch_bytes,
                                     cancel,
@@ -2158,7 +2077,7 @@ fn admit_schedule<'model>(
                                     live_retained_points,
                                     live_owned_bytes,
                                     &mut neighborhoods,
-                                    &[&lower, &upper],
+                                    &[],
                                     scratch,
                                     scratch_bytes,
                                     cancel,
@@ -2192,16 +2111,13 @@ fn admit_schedule<'model>(
                     // Refresh its capacity before cloning interface metadata below.
                     live_owned_bytes =
                         geometry_bytes(&[outside_owned_bytes, anchor_capacity.get()])?;
-                    let base = skin_retained_points(
-                        live_retained_points,
-                        &neighborhoods,
-                        &[&lower, &upper],
-                    )? + classified.retained_points()
+                    let base = skin_retained_points(live_retained_points, &neighborhoods, &[])?
+                        + classified.retained_points()
                         + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
                         + bonds::skin_bridge_points(&skin_bridge_domains)
                         + bonds::skin_command_fit_points(&skin_command_fits);
                     let live_bytes = geometry_bytes(&[
-                        skin_retained_bytes(live_owned_bytes, &neighborhoods, &[&lower, &upper])?,
+                        skin_retained_bytes(live_owned_bytes, &neighborhoods, &[])?,
                         classified_bytes,
                         bonds::path_bytes(&paths),
                         bonds::skin_bridge_bytes(&skin_bridge_domains),
@@ -2298,6 +2214,8 @@ fn admit_schedule<'model>(
             },
         );
         timing.mark("support_realization");
+        drop(classifications);
+        retained_points -= classification_points;
         *neighborhoods.work_mut() = support_work.planar;
         let support_admission = support_admission?;
         let withdrawal = match support_admission {
