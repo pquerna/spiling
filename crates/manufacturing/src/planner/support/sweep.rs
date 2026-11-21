@@ -64,6 +64,9 @@ pub(super) struct SweepOutput {
     pub access: Vec<(usize, usize, Rc<OwnedMaterial>)>,
     /// The kept cells final clearance certifies emitted support against.
     pub kept: KeptSupport,
+    /// Per part root, the established landing cells some ordinary channel
+    /// reached: interface anchors on the part there.
+    pub part_contacts: Vec<Option<Bits>>,
 }
 
 /// What the sweep built clear, for the final clearance assertion: each
@@ -511,6 +514,7 @@ impl Sweep<'_> {
                 contact_tops,
                 access,
                 kept: KeptSupport::default(),
+                part_contacts: Vec::new(),
             });
         };
         let cells = CellFrame::new(bounds, SUPPORT_CELL_MM)?;
@@ -713,6 +717,9 @@ impl Sweep<'_> {
         // with the kept support below standing in for deposited support.
         let mut establishment = established::Establishment::new(&live);
         let mut anchors = AnchorWorkspace::default();
+        let mut part_contacts: Vec<Option<Bits>> = Vec::new();
+        reserve_owned(&mut part_contacts, self.roots.len(), self.owned_bytes)?;
+        part_contacts.resize_with(self.roots.len(), || None);
         for l in 0..=max_top {
             check_cancel(cancel)?;
             if channels.iter().all(|channel| channel.active[l].is_none()) {
@@ -751,7 +758,7 @@ impl Sweep<'_> {
                 release(&active);
                 let mut ground = Bits::default();
                 if channel.relieved.is_none() {
-                    for landing in &landings {
+                    for (_, landing) in &landings {
                         check_cancel(cancel)?;
                         let accepted = raster.intersection(&active, landing)?;
                         if accepted.is_empty() {
@@ -833,10 +840,11 @@ impl Sweep<'_> {
                     interface: layer_interface,
                 });
             }
-            for landing in &landings {
-                release(landing);
+            // Raster retention and final reconciliation anchor interface on
+            // these same cells; they stay held until the output is dropped.
+            for (index, landing) in landings {
+                part_contacts[index] = Some(landing);
             }
-            drop(landings);
             charge(work)?;
         }
         drop(establishment);
@@ -909,6 +917,7 @@ impl Sweep<'_> {
             contact_tops,
             access,
             kept,
+            part_contacts,
         })
     }
 
@@ -928,9 +937,9 @@ impl Sweep<'_> {
         anchors: &mut AnchorWorkspace,
         hold: &dyn Fn(&Bits) -> Result<(), ManufacturingError>,
         work: &mut usize,
-    ) -> Result<Vec<Bits>, ManufacturingError> {
+    ) -> Result<Vec<(usize, Bits)>, ManufacturingError> {
         let mut landings = Vec::new();
-        for root in self.roots.iter().rev() {
+        for (index, root) in self.roots.iter().enumerate().rev() {
             let Root::Part {
                 object_layer,
                 first_support_layer,
@@ -958,20 +967,15 @@ impl Sweep<'_> {
                 raster,
                 layers: self.layers,
                 contact_tops,
-                recipe: self.recipe,
                 anchors,
                 work,
                 owned_bytes: self.owned_bytes,
             };
-            let cells = establishment.landing(&mut step, object_layer, &mut |_, k| {
-                Ok(grids[k]
-                    .as_ref()
-                    .map_or_else(established::LowerSupport::none, |grid| {
-                        established::LowerSupport {
-                            cells: std::borrow::Cow::Borrowed(&grid.support),
-                            paths: Vec::new(),
-                        }
-                    }))
+            let cells = establishment.landing(&mut step, object_layer, &mut |k| {
+                grids[k].as_ref().map_or_else(
+                    || std::borrow::Cow::Owned(Bits::default()),
+                    |grid| std::borrow::Cow::Borrowed(&grid.support),
+                )
             })?;
             let accepted = raster.intersection(&landing, &cells)?;
             if accepted.is_empty() {
@@ -979,7 +983,7 @@ impl Sweep<'_> {
             }
             hold(&accepted)?;
             reserve_owned(&mut landings, 1, self.owned_bytes)?;
-            landings.push(accepted);
+            landings.push((index, accepted));
         }
         Ok(landings)
     }

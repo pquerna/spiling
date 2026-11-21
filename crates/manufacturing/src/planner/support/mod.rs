@@ -1523,14 +1523,18 @@ pub(super) fn realize(
         // they stay admitted until it consumes them.
         let kept = output.kept;
         support_metadata_bytes += kept.bytes();
+        // Established landing cells per part root, computed once by the
+        // sweep; raster retention and final reconciliation anchor on them.
+        let part_contacts = output.part_contacts;
+        support_metadata_bytes += part_contacts
+            .iter()
+            .flatten()
+            .map(grid::Bits::bytes)
+            .fold(vec_bytes(&part_contacts), usize::saturating_add);
         trace.report("corridors_complete");
         timing.mark("roots_and_corridors");
         drop(nominal);
         let mut retained = base_retained;
-        // Established part cells live in this counter; every admission below
-        // includes it.
-        let established_live = std::sync::atomic::AtomicUsize::new(0);
-        let mut establishment = established::Establishment::new(&established_live);
         // A layer's walls and rows depend only on its own kept cells and its
         // preferred axis, so they are staged in parallel and admitted
         // together; anchoring to lower layers stays in layer order below.
@@ -1655,7 +1659,7 @@ pub(super) fn realize(
             let (layer, following) = remaining.split_first_mut().expect("current support layer");
             let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
             let retained_domains = retained + geometry.0;
-            let mut live_bytes = owned_bytes
+            let live_bytes = owned_bytes
                 .saturating_add(geometry.1)
                 .saturating_add(staged_bytes);
             // The bed roots the first layer. Above it, every stroke needs
@@ -1663,18 +1667,11 @@ pub(super) fn realize(
             // established part contact. The preferred axis is the only one
             // tried: what it cannot anchor is omitted and reported.
             if i > 0 && !paths.is_empty() {
-                live_bytes = live_bytes
-                    .saturating_add(established_live.load(std::sync::atomic::Ordering::Relaxed));
                 let paths_bytes = super::bonds::path_bytes(&paths);
                 let admit = |extra: usize| {
                     super::remaining_geometry_units(
                         retained_domains,
-                        live_bytes
-                            .saturating_add(paths_bytes)
-                            .saturating_add(
-                                established_live.load(std::sync::atomic::Ordering::Relaxed),
-                            )
-                            .saturating_add(extra),
+                        live_bytes.saturating_add(paths_bytes).saturating_add(extra),
                     )
                     .map(|_| ())
                 };
@@ -1688,24 +1685,8 @@ pub(super) fn realize(
                     });
                 let contact_cells = match &contact_raster {
                     Some(raster) => {
-                        anchors.set_budget(workspace_budget(
-                            retained_domains,
-                            live_bytes.saturating_add(paths_bytes),
-                        )?);
-                        let cells = established::part_contacts(
-                            &mut establishment,
-                            &mut established::Step {
-                                raster,
-                                layers: prior,
-                                contact_tops: &contact_tops,
-                                recipe,
-                                anchors: &mut anchors,
-                                work: &mut anchor_work,
-                                owned_bytes: live_bytes.saturating_add(paths_bytes),
-                            },
-                            &roots,
-                            i,
-                        )?;
+                        let cells =
+                            established::root_contacts(raster, &roots, &part_contacts, i, None)?;
                         charge_owned_work(&mut work, foreign_work, raster.take_work(), cancel)?;
                         Some(cells)
                     }
@@ -1789,16 +1770,13 @@ pub(super) fn realize(
                 "support retained point accounting underflow",
             )
         })?;
-        // Object roads are regenerated below: establish again from the bed.
-        drop(establishment);
-        let mut establishment = established::Establishment::new(&established_live);
         for index in 1..layers.len() {
             support_metadata_bytes += reconcile_layer_roots(
                 layers,
                 FinalSupportInput {
                     index,
-                    contact_tops: &contact_tops,
                     roots: &roots,
+                    part_contacts: &part_contacts,
                     frame: grid_frame,
                     wall_paths: &mut support_wall_paths,
                     recipe,
@@ -1807,7 +1785,6 @@ pub(super) fn realize(
                         + support_metadata_bytes
                         + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
                 },
-                &mut establishment,
                 segments,
                 &mut anchors,
                 &mut anchor_work,
@@ -2161,7 +2138,14 @@ pub(super) fn realize(
         }
         support_metadata_bytes -= vec_bytes(&original_bridge_roles);
         drop(original_bridge_roles);
-        drop(establishment);
+        support_metadata_bytes = support_metadata_bytes.saturating_sub(
+            part_contacts
+                .iter()
+                .flatten()
+                .map(grid::Bits::bytes)
+                .fold(vec_bytes(&part_contacts), usize::saturating_add),
+        );
+        drop(part_contacts);
         // Contact selection is only a proposal until actual final paths exist.
         // Check the same closed, physical-decimal bead enclosure used by the XY
         // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
@@ -2260,8 +2244,9 @@ pub(super) fn realize(
 
 struct FinalSupportInput<'a> {
     index: usize,
-    contact_tops: &'a [Option<usize>],
     roots: &'a [Root],
+    /// Per root, the sweep's established landing cells.
+    part_contacts: &'a [Option<grid::Bits>],
     /// The support grid frame; `None` when the sweep had no demand.
     frame: Option<grid::CellFrame>,
     wall_paths: &'a mut [usize],
@@ -2273,7 +2258,6 @@ struct FinalSupportInput<'a> {
 fn reconcile_layer_roots(
     layers: &mut [PrintLayer],
     input: FinalSupportInput<'_>,
-    establishment: &mut established::Establishment<'_>,
     segments: &mut usize,
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
@@ -2282,8 +2266,8 @@ fn reconcile_layer_roots(
     check_cancel(cancel)?;
     let FinalSupportInput {
         index,
-        contact_tops,
         roots,
+        part_contacts,
         frame,
         wall_paths,
         recipe,
@@ -2335,8 +2319,7 @@ fn reconcile_layer_roots(
             let outside = owned_bytes
                 .saturating_add(added_bytes)
                 .saturating_add(layer_payload_bytes(prior.iter().chain(following.iter())))
-                .saturating_add(layer_bytes)
-                .saturating_add(establishment.bytes());
+                .saturating_add(layer_bytes);
             let admit = |extra: usize| {
                 super::remaining_geometry_units(retained_units, outside.saturating_add(extra))
                     .map(|_| ())
@@ -2349,22 +2332,16 @@ fn reconcile_layer_roots(
                     admit: &admit,
                     work: std::sync::atomic::AtomicUsize::new(0),
                 });
+            // Object roads were regenerated: keep only landing cells still
+            // wholly under ordinary roads of each object layer.
             let contact_cells = match &contact_raster {
                 Some(raster) => {
-                    anchors.set_budget(workspace_budget(retained_units, outside)?);
-                    let cells = established::part_contacts(
-                        establishment,
-                        &mut established::Step {
-                            raster,
-                            layers: prior,
-                            contact_tops,
-                            recipe,
-                            anchors,
-                            work,
-                            owned_bytes: outside,
-                        },
+                    let cells = established::root_contacts(
+                        raster,
                         roots,
+                        part_contacts,
                         index,
+                        Some((&*prior, outside)),
                     )?;
                     *work = work.saturating_add(raster.take_work());
                     Some(cells)
@@ -3815,12 +3792,24 @@ mod tests {
                 first_support_layer: 2,
                 landing: 0,
             }];
-            let contacts = [None, None, None, None, Some(2)];
-            let live = std::sync::atomic::AtomicUsize::new(0);
-            let mut established = established::Establishment::new(&live);
-            let frame = Some(
-                grid::CellFrame::new([[-5.0, -5.0], [35.0, 5.0]], grid::SUPPORT_CELL_MM).unwrap(),
-            );
+            let cell_frame =
+                grid::CellFrame::new([[-5.0, -5.0], [35.0, 5.0]], grid::SUPPORT_CELL_MM).unwrap();
+            let frame = Some(cell_frame);
+            // The sweep's landing cells: the bed-established object road.
+            let admit = |_: usize| Ok(());
+            let part_contacts = [Some(
+                established::footprint(
+                    &grid::Raster {
+                        frame: cell_frame,
+                        cancel: &cancel,
+                        admit: &admit,
+                        work: std::sync::atomic::AtomicUsize::new(0),
+                    },
+                    layers[0].paths.iter().filter(|path| path.kind.is_model()),
+                    0,
+                )
+                .unwrap(),
+            )];
             let mut segments = layers.iter().map(|layer| path_segments(&layer.paths)).sum();
             let mut anchors = AnchorWorkspace::default();
             anchors.set_budget(usize::MAX);
@@ -3840,15 +3829,14 @@ mod tests {
                     &mut layers,
                     FinalSupportInput {
                         index,
-                        contact_tops: &contacts,
                         roots: &roots,
+                        part_contacts: &part_contacts,
                         frame,
                         wall_paths: &mut wall_paths,
                         recipe: &recipe,
                         retained_units: 0,
                         owned_bytes: 0,
                     },
-                    &mut established,
                     &mut segments,
                     &mut anchors,
                     &mut 0,
@@ -3908,15 +3896,14 @@ mod tests {
                     &mut layers,
                     FinalSupportInput {
                         index: 1,
-                        contact_tops: &contacts,
                         roots: &roots,
+                        part_contacts: &part_contacts,
                         frame,
                         wall_paths: &mut wall_paths,
                         recipe: &recipe,
                         retained_units: 0,
                         owned_bytes: 0
                     },
-                    &mut established::Establishment::new(&live),
                     &mut segments,
                     &mut anchors,
                     &mut 0,

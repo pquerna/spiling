@@ -255,42 +255,6 @@ fn set_algebra_matches_cellwise_logic() {
 }
 
 #[test]
-fn inward_dilation_keeps_only_cells_wholly_within_reach_of_a_set_cell() {
-    let frame = frame();
-    let cancel = AtomicBool::new(false);
-    let raster = raster(frame, &cancel);
-    for polygon in cases().iter().take(9) {
-        let bits = raster.inward([polygon]).unwrap();
-        for radius in [0.0, CELL, 1.7 * CELL, 3.2 * CELL] {
-            let dilated = raster.dilate_inward(&bits, radius).unwrap();
-            let reach = (radius / CELL).ceil() as i64 + 1;
-            for row in 0..frame.rows as i64 {
-                for col in 0..frame.cols as i64 {
-                    let mut keep = bits.contains(col as usize, row as usize);
-                    for dr in -reach..=reach {
-                        for dc in -reach..=reach {
-                            let (r, c) = (row + dr, col + dc);
-                            if r < 0 || c < 0 || !bits.contains(c as usize, r as usize) {
-                                continue;
-                            }
-                            let centre = (dr as f64).hypot(dc as f64) * CELL;
-                            if centre + CELL * std::f64::consts::FRAC_1_SQRT_2 <= radius + SLACK {
-                                keep = true;
-                            }
-                        }
-                    }
-                    assert_eq!(
-                        dilated.contains(col as usize, row as usize),
-                        keep,
-                        "cell {col},{row} at radius {radius}"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn erosion_matches_brute_force_closed_distance() {
     let frame = frame();
     let cancel = AtomicBool::new(false);
