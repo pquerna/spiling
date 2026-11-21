@@ -91,6 +91,26 @@ struct LayerWindow {
     separated_end: usize,
     road_end: usize,
     reads_landing: bool,
+    deposited_read: DepositedRead,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DepositedRead {
+    Unused,
+    SeparatedModel,
+    ContinuingSupport,
+    DirectModel,
+}
+
+impl DepositedRead {
+    fn reads(self, role: DepositionKind) -> bool {
+        match self {
+            Self::Unused => false,
+            Self::SeparatedModel => role == DepositionKind::SupportInterface,
+            Self::ContinuingSupport => support(role),
+            Self::DirectModel => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -617,26 +637,44 @@ fn layer_windows(
         let road_end =
             road_start + roads[road_start..].partition_point(|road| road.layer as usize == index);
         let start = previous_end.min(end);
-        if start < end {
-            for road in &roads[road_start..road_end] {
-                debit(work, 1, cancel)?;
-                if road.role == DepositionKind::SupportInterface {
-                    for donor in &mut windows[start..end] {
-                        debit(work, 1, cancel)?;
-                        donor.reads_landing = true;
-                    }
-                    break;
-                }
+        let mut reads_continuation = false;
+        for road in &roads[road_start..road_end] {
+            debit(work, 1, cancel)?;
+            if !support(road.role) {
+                continue;
             }
+            reads_continuation = true;
+            if start == end || road.role == DepositionKind::SupportInterface {
+                for donor in &mut windows[start..end] {
+                    debit(work, 1, cancel)?;
+                    donor.reads_landing = true;
+                }
+                break;
+            }
+        }
+        if reads_continuation && let Some(previous) = windows.last_mut() {
+            previous.deposited_read = DepositedRead::ContinuingSupport;
         }
         windows.push(LayerWindow {
             top,
             separated_end: end,
             road_end,
             reads_landing: false,
+            deposited_read: DepositedRead::Unused,
         });
         road_start = road_end;
         previous_end = end;
+    }
+    for index in 1..windows.len() {
+        debit(work, 1, cancel)?;
+        if windows[index].reads_landing {
+            let contact = windows[index].separated_end.checked_sub(1);
+            windows[index - 1].deposited_read = DepositedRead::DirectModel;
+            if let Some(contact) = contact {
+                let read = &mut windows[contact].deposited_read;
+                *read = (*read).max(DepositedRead::SeparatedModel);
+            }
+        }
     }
     Ok(windows)
 }
@@ -712,7 +750,8 @@ pub(super) fn verify(
             }
         }
         expired = oldest;
-        let mut deposited = Inventory::empty();
+        let mut deposited =
+            (use_window.deposited_read != DepositedRead::Unused).then(Inventory::empty);
         let mut landing = Inventory::empty();
         let previous = bands.last();
         let previous_nominal_top = index.checked_sub(1).map(|prior| layers[prior].z_mm);
@@ -775,19 +814,25 @@ pub(super) fn verify(
             }
             if index != last_support {
                 for &road in path_roads {
-                    replay.insert(&mut deposited, road, Span::FULL)?;
+                    if use_window.deposited_read.reads(road.role)
+                        && let Some(inventory) = &mut deposited
+                    {
+                        replay.insert(inventory, road, Span::FULL)?;
+                    }
                     if index == 0 && can_land {
                         replay.insert(&mut landing, road, Span::FULL)?;
                     }
                 }
             }
         }
-        deposited.rows.finish(replay.work, cancel)?;
+        if let Some(inventory) = &mut deposited {
+            inventory.rows.finish(replay.work, cancel)?;
+        }
         if use_window.reads_landing {
             landing.rows.finish(replay.work, cancel)?;
         }
         bands.push(Band {
-            deposited: Some(deposited),
+            deposited,
             landing: use_window.reads_landing.then_some(landing),
         });
         last_separated_end = end;
@@ -893,6 +938,50 @@ mod tests {
             [false, true, false, false, false]
         );
         assert_eq!(windows[3].separated_end, 2);
+    }
+
+    #[test]
+    fn raw_donor_bands_keep_only_roles_reachable_by_their_readers() {
+        let roads = [
+            row(0, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(1, 0, DepositionKind::SupportInterface, 0, 1_000_000),
+            row(2, 0, DepositionKind::Bridge, 0, 1_000_000),
+            row(3, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(4, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(5, 0, DepositionKind::SupportInterface, 0, 1_000_000),
+            row(6, 0, DepositionKind::Support, 0, 1_000_000),
+        ];
+        let (_, layers) = fixture(&roads);
+        let windows = layer_windows(
+            &roads,
+            &layers,
+            Z_STEP,
+            &mut Admission::default(),
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        use DepositedRead::{ContinuingSupport, DirectModel, SeparatedModel, Unused};
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.deposited_read)
+                .collect::<Vec<_>>(),
+            [
+                ContinuingSupport,
+                SeparatedModel,
+                DirectModel,
+                Unused,
+                ContinuingSupport,
+                ContinuingSupport,
+                Unused,
+            ]
+        );
+        assert!(DirectModel.reads(DepositionKind::Bridge));
+        assert!(!ContinuingSupport.reads(DepositionKind::SolidFill));
+        assert!(ContinuingSupport.reads(DepositionKind::SupportInterface));
+        assert!(!SeparatedModel.reads(DepositionKind::Support));
+        assert!(SeparatedModel.reads(DepositionKind::SupportInterface));
     }
 
     #[test]
