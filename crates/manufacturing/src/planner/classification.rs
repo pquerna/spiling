@@ -2229,6 +2229,7 @@ impl ClassifiedRegions {
             skin_construction_used = true;
         }
         let original_patch_count = patches.len();
+        let mut terminal_rows_kept = false;
         loop {
             patches.truncate(original_patch_count);
             let base = recovery_points(
@@ -2611,6 +2612,52 @@ impl ClassifiedRegions {
                         bridge_points = path_points(&bridge.paths)
                             + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains);
                         skin_construction_used = true;
+                        continue;
+                    }
+                }
+                if !terminal_rows_kept {
+                    let work = proof
+                        .demands
+                        .len()
+                        .checked_mul(normal.paths.len() + original_patch_count + bridge.paths.len())
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "terminal skin row selection work overflow",
+                            )
+                        })?;
+                    let scratch_bytes = (original_patch_count + bridge.paths.len())
+                        * std::mem::size_of::<[f64; 2]>();
+                    admit(
+                        recovery_points(
+                            class_points,
+                            normal_points,
+                            path_points(&bridge.paths),
+                            owners.capacity(),
+                            patches.capacity(),
+                        )?,
+                        recovery_bytes(classified_owned_bytes, &normal, &bridge, &owners, &patches)
+                            + merge.retained_bytes()
+                            + proof.retained_bytes()
+                            + capacity_bytes(&intervals)
+                            + anchor_workspace_bytes
+                            + scratch_bytes,
+                        work,
+                    )?;
+                    if keep_terminal_rows(
+                        &normal.paths,
+                        &owners,
+                        &mut patches[..original_patch_count],
+                        &mut bridge.paths,
+                        &proof.demands,
+                        cancel,
+                    )? {
+                        // The shortened Bridge rows already carry whole-row
+                        // proofs; re-prove them as they are, never re-extend.
+                        terminal_rows_kept = true;
+                        skin_construction_used = true;
+                        bridge_points = path_points(&bridge.paths)
+                            + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains);
                         continue;
                     }
                 }
@@ -3943,6 +3990,169 @@ struct NormalOwner<'a> {
     paths: std::ops::Range<usize>,
 }
 
+/// Along-axis extent of a corridor that cuts the straight row at `fixed`
+/// coordinate `row` over `[lo, hi]`, shortened so it ends at the row's bead
+/// edge `half` from its centreline. `None` when the corridor does not cut the
+/// row; `Err(())` when it cuts the row but continues beyond that bead.
+fn terminal_cut(
+    corridor: [f64; 2],
+    cut: [f64; 2],
+    row: f64,
+    half: f64,
+    [lo, hi]: [f64; 2],
+) -> Option<Result<[f64; 2], ()>> {
+    if !(corridor[0] <= row && row <= corridor[1] && cut[0] < hi && lo < cut[1]) {
+        return None;
+    }
+    Some(if corridor[1] <= row + half && corridor[0] < row - half {
+        Ok([corridor[0], row - half])
+    } else if corridor[0] >= row - half && corridor[1] > row + half {
+        Ok([row + half, corridor[1]])
+    } else {
+        Err(())
+    })
+}
+
+/// A Bridge row may run through a polygon's terminal required skin row,
+/// leaving that row's pieces between Bridge corridors without the anchors
+/// the whole row had. When every remaining demand lies on such a row and
+/// every corridor cutting it ends inside its bead, end those corridors and
+/// their Bridge rows at the row's bead edge instead: the required row keeps
+/// its whole original extent. Nothing changes unless every demand qualifies;
+/// the caller re-proves every Bridge row and the complete mixed candidate.
+fn keep_terminal_rows(
+    normal: &[DepositionPath],
+    owners: &[NormalOwner<'_>],
+    cells: &mut [BridgePatch<'_>],
+    bridges: &mut [DepositionPath],
+    demands: &[[[f64; 2]; 2]],
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    if demands.is_empty() {
+        return Ok(false);
+    }
+    let mut cell_along: Vec<[f64; 2]> = Vec::new();
+    let mut bridge_along: Vec<[f64; 2]> = Vec::new();
+    cell_along.try_reserve_exact(cells.len()).map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "terminal skin row corridor allocation refused",
+        )
+    })?;
+    bridge_along.try_reserve_exact(bridges.len()).map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "terminal skin row bridge allocation refused",
+        )
+    })?;
+    cell_along.extend(cells.iter().map(|cell| cell.along));
+    for path in bridges.iter() {
+        let [a, b] = path.points_mm.as_slice() else {
+            return Ok(false);
+        };
+        let along = usize::from(a[0] == b[0]);
+        bridge_along.push([a[along].min(b[along]), a[along].max(b[along])]);
+    }
+    for gap in demands {
+        let mut row = None;
+        for owner in owners {
+            for path in &normal[owner.paths.clone()] {
+                check_cancel(cancel)?;
+                let [a, b] = path.points_mm.as_slice() else {
+                    continue;
+                };
+                let along = usize::from(a[0] == b[0]);
+                let fixed = 1 - along;
+                let (lo, hi) = (a[along].min(b[along]), a[along].max(b[along]));
+                if gap[0][fixed] == a[fixed]
+                    && gap[1][fixed] == a[fixed]
+                    && gap[0][along].min(gap[1][along]) >= lo
+                    && gap[0][along].max(gap[1][along]) <= hi
+                {
+                    row = Some((owner.owner, path, fixed, [lo, hi]));
+                }
+            }
+        }
+        let Some((polygon, path, fixed, extent)) = row else {
+            return Ok(false);
+        };
+        let at = path.points_mm[0][fixed];
+        let half = region::constant_width(path)? * 0.5;
+        for (cell, corridor) in cells.iter().zip(&mut cell_along) {
+            check_cancel(cancel)?;
+            if !cell.owner.is_some_and(|owner| std::ptr::eq(owner, polygon)) {
+                continue;
+            }
+            if cell.along_axis != fixed {
+                // A same-axis cell cuts this row along its own length.
+                let cuts = cell.across[0] <= at
+                    && at <= cell.across[1]
+                    && cell.along[0] < extent[1]
+                    && extent[0] < cell.along[1];
+                if cuts {
+                    return Ok(false);
+                }
+                continue;
+            }
+            match terminal_cut(*corridor, cell.across, at, half, extent) {
+                None => {}
+                Some(Ok(shortened)) => *corridor = shortened,
+                Some(Err(())) => return Ok(false),
+            }
+        }
+        for (bridge, range) in bridges.iter().zip(&mut bridge_along) {
+            check_cancel(cancel)?;
+            let [a, b] = [bridge.points_mm[0], bridge.points_mm[1]];
+            let bridge_along = usize::from(a[0] == b[0]);
+            let coordinate = a[1 - bridge_along];
+            let width = region::constant_width(bridge)? * 0.5;
+            let across = [coordinate - width, coordinate + width];
+            if bridge_along != fixed {
+                let cuts = across[0] <= at
+                    && at <= across[1]
+                    && range[0] < extent[1]
+                    && extent[0] < range[1];
+                if cuts {
+                    return Ok(false);
+                }
+                continue;
+            }
+            match terminal_cut(*range, across, at, half, extent) {
+                None => {}
+                Some(Ok(shortened)) => *range = shortened,
+                Some(Err(())) => return Ok(false),
+            }
+        }
+    }
+    if cell_along
+        .iter()
+        .chain(&bridge_along)
+        .any(|range| range[0] >= range[1])
+    {
+        return Ok(false);
+    }
+    let mut changed = false;
+    for (cell, along) in cells.iter_mut().zip(cell_along) {
+        changed |= cell.along != along;
+        cell.along = along;
+    }
+    for (bridge, range) in bridges.iter_mut().zip(bridge_along) {
+        let along = usize::from(bridge.points_mm[0][0] == bridge.points_mm[1][0]);
+        for point in &mut bridge.points_mm {
+            let value = if point[along] <= range[0] {
+                range[0]
+            } else if point[along] >= range[1] {
+                range[1]
+            } else {
+                point[along]
+            };
+            changed |= value != point[along];
+            point[along] = value;
+        }
+    }
+    Ok(changed)
+}
+
 /// `rows` with every span covered by a stroke of `barriers` on the same XYZ6
 /// row removed. Rows run along `axis`; touching spans are kept.
 fn cut_rows_at_barriers(
@@ -4890,6 +5100,196 @@ mod skin_bridge_tests {
 mod split_skin_tests {
     use super::*;
     use crate::planner::support::{self, AnchorWorkspace};
+    use geo::polygon;
+
+    #[test]
+    fn bottom_skin_over_nothing_recovers_bridge_rows_through_a_terminal_skin_row() {
+        // A bottom skin band over nothing joins a channel whose skin rows rest
+        // on the layer below, except its last row, which only spans between
+        // the channel walls. Orthogonal Bridge rows across the band run up the
+        // channel; they must stop at that terminal row rather than cut it into
+        // pieces with no anchor, or the whole band reverts to one unsupported
+        // authored row.
+        let cancel = AtomicBool::new(false);
+        let mut recipe = crate::planner::tests::recipe(0.2);
+        recipe.bead_width_mm = 0.45;
+        recipe.process.max_bridge_span_mm = 10.;
+        let bottom = MultiPolygon(vec![polygon![
+            (x: 0., y: 0.), (x: 10., y: 0.), (x: 10., y: 1.), (x: 6.5, y: 1.),
+            (x: 6.5, y: 8.), (x: 3.5, y: 8.), (x: 3.5, y: 1.), (x: 0., y: 1.),
+            (x: 0., y: 0.)
+        ]]);
+        let classified = ClassifiedRegions {
+            layout: Arc::new(WallPlan {
+                paths: Vec::new(),
+                fill: bottom.clone(),
+                correspondence: Vec::new(),
+                retained_points: 0,
+                retained_bytes: 0,
+                section_area_mm2: bottom.unsigned_area(),
+                wall_area_mm2: 0.,
+                protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
+            }),
+            bottom,
+            top: MultiPolygon(Vec::new()),
+            interiors: Vec::new(),
+            separator_bands: Vec::new(),
+            coverage: crate::planner::empty_coverage(0.2),
+            applied_operations: Vec::new(),
+        };
+        let lower = |a: [f64; 2], b: [f64; 2]| DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::Perimeter,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [0., 0.2],
+            points_mm: vec![[a[0], a[1], 0.2], [b[0], b[1], 0.2]],
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        };
+        let layer = region::HatchLayer {
+            roof: None,
+            width_mm: recipe.bead_width_mm,
+            z: 0.4,
+            lower_z: 0.2,
+            height: 0.2,
+            axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::X,
+            recipe: &recipe,
+        };
+        let (authored, _, _) = classified
+            .paths(
+                layer.z,
+                layer.lower_z,
+                layer.axis,
+                layer.top_axis,
+                &recipe,
+                None,
+                region::OrdinaryHatchPhase::Centered,
+                0,
+                &[],
+                &mut 0,
+                |_, _, _| Ok(()),
+                &cancel,
+            )
+            .unwrap();
+        let mut channel_rows: Vec<f64> = authored
+            .iter()
+            .map(|path| path.points_mm[0][1])
+            .filter(|&y| y > 1.)
+            .collect();
+        channel_rows.sort_by(f64::total_cmp);
+        channel_rows.dedup();
+        let terminal = channel_rows.pop().expect("channel skin rows");
+        // Lower material: the band's front edge, its rear edges beside the
+        // channel, a rear wall half a bead beyond the terminal row, and narrow
+        // material under every other channel row. The channel sides are only
+        // lower support contacts, so the terminal row is supported through
+        // contacts at its two ends, not as a Bridge of its own.
+        let contacts = [[3.5, 1.], [6.5, 1.]].map(|[x, y]| DepositionPath {
+            kind: DepositionKind::SupportInterface,
+            physical_z_mm: [-0.2, 0.],
+            points_mm: vec![[x, y, 0.], [x, 8.2, 0.]],
+            ..lower([x, y], [x, 8.2])
+        });
+        let mut previous = vec![
+            lower([-0.2, 0.], [10.2, 0.]),
+            lower([-0.2, 1.], [3.5, 1.]),
+            lower([6.5, 1.], [10.2, 1.]),
+            lower([3.5, terminal + 0.45], [4.6, terminal + 0.45]),
+            lower([5.4, terminal + 0.45], [6.5, terminal + 0.45]),
+            // A lower rib under the middle of the channel, short of the rear
+            // wall: the orthogonal row over it overhangs one-sided, so it is
+            // no Bridge and authored rows keep a piece in its cell.
+            lower([5., -0.2], [5., terminal - 0.45]),
+        ];
+        // Narrow enough that a neighbour's bead never reaches this row's ends.
+        previous.extend(channel_rows.iter().map(|&y| DepositionPath {
+            width: WidthProfile::Constant { width_mm: 0.3 },
+            ..lower([3.5, y], [6.5, y])
+        }));
+        let unrecovered = support::strokes::analyze(
+            &authored,
+            previous.iter(),
+            contacts.iter(),
+            &recipe,
+            &mut AnchorWorkspace::default(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            unrecovered.worst_unanchored_mm > 4.,
+            "the authored band rows span the unsupported band"
+        );
+        let mut anchors = AnchorWorkspace::default();
+        let mut work = 0;
+        let mut check = |candidate: &mut support::RasterCandidate, axis, _, _| {
+            support::component_admission(
+                (candidate, axis, 100_000, false),
+                previous.iter(),
+                contacts.iter(),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+        };
+        let recovered = classified
+            .paths_with_bridge_recovery_unfitted(
+                &layer,
+                region::OrdinaryHatchPhase::Centered,
+                &[],
+                0,
+                0,
+                &mut 0,
+                |_, _, _| Ok(()),
+                &mut check,
+                &mut Vec::new(),
+                &cancel,
+            )
+            .unwrap();
+        let proof = support::strokes::analyze(
+            &recovered,
+            previous.iter(),
+            contacts.iter(),
+            &recipe,
+            &mut anchors,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            proof.failure.is_none(),
+            "recovery leaves a {} mm unsupported span",
+            proof.worst_unanchored_mm
+        );
+        let bridges: Vec<_> = recovered
+            .iter()
+            .filter(|path| path.kind == DepositionKind::Bridge)
+            .collect();
+        assert!(!bridges.is_empty());
+        for bridge in &bridges {
+            let [a, b] = [bridge.points_mm[0], bridge.points_mm[1]];
+            // Orthogonal, bounded Bridge rows that end at the terminal row's bead.
+            assert_eq!(a[0], b[0]);
+            assert!(a[1].max(b[1]) <= terminal - 0.225, "{:?}", bridge.points_mm);
+        }
+        // The terminal row keeps its whole original extent and role.
+        let original = authored
+            .iter()
+            .find(|path| path.points_mm[0][1] == terminal)
+            .unwrap();
+        assert!(
+            recovered
+                .iter()
+                .any(|path| path.kind == DepositionKind::BottomSkin
+                    && path.points_mm == original.points_mm)
+        );
+    }
 
     #[test]
     fn demanded_hole_split_bridge_preserves_supported_sibling_and_anchor_limits() {
