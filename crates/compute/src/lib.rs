@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Bounded session-owned exact numeric predicates; not manufacturing authority.
+//! Bounded session-owned data-parallel kernels whose results are identical on every backend.
 
 mod kernels;
 mod runtime;
