@@ -82,9 +82,15 @@ impl Inventory {
 }
 
 struct Band {
-    height: [f64; 2],
     deposited: Option<Inventory>,
     landing: Option<Inventory>,
+}
+
+struct LayerWindow {
+    top: f64,
+    separated_end: usize,
+    road_end: usize,
+    reads_landing: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -573,23 +579,66 @@ fn sort_coverage(
 }
 
 fn separated_end(
-    bands: &[Band],
+    windows: &[LayerWindow],
     floor: f64,
     gap: f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<usize, ManufacturingError> {
-    let (mut start, mut end) = (0, bands.len());
+    let (mut start, mut end) = (0, windows.len());
     while start < end {
         debit(work, 1, cancel)?;
         let middle = start + (end - start) / 2;
-        if enclosed_vertical_gap_mm(floor, bands[middle].height[1])? >= gap {
+        if enclosed_vertical_gap_mm(floor, windows[middle].top)? >= gap {
             start = middle + 1;
         } else {
             end = middle;
         }
     }
     Ok(start)
+}
+
+fn layer_windows(
+    roads: &[Road],
+    layers: &[PrintLayer],
+    z_gap: f64,
+    admission: &mut Admission,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<LayerWindow>, ManufacturingError> {
+    let mut windows = Vec::new();
+    admission.reserve(&mut windows, layers.len())?;
+    let mut road_start = 0;
+    let mut previous_end = 0;
+    for (index, layer) in layers.iter().enumerate() {
+        debit(work, 1, cancel)?;
+        let [floor, top] = project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm)?;
+        let end = separated_end(&windows, floor, z_gap, work, cancel)?;
+        let road_end =
+            road_start + roads[road_start..].partition_point(|road| road.layer as usize == index);
+        let start = previous_end.min(end);
+        if start < end {
+            for road in &roads[road_start..road_end] {
+                debit(work, 1, cancel)?;
+                if road.role == DepositionKind::SupportInterface {
+                    for donor in &mut windows[start..end] {
+                        debit(work, 1, cancel)?;
+                        donor.reads_landing = true;
+                    }
+                    break;
+                }
+            }
+        }
+        windows.push(LayerWindow {
+            top,
+            separated_end: end,
+            road_end,
+            reads_landing: false,
+        });
+        road_start = road_end;
+        previous_end = end;
+    }
+    Ok(windows)
 }
 
 pub(super) fn verify(
@@ -623,21 +672,26 @@ pub(super) fn verify(
     let selected_layers = layers
         .get(..=last_support)
         .ok_or_else(|| failed("decoded support layer is outside the verified schedule"))?;
-    let mut bands = Vec::<Band>::new();
-    replay.admission.reserve(
-        &mut bands,
-        last_support.checked_add(1).ok_or_else(overflow)?,
+    let windows = layer_windows(
+        roads,
+        selected_layers,
+        z_gap,
+        &mut replay.admission,
+        replay.work,
+        cancel,
     )?;
-    let mut unpublished = roads;
+    let mut bands = Vec::<Band>::new();
+    replay
+        .admission
+        .reserve(&mut bands, selected_layers.len())?;
+    let mut road_start = 0;
     let mut expired = 0;
     let mut last_separated_end = 0;
-    for (index, layer) in selected_layers.iter().enumerate() {
+    for (index, (layer, use_window)) in selected_layers.iter().zip(&windows).enumerate() {
         debit(replay.work, 1, cancel)?;
-        let height = project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm)?;
-        let count = unpublished.partition_point(|road| road.layer as usize == index);
-        let (current, later) = unpublished.split_at(count);
-        unpublished = later;
-        let end = separated_end(&bands, height[0], z_gap, replay.work, cancel)?;
+        let current = &roads[road_start..use_window.road_end];
+        road_start = use_window.road_end;
+        let end = use_window.separated_end;
         let support_start = last_separated_end.min(end);
         let contact_index = end.saturating_sub(1);
         let oldest = support_start
@@ -673,21 +727,29 @@ pub(super) fn verify(
                 previous,
                 previous_nominal_top,
                 z_gap,
-                separated: if is_support {
-                    &bands[support_start..end]
-                } else {
-                    &bands[contact_index..end]
+                separated: match first_road.role {
+                    DepositionKind::SupportInterface => &bands[support_start..end],
+                    DepositionKind::Support => &[],
+                    _ => &bands[contact_index..end],
                 },
             };
-            let can_land = first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
-            if index != 0 && (is_support || can_land) {
+            let ordinary_model =
+                first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
+            let can_land = ordinary_model && use_window.reads_landing;
+            if index != 0 && (is_support || ordinary_model) {
                 let path = &layer.paths[first_road.path];
                 if path_roads.len() + 1 != path.points_mm.len() {
                     return Err(failed(
                         "decoded support stroke differs from its associated edge count",
                     ));
                 }
-                for (first, last, width) in StrokeRuns::for_path(path)? {
+                if !is_support && !can_land {
+                    path.checked_edges()?;
+                }
+                let runs = (is_support || can_land)
+                    .then(|| StrokeRuns::for_path(path))
+                    .transpose()?;
+                for (first, last, width) in runs.into_iter().flatten() {
                     let count = if last > first {
                         last - first
                     } else {
@@ -721,11 +783,12 @@ pub(super) fn verify(
             }
         }
         deposited.rows.finish(replay.work, cancel)?;
-        landing.rows.finish(replay.work, cancel)?;
+        if use_window.reads_landing {
+            landing.rows.finish(replay.work, cancel)?;
+        }
         bands.push(Band {
-            height,
             deposited: Some(deposited),
-            landing: Some(landing),
+            landing: use_window.reads_landing.then_some(landing),
         });
         last_separated_end = end;
     }
@@ -801,6 +864,35 @@ mod tests {
             layers.push(layer);
         }
         (intent.recipe, layers)
+    }
+
+    #[test]
+    fn only_separated_interface_readers_request_landing_bands() {
+        let roads = [
+            row(0, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(1, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(2, 0, DepositionKind::Support, 0, 1_000_000),
+            row(3, 0, DepositionKind::SupportInterface, 0, 1_000_000),
+            row(4, 0, DepositionKind::Support, 0, 1_000_000),
+        ];
+        let (_, layers) = fixture(&roads);
+        let windows = layer_windows(
+            &roads,
+            &layers,
+            Z_STEP,
+            &mut Admission::default(),
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.reads_landing)
+                .collect::<Vec<_>>(),
+            [false, true, false, false, false]
+        );
+        assert_eq!(windows[3].separated_end, 2);
     }
 
     #[test]
