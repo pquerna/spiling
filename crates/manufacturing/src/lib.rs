@@ -151,7 +151,7 @@ fn compile_exact(
     // Shared admission validates intent, native identity and the complete image
     // table before planning or provenance allocation. Do not hash/copy assets or
     // prepare the same native/field schedule through a second compile-only lane.
-    let (plan, emission) = planner::plan(&input, cancel, geometry_work)?;
+    let prepared = planner::plan(&input, cancel, geometry_work)?;
     timing.mark("planning");
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
@@ -193,7 +193,8 @@ fn compile_exact(
         verifier_version: VERIFIER_VERSION.into(),
     };
     timing.mark("provenance");
-    let program = backend::emit_prepared(&plan, input.intent, emission.as_ref(), cancel)?;
+    let program = backend::emit_prepared(&prepared, cancel)?;
+    let plan = prepared.into_plan();
     timing.mark("emission");
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
     timing.mark("independent_replay");

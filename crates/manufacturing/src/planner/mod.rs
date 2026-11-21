@@ -80,20 +80,38 @@ fn remaining_geometry_units(
 // envelope. Actual physical Z remains on each materialized layer and skin key.
 type WallCacheKey = (usize, Option<usize>, [u64; 3], Option<usize>);
 
+/// The only production input to emission. The planner seals the realized
+/// paths and the exact intent they were admitted against together.
+pub(crate) struct PreparedPlan<'a> {
+    plan: NormalizedPrintPlan,
+    intent: &'a ManufacturingIntent,
+    estimate: Option<crate::realization::BambuEstimate>,
+}
+
+impl PreparedPlan<'_> {
+    pub(crate) fn emission_inputs(
+        &self,
+    ) -> (
+        &NormalizedPrintPlan,
+        &ManufacturingIntent,
+        Option<&crate::realization::BambuEstimate>,
+    ) {
+        (&self.plan, self.intent, self.estimate.as_ref())
+    }
+
+    pub(crate) fn into_plan(self) -> NormalizedPrintPlan {
+        self.plan
+    }
+}
+
 /// Plan through ADR012 tolerant sections: the one slicing pipeline. Every
 /// source, STEP or hybrid, is sectioned from its tessellation within the
 /// recorded tolerance policy; no exact native lane remains.
-pub(crate) fn plan(
-    input: &CompilerInput<'_>,
+pub(crate) fn plan<'a>(
+    input: &CompilerInput<'a>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<
-    (
-        NormalizedPrintPlan,
-        Option<crate::realization::BambuEstimate>,
-    ),
-    ManufacturingError,
-> {
+) -> Result<PreparedPlan<'a>, ManufacturingError> {
     let mut timing = crate::timing::Clock::new("planner.plan");
     let CompletedSchedule {
         mut plan,
@@ -131,7 +149,11 @@ pub(crate) fn plan(
     }
     plan.validate(input.intent)?;
     timing.mark("plan_validation");
-    Ok((plan, emission))
+    Ok(PreparedPlan {
+        plan,
+        intent: input.intent,
+        estimate: emission,
+    })
 }
 
 /// A fill, skin or bridge row whose emitted XYZ6 chord is shorter than the

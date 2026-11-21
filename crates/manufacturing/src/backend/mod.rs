@@ -20,8 +20,15 @@ pub(crate) fn emit(
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
-    // Verifier fixtures already supply ordered plans. Price only the fixture
-    // metadata here so their motion order is not rebuilt before the test.
+    check_cancel(cancel)?;
+    // Fixture callers supply their own plan and intent. Admit the pair before
+    // emission without rebuilding the fixture's authored motion order.
+    plan.validate(intent)?;
+    let execution = plan.execution_intent(intent)?;
+    let intent = execution.as_ref();
+    if let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow {
+        crate::routing::validate_plan(plan, intent, job, cancel)?;
+    }
     let estimate = match &intent.printer.workflow {
         JobWorkflow::CompleteMarlin { job }
             if intent.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 =>
@@ -30,21 +37,28 @@ pub(crate) fn emit(
         }
         _ => None,
     };
-    emit_prepared(plan, intent, estimate.as_ref(), cancel)
+    emit_body(plan, intent, estimate.as_ref(), cancel)
 }
 
 /// Emit the explicit diagnostic, complete single-extruder or fixed-dual
 /// workflow in the printer's dialect. Takes the validated construction;
 /// independent replay is mandatory.
 pub(crate) fn emit_prepared(
+    prepared: &crate::planner::PreparedPlan<'_>,
+    cancel: &AtomicBool,
+) -> Result<ChunkSource, ManufacturingError> {
+    check_cancel(cancel)?;
+    let (plan, intent, estimate) = prepared.emission_inputs();
+    let execution = plan.execution_intent(intent)?;
+    emit_body(plan, execution.as_ref(), estimate, cancel)
+}
+
+fn emit_body(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     estimate: Option<&crate::realization::BambuEstimate>,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
-    check_cancel(cancel)?;
-    let execution = plan.execution_intent(intent)?;
-    let intent = execution.as_ref();
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
