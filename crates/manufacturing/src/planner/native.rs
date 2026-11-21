@@ -97,12 +97,45 @@ struct ClearanceTrace {
     pair_tests: std::cell::Cell<usize>,
     index_bytes: std::cell::Cell<usize>,
     skipped_paths: std::cell::Cell<usize>,
+    raw_wave_pieces: std::cell::Cell<usize>,
+    raw_inline_pieces: std::cell::Cell<usize>,
+    raw_waves: std::cell::Cell<usize>,
+    raw_declined: std::cell::Cell<usize>,
 }
 
 impl ClearanceTrace {
     fn add(&self, counter: &std::cell::Cell<usize>, amount: usize) {
         if self.enabled {
             counter.set(counter.get().saturating_add(amount));
+        }
+    }
+
+    fn merge_polygon(&self, local: &Self) {
+        for (total, part) in [
+            (&self.polygons, &local.polygons),
+            (&self.layers, &local.layers),
+            (&self.paths, &local.paths),
+            (&self.support_paths, &local.support_paths),
+            (&self.bounds_points, &local.bounds_points),
+            (&self.path_rejects, &local.path_rejects),
+            (&self.edges, &local.edges),
+            (&self.height_rejects, &local.height_rejects),
+            (
+                &self.polygon_edge_block_queries,
+                &local.polygon_edge_block_queries,
+            ),
+            (
+                &self.polygon_edge_block_clears,
+                &local.polygon_edge_block_clears,
+            ),
+            (&self.polygon_tests, &local.polygon_tests),
+            (&self.protected_memo_hits, &local.protected_memo_hits),
+            (&self.skipped_paths, &local.skipped_paths),
+            (&self.raw_wave_pieces, &local.raw_wave_pieces),
+            (&self.raw_inline_pieces, &local.raw_inline_pieces),
+            (&self.raw_waves, &local.raw_waves),
+        ] {
+            self.add(total, part.get());
         }
     }
 
@@ -155,6 +188,8 @@ impl ClearanceTrace {
                     "deposited_index_bytes": self.deposited_index_bytes.get(),
                     "edge_pairs": self.edge_pairs.get(), "edge_pair_rejects": self.edge_pair_rejects.get(),
                     "height_pair_rejects": self.height_pair_rejects.get(), "pair_tests": self.pair_tests.get(),
+                    "raw_waves": self.raw_waves.get(), "raw_wave_pieces": self.raw_wave_pieces.get(),
+                    "raw_inline_pieces": self.raw_inline_pieces.get(), "raw_declined": self.raw_declined.get(),
                 })
             );
         }
@@ -666,45 +701,63 @@ fn certify_support_clearance_traced(
         .set(index.as_ref().map_or(0, |index| index.retained_bytes()));
     trace.report("path_index", index_started);
     let raw_started = std::time::Instant::now();
-    for span in sections {
-        let interval = [
-            schedule[span.start as usize].lower_z,
-            schedule[(span.end - 1) as usize].z,
-        ];
-        span.visit_occupied(cancel, |polygon, piece_scope| {
-            let height = piece_scope.map_or(interval, |height| {
-                [interval[0].max(height[0]), interval[1].min(height[1])]
-            });
-            if height[0] > height[1] {
-                return Ok(true);
-            }
-            let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                lower_mm: height[0],
-                upper_mm: height[1],
-            };
-            let range =
-                scoped_support_layer_range(schedule, scope, vertical, support_work, cancel)?;
-            certify_polygon_capsules(
-                PolygonDeposition {
-                    layers,
-                    range,
-                    index: index.as_ref(),
-                },
-                &ForbiddenPolygonScope {
-                    polygon,
-                    height: scope,
-                    label: "continuous native/finish outer occupancy",
-                    memo_bytes: 0,
-                },
-                xy_clearance_mm,
-                native_work,
-                support_work,
-                trace,
-                None,
-                cancel,
-            )?;
-            Ok(true)
-        })?;
+    let raw_bytes =
+        index_bytes.saturating_sub(index.as_ref().map_or(0, |index| index.retained_bytes()));
+    if !certify_raw_occupancy_waves(
+        &RawOccupancy {
+            sections,
+            schedule,
+            layers,
+            vertical,
+            index: index.as_ref(),
+            clearance: xy_clearance_mm,
+        },
+        raw_bytes,
+        native_work,
+        support_work,
+        trace,
+        cancel,
+    )? {
+        for span in sections {
+            let interval = [
+                schedule[span.start as usize].lower_z,
+                schedule[(span.end - 1) as usize].z,
+            ];
+            span.visit_occupied(cancel, |polygon, piece_scope| {
+                let height = piece_scope.map_or(interval, |height| {
+                    [interval[0].max(height[0]), interval[1].min(height[1])]
+                });
+                if height[0] > height[1] {
+                    return Ok(true);
+                }
+                let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                    lower_mm: height[0],
+                    upper_mm: height[1],
+                };
+                let range =
+                    scoped_support_layer_range(schedule, scope, vertical, support_work, cancel)?;
+                certify_polygon_capsules(
+                    PolygonDeposition {
+                        layers,
+                        range,
+                        index: index.as_ref(),
+                    },
+                    &ForbiddenPolygonScope {
+                        polygon,
+                        height: scope,
+                        label: "continuous native/finish outer occupancy",
+                        memo_bytes: 0,
+                    },
+                    xy_clearance_mm,
+                    native_work,
+                    support_work,
+                    trace,
+                    None,
+                    cancel,
+                )?;
+                Ok(true)
+            })?;
+        }
     }
     trace.report("raw_occupancy", raw_started);
     let void_started = std::time::Instant::now();
@@ -847,6 +900,276 @@ fn edge_block_clear<'a>(
         (width * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up(),
         clearance,
     )
+}
+
+struct RawOccupancy<'a> {
+    sections: &'a [super::SectionSpan],
+    schedule: &'a [LayerElevation],
+    layers: &'a [PrintLayer],
+    vertical: [f64; 2],
+    index: Option<&'a clearance_index::ClearanceIndex>,
+    clearance: f64,
+}
+
+/// The immutable operands one raw piece's proof borrows on a worker.
+struct RawTask<'a> {
+    layers: &'a [PrintLayer],
+    index: Option<&'a clearance_index::ClearanceIndex>,
+    clearance: f64,
+}
+
+/// Pieces buffered per worker in one raw-occupancy wave.
+const RAW_PIECES_PER_WORKER: usize = 64;
+
+struct RawPieceResult {
+    result: Result<(), ManufacturingError>,
+    geometry_work: u64,
+    scan_work: usize,
+    trace: ClearanceTrace,
+}
+
+/// Certifies every raw occupied piece against actual support in byte-admitted
+/// parallel waves. Pieces are independent: no memo, lease or withdrawal state
+/// is shared. Work and trace counters are speculative until every piece has
+/// passed; on any failure, or when the waves cannot be admitted, this returns
+/// `false` with the caller's counters untouched, and the caller runs the
+/// original serial scan, which reproduces the first refusal and its work.
+fn certify_raw_occupancy_waves(
+    raw: &RawOccupancy<'_>,
+    available: usize,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
+    support_work: &mut usize,
+    trace: &ClearanceTrace,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    let threads = rayon::current_num_threads();
+    if threads < 2 || !native_work.is_monitored() {
+        trace.add(&trace.raw_declined, 1);
+        return Ok(false);
+    }
+    let wave = threads.saturating_mul(RAW_PIECES_PER_WORKER);
+    let slot =
+        std::mem::size_of::<RawPieceResult>().saturating_add(std::mem::size_of::<RawPiece>());
+    if wave.saturating_mul(slot) > available {
+        trace.add(&trace.raw_declined, 1);
+        return Ok(false);
+    }
+    let mut pending: Vec<RawPiece> = Vec::new();
+    let mut results: Vec<RawPieceResult> = Vec::new();
+    if pending.try_reserve_exact(wave).is_err() || results.try_reserve_exact(wave).is_err() {
+        return Ok(false);
+    }
+    let piece_bytes_available = available - wave.saturating_mul(slot);
+    let mut speculative = Speculative {
+        work: *support_work,
+        geometry_work: 0,
+        trace: ClearanceTrace {
+            enabled: trace.enabled,
+            ..ClearanceTrace::default()
+        },
+        failed: false,
+    };
+    let task = RawTask {
+        layers: raw.layers,
+        index: raw.index,
+        clearance: raw.clearance,
+    };
+    let mut pending_bytes = 0usize;
+    for span in raw.sections {
+        let interval = [
+            raw.schedule[span.start as usize].lower_z,
+            raw.schedule[(span.end - 1) as usize].z,
+        ];
+        span.visit_occupied(cancel, |polygon, piece_scope| {
+            let height = piece_scope.map_or(interval, |height| {
+                [interval[0].max(height[0]), interval[1].min(height[1])]
+            });
+            if height[0] > height[1] {
+                return Ok(true);
+            }
+            let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                lower_mm: height[0],
+                upper_mm: height[1],
+            };
+            let Ok(range) = scoped_support_layer_range(
+                raw.schedule,
+                scope,
+                raw.vertical,
+                &mut speculative.work,
+                cancel,
+            ) else {
+                speculative.failed = true;
+                return Ok(false);
+            };
+            let bytes = cloned_polygon_bytes(polygon);
+            if pending.len() == wave || pending_bytes.saturating_add(bytes) > piece_bytes_available
+            {
+                flush_raw_wave(&task, &mut pending, &mut results, &mut speculative, cancel)?;
+                pending_bytes = 0;
+                if speculative.failed {
+                    return Ok(false);
+                }
+            }
+            if bytes > piece_bytes_available {
+                // Too large to buffer: certify it in place, still speculatively.
+                speculative
+                    .trace
+                    .add(&speculative.trace.raw_inline_pieces, 1);
+                let local = certify_raw_piece(&task, polygon, scope, range, trace.enabled, cancel);
+                speculative.absorb(local);
+                return Ok(!speculative.failed);
+            }
+            pending.push(RawPiece {
+                polygon: polygon.clone(),
+                scope,
+                range,
+            });
+            pending_bytes = pending_bytes.saturating_add(bytes);
+            Ok(true)
+        })?;
+        if speculative.failed {
+            return Ok(false);
+        }
+    }
+    flush_raw_wave(&task, &mut pending, &mut results, &mut speculative, cancel)?;
+    if speculative.failed {
+        return Ok(false);
+    }
+    native_work
+        .charge(speculative.geometry_work, cancel)
+        .map_err(|failure| {
+            super::native_error(failure, "account raw occupancy support clearance")
+        })?;
+    *support_work = speculative.work;
+    trace.merge_polygon(&speculative.trace);
+    Ok(true)
+}
+
+struct RawPiece {
+    polygon: geo::Polygon<f64>,
+    scope: spiling_geometry::ProtectedVoidHeightScope,
+    range: std::ops::Range<usize>,
+}
+
+struct Speculative {
+    work: usize,
+    geometry_work: u64,
+    trace: ClearanceTrace,
+    failed: bool,
+}
+
+impl Speculative {
+    fn absorb(&mut self, local: RawPieceResult) {
+        if self.failed {
+            return;
+        }
+        match (local.result, self.work.checked_add(local.scan_work)) {
+            (Ok(()), Some(work)) => {
+                self.work = work;
+                self.geometry_work = self.geometry_work.saturating_add(local.geometry_work);
+                self.trace.merge_polygon(&local.trace);
+            }
+            _ => self.failed = true,
+        }
+    }
+}
+
+fn flush_raw_wave(
+    raw: &RawTask<'_>,
+    pending: &mut Vec<RawPiece>,
+    results: &mut Vec<RawPieceResult>,
+    speculative: &mut Speculative,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let working_set = crate::working_set::current();
+    let trace_enabled = speculative.trace.enabled;
+    speculative.trace.add(&speculative.trace.raw_waves, 1);
+    speculative
+        .trace
+        .add(&speculative.trace.raw_wave_pieces, pending.len());
+    pending
+        .par_drain(..)
+        .map(|piece| {
+            crate::working_set::scope(working_set, || {
+                certify_raw_piece(
+                    raw,
+                    &piece.polygon,
+                    piece.scope,
+                    piece.range,
+                    trace_enabled,
+                    cancel,
+                )
+            })
+        })
+        .collect_into_vec(results);
+    for local in results.drain(..) {
+        speculative.absorb(local);
+    }
+    Ok(())
+}
+
+fn certify_raw_piece(
+    raw: &RawTask<'_>,
+    polygon: &geo::Polygon<f64>,
+    scope: spiling_geometry::ProtectedVoidHeightScope,
+    range: std::ops::Range<usize>,
+    trace_enabled: bool,
+    cancel: &AtomicBool,
+) -> RawPieceResult {
+    let mut native = spiling_geometry::GeometryWorkBudget::monitored();
+    let mut scan_work = 0;
+    let trace = ClearanceTrace {
+        enabled: trace_enabled,
+        ..ClearanceTrace::default()
+    };
+    let result = certify_polygon_capsules(
+        PolygonDeposition {
+            layers: raw.layers,
+            range,
+            index: raw.index,
+        },
+        &ForbiddenPolygonScope {
+            polygon,
+            height: scope,
+            label: "continuous native/finish outer occupancy",
+            memo_bytes: 0,
+        },
+        raw.clearance,
+        &mut native,
+        &mut scan_work,
+        &trace,
+        None,
+        cancel,
+    );
+    RawPieceResult {
+        result,
+        geometry_work: native.consumed(),
+        scan_work,
+        trace,
+    }
+}
+
+/// Bytes a clone of `polygon` allocates: clones size to length.
+fn cloned_polygon_bytes(polygon: &geo::Polygon<f64>) -> usize {
+    let coords = polygon.exterior().0.len()
+        + polygon
+            .interiors()
+            .iter()
+            .map(|ring| ring.0.len())
+            .sum::<usize>();
+    coords
+        .saturating_mul(std::mem::size_of::<geo::Coord<f64>>())
+        .saturating_add(
+            polygon
+                .interiors()
+                .len()
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<geo::LineString<f64>>()),
+        )
 }
 
 #[expect(clippy::too_many_arguments)]

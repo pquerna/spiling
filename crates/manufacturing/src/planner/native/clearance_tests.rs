@@ -1082,3 +1082,114 @@ fn skipped_range_work_preserves_the_original_overflow_and_cancellation_state() {
     );
     assert_eq!(work, 7);
 }
+
+#[test]
+fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
+    let cancel = AtomicBool::new(false);
+    let schedule: Vec<_> = (0..12)
+        .map(|index| {
+            let lower_z = f64::from(index) * 0.2;
+            LayerElevation {
+                lower_z,
+                z: lower_z + 0.2,
+                sample: lower_z + 0.1,
+                height: 0.2,
+                course: index as u32,
+            }
+        })
+        .collect();
+    for refuses in [false, true] {
+        // Many independent raw pieces per section, enough for several waves;
+        // the refusing case puts one piece under a support bead mid-scan.
+        let sections: Vec<_> = (0..schedule.len() as u32)
+            .map(|index| crate::planner::SectionSpan {
+                start: index,
+                end: index + 1,
+                material: Arc::new(MultiPolygon(
+                    (0..48)
+                        .map(|piece| {
+                            let x = 10.0 + f64::from(piece) * 3.0;
+                            let y = if refuses && index == 7 && piece == 13 {
+                                0.0
+                            } else {
+                                5.0
+                            };
+                            geo::Rect::new([x, y], [x + 1.0, y + 1.0]).to_polygon()
+                        })
+                        .collect(),
+                )),
+                process_domains: Vec::new(),
+                occupied: None,
+                source_area_mm2: 0.0,
+            })
+            .collect();
+        let layers: Vec<_> = schedule
+            .iter()
+            .enumerate()
+            .map(|(index, elevation)| {
+                let mut support = path(10.0 + 13.0 * 3.0);
+                support.physical_z_mm = [elevation.lower_z, elevation.z];
+                for point in &mut support.points_mm {
+                    point[2] = elevation.z;
+                }
+                let mut current = layer(vec![support]);
+                current.index = index as u32;
+                current.z_mm = elevation.z;
+                current.lower_z_mm = elevation.lower_z;
+                current.height_mm = elevation.height;
+                current
+            })
+            .collect();
+        let policy = SupportPolicy::Breakaway {
+            density: 0.3,
+            xy_clearance_mm: 0.2,
+            z_gap_mm: 0.1,
+            interface_thickness_mm: 0.4,
+        };
+        let evaluate = || {
+            let trace = ClearanceTrace {
+                enabled: true,
+                ..ClearanceTrace::default()
+            };
+            let mut native = spiling_geometry::GeometryWorkBudget::monitored();
+            let mut work = 7;
+            let result = certify_support_clearance_traced(
+                &layers,
+                &SupportClearanceGeometry {
+                    sections: &sections,
+                    schedule: &schedule,
+                    protected: &MultiPolygon(Vec::new()),
+                    scopes: &[],
+                    index_bytes: 4 * 1024 * 1024,
+                },
+                &policy,
+                &mut native,
+                &mut work,
+                &trace,
+                &cancel,
+            );
+            (
+                result.err().map(|e| (e.code, e.message)),
+                work,
+                native.consumed(),
+                trace.polygons.get(),
+                trace.paths.get(),
+                trace.edges.get(),
+                trace.polygon_tests.get(),
+            )
+        };
+        let serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(evaluate);
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(evaluate);
+        assert_eq!(serial.0.is_some(), refuses, "{serial:?}");
+        assert!(serial.3 > 4 * RAW_PIECES_PER_WORKER, "covers several waves");
+        assert_eq!(parallel, serial);
+    }
+}
