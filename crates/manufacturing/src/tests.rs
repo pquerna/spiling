@@ -1904,13 +1904,23 @@ fn housing_horizontal_plate_is_supported_permanent_construction_with_exact_actua
             ) && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
         })
         .unwrap();
+    // Keep just its first row, whatever order and connections it was given.
+    row.points_mm.truncate(2);
+    row.connectors.clear();
+    if let WidthProfile::PerEdge { widths_mm } = &mut row.width {
+        widths_mm.truncate(1);
+    }
     let along = usize::from(row.points_mm[0][0] == row.points_mm[1][0]);
     let center = [shift[0] + 12., shift[1] + 9.];
     row.points_mm[0][along] = center[along] - 1.;
     row.points_mm[1][along] = center[along] + 1.;
     row.points_mm[0][1 - along] = center[1 - along];
     row.points_mm[1][1 - along] = center[1 - along];
-    assert_reemitted_interface_refuses(unanchored_upper, &recipe);
+    let error = assert_reemitted_interface_refuses(unanchored_upper, &recipe);
+    assert!(
+        error.message.contains("lacks direct lower anchors"),
+        "{error:?}"
+    );
     let mut combined_intent = recipe.clone();
     combined_intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible {
         max_height_mm: 0.30,
@@ -3619,7 +3629,7 @@ fn cathedral_replay_rejects_a_floating_loop_however_it_is_tessellated() {
         0.5 * (l[k] + l[k + 1])
     };
     let (x, y) = (center(0), center(1));
-    let (_, template) = cathedral_roads(&plan.layers[middle]).next().unwrap();
+    let (at, template) = cathedral_roads(&plan.layers[middle]).next().unwrap();
     let z = plan.layers[middle].z_mm;
     for subdivisions in [1usize, 8] {
         let mut floating = plan.clone();
@@ -3644,7 +3654,8 @@ fn cathedral_replay_rejects_a_floating_loop_however_it_is_tessellated() {
         loop_points.push([corners[0][0], corners[0][1], z]);
         let mut road = template.clone();
         road.points_mm = loop_points;
-        floating.layers[middle].paths.push(road);
+        // Just before a sparse road, so no later wall seam follows its end.
+        floating.layers[middle].paths.insert(at, road);
         let error = assert_emitted_refuses(floating, &requested, false);
         assert!(
             error.message.contains("Cathedral"),

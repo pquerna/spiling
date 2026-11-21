@@ -334,7 +334,33 @@ fn layered_squares(squares: &[[[PointMm; 4]; 2]], policy: SeamPolicy) -> Vec<Tas
 }
 
 #[test]
-fn layers_route_alone_from_the_machine_start_and_seams_follow_their_policy() {
+fn layers_alternate_their_start_side_instead_of_returning_to_the_machine_start() {
+    // Each layer is one 12 mm run of three chained lines from x = 0. From
+    // the machine start every layer ends at x = 12; the second candidate,
+    // routed from that end, runs back to x = 0. Choosing per layer chains
+    // the runs, so the only travel is the 0.2 mm rise between layers.
+    let tasks: Vec<_> = (0..6u32)
+        .flat_map(|layer| {
+            let z = 0.2 * f64::from(layer + 1);
+            (0..3).map(move |i| line(f64::from(i) * 4., 0., z, 0, layer))
+        })
+        .collect();
+    let m = machine(1, Service::WhenUsed);
+    let routed = run(&tasks, &m, ToolOrder::Fixed);
+    assert!(
+        (routed.cost.travel_mm - 5. * 0.2).abs() < 1e-9,
+        "{}",
+        routed.cost.travel_mm
+    );
+    assert_eq!(
+        check(&tasks, &m, ToolOrder::Fixed, &routed),
+        Ok(routed.cost)
+    );
+    assert_eq!(routed, run(&tasks, &m, ToolOrder::Fixed));
+}
+
+#[test]
+fn seams_follow_their_policy_through_the_actual_order() {
     let squares: Vec<[[PointMm; 4]; 2]> = (0..6)
         .map(|layer| {
             let z = 0.2 * (layer + 1) as f64;
@@ -347,41 +373,17 @@ fn layers_route_alone_from_the_machine_start_and_seams_follow_their_policy() {
         let tasks = layered_squares(&squares, policy);
         let whole = run(&tasks, &m, ToolOrder::Fixed);
         assert_eq!(check(&tasks, &m, ToolOrder::Fixed, &whole), Ok(whole.cost));
-        // Each layer alone, from the same start, yields the same order and seams.
-        for layer in 0..6u32 {
-            let own: Vec<Task<'_>> = tasks.iter().filter(|t| t.layer == layer).copied().collect();
-            let alone = run(&own, &m, ToolOrder::Fixed);
-            let offset = 3 * layer;
-            let expected: Vec<Visit> = alone
+        if policy == SeamPolicy::Distributed {
+            // Turned by layer: the first square's seam scatters over corners.
+            let mut seams: Vec<u32> = whole
                 .visits
                 .iter()
-                .map(|v| Visit {
-                    task: v.task + offset,
-                    ..*v
-                })
+                .filter(|v| v.task % 3 == 0)
+                .map(|v| v.seam)
                 .collect();
-            let group = &whole.groups[layer as usize];
-            assert_eq!(
-                whole.visits[group.visits.clone()],
-                expected[..],
-                "{policy:?} {layer}"
-            );
-        }
-        // The first square's seam vertex in each layer.
-        let seams: Vec<u32> = whole
-            .visits
-            .iter()
-            .filter(|v| v.task % 3 == 0)
-            .map(|v| v.seam)
-            .collect();
-        let mut distinct = seams.clone();
-        distinct.sort_unstable();
-        distinct.dedup();
-        match policy {
-            // Nearest the start (the origin) on every layer: aligned.
-            SeamPolicy::Nearest => assert_eq!(seams, vec![0; 6]),
-            // Turned by layer: scattered over several corners.
-            _ => assert!(distinct.len() >= 3, "{seams:?}"),
+            seams.sort_unstable();
+            seams.dedup();
+            assert!(seams.len() >= 3, "{seams:?}");
         }
     }
 }

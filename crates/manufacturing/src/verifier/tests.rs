@@ -2346,8 +2346,9 @@ fn distributed_square_fixture(layer_count: usize) -> (ManufacturingIntent, Norma
 fn distributed_seams_turn_with_the_layer_by_a_hand_derived_compass() {
     // The square's least vertex (1, 1) mixes to identity 4, so layer k faces
     // compass entry (7k + 4) mod 16: (0,1), (-1,-2), (1,1), (-2,-1), (1,0),
-    // (-2,1), (1,-1), (-1,2), (0,-1), (1,2), (-1,-1), (2,1). Ties at a
-    // shared maximum have no previous position and take the least XY.
+    // (-2,1), (1,-1), (-1,2), (0,-1), (1,2), (-1,-1), (2,1). Layer 0's tie
+    // has no previous position and takes the least XY; layers 4 and 8 tie
+    // toward the previous layer's actual end, (1, 1) and (1, 5).
     let (intent, mut plan) = distributed_square_fixture(12);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
@@ -2402,15 +2403,15 @@ G1 X1 Y1 Z2 E8 F600\n";
 }
 
 #[test]
-fn distributed_ties_start_every_layer_at_the_actual_prime_endpoint() {
-    // Layers 0 and 4 tie two corners; the prime end (20, 10) breaks both,
-    // not the end of the layer below.
+fn distributed_ties_follow_the_actual_previous_end_from_the_prime_endpoint() {
+    // Layers 0 and 4 tie two corners. The prime end (20, 10) breaks layer
+    // 0's tie; layer 4's goes to the corner nearer layer 3's actual end (1, 1).
     let (mut intent, mut plan) = distributed_square_fixture(5);
     let (complete, _) = complete_fixture();
     intent.printer = complete.printer;
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    let expected = [[5.0, 5.0], [1.0, 1.0], [5.0, 5.0], [1.0, 1.0], [5.0, 5.0]];
+    let expected = [[5.0, 5.0], [1.0, 1.0], [5.0, 5.0], [1.0, 1.0], [5.0, 1.0]];
     for (layer, xy) in plan.layers.iter().zip(expected) {
         assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
     }
@@ -2485,20 +2486,16 @@ fn distributed_seam_directions_ignore_non_wall_and_open_wall_paths() {
 }
 
 #[test]
-fn distributed_seam_ties_use_projected_scores_then_the_layer_start() {
+fn distributed_seam_ties_use_projected_scores_then_the_previous_end() {
     // Layer 4 faces (1, 0): (5, 1) and (5, 5) tie once projected, though
-    // one raw x is larger. Without a start the least XY wins; from the prime
-    // end (20, 10) the nearer (5, 5) wins.
+    // (5, 5)'s raw x is larger. With or without a prime, the layer below
+    // ends at (1, 1), so the nearer (5, 1) wins.
     for primed in [false, true] {
         let (mut intent, mut plan) = distributed_square_fixture(5);
         if primed {
             intent.printer = complete_fixture().0.printer;
         }
-        let (expected, alternate) = if primed {
-            ([5.0, 5.0, 5.0], [5.0, 1.0, 5.0])
-        } else {
-            ([5.0, 1.0, 5.0], [5.0, 5.0, 5.0])
-        };
+        let (expected, alternate) = ([5.0, 1.0, 5.0], [5.0, 5.0, 5.0]);
         for point in &mut plan.layers[4].paths[0].points_mm {
             if *point == alternate {
                 point[0] += 0.000_000_4;

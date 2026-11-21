@@ -63,8 +63,8 @@ impl Pricing {
 }
 
 pub(crate) type Groups = Vec<(u32, u32, Range<usize>)>;
-/// One layer's visits, layer-local groups and counted work.
-type RoutedLayer = (Vec<Visit>, Groups, u64);
+/// One layer's visits, layer-local groups and the search's end position.
+type RoutedLayer = (Vec<Visit>, Groups, Option<PointMm>);
 
 /// Tasks bucketed by barrier (ascending), then by tool.
 struct Buckets {
@@ -101,8 +101,14 @@ fn present(context: &Context<'_, '_>, tools: &[Vec<u32>]) -> Vec<u32> {
         .collect()
 }
 
-/// Route every layer independently from the machine start, in parallel, and
-/// concatenate the layers in barrier order. Each layer counts its own work.
+/// Route every layer in parallel from two starts, then choose per layer.
+///
+/// Pass 1 routes each layer from the machine start. Pass 2 routes each layer
+/// again from pass 1's end of the layer below. A serial pass over the layers
+/// then keeps, per layer, whichever candidate travels less from the end the
+/// chosen layers below actually reached (ties to pass 1). Both passes are
+/// parallel and independent of the choice, so the result is deterministic;
+/// a long part alternates its start side instead of returning each layer.
 pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups), Error> {
     let avx2 = std::env::var_os("SPILING_ROUTING_AVX2").is_none_or(|value| value == "1");
     let buckets = buckets(context);
@@ -121,25 +127,51 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
         context.order,
         context.cancel,
     );
-    let routed: Vec<Result<RoutedLayer, Error>> = layers
-        .into_par_iter()
-        .map(|barriers| {
-            let mut layer = Context {
-                tasks,
-                machine,
-                order,
-                cancel,
-                work: 0,
-            };
-            let (visits, groups) = route_layer(&mut layer, &buckets, &orders, barriers, avx2)?;
-            Ok((visits, groups, layer.work))
-        })
+    let route = |barriers: Range<usize>, start: Option<PointMm>| {
+        let mut layer = Context {
+            tasks,
+            machine,
+            order,
+            cancel,
+            work: 0,
+        };
+        let routed = route_layer(&mut layer, &buckets, &orders, barriers, start, avx2)?;
+        Ok((routed, layer.work))
+    };
+    let first: Vec<Result<(RoutedLayer, u64), Error>> = layers
+        .par_iter()
+        .map(|barriers| route(barriers.clone(), machine.start))
         .collect();
+    let first = first.into_iter().collect::<Result<Vec<_>, Error>>()?;
+    let second: Vec<Result<Option<(RoutedLayer, u64)>, Error>> = (0..layers.len())
+        .into_par_iter()
+        .map(
+            |l| match l.checked_sub(1).and_then(|below| first[below].0.2) {
+                Some(start) if Some(start) != machine.start => {
+                    route(layers[l].clone(), Some(start)).map(Some)
+                }
+                _ => Ok(None),
+            },
+        )
+        .collect();
+    let second = second.into_iter().collect::<Result<Vec<_>, Error>>()?;
     let total: usize = orders.iter().map(Vec::len).sum();
     let mut visits = Vec::with_capacity(context.tasks.len());
     let mut groups = Vec::with_capacity(total);
-    for layer in routed {
-        let (layer_visits, layer_groups, work) = layer?;
+    let mut position = machine.start;
+    for (pass1, pass2) in first.into_iter().zip(second) {
+        context.work = context.work.saturating_add(pass1.1);
+        let mut chosen = pass1.0;
+        if let Some((candidate, work)) = pass2 {
+            context.work = context.work.saturating_add(work);
+            let (keep, _) = travel_from(tasks, machine, &chosen, position);
+            let (other, _) = travel_from(tasks, machine, &candidate, position);
+            if other < keep {
+                chosen = candidate;
+            }
+        }
+        position = travel_from(tasks, machine, &chosen, position).1;
+        let (layer_visits, layer_groups, _) = chosen;
         let base = visits.len();
         visits.extend(layer_visits);
         groups.extend(
@@ -147,22 +179,49 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
                 (barrier, tool, range.start + base..range.end + base)
             }),
         );
-        context.work = context.work.saturating_add(work);
     }
     Ok((visits, groups))
 }
 
-/// One layer's groups, starting at the machine start. Ranges are layer-local.
+/// Modelled travel seconds of one routed layer entered from `from`, and
+/// where it ends.
+fn travel_from(
+    tasks: &[Task<'_>],
+    machine: &Machine,
+    (visits, groups, _): &RoutedLayer,
+    from: Option<PointMm>,
+) -> (f64, Option<PointMm>) {
+    let mut seconds = 0.;
+    let mut position = from;
+    for (_, tool, range) in groups {
+        let first = visits
+            .get(range.start)
+            .copied()
+            .filter(|_| !range.is_empty());
+        position = cost::group_start(tasks, machine, *tool, first, position);
+        for visit in &visits[range.clone()] {
+            let (entry, exit) = entry_exit(&tasks[visit.task as usize], *visit);
+            if let Some(p) = position {
+                seconds += gap_seconds(&machine.travel, p, entry);
+            }
+            position = Some(exit);
+        }
+    }
+    (seconds, position)
+}
+
+/// One layer's groups from `start`: layer-local ranges and the search's end.
 fn route_layer(
     context: &mut Context<'_, '_>,
     buckets: &Buckets,
     orders: &[Vec<u32>],
     barriers: Range<usize>,
+    start: Option<PointMm>,
     avx2: bool,
-) -> Result<(Vec<Visit>, Groups), Error> {
+) -> Result<RoutedLayer, Error> {
     let mut visits = Vec::new();
     let mut groups = Vec::new();
-    let mut position = context.machine.start;
+    let mut position = start;
     for b in barriers {
         for &tool in &orders[b] {
             let members = &buckets.members[b][tool as usize];
@@ -191,7 +250,7 @@ fn route_layer(
             groups.push((buckets.barriers[b], tool, begin..visits.len()));
         }
     }
-    Ok((visits, groups))
+    Ok((visits, groups, position))
 }
 
 /// Input order within ascending tool groups: no search, entries as given.

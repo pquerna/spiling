@@ -530,9 +530,9 @@ nearest/preferred build-XY or distributed-start policy, preserving winding and c
 maximizes the dot product with one of sixteen compass directions, chosen by the layer
 index and the loop's least projected vertex, so starts turn between layers without
 any cross-layer history. It neither guarantees a minimum separation nor establishes
-sealing. Exact projected ties use previous-position distance within the layer,
-lexicographic projected/raw XY and original cyclic index; every layer starts from the
-complete-job prime end (or its group's waste end), so layers route independently.
+sealing. Exact projected ties use actual previous-position distance, lexicographic
+projected/raw XY and original cyclic index; complete-job prime supplies the initial
+previous position.
 No source pose or camera rotation changes the declared build direction.
 The independent [`verifier`](../../crates/manufacturing/src/verifier/mod.rs) parses
 actual command bytes and modal state against expected paths, lifecycle, coordinates,

@@ -29,14 +29,15 @@ const COMPASS: [[f64; 2]; 16] = [
 
 /// Check authored seam semantics independently of path/program correspondence.
 /// The prior endpoint is projected because accepted byte replay must reach that
-/// exact command-space point. No path is reordered or copied here. Every layer
-/// begins at `layer_start` (or its group's waste end); nothing crosses layers.
-/// A Distributed wall maximizes its dot product with compass entry
-/// `(7 * layer + identity) mod 16`, `identity` mixing its least projected XY.
+/// exact command-space point. No path is reordered or copied here. Proximity
+/// ties follow the actual previous path end through every layer (or a fixed-
+/// dual group's waste end). A Distributed wall maximizes its dot product with
+/// compass entry `(7 * layer + identity) mod 16`, `identity` mixing its least
+/// projected XY; no history crosses walls or layers.
 pub(super) fn validate_wall_seams(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
-    layer_start: Option<[f64; 3]>,
+    mut previous: Option<[f64; 3]>,
     routing: Option<&FixedDualRouter>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -46,13 +47,12 @@ pub(super) fn validate_wall_seams(
             .total_cmp(&zero(b[0]))
             .then_with(|| zero(a[1]).total_cmp(&zero(b[1])))
     };
+    let mut previous_group = None;
     for layer in &plan.layers {
-        let mut previous = layer_start;
-        let mut previous_tool = None;
         for path in &layer.paths {
             let tool = routing.map_or(Ok(0), |job| job.tool_for_path(path))?;
             if let Some(job) = routing
-                && previous_tool != Some(tool)
+                && previous_group != Some((layer.index, tool))
             {
                 let endpoint = job.waste_end_mm(tool, layer.z_mm);
                 previous = Some(if recipe.seam_policy == SeamPolicy::Distributed {
@@ -60,7 +60,7 @@ pub(super) fn validate_wall_seams(
                 } else {
                     endpoint
                 });
-                previous_tool = Some(tool);
+                previous_group = Some((layer.index, tool));
             }
             super::cancelled(cancel)?;
             let points = &path.points_mm;

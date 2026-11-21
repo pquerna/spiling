@@ -39,10 +39,9 @@ pub struct Task<'a> {
     /// Every task with a lower barrier completes first. The caller decides what
     /// a barrier is (today one physical layer); it is a constraint, not a type.
     pub barrier: u32,
-    /// The independent routing unit holding this task's barrier. Every layer
-    /// starts from [`Machine::start`], never the previous layer's end, so
-    /// layers route in parallel. Barriers never span layers, and layers
-    /// ascend with barriers.
+    /// The routing unit holding this task's barrier: layers are searched in
+    /// parallel, and a Distributed wall's direction turns with it. Barriers
+    /// never span layers, and layers ascend with barriers.
     pub layer: u32,
     /// Indexes of tasks that must be deposited earlier.
     pub prerequisites: &'a [u32],
@@ -95,9 +94,8 @@ pub struct ToolChange {
 
 #[derive(Clone, Debug)]
 pub struct Machine {
-    /// Known position before the first task, if any. Every layer's search and
-    /// wall seams begin here (or at the group's station); travel is still
-    /// priced from the actual previous end.
+    /// Known position before the first task, if any. Every layer is also
+    /// searched from here, as one of its two candidate starts.
     pub start: Option<PointMm>,
     /// Tool selected before the first group; `None` prices the first selection.
     pub initial_tool: Option<u32>,

@@ -3,11 +3,9 @@
 //! Authored wall entry decisions in the scheduler. The production verifier
 //! independently reconstructs them from emitted command coordinates.
 //!
-//! Each layer is decided alone: its first group starts at the machine start
-//! (or the group's station) and no seam history crosses layers, so layers are
-//! authored in parallel.
+//! Seams follow the actual previous position through the whole order; no
+//! seam history crosses walls or layers.
 use crate::*;
-use rayon::prelude::*;
 use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
 
 fn project(p: PointMm) -> Result<PointMm, Error> {
@@ -77,7 +75,8 @@ fn score(direction: Option<[f64; 2]>, p: PointMm) -> f64 {
 }
 
 /// Author every policy wall's seam: highest policy score, then nearest the
-/// layer's previous position, then projected XY, raw XY and index.
+/// actual previous position (the previous path's end, across layers), then
+/// projected XY, raw XY and index. One cheap serial pass over the order.
 pub(crate) fn apply(
     tasks: &[Task<'_>],
     machine: &Machine,
@@ -85,59 +84,8 @@ pub(crate) fn apply(
     groups: &[(u32, u32, Range<usize>)],
     cancel: Option<&AtomicBool>,
 ) -> Result<(), Error> {
-    let mut layers: Vec<(u32, u32)> = tasks.iter().map(|t| (t.barrier, t.layer)).collect();
-    layers.sort_unstable();
-    layers.dedup();
-    let layer_of = |barrier: u32| {
-        layers
-            .binary_search_by_key(&barrier, |(b, _)| *b)
-            .map(|at| layers[at].1)
-            .map_err(|_| Error::InvalidInput("group barrier"))
-    };
-    // Split the visits into each layer's contiguous groups.
-    let mut jobs = Vec::new();
-    let mut rest = visits;
-    let mut base = 0;
-    let mut begin = 0;
-    while begin < groups.len() {
-        let layer = layer_of(groups[begin].0)?;
-        let mut end = begin;
-        let mut cursor = base;
-        while end < groups.len() && layer_of(groups[end].0)? == layer {
-            let range = &groups[end].2;
-            if range.start != cursor || range.end < range.start {
-                return Err(Error::InvalidInput("grouping"));
-            }
-            cursor = range.end;
-            end += 1;
-        }
-        if cursor - base > rest.len() {
-            return Err(Error::InvalidInput("grouping"));
-        }
-        let (head, tail) = std::mem::take(&mut rest).split_at_mut(cursor - base);
-        jobs.push((&groups[begin..end], head, base));
-        rest = tail;
-        base = cursor;
-        begin = end;
-    }
-    let results: Vec<Result<(), Error>> = jobs
-        .into_par_iter()
-        .map(|(groups, visits, base)| apply_layer(tasks, machine, visits, groups, base, cancel))
-        .collect();
-    results.into_iter().collect()
-}
-
-fn apply_layer(
-    tasks: &[Task<'_>],
-    machine: &Machine,
-    visits: &mut [Visit],
-    groups: &[(u32, u32, Range<usize>)],
-    base: usize,
-    cancel: Option<&AtomicBool>,
-) -> Result<(), Error> {
     let mut position = machine.start;
     for (_, tool, range) in groups {
-        let range = range.start - base..range.end - base;
         let first = visits
             .get(range.start)
             .copied()
@@ -148,7 +96,7 @@ fn apply_layer(
         {
             position = position.map(project).transpose()?;
         }
-        for visit in &mut visits[range] {
+        for visit in &mut visits[range.clone()] {
             if let Some(cancel) = cancel {
                 cancelled(cancel)?;
             }
