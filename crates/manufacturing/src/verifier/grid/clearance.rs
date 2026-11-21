@@ -634,6 +634,12 @@ struct RowDirectory {
     len: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+struct RowBucket {
+    next: usize,
+    end: usize,
+}
+
 #[derive(Default)]
 pub(super) struct Rows {
     entries: Vec<Incidence>,
@@ -690,6 +696,95 @@ impl Rows {
                 },
             )
         })
+    }
+
+    pub(super) fn finish_ancestry(
+        &mut self,
+        admission: &mut Admission,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        cancelled(cancel)?;
+        let Some(head) = self.entries.first() else {
+            return Ok(());
+        };
+        let mut first = head.row;
+        let mut last = first;
+        for entry in &self.entries {
+            debit(work, 1, cancel)?;
+            first = first.min(entry.row);
+            last = last.max(entry.row);
+        }
+        let Some(len) = last
+            .checked_sub(first)
+            .and_then(|span| usize::try_from(span).ok())
+            .and_then(|span| span.checked_add(1))
+            .filter(|len| *len <= self.entries.len())
+        else {
+            return self.finish(work, cancel);
+        };
+        let mut buckets = Vec::new();
+        if admission.reserve(&mut buckets, len).is_err() {
+            drop(buckets);
+            return self.finish(work, cancel);
+        }
+        buckets.resize(len, RowBucket::default());
+        let result = self.finish_bucketed(first, &mut buckets, work, cancel);
+        admission.release(buckets);
+        result
+    }
+
+    fn finish_bucketed(
+        &mut self,
+        first: i64,
+        buckets: &mut [RowBucket],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        for entry in &self.entries {
+            debit(work, 1, cancel)?;
+            buckets[(entry.row - first) as usize].end += 1;
+        }
+        let mut end = 0;
+        for bucket in &mut *buckets {
+            debit(work, 1, cancel)?;
+            bucket.next = end;
+            end += bucket.end;
+            bucket.end = end;
+        }
+        for index in 0..buckets.len() {
+            while buckets[index].next < buckets[index].end {
+                debit(work, 1, cancel)?;
+                let current = buckets[index].next;
+                let target = &mut buckets[(self.entries[current].row - first) as usize];
+                self.entries.swap(current, target.next);
+                target.next += 1;
+            }
+        }
+        let mut start = 0;
+        for bucket in &*buckets {
+            debit(work, 1, cancel)?;
+            let entries = &mut self.entries[start..bucket.end];
+            sort_by_key(entries, |entry| (entry.left, entry.road), work, cancel)?;
+            let mut prefix = i64::MIN;
+            for entry in entries {
+                debit(work, 1, cancel)?;
+                prefix = prefix.max(entry.right);
+                entry.prefix_right = prefix;
+            }
+            start = bucket.end;
+        }
+        let mut start = 0;
+        for (entry, bucket) in self.entries.iter_mut().zip(&*buckets) {
+            debit(work, 1, cancel)?;
+            entry.row = start as i64;
+            start = bucket.end;
+        }
+        self.directory = Some(RowDirectory {
+            first,
+            len: buckets.len(),
+        });
+        Ok(())
     }
 
     pub(super) fn finish(
@@ -1034,5 +1129,91 @@ mod tests {
             rows.release(&mut admission);
             assert_eq!(admission.0, 0);
         }
+    }
+
+    fn ancestry_rows(last: i64) -> (Rows, Admission) {
+        let mut rows = Rows::default();
+        let mut admission = Admission::default();
+        for (road, row, left, right) in [
+            (5, last, 2, 5),
+            (6, 1, 0, 4),
+            (4, -4, 1, 1),
+            (1, last, 2, 2),
+            (7, 1, 1, 3),
+            (0, -4, -3, 4),
+            (2, last, -1, 0),
+            (3, last, 1, 2),
+        ] {
+            admission
+                .push(
+                    &mut rows.entries,
+                    Incidence {
+                        row,
+                        left,
+                        right,
+                        prefix_right: right,
+                        road,
+                    },
+                )
+                .unwrap();
+        }
+        (rows, admission)
+    }
+
+    #[test]
+    fn bucketed_ancestry_preserves_queries_with_signed_rows_and_pressure_fallback() {
+        let cancel = AtomicBool::new(false);
+        for (last, scratch, bucketed) in [(3, 8, true), (3, 0, false), (100, 8, false)] {
+            let (mut control, _) = ancestry_rows(last);
+            control.finish(&mut 0, &cancel).unwrap();
+            let (mut rows, mut admission) = ancestry_rows(last);
+            let live = admission.0;
+            let allowance =
+                crate::working_set::WorkingSet::new(live + scratch * size_of::<RowBucket>())
+                    .unwrap();
+            crate::working_set::scope(allowance, || {
+                rows.finish_ancestry(&mut admission, &mut 0, &cancel)
+            })
+            .unwrap();
+            assert_eq!(rows.directory.is_some(), bucketed);
+            for row in -5..=last + 1 {
+                for left in -4..=6 {
+                    for right in left..=6 {
+                        let signature = |index: &Rows| {
+                            index
+                                .intersect(row, left, right)
+                                .iter()
+                                .map(|entry| (entry.road, entry.left, entry.right))
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(signature(&rows), signature(&control));
+                    }
+                }
+            }
+            assert_eq!(admission.0, live);
+            rows.release(&mut admission);
+            assert_eq!(admission.0, 0);
+        }
+    }
+
+    #[test]
+    fn ancestry_bucket_refusal_does_not_retain_scratch() {
+        let (mut rows, mut admission) = ancestry_rows(3);
+        let live = admission.0;
+        let cancel = AtomicBool::new(true);
+        let refusal = rows
+            .finish_ancestry(&mut admission, &mut 0, &cancel)
+            .unwrap_err();
+        assert_eq!(refusal.code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(admission.0, live);
+
+        let cancel = AtomicBool::new(false);
+        let mut work = usize::MAX - rows.entries.len();
+        let refusal = rows
+            .finish_ancestry(&mut admission, &mut work, &cancel)
+            .unwrap_err();
+        assert_eq!(refusal, overflow());
+        assert_eq!(admission.0, live);
+        assert!(rows.directory.is_none());
     }
 }

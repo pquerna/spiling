@@ -826,10 +826,14 @@ pub(super) fn verify(
             }
         }
         if let Some(inventory) = &mut deposited {
-            inventory.rows.finish(replay.work, cancel)?;
+            inventory
+                .rows
+                .finish_ancestry(&mut replay.admission, replay.work, cancel)?;
         }
         if use_window.reads_landing {
-            landing.rows.finish(replay.work, cancel)?;
+            landing
+                .rows
+                .finish_ancestry(&mut replay.admission, replay.work, cancel)?;
         }
         bands.push(Band {
             deposited,
