@@ -50,6 +50,7 @@ impl Case {
                 },
                 tool: s.tool,
                 barrier: s.barrier,
+                layer: s.barrier,
                 prerequisites: &s.prerequisites,
                 duration_s: s.length() / DEPOSITION_MM_S,
                 seam_policy: None,

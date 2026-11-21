@@ -2343,23 +2343,27 @@ fn distributed_square_fixture(layer_count: usize) -> (ManufacturingIntent, Norma
 }
 
 #[test]
-fn distributed_seams_have_hand_derived_xy_history_and_evict_after_eight_starts() {
+fn distributed_seams_turn_with_the_layer_by_a_hand_derived_compass() {
+    // The square's least vertex (1, 1) mixes to identity 4, so layer k faces
+    // compass entry (7k + 4) mod 16: (0,1), (-1,-2), (1,1), (-2,-1), (1,0),
+    // (-2,1), (1,-1), (-1,2), (0,-1), (1,2), (-1,-1), (2,1). Ties at a
+    // shared maximum have no previous position and take the least XY.
     let (intent, mut plan) = distributed_square_fixture(12);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     let expected = [
+        [1.0, 5.0],
         [1.0, 1.0],
         [5.0, 5.0],
+        [1.0, 1.0],
+        [5.0, 1.0],
         [1.0, 5.0],
         [5.0, 1.0],
-        [5.0, 1.0],
-        [5.0, 1.0],
-        [5.0, 1.0],
-        [5.0, 1.0],
-        [5.0, 1.0],
+        [1.0, 5.0],
         [1.0, 1.0],
         [5.0, 5.0],
-        [1.0, 5.0],
+        [1.0, 1.0],
+        [5.0, 5.0],
     ];
     for (layer, xy) in plan.layers.iter().zip(expected) {
         assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
@@ -2380,38 +2384,42 @@ fn distributed_seams_have_hand_derived_xy_history_and_evict_after_eight_starts()
 #[test]
 fn distributed_seams_accept_independent_two_square_numeric_program() {
     let (intent, mut plan) = distributed_square_fixture(2);
-    plan.layers[1].paths[0].rotate_closed(2).unwrap();
+    plan.layers[0].paths[0].rotate_closed(3).unwrap();
     let program = "G21\nG90\nM82\nG92 E0\nM106 S0\n\
-G0 X1 Y1 Z1 F1200\n\
-G1 X5 Y1 Z1 E1 F600\n\
-G1 X5 Y5 Z1 E2 F600\n\
-G1 X1 Y5 Z1 E3 F600\n\
-G1 X1 Y1 Z1 E4 F600\n\
-G0 X5 Y5 Z2 F1200\n\
-G1 X1 Y5 Z2 E5 F600\n\
-G1 X1 Y1 Z2 E6 F600\n\
-G1 X5 Y1 Z2 E7 F600\n\
-G1 X5 Y5 Z2 E8 F600\n";
+G0 X1 Y5 Z1 F1200\n\
+G1 X1 Y1 Z1 E1 F600\n\
+G1 X5 Y1 Z1 E2 F600\n\
+G1 X5 Y5 Z1 E3 F600\n\
+G1 X1 Y5 Z1 E4 F600\n\
+G0 X1 Y1 Z2 F1200\n\
+G1 X5 Y1 Z2 E5 F600\n\
+G1 X5 Y5 Z2 E6 F600\n\
+G1 X1 Y5 Z2 E7 F600\n\
+G1 X1 Y1 Z2 E8 F600\n";
     let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
     assert_eq!(report.deposition_segments, 8);
     assert_eq!(report.filament_length_mm, 8.0);
 }
 
 #[test]
-fn distributed_empty_history_uses_actual_prime_endpoint_without_recording_it() {
-    let (mut intent, mut plan) = distributed_square_fixture(2);
+fn distributed_ties_start_every_layer_at_the_actual_prime_endpoint() {
+    // Layers 0 and 4 tie two corners; the prime end (20, 10) breaks both,
+    // not the end of the layer below.
+    let (mut intent, mut plan) = distributed_square_fixture(5);
     let (complete, _) = complete_fixture();
     intent.printer = complete.printer;
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
-    assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 1.0, 2.0]);
+    let expected = [[5.0, 5.0], [1.0, 1.0], [5.0, 5.0], [1.0, 1.0], [5.0, 5.0]];
+    for (layer, xy) in plan.layers.iter().zip(expected) {
+        assert_eq!(layer.paths[0].points_mm[0], [xy[0], xy[1], layer.z_mm]);
+    }
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
 #[test]
-fn distributed_seams_share_history_between_walls_within_each_actual_layer() {
+fn distributed_seams_face_each_loop_its_own_direction_within_a_layer() {
     let (intent, mut plan) = distributed_square_fixture(2);
     for layer in &mut plan.layers {
         for point in &mut layer.paths[0].points_mm {
@@ -2428,16 +2436,19 @@ fn distributed_seams_share_history_between_walls_within_each_actual_layer() {
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
-    assert_eq!(plan.layers[0].paths[1].points_mm[0], [8.0, 8.0, 1.0]);
-    assert_eq!(plan.layers[1].paths[0].points_mm[0], [2.0, 8.0, 2.0]);
-    assert_eq!(plan.layers[1].paths[1].points_mm[0], [9.0, 1.0, 2.0]);
+    // Outer (least vertex (1, 1)) and inner ((2, 2)) loops face (0,1) and
+    // (-2,-1) on layer 0, then (-1,-2) and (1,0) on layer 1; the inner tie
+    // on layer 1 goes to the corner nearer the outer seam.
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 9.0, 1.0]);
+    assert_eq!(plan.layers[0].paths[1].points_mm[0], [2.0, 2.0, 1.0]);
+    assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 1.0, 2.0]);
+    assert_eq!(plan.layers[1].paths[1].points_mm[0], [8.0, 2.0, 2.0]);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
 #[test]
-fn distributed_seams_ignore_non_wall_and_open_wall_starts() {
+fn distributed_seam_directions_ignore_non_wall_and_open_wall_paths() {
     for closed in [false, true] {
         let (intent, mut plan) = distributed_square_fixture(2);
         let mut other = plan.layers[0].paths[0].clone();
@@ -2460,56 +2471,50 @@ fn distributed_seams_ignore_non_wall_and_open_wall_starts() {
         refresh_volumes(&intent, &mut plan);
         let cancel = AtomicBool::new(false);
         crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-        assert_eq!(plan.layers[0].paths[0].points_mm[0], [1.0, 1.0, 1.0]);
-        assert_eq!(plan.layers[1].paths[0].points_mm[0], [5.0, 5.0, 2.0]);
+        let wall = plan.layers[0]
+            .paths
+            .iter()
+            .find(|path| path.points_mm.len() == 5 && path.owner == Some(DepositionOwner::Wall))
+            .unwrap();
+        // The layer-0 direction (0,1) ties two corners; either is authored.
+        assert!(matches!(wall.points_mm[0], [1.0 | 5.0, 5.0, 1.0]));
+        assert_eq!(plan.layers[1].paths[0].points_mm[0], [1.0, 1.0, 2.0]);
         let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
     }
 }
 
 #[test]
-fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
-    for proximity_wins in [false, true] {
-        let (intent, mut plan) = distributed_square_fixture(3);
-        for layer in &mut plan.layers[..2] {
-            for point in &mut layer.paths[0].points_mm {
-                point[1] += 0.000_000_4;
-            }
+fn distributed_seam_ties_use_projected_scores_then_the_layer_start() {
+    // Layer 4 faces (1, 0): (5, 1) and (5, 5) tie once projected, though
+    // one raw x is larger. Without a start the least XY wins; from the prime
+    // end (20, 10) the nearer (5, 5) wins.
+    for primed in [false, true] {
+        let (mut intent, mut plan) = distributed_square_fixture(5);
+        if primed {
+            intent.printer = complete_fixture().0.printer;
         }
-        if proximity_wins {
-            plan.layers[1].paths.push(DepositionPath {
-                material_domain: None,
-                kind: DepositionKind::SolidFill,
-                owner: None,
-                width: WidthProfile::Constant { width_mm: 1.0 },
-                physical_z_mm: [1.0, 2.0],
-                points_mm: vec![[5.0, 4.0, 2.0], [5.0, 1.0, 2.0]],
-                arcs: Vec::new(),
-                exposed: false,
-                connectors: Vec::new(),
-            });
+        let (expected, alternate) = if primed {
+            ([5.0, 5.0, 5.0], [5.0, 1.0, 5.0])
+        } else {
+            ([5.0, 1.0, 5.0], [5.0, 5.0, 5.0])
+        };
+        for point in &mut plan.layers[4].paths[0].points_mm {
+            if *point == alternate {
+                point[0] += 0.000_000_4;
+            }
         }
         refresh_volumes(&intent, &mut plan);
         let cancel = AtomicBool::new(false);
         crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-        let expected = if proximity_wins {
-            [5.0, 1.0, 3.0]
-        } else {
-            [1.0, 5.0, 3.0]
-        };
-        assert_eq!(plan.layers[2].paths[0].points_mm[0], expected);
+        assert_eq!(plan.layers[4].paths[0].points_mm[0], expected);
         let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
-        let alternate = if proximity_wins {
-            [1.0, 5.0, 3.0]
-        } else {
-            [5.0, 1.0, 3.0]
-        };
-        let wall = &mut plan.layers[2].paths[0];
+        let wall = &mut plan.layers[4].paths[0];
         let index = wall
             .points_mm
             .iter()
-            .position(|point| *point == alternate)
+            .position(|point| point[1] == alternate[1] && point[0] != 1.0)
             .unwrap();
         wall.rotate_closed(index).unwrap();
         let program = emit_text(&plan, &intent, &cancel).unwrap();
@@ -2522,10 +2527,10 @@ fn distributed_seam_ties_use_projected_history_then_previous_actual_position() {
 
 #[test]
 fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
-    let (mut intent, mut plan) = distributed_square_fixture(2);
+    let (mut intent, mut plan) = distributed_square_fixture(3);
     intent.recipe.process.first_layer_flow_factor = 1.1;
     intent.recipe.process.bridge_flow_factor = 0.8;
-    let second = &mut plan.layers[1].paths[0];
+    let second = &mut plan.layers[2].paths[0];
     second.kind = DepositionKind::Bridge;
     second.width = WidthProfile::PerEdge {
         widths_mm: vec![1.0, 1.001, 1.005, 1.01],
@@ -2540,13 +2545,13 @@ fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
         .sum();
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    assert_eq!(plan.layers[1].paths[0], expected);
+    assert_eq!(plan.layers[2].paths[0], expected);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
-    assert_eq!(report.deposition_segments, 8);
+    assert_eq!(report.deposition_segments, 12);
     assert!((report.deposited_volume_mm3 - volume).abs() < 2e-8);
     assert!(program.contains("M106 S255\n"));
-    if let WidthProfile::PerEdge { widths_mm } = &mut plan.layers[1].paths[0].width {
+    if let WidthProfile::PerEdge { widths_mm } = &mut plan.layers[2].paths[0].width {
         widths_mm.rotate_left(1);
     }
     refresh_volumes(&intent, &mut plan);
@@ -2558,18 +2563,18 @@ fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
 
 #[test]
 fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
-    let (intent, mut plan) = distributed_square_fixture(2);
+    let (intent, mut plan) = distributed_square_fixture(3);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let altered = program.replacen(
-        "G0 X5.000000 Y5.000000 Z2.000000",
-        "G0 X1.000000 Y1.000000 Z2.000000",
+        "G0 X5.000000 Y5.000000 Z3.000000",
+        "G0 X1.000000 Y1.000000 Z3.000000",
         1,
     );
     assert_ne!(altered, program);
     assert!(verify(&altered, &plan, &intent, &cancel).is_err());
-    plan.layers[1].paths[0].rotate_closed(2).unwrap();
+    plan.layers[2].paths[0].rotate_closed(2).unwrap();
     plan.validate(&intent).unwrap();
     let altered = emit_text(&plan, &intent, &cancel).unwrap();
     assert_ne!(altered, program);
@@ -4014,7 +4019,7 @@ fn fixed_dual_actual_epochs_repay_feeders_and_separate_waste_from_model() {
 }
 
 #[test]
-fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() {
+fn distributed_fixed_dual_seams_turn_per_loop_and_start_at_each_waste_end() {
     let (mut intent, mut plan) = fixed_dual_fixture();
     intent.recipe.seam_policy = SeamPolicy::Distributed;
     let mut template = plan.layers[0].clone();
@@ -4042,16 +4047,18 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    // Per layer, tool 0's and tool 1's loop seams. Ties (tool 1 on layer 1)
+    // go to the corner nearer that group's waste end (180, 160).
     let expected = [
-        [25.0, 25.0],
-        [21.0, 21.0],
-        [21.0, 25.0],
-        [25.0, 21.0],
-        [25.0, 25.0],
-        [25.0, 25.0],
-        [25.0, 25.0],
+        [[25.0, 21.0], [125.0, 21.0]],
+        [[21.0, 25.0], [125.0, 25.0]],
+        [[25.0, 21.0], [121.0, 21.0]],
+        [[25.0, 25.0], [125.0, 25.0]],
+        [[21.0, 21.0], [121.0, 21.0]],
+        [[25.0, 25.0], [125.0, 25.0]],
+        [[21.0, 21.0], [121.0, 25.0]],
     ];
-    for (layer, xy) in plan.layers.iter().zip(expected) {
+    for (layer, seams) in plan.layers.iter().zip(expected) {
         let JobWorkflow::FixedDualMarlin { job } = &intent.printer.workflow else {
             unreachable!()
         };
@@ -4061,10 +4068,8 @@ fn distributed_fixed_dual_seams_keep_separate_history_across_layers_and_waste() 
                 .iter()
                 .find(|p| job.tool_for_path(p).unwrap() == tool)
                 .unwrap();
-            assert_eq!(
-                path.points_mm[0],
-                [xy[0] + 100.0 * f64::from(tool), xy[1], layer.z_mm]
-            );
+            let xy = seams[tool as usize];
+            assert_eq!(path.points_mm[0], [xy[0], xy[1], layer.z_mm]);
         }
     }
     let program = emit_text(&plan, &intent, &cancel).unwrap();

@@ -17,6 +17,7 @@ fn task(ends: Ends<'_>) -> Task<'_> {
         ends,
         tool: 0,
         barrier: 0,
+        layer: 0,
         prerequisites: &[],
         duration_s: 1.0,
         seam_policy: None,

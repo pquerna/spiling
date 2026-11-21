@@ -39,6 +39,11 @@ pub struct Task<'a> {
     /// Every task with a lower barrier completes first. The caller decides what
     /// a barrier is (today one physical layer); it is a constraint, not a type.
     pub barrier: u32,
+    /// The independent routing unit holding this task's barrier. Every layer
+    /// starts from [`Machine::start`], never the previous layer's end, so
+    /// layers route in parallel. Barriers never span layers, and layers
+    /// ascend with barriers.
+    pub layer: u32,
     /// Indexes of tasks that must be deposited earlier.
     pub prerequisites: &'a [u32],
     /// Modelled deposition seconds, used only for the schedule clock.
@@ -90,7 +95,9 @@ pub struct ToolChange {
 
 #[derive(Clone, Debug)]
 pub struct Machine {
-    /// Known position before the first task, if any.
+    /// Known position before the first task, if any. Every layer's search and
+    /// wall seams begin here (or at the group's station); travel is still
+    /// priced from the actual previous end.
     pub start: Option<PointMm>,
     /// Tool selected before the first group; `None` prices the first selection.
     pub initial_tool: Option<u32>,
@@ -200,6 +207,15 @@ fn validate(tasks: &[Task<'_>], machine: &Machine) -> Result<(), Error> {
     {
         return Err(Error::InvalidInput("machine model"));
     }
+    let mut layers: Vec<(u32, u32)> = tasks.iter().map(|t| (t.barrier, t.layer)).collect();
+    layers.sort_unstable();
+    layers.dedup();
+    if layers
+        .windows(2)
+        .any(|w| w[0].0 == w[1].0 || w[0].1 > w[1].1)
+    {
+        return Err(Error::InvalidInput("layer"));
+    }
     for (i, task) in tasks.iter().enumerate() {
         let ends_valid = match task.ends {
             Ends::Open { first, last, .. } => finite(&first) && finite(&last),
@@ -300,9 +316,16 @@ fn finish(
             return Err(Error::Rejected(CheckError::Permission));
         }
     }
+    let mut next = 0;
     if groups.iter().any(|(_, tool, range)| {
-        *tool >= machine.tools || range.start > range.end || range.end > visits.len()
-    }) {
+        let refused = *tool >= machine.tools
+            || range.start != next
+            || range.start > range.end
+            || range.end > visits.len();
+        next = range.end;
+        refused
+    }) || next != visits.len()
+    {
         return Err(Error::Rejected(CheckError::Grouping));
     }
     cancelled(cancel)?;

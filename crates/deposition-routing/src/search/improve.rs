@@ -813,6 +813,7 @@ mod tests {
                 },
                 tool: 0,
                 barrier: 0,
+                layer: 0,
                 prerequisites: &[],
                 duration_s: 1.,
                 seam_policy: None,

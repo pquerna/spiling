@@ -195,7 +195,6 @@ fn lex(p: PointMm, q: PointMm) -> std::cmp::Ordering {
 pub(super) fn nearest<'a, 't>(
     context: &mut Context<'a, 't>,
     members: &[u32],
-    local: &[u32],
     start: Option<PointMm>,
 ) -> Result<Order<'a, 't>, Error> {
     let tasks = context.tasks;
@@ -207,11 +206,11 @@ pub(super) fn nearest<'a, 't>(
     let mut prerequisites = vec![Vec::new(); n];
     for (l, index) in members.iter().enumerate() {
         for q in tasks[*index as usize].prerequisites {
-            let other = local[*q as usize];
-            if other != u32::MAX {
+            // Members ascend by task index.
+            if let Ok(other) = members.binary_search(q) {
                 waiting[l] += 1;
-                dependents[other as usize].push(l as u32);
-                prerequisites[l].push(other);
+                dependents[other].push(l as u32);
+                prerequisites[l].push(other as u32);
             }
         }
     }
@@ -250,7 +249,7 @@ pub(super) fn nearest<'a, 't>(
                 }
             }
             Ends::Loop { seams: vertices } => {
-                let permitted = crate::seam::preferred(task);
+                let permitted = crate::seam::policy_seams(task);
                 let least = vertices
                     .iter()
                     .copied()

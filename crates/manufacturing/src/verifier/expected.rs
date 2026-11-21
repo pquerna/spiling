@@ -6,42 +6,53 @@ use spiling_contracts::manufacturing::*;
 use std::cmp::Ordering;
 use std::sync::atomic::AtomicBool;
 
+/// Build-XY seam directions for Distributed walls: the verifier's own copy of
+/// the authored rule, exact small integers in compass order.
+const COMPASS: [[f64; 2]; 16] = [
+    [1.0, 0.0],
+    [2.0, 1.0],
+    [1.0, 1.0],
+    [1.0, 2.0],
+    [0.0, 1.0],
+    [-1.0, 2.0],
+    [-1.0, 1.0],
+    [-2.0, 1.0],
+    [-1.0, 0.0],
+    [-2.0, -1.0],
+    [-1.0, -1.0],
+    [-1.0, -2.0],
+    [0.0, -1.0],
+    [1.0, -2.0],
+    [1.0, -1.0],
+    [2.0, -1.0],
+];
+
 /// Check authored seam semantics independently of path/program correspondence.
 /// The prior endpoint is projected because accepted byte replay must reach that
-/// exact command-space point. No path is reordered or copied here.
+/// exact command-space point. No path is reordered or copied here. Every layer
+/// begins at `layer_start` (or its group's waste end); nothing crosses layers.
+/// A Distributed wall maximizes its dot product with compass entry
+/// `(7 * layer + identity) mod 16`, `identity` mixing its least projected XY.
 pub(super) fn validate_wall_seams(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
-    mut previous: Option<[f64; 3]>,
+    layer_start: Option<[f64; 3]>,
     routing: Option<&FixedDualRouter>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let zero = |value: f64| if value == 0.0 { 0.0 } else { value };
-    let score = |point: [f64; 3], history: &[[f64; 2]]| match recipe.seam_policy {
-        SeamPolicy::Nearest => 0.0,
-        SeamPolicy::Distributed => {
-            let mut clearance = f64::INFINITY;
-            for prior in history {
-                clearance = clearance.min((prior[0] - point[0]).hypot(prior[1] - point[1]));
-            }
-            clearance
-        }
-        SeamPolicy::PreferredBuildDirection { xy } => zero(point[0] * xy[0] + point[1] * xy[1]),
-    };
     let lex_xy = |a: [f64; 3], b: [f64; 3]| {
         zero(a[0])
             .total_cmp(&zero(b[0]))
             .then_with(|| zero(a[1]).total_cmp(&zero(b[1])))
     };
-    let mut previous_group = None;
-    let mut wall_starts = [[[0.0; 2]; 8]; 2];
-    let mut wall_counts = [0usize; 2];
-    let mut wall_cursor = [0usize; 2];
     for layer in &plan.layers {
+        let mut previous = layer_start;
+        let mut previous_tool = None;
         for path in &layer.paths {
             let tool = routing.map_or(Ok(0), |job| job.tool_for_path(path))?;
             if let Some(job) = routing
-                && previous_group != Some((layer.index, tool))
+                && previous_tool != Some(tool)
             {
                 let endpoint = job.waste_end_mm(tool, layer.z_mm);
                 previous = Some(if recipe.seam_policy == SeamPolicy::Distributed {
@@ -49,18 +60,38 @@ pub(super) fn validate_wall_seams(
                 } else {
                     endpoint
                 });
-                previous_group = Some((layer.index, tool));
+                previous_tool = Some(tool);
             }
             super::cancelled(cancel)?;
             let points = &path.points_mm;
             if path.owner == Some(DepositionOwner::Wall) && points.first() == points.last() {
+                let vertices = &points[..points.len() - 1];
+                let direction = match recipe.seam_policy {
+                    SeamPolicy::Nearest => None,
+                    SeamPolicy::PreferredBuildDirection { xy } => Some(xy),
+                    SeamPolicy::Distributed => {
+                        let mut least = super::project_xyz6_point_mm(vertices[0])?;
+                        for &raw in vertices {
+                            let p = super::project_xyz6_point_mm(raw)?;
+                            if lex_xy(p, least).is_lt() {
+                                least = p;
+                            }
+                        }
+                        let key = |v: f64| (v * 1e6).round() as i64 as u64;
+                        let identity = (key(least[0]) ^ key(least[1]).rotate_left(32))
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            >> 60;
+                        Some(COMPASS[((7 * u64::from(layer.index) + identity) % 16) as usize])
+                    }
+                };
+                let score =
+                    |p: [f64; 3]| direction.map_or(0.0, |xy| zero(p[0] * xy[0] + p[1] * xy[1]));
                 let start = super::project_xyz6_point_mm(points[0])?;
-                let history = &wall_starts[tool as usize][..wall_counts[tool as usize]];
-                let start_score = score(start, history);
-                for &raw in &points[1..points.len() - 1] {
+                let start_score = score(start);
+                for &raw in &vertices[1..] {
                     super::cancelled(cancel)?;
                     let candidate = super::project_xyz6_point_mm(raw)?;
-                    let precedes_start = match score(candidate, history).total_cmp(&start_score) {
+                    let precedes_start = match score(candidate).total_cmp(&start_score) {
                         Ordering::Greater => true,
                         Ordering::Less => false,
                         Ordering::Equal => {
@@ -79,12 +110,6 @@ pub(super) fn validate_wall_seams(
                             "closed wall start violates authored seam policy",
                         ));
                     }
-                }
-                if recipe.seam_policy == SeamPolicy::Distributed {
-                    let tool = tool as usize;
-                    wall_starts[tool][wall_cursor[tool]] = [start[0], start[1]];
-                    wall_cursor[tool] = (wall_cursor[tool] + 1) % 8;
-                    wall_counts[tool] = (wall_counts[tool] + 1).min(8);
                 }
                 // Identical projected/raw XY ties have the same physical seam;
                 // their pre-rotation cyclic indices are not retained by the plan.

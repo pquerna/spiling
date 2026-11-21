@@ -13,3 +13,5 @@ repository.workspace = true
 # and independent judge keep route admission on the CPU.
 spiling-compute.workspace = true
 spiling-contracts.workspace = true
+# Layers route independently; results reduce in layer order.
+rayon.workspace = true

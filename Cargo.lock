@@ -6873,6 +6873,7 @@ dependencies = [
 name = "spiling-deposition-routing"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "spiling-compute",
  "spiling-contracts",
 ]

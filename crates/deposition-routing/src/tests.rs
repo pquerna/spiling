@@ -12,6 +12,7 @@ fn line(x: f64, y: f64, z: f64, tool: u32, barrier: u32) -> Task<'static> {
         },
         tool,
         barrier,
+        layer: barrier,
         prerequisites: NONE,
         duration_s: 1.,
         seam_policy: None,
@@ -296,7 +297,7 @@ fn authored_wall_seams_use_command_coordinates_and_reject_tampering() {
     ];
     let task = Task {
         ends: Ends::Loop { seams: &points },
-        seam_policy: Some(SeamPolicy::Distributed),
+        seam_policy: Some(SeamPolicy::Nearest),
         ..line(0., 0., 0.2, 0, 0)
     };
     let mut m = machine(1, Service::WhenUsed);
@@ -313,6 +314,76 @@ fn authored_wall_seams_use_command_coordinates_and_reject_tampering() {
         schedule(&[task], &m, ToolOrder::Fixed, &AtomicBool::new(true)),
         Err(Error::Cancelled)
     );
+}
+
+/// One layer per entry: two wall squares and a line, under one wall policy.
+fn layered_squares(squares: &[[[PointMm; 4]; 2]], policy: SeamPolicy) -> Vec<Task<'_>> {
+    let mut tasks = Vec::new();
+    for (layer, pair) in squares.iter().enumerate() {
+        let z = pair[0][0][2];
+        for square in pair {
+            tasks.push(Task {
+                ends: Ends::Loop { seams: square },
+                seam_policy: Some(policy),
+                ..line(0., 0., z, 0, layer as u32)
+            });
+        }
+        tasks.push(line(20., 3., z, 0, layer as u32));
+    }
+    tasks
+}
+
+#[test]
+fn layers_route_alone_from_the_machine_start_and_seams_follow_their_policy() {
+    let squares: Vec<[[PointMm; 4]; 2]> = (0..6)
+        .map(|layer| {
+            let z = 0.2 * (layer + 1) as f64;
+            let square = |x: f64| [[x, 0., z], [x + 4., 0., z], [x + 4., 4., z], [x, 4., z]];
+            [square(2.), square(10.)]
+        })
+        .collect();
+    let m = machine(1, Service::WhenUsed);
+    for policy in [SeamPolicy::Nearest, SeamPolicy::Distributed] {
+        let tasks = layered_squares(&squares, policy);
+        let whole = run(&tasks, &m, ToolOrder::Fixed);
+        assert_eq!(check(&tasks, &m, ToolOrder::Fixed, &whole), Ok(whole.cost));
+        // Each layer alone, from the same start, yields the same order and seams.
+        for layer in 0..6u32 {
+            let own: Vec<Task<'_>> = tasks.iter().filter(|t| t.layer == layer).copied().collect();
+            let alone = run(&own, &m, ToolOrder::Fixed);
+            let offset = 3 * layer;
+            let expected: Vec<Visit> = alone
+                .visits
+                .iter()
+                .map(|v| Visit {
+                    task: v.task + offset,
+                    ..*v
+                })
+                .collect();
+            let group = &whole.groups[layer as usize];
+            assert_eq!(
+                whole.visits[group.visits.clone()],
+                expected[..],
+                "{policy:?} {layer}"
+            );
+        }
+        // The first square's seam vertex in each layer.
+        let seams: Vec<u32> = whole
+            .visits
+            .iter()
+            .filter(|v| v.task % 3 == 0)
+            .map(|v| v.seam)
+            .collect();
+        let mut distinct = seams.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        match policy {
+            // Nearest the start (the origin) on every layer: aligned.
+            SeamPolicy::Nearest => assert_eq!(seams, vec![0; 6]),
+            // Turned by layer: scattered over several corners.
+            _ => assert!(distinct.len() >= 3, "{seams:?}"),
+        }
+    }
 }
 
 #[test]
@@ -390,6 +461,7 @@ fn preferred_build_direction_walls_are_searched_only_at_their_policy_seams() {
             ends: Ends::Loop { seams },
             tool: 0,
             barrier: 0,
+            layer: 0,
             prerequisites: &[],
             duration_s: 1.,
             seam_policy: Some(SeamPolicy::PreferredBuildDirection { xy: [0., 1.] }),

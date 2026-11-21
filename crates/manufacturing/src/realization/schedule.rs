@@ -168,6 +168,7 @@ pub(super) fn apply(
                     .map_or(Ok(0), |job| job.tool_for_path(path))?
                     .into(),
                 barrier,
+                layer: layer.index,
                 prerequisites: &dependencies[tasks.len()],
                 duration_s: length / process.speed_mm_s,
                 seam_policy: (closed(path) && path.owner == Some(DepositionOwner::Wall))

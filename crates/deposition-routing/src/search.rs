@@ -6,6 +6,7 @@ mod construct;
 mod improve;
 mod sequence;
 use crate::*;
+use rayon::prelude::*;
 
 pub(crate) struct Context<'a, 't> {
     pub tasks: &'a [Task<'t>],
@@ -62,10 +63,14 @@ impl Pricing {
 }
 
 pub(crate) type Groups = Vec<(u32, u32, Range<usize>)>;
+/// One layer's visits, layer-local groups and counted work.
+type RoutedLayer = (Vec<Visit>, Groups, u64);
 
 /// Tasks bucketed by barrier (ascending), then by tool.
 struct Buckets {
     barriers: Vec<u32>,
+    /// The layer of each barrier (validated: one per barrier, ascending).
+    layers: Vec<u32>,
     /// `members[barrier_index][tool]` holds task indexes in input order.
     members: Vec<Vec<Vec<u32>>>,
 }
@@ -75,11 +80,17 @@ fn buckets(context: &Context<'_, '_>) -> Buckets {
     barriers.dedup();
     let tools = context.machine.tools as usize;
     let mut members = vec![vec![Vec::new(); tools]; barriers.len()];
+    let mut layers = vec![0; barriers.len()];
     for (index, task) in context.tasks.iter().enumerate() {
         let b = barriers.binary_search(&task.barrier).unwrap();
         members[b][task.tool as usize].push(index as u32);
+        layers[b] = task.layer;
     }
-    Buckets { barriers, members }
+    Buckets {
+        barriers,
+        layers,
+        members,
+    }
 }
 fn present(context: &Context<'_, '_>, tools: &[Vec<u32>]) -> Vec<u32> {
     (0..context.machine.tools)
@@ -90,17 +101,70 @@ fn present(context: &Context<'_, '_>, tools: &[Vec<u32>]) -> Vec<u32> {
         .collect()
 }
 
+/// Route every layer independently from the machine start, in parallel, and
+/// concatenate the layers in barrier order. Each layer counts its own work.
 pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups), Error> {
     let avx2 = std::env::var_os("SPILING_ROUTING_AVX2").is_none_or(|value| value == "1");
     let buckets = buckets(context);
     let orders = sequence::plan(context, &buckets.barriers, &buckets.members)?;
+    // Contiguous barrier-index runs of one layer.
+    let mut layers: Vec<Range<usize>> = Vec::new();
+    for b in 0..buckets.barriers.len() {
+        match layers.last_mut() {
+            Some(run) if buckets.layers[run.start] == buckets.layers[b] => run.end = b + 1,
+            _ => layers.push(b..b + 1),
+        }
+    }
+    let (tasks, machine, order, cancel) = (
+        context.tasks,
+        context.machine,
+        context.order,
+        context.cancel,
+    );
+    let routed: Vec<Result<RoutedLayer, Error>> = layers
+        .into_par_iter()
+        .map(|barriers| {
+            let mut layer = Context {
+                tasks,
+                machine,
+                order,
+                cancel,
+                work: 0,
+            };
+            let (visits, groups) = route_layer(&mut layer, &buckets, &orders, barriers, avx2)?;
+            Ok((visits, groups, layer.work))
+        })
+        .collect();
     let total: usize = orders.iter().map(Vec::len).sum();
     let mut visits = Vec::with_capacity(context.tasks.len());
     let mut groups = Vec::with_capacity(total);
+    for layer in routed {
+        let (layer_visits, layer_groups, work) = layer?;
+        let base = visits.len();
+        visits.extend(layer_visits);
+        groups.extend(
+            layer_groups.into_iter().map(|(barrier, tool, range)| {
+                (barrier, tool, range.start + base..range.end + base)
+            }),
+        );
+        context.work = context.work.saturating_add(work);
+    }
+    Ok((visits, groups))
+}
+
+/// One layer's groups, starting at the machine start. Ranges are layer-local.
+fn route_layer(
+    context: &mut Context<'_, '_>,
+    buckets: &Buckets,
+    orders: &[Vec<u32>],
+    barriers: Range<usize>,
+    avx2: bool,
+) -> Result<(Vec<Visit>, Groups), Error> {
+    let mut visits = Vec::new();
+    let mut groups = Vec::new();
     let mut position = context.machine.start;
-    let mut local = vec![u32::MAX; context.tasks.len()];
-    for (b, order) in orders.iter().enumerate() {
-        for &tool in order {
+    for b in barriers {
+        for &tool in &orders[b] {
             let members = &buckets.members[b][tool as usize];
             let begin = visits.len();
             if !members.is_empty() {
@@ -112,19 +176,13 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
                     Some(xy) => Some([xy[0], xy[1], z]),
                     None => position,
                 };
-                for (l, index) in members.iter().enumerate() {
-                    local[*index as usize] = l as u32;
-                }
-                let mut order = construct::nearest(context, members, &local, start)?;
+                let mut order = construct::nearest(context, members, start)?;
                 if avx2 {
                     order.enable_simd(context.cancel);
                 }
                 improve::improve(context, &mut order)?;
                 position = order.end().or(start);
                 visits.extend(order.into_visits(members));
-                for index in members {
-                    local[*index as usize] = u32::MAX;
-                }
             } else if let (Some(xy), Some(p)) =
                 (context.machine.change.stations_xy[tool as usize], position)
             {
