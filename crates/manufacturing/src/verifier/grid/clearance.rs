@@ -1,4 +1,4 @@
-use super::{Chord, MAX_XYZ6_TICKS, cancelled, failed, overflow, validate_cell_size};
+use super::{CELL_TICKS, Chord, MAX_XYZ6_TICKS, cancelled, failed, overflow, validate_cell_size};
 use spiling_contracts::geometry::GeometryErrorCode;
 use spiling_contracts::manufacturing::{
     DepositionKind, ManufacturingError, ManufacturingErrorCode, NormalizedPrintPlan,
@@ -6,6 +6,9 @@ use spiling_contracts::manufacturing::{
     program_coordinates::{enclosed_vertical_gap_mm, xyz6_coordinate_error_mm},
 };
 use std::{mem::size_of, ops::Range, sync::atomic::AtomicBool};
+
+const UNSEEN: usize = usize::MAX;
+const DISJOINT: usize = usize::MAX - 1;
 
 pub(in crate::verifier) struct RoadInput {
     pub layer: u32,
@@ -167,7 +170,7 @@ fn separated(first: [f64; 2], second: [f64; 2], gap: f64) -> Result<bool, Manufa
         || enclosed_vertical_gap_mm(second[0], first[1])? >= gap)
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::verifier) struct ClearanceReceipt {
     pub shared_edge_cells: usize,
     pub checked_pairs: usize,
@@ -236,9 +239,18 @@ impl Clearance {
     }
 
     pub(in crate::verifier) fn verify(
+        self,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<ClearanceReceipt, ManufacturingError> {
+        self.verify_screened(work, cancel, true)
+    }
+
+    fn verify_screened(
         mut self,
         work: &mut usize,
         cancel: &AtomicBool,
+        screen: bool,
     ) -> Result<ClearanceReceipt, ManufacturingError> {
         let mut bands = Vec::new();
         let mut start = 0;
@@ -283,7 +295,10 @@ impl Clearance {
         }
         let mut marks = Vec::new();
         self.admission.reserve(&mut marks, self.roads.len())?;
-        marks.resize(self.roads.len(), usize::MAX);
+        marks.resize(self.roads.len(), UNSEEN);
+        if screen {
+            self.screen_disjoint(&bands, &mut marks, work, cancel)?;
+        }
         let mut selected = Vec::new();
         let mut overlaps = Vec::new();
         let mut receipt = ClearanceReceipt::default();
@@ -295,11 +310,8 @@ impl Clearance {
             if !floor.is_finite() {
                 continue;
             }
-            let low_bound = (floor - self.z_gap).next_down();
-            let high_bound = (top + self.z_gap).next_up();
-            let first = bands.partition_point(|band| band.prefix_high < low_bound);
-            let end = bands.partition_point(|band| band.suffix_model_low <= high_bound);
-            let windows = &mut bands[first..end.max(first)];
+            let window = model_window(&bands, [floor, top], self.z_gap);
+            let windows = &mut bands[window.clone()];
             for band in &mut *windows {
                 debit(work, 1, cancel)?;
                 if band.rows.is_none()
@@ -310,6 +322,7 @@ impl Clearance {
                         &self.roads,
                         band.roads.clone(),
                         self.xy_gap,
+                        &marks,
                         &mut self.admission,
                         work,
                         cancel,
@@ -317,9 +330,12 @@ impl Clearance {
                 }
             }
             let roads = bands[ordinal].roads.clone();
-            let windows = &bands[first..end.max(first)];
+            let windows = &bands[window];
             for support_index in roads.filter(|index| self.roads[*index].support) {
                 debit(work, 1, cancel)?;
+                if marks[support_index] == DISJOINT {
+                    continue;
+                }
                 let support = self.roads[support_index];
                 selected.clear();
                 let mut raster_work = 0;
@@ -393,6 +409,42 @@ impl Clearance {
         }
         Ok(receipt)
     }
+
+    fn screen_disjoint(
+        &self,
+        bands: &[Band],
+        marks: &mut [usize],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let Some(forest) = ChordForest::build(self, bands, work, cancel)? else {
+            return Ok(());
+        };
+        marks.fill(DISJOINT);
+        for band in bands.iter().filter(|band| band.support[0].is_finite()) {
+            debit(work, 1, cancel)?;
+            let roots = &forest.roots[model_window(bands, band.support, self.z_gap)];
+            for index in band
+                .roads
+                .clone()
+                .filter(|index| self.roads[*index].support)
+            {
+                debit(work, 1, cancel)?;
+                let Ok(bounds) = CellBounds::for_road(self.roads[index], 0.0) else {
+                    marks.fill(UNSEEN);
+                    return Ok(());
+                };
+                let mut hits = false;
+                for &root in roots.iter().flatten() {
+                    hits |= forest.mark_hits(root, bounds, marks, work, cancel)?;
+                }
+                if hits {
+                    marks[index] = UNSEEN;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 struct Band {
@@ -403,6 +455,170 @@ struct Band {
     suffix_model_low: f64,
     future_support_low: f64,
     rows: Option<Rows>,
+}
+
+fn model_window(bands: &[Band], support: [f64; 2], gap: f64) -> Range<usize> {
+    let low = (support[0] - gap).next_down();
+    let high = (support[1] + gap).next_up();
+    let first = bands.partition_point(|band| band.prefix_high < low);
+    let end = bands.partition_point(|band| band.suffix_model_low <= high);
+    first..end.max(first)
+}
+
+#[derive(Clone, Copy)]
+struct CellBounds {
+    low: [i64; 2],
+    high: [i64; 2],
+}
+
+impl CellBounds {
+    fn for_road(road: Road, gap: f64) -> Result<Self, ManufacturingError> {
+        let radius = road.outer_radius(gap)?;
+        let [start, end] = [road.chord.start, road.chord.end];
+        Ok(Self {
+            low: std::array::from_fn(|axis| {
+                (start[axis].min(end[axis]) - radius - 1).div_euclid(CELL_TICKS)
+            }),
+            high: std::array::from_fn(|axis| {
+                (start[axis].max(end[axis]) + radius).div_euclid(CELL_TICKS)
+            }),
+        })
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            low: std::array::from_fn(|axis| self.low[axis].min(other.low[axis])),
+            high: std::array::from_fn(|axis| self.high[axis].max(other.high[axis])),
+        }
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        (0..2).all(|axis| self.low[axis] <= other.high[axis] && other.low[axis] <= self.high[axis])
+    }
+}
+
+struct ChordNode {
+    bounds: CellBounds,
+    first: usize,
+    second: usize,
+}
+
+#[derive(Default)]
+struct ChordForest {
+    nodes: Vec<ChordNode>,
+    roots: Vec<Option<usize>>,
+}
+
+impl ChordForest {
+    fn build(
+        clearance: &Clearance,
+        bands: &[Band],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, ManufacturingError> {
+        let mut model_count = 0usize;
+        for road in &clearance.roads {
+            debit(work, 1, cancel)?;
+            model_count += usize::from(!road.support);
+        }
+        let Some(nodes) = model_count.checked_mul(2) else {
+            return Ok(None);
+        };
+        let mut forest = Self::default();
+        let mut scratch = Admission(clearance.admission.0);
+        if scratch.reserve(&mut forest.nodes, nodes).is_err()
+            || scratch.reserve(&mut forest.roots, bands.len()).is_err()
+        {
+            return Ok(None);
+        }
+        for band in bands {
+            debit(work, 1, cancel)?;
+            let first = forest.nodes.len();
+            for index in band.roads.clone() {
+                debit(work, 1, cancel)?;
+                let road = clearance.roads[index];
+                if road.support {
+                    continue;
+                }
+                let Ok(bounds) = CellBounds::for_road(road, clearance.xy_gap) else {
+                    return Ok(None);
+                };
+                forest.nodes.push(ChordNode {
+                    bounds,
+                    first: index,
+                    second: UNSEEN,
+                });
+            }
+            let end = forest.nodes.len();
+            let root = if first == end {
+                None
+            } else {
+                Some(forest.group(first..end, work, cancel)?)
+            };
+            forest.roots.push(root);
+        }
+        Ok(Some(forest))
+    }
+
+    fn group(
+        &mut self,
+        span: Range<usize>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<usize, ManufacturingError> {
+        if span.len() == 1 {
+            return Ok(span.start);
+        }
+        let mut bounds = self.nodes[span.start].bounds;
+        for node in &self.nodes[span.start + 1..span.end] {
+            debit(work, 1, cancel)?;
+            bounds = bounds.union(node.bounds);
+        }
+        let [width, height] = std::array::from_fn(|axis| bounds.high[axis] - bounds.low[axis]);
+        let axis = usize::from(height > width);
+        let half = span.len() / 2;
+        let mut comparisons = 0usize;
+        self.nodes[span.clone()].select_nth_unstable_by(half, |left, right| {
+            comparisons = comparisons.saturating_add(1);
+            (left.bounds.low[axis] + left.bounds.high[axis], left.first).cmp(&(
+                right.bounds.low[axis] + right.bounds.high[axis],
+                right.first,
+            ))
+        });
+        debit(work, comparisons, cancel)?;
+        let middle = span.start + half;
+        let first = self.group(span.start..middle, work, cancel)?;
+        let second = self.group(middle..span.end, work, cancel)?;
+        let root = self.nodes.len();
+        self.nodes.push(ChordNode {
+            bounds,
+            first,
+            second,
+        });
+        Ok(root)
+    }
+
+    fn mark_hits(
+        &self,
+        root: usize,
+        bounds: CellBounds,
+        marks: &mut [usize],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        debit(work, 1, cancel)?;
+        let node = &self.nodes[root];
+        if !bounds.intersects(node.bounds) {
+            return Ok(false);
+        }
+        if node.second == UNSEEN {
+            marks[node.first] = UNSEEN;
+            return Ok(true);
+        }
+        let first = self.mark_hits(node.first, bounds, marks, work, cancel)?;
+        let second = self.mark_hits(node.second, bounds, marks, work, cancel)?;
+        Ok(first || second)
+    }
 }
 
 pub(super) struct Incidence {
@@ -429,6 +645,7 @@ impl Rows {
         roads: &[Road],
         span: Range<usize>,
         clearance_mm: f64,
+        marks: &[usize],
         admission: &mut Admission,
         work: &mut usize,
         cancel: &AtomicBool,
@@ -437,7 +654,7 @@ impl Rows {
         for index in span {
             debit(work, 1, cancel)?;
             let road = roads[index];
-            if !road.support {
+            if !road.support && marks[index] != DISJOINT {
                 entries.insert(
                     index,
                     road.chord,
@@ -636,20 +853,94 @@ mod tests {
     fn shared_cells_resolve_locally_and_count_each_pair_once() {
         let cancel = AtomicBool::new(false);
         for lateral in [499_999, 500_000, 500_001, 600_000] {
-            let mut grid = clearance();
-            grid.record(road(0, DepositionKind::Perimeter, lateral, 250_000))
-                .unwrap();
-            grid.record(road(0, DepositionKind::Support, 0, 250_000))
-                .unwrap();
-            let result = grid.verify(&mut 0, &cancel);
-            if lateral == 499_999 {
-                assert!(result.err().unwrap().message.contains("line 1"));
-            } else {
-                let receipt = result.unwrap();
-                assert_eq!(receipt.checked_pairs, usize::from(lateral < 600_000));
-                assert_eq!(receipt.shared_edge_cells > 0, lateral < 600_000);
+            for screen in [false, true] {
+                let mut grid = clearance();
+                grid.record(road(0, DepositionKind::Perimeter, lateral, 250_000))
+                    .unwrap();
+                grid.record(road(0, DepositionKind::Support, 0, 250_000))
+                    .unwrap();
+                let result = grid.verify_screened(&mut 0, &cancel, screen);
+                if lateral == 499_999 {
+                    assert!(result.err().unwrap().message.contains("line 1"));
+                } else {
+                    let receipt = result.unwrap();
+                    assert_eq!(receipt.checked_pairs, usize::from(lateral < 600_000));
+                    assert_eq!(receipt.shared_edge_cells > 0, lateral < 600_000);
+                }
             }
         }
+    }
+
+    #[test]
+    fn disjoint_members_of_an_overlapping_group_do_not_expand_rows() {
+        let cancel = AtomicBool::new(false);
+        let run = |screen| {
+            let mut grid = clearance();
+            for (x, role) in [
+                (-1_000_000, DepositionKind::Perimeter),
+                (1_000_000, DepositionKind::Perimeter),
+                (0, DepositionKind::Support),
+            ] {
+                let mut input = road(0, role, 0, 250_000);
+                input.from = [x, -20_000_000, 250_000];
+                input.to = [x, 20_000_000, 250_000];
+                input.length_upper_mm = 40.0;
+                grid.record(input).unwrap();
+            }
+            let mut work = 0;
+            (
+                grid.verify_screened(&mut work, &cancel, screen).unwrap(),
+                work,
+            )
+        };
+        let (control, full_work) = run(false);
+        let (screened, screened_work) = run(true);
+        assert_eq!(screened, control);
+        assert_eq!(screened, ClearanceReceipt::default());
+        assert!(screened_work * 20 < full_work);
+    }
+
+    #[test]
+    fn chord_screen_preserves_the_first_clearance_refusal() {
+        let cancel = AtomicBool::new(false);
+        let failure = |screen| {
+            let mut grid = clearance();
+            for (line, lateral, role) in [
+                (3, -1_000_000, DepositionKind::Perimeter),
+                (5, 100_000, DepositionKind::Perimeter),
+                (6, -100_000, DepositionKind::Perimeter),
+                (17, 0, DepositionKind::Support),
+            ] {
+                let mut input = road(0, role, lateral, 250_000);
+                input.line = line;
+                grid.record(input).unwrap();
+            }
+            grid.verify_screened(&mut 0, &cancel, screen).unwrap_err()
+        };
+        let reference = failure(false);
+        let screened = failure(true);
+        assert_eq!(
+            (screened.code, &screened.message),
+            (reference.code, &reference.message)
+        );
+        assert!(screened.message.contains("line 17"));
+        assert!(screened.message.contains("line 5"));
+    }
+
+    #[test]
+    fn chord_screen_declines_unadmitted_scratch() {
+        let cancel = AtomicBool::new(false);
+        let mut grid = clearance();
+        grid.record(road(0, DepositionKind::Perimeter, 0, 250_000))
+            .unwrap();
+        let allowance = crate::working_set::WorkingSet::new(grid.admission.0).unwrap();
+        crate::working_set::scope(allowance, || {
+            assert!(
+                ChordForest::build(&grid, &[], &mut 0, &cancel)
+                    .unwrap()
+                    .is_none()
+            );
+        });
     }
 
     #[test]
