@@ -2631,14 +2631,6 @@ fn validate_process_overlap(
 }
 
 impl SectionSpan {
-    fn visit_occupied(
-        &self,
-        cancel: &AtomicBool,
-        visit: impl FnMut(&geo::Polygon<f64>, Option<[f64; 2]>) -> Result<bool, ManufacturingError>,
-    ) -> Result<(), ManufacturingError> {
-        self.visit_occupied_screened(cancel, |_, _| Ok(true), visit)
-    }
-
     /// `screen` sees each piece's XY bounds and height scope before the piece
     /// is constructed; `Ok(false)` skips it. Only a consumer that provably
     /// ignores the piece may decline it; proofs must not.

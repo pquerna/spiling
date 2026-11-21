@@ -1110,7 +1110,7 @@ fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
                         .map(|piece| {
                             let x = 10.0 + f64::from(piece) * 3.0;
                             let y = if refuses && index == 7 && piece == 13 {
-                                0.0
+                                4.3
                             } else {
                                 5.0
                             };
@@ -1127,11 +1127,13 @@ fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
             .iter()
             .enumerate()
             .map(|(index, elevation)| {
-                let mut support = path(10.0 + 13.0 * 3.0);
+                // A loop around the whole row: every piece is near support
+                // (so none is screened out) and clear of it unless moved.
+                let mut support = path(0.0);
                 support.physical_z_mm = [elevation.lower_z, elevation.z];
-                for point in &mut support.points_mm {
-                    point[2] = elevation.z;
-                }
+                support.points_mm = [[8.0, 4.4], [160.0, 4.4], [160.0, 6.6], [8.0, 6.6]]
+                    .map(|[x, y]| [x, y, elevation.z])
+                    .to_vec();
                 let mut current = layer(vec![support]);
                 current.index = index as u32;
                 current.z_mm = elevation.z;

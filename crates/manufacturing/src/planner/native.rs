@@ -703,39 +703,22 @@ fn certify_support_clearance_traced(
     let raw_started = std::time::Instant::now();
     let raw_bytes =
         index_bytes.saturating_sub(index.as_ref().map_or(0, |index| index.retained_bytes()));
-    if !certify_raw_occupancy_waves(
-        &RawOccupancy {
-            sections,
-            schedule,
-            layers,
-            vertical,
-            index: index.as_ref(),
-            clearance: xy_clearance_mm,
-        },
-        raw_bytes,
-        native_work,
-        support_work,
-        trace,
-        cancel,
-    )? {
-        for span in sections {
-            let interval = [
-                schedule[span.start as usize].lower_z,
-                schedule[(span.end - 1) as usize].z,
-            ];
-            span.visit_occupied(cancel, |polygon, piece_scope| {
-                let height = piece_scope.map_or(interval, |height| {
-                    [interval[0].max(height[0]), interval[1].min(height[1])]
-                });
-                if height[0] > height[1] {
-                    return Ok(true);
-                }
-                let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                    lower_mm: height[0],
-                    upper_mm: height[1],
-                };
-                let range =
-                    scoped_support_layer_range(schedule, scope, vertical, support_work, cancel)?;
+    let raw = RawOccupancy {
+        sections,
+        schedule,
+        layers,
+        vertical,
+        index: index.as_ref(),
+        clearance: xy_clearance_mm,
+    };
+    if !certify_raw_occupancy_waves(&raw, raw_bytes, native_work, support_work, trace, cancel)? {
+        let task = raw.task();
+        visit_raw_pieces(
+            &raw,
+            &task,
+            support_work,
+            cancel,
+            |polygon, scope, range, work| {
                 certify_polygon_capsules(
                     PolygonDeposition {
                         layers,
@@ -750,14 +733,14 @@ fn certify_support_clearance_traced(
                     },
                     xy_clearance_mm,
                     native_work,
-                    support_work,
+                    work,
                     trace,
                     None,
                     cancel,
                 )?;
                 Ok(true)
-            })?;
-        }
+            },
+        )?;
     }
     trace.report("raw_occupancy", raw_started);
     let void_started = std::time::Instant::now();
@@ -918,6 +901,166 @@ struct RawTask<'a> {
     clearance: f64,
 }
 
+impl<'a> RawOccupancy<'a> {
+    fn task(&self) -> RawTask<'a> {
+        RawTask {
+            layers: self.layers,
+            index: self.index,
+            clearance: self.clearance,
+        }
+    }
+}
+
+/// Visits each raw occupied piece with its certified height scope and layer
+/// range, in source order. A piece that no actual support path approaches in
+/// that range would perform no capsule proof, so it is declined from its
+/// conservative bounds before the piece is constructed. Serial and parallel
+/// certification share this visitor, so they see the same pieces and work.
+fn visit_raw_pieces(
+    raw: &RawOccupancy<'_>,
+    task: &RawTask<'_>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(
+        &geo::Polygon<f64>,
+        spiling_geometry::ProtectedVoidHeightScope,
+        std::ops::Range<usize>,
+        &mut usize,
+    ) -> Result<bool, ManufacturingError>,
+) -> Result<(), ManufacturingError> {
+    let counter = std::cell::Cell::new(*work);
+    let result = (|| {
+        for span in raw.sections {
+            let interval = [
+                raw.schedule[span.start as usize].lower_z,
+                raw.schedule[(span.end - 1) as usize].z,
+            ];
+            let scoped = |piece_scope: Option<[f64; 2]>| {
+                let height = piece_scope.map_or(interval, |height| {
+                    [interval[0].max(height[0]), interval[1].min(height[1])]
+                });
+                (height[0] <= height[1]).then_some(
+                    spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                        lower_mm: height[0],
+                        upper_mm: height[1],
+                    },
+                )
+            };
+            let charged = |f: &mut dyn FnMut(&mut usize) -> Result<bool, ManufacturingError>| {
+                let mut work = counter.get();
+                let result = f(&mut work);
+                counter.set(work);
+                result
+            };
+            span.visit_occupied_screened(
+                cancel,
+                |bounds, piece_scope| {
+                    let Some(scope) = scoped(piece_scope) else {
+                        return Ok(false);
+                    };
+                    charged(&mut |work| {
+                        let range = scoped_support_layer_range(
+                            raw.schedule,
+                            scope,
+                            raw.vertical,
+                            work,
+                            cancel,
+                        )?;
+                        raw_piece_meets_support(task, bounds, range, work, cancel)
+                    })
+                },
+                |polygon, piece_scope| {
+                    let Some(scope) = scoped(piece_scope) else {
+                        return Ok(true);
+                    };
+                    charged(&mut |work| {
+                        let range = scoped_support_layer_range(
+                            raw.schedule,
+                            scope,
+                            raw.vertical,
+                            work,
+                            cancel,
+                        )?;
+                        visit(polygon, scope, range, work)
+                    })
+                },
+            )?;
+        }
+        Ok(())
+    })();
+    *work = counter.get();
+    result
+}
+
+/// Whether certifying a piece within these conservative bounds would test any
+/// actual support capsule: the same index query and per-path bounds rejection
+/// the proof applies, without the proof.
+fn raw_piece_meets_support(
+    task: &RawTask<'_>,
+    bounds: [[f64; 2]; 2],
+    range: std::ops::Range<usize>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    if !bounds.iter().flatten().all(|value| value.is_finite()) {
+        return Ok(true);
+    }
+    for ordinal in range {
+        let layer = &task.layers[ordinal];
+        charge_support_clearance(work, cancel)?;
+        let mut meets = false;
+        let mut check = |candidate| {
+            let range = match candidate {
+                clearance_index::Candidates::Charge(amount) => {
+                    return charge_support_clearance_range(work, amount, cancel);
+                }
+                clearance_index::Candidates::Skip { paths, .. } => {
+                    return charge_support_clearance_range(work, paths, cancel);
+                }
+                clearance_index::Candidates::Visit(range) => range.paths,
+            };
+            for path in &layer.paths[range] {
+                charge_support_clearance(work, cancel)?;
+                if path.kind.is_model() {
+                    continue;
+                }
+                if !path_xy_bounds(path).is_some_and(|(path_bounds, width)| {
+                    spiling_geometry::planar_bounds_clear(
+                        path_bounds,
+                        bounds,
+                        width * 0.5 + XYZ6_SCREEN_SLACK_MM,
+                        task.clearance,
+                    )
+                }) {
+                    meets = true;
+                    break;
+                }
+            }
+            Ok(())
+        };
+        if let Some(index) = task.index.and_then(|index| index.layer(ordinal)) {
+            index.visit(
+                bounds,
+                task.clearance,
+                XYZ6_SCREEN_SLACK_MM,
+                cancel,
+                &mut check,
+            )?;
+        } else {
+            check(clearance_index::Candidates::Visit(
+                clearance_index::PathRange {
+                    paths: 0..layer.paths.len(),
+                    nonmodel_paths: 0,
+                },
+            ))?;
+        }
+        if meets {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Pieces buffered per worker in one raw-occupancy wave.
 const RAW_PIECES_PER_WORKER: usize = 64;
 
@@ -961,7 +1104,6 @@ fn certify_raw_occupancy_waves(
     }
     let piece_bytes_available = available - wave.saturating_mul(slot);
     let mut speculative = Speculative {
-        work: *support_work,
         geometry_work: 0,
         trace: ClearanceTrace {
             enabled: trace.enabled,
@@ -969,42 +1111,26 @@ fn certify_raw_occupancy_waves(
         },
         failed: false,
     };
-    let task = RawTask {
-        layers: raw.layers,
-        index: raw.index,
-        clearance: raw.clearance,
-    };
+    let task = raw.task();
     let mut pending_bytes = 0usize;
-    for span in raw.sections {
-        let interval = [
-            raw.schedule[span.start as usize].lower_z,
-            raw.schedule[(span.end - 1) as usize].z,
-        ];
-        span.visit_occupied(cancel, |polygon, piece_scope| {
-            let height = piece_scope.map_or(interval, |height| {
-                [interval[0].max(height[0]), interval[1].min(height[1])]
-            });
-            if height[0] > height[1] {
-                return Ok(true);
-            }
-            let scope = spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                lower_mm: height[0],
-                upper_mm: height[1],
-            };
-            let Ok(range) = scoped_support_layer_range(
-                raw.schedule,
-                scope,
-                raw.vertical,
-                &mut speculative.work,
-                cancel,
-            ) else {
-                speculative.failed = true;
-                return Ok(false);
-            };
+    let mut work = *support_work;
+    let visited = visit_raw_pieces(
+        raw,
+        &task,
+        &mut work,
+        cancel,
+        |polygon, scope, range, work| {
             let bytes = cloned_polygon_bytes(polygon);
             if pending.len() == wave || pending_bytes.saturating_add(bytes) > piece_bytes_available
             {
-                flush_raw_wave(&task, &mut pending, &mut results, &mut speculative, cancel)?;
+                flush_raw_wave(
+                    &task,
+                    &mut pending,
+                    &mut results,
+                    &mut speculative,
+                    work,
+                    cancel,
+                )?;
                 pending_bytes = 0;
                 if speculative.failed {
                     return Ok(false);
@@ -1016,7 +1142,7 @@ fn certify_raw_occupancy_waves(
                     .trace
                     .add(&speculative.trace.raw_inline_pieces, 1);
                 let local = certify_raw_piece(&task, polygon, scope, range, trace.enabled, cancel);
-                speculative.absorb(local);
+                speculative.absorb(local, work);
                 return Ok(!speculative.failed);
             }
             pending.push(RawPiece {
@@ -1026,13 +1152,22 @@ fn certify_raw_occupancy_waves(
             });
             pending_bytes = pending_bytes.saturating_add(bytes);
             Ok(true)
-        })?;
-        if speculative.failed {
-            return Ok(false);
-        }
+        },
+    );
+    if visited.is_err() || speculative.failed {
+        return Ok(false);
     }
-    flush_raw_wave(&task, &mut pending, &mut results, &mut speculative, cancel)?;
-    if speculative.failed {
+    if flush_raw_wave(
+        &task,
+        &mut pending,
+        &mut results,
+        &mut speculative,
+        &mut work,
+        cancel,
+    )
+    .is_err()
+        || speculative.failed
+    {
         return Ok(false);
     }
     native_work
@@ -1040,7 +1175,7 @@ fn certify_raw_occupancy_waves(
         .map_err(|failure| {
             super::native_error(failure, "account raw occupancy support clearance")
         })?;
-    *support_work = speculative.work;
+    *support_work = work;
     trace.merge_polygon(&speculative.trace);
     Ok(true)
 }
@@ -1052,20 +1187,19 @@ struct RawPiece {
 }
 
 struct Speculative {
-    work: usize,
     geometry_work: u64,
     trace: ClearanceTrace,
     failed: bool,
 }
 
 impl Speculative {
-    fn absorb(&mut self, local: RawPieceResult) {
+    fn absorb(&mut self, local: RawPieceResult, work: &mut usize) {
         if self.failed {
             return;
         }
-        match (local.result, self.work.checked_add(local.scan_work)) {
-            (Ok(()), Some(work)) => {
-                self.work = work;
+        match (local.result, work.checked_add(local.scan_work)) {
+            (Ok(()), Some(total)) => {
+                *work = total;
                 self.geometry_work = self.geometry_work.saturating_add(local.geometry_work);
                 self.trace.merge_polygon(&local.trace);
             }
@@ -1079,6 +1213,7 @@ fn flush_raw_wave(
     pending: &mut Vec<RawPiece>,
     results: &mut Vec<RawPieceResult>,
     speculative: &mut Speculative,
+    work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
@@ -1107,7 +1242,7 @@ fn flush_raw_wave(
         })
         .collect_into_vec(results);
     for local in results.drain(..) {
-        speculative.absorb(local);
+        speculative.absorb(local, work);
     }
     Ok(())
 }
