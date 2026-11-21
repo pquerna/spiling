@@ -1062,21 +1062,11 @@ fn admit_schedule<'model>(
                     "classification metadata overflow",
                 )
             })?;
-        let phase_bytes = schedule
-            .len()
-            .checked_mul(std::mem::size_of::<region::OrdinaryHatchPhase>())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "ordinary phase metadata overflow",
-                )
-            })?;
         remaining_geometry_units(
             retained_points,
             geometry_bytes(&[
                 wall_static_base_bytes,
                 retained_plan_bytes,
-                phase_bytes,
                 classification_metadata_bytes,
                 startup_wall.as_ref().map_or(0, |wall| {
                     wall.layout_bytes().saturating_add(wall_index_entry_bytes)
@@ -1097,26 +1087,6 @@ fn admit_schedule<'model>(
             retained_wall_bytes = startup.layout_bytes();
             wall_cache.insert(startup.key, startup.layout);
         }
-        let mut phase_by_layer = Vec::new();
-        phase_by_layer
-            .try_reserve_exact(schedule.len())
-            .map_err(|_| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "ordinary phase metadata allocation refused",
-                )
-            })?;
-        phase_by_layer.resize(schedule.len(), region::OrdinaryHatchPhase::Centered);
-        let phase_bytes = phase_by_layer
-            .capacity()
-            .checked_mul(std::mem::size_of::<region::OrdinaryHatchPhase>())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "ordinary phase capacity overflow",
-                )
-            })?;
-        let wall_static_base_bytes = geometry_bytes(&[wall_static_base_bytes, phase_bytes])?;
         remaining_geometry_units(
             retained_points,
             geometry_bytes(&[
@@ -1650,7 +1620,6 @@ fn admit_schedule<'model>(
                     neighborhoods.work_mut(),
                     cancel,
                 )?;
-            phase_by_layer[index as usize] = phase;
             if templates[axis_slot]
                 .as_ref()
                 .is_some_and(|template| template.phase != phase || template.top_axis != top_axis)
@@ -1909,7 +1878,6 @@ fn admit_schedule<'model>(
             schedule.capacity() * std::mem::size_of::<LayerElevation>(),
             wall_layouts.capacity() * std::mem::size_of::<Option<Arc<walls::WallPlan>>>(),
             layers.capacity() * std::mem::size_of::<PrintLayer>(),
-            phase_bytes,
         ])?;
         let support_outside_bytes = skin_external_owned_bytes(
             support_static_bytes,
@@ -1983,8 +1951,6 @@ fn admit_schedule<'model>(
                     .values()
                     .map(|model| model.support_margin())
                     .fold(0.0, f64::max),
-                replay: web_roof.is_none() && construction.domains.is_empty(),
-                phases: &phase_by_layer,
             },
             &mut segments,
             cancel,

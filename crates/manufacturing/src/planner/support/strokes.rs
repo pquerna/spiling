@@ -59,6 +59,9 @@ pub(in crate::planner) struct Failure {
 }
 pub(in crate::planner) struct Admission {
     pub(in crate::planner) bridges: Vec<usize>,
+    /// Ascending indices of every path with an unsupported span; `failure`
+    /// names the first. A path's own analysis fails iff it is listed here.
+    pub(in crate::planner) unanchored: Vec<usize>,
     pub(in crate::planner) failure: Option<Failure>,
     pub(in crate::planner) worst_unanchored_mm: f64,
 }
@@ -229,6 +232,7 @@ where
     ) -> Result<Admission, ManufacturingError> {
         let mut result = Admission {
             bridges: Vec::new(),
+            unanchored: Vec::new(),
             failure: None,
             worst_unanchored_mm: 0.0,
         };
@@ -246,6 +250,7 @@ where
         for (path_index, path) in paths.iter().enumerate() {
             check_cancel(cancel)?;
             let mut has_bridge = false;
+            let mut unanchored = false;
             // A curved Gyroid road cannot become a taut straight bridge merely
             // because its approximation contains short chords. Carry gaps over
             // chord boundaries until an actual positive lower contact resets it.
@@ -305,11 +310,13 @@ where
                         // but a short unanchored run of hidden sparse infill
                         // prints as is: demand support only beyond the run
                         // independent replay accepts.
-                        if curved_gap > MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS * width_mm
+                        let exceeded = curved_gap > MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS * width_mm
                             && !matches!(
                                 gap_kind(gap, curved_gap, width_mm, 0.0),
                                 GapKind::Supported
-                            )
+                            );
+                        unanchored |= exceeded;
+                        if exceeded
                             && result
                                 .failure
                                 .as_ref()
@@ -348,6 +355,7 @@ where
                         GapKind::Bridge => bridge = true,
                         GapKind::Demand => {
                             demand = true;
+                            unanchored = true;
                             result.worst_unanchored_mm = result.worst_unanchored_mm.max(span);
                             if result.failure.is_none() {
                                 result.failure = Some(Failure {
@@ -371,6 +379,9 @@ where
             }
             if has_bridge {
                 result.bridges.push(path_index);
+            }
+            if unanchored {
+                result.unanchored.push(path_index);
             }
         }
         Ok(result)

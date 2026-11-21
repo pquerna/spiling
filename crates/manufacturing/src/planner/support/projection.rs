@@ -175,8 +175,6 @@ mod tests {
             recipe,
             nominal_height_mm: 0.2,
             source_z_allowance_mm: 0.0,
-            replay: false,
-            phases: &[],
         }
     }
 

@@ -5246,8 +5246,6 @@ fn an_unanchored_wall_is_carried_by_support_never_split() {
                 recipe,
                 nominal_height_mm: intent.select_layer_height().unwrap().height_mm,
                 source_z_allowance_mm: 0.0,
-                replay: false,
-                phases: &[],
             },
             &mut schedule.len(),
             &cancel,

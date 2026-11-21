@@ -289,117 +289,6 @@ fn establish_until(
     Ok(added_bytes)
 }
 
-/// One layer's actual-stroke admission from an earlier pass of the same
-/// lane: the layer handed to support, its admitted result and the records
-/// the iteration appended, with every input it read. Valid only while all of
-/// them are bit-identical; output indices may differ.
-struct ReplayEntry {
-    identity: [u64; 4],
-    /// Skin horizon schedule identities and the admission context below.
-    horizon: Horizon,
-    lower: Option<Arc<PrintLayer>>,
-    before: PrintLayer,
-    after: Arc<PrintLayer>,
-    phase: region::OrdinaryHatchPhase,
-    axis_key: u32,
-    demand: Option<Demand>,
-    bridge_roles: Vec<(usize, DepositionKind)>,
-    joined: bool,
-    segments: [usize; 2],
-    retained: [usize; 2],
-    constructed_points: [usize; 2],
-}
-
-impl ReplayEntry {
-    /// The lower layer is the previous entry's shared `after`.
-    fn bytes(&self) -> usize {
-        layer_payload_bytes([&self.before, &*self.after].into_iter())
-            .saturating_add(std::mem::size_of::<Self>() + std::mem::size_of::<PrintLayer>())
-            .saturating_add(vec_bytes(&self.bridge_roles))
-            .saturating_add(vec_bytes(&self.horizon.layers))
-    }
-}
-
-/// Schedule identities a layer's raster regeneration reads: its whole skin
-/// horizon plus the layer bounding it below, its position there and whether
-/// each neighbor exists (a missing one depends on where the schedule ends).
-#[derive(PartialEq)]
-struct Horizon {
-    layers: Vec<[u64; 4]>,
-    offset: usize,
-    neighbors: [bool; 2],
-}
-
-impl Horizon {
-    fn of(schedule: &[super::LayerElevation], index: usize, recipe: &PlanarPrintRecipe) -> Self {
-        let below = super::physical_neighbor(
-            schedule,
-            index as u32,
-            recipe.bottom_skin_thickness_mm,
-            false,
-        );
-        let above =
-            super::physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true);
-        // Without a lower neighbor the horizon reaches the bed, which stays
-        // in the slice so both positions are absolute.
-        let first = below.map_or(0, |below| (below as usize).saturating_sub(1));
-        let last = above.map_or(schedule.len() - 1, |above| above as usize);
-        Self {
-            layers: schedule[first..=last].iter().map(elevation_bits).collect(),
-            offset: index - first,
-            neighbors: [below.is_some(), above.is_some()],
-        }
-    }
-}
-
-/// Every field but the output index.
-fn same_layer(a: &PrintLayer, b: &PrintLayer) -> bool {
-    let PrintLayer {
-        index: _,
-        hatch_course,
-        z_mm,
-        lower_z_mm,
-        height_mm,
-        section_z_mm,
-        paths,
-        region_coverage,
-        skin_command_fits,
-    } = a;
-    *hatch_course == b.hatch_course
-        && z_mm.to_bits() == b.z_mm.to_bits()
-        && lower_z_mm.to_bits() == b.lower_z_mm.to_bits()
-        && height_mm.to_bits() == b.height_mm.to_bits()
-        && section_z_mm.to_bits() == b.section_z_mm.to_bits()
-        && *paths == b.paths
-        && *region_coverage == b.region_coverage
-        && *skin_command_fits == b.skin_command_fits
-}
-
-/// Per-layer support admission kept across schedule retries. A refinement
-/// splits one layer and shifts every output index above it, but hatch axes
-/// follow courses and neighborhoods follow physical ranges, so a layer keeps
-/// its inputs wherever it moves. Entries are found by schedule identity and
-/// replayed while the layer handed to support, its phase and axis, the
-/// admitted layer below and its whole skin horizon are bit-identical.
-#[derive(Default)]
-pub(super) struct SupportReplay {
-    /// The last pass's schedule, bounding replay of unchanged layer admission.
-    schedule: Vec<[u64; 4]>,
-    /// Ascending schedule identity. A truncated pass keeps earlier entries
-    /// above its last layer.
-    entries: Vec<ReplayEntry>,
-    bytes: usize,
-}
-
-fn elevation_bits(layer: &super::LayerElevation) -> [u64; 4] {
-    [
-        layer.z.to_bits(),
-        layer.lower_z.to_bits(),
-        layer.sample.to_bits(),
-        layer.height.to_bits(),
-    ]
-}
-
 pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
@@ -626,13 +515,14 @@ pub(super) fn component_budget(
 }
 
 fn stroke_proof_reservation(paths: usize) -> usize {
-    // The existing stroke analyzer grows only a Vec<usize> of bridge indices.
-    // Reserve its old/new growth arrays; use actual capacity once returned.
+    // The stroke analyzer grows two Vec<usize> of path indices (bridges and
+    // unanchored). Reserve their old/new growth arrays; use actual capacity
+    // once returned.
     if paths == 0 {
         0
     } else {
         paths
-            .saturating_mul(3)
+            .saturating_mul(6)
             .max(4)
             .saturating_mul(std::mem::size_of::<usize>())
     }
@@ -877,11 +767,6 @@ pub(super) struct SupportInput<'a> {
     pub(super) recipe: &'a PlanarPrintRecipe,
     pub(super) nominal_height_mm: f64,
     pub(super) source_z_allowance_mm: f64,
-    /// Sections are a function of the schedule entry alone and each layer of
-    /// its skin horizon, so per-layer admission may replay across retries.
-    pub(super) replay: bool,
-    /// Ordinary hatch phase by output layer, a raster regeneration input.
-    pub(super) phases: &'a [region::OrdinaryHatchPhase],
 }
 
 #[derive(Default)]
@@ -891,7 +776,6 @@ pub(super) struct SupportWork {
     /// This receipt survives every compile-local schedule retry.
     pub(super) support_owned: usize,
     pub(super) anchors: usize,
-    pub(super) replay: SupportReplay,
 }
 
 impl SupportWork {
@@ -1003,13 +887,6 @@ pub(super) fn realize(
     let mut work = work_bank.planar;
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
-    let replaying = input.replay && !tentative;
-    let mut replay_old = if replaying {
-        std::mem::take(&mut work_bank.replay)
-    } else {
-        SupportReplay::default()
-    };
-    let mut replay_new = None;
     let outcome = (|| {
         let SupportInput {
             build_bounds: _,
@@ -1020,8 +897,6 @@ pub(super) fn realize(
             recipe,
             nominal_height_mm,
             source_z_allowance_mm,
-            replay: _,
-            phases,
         } = *input;
         native_points = native_points.saturating_add(trace.section_pieces.len());
         native_owned_bytes = native_owned_bytes.saturating_add(vec_bytes(&trace.section_pieces));
@@ -1030,47 +905,6 @@ pub(super) fn realize(
             ..recipe.clone()
         };
         let recipe = &resolved_recipe;
-        let mut replay_limit = if replaying {
-            schedule
-                .iter()
-                .zip(&replay_old.schedule)
-                .position(|(layer, recorded)| elevation_bits(layer) != *recorded)
-                .unwrap_or(schedule.len().min(replay_old.schedule.len()))
-        } else {
-            0
-        };
-        native_owned_bytes = native_owned_bytes.saturating_add(replay_old.bytes);
-        let mut replay_entries = std::mem::take(&mut replay_old.entries)
-            .into_iter()
-            .map(Some)
-            .collect::<Vec<_>>();
-        // Earlier entry with each output layer's schedule identity.
-        let mut cursor = 0usize;
-        let mut entry_at = |identity: [u64; 4], entries: &[Option<ReplayEntry>]| {
-            let z = f64::from_bits(identity[0]);
-            while entries.get(cursor).is_some_and(|entry| {
-                entry
-                    .as_ref()
-                    .is_none_or(|entry| f64::from_bits(entry.identity[0]) < z)
-            }) {
-                cursor += 1;
-            }
-            entries
-                .get(cursor)
-                .and_then(Option::as_ref)
-                .is_some_and(|entry| entry.identity == identity)
-                .then_some(cursor)
-        };
-        let phase_at = |index: usize| {
-            phases
-                .get(index)
-                .copied()
-                .unwrap_or(region::OrdinaryHatchPhase::Centered)
-        };
-        let mut recorded: Vec<ReplayEntry> = Vec::new();
-        let mut recorded_bytes = 0usize;
-        let mut recording = replaying;
-        let first_before = layers.first().filter(|_| recording).cloned();
         let width = recipe.bead_width_mm;
         let mut demands: Vec<Demand> = Vec::new();
         let mut constructed_points = layers.iter().try_fold(0usize, |total, layer| {
@@ -1119,113 +953,8 @@ pub(super) fn realize(
         {
             return Err(super::bonds::unresolved(first));
         }
-        if let (Some(before), Some(after)) = (first_before, layers.first()) {
-            recorded.push(ReplayEntry {
-                identity: elevation_bits(&schedule[0]),
-                horizon: Horizon::of(schedule, 0, recipe),
-                lower: None,
-                before,
-                after: Arc::new(after.clone()),
-                phase: phase_at(0),
-                axis_key: super::hatch_key(schedule, 0),
-                demand: None,
-                bridge_roles: Vec::new(),
-                joined: false,
-                segments: [0; 2],
-                retained: [0; 2],
-                constructed_points: [0; 2],
-            });
-        }
         for index in 1..layers.len() {
             check_cancel(cancel)?;
-            let identity = elevation_bits(&schedule[index]);
-            let old_index = if replaying {
-                entry_at(identity, &replay_entries)
-            } else {
-                None
-            };
-            let entry = old_index
-                .and_then(|old| replay_entries[old].take())
-                .filter(|entry| {
-                    entry.phase == phase_at(index)
-                        && entry.axis_key == super::hatch_key(schedule, index)
-                        && entry
-                            .lower
-                            .as_deref()
-                            .is_some_and(|lower| same_layer(lower, &layers[index - 1]))
-                        && same_layer(&entry.before, &layers[index])
-                        && entry.horizon == Horizon::of(schedule, index, recipe)
-                });
-            if let Some(mut entry) = entry {
-                // Bit-identical inputs: apply the recorded admission.
-                let live = native_owned_bytes
-                    + layer_payload_bytes(layers.iter())
-                    + vec_bytes(&joined_layers)
-                    + vec_bytes(&demands)
-                    + vec_bytes(&original_bridge_roles);
-                *segments = (*segments + entry.segments[1])
-                    .checked_sub(entry.segments[0])
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "replayed support segment accounting underflow",
-                        )
-                    })?;
-                retained = (retained + entry.retained[1])
-                    .checked_sub(entry.retained[0])
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "replayed support retained accounting underflow",
-                        )
-                    })?;
-                constructed_points = (constructed_points + entry.constructed_points[1])
-                    .checked_sub(entry.constructed_points[0])
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "replayed support constructed accounting underflow",
-                        )
-                    })?;
-                if retained > crate::working_set::units() {
-                    return Err(error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "replayed support retained point limit exceeded",
-                    ));
-                }
-                layers[index] = (*entry.after).clone();
-                layers[index].index = index as u32;
-                entry.before.index = index as u32;
-                if let Some(demand) = &mut entry.demand {
-                    demand.target = index;
-                }
-                // Re-link to this pass's lower entry: the record stays a chain.
-                entry.lower = recorded.last().map(|lower| Arc::clone(&lower.after));
-                joined_layers[index] = entry.joined;
-                if let Some(demand) = &entry.demand {
-                    reserve_owned(&mut demands, 1, live)?;
-                    demands.push(demand.clone());
-                }
-                reserve_owned(&mut original_bridge_roles, entry.bridge_roles.len(), live)?;
-                for &(path, kind) in &entry.bridge_roles {
-                    original_bridge_roles.push((index, path, kind));
-                }
-                if recording {
-                    recorded.push(entry);
-                }
-                continue;
-            }
-            replay_limit = replay_limit.min(index);
-            let replay_before = recording.then(|| {
-                (
-                    layers[index].clone(),
-                    *segments,
-                    retained,
-                    constructed_points,
-                    demands.len(),
-                    original_bridge_roles.len(),
-                )
-            });
             owned_bytes = native_owned_bytes
                 + layer_payload_bytes(layers.iter())
                 + vec_bytes(&joined_layers)
@@ -1289,7 +1018,8 @@ pub(super) fn realize(
                     ) + vec_bytes(&joined_layers)
                         + vec_bytes(&demands)
                         + vec_bytes(&original_bridge_roles)
-                        + vec_bytes(&admission.bridges);
+                        + vec_bytes(&admission.bridges)
+                        + vec_bytes(&admission.unanchored);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
                     let course = super::hatch_key(schedule, index);
@@ -1450,7 +1180,9 @@ pub(super) fn realize(
             }
             // Permanent construction and its first upper landing may never be
             // repaired by temporary support, even when unrelated support is enabled.
-            for path in &layer.paths {
+            // Paths are analyzed independently, so the layer's admission already
+            // names every path whose own proof would fail.
+            for path in admission.unanchored.iter().map(|&path| &layer.paths[path]) {
                 let Some(DepositionOwner::Regional { region_index }) = path.owner else {
                     continue;
                 };
@@ -1477,36 +1209,20 @@ pub(super) fn realize(
                             })
                     });
                 if plate_owned || landing_owned {
-                    anchors.set_budget(workspace_budget(
-                        retained,
-                        owned_bytes
-                            .saturating_add(vec_bytes(&admission.bridges))
-                            .saturating_add(stroke_proof_reservation(1)),
-                    )?);
-                    let proof = strokes::analyze(
-                        std::slice::from_ref(path),
-                        previous.clone(),
-                        std::iter::empty(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )?;
-                    if proof.failure.is_some() {
-                        return Err(error(
-                            ManufacturingErrorCode::UnsupportedGeometry,
-                            format!(
-                                "UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
-                                layer.index, layer.z_mm
-                            ),
-                        ));
-                    }
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        format!(
+                            "UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
+                            layer.index, layer.z_mm
+                        ),
+                    ));
                 }
             }
             anchors.set_budget(workspace_budget(
                 retained,
                 owned_bytes
                     .saturating_add(vec_bytes(&admission.bridges))
+                    .saturating_add(vec_bytes(&admission.unanchored))
                     .saturating_add(stroke_proof_reservation(layer.paths.len())),
             )?);
             if let Some(failure) = admission.failure.take() {
@@ -1530,7 +1246,8 @@ pub(super) fn realize(
                         + vec_bytes(&demands)
                         + vec_bytes(&original_bridge_roles)
                         + anchors.retained_bytes()
-                        + vec_bytes(&admission.bridges);
+                        + vec_bytes(&admission.bridges)
+                        + vec_bytes(&admission.unanchored);
                     reserve_owned(&mut demands, 1, live)?;
                     demands.push(Demand {
                         target: index,
@@ -1549,76 +1266,13 @@ pub(super) fn realize(
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles)
                 + anchors.retained_bytes()
-                + vec_bytes(&admission.bridges);
+                + vec_bytes(&admission.bridges)
+                + vec_bytes(&admission.unanchored);
             reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
             for path in admission.bridges {
                 original_bridge_roles.push((index, path, layer.paths[path].kind));
                 layer.paths[path].kind = DepositionKind::Bridge;
             }
-            if let Some((
-                before,
-                segments_before,
-                retained_before,
-                constructed_before,
-                demand_at,
-                roles_at,
-            )) = replay_before
-            {
-                let entry = ReplayEntry {
-                    identity,
-                    horizon: Horizon::of(schedule, index, recipe),
-                    lower: recorded.last().map(|lower| Arc::clone(&lower.after)),
-                    before,
-                    after: Arc::new(layer.clone()),
-                    phase: phase_at(index),
-                    axis_key: super::hatch_key(schedule, index),
-                    demand: demands.get(demand_at).cloned(),
-                    bridge_roles: original_bridge_roles[roles_at..]
-                        .iter()
-                        .map(|&(_, path, kind)| (path, kind))
-                        .collect(),
-                    joined: joined_layers[index],
-                    segments: [segments_before, *segments],
-                    retained: [retained_before, retained],
-                    constructed_points: [constructed_before, constructed_points],
-                };
-                // Optional: kept only while it fits beside the live working set.
-                let bytes = entry.bytes();
-                let live = native_owned_bytes
-                    .saturating_add(layer_payload_bytes(layers.iter()))
-                    .saturating_add(recorded_bytes)
-                    .saturating_add(bytes);
-                if super::remaining_geometry_units(retained, live).is_ok() {
-                    recorded_bytes += bytes;
-                    recorded.push(entry);
-                } else {
-                    recording = false;
-                    recorded = Vec::new();
-                    recorded_bytes = 0;
-                }
-            }
-        }
-        if recording {
-            // A truncated pass saw only a prefix; earlier entries above it
-            // remain exact records of their own inputs.
-            let top = recorded
-                .last()
-                .map(|entry| f64::from_bits(entry.identity[0]));
-            recorded.extend(
-                replay_entries
-                    .into_iter()
-                    .flatten()
-                    .filter(|entry| top.is_some_and(|top| f64::from_bits(entry.identity[0]) > top)),
-            );
-            let bytes = recorded
-                .iter()
-                .map(ReplayEntry::bytes)
-                .fold(0usize, usize::saturating_add);
-            replay_new = Some(SupportReplay {
-                schedule: schedule.iter().map(elevation_bits).collect(),
-                entries: recorded,
-                bytes,
-            });
         }
         if demands.is_empty() {
             return Ok(SupportAdmission::Complete(None));
@@ -2649,8 +2303,7 @@ pub(super) fn realize(
             native_owned_bytes
                 .saturating_add(support_metadata_bytes)
                 .saturating_add(layer_payload_bytes(layers.iter()))
-                .saturating_add(anchors.retained_bytes())
-                .saturating_add(replay_new.as_ref().map_or(0, |replay| replay.bytes)),
+                .saturating_add(anchors.retained_bytes()),
             &support_regions,
             &interfaces,
             &[&protected],
@@ -2676,9 +2329,6 @@ pub(super) fn realize(
         timing.mark("final_actual_clearance");
         Ok(SupportAdmission::Complete(withdrawal))
     })();
-    if let Some(replay) = replay_new {
-        work_bank.replay = replay;
-    }
     work_bank.finish(work, foreign_work, anchor_work)?;
     outcome
 }
@@ -4084,8 +3734,6 @@ mod tests {
                         recipe: &recipe,
                         nominal_height_mm: 0.2,
                         source_z_allowance_mm: 0.0,
-                        replay: false,
-                        phases: &[],
                     },
                     &mut (target + 1),
                     &cancel,
