@@ -23,7 +23,7 @@ pub mod working_set;
 pub use planner::preflight;
 pub use working_set::WorkingSet;
 
-use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord};
+use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord, SourceHash};
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
 use spiling_geometry::{KERNEL_NAME, KERNEL_REVISION, KERNEL_VERSION};
@@ -36,7 +36,7 @@ use std::sync::{
 /// Binds native material authority and physical per-occurrence material events.
 pub const PLANNER_VERSION: &str = "134";
 pub const EMITTER_VERSION: &str = "22";
-pub const VERIFIER_VERSION: &str = "54";
+pub const VERIFIER_VERSION: &str = "55";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -126,25 +126,35 @@ pub fn compile(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<ManufacturingResult, ManufacturingError> {
-    working_set::scope(input.working_set, || compile_scoped(input, cancel))
+    working_set::scope(input.working_set, || compile_scoped(input, cancel, None))
 }
 
 fn compile_scoped(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
+    replay: Option<&mut Option<verifier::ReplaySink>>,
 ) -> Result<ManufacturingResult, ManufacturingError> {
     if matches!(&input.intent.printer.workflow, JobWorkflow::FixedDualMarlin { job } if job.has_bound_interior())
     {
-        return selection::compile(input, cancel);
+        return selection::compile(input, cancel, replay);
     }
     let mut work = spiling_geometry::GeometryWorkBudget::compile();
-    compile_exact(input, cancel, &mut work)
+    compile_exact_with_replay(input, cancel, &mut work, replay)
 }
 
 fn compile_exact(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
+) -> Result<ManufacturingResult, ManufacturingError> {
+    compile_exact_with_replay(input, cancel, geometry_work, None)
+}
+
+fn compile_exact_with_replay(
+    input: CompilerInput<'_>,
+    cancel: &AtomicBool,
+    geometry_work: &mut spiling_geometry::GeometryWorkBudget,
+    replay: Option<&mut Option<verifier::ReplaySink>>,
 ) -> Result<ManufacturingResult, ManufacturingError> {
     let mut timing = timing::Clock::new("manufacturing.compile");
     check_cancel(cancel)?;
@@ -196,7 +206,7 @@ fn compile_exact(
     let program = backend::emit_prepared(&prepared, cancel)?;
     let plan = prepared.into_plan();
     timing.mark("emission");
-    let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
+    let verification = verify_compiled(&program, &plan, input.intent, cancel, replay)?;
     timing.mark("independent_replay");
     let bundle = ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -209,6 +219,21 @@ fn compile_exact(
     timing.mark("bundle_validation");
     check_cancel(cancel)?;
     Ok(ManufacturingResult { bundle, program })
+}
+
+fn verify_compiled(
+    program: &ChunkSource,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    replay: Option<&mut Option<verifier::ReplaySink>>,
+) -> Result<VerificationReport, ManufacturingError> {
+    let sink = if let Some(slot) = replay {
+        Some(slot.insert(verifier::ReplaySink::new(plan, intent)?))
+    } else {
+        None
+    };
+    verifier::verify_actual(program, plan, intent, cancel, sink)
 }
 
 /// Recompute replay; the persisted report is descriptive, never trusted authority.
@@ -230,6 +255,115 @@ pub struct ManufacturingInspection {
     pub report: VerificationReport,
     pub provenance: ManufacturingInspectionProvenance,
     pub replay: Option<EncodedReplayDisplay>,
+}
+
+/// Exact serialized output of the compiler's independent replay.
+pub struct CompiledArtifact {
+    pub record: ManufacturingArtifactRecord,
+    pub bundle: ChunkSource,
+    pub program: ChunkSource,
+    pub receipt: CompileVerification,
+    pub inspection: Option<CapturedInspection>,
+}
+
+pub struct CapturedInspection {
+    pub inspection: ManufacturingInspection,
+    pub interior_selection: Option<Arc<InteriorSelection>>,
+}
+
+/// One ephemeral proof of an exact bundle/program pair. No bytes or parsed plan are retained.
+pub struct CompileVerification {
+    bundle_digest: [u8; 32],
+    program_digest: [u8; 32],
+}
+
+impl CompileVerification {
+    /// Inspect exact bytes covered at compile, never a caller-supplied decoded document.
+    pub fn inspect_report(
+        &self,
+        encoded: &ChunkSource,
+        program: &ChunkSource,
+        cancel: &AtomicBool,
+    ) -> Result<Option<(ManufacturingInspection, Vec<OccurrenceRecord>)>, ManufacturingError> {
+        check_cancel(cancel)?;
+        if encoded.digest() != &self.bundle_digest || program.digest() != &self.program_digest {
+            return Ok(None);
+        }
+        let bundle = decode_bundle_from(encoded.len(), || encoded.reader())?;
+        let report = bundle.verification.clone();
+        let inspection = finish_inspection(
+            &bundle,
+            &SourceHash::from_digest(encoded.digest()),
+            report,
+            None,
+            cancel,
+        )?;
+        Ok(Some((inspection, bundle.provenance.occurrences)))
+    }
+}
+
+/// Serialize only a compiler-verified result, binding the receipt to the emitted immutable bytes.
+pub fn compile_artifact(
+    input: CompilerInput<'_>,
+    byte_budget: u32,
+    capture_motion: bool,
+    cancel: &AtomicBool,
+) -> Result<CompiledArtifact, ManufacturingError> {
+    working_set::scope(input.working_set, || {
+        let mut replay = None;
+        let result = compile_scoped(input, cancel, capture_motion.then_some(&mut replay))?;
+        seal_compiled_artifact(result, replay, byte_budget, cancel)
+    })
+}
+
+fn seal_compiled_artifact(
+    result: ManufacturingResult,
+    replay: Option<verifier::ReplaySink>,
+    byte_budget: u32,
+    cancel: &AtomicBool,
+) -> Result<CompiledArtifact, ManufacturingError> {
+    let ManufacturingResult { bundle, program } = result;
+    let exceeded = || {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "encoded manufacturing bundle exceeds remaining retained/staged budget",
+        )
+    };
+    let mut writer = spiling_chunks::ChunkWriter::new(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES));
+    serde_json::to_writer(&mut writer, &bundle).map_err(|_| exceeded())?;
+    let encoded = writer.finish().map_err(|_| exceeded())?;
+    if (encoded.retained_bytes() + program.retained_bytes()) as u64 > u64::from(byte_budget) {
+        return Err(exceeded());
+    }
+    check_cancel(cancel)?;
+    let record = ManufacturingArtifactRecord {
+        hash: SourceHash::from_digest(encoded.digest()),
+        input_hash: bundle.provenance.input_hash.clone(),
+        byte_count: encoded.len() as u32,
+        summary: bundle.summary(),
+        program: bundle.program.clone(),
+    };
+    let receipt = CompileVerification {
+        bundle_digest: *encoded.digest(),
+        program_digest: *program.digest(),
+    };
+    let inspection = replay
+        .map(|sink| {
+            let report = bundle.verification.clone();
+            let inspection = finish_inspection(&bundle, &record.hash, report, Some(sink), cancel)?;
+            Ok::<_, ManufacturingError>(CapturedInspection {
+                inspection,
+                interior_selection: bundle.plan.interior_selection.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(CompiledArtifact {
+        record,
+        bundle: encoded,
+        program,
+        receipt,
+        inspection,
+    })
 }
 
 /// Fresh independent replay; display output is opt-in and bound to the caller's immutable bundle hash.
@@ -256,6 +390,16 @@ pub fn inspect_bundle(
         cancel,
         sink.as_mut(),
     )?;
+    finish_inspection(bundle, bundle_hash, report, sink, cancel)
+}
+
+fn finish_inspection(
+    bundle: &ManufacturingBundle,
+    bundle_hash: &SourceHash,
+    report: VerificationReport,
+    sink: Option<verifier::ReplaySink>,
+    cancel: &AtomicBool,
+) -> Result<ManufacturingInspection, ManufacturingError> {
     check_cancel(cancel)?;
     // Motion too large to display is omitted, never a verification failure.
     let replay = if let Some(sink) = sink.filter(|sink| !sink.omitted()) {

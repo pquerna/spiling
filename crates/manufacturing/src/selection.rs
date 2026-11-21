@@ -3,7 +3,7 @@
 
 //! Bounded complete constructions over one immutable project capture. Retain
 //! three small assessments, never three geometry/program/GPU alternatives.
-use crate::{CompilerInput, ManufacturingResult, check_cancel, compile_exact, error};
+use crate::{CompilerInput, ManufacturingResult, check_cancel, compile_exact, error, verifier};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -93,6 +93,7 @@ fn assessment(
 pub(super) fn compile(
     input: CompilerInput<'_>,
     cancel: &AtomicBool,
+    replay: Option<&mut Option<verifier::ReplaySink>>,
 ) -> Result<ManufacturingResult, ManufacturingError> {
     input.intent.validate()?;
     let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow else {
@@ -209,7 +210,7 @@ pub(super) fn compile(
     // The selected captured goal/projection is exercised again by independent
     // actual-byte replay; stored candidate flags do not grant output authority.
     bundle.verification =
-        crate::verifier::verify(&bundle.program, &bundle.plan, input.intent, cancel)?;
+        crate::verify_compiled(&bundle.program, &bundle.plan, input.intent, cancel, replay)?;
     bundle.validate()?;
     check_cancel(cancel)?;
     Ok(bundle)

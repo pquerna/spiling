@@ -228,6 +228,71 @@ fn stepped_wall_cache_retention_preserves_schedule_program_and_fresh_replay() {
     assert!(crate::verify_bundle(&returned, &cancel).unwrap().verified);
 }
 
+#[test]
+fn compiled_inspection_binds_exact_bundle_and_program() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/manufacturing/native/source-nurbs-box.step"),
+        &[RigidPoseMm::IDENTITY],
+    );
+    let intent = intent(false);
+    let compiled = crate::compile_artifact(scene.input(&intent), u32::MAX, true, &cancel).unwrap();
+    let bundle_bytes = compiled.bundle.to_vec().unwrap();
+    let reopened = reload(&bundle_bytes, &compiled.program);
+    let fresh = crate::inspect_bundle(
+        &reopened,
+        &compiled.record.hash,
+        VerificationOutput::ReportAndMotion,
+        &cancel,
+    )
+    .unwrap();
+    let captured = compiled.inspection.unwrap().inspection;
+    assert_eq!(captured.report, fresh.report);
+    assert_eq!(captured.provenance, fresh.provenance);
+    let captured_replay = captured.replay.unwrap();
+    let fresh_replay = fresh.replay.unwrap();
+    assert_eq!(captured_replay.info, fresh_replay.info);
+    assert_eq!(captured_replay.bytes.digest(), fresh_replay.bytes.digest());
+
+    let (reused, occurrences) = compiled
+        .receipt
+        .inspect_report(&compiled.bundle, &compiled.program, &cancel)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reused.report, fresh.report);
+    assert_eq!(reused.provenance, fresh.provenance);
+    assert_eq!(occurrences, scene.occurrences);
+    assert!(reused.replay.is_none());
+
+    let mut changed_bundle = bundle_bytes;
+    changed_bundle.push(b' ');
+    let changed_bundle = ChunkSource::from_slice(&changed_bundle, u64::MAX).unwrap();
+    assert!(
+        compiled
+            .receipt
+            .inspect_report(&changed_bundle, &compiled.program, &cancel)
+            .unwrap()
+            .is_none()
+    );
+    let changed_program = chunks("G21\n");
+    assert!(
+        compiled
+            .receipt
+            .inspect_report(&compiled.bundle, &changed_program, &cancel)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        compiled
+            .receipt
+            .inspect_report(&compiled.bundle, &compiled.program, &AtomicBool::new(true))
+            .err()
+            .unwrap()
+            .code,
+        ManufacturingErrorCode::Cancelled,
+    );
+}
+
 fn translated(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],

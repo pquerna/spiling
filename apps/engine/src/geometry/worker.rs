@@ -22,6 +22,7 @@ use spiling_geometry::{
     GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
     MeshArtifact, PreparedSectionSource,
 };
+use spiling_manufacturing::{CapturedInspection, CompileVerification, ManufacturingInspection};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -379,6 +380,7 @@ fn run(
 ) {
     let mut definitions = BTreeMap::<DefinitionId, Resident>::new();
     let mut analysis_operator: Option<spiling_analysis::run::CachedOperator> = None;
+    let mut compile_receipt: Option<CompileVerification> = None;
     let mut epoch = 0;
     loop {
         reclaim(&mut definitions, &live, &mut epoch);
@@ -553,8 +555,9 @@ fn run(
                     Product::Import(parts)
                 })
             }
-            Work::Open(request) => open(request, &definitions, &cancel, &mut display_work, &report)
-                .map(
+            Work::Open(request) => {
+                compile_receipt = None;
+                open(request, &definitions, &cancel, &mut display_work, &report).map(
                     |Opened {
                          project,
                          imports,
@@ -571,7 +574,8 @@ fn run(
                         pending = residents;
                         Product::Open { project, imports }
                     },
-                ),
+                )
+            }
             Work::Save {
                 snapshot,
                 retained_source_bytes,
@@ -586,7 +590,10 @@ fn run(
                 })
                 .map(Product::Saved),
             Work::Compile(request) => {
-                compile(request, &definitions, &cancel).map(Product::Compiled)
+                compile(&request, &definitions, false, &cancel).map(|compiled| {
+                    compile_receipt = Some(compiled.receipt);
+                    Product::Compiled(compiled.asset)
+                })
             }
             Work::EvaluateAlternative {
                 interior_opportunity,
@@ -598,9 +605,18 @@ fn run(
                 let project_id = request.project_id.clone();
                 let captured_revision = request.revision;
                 let intent = request.intent.clone();
-                compile(request, &definitions, &cancel).and_then(|asset| {
-                    let inspection =
-                        inspect_asset(&asset, VerificationOutput::ReportAndMotion, &cancel)?;
+                compile(&request, &definitions, true, &cancel).and_then(|compiled| {
+                    let asset = compiled.asset;
+                    let CapturedInspection {
+                        inspection,
+                        interior_selection,
+                    } = compiled.inspection.ok_or_else(|| {
+                        ManufacturingError::new(
+                            ManufacturingErrorCode::CorruptArtifact,
+                            "candidate compile omitted its inspection",
+                        )
+                    })?;
+                    let inspection = assess_inspection(inspection, &request.occurrences, &cancel)?;
                     let replay = inspection.replay.ok_or_else(|| {
                         ManufacturingError::new(
                             ManufacturingErrorCode::CorruptArtifact,
@@ -609,14 +625,12 @@ fn run(
                     })?;
                     let interior_policy = interior_opportunity
                         .map(|opportunity| {
-                            let bundle = asset.decode()?;
-                            let selection =
-                                bundle.plan.interior_selection.as_deref().ok_or_else(|| {
-                                    ManufacturingError::new(
-                                        ManufacturingErrorCode::VerificationFailed,
-                                        "policy evaluation omitted construction assessment",
-                                    )
-                                })?;
+                            let selection = interior_selection.as_deref().ok_or_else(|| {
+                                ManufacturingError::new(
+                                    ManufacturingErrorCode::VerificationFailed,
+                                    "policy evaluation omitted construction assessment",
+                                )
+                            })?;
                             InteriorPolicyAssessment::from_selection(opportunity, selection)
                                 .map(Arc::new)
                         })
@@ -661,6 +675,7 @@ fn run(
                     .map_err(|message| {
                         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, message)
                     })?;
+                    compile_receipt = Some(compiled.receipt);
                     Ok(Product::AlternativeEvaluated {
                         evaluation,
                         asset,
@@ -723,18 +738,20 @@ fn run(
             })()
             .map_err(|error: GeometryError| JobError::from(error)),
             Work::Verify { asset, output } => {
-                inspect_asset(&asset, output, &cancel).and_then(|inspection| {
-                    let package = if output.delivery_package() {
-                        package_asset(&asset, &inspection.report, &definitions, &cancel)?
-                    } else {
-                        None
-                    };
-                    Ok(Product::Verified {
-                        record: asset.record.clone(),
-                        inspection,
-                        package,
-                    })
-                })
+                inspect_asset(&asset, output, compile_receipt.as_ref(), &cancel).and_then(
+                    |inspection| {
+                        let package = if output.delivery_package() {
+                            package_asset(&asset, &inspection.report, &definitions, &cancel)?
+                        } else {
+                            None
+                        };
+                        Ok(Product::Verified {
+                            record: asset.record.clone(),
+                            inspection,
+                            package,
+                        })
+                    },
+                )
             }
             Work::Section {
                 session,
@@ -1552,7 +1569,7 @@ fn open(
         .filter_map(|l| l.manufacturing_artifact.as_ref())
     {
         let _replay = crate::performance::span("open_replay");
-        inspect_asset(asset, VerificationOutput::ReportOnly, cancel)?;
+        inspect_asset(asset, VerificationOutput::ReportOnly, None, cancel)?;
     }
     let project = crate::resources::observed_project(Project::from_loaded(loaded)?);
     check_cancel(cancel)?;
@@ -1968,17 +1985,32 @@ fn posed_mesh(
 fn inspect_asset(
     asset: &ManufacturingAsset,
     output: VerificationOutput,
+    receipt: Option<&CompileVerification>,
     cancel: &AtomicBool,
-) -> Result<spiling_manufacturing::ManufacturingInspection, JobError> {
+) -> Result<ManufacturingInspection, JobError> {
+    if output == VerificationOutput::ReportOnly
+        && let Some(receipt) = receipt
+        && let Some((inspection, occurrences)) =
+            receipt.inspect_report(&asset.bundle, &asset.program, cancel)?
+    {
+        return assess_inspection(inspection, &occurrences, cancel);
+    }
     let bundle = asset.decode().map_err(JobError::from)?;
     let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())
         .map_err(JobError::from)?;
     let working_set = crate::resources::manufacturing_working_set()?;
-    let mut inspection = spiling_manufacturing::working_set::scope(working_set, || {
+    let inspection = spiling_manufacturing::working_set::scope(working_set, || {
         spiling_manufacturing::inspect_bundle(&result, &asset.record.hash, output, cancel)
     })
     .map_err(JobError::from)?;
-    let bundle = result.bundle;
+    assess_inspection(inspection, &result.bundle.provenance.occurrences, cancel)
+}
+
+fn assess_inspection(
+    mut inspection: ManufacturingInspection,
+    occurrences: &[OccurrenceRecord],
+    cancel: &AtomicBool,
+) -> Result<ManufacturingInspection, JobError> {
     if let JobWorkflow::FixedDualMarlin { job } = &inspection.provenance.workflow {
         for face in &mut inspection.provenance.surface_color {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1997,9 +2029,7 @@ fn inspect_asset(
                             .map_err(JobError::from)?,
                     )];
                 }
-                let pose_matches = bundle
-                    .provenance
-                    .occurrences
+                let pose_matches = occurrences
                     .iter()
                     .find(|o| o.occurrence_id == construction.occurrence_id)
                     .is_some_and(|o| o.pose == origin.applied_pose);
@@ -2056,11 +2086,18 @@ fn preflight(
     )?)
 }
 
+struct CompiledAsset {
+    asset: Arc<ManufacturingAsset>,
+    receipt: CompileVerification,
+    inspection: Option<CapturedInspection>,
+}
+
 fn compile(
-    request: CompileRequest,
+    request: &CompileRequest,
     residents: &BTreeMap<DefinitionId, Resident>,
+    capture_motion: bool,
     cancel: &AtomicBool,
-) -> Result<Arc<ManufacturingAsset>, JobError> {
+) -> Result<CompiledAsset, JobError> {
     let started = std::time::Instant::now();
     let CompileRequest {
         project_id,
@@ -2088,55 +2125,33 @@ fn compile(
                 })
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let spiling_manufacturing::ManufacturingResult { bundle, program } =
-        spiling_manufacturing::compile(
-            spiling_manufacturing::CompilerInput {
-                project_id: &project_id,
-                revision,
-                definitions: &definitions,
-                stored_definitions: &stored_definitions,
-                occurrences: &occurrences,
-                intent: &intent,
-                surface_overlays: &surface_overlays,
-                process_document: &process_document,
-                surface_images: &surface_images,
-                working_set: crate::resources::manufacturing_working_set()?,
-            },
-            cancel,
-        )?;
-    // Encode straight into compressed frames; no whole JSON buffer exists.
-    let exceeded = || {
-        ManufacturingError::new(
-            ManufacturingErrorCode::ResourceLimit,
-            "encoded manufacturing bundle exceeds remaining retained/staged budget",
-        )
-    };
-    let mut writer = spiling_chunks::ChunkWriter::new(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES));
-    serde_json::to_writer(&mut writer, &bundle).map_err(|_| exceeded())?;
-    let encoded = writer.finish().map_err(|_| exceeded())?;
+    let spiling_manufacturing::CompiledArtifact {
+        record,
+        bundle,
+        program,
+        receipt,
+        inspection,
+    } = spiling_manufacturing::compile_artifact(
+        spiling_manufacturing::CompilerInput {
+            project_id,
+            revision: *revision,
+            definitions: &definitions,
+            stored_definitions,
+            occurrences,
+            intent,
+            surface_overlays,
+            process_document,
+            surface_images,
+            working_set: crate::resources::manufacturing_working_set()?,
+        },
+        *byte_budget,
+        capture_motion,
+        cancel,
+    )?;
     let encoded_at = std::time::Instant::now();
-    if (encoded.retained_bytes() + program.retained_bytes()) as u64 > u64::from(byte_budget) {
-        return Err(exceeded().into());
-    }
-    if cancel.load(Ordering::Acquire) {
-        return Err(ManufacturingError::new(
-            ManufacturingErrorCode::Cancelled,
-            "manufacturing compile cancelled",
-        )
-        .into());
-    }
-    let record = ManufacturingArtifactRecord {
-        hash: SourceHash::from_digest(encoded.digest()),
-        input_hash: bundle.provenance.input_hash.clone(),
-        byte_count: encoded.len() as u32,
-        summary: bundle.summary(),
-        program: bundle.program.clone(),
-    };
-    drop(bundle);
-    let result = ManufacturingAsset::new(record, encoded, program)
-        .map(Arc::new)
+    let asset = ManufacturingAsset::new(record, bundle, program)
         .map_err(super::manufacturing::project_error)
-        .map_err(JobError::from);
+        .map_err(JobError::from)?;
     if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
         eprintln!(
             "{}",
@@ -2147,7 +2162,11 @@ fn compile(
             })
         );
     }
-    result
+    Ok(CompiledAsset {
+        asset: Arc::new(asset),
+        receipt,
+        inspection,
+    })
 }
 
 #[cfg(test)]
