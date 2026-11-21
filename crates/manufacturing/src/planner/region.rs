@@ -678,6 +678,20 @@ pub(super) struct HatchRows {
 }
 
 impl HatchRows {
+    pub(super) fn nearest(&self, coordinate: f64) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        let ordinal = if self.count == 1 {
+            0.0
+        } else {
+            ((coordinate - self.start) / self.spacing)
+                .round()
+                .clamp(0.0, (self.count - 1) as f64)
+        };
+        Some(self.start + ordinal * self.spacing)
+    }
+
     pub(super) fn support(
         polygon: &Polygon<f64>,
         fraction: f64,
@@ -780,6 +794,38 @@ impl HatchRows {
         rows.start = origin + first * spacing;
         rows.spacing = spacing;
         Ok(Some(rows))
+    }
+
+    pub(super) fn meets_vertex(
+        &self,
+        polygon: &Polygon<f64>,
+        axis: HatchAxis,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        if self.count == 0 {
+            return Ok(false);
+        }
+        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+            for point in &ring.0 {
+                check_cancel(cancel)?;
+                let coordinate = if axis == HatchAxis::X {
+                    point.y
+                } else {
+                    point.x
+                };
+                let index = if self.count == 1 {
+                    0.0
+                } else {
+                    ((coordinate - self.start) / self.spacing).round()
+                };
+                if (0.0..self.count as f64).contains(&index)
+                    && self.start + index * self.spacing == coordinate
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Adjoining zones share the transported physical definition origin,

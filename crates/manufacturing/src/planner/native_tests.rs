@@ -5182,7 +5182,7 @@ fn an_unanchored_wall_is_carried_by_support_never_split() {
             &mut spiling_geometry::GeometryWorkBudget::compile(),
             false,
             bank,
-            |index, _, _, _, _, _, _, _| {
+            |index, _, _, _, _, _, _, _, _| {
                 Ok(support::RasterCandidate {
                     paths: candidates[index].clone(),
                     whole_rows: Vec::new(),

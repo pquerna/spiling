@@ -1059,6 +1059,7 @@ pub(super) fn realize(
     mut raster: impl FnMut(
         usize,
         region::HatchAxis,
+        &[DepositionPath],
         &mut usize,
         usize,
         usize,
@@ -1417,6 +1418,7 @@ pub(super) fn realize(
                     let candidate = raster(
                         index,
                         axis,
+                        previous.as_slice(),
                         &mut staged_segments,
                         constructed_points,
                         extra_owned_bytes,
@@ -2492,6 +2494,7 @@ pub(super) fn realize(
                 let candidate = raster(
                     index,
                     authored_axis,
+                    previous.as_slice(),
                     &mut staged_segments,
                     retained_support_points + constructed_points,
                     extra_owned_bytes,
@@ -2639,6 +2642,7 @@ pub(super) fn realize(
                     let candidate = raster(
                         index,
                         axis,
+                        previous.as_slice(),
                         &mut staged_segments,
                         retained_support_points + constructed_points,
                         extra_owned_bytes,
@@ -4981,7 +4985,7 @@ mod tests {
                     &mut spiling_geometry::GeometryWorkBudget::compile(),
                     false,
                     &mut bank,
-                    |index, _, _, _, _, _, _, _| {
+                    |index, _, _, _, _, _, _, _, _| {
                         Ok(RasterCandidate {
                             paths: candidates[index].clone(),
                             whole_rows: Vec::new(),

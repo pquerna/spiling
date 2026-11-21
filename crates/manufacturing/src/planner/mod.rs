@@ -888,7 +888,7 @@ fn admit_schedule<'model>(
         cancel,
     )?;
     retained_points += construction.points;
-    let mut layers = Vec::with_capacity(count as usize);
+    let mut layers: Vec<PrintLayer> = Vec::with_capacity(count as usize);
     let mut retained_plan_bytes =
         layers.capacity() * std::mem::size_of::<PrintLayer>() + construction.bytes;
     let mut segments = 0usize;
@@ -1048,7 +1048,6 @@ fn admit_schedule<'model>(
                 classification_bytes,
             ])?,
         )?;
-        let mut phase_anchors = support::AnchorWorkspace::default();
         let mut templates: [Option<OrdinaryTemplate>; 2] = [None, None];
         let mut surface_resolution = Vec::new();
         let mut resolution_allocated_bytes = 0usize;
@@ -1179,11 +1178,8 @@ fn admit_schedule<'model>(
                 }
                 classification_start = index as usize;
                 templates = [None, None];
-                let wall_static_bytes = geometry_bytes(&[
-                    wall_static_base_bytes,
-                    classification_bytes,
-                    phase_anchors.retained_bytes(),
-                ])?;
+                let wall_static_bytes =
+                    geometry_bytes(&[wall_static_base_bytes, classification_bytes])?;
                 let actual_height = z - elevation.lower_z;
                 let limits = input.intent.effective_deposition_limits();
                 let envelope = walls::width_envelope(&limits, actual_height)?;
@@ -1556,18 +1552,6 @@ fn admit_schedule<'model>(
                     *template = None;
                 }
             }
-            // Selection is an initial construction proposal, not a reusable anchor
-            // receipt. It is recomputed against this layer's earlier initial paths,
-            // then frozen for every reconstruction of these required normal rows.
-            let guide_outside_bytes = skin_external_owned_bytes(
-                geometry_bytes(&[wall_static_base_bytes, classification_bytes])?,
-                retained_plan_bytes,
-                retained_wall_bytes,
-                wall_cache.len(),
-                wall_index_entry_bytes,
-                resolution_allocated_bytes,
-                &templates,
-            )?;
             let hatch_layer = region::HatchLayer {
                 roof: web_roof.as_ref().map(|field| field.roof()),
                 width_mm: recipe.bead_width_mm,
@@ -1578,46 +1562,15 @@ fn admit_schedule<'model>(
                 top_axis,
                 recipe,
             };
-            let phase = loop {
-                let revocable = neighborhoods.has_prefetch();
-                let proposed = classified
-                    .as_ref()
-                    .expect("region classification initialized")
-                    .choose_initial_ordinary_phase(
-                        &hatch_layer,
-                        layers
-                            .last()
-                            .into_iter()
-                            .flat_map(|layer| layer.paths.iter()),
-                        &mut phase_anchors,
-                        &mut support_work.anchors,
-                        classified_owned_bytes,
-                        skin_retained_points(retained_points, &neighborhoods, &[])?,
-                        skin_retained_bytes(guide_outside_bytes, &neighborhoods, &[])?,
-                        |scratch, scratch_bytes, work| {
-                            boolean::charge(neighborhoods.work_mut(), work)?;
-                            admit_skin_scratch(
-                                retained_points,
-                                guide_outside_bytes,
-                                &mut neighborhoods,
-                                &[],
-                                scratch,
-                                scratch_bytes,
-                                cancel,
-                            )
-                        },
-                        cancel,
-                    );
-                match proposed {
-                    Err(failure)
-                        if revocable && failure.code == ManufacturingErrorCode::ResourceLimit =>
-                    {
-                        neighborhoods.clear_prefetch();
-                        phase_anchors.set_budget(0);
-                    }
-                    result => break result?,
-                }
-            };
+            let phase = classified
+                .as_ref()
+                .expect("region classification initialized")
+                .ordinary_phase(
+                    &hatch_layer,
+                    layers.last().map_or(&[], |layer| layer.paths.as_slice()),
+                    neighborhoods.work_mut(),
+                    cancel,
+                )?;
             phase_by_layer[index as usize] = phase;
             if templates[axis_slot]
                 .as_ref()
@@ -1625,11 +1578,8 @@ fn admit_schedule<'model>(
             {
                 templates[axis_slot] = None;
             }
-            let wall_static_bytes = geometry_bytes(&[
-                wall_static_base_bytes,
-                classification_bytes,
-                phase_anchors.retained_bytes(),
-            ])?;
+            let wall_static_bytes =
+                geometry_bytes(&[wall_static_base_bytes, classification_bytes])?;
             let outside_skin_bytes = skin_external_owned_bytes(
                 wall_static_bytes,
                 retained_plan_bytes,
@@ -1848,7 +1798,6 @@ fn admit_schedule<'model>(
         }
         drop(wall_layout);
         drop(templates);
-        drop(phase_anchors);
         if probe.is_none() {
             retained_points -= native_surfaces
                 .iter()
@@ -1965,6 +1914,7 @@ fn admit_schedule<'model>(
             support_work,
             |index,
              axis,
+             lower,
              segments,
              retained_support_points,
              retained_support_bytes,
@@ -2017,6 +1967,12 @@ fn admit_schedule<'model>(
                         recipe,
                     };
                     let recovering_components = recovery.is_some();
+                    let phase = classified.ordinary_phase(
+                        &hatch_layer,
+                        lower,
+                        neighborhoods.work_mut(),
+                        cancel,
+                    )?;
                     let mut skin_bridge_domains = Vec::new();
                     let mut skin_command_fits = Vec::new();
                     let paths = if let Some(anchors) = recovery {
@@ -2048,7 +2004,7 @@ fn admit_schedule<'model>(
                             };
                         classified.paths_with_bridge_recovery(
                             &hatch_layer,
-                            phase_by_layer[index],
+                            phase,
                             &sections[current].process_domains,
                             classified_bytes,
                             anchor_owned_bytes,
@@ -2087,7 +2043,7 @@ fn admit_schedule<'model>(
                                     field.roof()
                                 }
                             }),
-                            phase_by_layer[index],
+                            phase,
                             classified_bytes,
                             &sections[current].process_domains,
                             segments,
