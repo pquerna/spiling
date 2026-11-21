@@ -57,6 +57,7 @@ pub(in crate::planner) struct Failure {
     pub(in crate::planner) end: f64,
     pub(in crate::planner) span: f64,
 }
+#[derive(Clone)]
 pub(in crate::planner) struct Admission {
     pub(in crate::planner) bridges: Vec<usize>,
     /// Ascending indices of every path with an unsupported span; `failure`

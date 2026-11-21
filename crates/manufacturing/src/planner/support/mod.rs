@@ -1119,15 +1119,22 @@ pub(super) fn realize(
                             .saturating_add(candidate_aux_bytes(&candidate))
                             .saturating_add(stroke_proof_reservation(candidate.paths.len())),
                     )?);
-                    let other = strokes::analyze(
-                        &candidate.paths,
-                        previous.clone(),
-                        std::iter::empty(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )?;
+                    // Paths are judged independently against the same committed
+                    // lower layer, so an attempt that rebuilt the layer's current
+                    // paths unchanged keeps the admission already proved for them.
+                    let other = if candidate.paths == layer.paths {
+                        admission.clone()
+                    } else {
+                        strokes::analyze(
+                            &candidate.paths,
+                            previous.clone(),
+                            std::iter::empty(),
+                            recipe,
+                            &mut anchors,
+                            &mut anchor_work,
+                            cancel,
+                        )?
+                    };
                     let complete = other.failure.is_none();
                     // Same-axis joins preserve every required piece and have their
                     // own direct-anchor proof. Keep that monotone improvement even
