@@ -13,7 +13,7 @@
 //! schedule is settled here from sections alone, so the plan is constructed
 //! once and never split and retried.
 
-use super::{LayerElevation, native, region};
+use super::{LayerElevation, native, region, tolerant::SectionStore};
 use crate::{check_cancel, error};
 use geo::{Area, BooleanOps, MultiPolygon};
 use spiling_contracts::manufacturing::*;
@@ -48,7 +48,7 @@ pub(super) fn without_cache<T>(operation: impl FnOnce() -> T) -> T {
 /// Split layers whose walls would hang past half a bead where thinner
 /// layers anchor them. Only with support enabled, where the alternative is
 /// scaffold; explicit Off prints authored overhangs as reported. Returns the
-/// number of layers added.
+/// source sections that can move to span collection.
 pub(super) fn split_for_slopes(
     input: &super::CompilerInput<'_>,
     admission: &super::preflight::Admission,
@@ -56,10 +56,10 @@ pub(super) fn split_for_slopes(
     outside_bytes: usize,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<usize, ManufacturingError> {
+) -> Result<SectionStore, ManufacturingError> {
     let intent = &input.intent;
     if matches!(intent.recipe.supports, SupportPolicy::Disabled) || schedule.len() < 2 {
-        return Ok(0);
+        return Ok(SectionStore::default());
     }
     let width = intent.recipe.bead_width_mm;
     let nominal = intent.select_layer_height()?.height_mm;
@@ -81,6 +81,8 @@ pub(super) fn split_for_slopes(
         width,
         noise_mm2,
         cached: Vec::new(),
+        sections: SectionStore::default(),
+        active_row_bytes: 0,
         excess: Vec::new(),
         live: Rc::new(Live::default()),
         outside_bytes,
@@ -98,6 +100,20 @@ pub(super) fn split_for_slopes(
             }
         },
     };
+    if steps.cache_enabled {
+        // Hold at most one share for optional raw rows; active section pairs
+        // and overlays keep the remaining allowance.
+        let allowance = crate::working_set::bytes()
+            .saturating_sub(outside_bytes)
+            .saturating_sub(state_bytes(schedule, &Vec::new()))
+            / 3;
+        for wave in schedule.chunks(rayon::current_num_threads().max(1)) {
+            check_cancel(cancel)?;
+            steps
+                .sections
+                .prefetch(&admission.models, wave, allowance, cancel);
+        }
+    }
     split_where_thinner_anchors(
         schedule,
         floor,
@@ -105,7 +121,9 @@ pub(super) fn split_for_slopes(
         &mut steps,
         noise_mm2,
         cancel,
-    )
+    )?;
+    steps.sections.keep_scheduled(schedule);
+    Ok(steps.sections)
 }
 
 /// The samples of the halves `split_resolved_layer` makes.
@@ -222,7 +240,7 @@ fn lookup_work(entries: usize) -> usize {
 
 /// The pinned geo conversion holds both polygon results and, for the largest
 /// ring, RDP indices plus disjoint pending subchains and old/new growth buffers.
-fn section_conversion(
+pub(super) fn section_conversion(
     section: &spiling_geometry::tolerant::TolerantSection,
 ) -> Result<(usize, usize), ManufacturingError> {
     let rings = section.loops.len();
@@ -259,7 +277,7 @@ fn section_conversion(
     Ok((bytes, work))
 }
 
-fn section_bytes(section: &spiling_geometry::tolerant::TolerantSection) -> usize {
+pub(super) fn section_bytes(section: &spiling_geometry::tolerant::TolerantSection) -> usize {
     section
         .loops
         .capacity()
@@ -350,6 +368,8 @@ struct Steps<'a> {
     width: f64,
     noise_mm2: f64,
     cached: Vec<(u64, Rc<Material>)>,
+    sections: SectionStore,
+    active_row_bytes: usize,
     excess: Vec<(Pair, f64)>,
     live: Rc<Live>,
     outside_bytes: usize,
@@ -360,7 +380,7 @@ struct Steps<'a> {
 }
 
 impl Steps<'_> {
-    fn sample(
+    fn sample_one(
         &mut self,
         model: &spiling_geometry::tolerant::TolerantModel,
         z: f64,
@@ -416,6 +436,8 @@ impl Steps<'_> {
     fn used_bytes(&self) -> usize {
         self.outside_bytes
             .saturating_add(self.state_bytes)
+            .saturating_add(self.sections.bytes())
+            .saturating_add(self.active_row_bytes)
             .saturating_add(
                 self.cached
                     .capacity()
@@ -432,6 +454,7 @@ impl Steps<'_> {
 
     fn clear(&mut self) {
         self.cached = Vec::new();
+        self.sections = SectionStore::default();
         self.excess = Vec::new();
     }
 
@@ -560,19 +583,35 @@ impl Steps<'_> {
         Ok(())
     }
 
-    fn at(&mut self, z: f64) -> Result<Rc<Material>, ManufacturingError> {
-        check_cancel(self.cancel)?;
-        self.charge(lookup_work(self.cached.len()))?;
-        if let Ok(position) = self
-            .cached
-            .binary_search_by_key(&z.to_bits(), |(key, _)| *key)
-        {
-            return Ok(Rc::clone(&self.cached[position].1));
+    fn union_row(
+        &mut self,
+        row: &super::tolerant::SampleRow,
+    ) -> Result<Rc<Material>, ManufacturingError> {
+        self.charge(row.work)?;
+        let mut section = self.own(MultiPolygon(Vec::new()))?;
+        for placed in &row.sections {
+            check_cancel(self.cancel)?;
+            let points = region::point_count(placed);
+            self.charge(points)?;
+            if section.region.0.is_empty() {
+                self.admit(points, row.bytes)?;
+                section = self.own(placed.clone())?;
+            } else {
+                self.budget(&section.region, placed, 0, 0)?;
+                let merged = section.region.union(placed);
+                check_cancel(self.cancel)?;
+                section = self.own(merged)?;
+            }
         }
+        Ok(section)
+    }
+
+    // When carrying an all-occurrence row won't fit, don't reduce the set of
+    // printable scenes: use the old one-occurrence-at-a-time slope reduction.
+    fn union_sequential(&mut self, z: f64) -> Result<Rc<Material>, ManufacturingError> {
         let mut section = self.own(MultiPolygon(Vec::new()))?;
         for model in self.models.values() {
-            check_cancel(self.cancel)?;
-            let placed = self.sample(model, z)?;
+            let placed = self.sample_one(model, z)?;
             self.charge(placed.points)?;
             if section.region.0.is_empty() {
                 section = placed;
@@ -583,6 +622,65 @@ impl Steps<'_> {
                 section = self.own(merged)?;
             }
         }
+        Ok(section)
+    }
+
+    fn at(&mut self, z: f64) -> Result<Rc<Material>, ManufacturingError> {
+        check_cancel(self.cancel)?;
+        self.charge(lookup_work(self.cached.len()))?;
+        if let Ok(position) = self
+            .cached
+            .binary_search_by_key(&z.to_bits(), |(key, _)| *key)
+        {
+            return Ok(Rc::clone(&self.cached[position].1));
+        }
+        let mut section = if !self.cache_enabled {
+            self.union_sequential(z)?
+        } else {
+            let available = |steps: &Self| {
+                crate::working_set::bytes()
+                    .saturating_sub(steps.used_bytes().saturating_sub(steps.sections.bytes()))
+            };
+            let headroom = available(self);
+            let mut row = self.sections.sample(self.models, z, headroom, self.cancel);
+            if row
+                .as_ref()
+                .is_err_and(|e| e.code == ManufacturingErrorCode::ResourceLimit)
+            {
+                self.clear();
+                let headroom = available(self);
+                row = self.sections.sample(self.models, z, headroom, self.cancel);
+            }
+            match row {
+                Ok(row) => {
+                    self.active_row_bytes = row.bytes;
+                    let combined = self.union_row(&row);
+                    self.active_row_bytes = 0;
+                    match combined {
+                        Ok(combined) => {
+                            if self.cache_enabled {
+                                let allowance = crate::working_set::bytes()
+                                    .saturating_sub(self.outside_bytes)
+                                    .min(available(self))
+                                    / 3;
+                                self.sections.remember(z, row, allowance);
+                            }
+                            combined
+                        }
+                        Err(failure) if failure.code == ManufacturingErrorCode::ResourceLimit => {
+                            drop(row);
+                            self.clear();
+                            self.union_sequential(z)?
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+                Err(failure) if failure.code == ManufacturingErrorCode::ResourceLimit => {
+                    self.union_sequential(z)?
+                }
+                Err(failure) => return Err(failure),
+            }
+        };
         region::canonicalize(&mut Rc::get_mut(&mut section).unwrap().region);
         self.cache_section(z.to_bits(), &section)?;
         Ok(section)
@@ -677,6 +775,8 @@ mod tests {
             noise_mm2: 0.0045,
             state_bytes: 0,
             cached: Vec::new(),
+            sections: SectionStore::default(),
+            active_row_bytes: 0,
             excess: Vec::new(),
             live: Rc::new(Live::default()),
             cache_enabled: true,

@@ -275,7 +275,7 @@ fn plan_with(
     let outside = retry_outside_bytes(&admission, &schedule, &process_captures)?
         .saturating_sub(schedule.capacity() * std::mem::size_of::<LayerElevation>());
     timing.mark("events_captures_initial_schedule");
-    slopes::split_for_slopes(
+    let mut source_sections = slopes::split_for_slopes(
         input,
         &admission,
         &mut schedule,
@@ -324,6 +324,7 @@ fn plan_with(
             &mut schedule,
             &mut surface_work,
             &mut support_work,
+            &mut source_sections,
             Some(probe),
             None,
             &mut wall_memo,
@@ -350,6 +351,7 @@ fn plan_with(
         &mut schedule,
         &mut surface_work,
         &mut support_work,
+        &mut source_sections,
         None,
         native_prefix,
         &mut wall_memo,
@@ -438,6 +440,7 @@ fn admit_schedule<'model>(
     schedule: &mut Vec<LayerElevation>,
     surface_work: &mut usize,
     support_work: &mut support::SupportWork,
+    source_sections: &mut tolerant::SectionStore,
     probe: Option<DepositionProbe>,
     native_prefix: Option<NativeScheduleCapture>,
     wall_memo: &mut WallMemo,
@@ -494,7 +497,24 @@ fn admit_schedule<'model>(
     let mut native_finished_bytes = 0usize;
     let mut native_source_area_mm2 = 0.0;
     let mut native_points = 0usize;
-    let mut prefetched = None;
+    let mut published = tolerant::PublishedSections::default();
+    sections.iter().for_each(|span| published.add_span(span));
+    native_surfaces
+        .iter()
+        .for_each(|surface| published.add_surface(surface));
+    let non_schedule_bytes = admission
+        .model_bytes()
+        .saturating_add(wall_memo.payload_bytes())
+        .saturating_add(std::mem::size_of_val(process_captures))
+        .saturating_add(
+            process_captures
+                .iter()
+                .map(|capture| {
+                    capture.operations.capacity()
+                        * std::mem::size_of::<spiling_contracts::process::ProcessProvenance>()
+                })
+                .sum::<usize>(),
+        );
     while index < count {
         check_cancel(cancel)?;
         let mut sample = schedule[index as usize].sample;
@@ -532,16 +552,46 @@ fn admit_schedule<'model>(
             } else {
                 count as usize
             };
-            let captured = tolerant::collect_span(
-                &occurrences,
-                &admission.models,
-                admission,
-                &schedule[index as usize..hold_end],
-                index,
-                &mut prefetched,
-                !matches!(input.intent.recipe.supports, SupportPolicy::Disabled),
-                cancel,
-            )?;
+            let available = crate::working_set::bytes()
+                .saturating_sub(non_schedule_bytes)
+                .saturating_sub(
+                    schedule
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LayerElevation>()),
+                )
+                .saturating_sub(void_memo.retained_bytes())
+                .saturating_sub(startup_wall.as_ref().map_or(0, StartupWall::layout_bytes));
+            let slice = &schedule[index as usize..hold_end];
+            let supports = !matches!(input.intent.recipe.supports, SupportPolicy::Disabled);
+            let mut collect = |bytes| {
+                tolerant::collect_span(
+                    &occurrences,
+                    &admission.models,
+                    admission,
+                    slice,
+                    index,
+                    source_sections,
+                    available.saturating_sub(bytes),
+                    supports,
+                    cancel,
+                )
+            };
+            let upper = published.bytes(
+                sections.capacity(),
+                native_surfaces.capacity(),
+                retained_section_bytes,
+            );
+            let captured = match collect(upper) {
+                Err(failure) if failure.code == ManufacturingErrorCode::ResourceLimit => {
+                    let exact =
+                        native::output_bytes(&sections, &native_surfaces, retained_section_bytes);
+                    if exact == upper {
+                        return Err(failure);
+                    }
+                    collect(exact)?
+                }
+                result => result?,
+            };
             count = schedule.partition_point(|layer| layer.z <= terminal_z) as u32;
             sample = schedule[index as usize].sample;
             native_slab_start = index;
@@ -773,6 +823,7 @@ fn admit_schedule<'model>(
             occupied,
             source_area_mm2,
         });
+        published.add_span(sections.last().expect("just retained a section"));
         if end == native_slab_end && !native_finished.is_empty() {
             // Image coverage needs M for diagnostics and C for mandatory coverage.
             native_finished.retain_mut(|(occurrence_id, material)| {
@@ -850,10 +901,16 @@ fn admit_schedule<'model>(
                     required: std::mem::take(&mut native_required),
                     native_bytes: native_finished_bytes,
                 });
+                published.add_surface(
+                    native_surfaces
+                        .last()
+                        .expect("just retained a native surface"),
+                );
             }
         }
         index = end;
     }
+    *source_sections = tolerant::SectionStore::default();
     timing.mark("source_sections_and_domains");
     let native_retained_points = retained_points;
     let retained_support_native_bytes = void_memo.retained_bytes();

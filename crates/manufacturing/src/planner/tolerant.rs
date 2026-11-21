@@ -14,6 +14,7 @@ use spiling_contracts::geometry::{OccurrenceId, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
 use spiling_geometry::tolerant::{TolerantModel, TolerantSection};
 use std::collections::BTreeMap;
+use std::mem::size_of;
 use std::sync::{Arc, atomic::AtomicBool};
 
 /// Section loops as polygons: each hole belongs to the smallest outer loop
@@ -129,24 +130,399 @@ fn start_at_least(ring: &mut LineString<f64>) {
     ring.0.push(ring.0[0]);
 }
 
-/// Sections of one layer for every occurrence, computed while deciding a
-/// span's extent; the next span starts from them.
-pub(super) type Prefetched = Option<(u32, u64, Vec<MultiPolygon<f64>>)>;
+/// Raw converted sections at one exact Z, in placed occurrence order. The
+/// slope union and held-span comparison each canonicalize at their old boundary.
+#[derive(Default)]
+pub(super) struct SampleRow {
+    pub sections: Vec<MultiPolygon<f64>>,
+    pub bytes: usize,
+    pub work: usize,
+    canonical: bool,
+}
 
-fn sections_at(
-    occurrences: &[&OccurrenceRecord],
-    models: &BTreeMap<OccurrenceId, Arc<TolerantModel>>,
-    z: f64,
-    cancel: &AtomicBool,
-) -> Result<Vec<MultiPolygon<f64>>, ManufacturingError> {
-    let mut sections = Vec::with_capacity(occurrences.len());
-    for occurrence in occurrences {
-        check_cancel(cancel)?;
-        let mut placed = section_at(&models[&occurrence.occurrence_id], z)?;
-        region::canonicalize(&mut placed);
-        sections.push(placed);
+/// Compile-local store, bound to the immutable placed models of one admission.
+/// A schedule split changes the lookup key, so a stale sample cannot authorize
+/// the new layer. Consumed rows release their material immediately.
+#[derive(Default)]
+pub(super) struct SectionStore {
+    rows: Vec<(u64, Option<SampleRow>)>,
+    payload: usize,
+}
+
+type Models = BTreeMap<OccurrenceId, Arc<TolerantModel>>;
+
+impl SectionStore {
+    pub(super) fn bytes(&self) -> usize {
+        self.payload.saturating_add(
+            self.rows
+                .capacity()
+                .saturating_mul(size_of::<(u64, Option<SampleRow>)>()),
+        )
     }
-    Ok(sections)
+
+    fn position(&self, z: f64) -> Result<usize, usize> {
+        self.rows
+            .binary_search_by_key(&z.to_bits(), |&(key, _)| key)
+    }
+
+    pub(super) fn take(&mut self, z: f64) -> Option<SampleRow> {
+        let index = self.position(z).ok()?;
+        let row = self.rows[index].1.take()?;
+        self.payload -= row.bytes;
+        Some(row)
+    }
+
+    pub(super) fn remember(&mut self, z: f64, row: SampleRow, limit: usize) {
+        if self.bytes().saturating_add(row.bytes) > limit {
+            return;
+        }
+        let bytes = row.bytes;
+        match self.position(z) {
+            Ok(index) => {
+                if self.rows[index].1.is_some() {
+                    return;
+                }
+                self.rows[index].1 = Some(row);
+            }
+            Err(index) => {
+                if self.rows.len() == self.rows.capacity() {
+                    let extra = self.rows.capacity().max(4);
+                    // The old buffer may remain live during reallocation.
+                    let next = self.rows.capacity().saturating_add(extra);
+                    if self
+                        .bytes()
+                        .saturating_add(row.bytes)
+                        .saturating_add(next.saturating_mul(size_of::<(u64, Option<SampleRow>)>()))
+                        > limit
+                        || self.rows.try_reserve_exact(extra).is_err()
+                    {
+                        return;
+                    }
+                }
+                self.rows.insert(index, (z.to_bits(), Some(row)));
+            }
+        }
+        self.payload += bytes;
+    }
+
+    /// Prepare one ordered wave. Each worker has an independent share of
+    /// remaining bytes; a row too large for its lane is computed in order
+    /// with the whole available allowance when it is needed.
+    pub(super) fn prefetch(
+        &mut self,
+        models: &Models,
+        layers: &[LayerElevation],
+        allowance: usize,
+        cancel: &AtomicBool,
+    ) {
+        use rayon::prelude::*;
+        let lanes = rayon::current_num_threads().max(1);
+        let layers = &layers[..layers.len().min(lanes)];
+        let header = layers.len().saturating_mul(size_of::<Option<SampleRow>>());
+        let growth = allowance
+            .saturating_sub(self.bytes())
+            .saturating_sub(header);
+        let Ok(lane) = crate::working_set::WorkingSet::new(growth / layers.len().max(1)) else {
+            return;
+        };
+        let mut rows: Vec<_> = layers
+            .par_iter()
+            .map(|layer| {
+                let z = layer.sample;
+                if self.has(z) {
+                    return None;
+                }
+                crate::working_set::scope(lane, || sample_row(models, z, lane.bytes(), cancel).ok())
+            })
+            .collect();
+        let mut pending = rows.iter().flatten().map(|row| row.bytes).sum::<usize>();
+        for (layer, row) in layers.iter().zip(&mut rows) {
+            if let Some(row) = row.take() {
+                pending -= row.bytes;
+                self.remember(
+                    layer.sample,
+                    row,
+                    allowance.saturating_sub(header).saturating_sub(pending),
+                );
+            }
+        }
+    }
+
+    pub(super) fn sample(
+        &mut self,
+        models: &Models,
+        z: f64,
+        available: usize,
+        cancel: &AtomicBool,
+    ) -> Result<SampleRow, ManufacturingError> {
+        check_cancel(cancel)?;
+        if self.bytes() > available {
+            *self = Self::default();
+        }
+        if let Some(row) = self.take(z) {
+            return Ok(row);
+        }
+        let result = sample_row(models, z, available.saturating_sub(self.bytes()), cancel);
+        if self.bytes() != 0
+            && result
+                .as_ref()
+                .is_err_and(|failure| failure.code == ManufacturingErrorCode::ResourceLimit)
+        {
+            *self = Self::default();
+            return sample_row(models, z, available, cancel);
+        }
+        result
+    }
+
+    pub(super) fn keep_scheduled(&mut self, schedule: &[LayerElevation]) {
+        self.rows.retain(|&(bits, _)| {
+            schedule
+                .binary_search_by(|layer| layer.sample.total_cmp(&f64::from_bits(bits)))
+                .is_ok()
+        });
+        self.payload = self
+            .rows
+            .iter()
+            .filter_map(|(_, row)| row.as_ref())
+            .map(|row| row.bytes)
+            .sum();
+    }
+
+    fn has(&self, z: f64) -> bool {
+        self.position(z)
+            .is_ok_and(|index| self.rows[index].1.is_some())
+    }
+}
+
+fn sample_row(
+    models: &Models,
+    z: f64,
+    allowance: usize,
+    cancel: &AtomicBool,
+) -> Result<SampleRow, ManufacturingError> {
+    let mut row = SampleRow::default();
+    let size = size_of::<MultiPolygon<f64>>();
+    admit_section(models.len().saturating_mul(size), allowance)?;
+    row.sections
+        .try_reserve_exact(models.len())
+        .map_err(|_| section_resource())?;
+    row.bytes = row.sections.capacity().saturating_mul(size);
+    for model in models.values() {
+        let (section, bytes, work) =
+            sample_model(model, z, allowance.saturating_sub(row.bytes), cancel)?;
+        row.sections.push(section);
+        row.bytes = row.bytes.saturating_add(bytes);
+        super::boolean::charge(&mut row.work, work)?;
+    }
+    Ok(row)
+}
+
+fn section_resource() -> ManufacturingError {
+    error(
+        ManufacturingErrorCode::ResourceLimit,
+        "tolerant section exceeds live byte allowance",
+    )
+}
+
+fn admit_section(bytes: usize, allowance: usize) -> Result<(), ManufacturingError> {
+    if bytes > allowance {
+        Err(section_resource())
+    } else {
+        Ok(())
+    }
+}
+
+fn sample_model(
+    model: &TolerantModel,
+    z: f64,
+    allowance: usize,
+    cancel: &AtomicBool,
+) -> Result<(MultiPolygon<f64>, usize, usize), ManufacturingError> {
+    use spiling_contracts::geometry::{GeometryError, GeometryErrorCode};
+    check_cancel(cancel)?;
+    let convert_error =
+        |failure| super::native_error(failure, &format!("tolerant section at Z {z} mm"));
+    let demand = model.section_demand(z).map_err(convert_error)?;
+    let mut reserved = demand.scratch_bytes.saturating_add(demand.output_bytes);
+    admit_section(reserved, allowance)?;
+    let section = model
+        .section_admitted(z, cancel, &mut |bytes| {
+            reserved = reserved.saturating_add(bytes);
+            if reserved > allowance {
+                Err(GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "tolerant section exceeds live byte allowance",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(convert_error)?;
+    let (conversion_bytes, work) = super::slopes::section_conversion(&section)?;
+    admit_section(
+        super::slopes::section_bytes(&section).saturating_add(conversion_bytes),
+        allowance,
+    )?;
+    let mut material = material_from_section(model, &section);
+    check_cancel(cancel)?;
+    drop(section);
+    let bytes = native::material_bytes(&mut material);
+    admit_section(bytes, allowance)?;
+    let work = demand
+        .triangles
+        .checked_add(work)
+        .ok_or_else(section_resource)?;
+    Ok((material, bytes, work))
+}
+
+impl SampleRow {
+    fn canonicalize(&mut self) {
+        if !self.canonical {
+            self.sections.iter_mut().for_each(region::canonicalize);
+            self.canonical = true;
+        }
+    }
+}
+
+fn canonical_view(raw: &SampleRow) -> Vec<MultiPolygon<f64>> {
+    let mut sections = raw.sections.clone();
+    sections.iter_mut().for_each(region::canonicalize);
+    sections
+}
+
+fn held_sections_match(a: &[MultiPolygon<f64>], b: &[MultiPolygon<f64>], profile: f64) -> bool {
+    a.iter()
+        .zip(b)
+        .all(|(a, b)| a.0 == b.0 || super::same_within(a, b, profile))
+}
+
+fn read_sample(
+    store: &mut SectionStore,
+    models: &Models,
+    layers: &[LayerElevation],
+    available: usize,
+    cancel: &AtomicBool,
+) -> Result<SampleRow, ManufacturingError> {
+    if !store.has(layers[0].sample) {
+        store.prefetch(models, layers, available, cancel);
+    }
+    store.sample(models, layers[0].sample, available, cancel)
+}
+
+#[derive(Default)]
+struct Midpoints {
+    rows: Vec<SampleRow>,
+    payload: usize,
+}
+
+impl Midpoints {
+    fn bytes(&self) -> usize {
+        self.payload
+            .saturating_add(self.rows.capacity().saturating_mul(size_of::<SampleRow>()))
+    }
+
+    fn push(&mut self, row: SampleRow, allowance: usize) -> Result<(), ManufacturingError> {
+        if self.rows.len() == self.rows.capacity() {
+            let extra = self.rows.capacity().max(4);
+            let new = self
+                .rows
+                .capacity()
+                .saturating_add(extra)
+                .saturating_mul(size_of::<SampleRow>());
+            admit_section(
+                self.bytes().saturating_add(row.bytes).saturating_add(new),
+                allowance,
+            )?;
+            self.rows
+                .try_reserve_exact(extra)
+                .map_err(|_| section_resource())?;
+        }
+        self.payload = self.payload.saturating_add(row.bytes);
+        admit_section(self.bytes(), allowance)?;
+        self.rows.push(row);
+        Ok(())
+    }
+}
+
+/// Preserve the legacy occurrence/layer/plane operand order exactly. The
+/// midpoint here is the raw row already used for held-span comparison, not a
+/// clone of the canonical representative or a recomputed source section.
+fn off_occupancy(
+    occurrences: &[&OccurrenceRecord],
+    admission: &super::preflight::Admission,
+    layers: &[LayerElevation],
+    mut midpoints: Midpoints,
+    allowance: usize,
+    cancel: &AtomicBool,
+) -> Result<ContinuousOccupied, ManufacturingError> {
+    let interval = [layers[0].lower_z, layers.last().unwrap().z];
+    let mut occupied = ContinuousOccupied::default();
+    // Midpoint geometry moves to occupied; it is already in `midpoint_bytes`.
+    let midpoint_bytes = midpoints.bytes();
+    let mut side_bytes = 0usize;
+    for (ordinal, occurrence) in occurrences.iter().enumerate() {
+        let bounds = admission.native_bounds[&occurrence.occurrence_id];
+        let height = [
+            interval[0].max(bounds.min[2]),
+            interval[1].min(bounds.max[2]),
+        ];
+        if height[0] > height[1] {
+            continue;
+        }
+        let model = &admission.models[&occurrence.occurrence_id];
+        for (layer, midpoint) in layers.iter().zip(&mut midpoints.rows) {
+            check_cancel(cancel)?;
+            let inset = (0.25 * (layer.z - layer.lower_z)).min(0.01);
+            for (plane, z) in [layer.lower_z + inset, layer.sample, layer.z - inset]
+                .into_iter()
+                .enumerate()
+            {
+                let held = midpoint_bytes.saturating_add(side_bytes).saturating_add(
+                    occupied
+                        .pieces
+                        .capacity()
+                        .saturating_mul(size_of::<super::OccupiedPiece>()),
+                );
+                let (polygons, bytes) = if plane == 1 {
+                    (
+                        std::mem::replace(
+                            &mut midpoint.sections[ordinal],
+                            MultiPolygon(Vec::new()),
+                        ),
+                        0,
+                    )
+                } else {
+                    let (polygons, bytes, _) =
+                        sample_model(model, z, allowance.saturating_sub(held), cancel)?;
+                    (polygons, bytes)
+                };
+                let need = occupied.pieces.len().saturating_add(polygons.0.len());
+                if need > occupied.pieces.capacity() {
+                    let capacity = occupied
+                        .pieces
+                        .capacity()
+                        .saturating_mul(2)
+                        .max(4)
+                        .max(need);
+                    admit_section(
+                        held.saturating_add(bytes).saturating_add(
+                            capacity.saturating_mul(size_of::<super::OccupiedPiece>()),
+                        ),
+                        allowance,
+                    )?;
+                    occupied
+                        .pieces
+                        .try_reserve_exact(capacity - occupied.pieces.len())
+                        .map_err(|_| section_resource())?;
+                }
+                side_bytes = side_bytes.saturating_add(bytes);
+                for polygon in polygons.0 {
+                    occupied.push(polygon, height)?;
+                }
+            }
+        }
+    }
+    Ok(occupied)
 }
 
 /// A span of layers as a native-shaped span: material at its first layer's
@@ -165,57 +541,90 @@ pub(super) fn collect_span(
     admission: &super::preflight::Admission,
     layers: &[LayerElevation],
     index: u32,
-    prefetched: &mut Prefetched,
+    store: &mut SectionStore,
+    allowance: usize,
     supports: bool,
     cancel: &AtomicBool,
 ) -> Result<native::NativeSpan, ManufacturingError> {
     let profile = spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
-    let sections = match prefetched.take() {
-        Some((at, sample, sections)) if at == index && sample == layers[0].sample.to_bits() => {
-            sections
-        }
-        _ => sections_at(occurrences, models, layers[0].sample, cancel)?,
+    let mut off_midpoints = Midpoints::default();
+    let mut first = read_sample(store, models, layers, allowance, cancel)?;
+    let (sections, section_bytes) = if supports {
+        first.canonicalize();
+        (first.sections, first.bytes)
+    } else {
+        admit_section(
+            first.bytes.saturating_mul(2),
+            allowance.saturating_sub(store.bytes()),
+        )?;
+        let sections = canonical_view(&first);
+        let bytes = first.bytes;
+        off_midpoints.push(
+            first,
+            allowance
+                .saturating_sub(store.bytes())
+                .saturating_sub(bytes),
+        )?;
+        (sections, bytes)
     };
     let mut held = 1;
     while held < layers.len() {
-        let next = sections_at(occurrences, models, layers[held].sample, cancel)?;
-        if !sections
-            .iter()
-            .zip(&next)
-            .all(|(held, other)| held.0 == other.0 || super::same_within(held, other, profile))
-        {
-            *prefetched = Some((index + held as u32, layers[held].sample.to_bits(), next));
+        let local = allowance
+            .saturating_sub(section_bytes)
+            .saturating_sub(off_midpoints.bytes());
+        let mut next = read_sample(store, models, &layers[held..], local, cancel)?;
+        let same = if supports {
+            next.canonicalize();
+            held_sections_match(&sections, &next.sections, profile)
+        } else {
+            admit_section(
+                next.bytes.saturating_mul(2),
+                local.saturating_sub(store.bytes()),
+            )?;
+            held_sections_match(&sections, &canonical_view(&next), profile)
+        };
+        if !same {
+            store.remember(layers[held].sample, next, local);
             break;
+        }
+        if !supports {
+            off_midpoints.push(
+                next,
+                local
+                    .saturating_sub(store.bytes())
+                    .saturating_add(off_midpoints.bytes()),
+            )?;
         }
         held += 1;
     }
     let layers = &layers[..held];
     let (lower, upper) = (layers[0].lower_z, layers[held - 1].z);
+    let mut occupied = if supports {
+        ContinuousOccupied::default()
+    } else {
+        off_occupancy(
+            occurrences,
+            admission,
+            layers,
+            off_midpoints,
+            allowance
+                .saturating_sub(section_bytes)
+                .saturating_sub(store.bytes()),
+            cancel,
+        )?
+    };
     let mut material = MultiPolygon(Vec::new());
     let mut contributions = Vec::with_capacity(occurrences.len());
     let mut finished = Vec::new();
     let mut finished_bytes = 0usize;
     let mut finished_area_mm2 = 0.0;
-    let mut occupied = ContinuousOccupied::default();
     for (occurrence, mut placed) in occurrences.iter().zip(sections) {
         check_cancel(cancel)?;
-        let model = &models[&occurrence.occurrence_id];
-        let bounds = admission.native_bounds[&occurrence.occurrence_id];
-        let height = [lower.max(bounds.min[2]), upper.min(bounds.max[2])];
         if supports {
             occupied.tolerant.push(super::TolerantOccupied {
-                model: Arc::clone(model),
+                model: Arc::clone(&models[&occurrence.occurrence_id]),
                 interval: [lower, upper],
             });
-        } else if height[0] <= height[1] {
-            for layer in layers {
-                let inset = (0.25 * (layer.z - layer.lower_z)).min(0.01);
-                for z in [layer.lower_z + inset, layer.sample, layer.z - inset] {
-                    for polygon in section_at(model, z)?.0 {
-                        occupied.push(polygon, height)?;
-                    }
-                }
-            }
         }
         if placed.0.is_empty() {
             continue;
@@ -521,4 +930,93 @@ pub(super) fn project_protected_voids(
         regions: MultiPolygon(regions),
         scopes,
     })
+}
+
+/// Linear accounting for source-stage owners. Shared payloads may be charged
+/// twice in the fast bound; the caller can retry a refused query using the
+/// existing exact owner ledger. Do not scan the growing prefix for aliases at
+/// every sample: that would add superlinear work to the section pass.
+#[derive(Default)]
+pub(super) struct PublishedSections {
+    payload: usize,
+}
+
+impl PublishedSections {
+    pub(super) fn add_span(&mut self, span: &super::SectionSpan) {
+        self.payload = self
+            .payload
+            .saturating_add(native::MATERIAL_ARC_BYTES)
+            .saturating_add(
+                span.process_domains
+                    .capacity()
+                    .saturating_mul(size_of::<super::ProcessDomain>()),
+            );
+        for domain in &span.process_domains {
+            self.payload = self
+                .payload
+                .saturating_add(domain.bytes)
+                .saturating_add(native::MATERIAL_ARC_BYTES)
+                .saturating_add(
+                    domain
+                        .coverage
+                        .contributions
+                        .capacity()
+                        .saturating_mul(size_of::<ProcessRegionContribution>()),
+                );
+            for source in &domain.coverage.contributions {
+                self.payload = self
+                    .payload
+                    .saturating_add(source.definition_id.allocated_bytes());
+            }
+        }
+        if let Some(occupied) = &span.occupied {
+            self.payload = self
+                .payload
+                .saturating_add(occupied.payload_bytes)
+                .saturating_add(
+                    occupied
+                        .pieces
+                        .capacity()
+                        .saturating_mul(size_of::<super::OccupiedPiece>()),
+                )
+                .saturating_add(
+                    occupied
+                        .tolerant
+                        .capacity()
+                        .saturating_mul(size_of::<super::TolerantOccupied>()),
+                );
+        }
+    }
+
+    pub(super) fn add_surface(&mut self, surface: &super::NativeSurfaceSpan) {
+        self.payload =
+            self.payload
+                .saturating_add(surface.native_bytes)
+                .saturating_add(
+                    surface
+                        .occurrences
+                        .capacity()
+                        .saturating_mul(size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>)>()),
+                )
+                .saturating_add(surface.image_islands.capacity().saturating_mul(size_of::<(
+                    OccurrenceId,
+                    usize,
+                )>(
+                )))
+                .saturating_add(surface.required.len().saturating_mul(
+                    16 * (size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>)>() + size_of::<usize>()),
+                ));
+    }
+
+    pub(super) fn bytes(
+        &self,
+        span_capacity: usize,
+        surface_capacity: usize,
+        material_bytes: usize,
+    ) -> usize {
+        self.payload
+            .saturating_add(span_capacity.saturating_mul(size_of::<super::SectionSpan>()))
+            .saturating_add(surface_capacity.saturating_mul(size_of::<super::NativeSurfaceSpan>()))
+            .saturating_add(material_bytes)
+    }
 }
