@@ -291,42 +291,6 @@ impl Bits {
     }
 }
 
-/// Which coarse blocks of `BLOCK_CELLS × 64` cells hold any cell of a set:
-/// a screen only, never an answer. A rectangle meeting no marked block
-/// meets no set cell.
-pub(super) struct Coarse {
-    row0: usize,
-    word0: usize,
-    rows: usize,
-    words: usize,
-    marked: Vec<bool>,
-}
-
-const BLOCK_CELLS: usize = 16;
-
-impl Coarse {
-    /// Whether the closed millimetre rectangle can meet a set cell.
-    pub(super) fn meets(&self, frame: &CellFrame, rect: [[f64; 2]; 2]) -> bool {
-        if self.marked.is_empty() {
-            return false;
-        }
-        let (Some((c0, c1)), Some((r0, r1))) = (
-            frame.touching(0, rect[0][0], rect[1][0]),
-            frame.touching(1, rect[0][1], rect[1][1]),
-        ) else {
-            return false;
-        };
-        let rows =
-            (r0 / BLOCK_CELLS).max(self.row0)..=(r1 / BLOCK_CELLS).min(self.row0 + self.rows - 1);
-        let words = (c0 / 64).max(self.word0)..=(c1 / 64).min(self.word0 + self.words - 1);
-        rows.into_iter().any(|row| {
-            words
-                .clone()
-                .any(|word| self.marked[(row - self.row0) * self.words + word - self.word0])
-        })
-    }
-}
-
 /// Cells of a closed capsule that lie outside a kept set: how many and the
 /// closed millimetre box around them (widened by the raster guard). Cells
 /// beyond the frame are never kept.
@@ -468,7 +432,11 @@ impl Raster<'_> {
         self.work.swap(0, Ordering::Relaxed)
     }
 
-    fn reserve<T>(&self, values: &mut Vec<T>, additional: usize) -> Result<(), ManufacturingError> {
+    pub(super) fn reserve<T>(
+        &self,
+        values: &mut Vec<T>,
+        additional: usize,
+    ) -> Result<(), ManufacturingError> {
         let needed = values.len().saturating_add(additional);
         if needed <= values.capacity() {
             return Ok(());
@@ -1032,65 +1000,6 @@ impl Raster<'_> {
         };
         result.shrink();
         Ok(result)
-    }
-
-    /// Whether the point lies in a closed set cell. A point within
-    /// [`RUN_CLIP_MM`] of a cell line belongs to every cell it lies on, so a
-    /// projected point stays with the closed cells it came from.
-    pub(super) fn holds_point(&self, bits: &Bits, point: [f64; 2]) -> bool {
-        let [cols, rows] = [0, 1].map(|axis| {
-            let u = (point[axis] - self.frame.origin[axis]) / self.frame.cell;
-            let near = u.round();
-            if (u - near).abs() <= RUN_CLIP_MM / self.frame.cell {
-                [near - 1.0, near]
-            } else {
-                [u.floor(), u.floor()]
-            }
-        });
-        cols.iter().any(|&col| {
-            rows.iter().any(|&row| {
-                col.is_finite()
-                    && row.is_finite()
-                    && col >= 0.0
-                    && row >= 0.0
-                    && bits.word(row as usize, col as usize / 64) >> (col as usize % 64) & 1 == 1
-            })
-        })
-    }
-
-    /// The coarse block screen of `bits`.
-    pub(super) fn coarse(&self, bits: &Bits) -> Result<Coarse, ManufacturingError> {
-        if bits.is_empty() {
-            return Ok(Coarse {
-                row0: 0,
-                word0: 0,
-                rows: 0,
-                words: 0,
-                marked: Vec::new(),
-            });
-        }
-        let row0 = bits.row0 / BLOCK_CELLS;
-        let rows = (bits.row0 + bits.rows() - 1) / BLOCK_CELLS + 1 - row0;
-        let words = bits.width;
-        let mut marked = Vec::new();
-        self.reserve(&mut marked, rows * words)?;
-        marked.resize(rows * words, false);
-        for r in 0..bits.rows() {
-            let block = (bits.row0 + r) / BLOCK_CELLS - row0;
-            for w in 0..words {
-                if bits.data[r * words + w] != 0 {
-                    marked[block * words + w] = true;
-                }
-            }
-        }
-        self.charge(bits.data.len());
-        Ok(Coarse {
-            row0,
-            word0: bits.word0,
-            rows,
-            words,
-            marked,
-        })
     }
 
     /// Polygons inside the cell set with few vertices: erode by one cell,

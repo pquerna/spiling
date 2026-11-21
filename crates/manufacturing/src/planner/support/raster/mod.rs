@@ -487,6 +487,7 @@ pub(super) fn scan_with_lower<'a>(
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
     let mut worst: Option<strokes::Failure> = None;
     let mut pieces = Vec::new();
+    let mut intervals = Vec::new();
     for (path_index, path) in paths.iter().enumerate() {
         // Only interface lands on the part, as for separated contacts.
         let cells = cells.filter(|_| path.kind != DepositionKind::Support);
@@ -494,18 +495,13 @@ pub(super) fn scan_with_lower<'a>(
             let a = path.points_mm[first_point];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-            if let Some(contacts) = cells {
-                contacts.raster.along(
-                    contacts.cells,
-                    contacts.cells,
-                    [a[0], a[1]],
-                    [b[0], b[1]],
-                    &mut pieces,
-                )?;
+            let ends = if let Some(contacts) = cells {
+                contacts.stroke([a, b], width_mm * 0.5, &mut pieces, &mut intervals)?
             } else {
                 pieces.clear();
                 pieces.push((1.0, false));
-            }
+                [false; 2]
+            };
             for gap in lower.gaps_supplied_contacts(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
@@ -520,6 +516,7 @@ pub(super) fn scan_with_lower<'a>(
                 super::established::CellContacts::refine(
                     &pieces,
                     gap,
+                    ends,
                     |start, end, left, right, direct_ends| {
                         let span = (end - start) * length;
                         let piece = super::anchors::AnchorGap {

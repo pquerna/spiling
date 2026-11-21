@@ -83,7 +83,8 @@ impl Inventory {
 
 struct Band {
     height: [f64; 2],
-    inventory: Option<Inventory>,
+    deposited: Option<Inventory>,
+    landing: Option<Inventory>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -108,13 +109,18 @@ impl Window<'_> {
         mut visit: impl FnMut(&Inventory, Bond) -> Result<bool, ManufacturingError>,
     ) -> Result<bool, ManufacturingError> {
         if self.previous_nominal_top == Some(receiver.floor)
-            && let Some(inventory) = self.previous.and_then(|band| band.inventory.as_ref())
+            && let Some(inventory) = self.previous.and_then(|band| band.deposited.as_ref())
             && visit(inventory, Bond::Direct)?
         {
             return Ok(true);
         }
         for band in self.separated {
-            if let Some(inventory) = &band.inventory
+            let inventory = if support(receiver.role) {
+                &band.landing
+            } else {
+                &band.deposited
+            };
+            if let Some(inventory) = inventory
                 && visit(inventory, Bond::Separated)?
             {
                 return Ok(true);
@@ -215,8 +221,8 @@ impl LocalCapsule {
         })
     }
 
-    fn interval(self, allowance: f64) -> Option<Span> {
-        let radius = (self.radius + allowance).next_down() - self.slack;
+    fn interval(self) -> Option<Span> {
+        let radius = self.radius.next_down() - self.slack;
         let mut result = None;
         let mut strip = Span::FULL;
         if restrict(&mut strip, self.origin[0], self.change[0], self.bounds)
@@ -320,6 +326,7 @@ struct Replay<'a> {
     cancel: &'a AtomicBool,
     covered: Vec<Span>,
     run: Vec<Span>,
+    unsupported: Vec<Span>,
 }
 
 impl Replay<'_> {
@@ -327,7 +334,6 @@ impl Replay<'_> {
         &mut self,
         window: &Window<'_>,
         receiver: Road,
-        allowance_mm: f64,
     ) -> Result<[Bond; 2], ManufacturingError> {
         self.covered.clear();
         let mut ends = [Bond::None; 2];
@@ -375,9 +381,8 @@ impl Replay<'_> {
         debit(self.work, 1, self.cancel)?;
         let query_id = *self.work;
         let radius = radius_ticks(receiver.inner_radius_mm, 0.0).max(0.0);
-        let allowance = radius_ticks(allowance_mm, 0.0).max(0.0);
         receiver.chord.row_candidates(
-            outside_ticks(receiver.inner_radius_mm.max(allowance_mm))?,
+            outside_ticks(receiver.inner_radius_mm)?,
             self.cancel,
             |row, left, right, _| {
                 debit(self.work, 1, self.cancel)?;
@@ -393,7 +398,7 @@ impl Replay<'_> {
                         }
                         donor.last_query.set(query_id);
                         if let Some(capsule) = LocalCapsule::for_pair(receiver, donor) {
-                            if let Some(span) = capsule.interval(allowance) {
+                            if let Some(span) = capsule.interval() {
                                 self.admission.push(&mut self.covered, span)?;
                             }
                             for (end, present) in ends.iter_mut().enumerate() {
@@ -441,55 +446,19 @@ impl Replay<'_> {
         )
     }
 
-    fn establish_model(
-        &mut self,
-        inventory: &mut Inventory,
-        road: Road,
-        window: &Window<'_>,
-        allowance: f64,
-    ) -> Result<(), ManufacturingError> {
-        let mut published = road;
-        published.inner_radius_mm = road.inner_radius_mm.min(allowance);
-        self.query(
-            window,
-            road,
-            (allowance - published.inner_radius_mm).next_down().max(0.0),
-        )?;
-        let mut pending: Option<Span> = None;
-        for index in 0..self.covered.len() {
-            debit(self.work, 1, self.cancel)?;
-            let current = self.covered[index];
-            pending = Some(match pending {
-                Some(prior) if current.start <= prior.end => Span {
-                    start: prior.start,
-                    end: prior.end.max(current.end),
-                },
-                Some(prior) => {
-                    self.insert(inventory, published, prior)?;
-                    current
-                }
-                None => current,
-            });
-        }
-        if let Some(span) = pending {
-            self.insert(inventory, published, span)?;
-        }
-        Ok(())
-    }
-
-    fn stroke(
+    fn measure_stroke(
         &mut self,
         window: &Window<'_>,
         roads: impl Iterator<Item = Road>,
         width: f64,
         limit: f64,
-        bridge: bool,
-    ) -> Result<bool, ManufacturingError> {
+    ) -> Result<(), ManufacturingError> {
         self.run.clear();
+        self.unsupported.clear();
         let mut length = 0.0;
         let mut ends = [Bond::None; 2];
         for (index, road) in roads.enumerate() {
-            let edge_ends = self.query(window, road, 0.0)?;
+            let edge_ends = self.query(window, road)?;
             if index == 0 {
                 ends[0] = edge_ends[0];
             }
@@ -509,12 +478,6 @@ impl Replay<'_> {
                 return Err(overflow());
             }
         }
-        if bridge
-            && (ends[0] == Bond::None && self.run.first().is_none_or(|span| span.start > 0.0)
-                || ends[1] == Bond::None && !self.run.iter().rev().any(|span| span.end >= length))
-        {
-            return Ok(false);
-        }
         let accepts = |span: f64, left: bool, right: bool| {
             (left || right)
                 && (span <= 2.0 * OFFSET_TOLERANCE_MM
@@ -531,16 +494,65 @@ impl Replay<'_> {
                     true,
                 )
             {
-                return Ok(false);
+                self.admission.push(
+                    &mut self.unsupported,
+                    Span {
+                        start: covered,
+                        end: coverage.start,
+                    },
+                )?;
             }
             covered = covered.max(coverage.end);
         }
-        Ok(covered >= length
-            || accepts(
+        if covered < length
+            && !accepts(
                 length - covered,
                 covered > 0.0 || ends[0] != Bond::None,
                 ends[1] != Bond::None,
-            ))
+            )
+        {
+            self.admission.push(
+                &mut self.unsupported,
+                Span {
+                    start: covered,
+                    end: length,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn publish_landing(
+        &mut self,
+        inventory: &mut Inventory,
+        roads: impl Iterator<Item = Road>,
+    ) -> Result<(), ManufacturingError> {
+        let mut offset = 0.0;
+        let mut gap = 0;
+        for road in roads {
+            debit(self.work, 1, self.cancel)?;
+            let length = road.length_upper_mm;
+            let end = offset + length;
+            let mut start = 0.0;
+            while let Some(&excluded) = self.unsupported.get(gap).filter(|span| span.start < end) {
+                debit(self.work, 1, self.cancel)?;
+                let stop = ((excluded.start - offset) / length).next_down();
+                if start < stop {
+                    self.insert(inventory, road, Span { start, end: stop })?;
+                }
+                if excluded.end >= end {
+                    start = 1.0;
+                    break;
+                }
+                start = ((excluded.end - offset) / length).next_up().max(start);
+                gap += 1;
+            }
+            if start < 1.0 {
+                self.insert(inventory, road, Span { start, end: 1.0 })?;
+            }
+            offset = end;
+        }
+        Ok(())
     }
 }
 
@@ -595,6 +607,7 @@ pub(super) fn verify(
         cancel,
         covered: Vec::new(),
         run: Vec::new(),
+        unsupported: Vec::new(),
     };
     let mut last_support = None;
     for road in roads.iter().rev() {
@@ -637,12 +650,16 @@ pub(super) fn verify(
         }
         for band in &mut bands[expired..oldest] {
             debit(replay.work, 1, cancel)?;
-            if let Some(inventory) = band.inventory.take() {
+            if let Some(inventory) = band.deposited.take() {
+                inventory.release(&mut replay.admission);
+            }
+            if let Some(inventory) = band.landing.take() {
                 inventory.release(&mut replay.admission);
             }
         }
         expired = oldest;
-        let mut inventory = Inventory::empty();
+        let mut deposited = Inventory::empty();
+        let mut landing = Inventory::empty();
         let previous = bands.last();
         let previous_nominal_top = index.checked_sub(1).map(|prior| layers[prior].z_mm);
         for path_roads in current.chunk_by(|left, right| left.path == right.path) {
@@ -662,14 +679,14 @@ pub(super) fn verify(
                     &bands[contact_index..end]
                 },
             };
-            if index != 0 && (is_support || first_road.role == DepositionKind::Bridge) {
+            let can_land = first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
+            if index != 0 && (is_support || can_land) {
                 let path = &layer.paths[first_road.path];
                 if path_roads.len() + 1 != path.points_mm.len() {
                     return Err(failed(
                         "decoded support stroke differs from its associated edge count",
                     ));
                 }
-                let mut rooted = true;
                 for (first, last, width) in StrokeRuns::for_path(path)? {
                     let count = if last > first {
                         last - first
@@ -677,46 +694,38 @@ pub(super) fn verify(
                         path_roads.len() - first + last
                     };
                     let run = (0..count).map(|edge| path_roads[(first + edge) % path_roads.len()]);
-                    if !replay.stroke(
+                    replay.measure_stroke(
                         &window,
-                        run,
+                        run.clone(),
                         width,
                         recipe.process.max_bridge_span_mm,
-                        !is_support,
-                    )? {
-                        rooted = false;
-                        break;
-                    }
-                }
-                if !rooted {
-                    if is_support {
+                    )?;
+                    if is_support && !replay.unsupported.is_empty() {
                         return Err(failed(format!(
                             "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact",
                             first_road.line
                         )));
                     }
-                    continue;
+                    if can_land {
+                        replay.publish_landing(&mut landing, run)?;
+                    }
                 }
             }
             if index != last_support {
                 for &road in path_roads {
-                    if index == 0 || is_support || road.role == DepositionKind::Bridge {
-                        replay.insert(&mut inventory, road, Span::FULL)?;
-                    } else {
-                        replay.establish_model(
-                            &mut inventory,
-                            road,
-                            &window,
-                            recipe.bead_width_mm * 0.5,
-                        )?;
+                    replay.insert(&mut deposited, road, Span::FULL)?;
+                    if index == 0 && can_land {
+                        replay.insert(&mut landing, road, Span::FULL)?;
                     }
                 }
             }
         }
-        inventory.rows.finish(replay.work, cancel)?;
+        deposited.rows.finish(replay.work, cancel)?;
+        landing.rows.finish(replay.work, cancel)?;
         bands.push(Band {
             height,
-            inventory: Some(inventory),
+            deposited: Some(deposited),
+            landing: Some(landing),
         });
         last_separated_end = end;
     }
@@ -810,7 +819,8 @@ mod tests {
             row(3, 1, DepositionKind::SupportInterface, 1_100_000, 1_900_000),
         ];
         let cancel = AtomicBool::new(false);
-        let (recipe, layers) = fixture(&roads);
+        let (mut recipe, layers) = fixture(&roads);
+        recipe.process.max_bridge_span_mm = 1.0;
         verify(
             &roads,
             &layers,
@@ -863,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_carries_chain_but_cannot_land_support() {
+    fn bridge_counts_as_deposition_but_cannot_land_support() {
         let mut roads = vec![
             row(0, 0, DepositionKind::SolidFill, 0, 500_000),
             row(0, 1, DepositionKind::SolidFill, 2_500_000, 3_000_000),
@@ -906,6 +916,40 @@ mod tests {
     }
 
     #[test]
+    fn an_unsupported_road_is_still_deposition_for_the_model_above() {
+        let mut roads = [
+            row(1, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(2, 0, DepositionKind::SolidFill, 0, 1_000_000),
+            row(4, 0, DepositionKind::SupportInterface, 0, 1_000_000),
+        ];
+        let cancel = AtomicBool::new(false);
+        let (recipe, layers) = fixture(&roads);
+        verify(
+            &roads,
+            &layers,
+            &recipe,
+            Z_GAP,
+            Admission::default(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        roads[1] = row(2, 0, DepositionKind::SolidFill, 2_000_000, 3_000_000);
+        assert!(
+            verify(
+                &roads,
+                &layers,
+                &recipe,
+                Z_GAP,
+                Admission::default(),
+                &mut 0,
+                &cancel,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn local_tie_break_keeps_thin_overlap_and_has_no_internal_cap() {
         let donor = Donor {
             road: row(0, 0, DepositionKind::SolidFill, 0, 4_000_000),
@@ -925,7 +969,7 @@ mod tests {
         assert!(
             LocalCapsule::for_pair(crossing, &donor)
                 .unwrap()
-                .interval(0.0)
+                .interval()
                 .is_none()
         );
         let mut roads = [

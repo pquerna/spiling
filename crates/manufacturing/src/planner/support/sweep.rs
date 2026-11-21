@@ -760,12 +760,6 @@ impl Sweep<'_> {
         let mut clearance: Vec<Option<Bits>> = vec![None; self.nominal.len()];
         let mut records: Vec<NominalRecord> = Vec::new();
         let mut relieved: Vec<(usize, usize, Bits)> = Vec::new();
-        // Part landings stand only on established cells, built bottom-up
-        // with the kept support below standing in for deposited support.
-        let mut establishment = established::Establishment::new(&live);
-        let mut courses = Vec::new();
-        reserve_owned(&mut courses, layers.len(), self.owned_bytes)?;
-        courses.extend(hatch_alternation_keys(layers));
         let mut up_e = std::time::Duration::ZERO;
         let mut up_nominal = std::time::Duration::ZERO;
         let mut part_contacts: Vec<Option<Bits>> = Vec::new();
@@ -790,16 +784,7 @@ impl Sweep<'_> {
             )?;
             up_nominal += tn.elapsed();
             let te = std::time::Instant::now();
-            let landings = self.part_landings(
-                l,
-                &raster,
-                &channels,
-                &grids,
-                &contact_tops,
-                &courses,
-                &mut establishment,
-                &hold,
-            )?;
+            let landings = self.part_landings(l, &raster, &channels, &hold)?;
             up_e += te.elapsed();
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
@@ -901,12 +886,10 @@ impl Sweep<'_> {
             }
             charge(work)?;
         }
-        drop(establishment);
         if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
             eprintln!(
                 "{}",
-                serde_json::json!({"event": "support_sweep_detail", "establishment_seconds": up_e.as_secs_f64(), "nominal_seconds": up_nominal.as_secs_f64(),
-                "stages": established::TRACE_NAMES.iter().zip(&established::TRACE).map(|(n, v)| (n.to_string(), v.swap(0, std::sync::atomic::Ordering::Relaxed))).collect::<std::collections::BTreeMap<_, _>>()})
+                serde_json::json!({"event": "support_sweep_detail", "landing_seconds": up_e.as_secs_f64(), "nominal_seconds": up_nominal.as_secs_f64()})
             );
         }
         drop(clearance);
@@ -982,23 +965,13 @@ impl Sweep<'_> {
         })
     }
 
-    /// Per part root first supported at layer `l`, the cells support may
-    /// land on: the inward landing that some ordinary channel reaches, met
-    /// with the established cells of its object layer. Roots are taken in
-    /// ascending object layer so the bottom-up establishment only advances.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the sweep's live grids, contact tops and byte owners stay explicit"
-    )]
+    /// Propose each reachable part root on ordinary model roads. Reconciliation
+    /// qualifies their final deposited intervals before granting contact.
     fn part_landings(
         &self,
         l: usize,
         raster: &Raster<'_>,
         channels: &[Channel],
-        grids: &[Option<LayerGrid>],
-        contact_tops: &[Option<usize>],
-        courses: &[u32],
-        establishment: &mut established::Establishment<'_>,
         hold: &dyn Fn(&Bits) -> Result<(), ManufacturingError>,
     ) -> Result<Vec<(usize, Bits)>, ManufacturingError> {
         let mut landings = Vec::new();
@@ -1025,42 +998,15 @@ impl Sweep<'_> {
             if !reached {
                 continue;
             }
-            // Kept support cells propose landings on part material standing on
-            // support; raster retention requalifies them against the support
-            // actually deposited.
-            let kept = |raster: &Raster<'_>, l: usize| {
-                let direct = grids[l - 1].as_ref().map(|grid| &grid.support);
-                let separated = contact_tops
-                    .get(l)
-                    .copied()
-                    .flatten()
-                    .filter(|top| top + 1 < l)
-                    .and_then(|top| grids[top].as_ref())
-                    .map(|grid| &grid.interface);
-                let empty = Bits::default();
-                let cells = raster.union(direct.unwrap_or(&empty), separated.unwrap_or(&empty))?;
-                Ok((cells, Vec::new()))
-            };
-            let step = established::Step {
+            let cells = established::proposal_footprint(
                 raster,
-                layers: self.layers,
-                allowance: self.recipe.bead_width_mm * 0.5,
-                recipe: self.recipe,
-                courses,
-                bridge_limit: self.recipe.process.max_bridge_span_mm,
-                horizon: self
-                    .roots
+                self.layers[object_layer]
+                    .paths
                     .iter()
-                    .filter_map(|root| match *root {
-                        Root::Part { object_layer, .. } => Some(object_layer),
-                        Root::Bed => None,
-                    })
-                    .max()
-                    .unwrap_or(object_layer),
-                support: &kept,
-                owned_bytes: self.owned_bytes,
-            };
-            let cells = establishment.landing(&step, object_layer)?;
+                    .filter(|path| established::ordinary(path)),
+                self.recipe.bead_width_mm * 0.5,
+                self.owned_bytes,
+            )?;
             let accepted = raster.intersection(&landing, &cells)?;
             if accepted.is_empty() {
                 continue;
