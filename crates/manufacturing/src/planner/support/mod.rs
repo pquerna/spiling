@@ -2370,13 +2370,9 @@ pub(super) fn realize(
                 );
         }
         timing.mark("support_raster");
-        // Restore original object roles before reevaluating the actual emitted
-        // support/contact strokes. A supported contour is not a fake Bridge.
-        support_metadata_bytes =
-            support_metadata_bytes.saturating_sub(vec_bytes(&original_bridge_roles));
-        for (index, path, kind) in original_bridge_roles {
-            layers[index].paths[object_start[index] + path].kind = kind;
-        }
+        let mut outstanding_roles = original_bridge_roles.as_slice();
+        let mut outstanding_demands = demands.as_slice();
+        let mut unchanged_lower = object_start[0] == 0;
         let mut retained_regions =
             retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
         // Raster staging must include these live support/protected domains without
@@ -2415,8 +2411,31 @@ pub(super) fn realize(
                 .iter()
                 .take_while(|path| support_role(path.kind))
                 .count();
+            let (original_roles, later_roles) = outstanding_roles
+                .split_at(outstanding_roles.partition_point(|&(layer, _, _)| layer == index));
+            outstanding_roles = later_roles;
+            let (original_demands, later_demands) = outstanding_demands
+                .split_at(outstanding_demands.partition_point(|demand| demand.target == index));
+            outstanding_demands = later_demands;
             let (prior, remaining) = layers.split_at_mut(index);
             let (layer, following) = remaining.split_first_mut().expect("current support layer");
+            let begin = object_start[index];
+            let contact_paths = contact_tops[index]
+                .map(|top| prior[top].paths.as_slice())
+                .unwrap_or(&[]);
+            let contact = contact_paths.iter().filter(|path| support_role(path.kind));
+            let mut replaced_object = joined_layers[index];
+            if unchanged_lower
+                && !replaced_object
+                && original_demands.is_empty()
+                && contact.clone().next().is_none()
+            {
+                unchanged_lower = begin == 0;
+                continue;
+            }
+            for &(_, path, kind) in original_roles {
+                layer.paths[begin + path].kind = kind;
+            }
             let extra_owned_bytes = layer_payload_bytes(
                 prior
                     .iter()
@@ -2430,12 +2449,7 @@ pub(super) fn realize(
                 recipe.rectilinear_axis,
                 super::hatch_key(schedule, index),
             );
-            let begin = object_start[index];
             let previous = prior[index - 1].paths.iter();
-            let contact_paths = contact_tops[index]
-                .map(|top| prior[top].paths.as_slice())
-                .unwrap_or(&[]);
-            let contact = contact_paths.iter().filter(|path| support_role(path.kind));
             if joined_layers[index] {
                 // Other support demands can change the eventual previous footprints.
                 // Recreate ownership pieces; never retain a stale composite Bridge.
@@ -2675,6 +2689,7 @@ pub(super) fn realize(
                         cancel,
                     )?;
                     if other.failure.is_none() {
+                        replaced_object = true;
                         *segments = without_old + path_segments(&candidate.paths);
                         layer.paths.truncate(begin);
                         let live_bytes = native_owned_bytes
@@ -2724,10 +2739,19 @@ pub(super) fn realize(
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
             layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
+            unchanged_lower = begin == 0
+                && !replaced_object
+                && admission
+                    .bridges
+                    .iter()
+                    .copied()
+                    .eq(original_roles.iter().map(|&(_, path, _)| path));
             for path in admission.bridges {
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
             }
         }
+        support_metadata_bytes -= vec_bytes(&original_bridge_roles);
+        drop(original_bridge_roles);
         drop(established);
         // Contact selection is only a proposal until actual final paths exist.
         // Check the same closed, physical-decimal bead enclosure used by the XY
