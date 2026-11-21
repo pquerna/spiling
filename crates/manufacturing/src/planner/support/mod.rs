@@ -1975,6 +1975,12 @@ pub(super) fn realize(
             if admission.failure.is_some() {
                 let without_old = *segments - path_segments(&layer.paths[begin..]);
                 for recover_components in [false, true] {
+                    if recover_components && joined_layers[index] {
+                        // This layer was just rebuilt by this same component
+                        // recovery against this same lower layer and contact,
+                        // and that rebuild has just failed analysis.
+                        break;
+                    }
                     let axis = authored_axis;
                     let mut staged_segments = without_old;
                     anchors.set_budget(0);
@@ -2078,15 +2084,22 @@ pub(super) fn realize(
                             .saturating_add(stroke_proof_reservation(candidate.paths.len())),
                     )?);
                     let t2 = split.start();
-                    let other = strokes::analyze(
-                        &candidate.paths,
-                        previous.clone(),
-                        contact.clone(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )?;
+                    // Paths are judged independently against the same lower
+                    // layer and contact: rebuilt unchanged paths keep their
+                    // admission.
+                    let other = if candidate.paths == layer.paths[begin..] {
+                        admission.clone()
+                    } else {
+                        strokes::analyze(
+                            &candidate.paths,
+                            previous.clone(),
+                            contact.clone(),
+                            recipe,
+                            &mut anchors,
+                            &mut anchor_work,
+                            cancel,
+                        )?
+                    };
                     split.stop(
                         if recover_components {
                             "reanalyze_components"
