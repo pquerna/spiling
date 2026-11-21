@@ -102,7 +102,6 @@ fn evaluate_with_budget(
             polygon: &polygon,
             height,
             label: "ordered-index regression",
-            memo_bytes: 0,
         },
         0.2,
         native_work,
@@ -112,45 +111,6 @@ fn evaluate_with_budget(
         &cancel,
     );
     (result, trace, work)
-}
-
-#[test]
-fn polygon_edge_blocks_keep_the_first_refusal_and_charge_logical_edges() {
-    let height = spiling_geometry::ProtectedVoidHeightScope::Bounded {
-        lower_mm: 0.0,
-        upper_mm: 0.2,
-    };
-    for refuses in [false, true] {
-        let mut road = path(0.5);
-        // The diagonal is clear but its bounds overlap the square in both
-        // axes, so path screening cannot hide the later edge block.
-        road.points_mm = vec![[0.5, 3.0, 0.2], [3.0, 0.5, 0.2]];
-        road.points_mm
-            .extend((1..=CLEARANCE_EDGE_BLOCK).map(|i| [3.0 + i as f64 * 0.1, 0.5, 0.2]));
-        if refuses {
-            road.points_mm.push([0.5, 0.5, 0.2]);
-        }
-        road.width = WidthProfile::PerEdge {
-            widths_mm: (1..road.points_mm.len())
-                .map(|i| if i % 2 == 0 { 0.4 } else { 0.6 })
-                .collect(),
-        };
-        let layers = [layer(vec![road])];
-        let mut baseline = spiling_geometry::GeometryWorkBudget::new(u64::MAX - 1);
-        let mut screened = spiling_geometry::GeometryWorkBudget::monitored();
-        let (expected, old, old_work) = evaluate_with_budget(&layers, height, 0, &mut baseline);
-        let (actual, new, new_work) = evaluate_with_budget(&layers, height, 0, &mut screened);
-        assert_eq!(expected.is_err(), refuses);
-        assert_eq!(
-            expected.err().map(|e| (e.code, e.message)),
-            actual.err().map(|e| (e.code, e.message)),
-        );
-        assert_eq!(new.polygon_edge_block_queries.get(), 1);
-        assert_eq!(new.polygon_edge_block_clears.get(), CLEARANCE_EDGE_BLOCK);
-        assert_eq!(new.edges.get(), old.edges.get());
-        assert_eq!(new_work, old_work);
-        assert_eq!(screened.consumed(), baseline.consumed());
-    }
 }
 
 fn repeated_emitted_chord() -> [DepositionPath; 2] {
@@ -180,14 +140,14 @@ fn protected_ring() -> geo::Polygon<f64> {
     )
 }
 
-const MEMO_TEST_POLICY: SupportPolicy = SupportPolicy::Breakaway {
+const VOID_TEST_POLICY: SupportPolicy = SupportPolicy::Breakaway {
     density: 0.3,
     xy_clearance_mm: 0.2,
     z_gap_mm: 0.1,
     interface_thickness_mm: 0.4,
 };
 
-const MEMO_TEST_SCHEDULE: [LayerElevation; 1] = [LayerElevation {
+const VOID_TEST_SCHEDULE: [LayerElevation; 1] = [LayerElevation {
     lower_z: 0.0,
     z: 0.2,
     sample: 0.1,
@@ -195,11 +155,11 @@ const MEMO_TEST_SCHEDULE: [LayerElevation; 1] = [LayerElevation {
     course: 0,
 }];
 
-const MEMO_TEST_HEIGHT: spiling_geometry::ProtectedVoidHeightScope =
+const VOID_TEST_HEIGHT: spiling_geometry::ProtectedVoidHeightScope =
     spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 1.0 };
 
 #[test]
-fn protected_memo_keeps_first_width_and_mask_refusals() {
+fn escaped_void_proofs_keep_the_first_width_and_mask_refusals() {
     let repeated = repeated_emitted_chord();
     let mut wider = repeated[0].clone();
     wider.width = WidthProfile::Constant { width_mm: 0.8 };
@@ -208,34 +168,37 @@ fn protected_memo_keeps_first_width_and_mask_refusals() {
     let ring = protected_ring();
     let filled = geo::Polygon::new(ring.exterior().clone(), Vec::new());
     let cancel = AtomicBool::new(false);
-    for (layers, protected, expected_width) in [
-        (&width_layers, MultiPolygon(vec![ring.clone()]), "0.8"),
-        (&mask_layers, MultiPolygon(vec![ring, filled]), "0.4"),
+    let kept = crate::planner::support::KeptSupport::default();
+    // The wider chord's escape box reaches lowest in X, so it is proved
+    // first; the mask case proves both chords clear of the ring first.
+    for (layers, protected, expected_width, tests) in [
+        (&width_layers, MultiPolygon(vec![ring.clone()]), "0.8", 1),
+        (&mask_layers, MultiPolygon(vec![ring, filled]), "0.4", 3),
     ] {
         let scopes = protected
             .0
             .iter()
-            .map(|_| crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None))
+            .map(|_| crate::planner::support::VoidScope::new(VOID_TEST_HEIGHT, None))
             .collect::<Vec<_>>();
         let geometry = SupportClearanceGeometry {
             sections: &[],
-            schedule: &MEMO_TEST_SCHEDULE,
+            schedule: &VOID_TEST_SCHEDULE,
             protected: &protected,
             scopes: &scopes,
             index_bytes: 128 * 1024,
+            kept: &kept,
         };
-        let compare = |memo_enabled| {
+        let run = || {
             let mut work = spiling_geometry::GeometryWorkBudget::compile();
             let mut support_work = 0;
             let trace = ClearanceTrace {
                 enabled: true,
-                memo_enabled,
                 ..ClearanceTrace::default()
             };
             let failure = certify_support_clearance_traced(
                 layers,
                 &geometry,
-                &MEMO_TEST_POLICY,
+                &VOID_TEST_POLICY,
                 &mut work,
                 &mut support_work,
                 &trace,
@@ -243,25 +206,33 @@ fn protected_memo_keeps_first_width_and_mask_refusals() {
             )
             .err()
             .expect("first protected clearance refusal");
-            assert_eq!(
-                failure.code,
-                ManufacturingErrorCode::NativeAnalysisIndeterminate
-            );
-            assert!(
-                failure
-                    .message
-                    .contains(&format!("width {expected_width} mm"))
-            );
-            assert_eq!(trace.protected_memo_hits.get(), usize::from(memo_enabled));
-            assert_eq!(trace.polygon_tests.get(), 3 - usize::from(memo_enabled));
-            (failure, work.consumed(), support_work)
+            assert_eq!(trace.escaped_edges.get(), layers[0].paths.len());
+            (
+                failure,
+                work.consumed(),
+                support_work,
+                trace.void_tests.get(),
+            )
         };
-        assert_eq!(compare(false), compare(true));
+        let (failure, _, _, void_tests) = run();
+        assert_eq!(
+            failure.code,
+            ManufacturingErrorCode::NativeAnalysisIndeterminate
+        );
+        assert!(failure.message.contains("projected protected native void"));
+        assert!(
+            failure
+                .message
+                .contains(&format!("width {expected_width} mm")),
+            "{failure:?}"
+        );
+        assert_eq!(void_tests, tests);
+        assert_eq!(run(), run());
     }
 }
 
 #[test]
-fn protected_memo_admits_beside_index_encoding_and_retained_withdrawal() {
+fn relieved_voids_record_the_withdrawal_beside_escaped_exclusions() {
     let cancel = AtomicBool::new(false);
     let mut distant = path(8.0);
     distant
@@ -276,17 +247,10 @@ fn protected_memo_admits_beside_index_encoding_and_retained_withdrawal() {
     )];
     let first = geo::Rect::new([1.4, 2.5], [4.2, 3.5]).to_polygon();
     let last = geo::Rect::new([7.5, 2.5], [9.5, 3.5]).to_polygon();
-    let ring = protected_ring();
-    let encoded = encode_polygons(std::iter::once(&ring), 0.0, &cancel).unwrap();
-    let encoded_bytes = encoded.capacity() * std::mem::size_of::<spiling_geometry::SectionLoopMm>()
-        + encoded
-            .iter()
-            .map(|ring| ring.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
-            .sum::<usize>();
-    let protected = MultiPolygon(vec![first.clone(), ring, last.clone()]);
+    let protected = MultiPolygon(vec![first.clone(), protected_ring(), last.clone()]);
     let lease = |polygon| {
         let mut scope = crate::planner::support::VoidScope::new(
-            MEMO_TEST_HEIGHT,
+            VOID_TEST_HEIGHT,
             Some(Arc::new(spiling_geometry::tolerant::TolerantVoidRoof {
                 height_mm: [0.9, 1.0],
                 facets: Vec::new(),
@@ -295,96 +259,70 @@ fn protected_memo_admits_beside_index_encoding_and_retained_withdrawal() {
         scope.allow_test_bead(0, MultiPolygon(vec![polygon]));
         scope
     };
-    let index = clearance_index::ClearanceIndex::build(
-        layers.iter().map(|layer| layer.paths.as_slice()),
-        128 * 1024,
-        &mut 0,
-        &cancel,
-    )
-    .unwrap()
-    .unwrap();
-    let index_bytes = index.retained_bytes();
-    let mut initial = withdrawal::Sweep::new(128 * 1024);
-    let (segment, endpoint_error_mm) = emitted_xy_segment(&layers[0].paths[0].points_mm).unwrap();
-    initial
-        .record(
-            segment,
-            spiling_geometry::PlanarCapsuleClearancePolicy {
-                radius_mm: 0.2,
-                required_gap_mm: 0.2,
-                endpoint_error_mm,
-            },
-            0.2,
-            &spiling_geometry::GeometryWorkBudget::compile(),
-            &cancel,
-        )
-        .unwrap();
-    let exact = index_bytes
-        + initial.retained_bytes()
-        + encoded_bytes
-        + protected_proof_memo::MemoizedForbidden::MEMO_BYTES;
-    drop((initial, index, encoded));
-
+    let kept = crate::planner::support::KeptSupport::default();
     for last_leased in [true, false] {
         let scopes = [
             lease(first.clone()),
-            crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None),
+            crate::planner::support::VoidScope::new(VOID_TEST_HEIGHT, None),
             if last_leased {
                 lease(last.clone())
             } else {
-                crate::planner::support::VoidScope::new(MEMO_TEST_HEIGHT, None)
+                crate::planner::support::VoidScope::new(VOID_TEST_HEIGHT, None)
             },
         ];
-        let run = |allowance, memo_enabled, hits| {
+        let run = |allowance| {
             let mut work = spiling_geometry::GeometryWorkBudget::compile();
-            let mut support_work = 0;
             let trace = ClearanceTrace {
                 enabled: true,
-                memo_enabled,
                 ..ClearanceTrace::default()
             };
             let proof = certify_support_clearance_traced(
                 &layers,
                 &SupportClearanceGeometry {
                     sections: &[],
-                    schedule: &MEMO_TEST_SCHEDULE,
+                    schedule: &VOID_TEST_SCHEDULE,
                     protected: &protected,
                     scopes: &scopes,
                     index_bytes: allowance,
+                    kept: &kept,
                 },
-                &MEMO_TEST_POLICY,
+                &VOID_TEST_POLICY,
                 &mut work,
-                &mut support_work,
+                &mut 0,
                 &trace,
                 &cancel,
             );
-            assert_eq!(trace.index_bytes.get(), index_bytes);
-            assert_eq!(trace.protected_memo_hits.get(), hits);
-            let outcome = proof.map(|sweep| {
-                let sweep = sweep.expect("leased beads survive as a withdrawal sweep");
-                sweep
-                    .certify_realized(&layers, &MEMO_TEST_POLICY, &mut work, &cancel)
-                    .unwrap();
-                for chord in [0, 2] {
-                    let mut object = layers[0].paths[chord].clone();
-                    object.kind = DepositionKind::Perimeter;
-                    let failure = sweep
-                        .certify_realized(
-                            &[layer(vec![object])],
-                            &MEMO_TEST_POLICY,
-                            &mut work,
-                            &cancel,
-                        )
-                        .unwrap_err();
-                    assert!(failure.message.contains("against deposited object"));
-                }
-                sweep.retained_bytes()
-            });
-            assert_eq!(outcome.is_ok(), last_leased);
-            (outcome, work.consumed(), support_work)
+            (proof, trace, work)
         };
-        assert_eq!(run(exact - 1, true, 0), run(exact, false, 0));
-        assert_eq!(run(exact, true, 1), run(exact, false, 0));
+        let (proof, trace, mut work) = run(128 * 1024);
+        // A relieved void keeps its full ordered-index proof.
+        assert_ne!(trace.index_bytes.get(), 0);
+        assert_ne!(trace.polygon_tests.get(), 0);
+        let outcome = proof.map(|sweep| {
+            let sweep = sweep.expect("leased beads survive as a withdrawal sweep");
+            sweep
+                .certify_realized(&layers, &VOID_TEST_POLICY, &mut work, &cancel)
+                .unwrap();
+            for chord in [0, 2] {
+                let mut object = layers[0].paths[chord].clone();
+                object.kind = DepositionKind::Perimeter;
+                let failure = sweep
+                    .certify_realized(
+                        &[layer(vec![object])],
+                        &VOID_TEST_POLICY,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap_err();
+                assert!(failure.message.contains("against deposited object"));
+            }
+        });
+        assert_eq!(outcome.is_ok(), last_leased, "{outcome:?}");
+        // Escape records are admitted against the same allowance.
+        assert_eq!(
+            run(0).0.err().map(|failure| failure.code),
+            Some(ManufacturingErrorCode::ResourceLimit)
+        );
     }
 }
 
@@ -462,16 +400,44 @@ fn indexed_native_clearance_matches_exhaustive_first_error_and_narrow_tests() {
     }
 }
 
+fn certify_objects(
+    layers: &[PrintLayer],
+    schedule: &[LayerElevation],
+    sections: &[crate::planner::SectionSpan],
+    kept: &crate::planner::support::KeptSupport,
+    [xy_gap, z_gap]: [f64; 2],
+) -> (Result<(), ManufacturingError>, ClearanceTrace) {
+    let trace = ClearanceTrace {
+        enabled: true,
+        ..ClearanceTrace::default()
+    };
+    let result = certify_support_clearance_traced(
+        layers,
+        &SupportClearanceGeometry {
+            sections,
+            schedule,
+            protected: &MultiPolygon(Vec::new()),
+            scopes: &[],
+            index_bytes: 1 << 20,
+            kept,
+        },
+        &SupportPolicy::Breakaway {
+            density: 0.3,
+            xy_clearance_mm: xy_gap,
+            z_gap_mm: z_gap,
+            interface_thickness_mm: 0.4,
+        },
+        &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
+        &mut 0,
+        &trace,
+        &AtomicBool::new(false),
+    )
+    .map(|_| ());
+    (result, trace)
+}
+
 #[test]
-fn deposited_blocks_preserve_ordered_errors_and_narrow_proofs() {
-    let cancel = AtomicBool::new(false);
-    let sweep = withdrawal_test_sweep(
-        0.625,
-        &mut spiling_geometry::GeometryWorkBudget::compile(),
-        &cancel,
-    );
-    let sweep_bytes = sweep.retained_bytes();
-    assert_ne!(sweep_bytes, 0);
+fn escaped_object_pairs_keep_ordered_errors_and_narrow_proofs() {
     let schedule = [LayerElevation {
         lower_z: 0.0,
         z: 0.2,
@@ -508,185 +474,52 @@ fn deposited_blocks_preserve_ordered_errors_and_narrow_proofs() {
         ),
     ] {
         let mut paths = vec![path(0.0)];
-        paths.extend(std::iter::repeat_n(distant.clone(), BLOCK_PATHS * 2 - 1));
+        paths.extend(std::iter::repeat_n(distant.clone(), 31));
         paths.extend(tail);
         let layers = [layer(paths)];
-        let mut scan_work = 0;
-        let deposition =
-            deposition_vertical_extensions(&layers, &schedule, &mut scan_work, &cancel)
-                .unwrap()
-                .unwrap();
-        let build = |bytes, work: &mut usize, cancel: &AtomicBool| {
-            prepare_deposited_screen(&layers, &deposition, bytes, sweep_bytes, work, cancel)
-        };
-        let index = build(usize::MAX, &mut scan_work, &cancel).unwrap().unwrap();
-        let exact = index.retained_bytes() + sweep_bytes;
-        assert!(build(exact - 1, &mut scan_work, &cancel).unwrap().is_none());
-        assert!(build(exact, &mut scan_work, &cancel).unwrap().is_some());
-        assert_eq!(
-            build(usize::MAX, &mut scan_work, &AtomicBool::new(true))
-                .err()
-                .unwrap()
-                .code,
-            ManufacturingErrorCode::Cancelled
+        let (result, trace) = certify_objects(
+            &layers,
+            &schedule,
+            &[],
+            &crate::planner::support::KeptSupport::default(),
+            [0.2, 0.1],
         );
-        let run = |screen, mut work| {
-            let trace = ClearanceTrace {
-                enabled: true,
-                ..Default::default()
-            };
-            let result = certify_deposited_clearance(
-                &ActualDepositionScope {
-                    layers: &layers,
-                    schedule: &schedule,
-                    vertical: deposition.vertical,
-                    screen,
-                },
-                0.2,
-                0.1,
-                &mut spiling_geometry::GeometryWorkBudget::new(1_000_000),
-                &mut work,
-                &trace,
-                &cancel,
-            );
-            (result.err(), trace)
-        };
-        let (exhaustive, exhaustive_trace) = run(None, 0);
-        let (screened, screened_trace) = run(Some(&index), scan_work);
-        assert_eq!(exhaustive.as_ref().map(|error| error.code), expected);
-        assert_eq!(format!("{screened:?}"), format!("{exhaustive:?}"));
-        assert_eq!(exhaustive_trace.pair_tests.get(), narrow_tests);
-        assert_eq!(screened_trace.pair_tests.get(), narrow_tests);
-        assert!(screened_trace.deposited_block_skipped_slots.get() >= BLOCK_PATHS);
+        assert_eq!(result.err().map(|error| error.code), expected);
+        assert_eq!(trace.pair_tests.get(), narrow_tests);
     }
 }
 
-#[test]
-fn deposited_layer_waves_reduce_the_same_work_and_first_refusal() {
+/// Every non-model edge against every non-support edge, unscreened.
+fn exhaustive_object_pairs(layers: &[PrintLayer], gaps: [f64; 2]) -> bool {
     let cancel = AtomicBool::new(false);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(2)
-        .build()
-        .unwrap();
-    let schedule = [0.0, 0.2, 0.4, 0.6].map(|lower_z| LayerElevation {
-        lower_z,
-        z: lower_z + 0.2,
-        sample: lower_z + 0.1,
-        height: 0.2,
-        course: 0,
-    });
-    for refuses in [false, true] {
-        let layers: Vec<_> = schedule
-            .iter()
-            .enumerate()
-            .map(|(i, elevation)| {
-                let mut support = path(0.0);
-                let mut object = path(if refuses && i >= 1 { 0.0 } else { 100.0 });
-                object.kind = DepositionKind::Perimeter;
-                for path in [&mut support, &mut object] {
-                    path.physical_z_mm = [elevation.lower_z, elevation.z];
-                    for point in &mut path.points_mm {
-                        point[2] = elevation.z;
+    let mut work = spiling_geometry::GeometryWorkBudget::compile();
+    let paths = || layers.iter().flat_map(|layer| &layer.paths);
+    for support in paths().filter(|path| !path.kind.is_model()) {
+        for object in paths().filter(|path| !path.kind.is_support()) {
+            for s in support.checked_edges().unwrap() {
+                for o in object.checked_edges().unwrap() {
+                    if certify_capsule_pair(
+                        &emitted_edge(support, s).unwrap(),
+                        &emitted_edge(object, o).unwrap(),
+                        gaps,
+                        &mut work,
+                        &ClearanceTrace::default(),
+                        &cancel,
+                        String::new,
+                    )
+                    .is_err()
+                    {
+                        return false;
                     }
                 }
-                let mut current = layer(vec![support, object]);
-                current.index = i as u32;
-                current.z_mm = elevation.z;
-                current.lower_z_mm = elevation.lower_z;
-                current
-            })
-            .collect();
-        let envelope = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
-            .unwrap()
-            .unwrap();
-        let scope = ActualDepositionScope {
-            layers: &layers,
-            schedule: &schedule,
-            vertical: envelope.vertical,
-            screen: None,
-        };
-        let evaluate = |available| {
-            let trace = ClearanceTrace {
-                enabled: true,
-                ..Default::default()
-            };
-            let mut native = spiling_geometry::GeometryWorkBudget::monitored();
-            let mut work = 11;
-            let result = certify_deposited_layers(
-                &scope,
-                &envelope,
-                available,
-                0.2,
-                0.1,
-                &mut native,
-                &mut work,
-                &trace,
-                &cancel,
-            );
-            (
-                result.err().map(|e| (e.code, e.message)),
-                work,
-                native.consumed(),
-                trace.deposited_support_paths.get(),
-                trace.pair_tests.get(),
-            )
-        };
-        let (serial, parallel) = pool.install(|| (evaluate(0), evaluate(usize::MAX)));
-        assert_eq!(serial.0.is_some(), refuses);
-        assert_eq!(parallel, serial);
+            }
+        }
     }
+    true
 }
 
 #[test]
-fn near_work_overflow_leaves_the_first_collision_in_authority() {
-    let cancel = AtomicBool::new(false);
-    let schedule = [LayerElevation {
-        lower_z: 0.0,
-        z: 0.2,
-        sample: 0.1,
-        height: 0.2,
-        course: 0,
-    }];
-    let mut collision = path(0.0);
-    collision.kind = DepositionKind::Bridge;
-    let mut distant = path(100.0);
-    distant.kind = DepositionKind::Perimeter;
-    let mut paths = vec![path(0.0), collision];
-    paths.extend(std::iter::repeat_n(distant, 64));
-    let layers = [layer(paths)];
-    let deposition = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
-        .unwrap()
-        .unwrap();
-    let before = usize::MAX - 64;
-    let mut work = before;
-    let screen =
-        prepare_deposited_screen(&layers, &deposition, usize::MAX, 0, &mut work, &cancel).unwrap();
-    assert!(screen.is_none());
-    assert_eq!(work, before);
-    let failure = certify_deposited_clearance(
-        &ActualDepositionScope {
-            layers: &layers,
-            schedule: &schedule,
-            vertical: deposition.vertical,
-            screen: screen.as_ref(),
-        },
-        0.2,
-        0.1,
-        &mut spiling_geometry::GeometryWorkBudget::new(1024),
-        &mut work,
-        &ClearanceTrace::default(),
-        &cancel,
-    )
-    .unwrap_err();
-    assert_eq!(
-        failure.code,
-        ManufacturingErrorCode::NativeAnalysisIndeterminate
-    );
-}
-
-#[test]
-fn deposited_screen_keeps_widest_last_edge_at_threshold_in_both_z_directions() {
-    let cancel = AtomicBool::new(false);
+fn escaped_object_screens_keep_the_widest_last_edge_at_threshold_in_both_z_directions() {
     let mut schedule = [0.0, 0.2].map(|lower_z| LayerElevation {
         lower_z,
         z: lower_z + 0.2,
@@ -697,8 +530,14 @@ fn deposited_screen_keeps_widest_last_edge_at_threshold_in_both_z_directions() {
     schedule[1].course = 1;
     let xy_gap = 0.2;
     let threshold = 0.5 + (0.4 + 0.6) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM + xy_gap;
+    let mut outcomes = Vec::new();
     for support_layer in 0..schedule.len() {
-        for ordinate in [threshold.next_down(), threshold, threshold.next_up()] {
+        for ordinate in [
+            threshold - 0.01,
+            threshold.next_down(),
+            threshold,
+            threshold.next_up(),
+        ] {
             let object_z = schedule[1 - support_layer].z;
             let mut object = path(0.0);
             object.kind = DepositionKind::Bridge;
@@ -726,35 +565,96 @@ fn deposited_screen_keeps_widest_last_edge_at_threshold_in_both_z_directions() {
                 current.lower_z_mm = schedule[ordinal].lower_z;
                 current.z_mm = schedule[ordinal].z;
             }
-            let deposition = deposition_vertical_extensions(&layers, &schedule, &mut 0, &cancel)
-                .unwrap()
-                .unwrap();
-            let index =
-                prepare_deposited_screen(&layers, &deposition, usize::MAX, 0, &mut 0, &cancel)
-                    .unwrap()
-                    .unwrap();
-            let evaluate = |screen| {
-                let trace = ClearanceTrace {
-                    enabled: true,
-                    ..Default::default()
-                };
-                let result = certify_deposited_clearance(
-                    &ActualDepositionScope {
-                        layers: &layers,
-                        schedule: &schedule,
-                        vertical: deposition.vertical,
-                        screen,
-                    },
-                    xy_gap,
-                    0.2,
-                    &mut spiling_geometry::GeometryWorkBudget::compile(),
-                    &mut 0,
-                    &trace,
-                    &cancel,
-                );
-                (format!("{result:?}"), trace.pair_tests.get())
-            };
-            assert_eq!(evaluate(Some(&index)), evaluate(None));
+            let (result, _) = certify_objects(
+                &layers,
+                &schedule,
+                &[],
+                &crate::planner::support::KeptSupport::default(),
+                [xy_gap, 0.2],
+            );
+            let exhaustive = exhaustive_object_pairs(&layers, [xy_gap, 0.2]);
+            assert_eq!(
+                result.is_ok(),
+                exhaustive,
+                "{support_layer} {ordinate}: {result:?}"
+            );
+            outcomes.push(exhaustive);
+        }
+    }
+    assert!(outcomes.contains(&false));
+}
+
+#[test]
+fn object_beads_the_sweep_never_excluded_are_proved_directly() {
+    let schedule = [0.0, 0.2].map(|lower_z| LayerElevation {
+        lower_z,
+        z: lower_z + 0.2,
+        sample: lower_z + 0.1,
+        height: 0.2,
+        course: 0,
+    });
+    // An object bead poking outside its section material, and support one
+    // layer up whose bead is 0.1 mm short of the XY gap from it.
+    let mut object = path(1.0);
+    object.kind = DepositionKind::Perimeter;
+    object.points_mm = vec![[1.0, 4.15, 0.2], [3.0, 4.15, 0.2]];
+    let mut support = path(1.0);
+    support.physical_z_mm = [0.2, 0.4];
+    support.points_mm = vec![[1.0, 4.65, 0.4], [3.0, 4.65, 0.4]];
+    let mut layers = [layer(vec![object]), layer(vec![support])];
+    for (ordinal, current) in layers.iter_mut().enumerate() {
+        current.index = ordinal as u32;
+        current.lower_z_mm = schedule[ordinal].lower_z;
+        current.z_mm = schedule[ordinal].z;
+    }
+    let sections: Vec<_> = (0..2)
+        .map(|index| crate::planner::SectionSpan {
+            start: index,
+            end: index + 1,
+            material: Arc::new(MultiPolygon(if index == 0 {
+                vec![geo::Rect::new([0.0, 0.0], [4.0, 4.0]).to_polygon()]
+            } else {
+                Vec::new()
+            })),
+            process_domains: Vec::new(),
+            occupied: None,
+            source_area_mm2: 0.0,
+        })
+        .collect();
+    let everywhere = MultiPolygon(vec![geo::Rect::new([-2.0, -2.0], [8.0, 8.0]).to_polygon()]);
+    let kept = || {
+        crate::planner::support::KeptSupport::for_test(
+            [[-2.0, -2.0], [8.0, 8.0]],
+            [(1, [-1.0, 1.0], everywhere.clone())],
+        )
+    };
+    let edge = ([1.0, 4.15], [3.0, 4.15], 0.2);
+    let other = ([1.0, 0.2], [3.0, 0.2], 0.2);
+    for (record, unseen, accepted) in [
+        // The sweep excluded exactly this bead: its kept cells vouch for it.
+        (Some(([-1.0, 1.0], edge)), 0, true),
+        // It excluded another bead: this one is proved and refused.
+        (Some(([-1.0, 1.0], other)), 1, false),
+        // The object band left the band the scope was applied for.
+        (Some(([-1.0, 0.1], edge)), 1, false),
+        // No scope at all.
+        (None, 1, false),
+    ] {
+        let kept = match record {
+            Some((band, edge)) => kept().with_test_scope(0, band, &[edge]),
+            None => kept(),
+        };
+        let (result, trace) = certify_objects(&layers, &schedule, &sections, &kept, [0.2, 0.1]);
+        assert_eq!(result.is_ok(), accepted, "{result:?}");
+        assert_eq!(trace.escaped_edges.get(), 0);
+        assert_eq!(trace.unseen_object_edges.get(), unseen);
+        if !accepted {
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .contains("versus deposited object/bridge layer 0")
+            );
         }
     }
 }
@@ -768,7 +668,7 @@ fn cancellation_inside_deposited_index_build_is_fatal() {
     object.kind = DepositionKind::Perimeter;
     let layers = [layer(vec![object; 32])];
     let mut work = 0;
-    let error = ObjectClearanceIndex::build(
+    let error = crate::clearance_screen::ObjectClearanceIndex::build(
         &layers,
         usize::MAX,
         |kind| !kind.is_support(),
@@ -903,6 +803,7 @@ fn pocket_relief_requires_the_full_actual_bead_to_clear_lower_geometry() {
                 protected: &protected,
                 scopes: &[scope],
                 index_bytes: 64 * 1024,
+                kept: &crate::planner::support::KeptSupport::default(),
             },
             &policy,
             &mut work,
@@ -1084,8 +985,7 @@ fn skipped_range_work_preserves_the_original_overflow_and_cancellation_state() {
 }
 
 #[test]
-fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
-    let cancel = AtomicBool::new(false);
+fn escaped_occupancy_proves_only_nearby_pieces_and_keeps_the_first_refusal() {
     let schedule: Vec<_> = (0..12)
         .map(|index| {
             let lower_z = f64::from(index) * 0.2;
@@ -1099,8 +999,8 @@ fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
         })
         .collect();
     for refuses in [false, true] {
-        // Many independent raw pieces per section, enough for several waves;
-        // the refusing case puts one piece under a support bead mid-scan.
+        // Many independent raw pieces per section; the refusing case puts
+        // one piece under a support bead mid-scan.
         let sections: Vec<_> = (0..schedule.len() as u32)
             .map(|index| crate::planner::SectionSpan {
                 start: index,
@@ -1127,8 +1027,8 @@ fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
             .iter()
             .enumerate()
             .map(|(index, elevation)| {
-                // A loop around the whole row: every piece is near support
-                // (so none is screened out) and clear of it unless moved.
+                // A loop around the whole row, clear of every piece unless
+                // moved.
                 let mut support = path(0.0);
                 support.physical_z_mm = [elevation.lower_z, elevation.z];
                 support.points_mm = [[8.0, 4.4], [160.0, 4.4], [160.0, 6.6], [8.0, 6.6]]
@@ -1142,56 +1042,99 @@ fn raw_occupancy_waves_reduce_the_same_work_and_first_refusal() {
                 current
             })
             .collect();
-        let policy = SupportPolicy::Breakaway {
-            density: 0.3,
-            xy_clearance_mm: 0.2,
-            z_gap_mm: 0.1,
-            interface_thickness_mm: 0.4,
-        };
         let evaluate = || {
-            let trace = ClearanceTrace {
-                enabled: true,
-                ..ClearanceTrace::default()
-            };
-            let mut native = spiling_geometry::GeometryWorkBudget::monitored();
-            let mut work = 7;
-            let result = certify_support_clearance_traced(
+            let (result, trace) = certify_objects(
                 &layers,
-                &SupportClearanceGeometry {
-                    sections: &sections,
-                    schedule: &schedule,
-                    protected: &MultiPolygon(Vec::new()),
-                    scopes: &[],
-                    index_bytes: 4 * 1024 * 1024,
-                },
-                &policy,
-                &mut native,
-                &mut work,
-                &trace,
-                &cancel,
+                &schedule,
+                &sections,
+                &crate::planner::support::KeptSupport::default(),
+                [0.2, 0.1],
             );
             (
                 result.err().map(|e| (e.code, e.message)),
-                work,
-                native.consumed(),
-                trace.polygons.get(),
-                trace.paths.get(),
-                trace.edges.get(),
-                trace.polygon_tests.get(),
+                trace.escaped_edges.get(),
+                trace.occupancy_tests.get(),
             )
         };
-        let serial = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .unwrap()
-            .install(evaluate);
-        let parallel = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .unwrap()
-            .install(evaluate);
-        assert_eq!(serial.0.is_some(), refuses, "{serial:?}");
-        assert!(serial.3 > 4 * RAW_PIECES_PER_WORKER, "covers several waves");
-        assert_eq!(parallel, serial);
+        let outcome = evaluate();
+        assert_eq!(outcome.0.is_some(), refuses, "{outcome:?}");
+        if let Some((code, message)) = &outcome.0 {
+            assert_eq!(*code, ManufacturingErrorCode::NativeAnalysisIndeterminate);
+            assert!(message.contains("against continuous native/finish outer occupancy"));
+        }
+        // Without kept cells every support edge escapes whole, yet only the
+        // moved piece comes within the gap of an escape box.
+        assert_eq!(outcome.1, 3 * schedule.len());
+        assert_eq!(outcome.2 > 0, refuses);
+        assert_eq!(evaluate(), outcome);
     }
+}
+
+/// One support bead on a layer whose kept cells are `[0, 2] × [0, 1]`,
+/// ending at `end_x`, beside one occupied piece starting at `piece_x`.
+fn kept_tie_break(piece_x: f64, end_x: f64) -> (Result<(), ManufacturingError>, ClearanceTrace) {
+    let schedule = [LayerElevation {
+        lower_z: 0.0,
+        z: 0.2,
+        sample: 0.1,
+        height: 0.2,
+        course: 0,
+    }];
+    let mut support = path(0.5);
+    support.points_mm = vec![[0.5, 0.5, 0.2], [end_x, 0.5, 0.2]];
+    let mut current = layer(vec![support]);
+    current.index = 0;
+    let sections = [crate::planner::SectionSpan {
+        start: 0,
+        end: 1,
+        material: Arc::new(MultiPolygon(vec![
+            geo::Rect::new([piece_x, 0.0], [piece_x + 1.0, 1.0]).to_polygon(),
+        ])),
+        process_domains: Vec::new(),
+        occupied: None,
+        source_area_mm2: 0.0,
+    }];
+    let kept = crate::planner::support::KeptSupport::for_test(
+        [[-1.0, -1.0], [5.0, 2.0]],
+        [(
+            0,
+            [-1.0, 1.0],
+            MultiPolygon(vec![geo::Rect::new([0.0, 0.0], [2.0, 1.0]).to_polygon()]),
+        )],
+    );
+    certify_objects(&[current], &schedule, &sections, &kept, [0.2, 0.1])
+}
+
+#[test]
+fn kept_cells_certify_beads_and_only_escaped_cells_take_an_exact_proof() {
+    // Inside the kept cells: certified with no exact proof, although the
+    // piece's box is within a millimetre.
+    let (result, trace) = kept_tie_break(2.3, 1.5);
+    result.unwrap();
+    assert_eq!(trace.support_edges.get(), 1);
+    assert_eq!(trace.escaped_edges.get(), 0);
+    assert_eq!(trace.occupancy_tests.get(), 0);
+
+    // The bead's end leaves the kept cells but stays 0.02 mm beyond the XY
+    // gap from the piece: the local exact tie-break passes.
+    let (result, trace) = kept_tie_break(2.27, 1.85);
+    result.unwrap();
+    assert_eq!(trace.escaped_edges.get(), 1);
+    assert!(trace.escaped_cells.get() > 0);
+    assert_eq!(trace.occupancy_tests.get(), 1);
+
+    // Truly too close: the same tie-break refuses.
+    let (result, trace) = kept_tie_break(2.15, 1.85);
+    let failure = result.unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::NativeAnalysisIndeterminate
+    );
+    assert!(
+        failure
+            .message
+            .contains("against continuous native/finish outer occupancy")
+    );
+    assert_eq!(trace.escaped_edges.get(), 1);
+    assert_eq!(trace.occupancy_tests.get(), 1);
 }

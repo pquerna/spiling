@@ -19,7 +19,7 @@
 //! only at the output, inside the kept cells. Each layer's occupancy, void
 //! and nominal clearance is built once and shared by every demand.
 
-use super::grid::{Bits, CellFrame, Raster, SUPPORT_CELL_MM};
+use super::grid::{Bits, CellFrame, Escape, Raster, SUPPORT_CELL_MM};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -62,6 +62,290 @@ pub(super) struct SweepOutput {
     pub contact_tops: Vec<Option<usize>>,
     /// (protected ordinal, layer, grounded relieved support at that layer).
     pub access: Vec<(usize, usize, Rc<OwnedMaterial>)>,
+    /// The kept cells final clearance certifies emitted support against.
+    pub kept: KeptSupport,
+}
+
+/// What the sweep built clear, for the final clearance assertion: each
+/// layer's kept support cells, the height band its exclusions hold for, and
+/// the object bead edges each nominal scope excluded. Every point of a kept
+/// cell is at least the XY clearance from the occupancy, protected voids
+/// (other than the void a relieved channel enters, whose lease is proved
+/// separately) and object beads that reach that band, so an emitted bead
+/// whose outward cells are all kept is clear by construction.
+#[derive(Default)]
+pub(in crate::planner) struct KeptSupport {
+    frame: Option<CellFrame>,
+    /// Ascending by layer.
+    layers: Vec<KeptLayer>,
+    /// Ascending by section.
+    scopes: Vec<NominalRecord>,
+}
+
+struct KeptLayer {
+    layer: usize,
+    band: [f64; 2],
+    bits: Bits,
+}
+
+/// One nominal scope as the sweep excluded it: its section, the object
+/// height band it was applied for, and the exact bead edges outside its
+/// material that it excluded, as sorted bit keys.
+struct NominalRecord {
+    section: usize,
+    floor: f64,
+    ceiling: f64,
+    edges: Vec<[u64; 5]>,
+}
+
+fn edge_key(edge: &beads::BeadEdge) -> [u64; 5] {
+    [edge.a[0], edge.a[1], edge.b[0], edge.b[1], edge.half].map(f64::to_bits)
+}
+
+/// An emitted bead's cells that the kept grid does not certify.
+pub(in crate::planner) struct BeadEscape {
+    pub cells: usize,
+    pub bounds: [[f64; 2]; 2],
+}
+
+impl KeptSupport {
+    /// Bytes this record retains.
+    pub(in crate::planner) fn bytes(&self) -> usize {
+        vec_bytes(&self.layers)
+            .saturating_add(vec_bytes(&self.scopes))
+            .saturating_add(
+                self.layers
+                    .iter()
+                    .map(|layer| layer.bits.bytes())
+                    .fold(0, usize::saturating_add),
+            )
+            .saturating_add(
+                self.scopes
+                    .iter()
+                    .map(|scope| vec_bytes(&scope.edges))
+                    .fold(0, usize::saturating_add),
+            )
+    }
+
+    fn layer(&self, layer: usize) -> Option<&KeptLayer> {
+        self.layers
+            .binary_search_by_key(&layer, |kept| kept.layer)
+            .ok()
+            .map(|at| &self.layers[at])
+    }
+
+    /// The cells of the closed emitted capsule `segment ⊕ radius` with
+    /// vertical extent `band` on `layer` that the kept grid does not
+    /// certify, and the cells and words inspected. A bead outside its
+    /// layer's certified band, or on a layer without kept cells, escapes
+    /// whole.
+    pub(in crate::planner) fn escaped(
+        &self,
+        layer: usize,
+        segment: [[f64; 2]; 2],
+        radius: f64,
+        band: [f64; 2],
+    ) -> Result<(Option<BeadEscape>, usize), ManufacturingError> {
+        let [a, b] = segment;
+        let Some(frame) = &self.frame else {
+            let bounds = [
+                [
+                    (a[0].min(b[0]) - radius).next_down(),
+                    (a[1].min(b[1]) - radius).next_down(),
+                ],
+                [
+                    (a[0].max(b[0]) + radius).next_up(),
+                    (a[1].max(b[1]) + radius).next_up(),
+                ],
+            ];
+            if !(radius >= 0.0 && bounds.iter().flatten().all(|v| v.is_finite())) {
+                return Err(error(
+                    ManufacturingErrorCode::NativeConditioningFailure,
+                    "support grid capsule has non-finite coordinates",
+                ));
+            }
+            return Ok((Some(BeadEscape { cells: 0, bounds }), 1));
+        };
+        let empty = Bits::default();
+        let kept = self
+            .layer(layer)
+            .filter(|kept| kept.band[0] <= band[0] && band[1] <= kept.band[1])
+            .map_or(&empty, |kept| &kept.bits);
+        let (escape, work) = frame.escaped(kept, a, b, radius)?;
+        Ok((
+            escape.map(|Escape { cells, bounds }| BeadEscape { cells, bounds }),
+            work,
+        ))
+    }
+
+    /// Visits each final object bead edge whose clearance no kept layer
+    /// within `z_gap` of it already holds: the edges outside their section's
+    /// material that its nominal scope did not exclude, or every object edge
+    /// of a section whose final height band leaves the band its scope was
+    /// applied for. Object roads regenerated after the sweep are therefore
+    /// never trusted to the sweep's copy of them.
+    pub(in crate::planner) fn visit_unseen_object_edges(
+        &self,
+        layers: &[PrintLayer],
+        sections: &[super::super::SectionSpan],
+        z_gap: f64,
+        work: &mut usize,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        if self.layers.is_empty() {
+            return Ok(());
+        }
+        for (index, section) in sections.iter().enumerate() {
+            check_cancel(cancel)?;
+            let objects = layers
+                .get(section.start as usize..(section.end as usize).min(layers.len()))
+                .unwrap_or(&[]);
+            let mut band: Option<[f64; 2]> = None;
+            for path in objects.iter().flat_map(|layer| &layer.paths) {
+                super::super::native::charge_support_clearance(work, cancel)?;
+                if support_role(path.kind) {
+                    continue;
+                }
+                let mut take = |[lower, upper]: [f64; 2]| {
+                    band = Some(band.map_or([lower, upper], |[l, u]| [l.min(lower), u.max(upper)]));
+                };
+                take([
+                    program_coordinates::project_xyz6_bead_height_mm(
+                        path.physical_z_mm[1],
+                        path.physical_z_mm[1] - path.physical_z_mm[0],
+                    )?[0],
+                    program_coordinates::project_xyz6_bead_height_mm(
+                        path.physical_z_mm[1],
+                        path.height_mm(),
+                    )?[1],
+                ]);
+                for point in &path.points_mm {
+                    super::super::native::charge_support_clearance(work, cancel)?;
+                    take(program_coordinates::project_xyz6_bead_height_mm(
+                        point[2],
+                        path.height_mm(),
+                    )?);
+                }
+            }
+            let Some([floor, ceiling]) = band else {
+                continue;
+            };
+            // Kept bands rise with the layer: the first whose top comes within
+            // the gap of the floor is the lowest that can meet the section.
+            let mut failure = None;
+            let first = self.layers.partition_point(|kept| {
+                match program_coordinates::enclosed_vertical_gap_mm(floor, kept.band[1]) {
+                    Ok(gap) => gap >= z_gap,
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                        false
+                    }
+                }
+            });
+            if let Some(failure) = failure {
+                return Err(failure);
+            }
+            let Some(kept) = self.layers.get(first) else {
+                continue;
+            };
+            if program_coordinates::enclosed_vertical_gap_mm(kept.band[0], ceiling)? >= z_gap {
+                continue;
+            }
+            let record = self
+                .scopes
+                .binary_search_by_key(&index, |scope| scope.section)
+                .ok()
+                .map(|at| &self.scopes[at])
+                .filter(|scope| scope.floor <= floor && ceiling <= scope.ceiling);
+            let start = section.start as usize;
+            let tagged = objects.iter().enumerate().flat_map(|(offset, layer)| {
+                layer
+                    .paths
+                    .iter()
+                    .enumerate()
+                    .map(move |(path, value)| ((start + offset, path), value))
+            });
+            if let Some(record) = record {
+                beads::visit_outside_material(
+                    &section.material,
+                    tagged,
+                    BEAD_OUTSIDE_ALLOWANCE_MM,
+                    work,
+                    cancel,
+                    |(layer, path), edge, bead| {
+                        if record.edges.binary_search(&edge_key(&bead)).is_ok() {
+                            return Ok(());
+                        }
+                        visit(layer, path, edge)
+                    },
+                )?;
+            } else {
+                for ((layer, path), value) in tagged {
+                    super::super::native::charge_support_clearance(work, cancel)?;
+                    if support_role(value.kind) {
+                        continue;
+                    }
+                    for edge in 0..value.points_mm.len().saturating_sub(1) {
+                        visit(layer, path, edge)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A record whose layers keep the cells entirely inside `kept`.
+    #[cfg(test)]
+    pub(in crate::planner) fn for_test(
+        bounds: [[f64; 2]; 2],
+        layers: impl IntoIterator<Item = (usize, [f64; 2], MultiPolygon<f64>)>,
+    ) -> Self {
+        let cancel = AtomicBool::new(false);
+        let frame = CellFrame::new(bounds, SUPPORT_CELL_MM).unwrap();
+        let admit = |_: usize| Ok(());
+        let raster = Raster {
+            frame,
+            cancel: &cancel,
+            admit: &admit,
+            work: AtomicUsize::new(0),
+        };
+        Self {
+            frame: Some(frame),
+            layers: layers
+                .into_iter()
+                .map(|(layer, band, kept)| KeptLayer {
+                    layer,
+                    band,
+                    bits: raster.inward(&kept.0).unwrap(),
+                })
+                .collect(),
+            scopes: Vec::new(),
+        }
+    }
+
+    /// Adds the record of a nominal scope that excluded `edges`.
+    #[cfg(test)]
+    pub(in crate::planner) fn with_test_scope(
+        mut self,
+        section: usize,
+        [floor, ceiling]: [f64; 2],
+        edges: &[([f64; 2], [f64; 2], f64)],
+    ) -> Self {
+        let mut keys: Vec<[u64; 5]> = edges
+            .iter()
+            .map(|&(a, b, half)| edge_key(&beads::BeadEdge { a, b, half }))
+            .collect();
+        keys.sort_unstable();
+        self.scopes.push(NominalRecord {
+            section,
+            floor,
+            ceiling,
+            edges: keys,
+        });
+        self.scopes.sort_unstable_by_key(|scope| scope.section);
+        self
+    }
 }
 
 /// One independently grounded set of demands: the ordinary channel, or the
@@ -226,6 +510,7 @@ impl Sweep<'_> {
                 grids,
                 contact_tops,
                 access,
+                kept: KeptSupport::default(),
             });
         };
         let cells = CellFrame::new(bounds, SUPPORT_CELL_MM)?;
@@ -312,10 +597,7 @@ impl Sweep<'_> {
             if carried.iter().all(Bits::is_empty) && seeds.iter().all(Option::is_none) {
                 continue;
             }
-            let slab = program_coordinates::project_xyz6_bead_height_mm(
-                layers[l].z_mm,
-                layers[l].height_mm,
-            )?;
+            let slab = bead_slab(&layers[l])?;
             self.load_pieces(l, &mut window, cell_bounds, distance, work, cancel)?;
             // A carry already excludes every piece that touched a layer above
             // since it was seeded, and a piece's height scope is contiguous,
@@ -425,6 +707,7 @@ impl Sweep<'_> {
         let mut grounded: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
         let mut part_bands: Vec<Vec<(f64, Bits)>> = channels.iter().map(|_| Vec::new()).collect();
         let mut clearance: Vec<Option<Bits>> = vec![None; self.nominal.len()];
+        let mut records: Vec<NominalRecord> = Vec::new();
         let mut footprint: Option<(usize, Bits)> = None;
         let mut relieved: Vec<(usize, usize, Bits)> = Vec::new();
         for l in 0..=max_top {
@@ -434,8 +717,15 @@ impl Sweep<'_> {
                 part_bands.iter_mut().for_each(Vec::clear);
                 continue;
             }
-            let reaching =
-                self.prepare_nominal(l, &raster, &mut clearance, &hold, &release, work)?;
+            let reaching = self.prepare_nominal(
+                l,
+                &raster,
+                &mut clearance,
+                &mut records,
+                &hold,
+                &release,
+                work,
+            )?;
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
             for (c, channel) in channels.iter_mut().enumerate() {
@@ -591,11 +881,37 @@ impl Sweep<'_> {
             access.push((*ordinal, *l, column.into_shared()));
         }
         timing.mark("contours");
+        drop(relieved);
+        let mut kept = KeptSupport {
+            frame: Some(cells),
+            layers: Vec::new(),
+            scopes: records,
+        };
+        kept.scopes.sort_unstable_by_key(|scope| scope.section);
+        // Raster consumes the support cells; final clearance keeps its own
+        // admitted copy until it asserts against them.
+        let kept_layers = grids.iter().filter(|grid| grid.is_some()).count();
+        reserve_owned(&mut kept.layers, kept_layers, self.owned_bytes)?;
+        for (l, grid) in grids.iter().enumerate() {
+            let Some(grid) = grid else {
+                continue;
+            };
+            let bits = grid.support.clone();
+            hold(&bits)?;
+            let slab = bead_slab(&layers[l])?;
+            let nominal = nominal_band(layers, l)?;
+            kept.layers.push(KeptLayer {
+                layer: l,
+                band: [slab[0].max(nominal[0]), slab[1].min(nominal[1])],
+                bits,
+            });
+        }
         Ok(SweepOutput {
             frame: Some(raster.frame),
             grids,
             contact_tops,
             access,
+            kept,
         })
     }
 
@@ -674,12 +990,15 @@ impl Sweep<'_> {
     /// Nominal clearance of every scope reaching layer `l`: each section
     /// polygon dilated by its clearance distance, plus the actual object bead
     /// edges outside it. Each scope's grid is built once; a scope the rising
-    /// pass has left for good is released.
+    /// pass has left for good is released. Each built scope is recorded for
+    /// final clearance.
+    #[expect(clippy::too_many_arguments)]
     fn prepare_nominal(
         &self,
         l: usize,
         raster: &Raster<'_>,
         clearance: &mut [Option<Bits>],
+        records: &mut Vec<NominalRecord>,
         hold: &impl Fn(&Bits) -> Result<(), ManufacturingError>,
         release: &impl Fn(&Bits),
         work: &mut usize,
@@ -720,6 +1039,7 @@ impl Sweep<'_> {
                     })
                     .collect::<Result<Vec<f64>, ManufacturingError>>()?;
                 let mut bits = raster.dilated(section.material.0.iter().zip(distances))?;
+                let mut keys = Vec::new();
                 if scope.beads.is_some() {
                     let objects = self
                         .layers
@@ -739,7 +1059,18 @@ impl Sweep<'_> {
                             .map(|edge| (edge.a, edge.b, (edge.half + distance).next_up())),
                     )?;
                     bits = raster.union(&bits, &beads)?;
+                    reserve_owned(&mut keys, edges.len(), self.owned_bytes)?;
+                    keys.extend(edges.iter().map(edge_key));
+                    keys.sort_unstable();
+                    keys.dedup();
                 }
+                reserve_owned(records, 1, self.owned_bytes)?;
+                records.push(NominalRecord {
+                    section: scope.index,
+                    floor: scope.floor,
+                    ceiling: scope.ceiling,
+                    edges: keys,
+                });
                 hold(&bits)?;
                 clearance[at] = Some(bits);
             }
@@ -903,10 +1234,22 @@ fn inscribed_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[f64; 2]> {
     points
 }
 
+/// The closed full-bead slab of a layer's beads. A road's height is its
+/// physical extent `z − lower_z`, which can differ from the layer's recorded
+/// height in the last bit; the slab encloses both, so every road on the
+/// layer lies inside the band its exclusions are built for.
+fn bead_slab(layer: &PrintLayer) -> Result<[f64; 2], ManufacturingError> {
+    let recorded = program_coordinates::project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm)?;
+    let physical = program_coordinates::project_xyz6_bead_height_mm(
+        layer.z_mm,
+        layer.z_mm - layer.lower_z_mm,
+    )?;
+    Ok([recorded[0].min(physical[0]), recorded[1].max(physical[1])])
+}
+
 /// Lower bead floor and upper segment ceiling of layer `l`'s physical slab.
 fn nominal_band(layers: &[PrintLayer], l: usize) -> Result<[f64; 2], ManufacturingError> {
-    let lower =
-        program_coordinates::project_xyz6_bead_height_mm(layers[l].z_mm, layers[l].height_mm)?[0];
+    let lower = bead_slab(&layers[l])?[0];
     let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
         layers[l].z_mm,
         layers[l].z_mm,

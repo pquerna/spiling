@@ -243,8 +243,32 @@ pub(super) fn outside_material<'a>(
     cancel: &AtomicBool,
 ) -> Result<Vec<BeadEdge>, ManufacturingError> {
     let mut result = Vec::new();
+    visit_outside_material(
+        material,
+        objects.map(|path| ((), path)),
+        allowance,
+        work,
+        cancel,
+        |(), _, bead| {
+            result.push(bead);
+            Ok(())
+        },
+    )?;
+    Ok(result)
+}
+
+/// [`outside_material`] as a visit of each reported edge with its object's
+/// tag and its edge ordinal within that path, in object order.
+pub(super) fn visit_outside_material<'a, T: Copy>(
+    material: &MultiPolygon<f64>,
+    objects: impl Iterator<Item = (T, &'a DepositionPath)> + Clone,
+    allowance: f64,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(T, usize, BeadEdge) -> Result<(), ManufacturingError>,
+) -> Result<(), ManufacturingError> {
     let mut widest = 0.0f64;
-    for path in objects.clone() {
+    for (_, path) in objects.clone() {
         if super::support_role(path.kind) {
             continue;
         }
@@ -255,45 +279,43 @@ pub(super) fn outside_material<'a>(
         }
     }
     let grid = BoundaryGrid::new(material, widest * 0.5, work, cancel)?;
-    for path in objects {
-        {
-            check_cancel(cancel)?;
-            if super::support_role(path.kind) || path.points_mm.len() < 2 {
-                continue;
-            }
-            let Ok(edges) = path.checked_edges() else {
+    for (tag, path) in objects {
+        check_cancel(cancel)?;
+        if super::support_role(path.kind) || path.points_mm.len() < 2 {
+            continue;
+        }
+        let Ok(edges) = path.checked_edges() else {
+            continue;
+        };
+        // Containment of the current boundary-free run, decided once.
+        let mut run_inside: Option<bool> = None;
+        for (ordinal, edge) in edges.enumerate() {
+            super::super::native::charge_support_clearance(work, cancel)?;
+            let &[p, q] = edge.points_mm else {
                 continue;
             };
-            // Containment of the current boundary-free run, decided once.
-            let mut run_inside: Option<bool> = None;
-            for edge in edges {
-                super::super::native::charge_support_clearance(work, cancel)?;
-                let &[p, q] = edge.points_mm else {
-                    continue;
-                };
-                let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
-                let half = edge.width_mm * 0.5;
-                let bead = BeadEdge { a, b, half };
-                let Some(grid) = &grid else {
-                    result.push(bead);
-                    continue;
-                };
-                if grid.near(a, b, half - allowance, work, cancel)? {
-                    run_inside = None;
-                    result.push(bead);
-                    continue;
-                }
-                let inside = match run_inside {
-                    Some(inside) => inside,
-                    None => *run_inside.insert(grid.contains(a, work, cancel)?),
-                };
-                if !inside {
-                    result.push(bead);
-                }
+            let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
+            let half = edge.width_mm * 0.5;
+            let bead = BeadEdge { a, b, half };
+            let Some(grid) = &grid else {
+                visit(tag, ordinal, bead)?;
+                continue;
+            };
+            if grid.near(a, b, half - allowance, work, cancel)? {
+                run_inside = None;
+                visit(tag, ordinal, bead)?;
+                continue;
+            }
+            let inside = match run_inside {
+                Some(inside) => inside,
+                None => *run_inside.insert(grid.contains(a, work, cancel)?),
+            };
+            if !inside {
+                visit(tag, ordinal, bead)?;
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 #[cfg(test)]

@@ -466,3 +466,47 @@ fn frame_refuses_unrepresentable_bounds_and_cancels() {
         ManufacturingErrorCode::ResourceLimit
     );
 }
+
+#[test]
+fn escaped_cells_are_exactly_the_outward_capsule_outside_the_kept_set() {
+    let cancel = AtomicBool::new(false);
+    let frame = frame();
+    let raster = raster(frame, &cancel);
+    let kept = raster.inward(&cases()[..1]).unwrap();
+    let mut rng = Lcg(17);
+    for _ in 0..200 {
+        let a = [rng.range(0.0, 10.0), rng.range(0.0, 10.0)];
+        let b = [rng.range(0.0, 10.0), rng.range(0.0, 10.0)];
+        let radius = rng.range(0.0, 0.6);
+        let cover = raster.capsules([(a, b, radius)]).unwrap();
+        let mut outside = cover.clone();
+        outside.subtract(&kept);
+        let (escape, work) = frame.escaped(&kept, a, b, radius).unwrap();
+        assert!(work > 0);
+        assert_eq!(escape.map_or(0, |e| e.cells), outside.count());
+        if let Some(escape) = escape {
+            for (index, inside) in brute(&frame, &outside).into_iter().enumerate() {
+                if inside {
+                    let (col, row) = (index % frame.cols, index / frame.cols);
+                    let [lo, hi] = escape.bounds;
+                    assert!(lo[0] <= frame.x(col as f64) && frame.x(col as f64 + 1.0) <= hi[0]);
+                    assert!(lo[1] <= frame.y(row as f64) && frame.y(row as f64 + 1.0) <= hi[1]);
+                }
+            }
+        }
+    }
+    // Cells beyond the frame are never kept, even for a full kept set.
+    let all = raster
+        .inward([&Rect::new(coord! { x: -5.0, y: -5.0 }, coord! { x: 20.0, y: 20.0 }).to_polygon()])
+        .unwrap();
+    let (inside, _) = frame.escaped(&all, [1.0, 1.0], [9.0, 9.0], 0.3).unwrap();
+    assert_eq!(inside, None);
+    let (escape, _) = frame.escaped(&all, [10.5, 1.0], [12.0, 1.0], 0.1).unwrap();
+    let escape = escape.unwrap();
+    assert!(escape.cells > 0 && escape.bounds[1][0] >= 12.1);
+    assert!(
+        frame
+            .escaped(&all, [f64::NAN, 0.0], [1.0, 1.0], 0.1)
+            .is_err()
+    );
+}

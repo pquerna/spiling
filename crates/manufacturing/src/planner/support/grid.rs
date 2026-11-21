@@ -291,6 +291,119 @@ impl Bits {
     }
 }
 
+/// Cells of a closed capsule that lie outside a kept set: how many and the
+/// closed millimetre box around them (widened by the raster guard). Cells
+/// beyond the frame are never kept.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Escape {
+    pub(super) cells: usize,
+    pub(super) bounds: [[f64; 2]; 2],
+}
+
+impl CellFrame {
+    /// Unclamped inclusive cell indexes whose closed cells meet `[lo, hi]`.
+    fn cell_span(&self, axis: usize, lo: f64, hi: f64) -> Option<(i64, i64)> {
+        let first = ((lo - GUARD_MM - self.origin[axis]) / self.cell).floor();
+        let last = ((hi + GUARD_MM - self.origin[axis]) / self.cell).floor();
+        let limit = f64::from(i32::MAX);
+        (first.is_finite() && last.is_finite() && first.abs() < limit && last.abs() < limit)
+            .then_some((first as i64, last as i64))
+    }
+
+    /// Every cell meeting the closed capsule of `ab` and `radius` that is not
+    /// in `kept`, rasterized outward exactly as [`Raster::capsules`] does but
+    /// without clipping to the frame. Returns the escape, if any, and the
+    /// rows and words inspected.
+    pub(super) fn escaped(
+        &self,
+        kept: &Bits,
+        a: [f64; 2],
+        b: [f64; 2],
+        radius: f64,
+    ) -> Result<(Option<Escape>, usize), ManufacturingError> {
+        let invalid = || {
+            error(
+                ManufacturingErrorCode::NativeConditioningFailure,
+                "support grid capsule has non-finite coordinates",
+            )
+        };
+        if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0) {
+            return Err(invalid());
+        }
+        let (r0, r1) = self
+            .cell_span(1, a[1].min(b[1]) - radius, a[1].max(b[1]) + radius)
+            .ok_or_else(invalid)?;
+        let (cols, rows) = (self.cols as i64, self.rows as i64);
+        let mut cells = 0usize;
+        let mut work = 0usize;
+        let mut lo = [i64::MAX; 2];
+        let mut hi = [i64::MIN; 2];
+        let mut mark = |count: usize, from: i64, to: i64, row: i64| {
+            cells = cells.saturating_add(count);
+            lo = [lo[0].min(from), lo[1].min(row)];
+            hi = [hi[0].max(to), hi[1].max(row)];
+        };
+        for row in r0..=r1 {
+            work = work.saturating_add(1);
+            let band = [
+                self.y(row as f64) - GUARD_MM,
+                self.y(row as f64 + 1.0) + GUARD_MM,
+            ];
+            let Some((x0, x1)) = capsule_band(a, b, radius, band) else {
+                continue;
+            };
+            let (c0, c1) = self.cell_span(0, x0, x1).ok_or_else(invalid)?;
+            if row < 0 || row >= rows {
+                mark((c1 - c0 + 1) as usize, c0, c1, row);
+                continue;
+            }
+            if c0 < 0 {
+                let to = c1.min(-1);
+                mark((to - c0 + 1) as usize, c0, to, row);
+            }
+            if c1 >= cols {
+                let from = c0.max(cols);
+                mark((c1 - from + 1) as usize, from, c1, row);
+            }
+            let (from, to) = (c0.max(0), c1.min(cols - 1));
+            if from > to {
+                continue;
+            }
+            let (from, to) = (from as usize, to as usize);
+            for word in from / 64..=to / 64 {
+                work = work.saturating_add(1);
+                let mut mask = !0u64;
+                if word == from / 64 {
+                    mask &= !0u64 << (from % 64);
+                }
+                if word == to / 64 {
+                    mask &= !0u64 >> (63 - to % 64);
+                }
+                let missing = mask & !kept.word(row as usize, word);
+                if missing != 0 {
+                    let first = (word * 64) as i64 + i64::from(missing.trailing_zeros());
+                    let last = (word * 64 + 63) as i64 - i64::from(missing.leading_zeros());
+                    mark(missing.count_ones() as usize, first, last, row);
+                }
+            }
+        }
+        let escape = (cells > 0).then(|| Escape {
+            cells,
+            bounds: [
+                [
+                    (self.x(lo[0] as f64) - GUARD_MM).next_down(),
+                    (self.y(lo[1] as f64) - GUARD_MM).next_down(),
+                ],
+                [
+                    (self.x(hi[0] as f64 + 1.0) + GUARD_MM).next_up(),
+                    (self.y(hi[1] as f64 + 1.0) + GUARD_MM).next_up(),
+                ],
+            ],
+        });
+        Ok((escape, work))
+    }
+}
+
 /// One horizontal run of cells, `to` exclusive.
 #[derive(Clone, Copy)]
 struct Span {

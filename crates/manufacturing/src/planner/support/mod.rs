@@ -26,6 +26,7 @@ mod contact_extensions;
 pub(in crate::planner) mod projection;
 mod raster;
 mod sweep;
+pub(in crate::planner) use sweep::KeptSupport;
 
 struct ProjectionTrace {
     enabled: bool,
@@ -1982,6 +1983,10 @@ pub(super) fn realize(
         for (ordinal, layer, column) in output.access {
             scopes[ordinal].record_access(layer, column);
         }
+        // Final clearance asserts emitted support against these kept cells;
+        // they stay admitted until it consumes them.
+        let kept = output.kept;
+        support_metadata_bytes += kept.bytes();
         trace.report("corridors_complete");
         timing.mark("roots_and_corridors");
         drop(nominal);
@@ -2661,6 +2666,7 @@ pub(super) fn realize(
                 protected: &protected,
                 scopes: &scopes,
                 index_bytes,
+                kept: &kept,
             },
             &recipe.supports,
             native_work,
