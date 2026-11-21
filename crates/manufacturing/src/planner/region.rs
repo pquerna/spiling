@@ -108,48 +108,12 @@ pub(super) fn offset_admitted(
     ) -> Result<(), ManufacturingError>,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    offset_polygons(&region.0, distance, None, &mut admit, cancel)
-}
-
-pub(super) fn offset_admitted_in_frame(
-    region: &MultiPolygon<f64>,
-    distance: f64,
-    frame: &super::support::projection::Frame,
-    mut admit: impl FnMut(
-        usize,
-        usize,
-        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
-    ) -> Result<(), ManufacturingError>,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    offset_polygons(&region.0, distance, Some(frame), &mut admit, cancel)
-}
-
-/// The polygon form keeps the same borrowed operand and float frame while
-/// exposing the common offset implementation's live-capacity admission.
-pub(super) fn offset_polygon_admitted(
-    polygon: &Polygon<f64>,
-    distance: f64,
-    mut admit: impl FnMut(
-        usize,
-        usize,
-        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
-    ) -> Result<(), ManufacturingError>,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    offset_polygons(
-        std::slice::from_ref(polygon),
-        distance,
-        None,
-        &mut admit,
-        cancel,
-    )
+    offset_polygons(&region.0, distance, &mut admit, cancel)
 }
 
 fn offset_polygons(
     polygons: &[Polygon<f64>],
     distance: f64,
-    frame: Option<&super::support::projection::Frame>,
     admit: &mut impl FnMut(
         usize,
         usize,
@@ -195,7 +159,6 @@ fn offset_polygons(
                 true,
                 retained,
                 retained_bytes,
-                frame,
                 admit,
                 cancel,
             )?;
@@ -214,9 +177,7 @@ fn offset_polygons(
         eroded_polygons
     } else {
         // Dilation distributes over union: one overlay of every ring's cycle.
-        convolution::offset(
-            polygons, &disk, false, sides, disk_bytes, frame, admit, cancel,
-        )?
+        convolution::offset(polygons, &disk, false, sides, disk_bytes, admit, cancel)?
     };
     drop(disk);
     check_cancel(cancel)?;
@@ -267,17 +228,6 @@ fn offset_disk_sides(radius: f64) -> Result<usize, ManufacturingError> {
         return Err(resource("offset disk cannot meet the radial error budget"));
     }
     Ok(sides)
-}
-
-/// The same circumscribed disk the offsets use, for constructing outward
-/// conservative capsules around actual stroke centerlines.
-pub(super) fn circumscribed_disk(radius: f64) -> Result<Vec<Coord<f64>>, ManufacturingError> {
-    if !radius.is_finite() || radius <= 0.0 {
-        return Err(unsupported(
-            "circumscribed disk radius is not finite and positive",
-        ));
-    }
-    offset_disk(radius)
 }
 
 /// Counterclockwise circumscribed disk vertices at `(k + 1/2)·2π/sides`.

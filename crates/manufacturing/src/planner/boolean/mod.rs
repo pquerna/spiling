@@ -261,14 +261,6 @@ pub(crate) fn budget_limited(
     result
 }
 
-pub(super) fn budget_polygon_accumulated(
-    polygon: &Polygon<f64>,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    polygon_budget(std::iter::once(polygon), work, 256, cancel)
-}
-
 /// Borrowed required-material pieces share the ordinary Boolean admission proof.
 pub(super) fn budget_parts_accumulated(
     parts: &[&Polygon<f64>],

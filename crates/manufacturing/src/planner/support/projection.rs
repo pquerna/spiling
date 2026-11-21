@@ -1,11 +1,7 @@
 use super::*;
-use i_overlay::core::overlay::ShapeType;
-use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
-use i_overlay::float::overlay::FloatOverlay;
 use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
 
 pub(in crate::planner) struct Frame {
-    pub(in crate::planner) adapter: FloatPointAdapter<[f64; 2], f64>,
     pub(super) bounds: [[f64; 2]; 2],
     pub(super) distance: f64,
 }
@@ -73,7 +69,7 @@ impl Frame {
                 "support clearance work frame has non-finite bounds",
             ));
         }
-        let adapter = FloatPointAdapter::new(FloatRect {
+        let adapter = FloatPointAdapter::<[f64; 2], f64>::new(FloatRect {
             min_x: bounds[0][0],
             min_y: bounds[0][1],
             max_x: bounds[1][0],
@@ -94,11 +90,19 @@ impl Frame {
                 "support clearance offset leaves its fixed work frame",
             ));
         }
-        Ok(Self {
-            adapter,
-            bounds,
-            distance,
+        Ok(Self { bounds, distance })
+    }
+
+    /// The integer quantum of an overlay adapter over this frame.
+    #[cfg(test)]
+    pub(super) fn quantum(&self) -> f64 {
+        FloatPointAdapter::<[f64; 2], f64>::new(FloatRect {
+            min_x: self.bounds[0][0],
+            min_y: self.bounds[0][1],
+            max_x: self.bounds[1][0],
+            max_y: self.bounds[1][1],
         })
+        .inv_scale
     }
 
     #[cfg(test)]
@@ -111,160 +115,14 @@ impl Frame {
             self.distance.to_bits(),
         ]
     }
-
-    pub(super) fn difference(
-        &self,
-        column: &MultiPolygon<f64>,
-        clearance: &MultiPolygon<f64>,
-    ) -> MultiPolygon<f64> {
-        self.overlay(column, clearance, OverlayRule::Difference)
-    }
-
-    pub(super) fn union(
-        &self,
-        column: &MultiPolygon<f64>,
-        clearance: &MultiPolygon<f64>,
-    ) -> MultiPolygon<f64> {
-        self.overlay(column, clearance, OverlayRule::Union)
-    }
-
-    /// `difference`, overlaying only the subject polygons whose bounds meet a
-    /// clip polygon's bounds; the rest are disjoint from the clip and pass
-    /// through unchanged.
-    pub(super) fn difference_local(
-        &self,
-        subject: &MultiPolygon<f64>,
-        clip: &MultiPolygon<f64>,
-    ) -> MultiPolygon<f64> {
-        let (touched, mut kept) = split_by_bounds(subject, clip);
-        if touched.0.is_empty() {
-            return subject.clone();
-        }
-        let mut result = self.overlay(&touched, clip, OverlayRule::Difference);
-        result.0.append(&mut kept.0);
-        result
-    }
-
-    /// `union` of two disjoint-polygon sets, overlaying only the polygons of
-    /// `a` whose bounds meet `b`; the rest are disjoint from `b`.
-    pub(super) fn union_local(
-        &self,
-        a: &MultiPolygon<f64>,
-        b: &MultiPolygon<f64>,
-    ) -> MultiPolygon<f64> {
-        let (touched, mut kept) = split_by_bounds(a, b);
-        let mut result = self.overlay(&touched, b, OverlayRule::Union);
-        result.0.append(&mut kept.0);
-        result
-    }
-
-    /// `intersection`, dropping subject polygons whose bounds meet no clip
-    /// polygon's bounds: their intersection is empty.
-    pub(super) fn intersection_local(
-        &self,
-        subject: &MultiPolygon<f64>,
-        clip: &MultiPolygon<f64>,
-    ) -> MultiPolygon<f64> {
-        let (touched, _) = split_by_bounds(subject, clip);
-        if touched.0.is_empty() {
-            return MultiPolygon(Vec::new());
-        }
-        self.overlay(&touched, clip, OverlayRule::Intersect)
-    }
-
-    fn overlay(
-        &self,
-        column: &MultiPolygon<f64>,
-        clearance: &MultiPolygon<f64>,
-        rule: OverlayRule,
-    ) -> MultiPolygon<f64> {
-        let subject = packed(column);
-        let clip = packed(clearance);
-        let capacity = subject.iter().chain(&clip).map(Vec::len).sum();
-        let shapes = FloatOverlay::with_adapter(self.adapter.clone(), capacity)
-            .unsafe_add_source(&subject, ShapeType::Subject)
-            .unsafe_add_source(&clip, ShapeType::Clip)
-            .overlay(rule, FillRule::EvenOdd);
-        unpack(shapes)
-    }
-}
-
-/// Split `subject` into polygons whose closed bounds meet some polygon of
-/// `clip` and polygons whose bounds meet none, each in input order.
-fn split_by_bounds(
-    subject: &MultiPolygon<f64>,
-    clip: &MultiPolygon<f64>,
-) -> (MultiPolygon<f64>, MultiPolygon<f64>) {
-    use geo::BoundingRect;
-    let mut boxes: Vec<[[f64; 2]; 2]> = clip
-        .0
-        .iter()
-        .filter_map(|polygon| polygon.bounding_rect())
-        .map(|rect| [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]])
-        .collect();
-    boxes.sort_unstable_by(|a, b| a[0][0].total_cmp(&b[0][0]));
-    let widest = boxes
-        .iter()
-        .map(|b| b[1][0] - b[0][0])
-        .fold(0.0f64, f64::max);
-    let mut touched = MultiPolygon(Vec::new());
-    let mut kept = MultiPolygon(Vec::new());
-    for polygon in &subject.0 {
-        let meets = polygon.bounding_rect().is_none_or(|rect| {
-            let lo = [rect.min().x, rect.min().y];
-            let hi = [rect.max().x, rect.max().y];
-            let from = boxes.partition_point(|b| b[0][0] < lo[0] - widest);
-            boxes[from..]
-                .iter()
-                .take_while(|b| b[0][0] <= hi[0])
-                .any(|b| b[1][0] >= lo[0] && b[0][1] <= hi[1] && b[1][1] >= lo[1])
-        });
-        if meets {
-            touched.0.push(polygon.clone());
-        } else {
-            kept.0.push(polygon.clone());
-        }
-    }
-    (touched, kept)
-}
-
-fn packed(material: &MultiPolygon<f64>) -> Vec<Vec<[f64; 2]>> {
-    material
-        .0
-        .iter()
-        .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
-        .map(|ring| ring.0.iter().map(|point| [point.x, point.y]).collect())
-        .collect()
-}
-
-fn unpack(shapes: Vec<Vec<Vec<[f64; 2]>>>) -> MultiPolygon<f64> {
-    MultiPolygon(
-        shapes
-            .into_iter()
-            .map(|shape| {
-                let mut rings = shape.into_iter().map(|ring| {
-                    let mut line =
-                        geo::LineString(ring.into_iter().map(geo::Coord::from).collect());
-                    line.close();
-                    line
-                });
-                Polygon::new(
-                    rings.next().unwrap_or_else(geo::LineString::empty),
-                    rings.collect(),
-                )
-            })
-            .collect(),
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geo::polygon;
-
-    fn rectangle(left: f64, bottom: f64, right: f64, top: f64) -> Polygon<f64> {
-        polygon![(x:left,y:bottom),(x:right,y:bottom),(x:right,y:top),(x:left,y:top)]
-    }
+    use i_overlay::core::overlay::ShapeType;
+    use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
+    use i_overlay::float::overlay::FloatOverlay;
 
     #[test]
     fn tree_y_screen_preserves_closed_contacts_and_rounded_crossings() {
@@ -328,7 +186,7 @@ mod tests {
         let support = support_input(&[], &[], &recipe);
         let cancel = AtomicBool::new(false);
         let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
-        let quantum = frame.adapter.inv_scale;
+        let quantum = frame.quantum();
         let slope = quantum / (4.0 * crate::planner::OFFSET_TOLERANCE_MM);
         let lower = DepositionPath {
             material_domain: None,
@@ -385,12 +243,7 @@ mod tests {
         let mut support = support_input(&[], &[], &recipe);
         let cancel = AtomicBool::new(false);
         let frame = Frame::new(&support, 0.2, 0, &cancel).unwrap();
-        assert!(
-            frame.adapter.inv_scale * 2.0f64.sqrt() <= crate::planner::OFFSET_TOLERANCE_MM / 2.0
-        );
-        let seed = MultiPolygon(vec![rectangle(0.0, 0.0, 12.0, 12.0)]);
-        let old = ColumnScreen::new(&seed, 0.2).unwrap().unwrap();
-        assert!(frame.distance <= old.reach);
+        assert!(frame.quantum() * 2.0f64.sqrt() <= crate::planner::OFFSET_TOLERANCE_MM / 2.0);
         assert_eq!(
             frame.identity(),
             Frame::new(&support, 0.2, 0, &cancel).unwrap().identity()

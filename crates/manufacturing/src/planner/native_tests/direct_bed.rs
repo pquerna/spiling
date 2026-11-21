@@ -198,7 +198,11 @@ fn support_sweep_installs_mixed_native_roots_and_replays() {
             translated(30.0, 0.0, LEGACY_BIRTH),
         ],
     );
-    let intent = intent(true);
+    // The west roof bridges the blocker's 6 mm through-hole between support
+    // on its rim; the support grid keeps that support a few cells inside the
+    // rim, so the bridge allowance carries that tolerance.
+    let mut intent = intent(true);
+    intent.recipe.process.max_bridge_span_mm = 6.5;
     let cancel = AtomicBool::new(false);
     let result = compile(scene.input(&intent), &cancel).unwrap();
     drop(scene);

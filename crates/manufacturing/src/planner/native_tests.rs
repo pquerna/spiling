@@ -1559,7 +1559,12 @@ fn mixed_bed_and_on_part_roots_each_anchor_their_actual_component() {
         BOX,
         &[translated(0.0, 0.0, 10.0), translated(30.0, 0.0, 10.0)],
     );
-    let bundle = compile(scene.input(&intent(true)), &AtomicBool::new(false)).unwrap();
+    // The box bridges the 6 mm through-hole between support standing on the
+    // hole's rim; the support grid keeps that support up to a few cells
+    // inside the rim, so the bridge allowance carries that tolerance.
+    let mut intent = intent(true);
+    intent.recipe.process.max_bridge_span_mm = 6.5;
+    let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
     assert!(
         bundle
             .plan

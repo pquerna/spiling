@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Layer-major support construction.
+//! Layer-major support construction on the support grid.
 //!
 //! A legacy column is one (demand, root) prism: the demand layer's buffered
 //! material, minus all occupancy from the root's first layer up to the
@@ -11,13 +11,17 @@
 //! - down: `A[l] = (A[l + 1] ∪ seeds[l]) − occupancy[l] − voids[l]`;
 //! - up: `G[l] = A[l] ∩ (G[l − 1] ∪ ground[l]) − nominal[l]`,
 //!
-//! where ground is the bed at the first layer and each accepted part landing
-//! at its first support layer. For one demand the passes reproduce its bed and
-//! landing prisms exactly. With several demands support may also stand on
-//! lower grounded support, which is physically valid. Each layer's occupancy,
-//! void and nominal clearance is built once and shared by every demand.
+//! where ground is the bed at the first layer and each part landing's
+//! anchored cells at its first support layer. Both passes run on the
+//! conservative cell grid of [`grid`](super::grid): seeds, occupancy, voids
+//! and clearance round outward, landings and road footprints inward, so every
+//! cell kept is support space under the exact rules. Polygons are produced
+//! only at the output, inside the kept cells. Each layer's occupancy, void
+//! and nominal clearance is built once and shared by every demand.
 
+use super::grid::{Bits, CellFrame, Raster, SUPPORT_CELL_MM};
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) struct Sweep<'a> {
     pub layers: &'a [PrintLayer],
@@ -50,127 +54,88 @@ pub(super) struct SweepOutput {
 /// bed-only demands a single open-below void relieves.
 struct Channel {
     relieved: Option<usize>,
-    seeds: Vec<Option<MultiPolygon<f64>>>,
+    seeds: Vec<Option<Bits>>,
     /// Per demand target, in first-seen order: its contact tops in demand
-    /// order, its seed and the seed's bounds. Every demand on one target
-    /// shares that target's buffered section as its seed.
+    /// order and its seed. Every demand on one target shares that target's
+    /// buffered section as its seed.
     interface_seeds: Vec<InterfaceSeed>,
-    tops: Vec<(usize, usize)>,
-    active: Vec<Option<Rc<OwnedMaterial>>>,
+    tops: Vec<usize>,
+    active: Vec<Option<Bits>>,
 }
 
 struct InterfaceSeed {
     target: usize,
     tops: Vec<usize>,
-    seed: MultiPolygon<f64>,
-    bounds: Option<[[f64; 2]; 2]>,
+    seed: Rc<Bits>,
 }
 
 impl Channel {
-    fn add_interface_seed(&mut self, top: usize, target: usize, seed: &MultiPolygon<f64>) {
+    fn new(relieved: Option<usize>, layers: usize) -> Self {
+        Self {
+            relieved,
+            seeds: vec![None; layers],
+            interface_seeds: Vec::new(),
+            tops: Vec::new(),
+            active: vec![None; layers],
+        }
+    }
+
+    fn add_seed(
+        &mut self,
+        raster: &Raster<'_>,
+        top: usize,
+        target: usize,
+        seed: &Rc<Bits>,
+    ) -> Result<(), ManufacturingError> {
+        let slot = &mut self.seeds[top];
+        *slot = Some(match slot.take() {
+            Some(old) => raster.union(&old, seed)?,
+            None => Bits::clone(seed),
+        });
+        self.tops.push(top);
         if let Some(entry) = self.interface_seeds.iter_mut().find(|e| e.target == target) {
             if !entry.tops.contains(&top) {
                 entry.tops.push(top);
             }
-            return;
+        } else {
+            self.interface_seeds.push(InterfaceSeed {
+                target,
+                tops: vec![top],
+                seed: Rc::clone(seed),
+            });
         }
-        self.interface_seeds.push(InterfaceSeed {
-            target,
-            tops: vec![top],
-            seed: seed.clone(),
-            bounds: material_bounds(seed),
-        });
+        Ok(())
     }
 }
 
-fn bounds_meet(a: Option<[[f64; 2]; 2]>, b: Option<[[f64; 2]; 2]>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => {
-            a[0][0] <= b[1][0] && b[0][0] <= a[1][0] && a[0][1] <= b[1][1] && b[0][1] <= a[1][1]
-        }
-        _ => false,
-    }
+/// A raw occupied piece, its height scope clipped to its span, the bounds
+/// its clearance can reach, and whether every live carry already excludes it.
+struct Piece {
+    polygon: Polygon<f64>,
+    scope: [f64; 2],
+    reach: [[f64; 2]; 2],
+    applied: bool,
 }
 
-/// Chained fixed-frame differences leave runs of nearly collinear vertices
-/// where nearly equal clearance arcs from successive layers cross. A
-/// Douglas–Peucker pass at this tolerance moves a boundary far inside the
-/// offset tolerance already reserved in every clearance distance; actual bead
-/// clearance is still proven independently at the end.
-const COLLINEAR_MM: f64 = 1.0e-4;
-
-fn drop_micro_edges(material: &mut MultiPolygon<f64>) {
-    use geo::Simplify;
-    let polygons = std::mem::take(&mut material.0);
-    for polygon in polygons {
-        let simplified = polygon.simplify(COLLINEAR_MM);
-        if simplified.exterior().0.len() < 4 {
-            continue;
-        }
-        let (exterior, interiors) = simplified.into_inner();
-        let holes = interiors
-            .into_iter()
-            .filter(|hole| hole.0.len() >= 4)
-            .collect();
-        material.0.push(Polygon::new(exterior, holes));
-    }
+/// One demand before rasterization: its contact top, target and relief.
+struct Entry {
+    top: usize,
+    target: usize,
+    relieved: Option<usize>,
 }
 
-/// Union disjoint-or-overlapping parts pairwise in a fixed index order, in
-/// parallel, so the result does not depend on scheduling.
-fn merge_pairwise(
-    frame: &projection::Frame,
-    mut parts: Vec<MultiPolygon<f64>>,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    use rayon::prelude::*;
-    while parts.len() > 1 {
-        check_cancel(cancel)?;
-        parts = parts
-            .par_chunks(2)
-            .map(|pair| match pair {
-                [left, right] => {
-                    if left.0.is_empty() {
-                        right.clone()
-                    } else if right.0.is_empty() {
-                        left.clone()
-                    } else {
-                        frame.union(left, right)
-                    }
-                }
-                [single] => single.clone(),
-                _ => unreachable!("chunks of at most two"),
-            })
-            .collect();
-    }
-    Ok(parts.pop().unwrap_or_else(|| MultiPolygon(Vec::new())))
+fn expand(bounds: [[f64; 2]; 2], by: f64) -> [[f64; 2]; 2] {
+    [
+        bounds[0].map(|v| (v - by).next_down()),
+        bounds[1].map(|v| (v + by).next_up()),
+    ]
 }
 
-/// Occupied pieces of the spans the down pass is currently inside, each
-/// collected once. A bead slab may touch an adjacent span's pieces.
-#[derive(Default)]
-struct SpanPieces {
-    spans: Vec<(usize, Vec<Piece>)>,
-    last: Option<(Vec<PieceKey>, MultiPolygon<f64>)>,
+fn rects_meet(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> bool {
+    a[0][0] <= b[1][0] && b[0][0] <= a[1][0] && a[0][1] <= b[1][1] && b[0][1] <= a[1][1]
 }
-
-/// (span, piece index) of a piece selected for one layer's clearance.
-type PieceKey = (usize, usize);
-
-/// A raw occupied piece, its height scope clipped to its span, and its bounds.
-type Piece = (Polygon<f64>, [f64; 2], [[f64; 2]; 2]);
 
 impl Sweep<'_> {
-    fn union(&self, a: &MultiPolygon<f64>, b: &MultiPolygon<f64>) -> MultiPolygon<f64> {
-        if a.0.is_empty() {
-            return b.clone();
-        }
-        if b.0.is_empty() {
-            return a.clone();
-        }
-        self.frame.union_local(a, b)
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "two ordered passes share local state"
@@ -178,9 +143,6 @@ impl Sweep<'_> {
     pub(super) fn run(
         &self,
         scopes: &[VoidScope],
-        segments: &mut usize,
-        anchors: &mut AnchorWorkspace,
-        anchor_work: &mut usize,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<SweepOutput, ManufacturingError> {
@@ -193,18 +155,10 @@ impl Sweep<'_> {
         let mut contact_tops = vec![None; layers.len()];
         let mut access = Vec::new();
 
-        // Seeds: each demand's buffered target material at its contact top.
-        let mut channels: Vec<Channel> = Vec::new();
-        let new_channel = |relieved| Channel {
-            relieved,
-            seeds: vec![None; layers.len()],
-            interface_seeds: Vec::new(),
-            tops: Vec::new(),
-            active: vec![None; layers.len()],
-        };
-        channels.push(new_channel(None));
-        let mut buffered: Option<(usize, MultiPolygon<f64>)> = None;
-        let mut max_top = None::<usize>;
+        // Each demand's contact top and relief; the seed is its target's
+        // section material buffered by half a bead.
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut bounds: Option<[[f64; 2]; 2]> = None;
         for demand in self.demands {
             check_cancel(cancel)?;
             let path = &layers[demand.target].paths[demand.failure.path];
@@ -212,18 +166,12 @@ impl Sweep<'_> {
             else {
                 continue;
             };
-            if buffered.as_ref().is_none_or(|(t, _)| *t != demand.target) {
-                let candidate =
-                    &self.sections[span_at(self.sections, demand.target as u32)].material;
-                charge_boolean(candidate, candidate, work, self.foreign_work, cancel)?;
-                buffered = Some((
-                    demand.target,
-                    candidate.buffer_with_style(
-                        BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel),
-                    ),
-                ));
-            }
-            let seed = &buffered.as_ref().expect("buffered demand").1;
+            let material = &self.sections[span_at(self.sections, demand.target as u32)].material;
+            let Some(seed_bounds) = material_bounds(material).map(|b| expand(b, width / 2.0))
+            else {
+                continue;
+            };
+            bounds = Some(bounds.map_or(seed_bounds, |b| union_frame(Some(b), seed_bounds)));
             // A bed-rooted demand may enter one open-below void whose roof it
             // supports; that relief is per demand, so it gets its own channel.
             let corridor_floor = layers[0].lower_z_mm;
@@ -232,7 +180,9 @@ impl Sweep<'_> {
                 if !void_reaches_corridor(&scope.height, corridor_floor, layers[top].z_mm) {
                     continue;
                 }
-                if candidate_clearance_distance(mask, seed, self.requested)?.is_none() {
+                if candidate_clearance_distance_in_bounds(mask, Some(seed_bounds), self.requested)?
+                    .is_none()
+                {
                     continue;
                 }
                 if scope.allows_roof_access(
@@ -249,37 +199,14 @@ impl Sweep<'_> {
                     break;
                 }
             }
-            let at = if relieved.is_none() {
-                0
-            } else if let Some(at) = channels.iter().position(|c| c.relieved == relieved) {
-                at
-            } else {
-                channels.push(new_channel(relieved));
-                channels.len() - 1
-            };
-            let channel = &mut channels[at];
-            let slot = &mut channel.seeds[top];
-            *slot = Some(
-                slot.take()
-                    .map_or_else(|| seed.clone(), |old| self.union(&old, seed)),
-            );
-            channel.add_interface_seed(top, demand.target, seed);
-            channel.tops.push((top, demand.target));
-            max_top = Some(max_top.map_or(top, |m| m.max(top)));
-            if relieved.is_some() {
-                // The ordinary channel still owns this demand's part roots.
-                let ordinary = &mut channels[0];
-                let slot = &mut ordinary.seeds[top];
-                *slot = Some(
-                    slot.take()
-                        .map_or_else(|| seed.clone(), |old| self.union(&old, seed)),
-                );
-                ordinary.tops.push((top, demand.target));
-                ordinary.add_interface_seed(top, demand.target, seed);
-            }
+            reserve_owned(&mut entries, 1, self.owned_bytes)?;
+            entries.push(Entry {
+                top,
+                target: demand.target,
+                relieved,
+            });
         }
-        drop(buffered);
-        let Some(max_top) = max_top else {
+        let (Some(bounds), Some(max_top)) = (bounds, entries.iter().map(|e| e.top).max()) else {
             return Ok(SweepOutput {
                 support,
                 interfaces,
@@ -287,252 +214,285 @@ impl Sweep<'_> {
                 access,
             });
         };
+        let cells = CellFrame::new(bounds, SUPPORT_CELL_MM)?;
+        let cell_bounds = cells.bounds();
+        // Live grid bytes held across steps; every new allocation is admitted
+        // against them and the planner's retained inventory.
+        let live = AtomicUsize::new(0);
+        let (retained, owned_bytes) = (self.retained, self.owned_bytes);
+        let admit = |extra: usize| -> Result<(), ManufacturingError> {
+            super::super::remaining_geometry_units(
+                retained,
+                owned_bytes
+                    .saturating_add(live.load(Ordering::Relaxed))
+                    .saturating_add(extra),
+            )
+            .map(|_| ())
+        };
+        admit(cells.dense_bytes().saturating_mul(4))?;
+        let raster = Raster {
+            frame: cells,
+            cancel,
+            admit: &admit,
+            work: AtomicUsize::new(0),
+        };
+        let hold = |bits: &Bits| -> Result<(), ManufacturingError> {
+            admit(bits.bytes())?;
+            live.fetch_add(bits.bytes(), Ordering::Relaxed);
+            Ok(())
+        };
+        let release = |bits: &Bits| {
+            live.fetch_sub(
+                bits.bytes().min(live.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
+        };
+        let charge = |work: &mut usize| {
+            charge_owned_work(work, self.foreign_work, raster.take_work(), cancel)
+        };
 
+        let mut channels = vec![Channel::new(None, layers.len())];
+        let mut seed: Option<(usize, Rc<Bits>)> = None;
+        for entry in &entries {
+            check_cancel(cancel)?;
+            if seed
+                .as_ref()
+                .is_none_or(|(target, _)| *target != entry.target)
+            {
+                let material = &self.sections[span_at(self.sections, entry.target as u32)].material;
+                let bits = raster.outward(&material.0, width / 2.0)?;
+                hold(&bits)?;
+                seed = Some((entry.target, Rc::new(bits)));
+            }
+            let bits = &seed.as_ref().expect("rasterized seed").1;
+            let at = if entry.relieved.is_none() {
+                0
+            } else if let Some(at) = channels.iter().position(|c| c.relieved == entry.relieved) {
+                at
+            } else {
+                reserve_owned(&mut channels, 1, self.owned_bytes)?;
+                channels.push(Channel::new(entry.relieved, layers.len()));
+                channels.len() - 1
+            };
+            channels[at].add_seed(&raster, entry.top, entry.target, bits)?;
+            if at != 0 {
+                // The ordinary channel still owns this demand's part roots.
+                channels[0].add_seed(&raster, entry.top, entry.target, bits)?;
+            }
+            charge(work)?;
+        }
+        drop(seed);
         timing.mark("seeds");
-        let mut span_pieces = SpanPieces::default();
+
         // Down pass: carry every channel's candidate through occupancy and voids.
-        let mut carried: Vec<MultiPolygon<f64>> =
-            channels.iter().map(|_| MultiPolygon(Vec::new())).collect();
-        let mut applied: Vec<std::collections::BTreeSet<PieceKey>> =
-            channels.iter().map(|_| Default::default()).collect();
-        let mut void_clearance: Vec<Option<(u64, MultiPolygon<f64>)>> =
-            vec![None; self.protected.0.len()];
+        let distance = self.frame.distance;
+        let mut window: Vec<(usize, Vec<Piece>)> = Vec::new();
+        let mut carried: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
+        let mut voids: Vec<Option<Option<Bits>>> = vec![None; self.protected.0.len()];
         for l in (0..=max_top).rev() {
             check_cancel(cancel)?;
-            let seeds: Vec<Option<MultiPolygon<f64>>> = channels
+            let seeds: Vec<Option<Bits>> = channels
                 .iter_mut()
                 .map(|channel| channel.seeds[l].take())
                 .collect();
-            if carried.iter().all(|carry| carry.0.is_empty()) && seeds.iter().all(Option::is_none) {
+            if carried.iter().all(Bits::is_empty) && seeds.iter().all(Option::is_none) {
                 continue;
             }
             let slab = program_coordinates::project_xyz6_bead_height_mm(
                 layers[l].z_mm,
                 layers[l].height_mm,
             )?;
-            self.subtract_occupancy(
-                l,
-                slab,
-                &mut span_pieces,
-                &mut carried,
-                seeds,
-                &mut applied,
-                work,
-                cancel,
-            )?;
+            self.load_pieces(l, &mut window, cell_bounds, distance, work, cancel)?;
+            // A carry already excludes every piece that touched a layer above
+            // since it was seeded, and a piece's height scope is contiguous,
+            // so only pieces newly touching this slab can change it.
+            let touches = |piece: &Piece| piece.scope[0] <= slab[1] && piece.scope[1] >= slab[0];
+            if carried.iter().any(|carry| !carry.is_empty()) {
+                let fresh: Vec<&Polygon<f64>> = window
+                    .iter()
+                    .flat_map(|(_, pieces)| pieces)
+                    .filter(|piece| !piece.applied && touches(piece))
+                    .filter(|piece| {
+                        carried
+                            .iter()
+                            .any(|carry| carry.meets_rect(&cells, piece.reach))
+                    })
+                    .map(|piece| &piece.polygon)
+                    .collect();
+                if !fresh.is_empty() {
+                    let occupancy = raster.outward(fresh, distance)?;
+                    for carry in &mut carried {
+                        carry.subtract(&occupancy);
+                    }
+                }
+            }
+            if seeds.iter().any(Option::is_some) {
+                // The top layer's own material lies inside its occupancy
+                // clearance; removing it first keeps the piece set local to
+                // the seed's overhang band.
+                let material = &self.sections[span_at(self.sections, l as u32)].material;
+                let material = raster.outward(&material.0, 0.0)?;
+                for (carry, seed) in carried.iter_mut().zip(&seeds) {
+                    let Some(seed) = seed else {
+                        continue;
+                    };
+                    let mut entered = seed.clone();
+                    entered.subtract(&material);
+                    let near: Vec<&Polygon<f64>> = window
+                        .iter()
+                        .flat_map(|(_, pieces)| pieces)
+                        .filter(|piece| touches(piece) && entered.meets_rect(&cells, piece.reach))
+                        .map(|piece| &piece.polygon)
+                        .collect();
+                    if !near.is_empty() {
+                        entered.subtract(&raster.outward(near, distance)?);
+                    }
+                    *carry = raster.union(carry, &entered)?;
+                }
+            }
+            for piece in window.iter_mut().flat_map(|(_, pieces)| pieces) {
+                if touches(piece) {
+                    piece.applied = true;
+                }
+            }
+            drop(seeds);
             for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
                 if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
                     continue;
                 }
-                for (channel, carry) in channels.iter().zip(&mut carried) {
-                    if carry.0.is_empty() || channel.relieved == Some(ordinal) {
-                        continue;
-                    }
-                    let Some(distance) = candidate_clearance_distance(mask, carry, self.requested)?
-                    else {
-                        continue;
-                    };
-                    // A void's clearance depends only on the void and the
-                    // distance; most layers reuse the previous one.
-                    let cached = &mut void_clearance[ordinal];
-                    if cached
-                        .as_ref()
-                        .is_none_or(|(bits, _)| *bits != distance.to_bits())
-                    {
-                        *cached = Some((
-                            distance.to_bits(),
-                            offset_polygon_owned(
-                                mask,
-                                distance,
-                                self.retained,
-                                self.owned_bytes,
-                                &support,
-                                &interfaces,
-                                &[self.protected],
-                                cancel,
-                            )?,
-                        ));
-                    }
-                    let clearance = &cached.as_ref().expect("cached void clearance").1;
-                    charge_boolean(carry, clearance, work, self.foreign_work, cancel)?;
-                    *carry = self.frame.difference_local(carry, clearance);
+                if channels
+                    .iter()
+                    .zip(&carried)
+                    .all(|(channel, carry)| carry.is_empty() || channel.relieved == Some(ordinal))
+                {
+                    continue;
                 }
-            }
-            for carry in &mut carried {
-                drop_micro_edges(carry);
+                // A void's clearance depends only on the void; build it once.
+                if voids[ordinal].is_none() {
+                    let clearance = match candidate_clearance_distance_in_bounds(
+                        mask,
+                        Some(cell_bounds),
+                        self.requested,
+                    )? {
+                        Some(distance) => Some(raster.outward([mask], distance)?),
+                        None => None,
+                    };
+                    if let Some(bits) = &clearance {
+                        hold(bits)?;
+                    }
+                    voids[ordinal] = Some(clearance);
+                }
+                let Some(Some(clearance)) = &voids[ordinal] else {
+                    continue;
+                };
+                for (channel, carry) in channels.iter().zip(&mut carried) {
+                    if channel.relieved != Some(ordinal) {
+                        carry.subtract(clearance);
+                    }
+                }
             }
             for (channel, carry) in channels.iter_mut().zip(&carried) {
-                if !carry.0.is_empty() {
-                    channel.active[l] = Some(OwnedMaterial::new(carry.clone()).into_shared());
+                if !carry.is_empty() {
+                    hold(carry)?;
+                    channel.active[l] = Some(carry.clone());
                 }
             }
+            charge(work)?;
         }
         drop(carried);
+        drop(window);
+        for bits in voids.into_iter().flatten().flatten() {
+            release(&bits);
+        }
         timing.mark("down_pass");
 
-        // Up pass: keep only grounded support, clipped by nominal clearance.
-        // Part-root acceptance and the per-scope clearance caches come first.
-        // Nominal clearance distributes over the grounded intersection, so it
-        // runs on every active layer in parallel; the grounded chain then
-        // stays in layer order.
-        let live = Live::of(&support, &interfaces, &[self.protected]);
-        let mut outside: Vec<Option<Vec<beads::BeadEdge>>> = vec![None; self.nominal.len()];
-        let mut offsets: Vec<Option<MultiPolygon<f64>>> = vec![None; self.nominal.len()];
-        let mut landed: Vec<Vec<Vec<MultiPolygon<f64>>>> = Vec::new();
-        for channel in &channels {
-            let mut per_layer = vec![Vec::new(); layers.len()];
-            for (l, active) in channel.active.iter().enumerate() {
-                let Some(active) = active.as_ref().filter(|_| channel.relieved.is_none()) else {
-                    continue;
-                };
-                for root in self.roots {
-                    let Root::Part {
-                        object_layer,
-                        first_support_layer,
-                        landing,
-                    } = *root
-                    else {
-                        continue;
-                    };
-                    if first_support_layer != l {
-                        continue;
-                    }
-                    check_cancel(cancel)?;
-                    let landing = &self.landings[landing];
-                    charge_boolean(active, landing, work, self.foreign_work, cancel)?;
-                    let candidate = self.frame.intersection_local(active, landing);
-                    if candidate.0.is_empty() {
-                        continue;
-                    }
-                    let accepted = self.anchored_on(
-                        &candidate,
-                        l,
-                        object_layer,
-                        &support,
-                        &interfaces,
-                        segments,
-                        anchors,
-                        anchor_work,
-                        work,
-                        cancel,
-                    )?;
-                    if !accepted.0.is_empty() {
-                        per_layer[l].push(accepted);
-                    }
-                }
-            }
-            landed.push(per_layer);
-        }
+        // Up pass: keep only grounded support, clipped by nominal clearance,
+        // one layer at a time across every channel.
+        let mut grounded: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
+        let mut part_bands: Vec<Vec<(f64, Bits)>> = channels.iter().map(|_| Vec::new()).collect();
+        let mut clearance: Vec<Option<Bits>> = vec![None; self.nominal.len()];
+        let mut footprint: Option<(usize, Bits)> = None;
+        let mut regions: Vec<(usize, Bits, Bits)> = Vec::new();
+        let mut relieved: Vec<(usize, usize, Bits)> = Vec::new();
         for l in 0..=max_top {
-            if channels.iter().any(|channel| channel.active[l].is_some()) {
-                self.prepare_nominal(l, &mut outside, &mut offsets, live, work, cancel)?;
+            check_cancel(cancel)?;
+            if channels.iter().all(|channel| channel.active[l].is_none()) {
+                grounded.iter_mut().for_each(|g| *g = Bits::default());
+                part_bands.iter_mut().for_each(Vec::clear);
+                continue;
             }
-        }
-        let mut cleared: Vec<Vec<Option<MultiPolygon<f64>>>> = {
-            use rayon::prelude::*;
-            let mut tasks: Vec<(usize, usize, MultiPolygon<f64>)> = Vec::new();
+            let reaching =
+                self.prepare_nominal(l, &raster, &mut clearance, &hold, &release, work)?;
+            let mut layer_support = Bits::default();
+            let mut layer_interface = Bits::default();
             for (c, channel) in channels.iter_mut().enumerate() {
-                for (l, slot) in channel.active.iter_mut().enumerate() {
-                    if let Some(active) = slot.take() {
-                        let material = match Rc::try_unwrap(active) {
-                            Ok(owned) => owned.material,
-                            Err(shared) => shared.material.clone(),
-                        };
-                        tasks.push((c, l, material));
-                    }
-                }
-            }
-            let clearance = NominalClearance {
-                layers,
-                nominal: self.nominal,
-                frame: self.frame,
-                offsets: &offsets,
-                outside: &outside,
-                gap: self.gap,
-                requested: self.requested,
-                retained: self.retained,
-                owned_bytes: self.owned_bytes,
-                // Each task counts from zero; its total is charged in order below.
-                foreign_work: 0,
-                live,
-            };
-            let working_set = crate::working_set::current();
-            type Cleared = (usize, usize, MultiPolygon<f64>, usize);
-            let results: Vec<Result<Cleared, ManufacturingError>> = tasks
-                .into_par_iter()
-                .map(|(c, l, material)| {
-                    crate::working_set::scope(working_set, || {
-                        let mut local = 0usize;
-                        clearance
-                            .apply(l, OwnedMaterial::new(material), &mut local, cancel)
-                            .map(|kept| (c, l, kept.material, local))
-                    })
-                })
-                .collect();
-            let mut cleared = vec![vec![None; layers.len()]; channels.len()];
-            let (mut units, mut bytes) = (0usize, 0usize);
-            for result in results {
-                let (c, l, kept, local) = result?;
-                charge_owned_work(work, self.foreign_work, local, cancel)?;
-                let owned = OwnedMaterial::new(kept);
-                units = units.saturating_add(owned.units);
-                bytes = bytes.saturating_add(owned.bytes);
-                cleared[c][l] = Some(owned.material);
-            }
-            live.budget(
-                self.retained.saturating_add(units),
-                self.owned_bytes.saturating_add(bytes),
-                &[],
-            )?;
-            cleared
-        };
-        for (c, channel) in channels.iter_mut().enumerate() {
-            let mut grounded = MultiPolygon(Vec::new());
-            let mut part_bands: Vec<(f64, MultiPolygon<f64>)> = Vec::new();
-            for l in 0..=max_top {
-                check_cancel(cancel)?;
-                let Some(kept) = cleared[c][l].take() else {
-                    grounded = MultiPolygon(Vec::new());
-                    part_bands.clear();
+                let Some(active) = channel.active[l].take() else {
+                    grounded[c] = Bits::default();
+                    part_bands[c].clear();
                     continue;
                 };
-                let mut ground = MultiPolygon(Vec::new());
-                for accepted in std::mem::take(&mut landed[c][l]) {
-                    ground = self.union(&ground, &accepted);
-                    part_bands.push((layers[l].lower_z_mm, accepted));
+                release(&active);
+                let mut ground = Bits::default();
+                if channel.relieved.is_none() {
+                    for root in self.roots {
+                        let Root::Part {
+                            object_layer,
+                            first_support_layer,
+                            landing,
+                        } = *root
+                        else {
+                            continue;
+                        };
+                        if first_support_layer != l {
+                            continue;
+                        }
+                        check_cancel(cancel)?;
+                        let landing = raster.inward(&self.landings[landing].0)?;
+                        let mut accepted = raster.intersection(&active, &landing)?;
+                        if accepted.is_empty() {
+                            continue;
+                        }
+                        if footprint.as_ref().is_none_or(|(at, _)| *at != object_layer) {
+                            footprint =
+                                Some((object_layer, self.road_footprint(&raster, object_layer)?));
+                        }
+                        let roads = &footprint.as_ref().expect("road footprint").1;
+                        accepted = raster.intersection(&accepted, roads)?;
+                        if accepted.is_empty() {
+                            continue;
+                        }
+                        ground = raster.union(&ground, &accepted)?;
+                        part_bands[c].push((layers[l].lower_z_mm, accepted));
+                    }
+                }
+                let mut kept = active;
+                for &at in &reaching {
+                    if let Some(bits) = &clearance[at] {
+                        kept.subtract(bits);
+                    }
                 }
                 // The bed grounds all of layer 0.
-                let mut column = OwnedMaterial::new(if l == 0 {
+                let mut column = if l == 0 {
                     kept
                 } else {
-                    let base = self.union(&grounded, &ground);
-                    charge_boolean(&kept, &base, work, self.foreign_work, cancel)?;
-                    self.frame.intersection_local(&kept, &base)
-                });
-                drop_micro_edges(&mut column.material);
+                    let base = raster.union(&grounded[c], &ground)?;
+                    raster.intersection(&kept, &base)?
+                };
                 // Higher support stands on this layer before the touching
                 // sheet trims a column ending here: the sheet sits on that
                 // column's top only, as in its own fixed-XY prism.
-                grounded = column.material.clone();
-                if column.0.is_empty() {
-                    part_bands.clear();
+                grounded[c] = column.clone();
+                if column.is_empty() {
+                    part_bands[c].clear();
                     continue;
                 }
-                if channel.tops.iter().any(|(top, _)| *top == l) {
-                    let live = Live::of(&support, &interfaces, &[self.protected]);
-                    column = self.subtract_sheet(l, column, live, work, cancel)?;
-                    drop_micro_edges(&mut column.material);
-                    if column.0.is_empty() {
+                if channel.tops.contains(&l) {
+                    column.subtract(&self.touching_sheet(l, &column, &raster, distance, cancel)?);
+                    if column.is_empty() {
                         continue;
                     }
                 }
-                region::canonicalize(&mut column.material);
-                let column = OwnedMaterial::new(column.material).into_shared();
-                // A target's seed is the same for all its demands, so one
-                // intersection per target serves its contact top and its
-                // interface band; disjoint bounds mean an empty intersection.
-                let column_bounds = material_bounds(&column.material);
-                let mut interface = MultiPolygon(Vec::new());
+                let mut interface = Bits::default();
                 for entry in &channel.interface_seeds {
                     let contact = if contact_tops[entry.target].is_none() {
                         entry.tops.iter().copied().find(|top| *top >= l)
@@ -542,11 +502,7 @@ impl Sweep<'_> {
                     let band = entry.tops.iter().any(|top| {
                         *top >= l && layers[l].z_mm > layers[*top].z_mm - self.interface_thickness
                     });
-                    if (contact.is_none() && !band) || !bounds_meet(entry.bounds, column_bounds) {
-                        continue;
-                    }
-                    let meet = self.frame.intersection_local(&column.material, &entry.seed);
-                    if meet.0.is_empty() {
+                    if (contact.is_none() && !band) || !column.intersects(&entry.seed) {
                         continue;
                     }
                     // As for a legacy column: a demand has its contact top once
@@ -555,62 +511,112 @@ impl Sweep<'_> {
                         contact_tops[entry.target] = Some(top);
                     }
                     if band {
-                        interface = self.union(&interface, &meet);
+                        let meet = raster.intersection(&column, &entry.seed)?;
+                        interface = raster.union(&interface, &meet)?;
                     }
                 }
-                part_bands
+                part_bands[c]
                     .retain(|(floor, _)| layers[l].lower_z_mm < floor + self.interface_thickness);
-                for (_, band) in &part_bands {
-                    interface = self.union(
-                        &interface,
-                        &self.frame.intersection_local(&column.material, band),
-                    );
+                for (_, band) in &part_bands[c] {
+                    let meet = raster.intersection(&column, band)?;
+                    interface = raster.union(&interface, &meet)?;
                 }
-                let mut cache = None;
-                let (units, bytes) = geometry_receipt(&support, &interfaces, &[&column]);
-                merge_shared(
-                    &mut support[l],
-                    &column,
-                    &mut cache,
-                    self.retained.saturating_add(units),
-                    self.owned_bytes.saturating_add(bytes),
-                    work,
-                    self.foreign_work,
-                    cancel,
-                )?;
-                if !interface.0.is_empty() {
-                    let interface = OwnedMaterial::new(interface).into_shared();
-                    let mut cache = None;
-                    let (units, bytes) = geometry_receipt(&support, &interfaces, &[&interface]);
-                    merge_shared(
-                        &mut interfaces[l],
-                        &interface,
-                        &mut cache,
-                        self.retained.saturating_add(units),
-                        self.owned_bytes.saturating_add(bytes),
-                        work,
-                        self.foreign_work,
-                        cancel,
-                    )?;
-                }
+                layer_support = raster.union(&layer_support, &column)?;
+                layer_interface = raster.union(&layer_interface, &interface)?;
                 if let Some(ordinal) = channel.relieved {
-                    access.push((ordinal, l, Rc::clone(&column)));
+                    hold(&column)?;
+                    reserve_owned(&mut relieved, 1, self.owned_bytes)?;
+                    relieved.push((ordinal, l, column));
                 }
             }
+            if !layer_support.is_empty() {
+                hold(&layer_support)?;
+                hold(&layer_interface)?;
+                reserve_owned(&mut regions, 1, self.owned_bytes)?;
+                regions.push((l, layer_support, layer_interface));
+            }
+            charge(work)?;
         }
+        drop(clearance);
+        drop(footprint);
+        drop(channels);
         timing.mark("up_pass");
-        // A layer that is interface throughout shares one owner with its
-        // support region: raster hatches it as whole interface.
-        for (region, interface) in support.iter().zip(&mut interfaces) {
-            check_cancel(cancel)?;
-            if interface.0.is_empty() || Rc::ptr_eq(region, interface) {
-                continue;
+
+        // Polygons only at the output, each inside its kept cells. Layers are
+        // independent, so they convert in parallel and land in layer order.
+        let contours = {
+            use rayon::prelude::*;
+            let working_set = crate::working_set::current();
+            let raster = &raster;
+            let convert = |bits: &Bits| -> Result<OwnedMaterial, ManufacturingError> {
+                crate::working_set::scope(working_set, || {
+                    let mut material = raster.contour(bits)?;
+                    region::canonicalize(&mut material);
+                    region::check_size(&material)?;
+                    Ok(OwnedMaterial::new(material))
+                })
+            };
+            let layers: Vec<Result<(OwnedMaterial, Option<OwnedMaterial>), ManufacturingError>> =
+                regions
+                    .par_iter()
+                    .map(|(_, region, interface)| {
+                        let region_polygons = convert(region)?;
+                        let interface_polygons = if interface.is_empty() || interface == region {
+                            None
+                        } else {
+                            Some(convert(interface)?)
+                        };
+                        Ok((region_polygons, interface_polygons))
+                    })
+                    .collect();
+            let columns: Vec<Result<OwnedMaterial, ManufacturingError>> = relieved
+                .par_iter()
+                .map(|(_, _, column)| convert(column))
+                .collect();
+            (layers, columns)
+        };
+        charge(work)?;
+        let (layer_contours, column_contours) = contours;
+        let (mut units, mut bytes) = (0usize, 0usize);
+        for ((l, _, interface), converted) in regions.iter().zip(layer_contours) {
+            let (region_polygons, interface_polygons) = converted?;
+            units = units.saturating_add(region_polygons.units);
+            bytes = bytes.saturating_add(region_polygons.bytes);
+            let region_polygons = region_polygons.into_shared();
+            if !interface.is_empty() {
+                interfaces[*l] = match interface_polygons {
+                    // A layer that is interface throughout shares one owner
+                    // with its support region: raster hatches it as whole
+                    // interface.
+                    None => Rc::clone(&region_polygons),
+                    Some(polygons) => {
+                        units = units.saturating_add(polygons.units);
+                        bytes = bytes.saturating_add(polygons.bytes);
+                        polygons.into_shared()
+                    }
+                };
             }
-            charge_boolean(region, interface, work, self.foreign_work, cancel)?;
-            if self.frame.difference(region, interface).0.is_empty() {
-                *interface = Rc::clone(region);
-            }
+            support[*l] = region_polygons;
+            super::super::remaining_geometry_units(
+                retained.saturating_add(units),
+                owned_bytes
+                    .saturating_add(live.load(Ordering::Relaxed))
+                    .saturating_add(bytes),
+            )?;
         }
+        for ((ordinal, l, _), converted) in relieved.iter().zip(column_contours) {
+            let column = converted?;
+            units = units.saturating_add(column.units);
+            bytes = bytes.saturating_add(column.bytes);
+            super::super::remaining_geometry_units(
+                retained.saturating_add(units),
+                owned_bytes
+                    .saturating_add(live.load(Ordering::Relaxed))
+                    .saturating_add(bytes),
+            )?;
+            access.push((*ordinal, *l, column.into_shared()));
+        }
+        timing.mark("contours");
         Ok(SweepOutput {
             support,
             interfaces,
@@ -619,227 +625,111 @@ impl Sweep<'_> {
         })
     }
 
-    /// Subtract every raw occupied piece touching this layer's bead slab.
-    ///
-    /// A carried region already excludes every piece applied at a higher
-    /// layer, and a piece's height scope is contiguous, so only pieces newly
-    /// touching this slab can change it. A seed entering here takes the full
-    /// set. A span's pieces are collected once; adjacent spans may touch a
-    /// slab. Pieces whose clearance cannot reach the operand are skipped.
-    #[expect(clippy::too_many_arguments, reason = "per-channel down-pass state")]
-    fn subtract_occupancy(
+    /// Keep the raw occupied pieces of the spans a bead slab at layer `l` can
+    /// touch (its own and both neighbours), each span collected once while
+    /// the descending pass is inside it. Pieces whose clearance cannot reach
+    /// the grid are never collected.
+    fn load_pieces(
         &self,
         l: usize,
-        slab: [f64; 2],
-        cache: &mut SpanPieces,
-        carried: &mut [MultiPolygon<f64>],
-        seeds: Vec<Option<MultiPolygon<f64>>>,
-        applied: &mut [std::collections::BTreeSet<PieceKey>],
+        window: &mut Vec<(usize, Vec<Piece>)>,
+        cell_bounds: [[f64; 2]; 2],
+        distance: f64,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
         let here = span_at(self.sections, l as u32);
         // The pass descends: spans above the next one up are finished.
-        cache.spans.retain(|(span, _)| *span <= here + 1);
-        let window = here.saturating_sub(1)..=(here + 1).min(self.sections.len() - 1);
-        for span in window.clone() {
-            if cache.spans.iter().any(|(cached, _)| *cached == span) {
+        window.retain(|(span, _)| *span <= here + 1);
+        for span in here.saturating_sub(1)..=(here + 1).min(self.sections.len() - 1) {
+            if window.iter().any(|(cached, _)| *cached == span) {
                 continue;
             }
             let section = &self.sections[span];
-            let interval = [
-                self.schedule[section.start as usize].lower_z,
-                self.schedule[(section.end - 1) as usize].z,
-            ];
+            let interval = self.span_interval(span);
             let mut pieces = Vec::new();
+            let mut failure = None;
             section.visit_occupied_screened(
                 cancel,
-                |_, _| Ok(true),
+                |bounds, _| Ok(rects_meet(expand(bounds, distance), cell_bounds)),
                 |piece, height| {
                     let scope = height.map_or(interval, |height| {
                         [height[0].max(interval[0]), height[1].min(interval[1])]
                     });
                     if scope[0] <= scope[1]
-                        && let Some(bounds) = material_bounds(&MultiPolygon(vec![piece.clone()]))
+                        && let Some(bounds) = piece.bounding_rect()
                     {
-                        pieces.push((piece.clone(), scope, bounds));
+                        if let Err(error) = reserve_owned(&mut pieces, 1, self.owned_bytes) {
+                            failure = Some(error);
+                            return Ok(false);
+                        }
+                        pieces.push(Piece {
+                            polygon: piece.clone(),
+                            scope,
+                            reach: expand(
+                                [
+                                    [bounds.min().x, bounds.min().y],
+                                    [bounds.max().x, bounds.max().y],
+                                ],
+                                distance,
+                            ),
+                            applied: false,
+                        });
                     }
                     Ok(true)
                 },
             )?;
-            *work = work.saturating_add(pieces.len());
-            cache.spans.push((span, pieces));
-        }
-        for set in applied.iter_mut() {
-            set.retain(|(span, _)| window.contains(span));
-        }
-        let touching: Vec<(PieceKey, [[f64; 2]; 2])> = cache
-            .spans
-            .iter()
-            .filter(|(span, _)| window.contains(span))
-            .flat_map(|(span, pieces)| {
-                pieces
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (_, scope, _))| scope[0] <= slab[1] && scope[1] >= slab[0])
-                    .map(move |(index, (_, _, bounds))| ((*span, index), *bounds))
-            })
-            .collect();
-        for ((carry, seed), applied) in carried.iter_mut().zip(seeds).zip(applied.iter_mut()) {
-            if !carry.0.is_empty() {
-                let near = self.screen(carry);
-                let fresh: Vec<PieceKey> = touching
-                    .iter()
-                    .filter(|(key, bounds)| !applied.contains(key) && near(bounds))
-                    .map(|(key, _)| *key)
-                    .collect();
-                if !fresh.is_empty() {
-                    let clearance = self.clearance(cache, &fresh, cancel)?;
-                    charge_boolean(carry, &clearance, work, self.foreign_work, cancel)?;
-                    *carry = self.frame.difference_local(carry, &clearance);
-                    applied.extend(fresh);
-                }
+            if let Some(error) = failure {
+                return Err(error);
             }
-            if let Some(seed) = seed {
-                // The top layer's own material lies inside its occupancy
-                // clearance, so only the overhang band of a seed can survive
-                // it; screening against that band keeps the piece set local.
-                let material = &self.sections[span_at(self.sections, l as u32)].material;
-                charge_boolean(&seed, material, work, self.foreign_work, cancel)?;
-                let seed = self.frame.difference_local(&seed, material);
-                let near = self.screen(&seed);
-                let mut full: Vec<PieceKey> = touching
-                    .iter()
-                    .filter(|(_, bounds)| near(bounds))
-                    .map(|(key, _)| *key)
-                    .collect();
-                full.sort_unstable();
-                let entered = if full.is_empty() {
-                    seed
-                } else {
-                    let clearance = if let Some((last, clearance)) = &cache.last
-                        && *last == full
-                    {
-                        clearance.clone()
-                    } else {
-                        let clearance = self.clearance(cache, &full, cancel)?;
-                        cache.last = Some((full.clone(), clearance.clone()));
-                        clearance
-                    };
-                    charge_boolean(&seed, &clearance, work, self.foreign_work, cancel)?;
-                    self.frame.difference_local(&seed, &clearance)
-                };
-                applied.extend(full);
-                charge_boolean(carry, &entered, work, self.foreign_work, cancel)?;
-                *carry = self.union(carry, &entered);
-            }
-            if carry.0.is_empty() {
-                applied.clear();
-            }
+            charge_owned_work(work, self.foreign_work, pieces.len(), cancel)?;
+            window.push((span, pieces));
         }
-        *work = work.saturating_add(touching.len());
         Ok(())
     }
 
-    /// Bounds screen: whether a piece's clearance can reach `material`.
-    fn screen(&self, material: &MultiPolygon<f64>) -> impl Fn(&[[f64; 2]; 2]) -> bool + use<> {
-        let reach = separation_reach(self.frame.distance);
-        let mut boxes: Vec<[[f64; 2]; 2]> = material
-            .0
-            .iter()
-            .filter_map(|polygon| material_bounds(&MultiPolygon(vec![polygon.clone()])))
-            .map(|b| {
-                [
-                    [b[0][0] - reach, b[0][1] - reach],
-                    [b[1][0] + reach, b[1][1] + reach],
-                ]
-            })
-            .collect();
-        boxes.sort_unstable_by(|a, b| a[0][0].total_cmp(&b[0][0]));
-        let widest = boxes
-            .iter()
-            .map(|b| b[1][0] - b[0][0])
-            .fold(0.0f64, f64::max);
-        move |piece: &[[f64; 2]; 2]| {
-            let from = boxes.partition_point(|b| b[0][0] < piece[0][0] - widest);
-            boxes[from..]
-                .iter()
-                .take_while(|b| b[0][0] <= piece[1][0])
-                .any(|b| b[1][0] >= piece[0][0] && b[0][1] <= piece[1][1] && b[1][1] >= piece[0][1])
-        }
+    /// The closed Z interval a section span's layers occupy.
+    fn span_interval(&self, span: usize) -> [f64; 2] {
+        let section = &self.sections[span];
+        [
+            self.schedule[section.start as usize].lower_z,
+            self.schedule[(section.end - 1) as usize].z,
+        ]
     }
 
-    /// Offset union of the given cached pieces at the shared clearance reach.
-    fn clearance(
-        &self,
-        cache: &SpanPieces,
-        keys: &[PieceKey],
-        cancel: &AtomicBool,
-    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-        // Union bounded chunks in parallel, then merge results pairwise in a
-        // fixed index order, so output does not depend on scheduling.
-        use rayon::prelude::*;
-        check_cancel(cancel)?;
-        let frame = self.frame;
-        let pieces: Vec<&Polygon<f64>> = keys
-            .iter()
-            .map(|&(span, index)| {
-                &cache
-                    .spans
-                    .iter()
-                    .find(|(cached, _)| *cached == span)
-                    .expect("cached span pieces")
-                    .1[index]
-                    .0
-            })
-            .collect();
-        let parts: Vec<MultiPolygon<f64>> = pieces
-            .par_chunks(1 << 7)
-            .map(|chunk| {
-                let batch = MultiPolygon(chunk.iter().map(|piece| (*piece).clone()).collect());
-                union_pieces_in_frame(&batch, Some(frame))
-            })
-            .collect();
-        drop(pieces);
-        let mut merged = merge_pairwise(frame, parts, cancel)?;
-        // Unions of many padded facet pieces carry the same near-collinear
-        // noise as chained differences; a convolution offset of it is
-        // pathologically slow.
-        drop_micro_edges(&mut merged);
-        region::offset_admitted_in_frame(
-            &merged,
-            self.frame.distance,
-            self.frame,
-            |_, _, _| Ok(()),
-            cancel,
-        )
-    }
-
-    /// Build the per-scope clearance and outside-bead caches every scope
-    /// reaching layer `l` needs, so `NominalClearance::apply` only reads them.
+    /// Nominal clearance of every scope reaching layer `l`: each section
+    /// polygon dilated by its clearance distance, plus the actual object bead
+    /// edges outside it. Each scope's grid is built once; a scope the rising
+    /// pass has left for good is released.
     fn prepare_nominal(
         &self,
         l: usize,
-        outside: &mut [Option<Vec<beads::BeadEdge>>],
-        offsets: &mut [Option<MultiPolygon<f64>>],
-        live: Live,
+        raster: &Raster<'_>,
+        clearance: &mut [Option<Bits>],
+        hold: &impl Fn(&Bits) -> Result<(), ManufacturingError>,
+        release: &impl Fn(&Bits),
         work: &mut usize,
-        cancel: &AtomicBool,
-    ) -> Result<(), ManufacturingError> {
-        let layers = self.layers;
-        let [lower, upper] = nominal_band(layers, l)?;
+    ) -> Result<Vec<usize>, ManufacturingError> {
+        let cancel = raster.cancel;
+        let [lower, upper] = nominal_band(self.layers, l)?;
+        let mut reaching = Vec::new();
         for (at, scope) in self.nominal.iter().enumerate() {
             check_cancel(cancel)?;
             if program_coordinates::enclosed_vertical_gap_mm(scope.floor, upper)? >= self.gap {
                 break;
             }
             if program_coordinates::enclosed_vertical_gap_mm(lower, scope.ceiling)? >= self.gap {
+                // Lower bands only rise, so this scope never reaches again.
+                if let Some(bits) = clearance[at].take() {
+                    release(&bits);
+                }
                 continue;
             }
-            if offsets[at].is_none() {
-                use rayon::prelude::*;
-                let polygons = &self.sections[scope.index].material.0;
-                let distances = polygons
+            if clearance[at].is_none() {
+                let section = &self.sections[scope.index];
+                let distances = section
+                    .material
+                    .0
                     .iter()
                     .map(|polygon| {
                         let rect = polygon.bounding_rect().ok_or_else(|| {
@@ -855,173 +745,188 @@ impl Sweep<'_> {
                         )
                     })
                     .collect::<Result<Vec<f64>, ManufacturingError>>()?;
-                // Each polygon's clearance is independent; offsets run in
-                // parallel against one inventory and are kept in input order.
-                let retained = self.retained.saturating_add(live.units);
-                let owned_bytes = self.owned_bytes.saturating_add(live.bytes);
-                let working_set = crate::working_set::current();
-                let built = polygons
-                    .par_iter()
-                    .zip(&distances)
-                    .map(|(polygon, &distance)| {
-                        crate::working_set::scope(working_set, || {
-                            offset_polygon_admitted_in(
-                                polygon,
-                                distance,
-                                retained,
-                                owned_bytes,
-                                cancel,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .collect::<Result<Vec<MultiPolygon<f64>>, ManufacturingError>>()?;
-                // One clearance per scope: every layer it reaches subtracts it
-                // with a single overlay instead of one per section polygon.
-                offsets[at] = Some(merge_pairwise(self.frame, built, cancel)?);
+                let mut bits = raster.dilated(section.material.0.iter().zip(distances))?;
+                if scope.beads.is_some() {
+                    let objects = self
+                        .layers
+                        .get(section.start as usize..(section.end as usize).min(self.layers.len()))
+                        .unwrap_or(&[]);
+                    let edges = beads::outside_material(
+                        &section.material,
+                        objects.iter().flat_map(|layer| &layer.paths),
+                        BEAD_OUTSIDE_ALLOWANCE_MM,
+                        work,
+                        cancel,
+                    )?;
+                    let distance = self.frame.distance;
+                    let beads = raster.capsules(
+                        edges
+                            .iter()
+                            .map(|edge| (edge.a, edge.b, (edge.half + distance).next_up())),
+                    )?;
+                    bits = raster.union(&bits, &beads)?;
+                }
+                hold(&bits)?;
+                clearance[at] = Some(bits);
             }
-            if scope.beads.is_some() && outside[at].is_none() {
-                let section = &self.sections[scope.index];
-                let objects = layers
-                    .get(section.start as usize..(section.end as usize).min(layers.len()))
-                    .unwrap_or(&[]);
-                outside[at] = Some(beads::outside_material(
-                    &section.material,
-                    objects.iter().flat_map(|layer| &layer.paths),
-                    BEAD_OUTSIDE_ALLOWANCE_MM,
-                    work,
-                    cancel,
-                )?);
-            }
+            reaching.push(at);
         }
-        Ok(())
+        Ok(reaching)
     }
 
-    fn subtract_sheet(
+    /// The next section's continuous occupancy pieces whose closed height
+    /// scope reaches the top support bead's actual upper height, dilated by
+    /// the clearance distance. Unscoped invariant D spans its whole height and
+    /// stays with the height-aware nominal exclusion.
+    fn touching_sheet(
         &self,
         top: usize,
-        column: OwnedMaterial,
-        live: Live,
-        work: &mut usize,
+        column: &Bits,
+        raster: &Raster<'_>,
+        distance: f64,
         cancel: &AtomicBool,
-    ) -> Result<OwnedMaterial, ManufacturingError> {
-        let proximity = index_column(&column, self.retained, self.owned_bytes, live, &[&column])?;
-        let admission = BeadStaging {
-            retained: self.retained,
-            owned_bytes: self.owned_bytes,
-            live,
+    ) -> Result<Bits, ManufacturingError> {
+        let next = span_at(self.sections, top as u32) + 1;
+        let Some(section) = self.sections.get(next) else {
+            return Ok(Bits::default());
         };
-        let mut batch = stage_touching_sheet(
-            self.layers,
-            self.sections,
-            top,
-            &column,
-            &proximity,
-            self.requested,
-            &admission,
-            work,
+        let layer = &self.layers[top];
+        let upper = (program_coordinates::project_xyz6_segment_bead_height_mm(
+            layer.z_mm,
+            layer.z_mm,
+            layer.z_mm - layer.lower_z_mm,
+        )?[1]
+            + super::super::native::XYZ6_SCREEN_SLACK_MM)
+            .next_up();
+        let lower = layer.lower_z_mm;
+        let touches = |height: Option<[f64; 2]>| {
+            height.is_some_and(|[from, to]| from <= upper && to >= lower)
+        };
+        let frame = &raster.frame;
+        let mut pieces = Vec::new();
+        let mut failure = None;
+        section.visit_occupied_screened(
             cancel,
+            |bounds, height| {
+                Ok(touches(height) && column.meets_rect(frame, expand(bounds, distance)))
+            },
+            |piece, height| {
+                if touches(height) {
+                    if let Err(error) = reserve_owned(&mut pieces, 1, self.owned_bytes) {
+                        failure = Some(error);
+                        return Ok(false);
+                    }
+                    pieces.push(piece.clone());
+                }
+                Ok(true)
+            },
         )?;
-        Ok(subtract_staged(
-            &mut batch,
-            &column,
-            self.requested,
-            self.retained,
-            self.owned_bytes,
-            live,
-            work,
-            self.foreign_work,
-            cancel,
-            None,
-        )?
-        .unwrap_or(column))
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        raster.outward(&pieces, distance)
     }
 
-    /// The legacy part-root rule: keep each landing polygon only if a
-    /// support hatch on it anchors to the landing layer's model roads.
-    #[expect(clippy::too_many_arguments, reason = "shared admission owners")]
-    fn anchored_on(
+    /// Cells lying entirely inside the nominal footprint of the object layer's
+    /// model roads: each road's centreline dilated by half its bead width,
+    /// unioned, then rasterized inward. Support may stand only over them.
+    fn road_footprint(
         &self,
-        candidate: &MultiPolygon<f64>,
-        l: usize,
+        raster: &Raster<'_>,
         object_layer: usize,
-        support: &[Rc<OwnedMaterial>],
-        interfaces: &[Rc<OwnedMaterial>],
-        segments: &mut usize,
-        anchors: &mut AnchorWorkspace,
-        anchor_work: &mut usize,
-        work: &mut usize,
-        cancel: &AtomicBool,
-    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-        let layers = self.layers;
-        let width = self.recipe.bead_width_mm;
-        let mut accepted = MultiPolygon(Vec::new());
-        for polygon in &candidate.0 {
-            check_cancel(cancel)?;
-            let single = OwnedMaterial::new(MultiPolygon(vec![polygon.clone()]));
-            let (units, bytes) = geometry_receipt(support, interfaces, &[self.protected, &single]);
-            let domains = raster::Domains::new(
-                &single,
-                &single,
-                true,
-                width,
-                self.retained + units,
-                self.owned_bytes + bytes,
-                anchors.retained_bytes(),
-                work,
-                self.foreign_work,
-                cancel,
-            )?;
-            let preferred = region::HatchAxis::for_policy(
-                RectilinearAxisPolicy::AlternatingXY,
-                super::super::hatch_key(self.schedule, l),
-            );
-            for axis in [preferred, preferred.orthogonal()] {
-                let hatch = region::HatchLayer {
-                    roof: None,
-                    width_mm: width,
-                    z: layers[l].z_mm,
-                    lower_z: layers[l].lower_z_mm,
-                    height: layers[l].height_mm,
-                    axis,
-                    top_axis: axis,
-                    recipe: self.recipe,
+    ) -> Result<Bits, ManufacturingError> {
+        let bounds = raster.frame.bounds();
+        let mut capsules: Vec<Vec<[f64; 2]>> = Vec::new();
+        let mut extent = bounds;
+        for path in self.layers[object_layer]
+            .paths
+            .iter()
+            .filter(|path| path.kind.is_model())
+        {
+            check_cancel(raster.cancel)?;
+            let Ok(edges) = path.checked_edges() else {
+                continue;
+            };
+            for edge in edges {
+                let &[p, q] = edge.points_mm else {
+                    continue;
                 };
-                let (mut paths, receipt) = domains.paths(
-                    &single,
-                    1.0,
-                    &hatch,
-                    *segments,
-                    work,
-                    self.foreign_work,
-                    cancel,
-                )?;
-                anchors.set_budget(domains.anchor_budget(&paths)?);
-                raster::retain_anchored(
-                    &mut paths,
-                    receipt.paths,
-                    std::iter::empty(),
-                    layers[object_layer]
-                        .paths
-                        .iter()
-                        .filter(|path| path.kind.is_model()),
-                    self.recipe,
-                    self.retained + units,
-                    domains.owned_bytes(),
-                    anchors,
-                    anchor_work,
-                    cancel,
-                )?;
-                if !paths.is_empty() {
-                    accepted.0.push(polygon.clone());
-                    break;
+                let half = edge.width_mm * 0.5 + FOOTPRINT_JOIN_MM;
+                let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
+                let reach = [
+                    [a[0].min(b[0]) - half, a[1].min(b[1]) - half],
+                    [a[0].max(b[0]) + half, a[1].max(b[1]) + half],
+                ];
+                if !rects_meet(reach, bounds) || half.is_nan() || half <= 0.0 {
+                    continue;
                 }
+                extent = union_frame(Some(extent), reach);
+                reserve_owned(&mut capsules, 1, self.owned_bytes)?;
+                capsules.push(inscribed_capsule(a, b, half));
             }
-            anchors.set_budget(0);
         }
-        Ok(accepted)
+        if capsules.is_empty() {
+            return Ok(Bits::default());
+        }
+        use i_overlay::core::overlay::ShapeType;
+        use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
+        use i_overlay::float::overlay::FloatOverlay;
+        use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
+        let points: usize = capsules.iter().map(Vec::len).sum();
+        (raster.admit)(points.saturating_mul(64))?;
+        let adapter = FloatPointAdapter::new(FloatRect {
+            min_x: extent[0][0],
+            min_y: extent[0][1],
+            max_x: extent[1][0],
+            max_y: extent[1][1],
+        });
+        let shapes = FloatOverlay::with_adapter(adapter, points)
+            .unsafe_add_source(&capsules, ShapeType::Subject)
+            .overlay(OverlayRule::Subject, FillRule::NonZero);
+        drop(capsules);
+        let union: Vec<Polygon<f64>> = shapes
+            .into_iter()
+            .map(|shape| {
+                let mut rings = shape.into_iter().map(|ring| {
+                    let mut line =
+                        geo::LineString(ring.into_iter().map(geo::Coord::from).collect());
+                    line.close();
+                    line
+                });
+                Polygon::new(
+                    rings.next().unwrap_or_else(geo::LineString::empty),
+                    rings.collect(),
+                )
+            })
+            .collect();
+        raster.inward(&union)
     }
+}
+
+/// Adjacent roads planned tangent (row spacing equal to bead width) share
+/// only a line; inflating each footprint by this much joins them so the
+/// shared line is not mistaken for a boundary. It is far below a grid cell.
+const FOOTPRINT_JOIN_MM: f64 = 1.0e-3;
+
+/// A polygon inside the round capsule of `ab` and `radius`: the straight
+/// sides and caps whose vertices lie on the circles.
+fn inscribed_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[f64; 2]> {
+    const STEPS: usize = 8;
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length = dx.hypot(dy);
+    let angle = if length > 0.0 { dy.atan2(dx) } else { 0.0 };
+    let mut points = Vec::with_capacity(2 * STEPS + 2);
+    // Around b from +normal through +direction to −normal, then around a.
+    for (centre, start) in [
+        (b, angle + std::f64::consts::FRAC_PI_2),
+        (a, angle - std::f64::consts::FRAC_PI_2),
+    ] {
+        for i in 0..=STEPS {
+            let t = start - std::f64::consts::PI * i as f64 / STEPS as f64;
+            points.push([centre[0] + radius * t.cos(), centre[1] + radius * t.sin()]);
+        }
+    }
+    points
 }
 
 /// Lower bead floor and upper segment ceiling of layer `l`'s physical slab.
@@ -1034,107 +939,4 @@ fn nominal_band(layers: &[PrintLayer], l: usize) -> Result<[f64; 2], Manufacturi
         layers[l].z_mm - layers[l].lower_z_mm,
     )?[1];
     Ok([lower, upper])
-}
-
-/// Read-only inputs of nominal clearance, shareable across worker threads.
-struct NominalClearance<'a> {
-    layers: &'a [PrintLayer],
-    nominal: &'a [NominalScope],
-    frame: &'a projection::Frame,
-    offsets: &'a [Option<MultiPolygon<f64>>],
-    outside: &'a [Option<Vec<beads::BeadEdge>>],
-    gap: f64,
-    requested: f64,
-    retained: usize,
-    owned_bytes: usize,
-    foreign_work: usize,
-    live: Live,
-}
-
-impl NominalClearance<'_> {
-    /// Remove every reaching nominal scope's clearance and its actual
-    /// outside-bead clearance from `column`. Clearance distributes over
-    /// intersection, so applying it before the grounded intersection keeps
-    /// the same set.
-    fn apply(
-        &self,
-        l: usize,
-        mut column: OwnedMaterial,
-        work: &mut usize,
-        cancel: &AtomicBool,
-    ) -> Result<OwnedMaterial, ManufacturingError> {
-        let [lower, upper] = nominal_band(self.layers, l)?;
-        for (at, scope) in self.nominal.iter().enumerate() {
-            check_cancel(cancel)?;
-            if column.0.is_empty() {
-                break;
-            }
-            if program_coordinates::enclosed_vertical_gap_mm(scope.floor, upper)? >= self.gap {
-                break;
-            }
-            if program_coordinates::enclosed_vertical_gap_mm(lower, scope.ceiling)? >= self.gap {
-                continue;
-            }
-            let clearance = self.offsets[at]
-                .as_ref()
-                .expect("prepared nominal clearance");
-            if let (Some(a), Some(b)) = (material_bounds(clearance), material_bounds(&column))
-                && !(a[1][0] < b[0][0]
-                    || a[0][0] > b[1][0]
-                    || a[1][1] < b[0][1]
-                    || a[0][1] > b[1][1])
-            {
-                charge_boolean(&column, clearance, work, self.foreign_work, cancel)?;
-                column =
-                    OwnedMaterial::new(self.frame.difference_local(&column.material, clearance));
-                region::check_size(&column)?;
-            }
-            if let Some(beads) = scope.beads
-                && !column.0.is_empty()
-                && !ColumnScreen::new(&column, self.requested)?
-                    .is_some_and(|screen| screen.rejects(beads))
-            {
-                let edges = self.outside[at]
-                    .as_deref()
-                    .expect("prepared outside bead edges");
-                let proximity = index_column(
-                    &column,
-                    self.retained,
-                    self.owned_bytes,
-                    self.live,
-                    &[&column],
-                )?;
-                let mut batch = stage_object_beads(
-                    edges,
-                    &column,
-                    &proximity,
-                    self.requested,
-                    &BeadStaging {
-                        retained: self.retained,
-                        owned_bytes: self.owned_bytes,
-                        live: self.live,
-                    },
-                    work,
-                    cancel,
-                )?;
-                if !batch.pieces.0.is_empty()
-                    && let Some(next) = subtract_staged(
-                        &mut batch,
-                        &column,
-                        self.requested,
-                        self.retained,
-                        self.owned_bytes,
-                        self.live,
-                        work,
-                        self.foreign_work,
-                        cancel,
-                        None,
-                    )?
-                {
-                    column = next;
-                }
-            }
-        }
-        Ok(column)
-    }
 }

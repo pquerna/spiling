@@ -35,17 +35,12 @@ use std::mem::size_of;
 /// `external` units/bytes belong to the caller and are added to every
 /// admission, as are this function's live scratch, cycle, packed-path and
 /// output buffers. The overlay operand is offered once before the overlay.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The optional fixed adapter belongs to the caller's admitted offset work frame"
-)]
 pub(super) fn offset(
     polygons: &[Polygon<f64>],
     disk: &[Coord<f64>],
     erode: bool,
     external: usize,
     external_bytes: usize,
-    frame: Option<&crate::planner::support::projection::Frame>,
     admit: &mut impl FnMut(
         usize,
         usize,
@@ -178,12 +173,7 @@ pub(super) fn offset(
     } else {
         FillRule::Positive
     };
-    let mut overlay = if let Some(frame) = frame {
-        FloatOverlay::with_adapter(frame.adapter.clone(), packed.coordinates.len())
-            .unsafe_add_source(&packed, i_overlay::core::overlay::ShapeType::Subject)
-    } else {
-        FloatOverlay::with_subj(&packed)
-    };
+    let mut overlay = FloatOverlay::with_subj(&packed);
     let shapes = overlay.overlay(OverlayRule::Subject, fill);
     drop(overlay);
     drop(packed);
@@ -571,7 +561,6 @@ mod tests {
                         true,
                         0,
                         0,
-                        None,
                         &mut free,
                         &cancel,
                     )
@@ -581,7 +570,7 @@ mod tests {
             }
             out
         } else {
-            offset(polygons, &disk, false, 0, 0, None, &mut free, &cancel).unwrap()
+            offset(polygons, &disk, false, 0, 0, &mut free, &cancel).unwrap()
         };
         canonicalize(&mut fresh);
         let mut old = capsule_reference(polygons, &disk, erode);
@@ -735,7 +724,7 @@ mod tests {
         let disk = offset_disk(0.2).unwrap();
         let cancel = AtomicBool::new(false);
         let sliver = Polygon::new(ring(&[(0.0, 0.0), (4.0, 0.0)]), Vec::new());
-        let grown = offset(&[sliver], &disk, false, 0, 0, None, &mut free, &cancel).unwrap();
+        let grown = offset(&[sliver], &disk, false, 0, 0, &mut free, &cancel).unwrap();
         let area = grown.unsigned_area();
         let expected = 4.0 * 0.4 + std::f64::consts::PI * 0.04;
         assert!((area - expected).abs() < 0.01, "{area} vs {expected}");

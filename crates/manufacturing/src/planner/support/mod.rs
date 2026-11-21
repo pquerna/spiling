@@ -3,15 +3,15 @@
 
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
-use geo::algorithm::buffer::{BufferStyle, LineJoin};
-use geo::{BooleanOps, BoundingRect, Buffer, Contains, Distance, Euclidean, MultiPolygon, Polygon};
+use geo::{BooleanOps, BoundingRect, Contains, Distance, Euclidean, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::{
-    rc::{Rc, Weak},
+    rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
 mod anchors;
 mod beads;
+mod grid;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::strict_capsule_point;
 pub(crate) use anchors::{
@@ -24,7 +24,6 @@ pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
 pub(in crate::planner) mod projection;
-mod proximity;
 mod raster;
 mod sweep;
 
@@ -54,9 +53,6 @@ struct ProjectionTrace {
     column_time: std::cell::Cell<std::time::Duration>,
     bead_time: std::cell::Cell<std::time::Duration>,
     sheet_time: std::cell::Cell<std::time::Duration>,
-    union_time: std::cell::Cell<std::time::Duration>,
-    offset_time: std::cell::Cell<std::time::Duration>,
-    difference_time: std::cell::Cell<std::time::Duration>,
 }
 
 impl ProjectionTrace {
@@ -98,16 +94,6 @@ impl ProjectionTrace {
             column_time: Default::default(),
             bead_time: Default::default(),
             sheet_time: Default::default(),
-            union_time: Default::default(),
-            offset_time: Default::default(),
-            difference_time: Default::default(),
-        }
-    }
-
-    fn measure<'a>(&self, total: &'a std::cell::Cell<std::time::Duration>) -> ProjectionClock<'a> {
-        ProjectionClock {
-            started: self.enabled.then(std::time::Instant::now),
-            total,
         }
     }
 
@@ -135,9 +121,6 @@ impl ProjectionTrace {
                     "column_seconds": self.column_time.get().as_secs_f64(),
                     "bead_seconds": self.bead_time.get().as_secs_f64(),
                     "sheet_seconds": self.sheet_time.get().as_secs_f64(),
-                    "union_seconds": self.union_time.get().as_secs_f64(),
-                    "offset_seconds": self.offset_time.get().as_secs_f64(),
-                    "difference_seconds": self.difference_time.get().as_secs_f64(),
                 })
             );
         }
@@ -147,20 +130,6 @@ impl ProjectionTrace {
 impl Drop for ProjectionTrace {
     fn drop(&mut self) {
         self.report("complete");
-    }
-}
-
-struct ProjectionClock<'a> {
-    started: Option<std::time::Instant>,
-    total: &'a std::cell::Cell<std::time::Duration>,
-}
-
-impl Drop for ProjectionClock<'_> {
-    fn drop(&mut self) {
-        if let Some(started) = self.started {
-            self.total
-                .set(self.total.get().saturating_add(started.elapsed()));
-        }
     }
 }
 
@@ -892,67 +861,6 @@ impl std::ops::Deref for OwnedMaterial {
     fn deref(&self) -> &Self::Target {
         &self.material
     }
-}
-
-/// One union for an incoming owner and the fixed column at this cache's scope.
-/// The weak source key must not keep an old contour array alive.
-struct SharedUnion {
-    source: Weak<OwnedMaterial>,
-    result: Rc<OwnedMaterial>,
-}
-
-// Identical fixed-XY columns share immutable contours between layers. Reuse a
-// union for identical incoming owners; a weak key retains no old point arrays.
-// Each cache is scoped to one fixed immutable `other` column below.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Column union must account both shared owners, its weak cache and foreign work before replacement"
-)]
-fn merge_shared(
-    into: &mut Rc<OwnedMaterial>,
-    other: &Rc<OwnedMaterial>,
-    cached: &mut Option<SharedUnion>,
-    live_units: usize,
-    live_bytes: usize,
-    work: &mut usize,
-    foreign_work: usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    check_cancel(cancel)?;
-    if other.0.is_empty() {
-        return Ok(());
-    }
-    if into.0.is_empty() {
-        *into = Rc::clone(other);
-        return Ok(());
-    }
-    if let Some(cached) = cached
-        && cached.source.as_ptr() == Rc::as_ptr(into)
-    {
-        *into = Rc::clone(&cached.result);
-        return Ok(());
-    }
-    charge_boolean(into, other, work, foreign_work, cancel)?;
-    let mut result = into.material.union(&other.material);
-    region::check_size(&result)?;
-    region::canonicalize(&mut result);
-    check_cancel(cancel)?;
-    let result = OwnedMaterial::new(result);
-    // Stock overlay output is opaque until returned. Admit all known old/new
-    // owners before allocating its Rc header or publishing either reference.
-    super::remaining_geometry_units(
-        live_units.saturating_add(result.units),
-        live_bytes.saturating_add(result.bytes).saturating_add(
-            std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
-        ),
-    )?;
-    let result = result.into_shared();
-    *cached = Some(SharedUnion {
-        source: Rc::downgrade(into),
-        result: Rc::clone(&result),
-    });
-    *into = result;
-    Ok(())
 }
 
 /// Realized object geometry and the retained native ownership used by support.
@@ -2063,14 +1971,7 @@ pub(super) fn realize(
             owned_bytes,
             foreign_work,
         }
-        .run(
-            &scopes,
-            segments,
-            &mut anchors,
-            &mut anchor_work,
-            &mut work,
-            cancel,
-        )?;
+        .run(&scopes, &mut work, cancel)?;
         support_regions = output.support;
         interfaces = output.interfaces;
         for (target, top) in output.contact_tops.into_iter().enumerate() {
@@ -3814,84 +3715,6 @@ fn reserve_owned<T>(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Offset admission inventories shared support, interfaces and temporary material without retaining them"
-)]
-fn offset_polygon_owned(
-    polygon: &Polygon<f64>,
-    distance: f64,
-    retained: usize,
-    owned_bytes: usize,
-    support: &[Rc<OwnedMaterial>],
-    interfaces: &[Rc<OwnedMaterial>],
-    temporary: &[&OwnedMaterial],
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let (units, bytes) = geometry_receipt(support, interfaces, temporary);
-    offset_polygon_admitted_in(
-        polygon,
-        distance,
-        retained.saturating_add(units),
-        owned_bytes.saturating_add(bytes),
-        cancel,
-    )
-}
-
-/// Offset one polygon against an already summed live inventory.
-fn offset_polygon_admitted_in(
-    polygon: &Polygon<f64>,
-    distance: f64,
-    retained: usize,
-    owned_bytes: usize,
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    region::offset_polygon_admitted(
-        polygon,
-        distance,
-        |scratch, scratch_bytes, overlay| {
-            super::remaining_geometry_units(
-                retained.saturating_add(scratch),
-                owned_bytes.saturating_add(scratch_bytes),
-            )?;
-            if let Some((a, b)) = overlay {
-                boolean_budget(a, b, cancel)?;
-            }
-            Ok(())
-        },
-        cancel,
-    )
-}
-
-fn offset_owned(
-    region: &MultiPolygon<f64>,
-    distance: f64,
-    retained: usize,
-    owned_bytes: usize,
-    live: Live,
-    temporary: &[&OwnedMaterial],
-    cancel: &AtomicBool,
-) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let (units, bytes) = live.with(temporary);
-    region::offset_admitted(
-        region,
-        distance,
-        |scratch, scratch_bytes, overlay| {
-            super::remaining_geometry_units(
-                retained.saturating_add(units).saturating_add(scratch),
-                owned_bytes
-                    .saturating_add(bytes)
-                    .saturating_add(scratch_bytes),
-            )?;
-            if let Some((a, b)) = overlay {
-                boolean_budget(a, b, cancel)?;
-            }
-            Ok(())
-        },
-        cancel,
-    )
-}
-
 fn vec_bytes<T>(values: &Vec<T>) -> usize {
     values.capacity().saturating_mul(std::mem::size_of::<T>())
 }
@@ -3970,224 +3793,6 @@ fn remaining_geometry_budget(
     )
 }
 
-/// The live shared support, interface and protected owners, counted once.
-/// Transient admissions add their own temporaries to it; it holds no
-/// borrow, so admissions on worker threads see the same inventory.
-#[derive(Clone, Copy, Default)]
-struct Live {
-    units: usize,
-    bytes: usize,
-}
-
-impl Live {
-    fn of(
-        support: &[Rc<OwnedMaterial>],
-        interfaces: &[Rc<OwnedMaterial>],
-        shared: &[&OwnedMaterial],
-    ) -> Self {
-        let (units, bytes) = geometry_receipt(support, interfaces, shared);
-        Self { units, bytes }
-    }
-
-    /// This inventory plus distinct transient owners.
-    fn with(self, temporary: &[&OwnedMaterial]) -> (usize, usize) {
-        let (units, bytes) = geometry_receipt(&[], &[], temporary);
-        (
-            self.units.saturating_add(units),
-            self.bytes.saturating_add(bytes),
-        )
-    }
-
-    fn budget(
-        self,
-        retained: usize,
-        owned_bytes: usize,
-        temporary: &[&OwnedMaterial],
-    ) -> Result<usize, ManufacturingError> {
-        let (units, bytes) = self.with(temporary);
-        super::remaining_geometry_units(
-            retained.saturating_add(units),
-            owned_bytes.saturating_add(bytes),
-        )
-    }
-}
-
-/// Column bounds and one clearance distance bounding every per-piece distance
-/// for pieces inside `frame` (overlay padding is monotone in the work frame).
-#[derive(Clone, Copy)]
-struct ColumnScreen {
-    column: [[f64; 2]; 2],
-    frame: [[f64; 2]; 2],
-    reach: f64,
-}
-
-impl ColumnScreen {
-    /// Margin of the bounding frame around the column; pieces beyond it fall
-    /// back to the exact per-piece computation.
-    const FRAME_MM: f64 = 1024.0;
-
-    fn new(column: &MultiPolygon<f64>, requested: f64) -> Result<Option<Self>, ManufacturingError> {
-        let Some(column) = material_bounds(column) else {
-            return Ok(None);
-        };
-        let frame = [
-            column[0].map(|v| v - Self::FRAME_MM),
-            column[1].map(|v| v + Self::FRAME_MM),
-        ];
-        let Ok(reach) = clearance_distance_in_frame(frame, frame, requested) else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            column,
-            frame,
-            reach,
-        }))
-    }
-
-    /// True only when `candidate_clearance_distance` would return `None`.
-    fn rejects(&self, piece: [[f64; 2]; 2]) -> bool {
-        let (a, b, d) = (piece, self.column, self.reach);
-        a.iter().flatten().all(|v| v.is_finite())
-            && a[0][0] >= self.frame[0][0]
-            && a[0][1] >= self.frame[0][1]
-            && a[1][0] <= self.frame[1][0]
-            && a[1][1] <= self.frame[1][1]
-            && ((a[1][0] + d).next_up() < b[0][0]
-                || (a[0][0] - d).next_down() > b[1][0]
-                || (a[1][1] + d).next_up() < b[0][1]
-                || (a[0][1] - d).next_down() > b[1][1])
-    }
-}
-
-/// Exclusion pieces staged against one column for a single union subtraction.
-struct PieceBatch {
-    pieces: MultiPolygon<f64>,
-    frame: Option<[[f64; 2]; 2]>,
-    points: usize,
-    bytes: usize,
-}
-
-impl Default for PieceBatch {
-    fn default() -> Self {
-        Self {
-            pieces: MultiPolygon(Vec::new()),
-            frame: None,
-            points: 0,
-            bytes: 0,
-        }
-    }
-}
-
-impl PieceBatch {
-    fn stage(
-        &mut self,
-        piece: &Polygon<f64>,
-        retained: usize,
-        owned_bytes: usize,
-        live: Live,
-        temporary: &[&OwnedMaterial],
-    ) -> Result<(), ManufacturingError> {
-        let points =
-            piece.exterior().0.len() + piece.interiors().iter().map(|r| r.0.len()).sum::<usize>();
-        let bytes = std::mem::size_of::<Polygon<f64>>()
-            + std::mem::size_of_val(piece.interiors())
-            + points * std::mem::size_of::<geo::Coord<f64>>();
-        let records = (self.pieces.0.len() + 1)
-            .max(self.pieces.0.capacity())
-            .saturating_mul(2 * std::mem::size_of::<Polygon<f64>>());
-        live.budget(
-            retained.saturating_add(self.points).saturating_add(points),
-            owned_bytes
-                .saturating_add(self.bytes)
-                .saturating_add(bytes)
-                .saturating_add(records),
-            temporary,
-        )?;
-        let b = piece.bounding_rect().ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                "native outer operand has no finite bounds",
-            )
-        })?;
-        self.frame = Some(union_frame(
-            self.frame,
-            [[b.min().x, b.min().y], [b.max().x, b.max().y]],
-        ));
-        self.pieces.0.push(piece.clone());
-        self.points += points;
-        self.bytes += bytes;
-        Ok(())
-    }
-
-    fn owned_bytes(&self) -> usize {
-        self.bytes
-            .saturating_add(self.pieces.0.capacity() * std::mem::size_of::<Polygon<f64>>())
-    }
-}
-
-/// Positive-winding union of possibly overlapping pieces, each oriented with
-/// its material on the left; overlaps are never XOR-normalized.
-fn union_pieces(pieces: &MultiPolygon<f64>) -> MultiPolygon<f64> {
-    union_pieces_in_frame(pieces, None)
-}
-
-fn union_pieces_in_frame(
-    pieces: &MultiPolygon<f64>,
-    frame: Option<&projection::Frame>,
-) -> MultiPolygon<f64> {
-    use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
-    use i_overlay::float::overlay::FloatOverlay;
-    let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
-    for polygon in &pieces.0 {
-        for (index, ring) in std::iter::once(polygon.exterior())
-            .chain(polygon.interiors())
-            .enumerate()
-        {
-            let mut points: Vec<[f64; 2]> = ring.0.iter().map(|c| [c.x, c.y]).collect();
-            if points.len() > 1 && points.first() == points.last() {
-                points.pop();
-            }
-            let twice_area: f64 = (0..points.len())
-                .map(|i| {
-                    let a = points[i];
-                    let b = points[(i + 1) % points.len()];
-                    a[0] * b[1] - b[0] * a[1]
-                })
-                .sum();
-            if (twice_area < 0.0) == (index == 0) {
-                points.reverse();
-            }
-            paths.push(points);
-        }
-    }
-    let mut overlay = if let Some(frame) = frame {
-        FloatOverlay::with_adapter(frame.adapter.clone(), paths.iter().map(Vec::len).sum())
-            .with_exact_y_screen()
-            .unsafe_add_source(&paths, i_overlay::core::overlay::ShapeType::Subject)
-    } else {
-        FloatOverlay::with_subj(&paths)
-    };
-    let shapes = overlay.overlay(OverlayRule::Subject, FillRule::Positive);
-    drop(overlay);
-    MultiPolygon(
-        shapes
-            .into_iter()
-            .map(|shape| {
-                let mut rings = shape.into_iter().map(|ring| {
-                    let mut line =
-                        geo::LineString(ring.into_iter().map(geo::Coord::from).collect());
-                    line.close();
-                    line
-                });
-                Polygon::new(
-                    rings.next().unwrap_or(geo::LineString::empty()),
-                    rings.collect(),
-                )
-            })
-            .collect(),
-    )
-}
-
 fn union_frame(frame: Option<[[f64; 2]; 2]>, other: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
     match frame {
         None => other,
@@ -4198,134 +3803,9 @@ fn union_frame(frame: Option<[[f64; 2]; 2]>, other: [[f64; 2]; 2]) -> [[f64; 2];
     }
 }
 
-// Subtracting the union of staged clearances equals subtracting each in turn.
-// One distance from the batch frame united with the column frame is at least
-// every per-piece distance, so the batch removes a superset, never less.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Batch subtraction inventories shared support, interfaces and temporary material"
-)]
-#[cfg(test)]
-fn subtract_batch(
-    batch: &mut PieceBatch,
-    column: &mut OwnedMaterial,
-    proximity: &mut proximity::ColumnProximity,
-    xy_clearance_mm: f64,
-    retained: usize,
-    owned_bytes: usize,
-    live: Live,
-    work: &mut usize,
-    foreign_work: usize,
-    cancel: &AtomicBool,
-    trace: Option<&ProjectionTrace>,
-) -> Result<(), ManufacturingError> {
-    let owned = owned_bytes.saturating_add(proximity.bytes());
-    let Some(next) = subtract_staged(
-        batch,
-        column,
-        xy_clearance_mm,
-        retained,
-        owned,
-        live,
-        work,
-        foreign_work,
-        cancel,
-        trace,
-    )?
-    else {
-        return Ok(());
-    };
-    *column = next;
-    *proximity = index_column(column, retained, owned, live, &[column])?;
-    Ok(())
-}
-
-/// The column minus the clearance offset of the staged pieces' positive union;
-/// `None` when nothing was staged. `owned_bytes` includes live column indexes.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Batch subtraction inventories shared support, interfaces and temporary material"
-)]
-fn subtract_staged(
-    batch: &mut PieceBatch,
-    column: &OwnedMaterial,
-    xy_clearance_mm: f64,
-    retained: usize,
-    owned_bytes: usize,
-    live: Live,
-    work: &mut usize,
-    foreign_work: usize,
-    cancel: &AtomicBool,
-    trace: Option<&ProjectionTrace>,
-) -> Result<Option<OwnedMaterial>, ManufacturingError> {
-    let staged = std::mem::take(batch);
-    let (Some(frame), Some(b)) = (staged.frame, column.bounding_rect()) else {
-        return Ok(None);
-    };
-    let distance = clearance_distance_in_frame(
-        frame,
-        [[b.min().x, b.min().y], [b.max().x, b.max().y]],
-        xy_clearance_mm,
-    )?;
-    // Union the raw pieces first: (A ∪ B) ⊕ D = (A ⊕ D) ∪ (B ⊕ D), and stacked
-    // facet hulls then cross only their few own edges, not offset cycles.
-    let merged = if staged.pieces.0.len() > 1 {
-        let _union_time = trace.map(|trace| trace.measure(&trace.union_time));
-        let (units, bytes) = live.with(&[column]);
-        // Packed overlay input and output each hold at most twice the staged
-        // coordinates before the merged pieces replace the staged copy.
-        super::remaining_geometry_units(
-            retained
-                .saturating_add(units)
-                .saturating_add(3 * staged.points),
-            owned_bytes
-                .saturating_add(bytes)
-                .saturating_add(3 * staged.owned_bytes()),
-        )?;
-        boolean_budget(&staged.pieces, &staged.pieces, cancel)?;
-        let merged = OwnedMaterial::new(union_pieces(&staged.pieces));
-        region::check_size(&merged)?;
-        merged
-    } else {
-        OwnedMaterial::new(staged.pieces.clone())
-    };
-    let offset_time = trace.map(|trace| trace.measure(&trace.offset_time));
-    let clearance = OwnedMaterial::new(offset_owned(
-        &merged,
-        distance,
-        retained
-            .saturating_add(staged.points)
-            .saturating_add(merged.units),
-        owned_bytes
-            .saturating_add(staged.owned_bytes())
-            .saturating_add(merged.bytes),
-        live,
-        &[column],
-        cancel,
-    )?);
-    drop(offset_time);
-    drop(staged);
-    drop(merged);
-    live.budget(retained, owned_bytes, &[column, &clearance])?;
-    charge_boolean(column, &clearance, work, foreign_work, cancel)?;
-    let difference_time = trace.map(|trace| trace.measure(&trace.difference_time));
-    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
-    drop(difference_time);
-    live.budget(retained, owned_bytes, &[column, &clearance, &next])?;
-    region::check_size(&next)?;
-    Ok(Some(next))
-}
-
 /// Object beads reaching at most this far outside D stay covered by the D
 /// exclusion, whose clearance distance already adds the offset tolerance.
 const BEAD_OUTSIDE_ALLOWANCE_MM: f64 = super::OFFSET_TOLERANCE_MM * 0.4;
-
-/// Admission context for staging actual object bead capsules.
-struct BeadStaging {
-    retained: usize,
-    owned_bytes: usize,
-    live: Live,
-}
 
 /// One section's admitted object floor and the outward XY bounds of its
 /// actual nominal bead footprints.
@@ -4373,185 +3853,6 @@ fn bead_bounds(
         .then_some(bounds))
 }
 
-/// Circumscribed polygon of one nominal bead capsule: the convex hull of the
-/// offset disk placed at both centerline endpoints contains the round capsule.
-fn bead_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Result<Polygon<f64>, ManufacturingError> {
-    use geo::ConvexHull;
-    let disk = region::circumscribed_disk(radius)?;
-    let points: Vec<geo::Coord<f64>> = [a, b]
-        .into_iter()
-        .flat_map(|center| {
-            disk.iter().map(move |offset| geo::Coord {
-                x: center[0] + offset.x,
-                y: center[1] + offset.y,
-            })
-        })
-        .collect();
-    Ok(geo::MultiPoint::from(points).convex_hull())
-}
-
-/// Stage the next section's continuous occupancy pieces whose closed height
-/// scope reaches the top support bead's actual upper height. Unscoped invariant
-/// D spans its whole height and stays with the height-aware nominal exclusion.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Sheet staging screens against the live column and its index under shared admission"
-)]
-fn stage_touching_sheet(
-    layers: &[PrintLayer],
-    sections: &[super::SectionSpan],
-    top: usize,
-    column: &MultiPolygon<f64>,
-    proximity: &proximity::ColumnProximity,
-    xy_clearance_mm: f64,
-    admission: &BeadStaging,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<PieceBatch, ManufacturingError> {
-    let mut batch = PieceBatch::default();
-    let next = span_at(sections, top as u32) + 1;
-    let Some(section) = sections.get(next) else {
-        return Ok(batch);
-    };
-    let Some(screen) = ColumnScreen::new(column, xy_clearance_mm)? else {
-        return Ok(batch);
-    };
-    let layer = &layers[top];
-    let upper = (program_coordinates::project_xyz6_segment_bead_height_mm(
-        layer.z_mm,
-        layer.z_mm,
-        layer.z_mm - layer.lower_z_mm,
-    )?[1]
-        + super::native::XYZ6_SCREEN_SLACK_MM)
-        .next_up();
-    let lower = layer.lower_z_mm;
-    let touches =
-        |height: Option<[f64; 2]>| height.is_some_and(|[from, to]| from <= upper && to >= lower);
-    let scanned = std::cell::Cell::new(0usize);
-    let mut failure = None;
-    section.visit_occupied_screened(
-        cancel,
-        |bounds, height| {
-            check_cancel(cancel)?;
-            scanned.set(scanned.get().saturating_add(1));
-            Ok(touches(height) && !screen.rejects(bounds))
-        },
-        |piece, height| {
-            if !touches(height) {
-                return Ok(true);
-            }
-            super::boolean::budget_polygon_accumulated(piece, work, cancel)?;
-            let Some(distance) = candidate_clearance_distance_in_bounds(
-                piece,
-                Some(screen.column),
-                xy_clearance_mm,
-            )?
-            else {
-                return Ok(true);
-            };
-            if proximity.separated(piece, separation_reach(distance)) {
-                return Ok(true);
-            }
-            if let Err(error) = batch.stage(
-                piece,
-                admission.retained,
-                admission.owned_bytes,
-                admission.live,
-                &[],
-            ) {
-                failure = Some(error);
-                return Ok(false);
-            }
-            Ok(true)
-        },
-    )?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    *work = work.checked_add(scanned.get()).ok_or_else(|| {
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            "cumulative touching occupancy scope work counter overflow",
-        )
-    })?;
-    Ok(batch)
-}
-
-/// Stage the circumscribed capsules of the given actual object bead edges that
-/// the column clearance can reach. Screens decide only what to skip: a skipped
-/// capsule's clearance offset provably cannot meet the column.
-fn stage_object_beads(
-    edges: &[beads::BeadEdge],
-    column: &MultiPolygon<f64>,
-    proximity: &proximity::ColumnProximity,
-    xy_clearance_mm: f64,
-    admission: &BeadStaging,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<PieceBatch, ManufacturingError> {
-    let mut batch = PieceBatch::default();
-    let Some(screen) = ColumnScreen::new(column, xy_clearance_mm)? else {
-        return Ok(batch);
-    };
-    for edge in edges {
-        super::native::charge_support_clearance(work, cancel)?;
-        let (p, q) = (edge.a, edge.b);
-        // The circumscribed capsule reaches at most half the offset tolerance
-        // beyond the round bead.
-        let half = (edge.half + super::OFFSET_TOLERANCE_MM).next_up();
-        let bounds = [
-            [
-                (p[0].min(q[0]) - half).next_down(),
-                (p[1].min(q[1]) - half).next_down(),
-            ],
-            [
-                (p[0].max(q[0]) + half).next_up(),
-                (p[1].max(q[1]) + half).next_up(),
-            ],
-        ];
-        if screen.rejects(bounds) {
-            continue;
-        }
-        let capsule = bead_capsule(p, q, edge.half)?;
-        super::boolean::budget_polygon_accumulated(&capsule, work, cancel)?;
-        let Some(distance) =
-            candidate_clearance_distance_in_bounds(&capsule, Some(screen.column), xy_clearance_mm)?
-        else {
-            continue;
-        };
-        if proximity.separated(&capsule, separation_reach(distance)) {
-            continue;
-        }
-        batch.stage(
-            &capsule,
-            admission.retained,
-            admission.owned_bytes,
-            admission.live,
-            &[],
-        )?;
-    }
-    Ok(batch)
-}
-
-/// A clearance offset reaches at most its circumscribed disk plus overlay
-/// padding beyond `distance`; twice the offset tolerance encloses both.
-fn separation_reach(distance: f64) -> f64 {
-    (distance + 2.0 * super::OFFSET_TOLERANCE_MM).next_up()
-}
-
-/// Admit the transient column edge index alongside the live owners it serves.
-fn index_column(
-    column: &MultiPolygon<f64>,
-    retained: usize,
-    owned_bytes: usize,
-    live: Live,
-    temporary: &[&OwnedMaterial],
-) -> Result<proximity::ColumnProximity, ManufacturingError> {
-    let estimate = proximity::ColumnProximity::bytes_for(column);
-    live.budget(retained, owned_bytes.saturating_add(estimate), temporary)?;
-    Ok(proximity::ColumnProximity::new(column))
-}
-
 fn void_reaches_corridor(
     scope: &spiling_geometry::ProtectedVoidHeightScope,
     corridor_lower: f64,
@@ -4565,14 +3866,6 @@ fn void_reaches_corridor(
             *upper_mm >= corridor_lower
         }
     }
-}
-
-fn candidate_clearance_distance(
-    occupied: &Polygon<f64>,
-    column: &MultiPolygon<f64>,
-    requested: f64,
-) -> Result<Option<f64>, ManufacturingError> {
-    candidate_clearance_distance_in_bounds(occupied, material_bounds(column), requested)
 }
 
 fn material_bounds(material: &MultiPolygon<f64>) -> Option<[[f64; 2]; 2]> {
@@ -4772,120 +4065,6 @@ mod tests {
         for point in sliver.exterior().points() {
             assert!(result.0[0].exterior().points().any(|kept| kept == point));
         }
-    }
-
-    #[test]
-    fn cached_column_bounds_preserve_candidate_clearance() {
-        for shift in [0.0, 0.37, 1_048_576.0, 35_184_372_088_832.0] {
-            let rectangle = |lower: [f64; 2], upper: [f64; 2]| {
-                polygon![
-                    (x: lower[0] + shift, y: lower[1] + shift),
-                    (x: upper[0] + shift, y: lower[1] + shift),
-                    (x: upper[0] + shift, y: upper[1] + shift),
-                    (x: lower[0] + shift, y: upper[1] + shift),
-                ]
-            };
-            let outer = rectangle([0.0, 0.0], [10.0, 10.0]);
-            let hole = rectangle([3.0, 3.0], [7.0, 7.0]);
-            let pieces = [
-                Polygon::empty(),
-                rectangle([1.0, 1.0], [2.0, 2.0]),
-                hole.clone(),
-                rectangle([10.2, 1.0], [11.0, 2.0]),
-                rectangle([10.3, 1.0], [11.0, 2.0]),
-                rectangle([100.0, 1.0], [101.0, 2.0]),
-                rectangle([-2048.0, 1.0], [-2047.0, 2.0]),
-            ];
-            for column in [
-                MultiPolygon(Vec::new()),
-                MultiPolygon(vec![outer.clone()]),
-                MultiPolygon(vec![Polygon::new(
-                    outer.exterior().clone(),
-                    vec![hole.exterior().clone()],
-                )]),
-                MultiPolygon(vec![
-                    rectangle([0.0, 0.0], [1.0, 10.0]),
-                    rectangle([9.0, 0.0], [10.0, 10.0]),
-                ]),
-            ] {
-                for requested in [0.0, 0.2, 10.0] {
-                    let screen = ColumnScreen::new(&column, requested).unwrap();
-                    for piece in &pieces {
-                        let fresh = candidate_clearance_distance(piece, &column, requested)
-                            .map(|distance| distance.map(f64::to_bits))
-                            .map_err(|failure| failure.code);
-                        let cached = candidate_clearance_distance_in_bounds(
-                            piece,
-                            screen
-                                .map(|screen| screen.column)
-                                .or_else(|| material_bounds(&column)),
-                            requested,
-                        )
-                        .map(|distance| distance.map(f64::to_bits))
-                        .map_err(|failure| failure.code);
-                        assert_eq!(cached, fresh);
-                        if let Some(screen) = screen
-                            && let Some(bounds) =
-                                material_bounds(&MultiPolygon(vec![piece.clone()]))
-                            && screen.rejects(bounds)
-                        {
-                            assert_eq!(fresh, Ok(None));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cached_column_bounds_refresh_after_batch_subtraction() {
-        let cancel = AtomicBool::new(false);
-        let mut column = OwnedMaterial::new(MultiPolygon(vec![polygon![
-            (x: 0.0, y: 0.0), (x: 10.0, y: 0.0),
-            (x: 10.0, y: 10.0), (x: 0.0, y: 10.0),
-        ]]));
-        let protected = OwnedMaterial::new(MultiPolygon(Vec::new()));
-        let mut proximity = proximity::ColumnProximity::new(&column);
-        let mut batch = PieceBatch::default();
-        let mask = polygon![
-            (x: -1.0, y: -1.0), (x: 4.0, y: -1.0),
-            (x: 4.0, y: 11.0), (x: -1.0, y: 11.0),
-        ];
-        batch
-            .stage(&mask, 0, 0, Live::default(), &[&column])
-            .unwrap();
-        let before = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
-        subtract_batch(
-            &mut batch,
-            &mut column,
-            &mut proximity,
-            0.2,
-            0,
-            0,
-            Live::of(&[], &[], &[&protected]),
-            &mut 0,
-            0,
-            &cancel,
-            None,
-        )
-        .unwrap();
-        let after = ColumnScreen::new(&column, 0.2).unwrap().unwrap();
-        assert_ne!(before.column, after.column);
-        assert_eq!(Some(after.column), material_bounds(&column));
-        let removed = polygon![
-            (x: 1.0, y: 1.0), (x: 2.0, y: 1.0),
-            (x: 2.0, y: 2.0), (x: 1.0, y: 2.0),
-        ];
-        assert!(
-            candidate_clearance_distance_in_bounds(&removed, Some(before.column), 0.2)
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            candidate_clearance_distance_in_bounds(&removed, Some(after.column), 0.2).unwrap(),
-            None
-        );
-        assert!(after.rejects(material_bounds(&MultiPolygon(vec![removed])).unwrap()));
     }
 
     #[test]

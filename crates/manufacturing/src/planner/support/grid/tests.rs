@@ -1,0 +1,434 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+
+use super::*;
+use geo::{Area, Contains, Distance, Euclidean, Intersects, Line, Rect, coord};
+
+const CELL: f64 = 0.25;
+/// Cells this close to the decision boundary are not judged.
+const SLACK: f64 = 1.0e-6;
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.next()
+    }
+}
+
+fn raster<'a>(frame: CellFrame, cancel: &'a AtomicBool) -> Raster<'a> {
+    static ADMIT: fn(usize) -> Result<(), ManufacturingError> = |_| Ok(());
+    Raster {
+        frame,
+        cancel,
+        admit: &ADMIT,
+        work: AtomicUsize::new(0),
+    }
+}
+
+fn frame() -> CellFrame {
+    CellFrame::new([[-1.0, -1.0], [11.0, 11.0]], CELL).unwrap()
+}
+
+fn cell_rect(frame: &CellFrame, col: usize, row: usize) -> Polygon<f64> {
+    Rect::new(
+        coord! { x: frame.x(col as f64), y: frame.y(row as f64) },
+        coord! { x: frame.x(col as f64 + 1.0), y: frame.y(row as f64 + 1.0) },
+    )
+    .to_polygon()
+}
+
+/// Exact closed distance between a cell and a polygon region.
+fn distance(cell: &Polygon<f64>, polygon: &Polygon<f64>) -> f64 {
+    if cell.intersects(polygon) {
+        return 0.0;
+    }
+    edges(polygon)
+        .map(|[a, b]| {
+            Euclidean.distance(
+                &Line::new(coord! {x: a[0], y: a[1]}, coord! {x: b[0], y: b[1]}),
+                cell,
+            )
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Distance from a cell to the polygon's boundary.
+fn boundary_distance(cell: &Polygon<f64>, polygon: &Polygon<f64>) -> f64 {
+    edges(polygon)
+        .map(|[a, b]| {
+            Euclidean.distance(
+                &Line::new(coord! {x: a[0], y: a[1]}, coord! {x: b[0], y: b[1]}),
+                cell,
+            )
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// A random star polygon around `centre`, optionally with a star hole.
+fn star(rng: &mut Lcg, centre: [f64; 2], radius: f64, points: usize, hole: bool) -> Polygon<f64> {
+    let ring = |rng: &mut Lcg, scale: f64, reverse: bool| {
+        let mut coords: Vec<geo::Coord<f64>> = (0..points)
+            .map(|i| {
+                let angle =
+                    std::f64::consts::TAU * (i as f64 + rng.range(0.0, 0.8)) / points as f64;
+                let r = scale * rng.range(0.4, 1.0);
+                coord! { x: centre[0] + r * angle.cos(), y: centre[1] + r * angle.sin() }
+            })
+            .collect();
+        if reverse {
+            coords.reverse();
+        }
+        LineString::from(coords)
+    };
+    let exterior = ring(rng, radius, false);
+    let holes = if hole {
+        vec![ring(rng, radius * 0.3, true)]
+    } else {
+        Vec::new()
+    };
+    Polygon::new(exterior, holes)
+}
+
+fn adversarial() -> Vec<Polygon<f64>> {
+    let poly = |points: &[[f64; 2]]| {
+        Polygon::new(
+            LineString::from(
+                points
+                    .iter()
+                    .map(|p| coord! {x: p[0], y: p[1]})
+                    .collect::<Vec<_>>(),
+            ),
+            Vec::new(),
+        )
+    };
+    vec![
+        // Diagonal sliver far thinner than a cell.
+        poly(&[[1.0, 1.0], [9.0, 8.0], [9.0, 8.01]]),
+        // Axis sliver lying exactly on a cell line.
+        poly(&[[2.0, 5.0], [8.0, 5.0], [8.0, 5.002], [2.0, 5.002]]),
+        // Vertices exactly on cell corners and midlines.
+        poly(&[[0.0, 0.0], [5.0, 0.0], [5.0, 0.125], [0.0, 0.125]]),
+        // Square with a square hole sharing grid lines.
+        Polygon::new(
+            LineString::from(vec![(1.0, 1.0), (9.0, 1.0), (9.0, 9.0), (1.0, 9.0)]),
+            vec![LineString::from(vec![
+                (3.0, 3.0),
+                (3.0, 7.0),
+                (7.0, 7.0),
+                (7.0, 3.0),
+            ])],
+        ),
+        // Hole leaving a ring thinner than a cell.
+        Polygon::new(
+            LineString::from(vec![(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)]),
+            vec![LineString::from(vec![
+                (2.1, 2.1),
+                (2.1, 7.9),
+                (7.9, 7.9),
+                (7.9, 2.1),
+            ])],
+        ),
+    ]
+}
+
+fn cases() -> Vec<Polygon<f64>> {
+    let mut rng = Lcg(7);
+    let mut cases = adversarial();
+    for i in 0..12 {
+        let centre = [rng.range(3.0, 7.0), rng.range(3.0, 7.0)];
+        let radius = rng.range(0.5, 4.0);
+        cases.push(star(&mut rng, centre, radius, 5 + i, i % 2 == 0));
+    }
+    cases
+}
+
+#[test]
+fn outward_and_dilation_match_exact_closed_distance() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    for polygon in cases() {
+        for d in [0.0, 0.1, 0.37, 1.3] {
+            let bits = raster.outward([&polygon], d).unwrap();
+            for row in 0..frame.rows {
+                for col in 0..frame.cols {
+                    let exact = distance(&cell_rect(&frame, col, row), &polygon);
+                    if (exact - d).abs() < SLACK {
+                        continue;
+                    }
+                    assert_eq!(
+                        bits.contains(col, row),
+                        exact < d || exact == 0.0,
+                        "cell ({col}, {row}) at distance {exact} for d {d}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn inward_keeps_exactly_the_cells_inside() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    for polygon in cases() {
+        let bits = raster.inward([&polygon]).unwrap();
+        for row in 0..frame.rows {
+            for col in 0..frame.cols {
+                let cell = cell_rect(&frame, col, row);
+                if bits.contains(col, row) {
+                    assert!(polygon.contains(&cell), "cell ({col}, {row}) not inside");
+                } else if boundary_distance(&cell, &polygon) > SLACK {
+                    assert!(
+                        !polygon.contains(&cell),
+                        "cell ({col}, {row}) inside but dropped"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn slivers_thinner_than_a_cell_round_to_the_safe_side() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    let sliver = &adversarial()[0];
+    let outward = raster.outward([sliver], 0.0).unwrap();
+    // Continuous: the sliver crosses about 32 columns and 28 rows.
+    assert!(outward.count() >= 32);
+    assert!(raster.inward([sliver]).unwrap().is_empty());
+    // Overlapping pieces union, never cancel.
+    let both = raster.outward([sliver, sliver], 0.0).unwrap();
+    assert_eq!(both, outward);
+}
+
+fn brute(frame: &CellFrame, bits: &Bits) -> Vec<bool> {
+    (0..frame.rows)
+        .flat_map(|row| (0..frame.cols).map(move |col| (col, row)))
+        .map(|(col, row)| bits.contains(col, row))
+        .collect()
+}
+
+#[test]
+fn set_algebra_matches_cellwise_logic() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    let polygons = cases();
+    for pair in polygons.windows(2) {
+        let a = raster.outward([&pair[0]], 0.2).unwrap();
+        let b = raster.outward([&pair[1]], 0.0).unwrap();
+        let (ca, cb) = (brute(&frame, &a), brute(&frame, &b));
+        let union = brute(&frame, &raster.union(&a, &b).unwrap());
+        let meet = brute(&frame, &raster.intersection(&a, &b).unwrap());
+        let mut difference = a.clone();
+        difference.subtract(&b);
+        let difference = brute(&frame, &difference);
+        for i in 0..ca.len() {
+            assert_eq!(union[i], ca[i] || cb[i]);
+            assert_eq!(meet[i], ca[i] && cb[i]);
+            assert_eq!(difference[i], ca[i] && !cb[i]);
+        }
+        assert_eq!(a.intersects(&b), meet.iter().any(|v| *v));
+    }
+    // Equal sets compare equal whatever produced them.
+    let a = raster.outward([&polygons[3]], 0.0).unwrap();
+    let mut b = raster
+        .union(&a, &raster.outward([&polygons[0]], 0.0).unwrap())
+        .unwrap();
+    b.subtract(&raster.outward([&polygons[0]], 0.0).unwrap());
+    let mut a2 = a.clone();
+    a2.subtract(&raster.outward([&polygons[0]], 0.0).unwrap());
+    assert_eq!(a2, b);
+}
+
+#[test]
+fn erosion_matches_brute_force_closed_distance() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    for polygon in cases().iter().take(9) {
+        let bits = raster.outward([polygon], 0.3).unwrap();
+        for radius in [0.0, CELL, 1.7 * CELL, 3.2 * CELL] {
+            let eroded = raster.erode(&bits, radius).unwrap();
+            let reach = (radius / CELL).floor() as i64 + 1;
+            for row in 0..frame.rows as i64 {
+                for col in 0..frame.cols as i64 {
+                    let mut keep = bits.contains(col as usize, row as usize);
+                    for dr in -reach..=reach {
+                        for dc in -reach..=reach {
+                            let gap = |d: i64| (d.abs() - 1).max(0) as f64 * CELL;
+                            if gap(dr).hypot(gap(dc)) > radius {
+                                continue;
+                            }
+                            let (r, c) = (row + dr, col + dc);
+                            let set = r >= 0 && c >= 0 && bits.contains(c as usize, r as usize);
+                            keep &= set;
+                        }
+                    }
+                    assert_eq!(eroded.contains(col as usize, row as usize), keep);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn contours_stay_inside_the_cells_with_few_vertices() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    let mut rng = Lcg(11);
+    for polygon in cases() {
+        let bits = raster.outward([&polygon], 0.1).unwrap();
+        let contour = raster.contour(&bits).unwrap();
+        let core = raster.erode(&bits, 4.0 * CELL).unwrap();
+        // Everything deep inside survives.
+        let mut covered = 0.0;
+        for row in 0..frame.rows {
+            for col in 0..frame.cols {
+                if core.contains(col, row) {
+                    let centre =
+                        geo::Point::new(frame.x(col as f64 + 0.5), frame.y(row as f64 + 0.5));
+                    assert!(contour.contains(&centre), "deep cell ({col}, {row}) lost");
+                    covered += 1.0;
+                }
+            }
+        }
+        assert!(contour.unsigned_area() >= covered * CELL * CELL * 0.99);
+        // Every contour point lies in a set cell.
+        let [lo, hi] = frame.bounds();
+        for _ in 0..4000 {
+            let point = geo::Point::new(rng.range(lo[0], hi[0]), rng.range(lo[1], hi[1]));
+            if contour.contains(&point) {
+                let col = ((point.x() - lo[0]) / CELL).floor() as usize;
+                let row = ((point.y() - lo[1]) / CELL).floor() as usize;
+                assert!(bits.contains(col, row), "contour point outside the cells");
+            }
+        }
+        for polygon in &contour.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                for p in &ring.0 {
+                    let col = (p.x - lo[0]) / CELL;
+                    let row = (p.y - lo[1]) / CELL;
+                    let near = [(0.0, 0.0), (-1e-9, 0.0), (0.0, -1e-9), (-1e-9, -1e-9)];
+                    assert!(
+                        near.iter().any(|(dc, dr)| bits
+                            .contains((col + dc).floor() as usize, (row + dr).floor() as usize)),
+                        "contour vertex outside the cells"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn contour_of_a_disk_has_few_vertices_and_separates_diagonal_cells() {
+    let frame = CellFrame::new([[-6.0, -6.0], [6.0, 6.0]], 0.05).unwrap();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    let disk = Polygon::new(
+        LineString::from(
+            (0..720)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / 720.0;
+                    (5.0 * a.cos(), 5.0 * a.sin())
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Vec::new(),
+    );
+    let bits = raster.outward([&disk], 0.0).unwrap();
+    let contour = raster.contour(&bits).unwrap();
+    assert_eq!(contour.0.len(), 1);
+    let vertices = contour.0[0].exterior().0.len();
+    assert!(vertices < 200, "{vertices} vertices");
+    let expected = std::f64::consts::PI * 25.0;
+    assert!((contour.unsigned_area() - expected).abs() < expected * 0.06);
+
+    // Two blocks touching at one corner trace as two rings, a block with a
+    // hole as a counterclockwise exterior and a clockwise hole.
+    let block = |c0: u32, r0: u32, n: u32| {
+        (r0..r0 + n).map(move |row| Span {
+            row,
+            from: c0,
+            to: c0 + n,
+        })
+    };
+    let blocks = raster
+        .bits_of(
+            &block(10, 10, 40)
+                .chain(block(50, 50, 40))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let rings = raster.trace(&blocks).unwrap();
+    assert_eq!(rings.len(), 2);
+    assert!(rings.iter().all(|ring| ring.len() == 4));
+    let contour = raster.contour(&blocks).unwrap();
+    assert_eq!(contour.0.len(), 2);
+    for polygon in &contour.0 {
+        assert_eq!(polygon.exterior().0.len(), 5);
+    }
+    let mut framed = raster
+        .bits_of(&block(10, 10, 40).collect::<Vec<_>>())
+        .unwrap();
+    framed.subtract(
+        &raster
+            .bits_of(&block(20, 20, 20).collect::<Vec<_>>())
+            .unwrap(),
+    );
+    let rings = raster.trace(&framed).unwrap();
+    let signed = |ring: &Vec<[i64; 2]>| {
+        (0..ring.len())
+            .map(|i| {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum::<i64>()
+    };
+    let mut areas: Vec<i64> = rings.iter().map(signed).collect();
+    areas.sort_unstable();
+    assert_eq!(areas, vec![-2 * 400, 2 * 1600]);
+    let contour = raster.contour(&framed).unwrap();
+    assert_eq!(contour.0.len(), 1);
+    assert_eq!(contour.0[0].interiors().len(), 1);
+}
+
+#[test]
+fn frame_refuses_unrepresentable_bounds_and_cancels() {
+    assert!(CellFrame::new([[0.0, 0.0], [1.0e12, 1.0]], 0.05).is_err());
+    assert!(CellFrame::new([[0.0, f64::NAN], [1.0, 1.0]], 0.05).is_err());
+    let cancel = AtomicBool::new(true);
+    let raster = raster(frame(), &cancel);
+    let square = &adversarial()[3];
+    assert_eq!(
+        raster.outward([square], 0.1).unwrap_err().code,
+        ManufacturingErrorCode::Cancelled
+    );
+    let refuse: fn(usize) -> Result<(), ManufacturingError> =
+        |_| Err(error(ManufacturingErrorCode::ResourceLimit, "refused"));
+    let refusing = Raster {
+        frame: frame(),
+        cancel: &AtomicBool::new(false),
+        admit: &refuse,
+        work: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        refusing.outward([square], 0.1).unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+}
