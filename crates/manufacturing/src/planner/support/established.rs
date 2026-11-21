@@ -6,6 +6,7 @@ use super::*;
 
 const SLACK_MM: f64 = 0.000_004;
 const PROPOSAL_JOIN_MM: f64 = 0.001;
+const CAPSULE_STEPS: usize = 8;
 
 /// An eligible lower centreline subspan: its endpoints, its donor
 /// radius, and whether each end is a real road end that keeps its cap.
@@ -126,12 +127,12 @@ impl Donor {
     }
 }
 
-pub(super) fn proposal_footprint<'p>(
+pub(super) fn proposal_geometry<'p>(
     raster: &Raster<'_>,
     paths: impl Iterator<Item = &'p DepositionPath>,
     max_radius: f64,
-    owned_bytes: usize,
-) -> Result<Bits, ManufacturingError> {
+    live_bytes: usize,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     let bounds = raster.frame.bounds();
     let mut capsules: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut extent = bounds;
@@ -155,19 +156,27 @@ pub(super) fn proposal_footprint<'p>(
                 continue;
             }
             extent = union_frame(Some(extent), reach);
-            reserve_owned(&mut capsules, 1, owned_bytes)?;
+            (raster.admit)(
+                live_bytes
+                    .saturating_add(
+                        (capsules.len() + 1)
+                            .saturating_mul((2 * CAPSULE_STEPS + 2) * size_of::<[f64; 2]>()),
+                    )
+                    .saturating_add(2 * vec_bytes(&capsules)),
+            )?;
+            raster.reserve(&mut capsules, 1)?;
             capsules.push(inscribed_capsule(a, b, half));
         }
     }
     if capsules.is_empty() {
-        return Ok(Bits::default());
+        return Ok(MultiPolygon::new(Vec::new()));
     }
     use i_overlay::core::overlay::ShapeType;
     use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
     use i_overlay::float::overlay::FloatOverlay;
     use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
     let points: usize = capsules.iter().map(Vec::len).sum();
-    (raster.admit)(points.saturating_mul(64))?;
+    (raster.admit)(live_bytes.saturating_add(points.saturating_mul(64)))?;
     let adapter = FloatPointAdapter::new(FloatRect {
         min_x: extent[0][0],
         min_y: extent[0][1],
@@ -179,7 +188,7 @@ pub(super) fn proposal_footprint<'p>(
         .overlay(OverlayRule::Subject, FillRule::NonZero);
     drop(capsules);
     raster.charge(points);
-    let union: Vec<Polygon<f64>> = shapes
+    let union = shapes
         .into_iter()
         .map(|shape| {
             let mut rings = shape.into_iter().map(|ring| {
@@ -193,7 +202,7 @@ pub(super) fn proposal_footprint<'p>(
             )
         })
         .collect();
-    raster.inward(&union)
+    Ok(MultiPolygon::new(union))
 }
 
 fn rects_meet(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> bool {
@@ -203,18 +212,17 @@ fn rects_meet(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> bool {
 /// A polygon inside the round capsule of `ab` and `radius`: the straight
 /// sides and caps whose vertices lie on the circles.
 fn inscribed_capsule(a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[f64; 2]> {
-    const STEPS: usize = 8;
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let length = dx.hypot(dy);
     let angle = if length > 0.0 { dy.atan2(dx) } else { 0.0 };
-    let mut points = Vec::with_capacity(2 * STEPS + 2);
+    let mut points = Vec::with_capacity(2 * CAPSULE_STEPS + 2);
     // Around b from +normal through +direction to −normal, then around a.
     for (centre, start) in [
         (b, angle + std::f64::consts::FRAC_PI_2),
         (a, angle - std::f64::consts::FRAC_PI_2),
     ] {
-        for i in 0..=STEPS {
-            let t = start - std::f64::consts::PI * i as f64 / STEPS as f64;
+        for i in 0..=CAPSULE_STEPS {
+            let t = start - std::f64::consts::PI * i as f64 / CAPSULE_STEPS as f64;
             points.push([centre[0] + radius * t.cos(), centre[1] + radius * t.sin()]);
         }
     }
@@ -561,31 +569,4 @@ impl CellContacts<'_, '_> {
         }
         Ok(())
     }
-}
-
-pub(super) fn root_contacts(
-    raster: &Raster<'_>,
-    roots: &[Root],
-    contacts: &[Option<Bits>],
-    index: usize,
-) -> Result<Bits, ManufacturingError> {
-    let mut union = Bits::default();
-    for (root, cells) in roots.iter().zip(contacts) {
-        check_cancel(raster.cancel)?;
-        let (
-            Root::Part {
-                first_support_layer,
-                ..
-            },
-            Some(cells),
-        ) = (*root, cells)
-        else {
-            continue;
-        };
-        if first_support_layer != index {
-            continue;
-        }
-        union = raster.union(&union, cells)?;
-    }
-    Ok(union)
 }

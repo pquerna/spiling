@@ -152,18 +152,6 @@ enum Root {
     },
 }
 
-impl Root {
-    fn first_layer(self) -> usize {
-        match self {
-            Self::Bed => 0,
-            Self::Part {
-                first_support_layer,
-                ..
-            } => first_support_layer,
-        }
-    }
-}
-
 pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
@@ -1526,7 +1514,7 @@ pub(super) fn realize(
         support_metadata_bytes += part_contacts
             .iter()
             .flatten()
-            .map(grid::Bits::bytes)
+            .map(sweep::PartContact::bytes)
             .fold(vec_bytes(&part_contacts), usize::saturating_add);
         trace.report("corridors_complete");
         timing.mark("roots_and_corridors");
@@ -1672,31 +1660,24 @@ pub(super) fn realize(
                     )
                     .map(|_| ())
                 };
-                let contact_raster = grid_frame
-                    .filter(|_| roots.iter().any(|root| root.first_layer() == i))
-                    .map(|frame| grid::Raster {
-                        frame,
-                        cancel,
-                        admit: &admit,
-                        work: std::sync::atomic::AtomicUsize::new(0),
-                    });
-                let contact_cells = match &contact_raster {
-                    Some(raster) => {
-                        let cells = established::root_contacts(raster, &roots, &part_contacts, i)?;
-                        charge_owned_work(&mut work, foreign_work, raster.take_work(), cancel)?;
-                        Some(cells)
-                    }
-                    None => None,
-                };
-                let contacts =
-                    contact_raster
-                        .as_ref()
-                        .zip(contact_cells.as_ref())
-                        .map(|(raster, cells)| established::CellContacts {
-                            raster,
-                            cells,
-                            donors: &[],
+                let proposal = part_contacts.get(i).and_then(Option::as_ref);
+                let contact_raster =
+                    grid_frame
+                        .filter(|_| proposal.is_some())
+                        .map(|frame| grid::Raster {
+                            frame,
+                            cancel,
+                            admit: &admit,
+                            work: std::sync::atomic::AtomicUsize::new(0),
                         });
+                let contacts = contact_raster
+                    .as_ref()
+                    .zip(proposal)
+                    .map(|(raster, proposal)| established::CellContacts {
+                        raster,
+                        cells: &proposal.cells,
+                        donors: &[],
+                    });
                 // One lower inventory serves every anchor query on this layer.
                 let mut lower = strokes::LowerStrokes::new(
                     prior[i - 1]
@@ -1712,7 +1693,7 @@ pub(super) fn realize(
                     contacts.as_ref(),
                     recipe,
                     retained_domains,
-                    live_bytes.saturating_add(contact_cells.as_ref().map_or(0, grid::Bits::bytes)),
+                    live_bytes,
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
@@ -1777,7 +1758,7 @@ pub(super) fn realize(
                 FinalSupportInput {
                     index,
                     roots: &roots,
-                    part_contacts: &part_contacts,
+                    part_contact: part_contacts.get(index).and_then(Option::as_ref),
                     contact_tops: &contact_tops,
                     z_gap: z_gap_mm,
                     frame: grid_frame,
@@ -2143,7 +2124,7 @@ pub(super) fn realize(
             part_contacts
                 .iter()
                 .flatten()
-                .map(grid::Bits::bytes)
+                .map(sweep::PartContact::bytes)
                 .fold(vec_bytes(&part_contacts), usize::saturating_add),
         );
         drop(part_contacts);
@@ -2246,8 +2227,7 @@ pub(super) fn realize(
 struct FinalSupportInput<'a> {
     index: usize,
     roots: &'a [Root],
-    /// Per-root proposal, not authority for final support.
-    part_contacts: &'a [Option<grid::Bits>],
+    part_contact: Option<&'a sweep::PartContact>,
     contact_tops: &'a [Option<usize>],
     z_gap: f64,
     /// The support grid frame; `None` when the sweep had no demand.
@@ -2270,7 +2250,7 @@ fn reconcile_layer_roots(
     let FinalSupportInput {
         index,
         roots,
-        part_contacts,
+        part_contact,
         contact_tops,
         z_gap,
         frame,
@@ -2329,29 +2309,29 @@ fn reconcile_layer_roots(
                 super::remaining_geometry_units(retained_units, outside.saturating_add(extra))
                     .map(|_| ())
             };
-            let contact_raster = frame
-                .filter(|_| roots.iter().any(|root| root.first_layer() == index))
-                .map(|frame| grid::Raster {
-                    frame,
-                    cancel,
-                    admit: &admit,
-                    work: std::sync::atomic::AtomicUsize::new(0),
-                });
+            let contact_raster =
+                frame
+                    .filter(|_| part_contact.is_some())
+                    .map(|frame| grid::Raster {
+                        frame,
+                        cancel,
+                        admit: &admit,
+                        work: std::sync::atomic::AtomicUsize::new(0),
+                    });
             let mut donors = Vec::new();
-            let contact_cells = match &contact_raster {
-                Some(raster) => {
-                    for (root_index, root) in roots.iter().enumerate().rev() {
+            let contact_cells = match contact_raster.as_ref().zip(part_contact) {
+                Some((raster, proposal)) => {
+                    for &root_index in &proposal.roots {
                         let Root::Part {
                             object_layer,
                             first_support_layer,
                             ..
-                        } = *root
+                        } = roots[root_index]
                         else {
                             continue;
                         };
                         if first_support_layer != index
                             || object_layer >= index
-                            || part_contacts[root_index].is_none()
                             || !established::new_contact_band(prior, layer, object_layer, z_gap)?
                         {
                             continue;
@@ -3828,20 +3808,27 @@ mod tests {
             // The sweep's landing cells: the bed-established object road.
             let admit = |_: usize| Ok(());
             let contacts = [None, None, None, None, Some(2)];
-            let part_contacts = [Some(
-                established::proposal_footprint(
-                    &grid::Raster {
-                        frame: cell_frame,
-                        cancel: &cancel,
-                        admit: &admit,
-                        work: std::sync::atomic::AtomicUsize::new(0),
-                    },
-                    layers[0].paths.iter().filter(|path| path.kind.is_model()),
-                    recipe.bead_width_mm * 0.5,
-                    0,
-                )
-                .unwrap(),
-            )];
+            let raster = grid::Raster {
+                frame: cell_frame,
+                cancel: &cancel,
+                admit: &admit,
+                work: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let part_contact = sweep::PartContact {
+                cells: raster
+                    .inward(
+                        &established::proposal_geometry(
+                            &raster,
+                            layers[0].paths.iter().filter(|path| path.kind.is_model()),
+                            recipe.bead_width_mm * 0.5,
+                            0,
+                        )
+                        .unwrap()
+                        .0,
+                    )
+                    .unwrap(),
+                roots: vec![0],
+            };
             let mut segments = layers.iter().map(|layer| path_segments(&layer.paths)).sum();
             let mut anchors = AnchorWorkspace::default();
             anchors.set_budget(usize::MAX);
@@ -3862,7 +3849,7 @@ mod tests {
                     FinalSupportInput {
                         index,
                         roots: &roots,
-                        part_contacts: &part_contacts,
+                        part_contact: (index == 2).then_some(&part_contact),
                         contact_tops: &contacts,
                         z_gap: 0.125,
                         frame,
@@ -3931,7 +3918,7 @@ mod tests {
                     FinalSupportInput {
                         index: 1,
                         roots: &roots,
-                        part_contacts: &part_contacts,
+                        part_contact: None,
                         contact_tops: &contacts,
                         z_gap: 0.125,
                         frame,
