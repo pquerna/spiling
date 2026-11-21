@@ -3860,6 +3860,40 @@ fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
 }
 
 #[test]
+fn bambu_arc_header_matches_independently_decoded_filament() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let setup = catalog.find_setup("bambulab.a1-mini.04").unwrap();
+    let intent = crate::create_default_intent(
+        Arc::new(catalog.stock_capture(setup).unwrap()),
+        crate::generic_selection(setup, "pla").unwrap(),
+        crate::QualityPreset::Draft,
+        crate::SupportChoice::Off,
+    )
+    .unwrap();
+    let built = Scene::new(HOLE, &[pose(80.0, 80.0, 0.0)])
+        .compile(&intent)
+        .unwrap();
+    let program = built.program_text().unwrap();
+    assert!(
+        program
+            .lines()
+            .any(|line| line.starts_with("G2 ") || line.starts_with("G3 "))
+    );
+    let filament_mm: f64 = program
+        .lines()
+        .find_map(|line| line.strip_prefix("; total filament length [mm] : "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let replay = verify_bundle(&built, &AtomicBool::new(false)).unwrap();
+    let decoded_mm = replay.filament_length_mm
+        + replay.priming_filament_length_mm
+        + replay.adhesion_filament_length_mm
+        + replay.support_filament_length_mm;
+    assert!((filament_mm - decoded_mm).abs() <= 0.0051);
+}
+
+#[test]
 fn bambu_inspection_writes_and_independently_rereads_a_deterministic_package() {
     use spiling_contracts::hardware::builtin_catalog;
     let catalog = builtin_catalog().unwrap();

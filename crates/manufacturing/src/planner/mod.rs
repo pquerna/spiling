@@ -87,7 +87,13 @@ pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<NormalizedPrintPlan, ManufacturingError> {
+) -> Result<
+    (
+        NormalizedPrintPlan,
+        Option<crate::realization::BambuEstimate>,
+    ),
+    ManufacturingError,
+> {
     let mut timing = crate::timing::Clock::new("planner.plan");
     let (mut plan, withdrawal) = plan_with(input, cancel, geometry_work)?;
     timing.mark("construction");
@@ -105,7 +111,7 @@ pub(crate) fn plan(
     arcs::attach(&mut plan, &sources, cancel)?;
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     timing.mark("arc_attachment_and_bed");
-    crate::realization::canonicalize(&mut plan, input.intent, cancel)?;
+    let emission = crate::realization::prepare(&mut plan, input.intent, cancel)?;
     timing.mark("realization");
     if let Some(withdrawal) = withdrawal {
         withdrawal.certify_realized(
@@ -119,7 +125,7 @@ pub(crate) fn plan(
     }
     plan.validate(input.intent)?;
     timing.mark("plan_validation");
-    Ok(plan)
+    Ok((plan, emission))
 }
 
 /// A fill, skin or bridge row whose emitted XYZ6 chord is shorter than the

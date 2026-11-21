@@ -6,107 +6,37 @@
 //! per-layer markers (`; CHANGE_LAYER`, `M73 P/R` progress, `M73 L` layer
 //! number, `M991 S0 P` layer-change notification). The marker forms were
 //! observed in Bambu Studio 02.09.01.70 A1/A1 mini exports; the values here
-//! are this producer's own. Progress and remaining time come from a simple
-//! producer estimate over the same realization stream (each move at its
-//! feed, capped by the speed one acceleration reaches over its length); they
-//! are display data, not the verifier's independent estimate.
+//! are this producer's own. Progress and remaining time read the routing
+//! clock; they are display data, separate from the verifier's estimate.
 
-use crate::{check_cancel, realization};
-use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+use crate::realization::BambuEstimate;
 use spiling_contracts::manufacturing::*;
 use std::fmt::Write;
-use std::sync::atomic::AtomicBool;
 
-pub(super) struct Survey {
-    /// Producer-estimated seconds of each scheduled layer.
-    layer_seconds: Vec<f64>,
-    total_seconds: f64,
-    filament_mm: f64,
+pub(super) struct Survey<'a> {
+    estimate: &'a BambuEstimate,
     filament_diameter_mm: f64,
-    max_z_mm: f64,
-    layers: Vec<(f64, f64)>,
+    layers: &'a [PrintLayer],
 }
 
-impl Survey {
+impl<'a> Survey<'a> {
     pub fn new(
-        plan: &NormalizedPrintPlan,
+        plan: &'a NormalizedPrintPlan,
         intent: &ManufacturingIntent,
-        job: &SingleExtruderJob,
-        cancel: &AtomicBool,
-    ) -> Result<Self, ManufacturingError> {
-        let acceleration = job.timing_model.map(|m| m.acceleration_mm_s2);
-        let move_seconds = |length: f64, speed: f64| {
-            if length <= 0.0 || speed <= 0.0 {
-                return 0.0;
-            }
-            let reachable = acceleration.map_or(speed, |a| speed.min((a * length).sqrt()));
-            length / reachable
-        };
-        let mut layer_seconds = vec![0.0; plan.layers.len()];
-        let mut layer = None;
-        let mut position = Some(project_xyz6_point_mm(job.prime_end_mm)?);
-        let mut extrusion = job.prime_filament_length_mm;
-        let mut max_z = job.prime_end_mm[2].max(job.prime_start_mm[2]);
-        let (_, last_extrusion) =
-            realization::stream(plan, intent, cancel, position, extrusion, |event| {
-                use realization::Event;
-                let mut seconds = 0.0;
-                match event {
-                    Event::Layer(index) => layer = Some(index as usize),
-                    Event::Travel(to, speed)
-                    | Event::Deposit(to, _, speed)
-                    | Event::Waste(to, _, speed)
-                    | Event::Arc(to, _, _, _, speed) => {
-                        let to = project_xyz6_point_mm(to)?;
-                        if let Some(from) = position {
-                            let length = (to[0] - from[0])
-                                .hypot(to[1] - from[1])
-                                .hypot(to[2] - from[2]);
-                            seconds = move_seconds(length, speed);
-                        }
-                        if !matches!(event, Event::Travel(..)) {
-                            max_z = max_z.max(to[2]);
-                        }
-                        if let Event::Deposit(_, e, _)
-                        | Event::Waste(_, e, _)
-                        | Event::Arc(_, _, _, e, _) = event
-                        {
-                            extrusion = e;
-                        }
-                        position = Some(to);
-                    }
-                    Event::Extrusion(e, speed) => {
-                        seconds = move_seconds((e - extrusion).abs(), speed);
-                        extrusion = e;
-                    }
-                    _ => {}
-                }
-                if let Some(index) = layer {
-                    layer_seconds[index] += seconds;
-                }
-                Ok(())
-            })?;
-        check_cancel(cancel)?;
-        let total_seconds = layer_seconds.iter().fold(0.0, |a, b| a + b);
-        Ok(Self {
-            layer_seconds,
-            total_seconds,
-            filament_mm: last_extrusion,
+        estimate: &'a BambuEstimate,
+    ) -> Self {
+        Self {
+            estimate,
             filament_diameter_mm: intent.recipe.filament_diameter_mm,
-            max_z_mm: max_z,
-            layers: plan
-                .layers
-                .iter()
-                .map(|l| (l.z_mm, l.z_mm - l.lower_z_mm))
-                .collect(),
-        })
+            layers: &plan.layers,
+        }
     }
 
     /// The header block. Keys follow the observed Bambu Studio header; the
     /// generator line names this producer.
     pub fn header(&self, out: &mut impl Write) -> std::fmt::Result {
         let area = std::f64::consts::PI * (self.filament_diameter_mm * 0.5).powi(2);
-        let time = duration(self.total_seconds);
+        let time = duration(self.estimate.total_s);
         writeln!(out, "; HEADER_BLOCK_START")?;
         writeln!(out, "; Spiling emitter {}", crate::EMITTER_VERSION)?;
         writeln!(
@@ -117,15 +47,15 @@ impl Survey {
         writeln!(
             out,
             "; total filament length [mm] : {:.2}",
-            self.filament_mm
+            self.estimate.filament_mm
         )?;
         writeln!(
             out,
             "; total filament volume [cm^3] : {:.2}",
-            self.filament_mm * area / 1000.0
+            self.estimate.filament_mm * area / 1000.0
         )?;
         writeln!(out, "; filament_diameter: {:.2}", self.filament_diameter_mm)?;
-        writeln!(out, "; max_z_height: {:.2}", self.max_z_mm)?;
+        writeln!(out, "; max_z_height: {:.2}", self.estimate.max_z_mm)?;
         writeln!(out, "; filament: 1")?;
         writeln!(out, "; HEADER_BLOCK_END")
     }
@@ -133,16 +63,16 @@ impl Survey {
     /// `M73 P<percent> R<minutes remaining>` before `layer` (the plan's
     /// layer count gives the finish).
     pub fn progress(&self, layer: usize, out: &mut impl Write) -> std::fmt::Result {
-        if layer >= self.layer_seconds.len() {
+        if layer >= self.estimate.starts_s.len() {
             return writeln!(out, "M73 P100 R0");
         }
-        let elapsed = self.layer_seconds[..layer].iter().fold(0.0, |a, b| a + b);
-        let (percent, remaining) = if self.total_seconds > 0.0 {
+        let elapsed = self.estimate.starts_s[layer];
+        let (percent, remaining) = if self.estimate.total_s > 0.0 {
             (
-                (100.0 * elapsed / self.total_seconds)
+                (100.0 * elapsed / self.estimate.total_s)
                     .floor()
                     .clamp(0.0, 100.0) as u32,
-                ((self.total_seconds - elapsed).max(0.0) / 60.0).ceil() as u32,
+                ((self.estimate.total_s - elapsed).max(0.0) / 60.0).ceil() as u32,
             )
         } else {
             (0, 0)
@@ -152,7 +82,8 @@ impl Survey {
 
     pub fn layer(&self, index: u32, out: &mut impl Write) -> std::fmt::Result {
         let i = index as usize;
-        let (z, height) = self.layers[i];
+        let layer = &self.layers[i];
+        let (z, height) = (layer.z_mm, layer.z_mm - layer.lower_z_mm);
         writeln!(out, "; CHANGE_LAYER")?;
         writeln!(out, "; Z_HEIGHT: {}", trimmed(z))?;
         writeln!(out, "; LAYER_HEIGHT: {}", trimmed(height))?;
@@ -160,6 +91,53 @@ impl Survey {
         writeln!(out, "M73 L{}", index + 1)?;
         writeln!(out, "M991 S0 P{index}")
     }
+}
+
+/// Metadata for emitter/verifier fixtures that begin with a hand-authored
+/// normalized plan, outside the production scheduling boundary.
+#[cfg(test)]
+pub(super) fn fixture_estimate(
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    job: &SingleExtruderJob,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<BambuEstimate, ManufacturingError> {
+    use crate::realization::{Event, stream};
+    let mut estimate = BambuEstimate {
+        starts_s: Vec::with_capacity(plan.layers.len()),
+        total_s: 0.0,
+        filament_mm: job.prime_filament_length_mm,
+        max_z_mm: job.prime_start_mm[2].max(job.prime_end_mm[2]),
+    };
+    let mut position = job.prime_end_mm;
+    let (_, extrusion) = stream(
+        plan,
+        intent,
+        cancel,
+        Some(position),
+        estimate.filament_mm,
+        |event| {
+            match event {
+                Event::Layer(_) => estimate.starts_s.push(estimate.total_s),
+                Event::Travel(to, speed)
+                | Event::Deposit(to, _, speed)
+                | Event::Arc(to, _, _, _, speed) => {
+                    estimate.total_s += (to[0] - position[0])
+                        .hypot(to[1] - position[1])
+                        .hypot(to[2] - position[2])
+                        / speed;
+                    position = to;
+                    if !matches!(event, Event::Travel(..)) {
+                        estimate.max_z_mm = estimate.max_z_mm.max(to[2]);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    )?;
+    estimate.filament_mm = extrusion;
+    Ok(estimate)
 }
 
 fn duration(seconds: f64) -> String {

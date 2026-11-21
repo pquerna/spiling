@@ -39,9 +39,16 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
 }
 
-/// Deposition order is stored in the normalized plan, never hidden in the
-/// emitter. The scheduler's transient decisions are released before streaming;
-/// no second motion/index stream is retained.
+/// Transient Bambu display data from the normalized order. It is not part of
+/// the serialized plan or used by independent replay.
+pub(crate) struct BambuEstimate {
+    pub starts_s: Vec<f64>,
+    pub total_s: f64,
+    pub filament_mm: f64,
+    pub max_z_mm: f64,
+}
+
+#[cfg(test)]
 pub(crate) fn canonicalize(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -55,12 +62,37 @@ pub(crate) fn canonicalize(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn canonicalize_with_tool_order(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
     order: spiling_deposition_routing::ToolOrder,
 ) -> Result<(), ManufacturingError> {
+    prepare_order(plan, intent, cancel, order).map(drop)
+}
+
+/// Deposition order is stored in the normalized plan. The emitter receives
+/// only the display estimates in addition to the plan, never a motion buffer.
+pub(crate) fn prepare(
+    plan: &mut NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+) -> Result<Option<BambuEstimate>, ManufacturingError> {
+    prepare_order(
+        plan,
+        intent,
+        cancel,
+        spiling_deposition_routing::ToolOrder::Free,
+    )
+}
+
+fn prepare_order(
+    plan: &mut NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    order: spiling_deposition_routing::ToolOrder,
+) -> Result<Option<BambuEstimate>, ManufacturingError> {
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => {
             crate::routing::validate_plan(plan, intent, job, cancel)?;
@@ -74,19 +106,45 @@ pub(crate) fn canonicalize_with_tool_order(
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
     connect::connect_roads(plan, intent, routed.is_some(), cancel)?;
-    schedule::apply(plan, intent, routed, position, cancel, order)?;
-    lower_arcs(plan, intent, routed.is_some(), cancel)
+    let mut estimate = schedule::apply(plan, intent, routed, position, cancel, order)?;
+    lower_arcs(plan, intent, routed.is_some(), estimate.as_mut(), cancel)?;
+    Ok(estimate)
+}
+
+fn filament_area(diameter_mm: f64) -> f64 {
+    std::f64::consts::PI * (diameter_mm * 0.5).powi(2)
+}
+
+fn bead_area(width: f64, height: f64, flow: f64) -> f64 {
+    ((width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2)) * flow
+}
+
+fn commanded_arc(
+    points: &[[f64; 3]],
+    run: &ArcRun,
+) -> Result<([f64; 2], program_coordinates::CommandedArc), ManufacturingError> {
+    let from = project_xyz6_point_mm(points[run.first as usize])?;
+    let to = project_xyz6_point_mm(points[run.last as usize])?;
+    let center = [
+        project_xyz6_coordinate_mm(run.center_mm[0])?,
+        project_xyz6_coordinate_mm(run.center_mm[1])?,
+    ];
+    Ok((
+        center,
+        program_coordinates::CommandedArc::new(from, to, center, run.clockwise)?,
+    ))
 }
 
 /// Keep only the arc runs this printer will execute faithfully, after seams
 /// have split them. A run its firmware would segment beyond the recorded
 /// profile tolerance, or too short to name its direction safely, stays the
-/// chords its points already are. This only ever removes arcs, so it cannot
-/// refuse a job; the stored plan is exactly what the emitter writes.
+/// chords its points already are. The stored plan is exactly what the
+/// emitter writes. Bambu also accounts for the retained projected arcs here.
 fn lower_arcs(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     routed: bool,
+    mut estimate: Option<&mut BambuEstimate>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let capabilities = &intent.printer.capabilities;
@@ -120,6 +178,32 @@ fn lower_arcs(
                 (a[0] - b[0]).hypot(a[1] - b[1]) >= MIN_ARC_CHORD_MM
                     && worst <= MAX_FIRMWARE_ARC_DEVIATION_MM
             });
+            if let Some(estimate) = estimate.as_deref_mut()
+                && !path.arcs.is_empty()
+            {
+                // The scheduler counted XYZ6 chords. Replace just the
+                // chords covered by retained commanded arcs, after seams.
+                let edges = path.checked_edges()?;
+                let process = intent.process_for_path(path)?;
+                let flow = speeds::flow_factor(&process, path.kind, layer.index);
+                let area = filament_area(intent.recipe.filament_diameter_mm);
+                for run in &path.arcs {
+                    check_cancel(cancel)?;
+                    let (_, arc) = commanded_arc(points, run)?;
+                    let first = run.first as usize;
+                    let width = edges.edge(first).unwrap().width_mm;
+                    let mut chord_length = 0.0;
+                    for edge in edges.skip(first).take((run.last - run.first) as usize) {
+                        chord_length += distance(
+                            project_xyz6_point_mm(edge.points_mm[0])?,
+                            project_xyz6_point_mm(edge.points_mm[1])?,
+                        );
+                    }
+                    estimate.filament_mm += (arc.length_mm - chord_length)
+                        * bead_area(width, path.height_mm(), flow)
+                        / area;
+                }
+            }
         }
     }
     Ok(())
@@ -145,7 +229,7 @@ pub(crate) fn stream(
     mut emit: impl FnMut(Event) -> Result<(), ManufacturingError>,
 ) -> Result<(Option<[f64; 3]>, f64), ManufacturingError> {
     let recipe = &intent.recipe;
-    let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
+    let filament_area = filament_area(recipe.filament_diameter_mm);
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
@@ -390,22 +474,9 @@ pub(crate) fn stream(
                         continue;
                     }
                     if let Some(run) = runs.next_if(|run| run.first as usize == index) {
-                        let (first, last) = (run.first as usize, run.last as usize);
-                        let from = project_xyz6_point_mm(path.points_mm[first])?;
-                        let to = project_xyz6_point_mm(path.points_mm[last])?;
-                        let center = [
-                            program_coordinates::project_xyz6_coordinate_mm(run.center_mm[0])?,
-                            program_coordinates::project_xyz6_coordinate_mm(run.center_mm[1])?,
-                        ];
-                        let arc = program_coordinates::CommandedArc::new(
-                            from,
-                            to,
-                            center,
-                            run.clockwise,
-                        )?;
-                        let area = ((edge.width_mm - height) * height
-                            + std::f64::consts::PI * (height * 0.5).powi(2))
-                            * flow;
+                        let last = run.last as usize;
+                        let (center, arc) = commanded_arc(&path.points_mm, run)?;
+                        let area = bead_area(edge.width_mm, height, flow);
                         // The bead follows the commanded arc, so its length
                         // owns the extrusion.
                         extrusion += arc.length_mm * area / filament_area;
@@ -434,9 +505,7 @@ pub(crate) fn stream(
                             ),
                         ));
                     }
-                    let area = ((edge.width_mm - height) * height
-                        + std::f64::consts::PI * (height * 0.5).powi(2))
-                        * flow;
+                    let area = bead_area(edge.width_mm, height, flow);
                     // Constant-section G1 deposits along the actual XYZ6 chord,
                     // not its unrounded source proposal. Otherwise a circular bead
                     // can become wholly sub-circular merely through XY rounding.

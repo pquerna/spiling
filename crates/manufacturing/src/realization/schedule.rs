@@ -89,7 +89,7 @@ pub(super) fn apply(
     start: Option<[f64; 3]>,
     cancel: &AtomicBool,
     order: routing::ToolOrder,
-) -> Result<(), ManufacturingError> {
+) -> Result<Option<BambuEstimate>, ManufacturingError> {
     let machine = machine(intent, routed, start)?;
     let router = routed.map(FixedDualJob::router).transpose()?;
     let count: usize = plan.layers.iter().map(|layer| layer.paths.len()).sum();
@@ -104,6 +104,20 @@ pub(super) fn apply(
     let dependencies = attachment_dependencies(plan, cancel)?;
     // A layer is one barrier; a first layer with a skirt or brim prints the
     // skirt, then the brim, then everything else, as three barriers.
+    let mut estimate = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job }
+            if intent.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 =>
+        {
+            Some(BambuEstimate {
+                starts_s: Vec::with_capacity(plan.layers.len()),
+                total_s: 0.0,
+                filament_mm: job.prime_filament_length_mm,
+                max_z_mm: job.prime_end_mm[2].max(job.prime_start_mm[2]),
+            })
+        }
+        _ => None,
+    };
+    let filament_area = filament_area(intent.recipe.filament_diameter_mm);
     let mut base = 0u32;
     for layer in &plan.layers {
         check_cancel(cancel)?;
@@ -120,7 +134,23 @@ pub(super) fn apply(
                     }
                 };
             let points = &path.points_mm;
-            let length: f64 = points.windows(2).map(|p| distance(p[0], p[1])).sum();
+            let process = intent.process_for_path(path)?;
+            let length = if let Some(estimate) = &mut estimate {
+                let flow = speeds::flow_factor(&process, path.kind, layer.index);
+                let height = path.height_mm();
+                let mut length = 0.0;
+                for edge in path.checked_edges()? {
+                    let [a, b] = [edge.points_mm[0], edge.points_mm[1]];
+                    length += distance(a, b);
+                    let [a, b] = [project_xyz6_point_mm(a)?, project_xyz6_point_mm(b)?];
+                    estimate.filament_mm +=
+                        distance(a, b) * bead_area(edge.width_mm, height, flow) / filament_area;
+                    estimate.max_z_mm = estimate.max_z_mm.max(a[2]).max(b[2]);
+                }
+                length
+            } else {
+                points.windows(2).map(|p| distance(p[0], p[1])).sum()
+            };
             tasks.push(routing::Task {
                 ends: if closed(path) {
                     routing::Ends::Loop {
@@ -139,7 +169,7 @@ pub(super) fn apply(
                     .into(),
                 barrier,
                 prerequisites: &dependencies[tasks.len()],
-                duration_s: length / intent.process_for_path(path)?.speed_mm_s,
+                duration_s: length / process.speed_mm_s,
                 seam_policy: (closed(path) && path.owner == Some(DepositionOwner::Wall))
                     .then_some(intent.recipe.seam_policy),
                 physical_z_mm: path.physical_z_mm,
@@ -151,7 +181,10 @@ pub(super) fn apply(
     drop(tasks);
     let scheduled = match scheduled {
         Ok(scheduled) => scheduled,
-        Err(routing::Error::Cancelled) => return check_cancel(cancel),
+        Err(routing::Error::Cancelled) => {
+            check_cancel(cancel)?;
+            unreachable!("routing cancels only on a set cancellation flag");
+        }
         Err(other) => {
             return Err(error(
                 ManufacturingErrorCode::InvalidSpecification,
@@ -165,6 +198,25 @@ pub(super) fn apply(
             plan.routing_tool_orders
                 .push([groups[0].tool as u8, groups[1].tool as u8]);
         }
+    }
+    if let Some(estimate) = &mut estimate {
+        // Empty layers start at the next group's time. Skirt/brim barriers
+        // belong to their layer, whose first group supplies the start time.
+        let mut groups = scheduled.groups.iter().peekable();
+        let mut barrier = 0;
+        for layer in &plan.layers {
+            let start = groups
+                .peek()
+                .map_or(scheduled.cost.total_s, |group| group.begins_at_s);
+            estimate.starts_s.push(start.min(scheduled.cost.total_s));
+            barrier += if layer.paths.iter().any(|path| path.kind.is_adhesion()) {
+                3
+            } else {
+                1
+            };
+            while groups.next_if(|group| group.barrier < barrier).is_some() {}
+        }
+        estimate.total_s = scheduled.cost.total_s;
     }
     // Visits are grouped by ascending layer; a layer's visits are contiguous.
     let mut visits = scheduled.visits.iter();
@@ -205,7 +257,7 @@ pub(super) fn apply(
         }
         offset += n;
     }
-    Ok(())
+    Ok(estimate)
 }
 
 /// A receipt names the actual stroke, not every path sharing a process role.

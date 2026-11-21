@@ -14,12 +14,32 @@ use std::sync::atomic::AtomicBool;
 mod bambu;
 mod lifecycle;
 
-/// Emit the explicit diagnostic, complete single-extruder or fixed-dual
-/// workflow in the printer's dialect. Takes the validated construction;
-/// independent replay is mandatory.
+#[cfg(test)]
 pub(crate) fn emit(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+) -> Result<ChunkSource, ManufacturingError> {
+    // Verifier fixtures already supply ordered plans. Price only the fixture
+    // metadata here so their motion order is not rebuilt before the test.
+    let estimate = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job }
+            if intent.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 =>
+        {
+            Some(bambu::fixture_estimate(plan, intent, job, cancel)?)
+        }
+        _ => None,
+    };
+    emit_prepared(plan, intent, estimate.as_ref(), cancel)
+}
+
+/// Emit the explicit diagnostic, complete single-extruder or fixed-dual
+/// workflow in the printer's dialect. Takes the validated construction;
+/// independent replay is mandatory.
+pub(crate) fn emit_prepared(
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    estimate: Option<&crate::realization::BambuEstimate>,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
     check_cancel(cancel)?;
@@ -32,8 +52,14 @@ pub(crate) fn emit(
     let dialect = intent.printer.capabilities.output_dialect;
     // Bambu programs carry header, executable-block and layer markers.
     let bambu = match &intent.printer.workflow {
-        JobWorkflow::CompleteMarlin { job } if dialect == OutputDialect::BambuLabGcode3mfV1 => {
-            Some(bambu::Survey::new(plan, intent, job, cancel)?)
+        JobWorkflow::CompleteMarlin { .. } if dialect == OutputDialect::BambuLabGcode3mfV1 => {
+            let estimate = estimate.ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "Bambu emission requires the construction estimate",
+                )
+            })?;
+            Some(bambu::Survey::new(plan, intent, estimate))
         }
         _ => None,
     };
@@ -552,18 +578,35 @@ pub(crate) fn emit(
 /// relative dialects write the exact E8 delta between the rounded target and
 /// the previously emitted rounded position, so the firmware's running sum of
 /// deltas equals the absolute E8 lattice position without float drift.
-fn e_word(target: f64, rounded: f64, emitted: f64, relative: bool) -> String {
+fn e_word(target: f64, rounded: f64, emitted: f64, relative: bool) -> ExtrusionWord {
     if !relative {
-        return format!("{target:.8}");
+        return ExtrusionWord::Absolute(target);
     }
     let units = (rounded * 100_000_000.0).round() as i64 - (emitted * 100_000_000.0).round() as i64;
-    let sign = if units < 0 { "-" } else { "" };
-    let magnitude = units.unsigned_abs();
-    format!(
-        "{sign}{}.{:08}",
-        magnitude / 100_000_000,
-        magnitude % 100_000_000
-    )
+    ExtrusionWord::Relative(units)
+}
+
+enum ExtrusionWord {
+    Absolute(f64),
+    Relative(i64),
+}
+
+impl fmt::Display for ExtrusionWord {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Absolute(target) => write!(out, "{target:.8}"),
+            Self::Relative(units) => {
+                let sign = if units < 0 { "-" } else { "" };
+                let magnitude = units.unsigned_abs();
+                write!(
+                    out,
+                    "{sign}{}.{:08}",
+                    magnitude / 100_000_000,
+                    magnitude % 100_000_000
+                )
+            }
+        }
+    }
 }
 fn writable_position(
     point: [f64; 3],
