@@ -140,6 +140,8 @@ impl Drop for ProjectionTrace {
 struct Demand {
     target: usize,
     failure: strokes::Failure,
+    /// The target layer's worst unanchored span at the end of demand analysis.
+    worst_unanchored_mm: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -815,18 +817,24 @@ pub(super) fn realize(
         {
             return Err(super::bonds::unresolved(first));
         }
+        let mut split = crate::timing::Split::new("support.demand");
+        // Layer payload accounting is read many times per layer; only the
+        // current layer changes, so keep a per-layer ledger.
+        let mut payload = PayloadLedger::new(layers)?;
         for index in 1..layers.len() {
             check_cancel(cancel)?;
+            payload.refresh(index - 1, &layers[index - 1]);
             owned_bytes = native_owned_bytes
-                + layer_payload_bytes(layers.iter())
+                + payload.refresh(index, &layers[index])
                 + vec_bytes(&joined_layers)
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
             anchors.set_budget(workspace_budget(retained, owned_bytes)?);
             let (prior, remaining) = layers.split_at_mut(index);
-            let (layer, following) = remaining.split_first_mut().expect("current support layer");
+            let layer = remaining.first_mut().expect("current support layer");
             check_cancel(cancel)?;
             layer.region_coverage.unsupported_overhang_mm = 0.0;
+            let t = split.start();
             let mut interface_bound = finalize_layer_interface(
                 index,
                 layer,
@@ -835,13 +843,9 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(anchors.retained_bytes()),
                 &mut finalize_interface,
             )?;
+            split.stop("finalize_interface", t);
             owned_bytes = native_owned_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
+                + payload.refresh(index, layer)
                 + vec_bytes(&joined_layers)
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
@@ -855,6 +859,7 @@ pub(super) fn realize(
                 retained,
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
             )?);
+            let t = split.start();
             let mut admission = strokes::analyze(
                 &layer.paths,
                 previous.clone(),
@@ -864,6 +869,8 @@ pub(super) fn realize(
                 &mut anchor_work,
                 cancel,
             )?;
+            split.stop("analyze", t);
+            let t = split.start();
             if admission.failure.is_some() || !interface_bound {
                 // Preserve ordinary authored hatch; only a finite demanded role
                 // component may acquire an independently proved Bridge construction.
@@ -872,12 +879,8 @@ pub(super) fn realize(
                     let axis = authored_axis;
                     let mut staged_segments = without_old;
                     anchors.set_budget(0);
-                    let extra_owned_bytes = layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    ) + vec_bytes(&joined_layers)
+                    let extra_owned_bytes = payload.refresh(index, layer)
+                        + vec_bytes(&joined_layers)
                         + vec_bytes(&demands)
                         + vec_bytes(&original_bridge_roles)
                         + vec_bytes(&admission.bridges)
@@ -916,6 +919,7 @@ pub(super) fn realize(
                             None
                         };
                     let raster_before = work;
+                    let t2 = split.start();
                     let candidate = raster(
                         index,
                         axis,
@@ -928,6 +932,15 @@ pub(super) fn realize(
                     );
                     exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                     let mut candidate = candidate?;
+                    split.stop(
+                        if recover_components {
+                            "raster_components"
+                        } else {
+                            "raster_plain"
+                        },
+                        t2,
+                    );
+                    let t2 = split.start();
                     let joined = coalesce_bridge_rows(
                         &mut candidate,
                         BridgeRowContext {
@@ -943,6 +956,14 @@ pub(super) fn realize(
                         &mut anchor_work,
                         cancel,
                     )?;
+                    split.stop(
+                        if recover_components {
+                            "coalesce_components"
+                        } else {
+                            "coalesce_plain"
+                        },
+                        t2,
+                    );
                     let candidate_bound = finalize_interface(
                         index,
                         &mut candidate,
@@ -983,6 +1004,7 @@ pub(super) fn realize(
                     // Paths are judged independently against the same committed
                     // lower layer, so an attempt that rebuilt the layer's current
                     // paths unchanged keeps the admission already proved for them.
+                    let t2 = split.start();
                     let other = if candidate.paths == layer.paths {
                         admission.clone()
                     } else {
@@ -996,6 +1018,14 @@ pub(super) fn realize(
                             cancel,
                         )?
                     };
+                    split.stop(
+                        if recover_components {
+                            "reanalyze_components"
+                        } else {
+                            "reanalyze_plain"
+                        },
+                        t2,
+                    );
                     let complete = other.failure.is_none();
                     // Same-axis joins preserve every required piece and have their
                     // own direct-anchor proof. Keep that monotone improvement even
@@ -1032,17 +1062,13 @@ pub(super) fn realize(
                     }
                 }
                 owned_bytes = native_owned_bytes
-                    + layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    )
+                    + payload.refresh(index, layer)
                     + vec_bytes(&joined_layers)
                     + vec_bytes(&demands)
                     + vec_bytes(&original_bridge_roles);
                 anchors.set_budget(workspace_budget(retained, owned_bytes)?);
             }
+            split.stop("recovery", t);
             if !interface_bound {
                 return Err(super::bonds::unresolved(layer));
             }
@@ -1104,12 +1130,7 @@ pub(super) fn realize(
                     layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
                 } else {
                     let live = native_owned_bytes
-                        + layer_payload_bytes(
-                            prior
-                                .iter()
-                                .chain(std::iter::once(&*layer))
-                                .chain(following.iter()),
-                        )
+                        + payload.refresh(index, layer)
                         + vec_bytes(&joined_layers)
                         + vec_bytes(&demands)
                         + vec_bytes(&original_bridge_roles)
@@ -1120,16 +1141,12 @@ pub(super) fn realize(
                     demands.push(Demand {
                         target: index,
                         failure,
+                        worst_unanchored_mm: admission.worst_unanchored_mm,
                     });
                 }
             }
             let live = native_owned_bytes
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                )
+                + payload.refresh(index, layer)
                 + vec_bytes(&joined_layers)
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles)
@@ -1142,6 +1159,8 @@ pub(super) fn realize(
                 layer.paths[path].kind = DepositionKind::Bridge;
             }
         }
+        drop(split);
+        drop(payload);
         if demands.is_empty() {
             return Ok(SupportAdmission::Complete(None));
         }
@@ -1208,6 +1227,7 @@ pub(super) fn realize(
         }
         let native_points_before = native_points;
         let native_bytes_before = native_owned_bytes;
+        timing.mark("demand_layers");
         let projected = project_voids(
             &demand_bounds,
             retained,
@@ -1634,14 +1654,18 @@ pub(super) fn realize(
             .flatten()
             .map(|(paths, _)| super::bonds::path_bytes(paths))
             .fold(vec_bytes(&prebuilt), usize::saturating_add);
+        let mut payload = PayloadLedger::new(layers)?;
         for i in 0..layers.len() {
+            if i > 0 {
+                payload.refresh(i - 1, &layers[i - 1]);
+            }
             owned_bytes =
-                native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
+                native_owned_bytes + payload.refresh(i, &layers[i]) + support_metadata_bytes;
             anchors.set_budget(0);
             let (mut paths, mut wall_receipt) = prebuilt[i].take().unwrap_or_default();
             staged_bytes = staged_bytes.saturating_sub(super::bonds::path_bytes(&paths));
             let (prior, remaining) = layers.split_at_mut(i);
-            let (layer, following) = remaining.split_first_mut().expect("current support layer");
+            let layer = remaining.first_mut().expect("current support layer");
             let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
             let retained_domains = retained + geometry.0;
             let live_bytes = owned_bytes
@@ -1730,14 +1754,10 @@ pub(super) fn realize(
             owned_bytes = native_owned_bytes
                 + support_metadata_bytes
                 + geometry.1
-                + layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                );
+                + payload.refresh(i, layer);
         }
         drop(prebuilt);
+        drop(payload);
         timing.mark("support_raster");
         let mut outstanding_roles = original_bridge_roles.as_slice();
         let mut outstanding_demands = demands.as_slice();
@@ -1752,9 +1772,13 @@ pub(super) fn realize(
                 "support retained point accounting underflow",
             )
         })?;
+        let mut split = crate::timing::Split::new("support.regeneration");
+        let mut payload = PayloadLedger::new(layers)?;
         for index in 1..layers.len() {
+            let t = split.start();
             support_metadata_bytes += reconcile_layer_roots(
                 layers,
+                &mut payload,
                 FinalSupportInput {
                     index,
                     roots: &roots,
@@ -1774,6 +1798,7 @@ pub(super) fn realize(
                 &mut anchor_work,
                 cancel,
             )?;
+            split.stop("reconcile_roots", t);
             object_start[index] = layers[index]
                 .paths
                 .iter()
@@ -1786,30 +1811,30 @@ pub(super) fn realize(
                 .split_at(outstanding_demands.partition_point(|demand| demand.target == index));
             outstanding_demands = later_demands;
             let (prior, remaining) = layers.split_at_mut(index);
-            let (layer, following) = remaining.split_first_mut().expect("current support layer");
+            let layer = remaining.first_mut().expect("current support layer");
             let begin = object_start[index];
             let contact_paths = contact_tops[index]
                 .map(|top| prior[top].paths.as_slice())
                 .unwrap_or(&[]);
             let contact = contact_paths.iter().filter(|path| support_role(path.kind));
             let mut replaced_object = joined_layers[index];
-            if unchanged_lower
-                && !replaced_object
-                && original_demands.is_empty()
-                && contact.clone().next().is_none()
-            {
+            if unchanged_lower && !replaced_object && contact.clone().next().is_none() {
+                // Demand analysis already judged and tried to recover these
+                // same object paths against this same lower layer without
+                // contact; repeating it reproduces its result. A layer whose
+                // recovery had succeeded has no demand, and one it replaced
+                // is joined.
+                for demand in original_demands {
+                    layer.region_coverage.unsupported_overhang_mm = demand.worst_unanchored_mm;
+                }
                 unchanged_lower = begin == 0;
                 continue;
             }
             for &(_, path, kind) in original_roles {
                 layer.paths[begin + path].kind = kind;
             }
-            let extra_owned_bytes = layer_payload_bytes(
-                prior
-                    .iter()
-                    .chain(std::iter::once(&*layer))
-                    .chain(following.iter()),
-            ) + support_metadata_bytes
+            let extra_owned_bytes = payload.refresh(index, layer)
+                + support_metadata_bytes
                 + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
             owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
             anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
@@ -1818,18 +1843,15 @@ pub(super) fn realize(
                 super::hatch_key(schedule, index),
             );
             let previous = prior[index - 1].paths.iter();
+            let t = split.start();
             if joined_layers[index] {
                 // Other support demands can change the eventual previous footprints.
                 // Recreate ownership pieces; never retain a stale composite Bridge.
                 let without_old = *segments - path_segments(&layer.paths[begin..]);
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let extra_owned_bytes = layer_payload_bytes(
-                    prior
-                        .iter()
-                        .chain(std::iter::once(&*layer))
-                        .chain(following.iter()),
-                ) + support_metadata_bytes
+                let extra_owned_bytes = payload.refresh(index, layer)
+                    + support_metadata_bytes
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 let staged_anchor_bytes = anchors.retained_bytes();
                 let course = super::hatch_key(schedule, index);
@@ -1903,12 +1925,7 @@ pub(super) fn realize(
                 layer.paths.truncate(begin);
                 let live_bytes = native_owned_bytes
                     + support_metadata_bytes
-                    + layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    )
+                    + payload.refresh(index, layer)
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
                     + super::bonds::path_bytes(&candidate.paths)
                     + candidate_aux_bytes(&candidate)
@@ -1934,19 +1951,16 @@ pub(super) fn realize(
                     retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
                 owned_bytes = native_owned_bytes
                     + support_metadata_bytes
-                    + layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    )
+                    + payload.refresh(index, layer)
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
+            split.stop("joined_rebuild", t);
             anchors.set_budget(workspace_budget(
                 retained_regions,
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
             )?);
+            let t = split.start();
             let mut admission = strokes::analyze(
                 &layer.paths[begin..],
                 previous.clone(),
@@ -1956,18 +1970,16 @@ pub(super) fn realize(
                 &mut anchor_work,
                 cancel,
             )?;
+            split.stop("analyze", t);
+            let t = split.start();
             if admission.failure.is_some() {
                 let without_old = *segments - path_segments(&layer.paths[begin..]);
                 for recover_components in [false, true] {
                     let axis = authored_axis;
                     let mut staged_segments = without_old;
                     anchors.set_budget(0);
-                    let extra_owned_bytes = layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    ) + support_metadata_bytes
+                    let extra_owned_bytes = payload.refresh(index, layer)
+                        + support_metadata_bytes
                         + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
                         + vec_bytes(&admission.bridges);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
@@ -2004,6 +2016,7 @@ pub(super) fn realize(
                             None
                         };
                     let raster_before = work;
+                    let t2 = split.start();
                     let candidate = raster(
                         index,
                         axis,
@@ -2016,6 +2029,15 @@ pub(super) fn realize(
                     );
                     exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                     let mut candidate = candidate?;
+                    split.stop(
+                        if recover_components {
+                            "raster_components"
+                        } else {
+                            "raster_plain"
+                        },
+                        t2,
+                    );
+                    let t2 = split.start();
                     coalesce_bridge_rows(
                         &mut candidate,
                         BridgeRowContext {
@@ -2031,6 +2053,14 @@ pub(super) fn realize(
                         &mut anchor_work,
                         cancel,
                     )?;
+                    split.stop(
+                        if recover_components {
+                            "coalesce_components"
+                        } else {
+                            "coalesce_plain"
+                        },
+                        t2,
+                    );
                     if !finalize_interface(
                         index,
                         &mut candidate,
@@ -2047,6 +2077,7 @@ pub(super) fn realize(
                             .saturating_add(candidate_aux_bytes(&candidate))
                             .saturating_add(stroke_proof_reservation(candidate.paths.len())),
                     )?);
+                    let t2 = split.start();
                     let other = strokes::analyze(
                         &candidate.paths,
                         previous.clone(),
@@ -2056,18 +2087,21 @@ pub(super) fn realize(
                         &mut anchor_work,
                         cancel,
                     )?;
+                    split.stop(
+                        if recover_components {
+                            "reanalyze_components"
+                        } else {
+                            "reanalyze_plain"
+                        },
+                        t2,
+                    );
                     if other.failure.is_none() {
                         replaced_object = true;
                         *segments = without_old + path_segments(&candidate.paths);
                         layer.paths.truncate(begin);
                         let live_bytes = native_owned_bytes
                             + support_metadata_bytes
-                            + layer_payload_bytes(
-                                prior
-                                    .iter()
-                                    .chain(std::iter::once(&*layer))
-                                    .chain(following.iter()),
-                            )
+                            + payload.refresh(index, layer)
                             + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
                             + super::bonds::path_bytes(&candidate.paths)
                             + candidate_aux_bytes(&candidate)
@@ -2097,15 +2131,11 @@ pub(super) fn realize(
                 }
                 owned_bytes = native_owned_bytes
                     + support_metadata_bytes
-                    + layer_payload_bytes(
-                        prior
-                            .iter()
-                            .chain(std::iter::once(&*layer))
-                            .chain(following.iter()),
-                    )
+                    + payload.refresh(index, layer)
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
+            split.stop("recovery", t);
             layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
             unchanged_lower = begin == 0
                 && !replaced_object
@@ -2118,6 +2148,8 @@ pub(super) fn realize(
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
             }
         }
+        drop(split);
+        drop(payload);
         support_metadata_bytes -= vec_bytes(&original_bridge_roles);
         drop(original_bridge_roles);
         support_metadata_bytes = support_metadata_bytes.saturating_sub(
@@ -2240,6 +2272,7 @@ struct FinalSupportInput<'a> {
 
 fn reconcile_layer_roots(
     layers: &mut [PrintLayer],
+    payload: &mut PayloadLedger,
     input: FinalSupportInput<'_>,
     segments: &mut usize,
     anchors: &mut AnchorWorkspace,
@@ -2262,7 +2295,7 @@ fn reconcile_layer_roots(
     let added_bytes = 0usize;
     {
         check_cancel(cancel)?;
-        let payload_bytes = layer_payload_bytes(layers.iter());
+        let payload_bytes = payload.refresh(index, &layers[index]);
         anchors.set_budget(workspace_budget(
             retained_units,
             owned_bytes
@@ -2270,7 +2303,7 @@ fn reconcile_layer_roots(
                 .saturating_add(payload_bytes),
         )?);
         let (prior, remaining) = layers.split_at_mut(index);
-        let (layer, following) = remaining.split_first_mut().expect("final support layer");
+        let layer = remaining.first_mut().expect("final support layer");
         let mut continuing = true;
         if index > 0 {
             // One lower inventory for every path on this layer.
@@ -2303,7 +2336,7 @@ fn reconcile_layer_roots(
             let layer_bytes = super::bonds::path_bytes(&layer.paths);
             let outside = owned_bytes
                 .saturating_add(added_bytes)
-                .saturating_add(layer_payload_bytes(prior.iter().chain(following.iter())))
+                .saturating_add(payload.others(index))
                 .saturating_add(layer_bytes);
             let admit = |extra: usize| {
                 super::remaining_geometry_units(retained_units, outside.saturating_add(extra))
@@ -3262,6 +3295,47 @@ fn material_units(material: &MultiPolygon<f64>) -> usize {
         .sum()
 }
 
+/// Per-layer payload bytes and their running total. Accounting inside a
+/// layer loop reads it instead of rescanning every layer; each read first
+/// re-measures the one layer the loop may have changed. Its own entries are
+/// counted in the total it reports.
+struct PayloadLedger {
+    per_layer: Vec<usize>,
+    total: usize,
+}
+
+impl PayloadLedger {
+    fn new(layers: &[PrintLayer]) -> Result<Self, ManufacturingError> {
+        let mut per_layer = Vec::new();
+        per_layer.try_reserve_exact(layers.len()).map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "layer payload ledger allocation refused",
+            )
+        })?;
+        per_layer.extend(
+            layers
+                .iter()
+                .map(|layer| layer_payload_bytes(std::iter::once(layer))),
+        );
+        let total = per_layer.iter().copied().fold(0, usize::saturating_add);
+        Ok(Self { per_layer, total })
+    }
+
+    /// Re-measure layer `index` and return every layer's payload.
+    fn refresh(&mut self, index: usize, layer: &PrintLayer) -> usize {
+        let bytes = layer_payload_bytes(std::iter::once(layer));
+        self.total = self.total - self.per_layer[index] + bytes;
+        self.per_layer[index] = bytes;
+        self.total.saturating_add(vec_bytes(&self.per_layer))
+    }
+
+    /// Every layer's payload except `index`, as last measured.
+    fn others(&self, index: usize) -> usize {
+        (self.total - self.per_layer[index]).saturating_add(vec_bytes(&self.per_layer))
+    }
+}
+
 fn layer_payload_bytes<'a>(layers: impl Iterator<Item = &'a PrintLayer>) -> usize {
     layers
         .map(|layer| {
@@ -3843,9 +3917,11 @@ mod tests {
             )
             .unwrap();
             assert!(before.failure.is_none() && !before.bridges.is_empty());
+            let mut payload = PayloadLedger::new(&layers).unwrap();
             for index in 1..layers.len() {
                 reconcile_layer_roots(
                     &mut layers,
+                    &mut payload,
                     FinalSupportInput {
                         index,
                         roots: &roots,
@@ -3912,9 +3988,11 @@ mod tests {
                     .sum::<usize>()
             );
             let captured = layers.clone();
+            let mut payload = PayloadLedger::new(&layers).unwrap();
             assert_eq!(
                 reconcile_layer_roots(
                     &mut layers,
+                    &mut payload,
                     FinalSupportInput {
                         index: 1,
                         roots: &roots,

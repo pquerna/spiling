@@ -79,6 +79,16 @@ impl PartContact {
     }
 }
 
+/// What a part landing proposal reads, shared across layer tasks.
+struct LandingInputs<'a> {
+    roots: &'a [Root],
+    /// Per landing, its exposed ledge.
+    ledges: Vec<&'a MultiPolygon<f64>>,
+    layers: &'a [PrintLayer],
+    radius: f64,
+    owned_bytes: usize,
+}
+
 struct LandingProposal<'a> {
     ledge: &'a MultiPolygon<f64>,
     roads: MultiPolygon<f64>,
@@ -812,6 +822,13 @@ impl Sweep<'_> {
         let mut part_contacts = Vec::new();
         reserve_owned(&mut part_contacts, max_top + 1, self.owned_bytes)?;
         part_contacts.resize_with(max_top + 1, || None);
+        let te = std::time::Instant::now();
+        let mut proposed = self.propose_landings(max_top, &raster, &channels[0].active)?;
+        for landing in proposed.iter().flatten() {
+            admit(landing.bytes())?;
+            live.fetch_add(landing.bytes(), Ordering::Relaxed);
+        }
+        up_e += te.elapsed();
         for l in 0..=max_top {
             check_cancel(cancel)?;
             if channels.iter().all(|channel| channel.active[l].is_none()) {
@@ -830,13 +847,7 @@ impl Sweep<'_> {
                 work,
             )?;
             up_nominal += tn.elapsed();
-            let te = std::time::Instant::now();
-            let landing = self.part_landing(l, &raster, channels[0].active[l].as_ref())?;
-            if let Some(landing) = &landing {
-                admit(landing.bytes())?;
-                live.fetch_add(landing.bytes(), Ordering::Relaxed);
-            }
-            up_e += te.elapsed();
+            let landing = proposed[l].take();
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
             for (c, channel) in channels.iter_mut().enumerate() {
@@ -1011,10 +1022,45 @@ impl Sweep<'_> {
         })
     }
 
+    /// Propose every layer's part landing before the up pass. A proposal
+    /// reads only the ordinary channel's down-pass candidate at that layer
+    /// and the object layers' roads, never the up pass, so layers are
+    /// proposed in parallel; each is the same proposal the up pass would
+    /// make at that layer.
+    fn propose_landings(
+        &self,
+        max_top: usize,
+        raster: &Raster<'_>,
+        active: &[Option<Bits>],
+    ) -> Result<Vec<Option<PartContact>>, ManufacturingError> {
+        use rayon::prelude::*;
+        let mut ledges = Vec::new();
+        reserve_owned(&mut ledges, self.landings.len(), self.owned_bytes)?;
+        ledges.extend(self.landings.iter().map(|landing| &landing.material));
+        let inputs = LandingInputs {
+            roots: self.roots,
+            ledges,
+            layers: self.layers,
+            radius: self.recipe.bead_width_mm * 0.5,
+            owned_bytes: self.owned_bytes,
+        };
+        let working_set = crate::working_set::current();
+        (0..=max_top)
+            .into_par_iter()
+            .map(|l| {
+                crate::working_set::scope(working_set, || {
+                    Self::part_landing(&inputs, l, raster, active[l].as_ref())
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// Propose each reachable part root on ordinary model roads. Reconciliation
     /// qualifies their final deposited intervals before granting contact.
     fn part_landing(
-        &self,
+        inputs: &LandingInputs<'_>,
         l: usize,
         raster: &Raster<'_>,
         active: Option<&Bits>,
@@ -1023,7 +1069,7 @@ impl Sweep<'_> {
             return Ok(None);
         };
         let mut roots = Vec::new();
-        for (index, root) in self.roots.iter().enumerate().rev() {
+        for (index, root) in inputs.roots.iter().enumerate().rev() {
             let Root::Part {
                 first_support_layer,
                 landing,
@@ -1036,30 +1082,30 @@ impl Sweep<'_> {
                 continue;
             }
             check_cancel(raster.cancel)?;
-            if material_bounds(&self.landings[landing])
+            if material_bounds(inputs.ledges[landing])
                 .is_some_and(|bounds| active.meets_rect(&raster.frame, bounds))
             {
-                reserve_owned(&mut roots, 1, self.owned_bytes)?;
+                reserve_owned(&mut roots, 1, inputs.owned_bytes)?;
                 roots.push(index);
             }
         }
         let footprint = |object_layer: usize, live_bytes| {
             established::proposal_geometry(
                 raster,
-                self.layers[object_layer]
+                inputs.layers[object_layer]
                     .paths
                     .iter()
                     .filter(|path| established::ordinary(path)),
-                self.recipe.bead_width_mm * 0.5,
+                inputs.radius,
                 live_bytes,
             )
         };
-        let root_geometry = |index| match self.roots[index] {
+        let root_geometry = |index| match inputs.roots[index] {
             Root::Part {
                 object_layer,
                 landing,
                 ..
-            } => (object_layer, &self.landings[landing].material),
+            } => (object_layer, inputs.ledges[landing]),
             Root::Bed => unreachable!("part landing root"),
         };
         match roots.as_slice() {
