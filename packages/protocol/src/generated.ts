@@ -870,7 +870,11 @@ export type NormalizedPrintPlan = {
  * Both mandatory service groups per actual layer for the bounded dual route.
  * Single-tool plans retain an empty table. Entries are permutations of 0,1.
  */
-routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, adhesion: AdhesionSummary, };
+routing_tool_orders: Array<[number, number]>, interior_selection: InteriorSelection | null, functional_material_frame: FunctionalMaterialFrame | null, material_frames: Array<SurfaceColorFrame>, material_domains: Array<ResolvedMaterialDomain>, schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number,
+/**
+ * Support grid cell edge in XYZ6 units; [`SUPPORT_GRID_CELL_XYZ6`].
+ */
+support_grid_cell_xyz6: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, adhesion: AdhesionSummary, };
 
 export type NormalizedSource = { hash: SourceHash, format: MeshSourceFormat,
 /**

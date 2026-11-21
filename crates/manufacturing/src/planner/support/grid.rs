@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// tolerance. Support domain, clearance and landing answers are computed on
 /// cells of this size and always rounded to the safe side, so a support
 /// boundary may sit up to a few cells inside the exact answer, never outside.
-pub(super) const SUPPORT_CELL_MM: f64 = 0.05;
+pub(super) const SUPPORT_CELL_MM: f64 = spiling_contracts::manufacturing::SUPPORT_GRID_CELL_MM;
 
 /// Absolute guard against floating rounding in raster arithmetic. Outward
 /// rasters widen by it and inward rasters lose it; it is far below a cell.

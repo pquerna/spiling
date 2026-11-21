@@ -254,6 +254,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         offset_tolerance_mm: 0.001,
         surface_tolerance_mm: 0.001,
         layer_quantization_mm: 0.000_001,
+        support_grid_cell_xyz6: spiling_contracts::manufacturing::SUPPORT_GRID_CELL_XYZ6,
         layers: vec![
             PrintLayer {
                 skin_command_fits: Vec::new(),

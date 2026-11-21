@@ -2433,6 +2433,7 @@ fn admit_schedule<'model>(
             offset_tolerance_mm: OFFSET_TOLERANCE_MM,
             surface_tolerance_mm: surface::SURFACE_TOLERANCE_MM,
             layer_quantization_mm: LAYER_QUANTIZATION_MM,
+            support_grid_cell_xyz6: SUPPORT_GRID_CELL_XYZ6,
         };
         if let JobWorkflow::FixedDualMarlin { job } = &input.intent.printer.workflow {
             let job = job.router()?;

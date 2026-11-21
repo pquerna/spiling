@@ -638,6 +638,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             surface_tolerance_mm: 0.001,
             offset_tolerance_mm: 0.001,
             layer_quantization_mm: 0.000001,
+            support_grid_cell_xyz6: spiling_contracts::manufacturing::SUPPORT_GRID_CELL_XYZ6,
             surface_resolution: vec![],
             layers: vec![PrintLayer {
                 skin_command_fits: Vec::new(),

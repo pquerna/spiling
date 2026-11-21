@@ -1335,6 +1335,28 @@ fn regional_accounting_consumes_heterogeneous_fractions_without_global_averaging
 }
 
 #[test]
+fn plans_record_exactly_the_support_grid_cell() {
+    let captured = regional_bundle();
+    captured.plan.validate(&captured.provenance.intent).unwrap();
+    assert_eq!(captured.plan.support_grid_cell_xyz6, 50_000);
+    assert_eq!(SUPPORT_GRID_CELL_MM, 0.05);
+    for cell in [0, 49_999, 50_001, u32::MAX] {
+        let mut changed = captured.plan.clone();
+        changed.support_grid_cell_xyz6 = cell;
+        assert!(
+            changed.validate(&captured.provenance.intent).is_err(),
+            "cell {cell}"
+        );
+    }
+    let mut value = serde_json::to_value(&captured.plan).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("support_grid_cell_xyz6");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(value).is_err());
+}
+
+#[test]
 fn regional_accounting_rejects_nonfinite_empty_and_out_of_range_domains() {
     let captured = regional_bundle();
     for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -1826,6 +1848,7 @@ fn plan() -> NormalizedPrintPlan {
         surface_tolerance_mm: 0.001,
         offset_tolerance_mm: 0.005,
         layer_quantization_mm: 0.000001,
+        support_grid_cell_xyz6: SUPPORT_GRID_CELL_XYZ6,
         surface_resolution: vec![],
         native_geometry: native_geometry(),
         layers: vec![PrintLayer {

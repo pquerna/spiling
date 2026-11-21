@@ -1525,6 +1525,12 @@ pub const SPARSE_ROAD_TOLERANCE_MM: f64 = 0.05;
 /// widths, that prints without support. Support admission demands nothing
 /// for a shorter run, and independent replay accepts it.
 pub const MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS: f64 = 3.0;
+/// ADR012 support grid cell edge in XYZ6 units (1 nm): the one recorded
+/// tolerance on which support demand, domain and clearance are rasterized,
+/// always rounded to the safe side. Every plan records it.
+pub const SUPPORT_GRID_CELL_XYZ6: u32 = 50_000;
+/// [`SUPPORT_GRID_CELL_XYZ6`] in millimetres, correctly rounded.
+pub const SUPPORT_GRID_CELL_MM: f64 = SUPPORT_GRID_CELL_XYZ6 as f64 / 1_000_000.0;
 impl PlanarPrintRecipe {
     /// The native shape error this recipe requests: the recorded profile
     /// tolerance, at most a twentieth of the bead width (ADR012).
@@ -3588,6 +3594,8 @@ pub struct NormalizedPrintPlan {
     pub surface_tolerance_mm: f64,
     pub offset_tolerance_mm: f64,
     pub layer_quantization_mm: f64,
+    /// Support grid cell edge in XYZ6 units; [`SUPPORT_GRID_CELL_XYZ6`].
+    pub support_grid_cell_xyz6: u32,
     #[serde(deserialize_with = "resolution::records")]
     pub surface_resolution: Vec<SurfaceResolution>,
     pub native_geometry: NativeGeometryCoverageSummary,
@@ -3851,6 +3859,11 @@ impl NormalizedPrintPlan {
         ])?;
         if self.surface_tolerance_mm > 0.001 {
             return Err(invalid("surface approximation bound exceeds 0.001 mm"));
+        }
+        if self.support_grid_cell_xyz6 != SUPPORT_GRID_CELL_XYZ6 {
+            return Err(invalid(
+                "support grid cell is not the recorded ADR012 support tolerance",
+            ));
         }
         if self.layers.is_empty() {
             return Err(invalid("print plan is empty"));
