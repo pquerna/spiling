@@ -540,23 +540,6 @@ pub(super) fn hatch(
     )
 }
 
-pub(super) fn hatch_support(
-    fill: &MultiPolygon<f64>,
-    kind: DepositionKind,
-    fraction: f64,
-    layer: &HatchLayer<'_>,
-    paths: &mut Vec<DepositionPath>,
-    segments: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    for polygon in &fill.0 {
-        check_cancel(cancel)?;
-        let rows = HatchRows::support(polygon, fraction, layer)?;
-        hatch_polygon(polygon, kind, &rows, layer, paths, segments, cancel)?;
-    }
-    Ok(())
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "Authored common phase and ordinary recovery phase are distinct hatch policies"
@@ -640,22 +623,6 @@ impl HatchRows {
                 .clamp(0.0, (self.count - 1) as f64)
         };
         Some(self.start + ordinal * self.spacing)
-    }
-
-    pub(super) fn support(
-        polygon: &Polygon<f64>,
-        fraction: f64,
-        layer: &HatchLayer<'_>,
-    ) -> Result<Self, ManufacturingError> {
-        Self::common(
-            polygon,
-            fraction,
-            &HatchLayer {
-                height: layer.recipe.layer_height_mm,
-                ..*layer
-            },
-            [0.0, 0.0],
-        )
     }
 
     pub(super) fn new(

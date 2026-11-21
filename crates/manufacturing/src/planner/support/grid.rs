@@ -34,6 +34,12 @@ const GUARD_MM: f64 = 1.0e-7;
 /// Cells of margin kept around the requested bounds.
 const MARGIN_CELLS: f64 = 2.0;
 
+/// Inward clip of every grid run end, and the distance within which a line
+/// counts as lying on a cell boundary. It covers XYZ6 projection, so a
+/// projected centreline point stays inside the closed cells it came from.
+const RUN_CLIP_MM: f64 =
+    2.0 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
+
 /// Fixed cell frame: cell `(col, row)` covers
 /// `[ox + col·c, ox + (col + 1)·c] × [oy + row·c, oy + (row + 1)·c]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -157,6 +163,25 @@ impl Bits {
     #[cfg(test)]
     pub(super) fn contains(&self, col: usize, row: usize) -> bool {
         self.word(row, col / 64) >> (col % 64) & 1 == 1
+    }
+
+    /// Millimetre extent of the window on `axis` (0: x, 1: y), or `None`
+    /// when empty.
+    pub(super) fn extent(&self, frame: &CellFrame, axis: usize) -> Option<[f64; 2]> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(if axis == 0 {
+            [
+                frame.x((self.word0 * 64) as f64),
+                frame.x(((self.word0 + self.width) * 64) as f64),
+            ]
+        } else {
+            [
+                frame.y(self.row0 as f64),
+                frame.y((self.row0 + self.rows()) as f64),
+            ]
+        })
     }
 
     /// Number of set cells.
@@ -285,7 +310,7 @@ pub(super) struct Raster<'a> {
 }
 
 impl Raster<'_> {
-    fn charge(&self, amount: usize) {
+    pub(super) fn charge(&self, amount: usize) {
         self.work.fetch_add(amount, Ordering::Relaxed);
     }
 
@@ -372,6 +397,15 @@ impl Raster<'_> {
             data,
         };
         bits.shrink();
+        Ok(bits)
+    }
+
+    /// Cells of `a` not in `b`.
+    pub(super) fn difference(&self, a: &Bits, b: &Bits) -> Result<Bits, ManufacturingError> {
+        let mut data = self.zeroed(a.data.len())?;
+        data.copy_from_slice(&a.data);
+        let mut bits = Bits { data, ..*a };
+        bits.subtract(b);
         Ok(bits)
     }
 
@@ -572,6 +606,194 @@ impl Raster<'_> {
         Ok(())
     }
 
+    /// The cell lines (rows when `fixed` is 1, columns when 0) holding the
+    /// line at `coordinate`: one, or both neighbours when it lies within
+    /// [`RUN_CLIP_MM`] of their shared boundary, so that a projected point
+    /// on it stays inside whichever it lands in.
+    fn lines(&self, fixed: usize, coordinate: f64) -> Option<[usize; 2]> {
+        let frame = &self.frame;
+        let limit = if fixed == 0 { frame.cols } else { frame.rows };
+        let t = (coordinate - frame.origin[fixed]) / frame.cell;
+        if !t.is_finite() {
+            return None;
+        }
+        let nearest = t.round();
+        let boundary = frame.origin[fixed] + nearest * frame.cell;
+        let [lo, hi] = if (coordinate - boundary).abs() <= RUN_CLIP_MM {
+            [nearest - 1.0, nearest]
+        } else {
+            [t.floor(), t.floor()]
+        };
+        (lo >= 0.0 && hi < limit as f64).then_some([lo as usize, hi as usize])
+    }
+
+    /// Runs of set cells along the line at `coordinate` on the `fixed`
+    /// axis (1: constant y, runs along x; 0: constant x, runs along y), as
+    /// millimetre `[start, end]` pairs pushed onto `hits` in increasing
+    /// order. Run ends are cell edges clipped inward by [`RUN_CLIP_MM`].
+    pub(super) fn line_runs(
+        &self,
+        bits: &Bits,
+        fixed: usize,
+        coordinate: f64,
+        hits: &mut Vec<f64>,
+    ) -> Result<(), ManufacturingError> {
+        if bits.is_empty() {
+            return Ok(());
+        }
+        let Some([first, second]) = self.lines(fixed, coordinate) else {
+            return Ok(());
+        };
+        let frame = &self.frame;
+        let mut push = |from: usize, to: usize| -> Result<(), ManufacturingError> {
+            let (from, to) = if fixed == 1 {
+                (frame.x(from as f64), frame.x(to as f64))
+            } else {
+                (frame.y(from as f64), frame.y(to as f64))
+            };
+            self.reserve(hits, 2)?;
+            hits.push(from + RUN_CLIP_MM);
+            hits.push(to - RUN_CLIP_MM);
+            Ok(())
+        };
+        let mut start = None;
+        if fixed == 1 {
+            self.charge(bits.width);
+            for w in bits.word0..bits.word0 + bits.width {
+                let word = bits.word(first, w) & bits.word(second, w);
+                let base = w * 64;
+                let mut pos = 0u32;
+                while pos < 64 {
+                    let rest = word >> pos;
+                    match start {
+                        None => {
+                            if rest == 0 {
+                                break;
+                            }
+                            pos += rest.trailing_zeros();
+                            start = Some(base + pos as usize);
+                        }
+                        Some(from) => {
+                            let ones = rest.trailing_ones();
+                            if pos + ones >= 64 {
+                                break;
+                            }
+                            pos += ones;
+                            push(from, base + pos as usize)?;
+                            start = None;
+                        }
+                    }
+                }
+            }
+            if let Some(from) = start {
+                push(from, (bits.word0 + bits.width) * 64)?;
+            }
+        } else {
+            self.charge(bits.rows());
+            let set = |row: usize, col: usize| bits.word(row, col / 64) >> (col % 64) & 1 == 1;
+            for row in bits.row0..bits.row0 + bits.rows() {
+                match (start, set(row, first) && set(row, second)) {
+                    (None, true) => start = Some(row),
+                    (Some(from), false) => {
+                        push(from, row)?;
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(from) = start {
+                push(from, bits.row0 + bits.rows())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Membership of `bits` along segment `ab` as consecutive pieces
+    /// `(end parameter, inside)`, equal neighbours merged, the last ending
+    /// at 1. Pieces split at cell boundaries; each is judged by the cells
+    /// holding its midpoint that lie in `within`.
+    pub(super) fn along(
+        &self,
+        bits: &Bits,
+        within: &Bits,
+        a: [f64; 2],
+        b: [f64; 2],
+        pieces: &mut Vec<(f64, bool)>,
+    ) -> Result<(), ManufacturingError> {
+        pieces.clear();
+        let frame = &self.frame;
+        for axis in 0..2 {
+            let (p, q) = (a[axis], b[axis]);
+            if p == q {
+                continue;
+            }
+            let first = ((p.min(q) - frame.origin[axis]) / frame.cell).ceil();
+            let last = ((p.max(q) - frame.origin[axis]) / frame.cell).floor();
+            if !(first.is_finite() && last.is_finite()) {
+                return Err(error(
+                    ManufacturingErrorCode::NativeConditioningFailure,
+                    "support grid segment has non-finite coordinates",
+                ));
+            }
+            if last < first {
+                continue;
+            }
+            let count = (last - first) as usize + 1;
+            self.reserve(pieces, count)?;
+            self.charge(count);
+            for m in 0..count {
+                let line = frame.origin[axis] + (first + m as f64) * frame.cell;
+                let t = (line - p) / (q - p);
+                if t > 0.0 && t < 1.0 {
+                    pieces.push((t, false));
+                }
+            }
+        }
+        pieces.sort_unstable_by(|l, r| l.0.total_cmp(&r.0));
+        pieces.dedup_by(|l, r| l.0 == r.0);
+        self.reserve(pieces, 1)?;
+        pieces.push((1.0, false));
+        let mut previous = 0.0;
+        let mut out = 0;
+        for k in 0..pieces.len() {
+            let t = pieces[k].0;
+            let mid = (previous + t) * 0.5;
+            let point = [a[0] + (b[0] - a[0]) * mid, a[1] + (b[1] - a[1]) * mid];
+            // A piece on a cell line belongs to the cells on both sides;
+            // judge it by those inside `within`, the set it runs along.
+            let [cols, rows] = [0, 1].map(|axis| {
+                let u = (point[axis] - frame.origin[axis]) / frame.cell;
+                let near = u.round();
+                if (u - near).abs() <= GUARD_MM / frame.cell {
+                    [near - 1.0, near]
+                } else {
+                    [u.floor(), u.floor()]
+                }
+            });
+            let set = |bits: &Bits, col: f64, row: f64| {
+                col >= 0.0
+                    && row >= 0.0
+                    && bits.word(row as usize, col as usize / 64) >> (col as usize % 64) & 1 == 1
+            };
+            let cells = cols
+                .iter()
+                .flat_map(|&col| rows.iter().map(move |&row| (col, row)));
+            let owned = cells.clone().any(|(col, row)| set(within, col, row));
+            let inside = cells
+                .filter(|&(col, row)| !owned || set(within, col, row))
+                .any(|(col, row)| set(bits, col, row));
+            if out > 0 && pieces[out - 1].1 == inside {
+                pieces[out - 1].0 = t;
+            } else {
+                pieces[out] = (t, inside);
+                out += 1;
+            }
+            previous = t;
+        }
+        pieces.truncate(out);
+        Ok(())
+    }
+
     /// Cells whose closed distance to every cell outside the set exceeds
     /// `radius`: the complement of the complement's dilation. The closed
     /// distance disk is a union of horizontal runs per row offset, so the
@@ -640,17 +862,40 @@ impl Raster<'_> {
     /// within one cell of the eroded set, hence inside the original set.
     pub(super) fn contour(&self, bits: &Bits) -> Result<MultiPolygon<f64>, ManufacturingError> {
         let core = self.erode(bits, self.frame.cell)?;
+        self.polygons(&core, false)
+    }
+
+    /// Polygons on the boundary of the cell set itself: trace cell-edge
+    /// boundaries and Douglas–Peucker at one cell, keeping only chords that
+    /// stay inside the closed set cells, then resolve crossings by even-odd
+    /// overlay. Every output point lies in a closed set cell.
+    pub(super) fn boundary(&self, bits: &Bits) -> Result<MultiPolygon<f64>, ManufacturingError> {
+        self.polygons(bits, true)
+    }
+
+    fn polygons(
+        &self,
+        core: &Bits,
+        constrained: bool,
+    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
         if core.is_empty() {
             return Ok(MultiPolygon(Vec::new()));
         }
-        let rings = self.trace(&core)?;
-        drop(core);
+        let rings = self.trace(core)?;
         let frame = &self.frame;
         let mut contours: Vec<Vec<[f64; 2]>> = Vec::new();
         self.reserve(&mut contours, rings.len())?;
         for ring in &rings {
             check_cancel(self.cancel)?;
-            let simplified = simplify_ring(ring, 1.0);
+            let simplified = simplify_ring(ring, 1.0, |a, b| {
+                if !constrained {
+                    return true;
+                }
+                self.charge(
+                    (a[0] - b[0]).unsigned_abs() as usize + (a[1] - b[1]).unsigned_abs() as usize,
+                );
+                chord_inside(core, a, b)
+            });
             self.charge(ring.len());
             if simplified.len() >= 3 {
                 contours.push(
@@ -953,8 +1198,13 @@ fn solve(k: f64, m: f64, lo: f64, hi: f64) -> Option<(f64, f64)> {
 
 /// Douglas–Peucker on a closed ring of integer corners, splitting at the
 /// vertex farthest from the first. Every dropped vertex lies within
-/// `tolerance` of its replacing segment.
-fn simplify_ring(ring: &[[i64; 2]], tolerance: f64) -> Vec<[i64; 2]> {
+/// `tolerance` of its replacing segment, and every replacing segment that
+/// spans dropped vertices is one `accept` admits.
+fn simplify_ring(
+    ring: &[[i64; 2]],
+    tolerance: f64,
+    mut accept: impl FnMut([i64; 2], [i64; 2]) -> bool,
+) -> Vec<[i64; 2]> {
     let n = ring.len();
     if n < 4 {
         return ring.to_vec();
@@ -983,13 +1233,45 @@ fn simplify_ring(ring: &[[i64; 2]], tolerance: f64) -> Vec<[i64; 2]> {
                 best = (d, k);
             }
         }
-        if best.0 > tolerance {
-            keep[best.1] = true;
-            stack.push((i, best.1));
-            stack.push((best.1, j));
+        if j > i + 1 && (best.0 > tolerance || !accept(ring[i], ring[j % n])) {
+            let split = if best.1 > i { best.1 } else { (i + j) / 2 };
+            keep[split] = true;
+            stack.push((i, split));
+            stack.push((split, j));
         }
     }
     (0..n).filter(|&i| keep[i]).map(|i| ring[i]).collect()
+}
+
+/// Whether segment `ab` (cell-corner coordinates) lies inside the closed
+/// set cells: it is cut at every cell line, and each piece, lying in one
+/// cell's closure, needs a set cell holding its midpoint.
+fn chord_inside(bits: &Bits, a: [i64; 2], b: [i64; 2]) -> bool {
+    let (p, q) = (a.map(|v| v as f64), b.map(|v| v as f64));
+    let mut cuts = vec![0.0, 1.0];
+    for axis in 0..2 {
+        let (lo, hi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
+        for line in lo + 1..hi {
+            cuts.push((line as f64 - p[axis]) / (q[axis] - p[axis]));
+        }
+    }
+    cuts.sort_unstable_by(f64::total_cmp);
+    cuts.dedup();
+    let candidates = |v: f64| {
+        let f = v.floor();
+        if f == v { [f - 1.0, f] } else { [f, f] }
+    };
+    cuts.windows(2).all(|w| {
+        let t = (w[0] + w[1]) * 0.5;
+        let m = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+        candidates(m[0]).iter().any(|&col| {
+            candidates(m[1]).iter().any(|&row| {
+                col >= 0.0
+                    && row >= 0.0
+                    && bits.word(row as usize, col as usize / 64) >> (col as usize % 64) & 1 == 1
+            })
+        })
+    })
 }
 
 fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {

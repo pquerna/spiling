@@ -336,6 +336,40 @@ fn contours_stay_inside_the_cells_with_few_vertices() {
 }
 
 #[test]
+fn boundaries_reach_the_set_edge_and_every_edge_stays_in_set_cells() {
+    let frame = frame();
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame, &cancel);
+    let [lo, _] = frame.bounds();
+    for polygon in cases() {
+        let bits = &raster.outward([&polygon], 0.1).unwrap();
+        let boundary = raster.boundary(bits).unwrap();
+        let contour = raster.contour(bits).unwrap();
+        assert!(boundary.unsigned_area() >= contour.unsigned_area());
+        // Every boundary edge, sampled densely, stays in closed set cells.
+        for polygon in &boundary.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                for edge in ring.0.windows(2) {
+                    for k in 0..=64 {
+                        let t = f64::from(k) / 64.0;
+                        let x = edge[0].x + (edge[1].x - edge[0].x) * t;
+                        let y = edge[0].y + (edge[1].y - edge[0].y) * t;
+                        let (col, row) = ((x - lo[0]) / CELL, (y - lo[1]) / CELL);
+                        let inside = [-1e-9, 0.0, 1e-9].iter().any(|dc| {
+                            [-1e-9, 0.0, 1e-9].iter().any(|dr| {
+                                let (c, r) = ((col + dc).floor(), (row + dr).floor());
+                                c >= 0.0 && r >= 0.0 && bits.contains(c as usize, r as usize)
+                            })
+                        });
+                        assert!(inside, "boundary edge leaves the cells at ({x}, {y})");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn contour_of_a_disk_has_few_vertices_and_separates_diagonal_cells() {
     let frame = CellFrame::new([[-6.0, -6.0], [6.0, 6.0]], 0.05).unwrap();
     let cancel = AtomicBool::new(false);

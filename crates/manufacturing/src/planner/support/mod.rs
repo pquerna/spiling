@@ -1741,8 +1741,8 @@ pub(super) fn realize(
                 ),
         )?;
         let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
-        let mut support_regions = vec![Rc::clone(&empty); layers.len()];
-        let mut interfaces = vec![empty; layers.len()];
+        let support_regions = vec![Rc::clone(&empty); layers.len()];
+        let interfaces = vec![empty; layers.len()];
         let mut object_start = vec![0; layers.len()];
         let mut support_wall_paths = vec![0; layers.len()];
         trace.report("analysis_complete");
@@ -1972,8 +1972,8 @@ pub(super) fn realize(
             foreign_work,
         }
         .run(&scopes, &mut work, cancel)?;
-        support_regions = output.support;
-        interfaces = output.interfaces;
+        let grid_frame = output.frame;
+        let grids = output.grids;
         for (target, top) in output.contact_tops.into_iter().enumerate() {
             if top.is_some() {
                 contact_tops[target] = top;
@@ -1989,142 +1989,138 @@ pub(super) fn realize(
         let mut established = Vec::new();
         reserve_owned(&mut established, layers.len(), owned_bytes)?;
         support_metadata_bytes += vec_bytes(&established);
-        // Support centers stay half a bead inside the clipped support region. This
-        // gives the nominal bead, not only its centerline, the declared XY clearance.
-        // A layer's centerline domains depend only on its own support and
-        // interface regions, so they are built in parallel and admitted together;
-        // anchoring to lower layers stays in layer order below.
-        let mut prebuilt = {
+        // A layer's walls and rows depend only on its own kept cells and its
+        // preferred axis, so they are staged in parallel and admitted
+        // together; anchoring to lower layers stays in layer order below.
+        let mut prebuilt: Vec<Option<(Vec<DepositionPath>, raster::WallReceipt)>> = {
             use rayon::prelude::*;
+            let grid_bytes = grids
+                .iter()
+                .flatten()
+                .map(sweep::LayerGrid::bytes)
+                .fold(vec_bytes(&grids), usize::saturating_add);
             let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
             let base_retained = retained + geometry.0;
             let base_owned =
                 (native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes)
-                    .saturating_add(geometry.1);
-            let operands: Vec<(&MultiPolygon<f64>, &MultiPolygon<f64>, bool)> = support_regions
+                    .saturating_add(geometry.1)
+                    .saturating_add(grid_bytes);
+            let hatches: Vec<_> = layers
                 .iter()
-                .zip(&interfaces)
-                .map(|(region, interface)| {
-                    (
-                        &region.material,
-                        &interface.material,
-                        Rc::ptr_eq(region, interface),
-                    )
+                .enumerate()
+                .map(|(i, layer)| {
+                    let axis = region::HatchAxis::for_policy(
+                        RectilinearAxisPolicy::AlternatingXY,
+                        super::hatch_key(schedule, i),
+                    );
+                    (layer.z_mm, layer.lower_z_mm, axis)
                 })
                 .collect();
-            let working_set = crate::working_set::current();
-            let built: Vec<Result<(raster::Domains, usize), ManufacturingError>> = operands
-                .par_iter()
-                .map(|&(region, interface, all_interface)| {
-                    crate::working_set::scope(working_set, || {
-                        let mut local = 0usize;
-                        raster::Domains::new(
-                            region,
-                            interface,
-                            all_interface,
-                            width,
-                            base_retained,
-                            base_owned,
-                            0,
-                            &mut local,
-                            0,
-                            cancel,
-                        )
-                        .map(|domains| (domains, local))
-                    })
-                })
-                .collect();
-            drop(operands);
+            let admit = |extra: usize| {
+                super::remaining_geometry_units(base_retained, base_owned.saturating_add(extra))
+                    .map(|_| ())
+            };
+            let built: Vec<Result<Option<_>, ManufacturingError>> = match grid_frame {
+                None => Vec::new(),
+                Some(frame) => {
+                    let raster = grid::Raster {
+                        frame,
+                        cancel,
+                        admit: &admit,
+                        work: std::sync::atomic::AtomicUsize::new(0),
+                    };
+                    let working_set = crate::working_set::current();
+                    let built = grids
+                        .par_iter()
+                        .zip(&hatches)
+                        .map(|(grid, &(z, lower_z, axis))| {
+                            let Some(grid) = grid else {
+                                return Ok(None);
+                            };
+                            crate::working_set::scope(working_set, || {
+                                let mut local = 0usize;
+                                let hatch = region::HatchLayer {
+                                    roof: None,
+                                    width_mm: width,
+                                    z,
+                                    lower_z,
+                                    height: z - lower_z,
+                                    axis,
+                                    top_axis: axis,
+                                    recipe,
+                                };
+                                raster::paths(
+                                    &raster,
+                                    &grid.support,
+                                    &grid.interface,
+                                    density,
+                                    &hatch,
+                                    0,
+                                    base_retained,
+                                    base_owned,
+                                    &mut local,
+                                    0,
+                                    cancel,
+                                )
+                                .map(|(paths, receipt)| Some((paths, receipt, local)))
+                            })
+                        })
+                        .collect();
+                    charge_owned_work(&mut work, foreign_work, raster.take_work(), cancel)?;
+                    built
+                }
+            };
+            drop(grids);
+            drop(hatches);
             let mut prebuilt = Vec::new();
             reserve_owned(&mut prebuilt, layers.len(), base_owned)?;
-            let mut domain_bytes = 0usize;
+            let (mut units, mut bytes) = (0usize, 0usize);
             for result in built {
-                let (domains, local) = result?;
-                charge_owned_work(&mut work, foreign_work, local, cancel)?;
-                domain_bytes = domain_bytes.saturating_add(domains.domain_bytes());
-                prebuilt.push(Some(domains));
+                let staged = result?.map(|(paths, receipt, local)| {
+                    units = paths.iter().fold(units, |total, path| {
+                        total.saturating_add(path.points_mm.capacity())
+                    });
+                    bytes = bytes.saturating_add(super::bonds::path_bytes(&paths));
+                    (paths, receipt, local)
+                });
+                if let Some((_, _, local)) = &staged {
+                    charge_owned_work(&mut work, foreign_work, *local, cancel)?;
+                }
+                prebuilt.push(staged.map(|(paths, receipt, _)| (paths, receipt)));
             }
+            prebuilt.resize_with(layers.len(), || None);
             super::remaining_geometry_units(
-                base_retained,
-                base_owned.saturating_add(domain_bytes),
+                base_retained.saturating_add(units),
+                base_owned
+                    .saturating_sub(grid_bytes)
+                    .saturating_add(vec_bytes(&prebuilt))
+                    .saturating_add(bytes),
             )?;
             prebuilt
         };
+        let mut staged_bytes = prebuilt
+            .iter()
+            .flatten()
+            .map(|(paths, _)| super::bonds::path_bytes(paths))
+            .fold(vec_bytes(&prebuilt), usize::saturating_add);
         for i in 0..layers.len() {
             owned_bytes =
                 native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
             anchors.set_budget(0);
+            let (mut paths, mut wall_receipt) = prebuilt[i].take().unwrap_or_default();
+            staged_bytes = staged_bytes.saturating_sub(super::bonds::path_bytes(&paths));
             let (prior, remaining) = layers.split_at_mut(i);
             let (layer, following) = remaining.split_first_mut().expect("current support layer");
-            let interface = interfaces[i].as_ref();
-            let retained_domains =
-                retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-            let mut domains = prebuilt[i].take().expect("prebuilt support domains");
-            domains.rebase(
-                retained_domains,
-                owned_bytes.saturating_add(
-                    geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
-                ),
-                anchors.retained_bytes(),
-            )?;
-            let preferred = region::HatchAxis::for_policy(
-                RectilinearAxisPolicy::AlternatingXY,
-                super::hatch_key(schedule, i),
-            );
-            let mut paths = Vec::new();
-            let mut wall_receipt = raster::WallReceipt::default();
-            let mut preferred_volume = None;
-            for axis in [preferred, preferred.orthogonal()] {
-                let hatch = region::HatchLayer {
-                    roof: None,
-                    width_mm: recipe.bead_width_mm,
-                    z: layer.z_mm,
-                    lower_z: layer.lower_z_mm,
-                    height: layer.z_mm - layer.lower_z_mm,
-                    axis,
-                    top_axis: axis,
-                    recipe,
-                };
-                anchors.set_budget(0);
-                domains.set_anchor_owned_bytes(anchors.retained_bytes());
-                (paths, wall_receipt) = domains.paths(
-                    interface,
-                    density,
-                    &hatch,
-                    *segments,
-                    &mut work,
-                    foreign_work,
-                    cancel,
-                )?;
-                // A clearance-clipped proposal can leave an unprintable sliver
-                // without carrying any final demand. Omit that proposal, then
-                // require actual lower anchors and complete final object/contact
-                // admission below; a nonempty polygon is not required material.
-                if i == 0 {
-                    break;
-                }
-                let lower = || {
-                    prior[i - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind))
-                };
-                anchors.set_budget(domains.anchor_budget(&paths)?);
-                if !paths.is_empty()
-                    && raster::scan(
-                        &paths,
-                        lower(),
-                        std::iter::empty(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                        true,
-                    )?
-                    .is_none()
-                {
-                    break;
-                }
+            let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
+            let retained_domains = retained + geometry.0;
+            let mut live_bytes = owned_bytes
+                .saturating_add(geometry.1)
+                .saturating_add(staged_bytes);
+            // The bed roots the first layer. Above it, every stroke needs
+            // actual anchors on the support below or, for interface, on an
+            // established part contact. The preferred axis is the only one
+            // tried: what it cannot anchor is omitted and reported.
+            if i > 0 && !paths.is_empty() {
                 if roots.iter().any(|root| root.first_layer() == i) {
                     let added_bytes = establish_until(
                         prior,
@@ -2134,133 +2130,56 @@ pub(super) fn realize(
                         &mut anchors,
                         &mut anchor_work,
                         retained_domains,
-                        domains
-                            .owned_bytes()
-                            .saturating_add(super::bonds::path_bytes(&paths)),
+                        live_bytes.saturating_add(super::bonds::path_bytes(&paths)),
                         cancel,
                     )?;
                     support_metadata_bytes += added_bytes;
-                    domains.retain_bytes(added_bytes)?;
+                    live_bytes = live_bytes.saturating_add(added_bytes);
                 }
-                let contacts = || part_contacts(prior, &roots, &established, i);
-                anchors.set_budget(domains.anchor_budget(&paths)?);
-                if !paths.is_empty()
-                    && raster::scan(
-                        &paths,
-                        lower(),
-                        contacts(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                        true,
-                    )?
-                    .is_none()
-                {
-                    break;
-                }
+                // One lower inventory serves every anchor query on this layer.
+                let mut lower = strokes::LowerStrokes::new(
+                    prior[i - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support_role(path.kind)),
+                    part_contacts(prior, &roots, &established, i),
+                );
                 let kept = raster::retain_anchored(
                     &mut paths,
                     wall_receipt.paths,
-                    lower(),
-                    contacts(),
+                    &mut lower,
                     recipe,
                     retained_domains,
-                    domains.owned_bytes(),
+                    live_bytes,
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
                 )?;
                 wall_receipt.paths = kept.paths;
                 wall_receipt.omitted_mm += kept.omitted_mm;
-                let volume = raster::nominal_volume(&paths, layer.index, recipe)?;
-                let Some(preferred_volume) = preferred_volume else {
-                    preferred_volume = Some(volume);
-                    // Release failed paths and anchor records before staging the
-                    // other axis. Neither attempt changes object or support ownership.
-                    paths = Vec::new();
-                    continue;
-                };
-                if volume <= preferred_volume {
-                    // Rebuild the preferred raster rather than retain both
-                    // candidates: construction is deterministic.
-                    drop(std::mem::take(&mut paths));
-                    anchors.set_budget(0);
-                    domains.set_anchor_owned_bytes(anchors.retained_bytes());
-                    (paths, wall_receipt) = domains.paths(
-                        interface,
-                        density,
-                        &region::HatchLayer {
-                            axis: preferred,
-                            top_axis: preferred,
-                            ..hatch
-                        },
-                        *segments,
-                        &mut work,
-                        foreign_work,
-                        cancel,
-                    )?;
-                }
-            }
-            if i > 0 {
-                anchors.set_budget(domains.anchor_budget(&paths)?);
-                let contacts = part_contacts(prior, &roots, &established, i);
-                if raster::scan(
-                    &paths,
-                    prior[i - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind)),
-                    contacts,
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                    true,
-                )?
-                .is_some()
-                {
-                    let kept = raster::retain_anchored(
-                        &mut paths,
-                        wall_receipt.paths,
-                        prior[i - 1]
-                            .paths
-                            .iter()
-                            .filter(|path| support_role(path.kind)),
-                        part_contacts(prior, &roots, &established, i),
-                        recipe,
-                        retained_domains,
-                        domains.owned_bytes(),
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )?;
-                    wall_receipt.paths = kept.paths;
-                    wall_receipt.omitted_mm += kept.omitted_mm;
-                }
             }
             layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
             support_wall_paths[i] = wall_receipt.paths;
-            *segments += path_segments(&paths);
-            anchors.set_budget(0);
-            domains.set_anchor_owned_bytes(anchors.retained_bytes());
-            layer.region_coverage.support_nominal_deposition_volume_mm3 =
-                paths.iter().try_fold(0.0, |sum, path| {
-                    Ok::<_, ManufacturingError>(
-                        sum + region::nominal_volume(path, layer.index, recipe)?,
+            *segments = segments
+                .checked_add(path_segments(&paths))
+                .filter(|count| *count <= crate::working_set::units())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "retained deposition segment limit exceeded",
                     )
                 })?;
+            anchors.set_budget(0);
+            layer.region_coverage.support_nominal_deposition_volume_mm3 =
+                raster::nominal_volume(&paths, layer.index, recipe)?;
             layer.region_coverage.support_area_mm2 =
                 layer.region_coverage.support_nominal_deposition_volume_mm3
                     / (layer.z_mm - layer.lower_z_mm);
             object_start[i] = paths.len();
-            let live_bytes = domains
-                .owned_bytes()
-                .saturating_add(super::bonds::path_bytes(&paths));
-            reserve_owned(&mut paths, layer.paths.len(), live_bytes)?;
+            let paths_live = live_bytes.saturating_add(super::bonds::path_bytes(&paths));
+            reserve_owned(&mut paths, layer.paths.len(), paths_live)?;
             paths.append(&mut layer.paths);
             layer.paths = paths;
-            drop(domains);
             let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
             owned_bytes = native_owned_bytes
                 + support_metadata_bytes
@@ -2272,6 +2191,7 @@ pub(super) fn realize(
                         .chain(following.iter()),
                 );
         }
+        drop(prebuilt);
         timing.mark("support_raster");
         let mut outstanding_roles = original_bridge_roles.as_slice();
         let mut outstanding_demands = demands.as_slice();
@@ -2846,11 +2766,13 @@ fn reconcile_layer_roots(
             let kept = raster::retain_anchored(
                 &mut layer.paths,
                 wall_paths[index],
-                prior[index - 1]
-                    .paths
-                    .iter()
-                    .filter(|path| support_role(path.kind)),
-                part_contacts(prior, roots, established, index),
+                &mut strokes::LowerStrokes::new(
+                    prior[index - 1]
+                        .paths
+                        .iter()
+                        .filter(|path| support_role(path.kind)),
+                    part_contacts(prior, roots, established, index),
+                ),
                 recipe,
                 retained_units,
                 outside,

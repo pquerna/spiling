@@ -42,9 +42,23 @@ pub(super) struct Sweep<'a> {
     pub foreign_work: usize,
 }
 
+/// One layer's kept support cells and the interface cells among them.
+pub(super) struct LayerGrid {
+    pub support: Bits,
+    pub interface: Bits,
+}
+
+impl LayerGrid {
+    pub(super) fn bytes(&self) -> usize {
+        self.support.bytes().saturating_add(self.interface.bytes())
+    }
+}
+
 pub(super) struct SweepOutput {
-    pub support: Vec<Rc<OwnedMaterial>>,
-    pub interfaces: Vec<Rc<OwnedMaterial>>,
+    /// The cell frame every grid below is in; `None` without demand.
+    pub frame: Option<CellFrame>,
+    /// Per layer, its kept support cells when it has any.
+    pub grids: Vec<Option<LayerGrid>>,
     pub contact_tops: Vec<Option<usize>>,
     /// (protected ordinal, layer, grounded relieved support at that layer).
     pub access: Vec<(usize, usize, Rc<OwnedMaterial>)>,
@@ -149,9 +163,9 @@ impl Sweep<'_> {
         let mut timing = crate::timing::Clock::new("support.sweep");
         let layers = self.layers;
         let width = self.recipe.bead_width_mm;
-        let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
-        let mut support = vec![Rc::clone(&empty); layers.len()];
-        let mut interfaces = vec![Rc::clone(&empty); layers.len()];
+        let mut grids: Vec<Option<LayerGrid>> = Vec::new();
+        reserve_owned(&mut grids, layers.len(), self.owned_bytes)?;
+        grids.resize_with(layers.len(), || None);
         let mut contact_tops = vec![None; layers.len()];
         let mut access = Vec::new();
 
@@ -208,8 +222,8 @@ impl Sweep<'_> {
         }
         let (Some(bounds), Some(max_top)) = (bounds, entries.iter().map(|e| e.top).max()) else {
             return Ok(SweepOutput {
-                support,
-                interfaces,
+                frame: None,
+                grids,
                 contact_tops,
                 access,
             });
@@ -412,7 +426,6 @@ impl Sweep<'_> {
         let mut part_bands: Vec<Vec<(f64, Bits)>> = channels.iter().map(|_| Vec::new()).collect();
         let mut clearance: Vec<Option<Bits>> = vec![None; self.nominal.len()];
         let mut footprint: Option<(usize, Bits)> = None;
-        let mut regions: Vec<(usize, Bits, Bits)> = Vec::new();
         let mut relieved: Vec<(usize, usize, Bits)> = Vec::new();
         for l in 0..=max_top {
             check_cancel(cancel)?;
@@ -532,8 +545,10 @@ impl Sweep<'_> {
             if !layer_support.is_empty() {
                 hold(&layer_support)?;
                 hold(&layer_interface)?;
-                reserve_owned(&mut regions, 1, self.owned_bytes)?;
-                regions.push((l, layer_support, layer_interface));
+                grids[l] = Some(LayerGrid {
+                    support: layer_support,
+                    interface: layer_interface,
+                });
             }
             charge(work)?;
         }
@@ -542,68 +557,27 @@ impl Sweep<'_> {
         drop(channels);
         timing.mark("up_pass");
 
-        // Polygons only at the output, each inside its kept cells. Layers are
-        // independent, so they convert in parallel and land in layer order.
-        let contours = {
+        // Support layers leave as cells: raster draws rows and walls from
+        // them. Only the relieved roof-access columns become polygons, each
+        // inside its kept cells, converted in parallel and kept in order.
+        let column_contours: Vec<Result<OwnedMaterial, ManufacturingError>> = {
             use rayon::prelude::*;
             let working_set = crate::working_set::current();
             let raster = &raster;
-            let convert = |bits: &Bits| -> Result<OwnedMaterial, ManufacturingError> {
-                crate::working_set::scope(working_set, || {
-                    let mut material = raster.contour(bits)?;
-                    region::canonicalize(&mut material);
-                    region::check_size(&material)?;
-                    Ok(OwnedMaterial::new(material))
-                })
-            };
-            let layers: Vec<Result<(OwnedMaterial, Option<OwnedMaterial>), ManufacturingError>> =
-                regions
-                    .par_iter()
-                    .map(|(_, region, interface)| {
-                        let region_polygons = convert(region)?;
-                        let interface_polygons = if interface.is_empty() || interface == region {
-                            None
-                        } else {
-                            Some(convert(interface)?)
-                        };
-                        Ok((region_polygons, interface_polygons))
-                    })
-                    .collect();
-            let columns: Vec<Result<OwnedMaterial, ManufacturingError>> = relieved
+            relieved
                 .par_iter()
-                .map(|(_, _, column)| convert(column))
-                .collect();
-            (layers, columns)
+                .map(|(_, _, column)| {
+                    crate::working_set::scope(working_set, || {
+                        let mut material = raster.contour(column)?;
+                        region::canonicalize(&mut material);
+                        region::check_size(&material)?;
+                        Ok(OwnedMaterial::new(material))
+                    })
+                })
+                .collect()
         };
         charge(work)?;
-        let (layer_contours, column_contours) = contours;
         let (mut units, mut bytes) = (0usize, 0usize);
-        for ((l, _, interface), converted) in regions.iter().zip(layer_contours) {
-            let (region_polygons, interface_polygons) = converted?;
-            units = units.saturating_add(region_polygons.units);
-            bytes = bytes.saturating_add(region_polygons.bytes);
-            let region_polygons = region_polygons.into_shared();
-            if !interface.is_empty() {
-                interfaces[*l] = match interface_polygons {
-                    // A layer that is interface throughout shares one owner
-                    // with its support region: raster hatches it as whole
-                    // interface.
-                    None => Rc::clone(&region_polygons),
-                    Some(polygons) => {
-                        units = units.saturating_add(polygons.units);
-                        bytes = bytes.saturating_add(polygons.bytes);
-                        polygons.into_shared()
-                    }
-                };
-            }
-            support[*l] = region_polygons;
-            super::super::remaining_geometry_units(
-                retained.saturating_add(units),
-                owned_bytes
-                    .saturating_add(live.load(Ordering::Relaxed))
-                    .saturating_add(bytes),
-            )?;
-        }
         for ((ordinal, l, _), converted) in relieved.iter().zip(column_contours) {
             let column = converted?;
             units = units.saturating_add(column.units);
@@ -618,8 +592,8 @@ impl Sweep<'_> {
         }
         timing.mark("contours");
         Ok(SweepOutput {
-            support,
-            interfaces,
+            frame: Some(raster.frame),
+            grids,
             contact_tops,
             access,
         })
