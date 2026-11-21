@@ -56,12 +56,12 @@ pub(super) fn supported_role(layer: &PrintLayer, path: &DepositionPath) -> Optio
 
 pub(super) fn split_bridged_rows(
     layers: &mut [PrintLayer],
+    alternation: &[u32],
     recipe: &PlanarPrintRecipe,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let mut anchors = AnchorWorkspace::default();
-    let alternation = hatch_alternation_keys(layers);
     for index in 1..layers.len() {
         check_cancel(cancel)?;
         let (lower, upper) = layers.split_at_mut(index);

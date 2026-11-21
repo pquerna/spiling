@@ -4239,7 +4239,7 @@ fn startup_wall_handoff_preserves_fresh_complete_admission() {
         if release {
             capture.startup_wall = None;
         }
-        let ScheduleAdmission::Complete(plan, _) = admit_schedule(
+        let ScheduleAdmission::Complete(CompletedSchedule { plan, .. }) = admit_schedule(
             &input,
             &cancel,
             &mut admission,
@@ -4991,7 +4991,7 @@ fn tolerant_supports_keep_real_anchors_holes_and_closed_pocket_floors() {
     for (name, scene) in cases {
         let input = scene.input(&enabled);
         let mut work = spiling_geometry::GeometryWorkBudget::compile();
-        let (mut plan, _) =
+        let CompletedSchedule { mut plan, .. } =
             plan_with(&input, &cancel, &mut work).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(plan.native_geometry.evidence, PreflightEvidence::Tolerant);
         crate::realization::canonicalize(&mut plan, &enabled, &cancel).unwrap();
@@ -5077,7 +5077,7 @@ fn tolerant_structured_interiors_keep_automatic_external_supports() {
         enabled.recipe.infill_fraction = 0.15;
         let input = scene.input(&enabled);
         let mut work = spiling_geometry::GeometryWorkBudget::compile();
-        let (mut plan, _) =
+        let CompletedSchedule { mut plan, .. } =
             plan_with(&input, &cancel, &mut work).unwrap_or_else(|e| panic!("{policy:?}: {e:?}"));
         assert!(
             plan.layers

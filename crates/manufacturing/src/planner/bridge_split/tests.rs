@@ -64,7 +64,15 @@ fn split(gaps: &[[f64; 2]], span_limit: f64) -> Vec<DepositionPath> {
     recipe.process.max_bridge_span_mm = span_limit;
     recipe.top_skin_axis = RectilinearAxisPolicy::X;
     let mut work = 0;
-    split_bridged_rows(&mut layers, &recipe, &mut work, &AtomicBool::new(false)).unwrap();
+    let keys = hatch_alternation_keys(&layers);
+    split_bridged_rows(
+        &mut layers,
+        &keys,
+        &recipe,
+        &mut work,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     layers.pop().unwrap().paths
 }
 

@@ -95,7 +95,11 @@ pub(crate) fn plan(
     ManufacturingError,
 > {
     let mut timing = crate::timing::Clock::new("planner.plan");
-    let (mut plan, withdrawal) = plan_with(input, cancel, geometry_work)?;
+    let CompletedSchedule {
+        mut plan,
+        withdrawal,
+        hatch_keys,
+    } = plan_with(input, cancel, geometry_work)?;
     timing.mark("construction");
     // Walls follow the BREP's own circles.
     let sources: Vec<_> = input
@@ -111,7 +115,7 @@ pub(crate) fn plan(
     arcs::attach(&mut plan, &sources, cancel)?;
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     timing.mark("arc_attachment_and_bed");
-    let emission = crate::realization::prepare(&mut plan, input.intent, cancel)?;
+    let emission = crate::realization::prepare(&mut plan, input.intent, &hatch_keys, cancel)?;
     timing.mark("realization");
     if let Some(withdrawal) = withdrawal {
         withdrawal.certify_realized(
@@ -168,7 +172,7 @@ fn plan_with(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
-) -> Result<(NormalizedPrintPlan, Option<native::SupportWithdrawal>), ManufacturingError> {
+) -> Result<CompletedSchedule, ManufacturingError> {
     let mut timing = crate::timing::Clock::new("planner.plan_with");
     let mut admission = preflight::admit(input, cancel, geometry_work)?;
     timing.mark("preflight");
@@ -329,7 +333,7 @@ fn plan_with(
         &mut survival_memo,
         &mut rooms_memo,
     )? {
-        ScheduleAdmission::Complete(plan, withdrawal) => Ok((plan, withdrawal)),
+        ScheduleAdmission::Complete(completed) => Ok(completed),
         // A complete pass never re-plans; a split it would need is a defect
         // of the schedule decided above, reported as such.
         ScheduleAdmission::RefineUnreachableLayer { failure, .. } => Err(failure),
@@ -369,7 +373,13 @@ enum ScheduleAdmission {
         index: usize,
         failure: ManufacturingError,
     },
-    Complete(NormalizedPrintPlan, Option<native::SupportWithdrawal>),
+    Complete(CompletedSchedule),
+}
+
+struct CompletedSchedule {
+    plan: NormalizedPrintPlan,
+    withdrawal: Option<native::SupportWithdrawal>,
+    hatch_keys: Vec<u32>,
 }
 
 struct OrdinaryTemplate {
@@ -2281,7 +2291,14 @@ fn admit_schedule<'model>(
         timing.mark("tail_diaphragm_coordinates");
         construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
         drop_unprintable_rows(&mut layers)?;
-        bridge_split::split_bridged_rows(&mut layers, recipe, neighborhoods.work_mut(), cancel)?;
+        let hatch_keys = hatch_alternation_keys(&layers);
+        bridge_split::split_bridged_rows(
+            &mut layers,
+            &hatch_keys,
+            recipe,
+            neighborhoods.work_mut(),
+            cancel,
+        )?;
         timing.mark("tail_attribute_and_bridge_rows");
         exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
         timing.mark("tail_exposed_top");
@@ -2412,7 +2429,11 @@ fn admit_schedule<'model>(
         timing.mark("tail_combine");
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
 
-        Ok(ScheduleAdmission::Complete(result, withdrawal))
+        Ok(ScheduleAdmission::Complete(CompletedSchedule {
+            plan: result,
+            withdrawal,
+            hatch_keys,
+        }))
     })();
     *surface_work = *neighborhoods.work_mut();
     drop(neighborhoods);
@@ -4019,7 +4040,7 @@ fn geometry_bytes(parts: &[usize]) -> Result<usize, ManufacturingError> {
     Ok(bytes)
 }
 
-fn layer_payload_bytes(layers: &[PrintLayer]) -> Result<usize, ManufacturingError> {
+pub(crate) fn layer_payload_bytes(layers: &[PrintLayer]) -> Result<usize, ManufacturingError> {
     // The stable PrintLayer Vec allocation belongs to the fixed outside pool.
     let mut bytes = 0usize;
     for layer in layers {

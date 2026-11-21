@@ -69,7 +69,8 @@ pub(crate) fn canonicalize_with_tool_order(
     cancel: &AtomicBool,
     order: spiling_deposition_routing::ToolOrder,
 ) -> Result<(), ManufacturingError> {
-    prepare_order(plan, intent, cancel, order).map(drop)
+    let hatch_keys = hatch_alternation_keys(&plan.layers);
+    prepare_order(plan, intent, &hatch_keys, cancel, order).map(drop)
 }
 
 /// Deposition order is stored in the normalized plan. The emitter receives
@@ -77,11 +78,13 @@ pub(crate) fn canonicalize_with_tool_order(
 pub(crate) fn prepare(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
+    hatch_keys: &[u32],
     cancel: &AtomicBool,
 ) -> Result<Option<BambuEstimate>, ManufacturingError> {
     prepare_order(
         plan,
         intent,
+        hatch_keys,
         cancel,
         spiling_deposition_routing::ToolOrder::Free,
     )
@@ -90,6 +93,7 @@ pub(crate) fn prepare(
 fn prepare_order(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
+    hatch_keys: &[u32],
     cancel: &AtomicBool,
     order: spiling_deposition_routing::ToolOrder,
 ) -> Result<Option<BambuEstimate>, ManufacturingError> {
@@ -105,7 +109,7 @@ fn prepare_order(
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
-    connect::connect_roads(plan, intent, routed.is_some(), cancel)?;
+    connect::connect_roads(plan, intent, routed.is_some(), hatch_keys, cancel)?;
     let mut estimate = schedule::apply(plan, intent, routed, position, cancel, order)?;
     lower_arcs(plan, intent, routed.is_some(), estimate.as_mut(), cancel)?;
     Ok(estimate)
