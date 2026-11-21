@@ -117,6 +117,8 @@ pub(crate) fn plan(
         plan.native_geometry.geometry_work = geometry_work.consumed();
         timing.mark("withdrawal_realized");
     }
+    plan.validate(input.intent)?;
+    timing.mark("plan_validation");
     Ok(plan)
 }
 
@@ -2389,9 +2391,6 @@ fn admit_schedule<'model>(
             }
         }
         timing.mark("tail_assemble");
-        result.validate(input.intent)?;
-        timing.mark("tail_validate");
-
         combined::combine(
             &mut result,
             input.intent,
@@ -2406,8 +2405,6 @@ fn admit_schedule<'model>(
         )?;
         timing.mark("tail_combine");
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
-        result.validate(input.intent)?;
-        timing.mark("tail_validate_combined");
 
         Ok(ScheduleAdmission::Complete(result, withdrawal))
     })();

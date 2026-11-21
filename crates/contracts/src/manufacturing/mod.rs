@@ -5100,14 +5100,21 @@ pub struct ManufacturingBundle {
     pub program: ProgramDescriptor,
     pub verification: VerificationReport,
 }
+fn bundle_segment_count(path: &DepositionPath) -> Result<usize, ManufacturingError> {
+    if path.points_mm.len() < 2 {
+        return Err(invalid("bundle path has fewer than two points"));
+    }
+    Ok(path.points_mm.len() - 1)
+}
+
 impl ManufacturingBundle {
-    /// Schema/integrity validation only: consumers must independently replay the program.
+    /// Validate the envelope and its provenance bindings. Plan semantics
+    /// are checked at construction and again by independent program replay.
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         if self.schema_version != MANUFACTURING_SCHEMA_VERSION {
             return Err(invalid("unsupported manufacturing bundle schema"));
         }
         self.provenance.validate()?;
-        self.plan.validate(&self.provenance.intent)?;
         let expected_native_analyses =
             if self.plan.native_geometry.evidence == PreflightEvidence::Certified {
                 self.provenance.occurrences.len()
@@ -5453,7 +5460,7 @@ impl ManufacturingBundle {
                 for path in self.plan.layers.iter().flat_map(|layer| &layer.paths) {
                     let tool = usize::from(job.tool_for_path(path)?);
                     routed_segments[tool] = routed_segments[tool]
-                        .checked_add((path.points_mm.len() - 1) as u32)
+                        .checked_add(bundle_segment_count(path)? as u32)
                         .ok_or_else(|| resource("routed model count overflow"))?;
                 }
                 for (index, tool) in routing.tools.iter().enumerate() {
@@ -5481,12 +5488,13 @@ impl ManufacturingBundle {
         let mut support_count = 0usize;
         let mut adhesion_count = 0usize;
         for path in self.plan.layers.iter().flat_map(|l| &l.paths) {
+            let segments = bundle_segment_count(path)?;
             if path.kind.is_support() {
-                support_count += path.points_mm.len() - 1;
+                support_count += segments;
             } else if path.kind.is_adhesion() {
-                adhesion_count += path.points_mm.len() - 1;
+                adhesion_count += segments;
             } else {
-                object_count += path.points_mm.len() - 1;
+                object_count += segments;
             }
         }
         if self.verification.deposition_segments as usize != object_count

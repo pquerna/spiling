@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Software-only native-section manufacturing, with mandatory independent replay.
-pub mod backend;
+mod backend;
 mod clearance_screen;
 pub mod delivery;
 mod material;
@@ -380,7 +380,9 @@ fn validate_inspection_bundle(
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
     let bundle = &result.bundle;
-    bundle.validate()?;
+    // Decoding binds the bundle envelope; inspection binds provenance and
+    // the current program, and replay independently validates plan semantics.
+    bundle.provenance.validate()?;
     result.check_program()?;
     let p = &bundle.provenance;
     if p.planner_version != PLANNER_VERSION

@@ -1328,7 +1328,7 @@ fn regional_accounting_consumes_heterogeneous_fractions_without_global_averaging
         }
         changed.verification.verified = true;
         assert!(
-            decode_bundle(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            changed.plan.validate(&changed.provenance.intent).is_err(),
             "case {case}"
         );
     }
@@ -1391,10 +1391,13 @@ fn regional_bundle_binds_every_contributor_to_captured_occurrence_and_winner() {
             _ => regions[2].contributions.clear(),
         }
         changed.verification.verified = true;
-        assert!(
-            decode_bundle(&serde_json::to_vec(&changed).unwrap()).is_err(),
-            "case {case}"
-        );
+        let decoded = decode_bundle(&serde_json::to_vec(&changed).unwrap());
+        if case == 5 {
+            let decoded = decoded.unwrap();
+            assert!(decoded.plan.validate(&decoded.provenance.intent).is_err());
+        } else {
+            assert!(decoded.is_err(), "case {case}");
+        }
     }
     let mut forged = captured.clone();
     let coverage = &mut forged.plan.layers[0].region_coverage;
@@ -1792,13 +1795,13 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
     assert!(serde_json::from_value::<ManufacturingSummary>(missing).is_err());
     let mut mismatch = captured.clone();
     mismatch.plan.native_geometry.requested_shape_error_mm = 0.03;
-    assert!(mismatch.validate().is_err());
+    assert!(mismatch.plan.validate(&mismatch.provenance.intent).is_err());
     let mut mismatch = captured.clone();
     mismatch.plan.native_geometry.height_analysis_count = 2;
     assert!(mismatch.validate().is_err());
     let mut mismatch = captured.clone();
     mismatch.plan.native_geometry.certified_layer_count = 2;
-    assert!(mismatch.validate().is_err());
+    assert!(mismatch.plan.validate(&mismatch.provenance.intent).is_err());
     let mut summary = captured.summary();
     summary.native_geometry.certified_layer_count = 2;
     assert!(summary.validate().is_err());
@@ -2005,7 +2008,7 @@ fn native_shape_error_follows_the_recorded_profile_tolerance() {
     assert_eq!(restored.provenance.intent, intent);
     let mut forged = captured.clone();
     forged.plan.native_geometry.requested_shape_error_mm = 0.1;
-    assert!(forged.validate().is_err());
+    assert!(forged.plan.validate(&forged.provenance.intent).is_err());
     let mut old = serde_json::to_value(&captured).unwrap();
     old["schema_version"] = serde_json::json!(MANUFACTURING_SCHEMA_VERSION - 1);
     assert!(decode_bundle(&serde_json::to_vec(&old).unwrap()).is_err());
@@ -2358,7 +2361,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
 }
 
 #[test]
-fn durable_bundle_rejects_rehashed_axis_mismatch_before_stored_verification() {
+fn decoded_plan_with_rehashed_axis_mismatch_still_fails_semantic_validation() {
     let mut captured = bundle();
     captured.plan = segmented_plan(&[&[3]]);
     decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
@@ -2375,7 +2378,11 @@ fn durable_bundle_rejects_rehashed_axis_mismatch_before_stored_verification() {
     .unwrap();
     provenance.validate().unwrap();
     captured.verification.verified = true;
-    let error = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap_err();
+    let decoded = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    let error = decoded
+        .plan
+        .validate(&decoded.provenance.intent)
+        .unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::InvalidSpecification);
 }
 
@@ -3644,11 +3651,20 @@ fn resolution_validation_is_strict_and_advisory_attribution_cannot_drift() {
             5 => record.representatives[0].cell = 2,
             _ => record.representatives[0].repeat = 3,
         }
-        assert!(changed.validate().is_err());
+        if field == 0 {
+            assert!(changed.plan.validate(&changed.provenance.intent).is_err());
+        } else {
+            assert!(changed.validate().is_err(), "field {field}");
+        }
     }
     let mut duplicate = bundle.clone();
     duplicate.plan.surface_resolution.push(record.clone());
-    assert!(duplicate.validate().is_err());
+    assert!(
+        duplicate
+            .plan
+            .validate(&duplicate.provenance.intent)
+            .is_err()
+    );
     let mut blank = record.clone();
     blank.evaluated_witnesses = 0;
     blank.ambiguous = 0;
@@ -4052,7 +4068,12 @@ fn empty_box_resolution_is_explicit_source_bound_and_visible_in_native_summary()
     assert!(duplicate.validate().is_err());
     let mut false_applied = captured.clone();
     false_applied.plan.process_resolution[0].status = ProcessRegionStatus::Applied;
-    assert!(false_applied.validate().is_err());
+    assert!(
+        false_applied
+            .plan
+            .validate(&false_applied.provenance.intent)
+            .is_err()
+    );
     let mut unbound = captured.clone();
     unbound.plan.process_resolution[0].provenance.operation_id =
         ProcessOperationId::new(2).unwrap();

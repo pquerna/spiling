@@ -4576,7 +4576,7 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
         width_mm: intent.recipe.bead_width_mm,
     };
     assert!(
-        crate::backend::emit(&wrong, &intent, &cancel).is_err(),
+        crate::verifier::verify(&mixed.program, &wrong, &intent, &cancel).is_err(),
         "fine paths cannot be relabeled as bulk work"
     );
 }

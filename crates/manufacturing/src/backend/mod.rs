@@ -15,22 +15,18 @@ mod bambu;
 mod lifecycle;
 
 /// Emit the explicit diagnostic, complete single-extruder or fixed-dual
-/// workflow in the printer's dialect; replay is mandatory.
-pub fn emit(
+/// workflow in the printer's dialect. Takes the validated construction;
+/// independent replay is mandatory.
+pub(crate) fn emit(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
     check_cancel(cancel)?;
-    intent.validate()?;
-    plan.validate(intent)?;
     let execution = plan.execution_intent(intent)?;
     let intent = execution.as_ref();
     let routed = match &intent.printer.workflow {
-        JobWorkflow::FixedDualMarlin { job } => {
-            crate::routing::validate_plan(plan, intent, job, cancel)?;
-            Some(job)
-        }
+        JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
     let dialect = intent.printer.capabilities.output_dialect;

@@ -61,7 +61,6 @@ pub(crate) fn canonicalize_with_tool_order(
     cancel: &AtomicBool,
     order: spiling_deposition_routing::ToolOrder,
 ) -> Result<(), ManufacturingError> {
-    plan.validate(intent)?;
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => {
             crate::routing::validate_plan(plan, intent, job, cancel)?;
