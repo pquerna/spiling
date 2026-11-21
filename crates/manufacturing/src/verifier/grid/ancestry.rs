@@ -70,13 +70,13 @@ struct Inventory {
 impl Inventory {
     fn empty() -> Self {
         Self {
-            rows: Rows(Vec::new()),
+            rows: Rows::default(),
             donors: Vec::new(),
         }
     }
 
     fn release(self, admission: &mut Admission) {
-        admission.release(self.rows.0);
+        self.rows.release(admission);
         admission.release(self.donors);
     }
 }

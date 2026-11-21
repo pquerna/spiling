@@ -386,7 +386,7 @@ impl Clearance {
             for band in &mut bands[discard_before..next] {
                 debit(work, 1, cancel)?;
                 if let Some(rows) = band.rows.take() {
-                    self.admission.release(rows.0);
+                    rows.release(&mut self.admission);
                 }
             }
             discard_before = next;
@@ -413,7 +413,16 @@ pub(super) struct Incidence {
     pub(super) road: usize,
 }
 
-pub(super) struct Rows(pub(super) Vec<Incidence>);
+struct RowDirectory {
+    first: i64,
+    len: usize,
+}
+
+#[derive(Default)]
+pub(super) struct Rows {
+    entries: Vec<Incidence>,
+    directory: Option<RowDirectory>,
+}
 
 impl Rows {
     fn build(
@@ -424,7 +433,7 @@ impl Rows {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
-        let mut entries = Self(Vec::new());
+        let mut entries = Self::default();
         for index in span {
             debit(work, 1, cancel)?;
             let road = roads[index];
@@ -454,7 +463,7 @@ impl Rows {
     ) -> Result<(), ManufacturingError> {
         chord.outer_rows(radius, work, cancel, |row, left, right| {
             admission.push(
-                &mut self.0,
+                &mut self.entries,
                 Incidence {
                     row,
                     left,
@@ -472,33 +481,85 @@ impl Rows {
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
         sort_by_key(
-            &mut self.0,
+            &mut self.entries,
             |entry| (entry.row, entry.left, entry.road),
             work,
             cancel,
         )?;
+        let Some(first) = self.entries.first().map(|entry| entry.row) else {
+            return Ok(());
+        };
         let mut previous = i64::MIN;
         let mut prefix = i64::MIN;
-        for entry in &mut self.0 {
+        let mut dense = true;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
             debit(work, 1, cancel)?;
             if entry.row != previous {
                 previous = entry.row;
                 prefix = i64::MIN;
+                dense &= usize::try_from(entry.row - first).is_ok_and(|row| row <= index);
             }
             prefix = prefix.max(entry.right);
             entry.prefix_right = prefix;
         }
+        if dense {
+            let mut next_offset = 0;
+            let mut start = 0;
+            while start < self.entries.len() {
+                let row = self.entries[start].row;
+                let end = start
+                    + 1
+                    + self.entries[start + 1..]
+                        .iter()
+                        .take_while(|entry| entry.row == row)
+                        .count();
+                let offset = (row - first) as usize;
+                debit(work, end - start, cancel)?;
+                for entry in &mut self.entries[next_offset..=offset] {
+                    entry.row = start as i64;
+                }
+                next_offset = offset + 1;
+                start = end;
+            }
+            self.directory = Some(RowDirectory {
+                first,
+                len: next_offset,
+            });
+        }
         Ok(())
     }
 
+    pub(super) fn release(self, admission: &mut Admission) {
+        admission.release(self.entries);
+    }
+
     pub(super) fn intersect(&self, row: i64, first: i64, last: i64) -> &[Incidence] {
-        let start = self
-            .0
-            .partition_point(|entry| (entry.row, entry.prefix_right) < (row, first));
-        let end = self
-            .0
-            .partition_point(|entry| (entry.row, entry.left) <= (row, last));
-        &self.0[start..end.max(start)]
+        let Some(directory) = &self.directory else {
+            let start = self
+                .entries
+                .partition_point(|entry| (entry.row, entry.prefix_right) < (row, first));
+            let end = self
+                .entries
+                .partition_point(|entry| (entry.row, entry.left) <= (row, last));
+            return &self.entries[start..end.max(start)];
+        };
+        let Some(offset) = row
+            .checked_sub(directory.first)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| *offset < directory.len)
+        else {
+            return &[];
+        };
+        let start = self.entries[offset].row as usize;
+        let end = if offset + 1 == directory.len {
+            self.entries.len()
+        } else {
+            self.entries[offset + 1].row as usize
+        };
+        let entries = &self.entries[start..end];
+        let start = entries.partition_point(|entry| entry.prefix_right < first);
+        let end = entries[start..].partition_point(|entry| entry.left <= last);
+        &entries[start..start + end]
     }
 }
 
@@ -636,5 +697,51 @@ mod tests {
                 .unwrap_err()
         });
         assert_eq!(refusal.code, ManufacturingErrorCode::ResourceLimit);
+    }
+
+    #[test]
+    fn signed_row_directory_preserves_order_empty_rows_and_closed_columns() {
+        let cancel = AtomicBool::new(false);
+        for (next_row, dense) in [(0, true), (9_000_000_000, false)] {
+            let mut rows = Rows::default();
+            let mut admission = Admission::default();
+            for (road, row, left, right) in [
+                (2, -2, 1, 2),
+                (3, next_row, 1, 2),
+                (0, -2, -4, 3),
+                (1, -2, 1, 1),
+            ] {
+                admission
+                    .push(
+                        &mut rows.entries,
+                        Incidence {
+                            row,
+                            left,
+                            right,
+                            prefix_right: right,
+                            road,
+                        },
+                    )
+                    .unwrap();
+            }
+            let allowance = crate::working_set::WorkingSet::new(admission.0).unwrap();
+            crate::working_set::scope(allowance, || rows.finish(&mut 0, &cancel)).unwrap();
+            assert_eq!(rows.directory.is_some(), dense);
+            let roads = |row, left, right| {
+                rows.intersect(row, left, right)
+                    .iter()
+                    .map(|entry| entry.road)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(roads(-2, 1, 1), [0, 1, 2]);
+            assert_eq!(roads(-2, -4, -4), [0]);
+            assert_eq!(roads(next_row, 2, 2), [3]);
+            for row in [i64::MIN, -3, -1, next_row + 1, i64::MAX] {
+                assert!(roads(row, i64::MIN, i64::MAX).is_empty());
+            }
+            assert!(roads(-2, 4, 4).is_empty());
+            rows.release(&mut admission);
+            assert_eq!(admission.0, 0);
+        }
     }
 }
