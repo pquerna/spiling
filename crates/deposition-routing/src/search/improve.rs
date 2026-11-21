@@ -6,7 +6,8 @@
 //! and respects prerequisites. Effort follows the group: descent always runs to
 //! a local optimum, longer groups relocate longer segments, and kicks continue
 //! while they keep shortening the order: they stop after a fixed run of kicks
-//! without improvement. Work is counted for cancellation and reporting only;
+//! without improvement, or once kicks past that run have cost the descent's
+//! work. Work is counted for cancellation and reporting only;
 //! output stays deterministic.
 use super::*;
 
@@ -727,7 +728,8 @@ impl<'a, 't> Order<'a, 't> {
 }
 
 /// Descent, then iterated kicks keeping the best order until a run of kicks
-/// fails to shorten it. Only the positions a kick touched are compared,
+/// fails to shorten it, or, past that run's length, until kicks have cost as
+/// much as the descent. Only the positions a kick touched are compared,
 /// snapshotted or restored. Cancellation aborts.
 pub(super) fn improve(
     context: &mut Context<'_, '_>,
@@ -739,14 +741,22 @@ pub(super) fn improve(
     }
     let mut workspace = Workspace::new(n);
     let all: Vec<usize> = (0..n).collect();
+    let started = context.work;
     order.descend_with(context, &all, &mut workspace)?;
+    let descent = context.work - started;
+    let kicking = context.work;
     order.take_dirty();
     let mut best_visits = order.visits.clone();
     let mut best_incoming = order.incoming.clone();
     let mut random = 0x2545_F491_4F6C_DD1D_u64;
     let mut seeds = Vec::with_capacity(6);
     let mut stalled = 0;
-    while stalled < STALL_KICKS {
+    let mut kicks = 0;
+    // Kicks never cost more than the descent once the stall floor is met:
+    // a long run of tiny improvements on a large group must not grow the
+    // search without bound.
+    while stalled < STALL_KICKS && (kicks < STALL_KICKS || context.work - kicking < descent) {
+        kicks += 1;
         seeds.clear();
         for _ in 0..3 {
             seeds.extend(order.kick(&mut random));
