@@ -2352,15 +2352,19 @@ fn admit_schedule<'model>(
             neighborhoods.work_mut(),
             cancel,
         )?;
+        timing.mark("tail_diaphragm_coordinates");
         construction.attribute(&mut layers, neighborhoods.work_mut(), cancel)?;
         drop_unprintable_rows(&mut layers)?;
         bridge_split::split_bridged_rows(&mut layers, recipe, neighborhoods.work_mut(), cancel)?;
+        timing.mark("tail_attribute_and_bridge_rows");
         exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
+        timing.mark("tail_exposed_top");
         support::object_volumes(&mut layers, input.intent)?;
         let adhesion = adhesion::plan(&mut layers, &sections, input.intent, cancel)?;
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
         }
+        timing.mark("tail_volumes_adhesion_witness");
         if process_captures
             .iter()
             .map(|capture| capture.operations.len())
@@ -2466,7 +2470,9 @@ fn admit_schedule<'model>(
                 }
             }
         }
+        timing.mark("tail_assemble");
         result.validate(input.intent)?;
+        timing.mark("tail_validate");
 
         combined::combine(
             &mut result,
@@ -2480,8 +2486,10 @@ fn admit_schedule<'model>(
             &admission.models,
             cancel,
         )?;
+        timing.mark("tail_combine");
         result.native_geometry.geometry_work = admission.geometry_work.consumed();
         result.validate(input.intent)?;
+        timing.mark("tail_validate_combined");
 
         Ok(ScheduleAdmission::Complete(result, withdrawal))
     })();
