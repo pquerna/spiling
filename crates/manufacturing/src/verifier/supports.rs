@@ -510,7 +510,8 @@ fn verify_roots(
                         .iter()
                         .zip(&established[lower_index])
                         .filter_map(|(path, valid)| {
-                            (path.kind.is_model() && *valid).then_some(path)
+                            (path.kind.is_model() && path.kind != DepositionKind::Bridge && *valid)
+                                .then_some(path)
                         })
                     {
                         charge(work, cancel)?;
@@ -1392,6 +1393,29 @@ mod tests {
         let mut missing = plan;
         missing.layers[0].paths.clear();
         assert!(check(&intent, &missing).is_err());
+    }
+
+    #[test]
+    fn bridge_cannot_be_a_separated_support_landing() {
+        let (intent, mut plan) = fixture();
+        check(&intent, &plan).unwrap();
+        plan.layers[0].paths[0].kind = DepositionKind::Bridge;
+        let failure = check(&intent, &plan).unwrap_err();
+        assert!(failure.message.starts_with("actual support layer 2 "));
+    }
+
+    #[test]
+    fn separated_landing_retains_subcell_endpoint_overlap() {
+        let (intent, mut plan) = fixture();
+        for point in &mut plan.layers[0].paths[0].points_mm {
+            point[1] = 1.999_999;
+        }
+        check(&intent, &plan).unwrap();
+        for point in &mut plan.layers[0].paths[0].points_mm {
+            point[1] = 2.0;
+        }
+        let failure = check(&intent, &plan).unwrap_err();
+        assert!(failure.message.starts_with("actual support layer 2 "));
     }
 
     #[test]
