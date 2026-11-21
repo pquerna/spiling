@@ -8,6 +8,7 @@
 //! points stay the path's geometry; a run only says they share one circle.
 
 use crate::{check_cancel, error};
+use rayon::prelude::*;
 use spiling_contracts::manufacturing::*;
 use spiling_geometry::tolerant::{CircleSource, SectionCircle};
 use std::f64::consts::PI;
@@ -50,20 +51,36 @@ pub(super) fn attach(
     if sources.iter().all(CircleSource::is_empty) {
         return Ok(());
     }
-    let mut circles = Vec::new();
-    for layer in &mut plan.layers {
-        check_cancel(cancel)?;
-        circles.clear();
-        for source in sources {
-            source.circles_at(layer.section_z_mm, &mut circles);
-        }
-        dedupe(&mut circles);
-        if circles.is_empty() {
-            continue;
-        }
+    let working_set = crate::working_set::current();
+    // Each layer reads the same immutable source and only writes its own
+    // paths. If several layers fail, return the first failure in plan order.
+    plan.layers
+        .par_iter_mut()
+        .map_init(Vec::new, |circles, layer| {
+            crate::working_set::scope(working_set, || {
+                attach_layer(layer, sources, circles, cancel)
+            })
+        })
+        .find_map_first(Result::err)
+        .map_or(Ok(()), Err)
+}
+
+fn attach_layer(
+    layer: &mut PrintLayer,
+    sources: &[CircleSource],
+    circles: &mut Vec<SectionCircle>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    circles.clear();
+    for source in sources {
+        source.circles_at(layer.section_z_mm, circles);
+    }
+    dedupe(circles);
+    if !circles.is_empty() {
         for path in &mut layer.paths {
             if path.owner == Some(DepositionOwner::Wall) && path.points_mm.len() >= 3 {
-                path.arcs = runs(path, &circles, cancel)?;
+                path.arcs = runs(path, circles, cancel)?;
             }
         }
     }

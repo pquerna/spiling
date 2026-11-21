@@ -111,7 +111,7 @@ fn prepare_order(
     };
     connect::connect_roads(plan, intent, routed.is_some(), hatch_keys, cancel)?;
     let mut estimate = schedule::apply(plan, intent, routed, position, cancel, order)?;
-    lower_arcs(plan, intent, routed.is_some(), estimate.as_mut(), cancel)?;
+    lower_arcs(plan, intent, estimate.as_mut(), cancel)?;
     Ok(estimate)
 }
 
@@ -139,6 +139,14 @@ fn commanded_arc(
     ))
 }
 
+pub(crate) fn arc_firmware(intent: &ManufacturingIntent) -> Option<ArcFirmware> {
+    let capabilities = &intent.printer.capabilities;
+    ArcFirmware::for_dialect(capabilities.output_dialect).filter(|_| {
+        capabilities.arc_moves
+            && !matches!(intent.printer.workflow, JobWorkflow::FixedDualMarlin { .. })
+    })
+}
+
 /// Keep only the arc runs this printer will execute faithfully, after seams
 /// have split them. A run its firmware would segment beyond the recorded
 /// profile tolerance, or too short to name its direction safely, stays the
@@ -147,13 +155,10 @@ fn commanded_arc(
 fn lower_arcs(
     plan: &mut NormalizedPrintPlan,
     intent: &ManufacturingIntent,
-    routed: bool,
     mut estimate: Option<&mut BambuEstimate>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let capabilities = &intent.printer.capabilities;
-    let firmware = ArcFirmware::for_dialect(capabilities.output_dialect)
-        .filter(|_| capabilities.arc_moves && !routed);
+    let firmware = arc_firmware(intent);
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
         for path in &mut layer.paths {

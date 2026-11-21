@@ -101,18 +101,20 @@ pub(crate) fn plan(
         hatch_keys,
     } = plan_with(input, cancel, geometry_work)?;
     timing.mark("construction");
-    // Walls follow the BREP's own circles.
-    let sources: Vec<_> = input
-        .occurrences
-        .iter()
-        .filter_map(|occurrence| {
-            input
-                .definitions
-                .get(&occurrence.definition_id)
-                .map(|definition| definition.circles(&occurrence.pose))
-        })
-        .collect();
-    arcs::attach(&mut plan, &sources, cancel)?;
+    if crate::realization::arc_firmware(input.intent).is_some() {
+        // Walls follow the BREP's own circles.
+        let sources: Vec<_> = input
+            .occurrences
+            .iter()
+            .filter_map(|occurrence| {
+                input
+                    .definitions
+                    .get(&occurrence.definition_id)
+                    .map(|definition| definition.circles(&occurrence.pose))
+            })
+            .collect();
+        arcs::attach(&mut plan, &sources, cancel)?;
+    }
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     timing.mark("arc_attachment_and_bed");
     let emission = crate::realization::prepare(&mut plan, input.intent, &hatch_keys, cancel)?;
