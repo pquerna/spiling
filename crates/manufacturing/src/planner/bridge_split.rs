@@ -75,17 +75,16 @@ pub(super) fn split_bridged_rows(
         for path_index in 0..layer.paths.len() {
             check_cancel(cancel)?;
             let path = &layer.paths[path_index];
-            let pieces = match supported_role(layer, path) {
-                Some(role)
-                    if path.physical_z_mm == [layer.lower_z_mm, layer.z_mm]
-                        && on_authored_axis(path, role, recipe, alternation[index])?
-                        && !separator_witness(layer, path)
-                        && !fitted(layer, path) =>
-                {
-                    split_row(path, role, previous, recipe, &mut anchors, work, cancel)?
-                }
-                _ => None,
-            };
+            let pieces = split_path(
+                layer,
+                path,
+                previous,
+                recipe,
+                alternation[index],
+                &mut anchors,
+                work,
+                cancel,
+            )?;
             match (pieces, &mut replacement) {
                 (Some(pieces), slot) => {
                     let out = match slot {
@@ -113,6 +112,53 @@ pub(super) fn split_bridged_rows(
         }
     }
     Ok(())
+}
+
+/// The pieces one path of `layer` is split into against the previous layer,
+/// or None when it stays whole: the same rule [`split_bridged_rows`] applies.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the split binds its layer, lower layer, recipe, course and caller-owned proof resources"
+)]
+pub(super) fn split_path(
+    layer: &PrintLayer,
+    path: &DepositionPath,
+    previous: &PrintLayer,
+    recipe: &PlanarPrintRecipe,
+    course: u32,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<Vec<DepositionPath>>, ManufacturingError> {
+    match splittable(layer, path, previous, recipe, course)? {
+        Some(role) => split_row(path, role, previous, recipe, anchors, work, cancel),
+        None => Ok(None),
+    }
+}
+
+/// The role a path of `layer` would take back if split against the previous
+/// layer, or None when the split rule leaves it whole regardless of gaps.
+pub(super) fn splittable(
+    layer: &PrintLayer,
+    path: &DepositionPath,
+    previous: &PrintLayer,
+    recipe: &PlanarPrintRecipe,
+    course: u32,
+) -> Result<Option<DepositionKind>, ManufacturingError> {
+    if layer.lower_z_mm != previous.z_mm || !layer.region_coverage.process_diaphragms.is_empty() {
+        return Ok(None);
+    }
+    Ok(match supported_role(layer, path) {
+        Some(role)
+            if path.physical_z_mm == [layer.lower_z_mm, layer.z_mm]
+                && on_authored_axis(path, role, recipe, course)?
+                && !separator_witness(layer, path)
+                && !fitted(layer, path) =>
+        {
+            Some(role)
+        }
+        _ => None,
+    })
 }
 
 fn resource() -> ManufacturingError {

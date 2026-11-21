@@ -4,55 +4,259 @@
 //! Established part material on the support grid, built bottom-up.
 //!
 //! Support may stand on the part only where the part is itself held up: by
-//! the bed, by deposited support, or by established material below. That is
-//! decided per centreline interval and stored as cells, never per road, so
-//! one local gap removes only the material over it:
+//! the bed or by established material below. That is decided per centreline
+//! interval and stored as cells, never per road, so one local gap removes
+//! only the material over it:
 //!
 //! - every first-layer road is established whole (the bed holds it);
-//! - above it, with `L = E[l − 1] ∪ S[l − 1] ∪ S[contact top]` (`S` is the
-//!   support kept on those layers), the proved part of an ordinary road's
-//!   centreline is where it lies over `L`'s cells, or where an exact capsule
-//!   interval reaches the established centreline subspans of a lower road.
-//!   Its established material is the bead of that proved centreline: the
-//!   cells of the layer's inward model footprint that no unproved
-//!   centreline's bead touches. Nothing is granted from a whole donor road,
-//!   a whole receiving edge, or a dilation;
+//! - above it, an ordinary road's centreline is proved where it lies in the
+//!   established cells of the layer below, or where it meets the exact
+//!   donor region of a lower proved subspan: the flat strip of half the
+//!   bead (at most half the recipe bead) across the subspan, with a round
+//!   cap only where the subspan reaches a real road end. A cut inside a road
+//!   never gains a cap. The layer's established cells are its inward model
+//!   footprint minus every cell an unproved stretch's bead touches, plus the
+//!   cells wholly inside one proved strip or real end cap. Nothing is
+//!   granted from a whole donor road, a whole receiving edge or a dilation;
 //! - an explicit Bridge road joins the chain only when both of its ends are
 //!   proved: a printed bridge holds up the layer above it, but it never
 //!   donates a landing itself.
 //!
-//! Only roads whose centreline meets a model cell off `L` take the exact
-//! interval work; the rest are proved by the cell screen alone. The set is
-//! computed once, layer by layer, in the sweep's up pass as each layer's
-//! support commits; its landing cells per part root are what raster
-//! retention and final reconciliation anchor interface on. These cells are
-//! producer evidence for choosing landings, not proof; the verifier keeps its
-//! own ancestry.
+//! Support is not yet deposited when this runs, so it never establishes part
+//! material here: part over support is not landing ground.
+//!
+//! Only roads whose centreline meets a model cell off the layer below take
+//! the exact interval work; the rest are proved by the cell screen alone.
+//! The set is computed once, layer by layer, in the sweep's up pass; its
+//! landing cells per part root are what raster retention and final
+//! reconciliation anchor interface on. These cells are producer evidence
+//! for choosing landings, not proof; the verifier keeps its own ancestry.
 
 use super::grid::{Bits, Raster, SUPPORT_CELL_MM};
 use super::*;
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Accumulated nanoseconds per establishment stage, for the phase ledger.
+pub(super) static TRACE: [std::sync::atomic::AtomicU64; 6] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+pub(super) const TRACE_NAMES: [&str; 6] = [
+    "footprint",
+    "lower",
+    "holes",
+    "unproved",
+    "bridges",
+    "layers",
+];
+fn trace(stage: usize, since: std::time::Instant) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    TRACE[stage].fetch_add(
+        now.duration_since(since).as_nanos() as u64,
+        Ordering::Relaxed,
+    );
+    now
+}
 
 /// Adjacent roads planned tangent (row spacing equal to bead width) share
 /// only a line; inflating each footprint by this much joins them so the
 /// shared line is not mistaken for a boundary. It is far below a grid cell.
 const FOOTPRINT_JOIN_MM: f64 = 1.0e-3;
 
-/// An established lower centreline subspan and its bead width.
-type Donor = ([[f64; 3]; 2], f64);
+/// Guard against floating rounding in the exact donor tests: intervals and
+/// distances lose it, so a borderline point is never claimed.
+const SLACK_MM: f64 = 1.0e-6;
 
-/// The support kept at one lower layer, as cells.
-pub(super) type LowerSupport<'s> = Cow<'s, Bits>;
+/// An established lower centreline subspan: its endpoints, its donor
+/// radius, and whether each end is a real road end that keeps its cap.
+#[derive(Clone, Copy)]
+pub(super) struct Donor {
+    ends: [[f64; 3]; 2],
+    radius: f64,
+    caps: [bool; 2],
+}
+
+impl Donor {
+    fn bounds(&self, by: f64) -> [[f64; 2]; 2] {
+        let [a, b] = self.ends;
+        [
+            [a[0].min(b[0]) - by, a[1].min(b[1]) - by],
+            [a[0].max(b[0]) + by, a[1].max(b[1]) + by],
+        ]
+    }
+
+    /// The donor frame: origin, unit axis and length.
+    fn frame(&self) -> ([f64; 2], [f64; 2], f64) {
+        let [a, b] = self.ends;
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let length = dx.hypot(dy);
+        let axis = if length > 0.0 {
+            [dx / length, dy / length]
+        } else {
+            [1.0, 0.0]
+        };
+        ([a[0], a[1]], axis, length)
+    }
+
+    /// The open parameter interval of segment `pq` inside the donor region
+    /// widened by `extra`: the strip across the subspan, and the round caps
+    /// at real ends.
+    fn interval(&self, p: [f64; 3], q: [f64; 3], extra: f64) -> Option<(f64, f64)> {
+        let radius = self.radius + extra - SLACK_MM;
+        if radius <= 0.0 {
+            return None;
+        }
+        let (origin, axis, length) = self.frame();
+        let local = |point: [f64; 3]| {
+            let (x, y) = (point[0] - origin[0], point[1] - origin[1]);
+            [axis[0] * x + axis[1] * y, axis[0] * y - axis[1] * x]
+        };
+        let (o, e) = (local(p), local(q));
+        let c = [e[0] - o[0], e[1] - o[1]];
+        let mut result: Option<(f64, f64)> = None;
+        let mut include = |span: (f64, f64)| {
+            if span.0 < span.1 {
+                result = Some(result.map_or(span, |r| (r.0.min(span.0), r.1.max(span.1))));
+            }
+        };
+        // Strip: 0 ≤ u ≤ length, |v| < radius (shrunk by the slack).
+        let mut strip = (0.0_f64, 1.0_f64);
+        let mut clip = |origin: f64, change: f64, lo: f64, hi: f64| -> bool {
+            if change == 0.0 {
+                return lo < origin && origin < hi;
+            }
+            let (t0, t1) = ((lo - origin) / change, (hi - origin) / change);
+            strip.0 = strip.0.max(t0.min(t1));
+            strip.1 = strip.1.min(t0.max(t1));
+            strip.0 < strip.1
+        };
+        let along = [
+            if self.caps[0] { 0.0 } else { SLACK_MM },
+            if self.caps[1] {
+                length
+            } else {
+                length - SLACK_MM
+            },
+        ];
+        if clip(o[0], c[0], along[0], along[1]) && clip(o[1], c[1], -radius, radius) {
+            include(strip);
+        }
+        let speed = c[0].hypot(c[1]);
+        if speed > 0.0 {
+            for (end, centre) in [(0, 0.0), (1, length)] {
+                if !self.caps[end] {
+                    continue;
+                }
+                // |o + t c − (centre, 0)| < radius.
+                let rel = [o[0] - centre, o[1]];
+                let b = (rel[0] * c[0] + rel[1] * c[1]) / (speed * speed);
+                let k = (rel[0] * rel[0] + rel[1] * rel[1] - radius * radius) / (speed * speed);
+                let disc = b * b - k;
+                if disc > 0.0 {
+                    let root = disc.sqrt();
+                    include(((-b - root).max(0.0), (-b + root).min(1.0)));
+                }
+            }
+        }
+        result
+    }
+
+    /// Whether the disk of `radius` about `point` overlaps the donor region.
+    fn touches(&self, point: [f64; 3], radius: f64) -> bool {
+        let (origin, axis, length) = self.frame();
+        let (x, y) = (point[0] - origin[0], point[1] - origin[1]);
+        let (u, v) = (axis[0] * x + axis[1] * y, (axis[0] * y - axis[1] * x).abs());
+        let reach = self.radius - SLACK_MM;
+        let mut distance = (u - u.clamp(0.0, length)).hypot((v - reach).max(0.0));
+        for (cap, centre) in self.caps.into_iter().zip([0.0, length]) {
+            if cap {
+                distance = distance.min(((u - centre).hypot(v) - reach).max(0.0));
+            }
+        }
+        distance + SLACK_MM < radius
+    }
+}
+
+/// What a layer rests on: the established and support cells below, and
+/// the support beads as exact donors.
+struct Below<'b> {
+    cells: &'b Bits,
+    support: &'b [Donor],
+}
 
 /// Everything one establishment step borrows from its caller.
 pub(super) struct Step<'r, 'a, 's> {
     pub raster: &'r Raster<'a>,
     pub layers: &'s [PrintLayer],
-    pub contact_tops: &'r [Option<usize>],
-    pub anchors: &'r mut AnchorWorkspace,
-    pub work: &'r mut usize,
+    /// Half the recipe bead: the most any bead donates.
+    pub allowance: f64,
+    /// The recipe, for splitting Bridge rows as they will print.
+    pub recipe: &'r PlanarPrintRecipe,
+    /// Per layer, its hatch alternation key.
+    pub courses: &'r [u32],
+    /// The recipe's longest two-ended unsupported bridge span.
+    pub bridge_limit: f64,
+    /// The highest layer any later query will establish: footprints are
+    /// rasterized ahead up to it.
+    pub horizon: usize,
+    /// The support that layer `l` may rest on: cells wholly inside support
+    /// beads, and those beads as exact donors. The sweep passes its kept
+    /// cells (no donors) to propose landings; raster retention passes the
+    /// support actually deposited, which requalifies them.
+    pub support: &'r SupportBelow<'r>,
     pub owned_bytes: usize,
+}
+
+/// The support layer `l` may rest on, as cells and exact donors.
+pub(super) type SupportBelow<'r> =
+    dyn Fn(&Raster<'_>, usize) -> Result<(Bits, Vec<Donor>), ManufacturingError> + Sync + 'r;
+
+/// No support below any layer.
+#[cfg(test)]
+pub(super) fn no_support(
+    _: &Raster<'_>,
+    _: usize,
+) -> Result<(Bits, Vec<Donor>), ManufacturingError> {
+    Ok((Bits::default(), Vec::new()))
+}
+
+/// The support beneath layer `l` of `layers`, from actual paths: every
+/// support road of layer `l − 1`, and the interface of the contact top
+/// below it across the Z gap. Cells lie wholly inside the beads.
+pub(super) fn deposited_support(
+    raster: &Raster<'_>,
+    layers: &[PrintLayer],
+    contact_top: Option<usize>,
+    l: usize,
+    owned_bytes: usize,
+) -> Result<(Bits, Vec<Donor>), ManufacturingError> {
+    let direct = layers[l - 1]
+        .paths
+        .iter()
+        .filter(|path| support_role(path.kind));
+    let separated = contact_top
+        .filter(|top| top + 1 < l)
+        .into_iter()
+        .flat_map(|top| {
+            layers[top]
+                .paths
+                .iter()
+                .filter(|path| path.kind == DepositionKind::SupportInterface)
+        });
+    let paths = direct.chain(separated);
+    let mut donors = Vec::new();
+    for path in paths.clone() {
+        let Ok(edges) = path.checked_edges() else {
+            continue;
+        };
+        for edge in edges {
+            reserve_owned(&mut donors, 1, owned_bytes)?;
+            donors.push(Donor {
+                ends: [edge.points_mm[0], edge.points_mm[1]],
+                radius: edge.width_mm * 0.5,
+                caps: [true, true],
+            });
+        }
+    }
+    Ok((bridge_cells(raster, paths, f64::INFINITY)?, donors))
 }
 
 /// One layer's established cells.
@@ -79,9 +283,10 @@ impl Layer {
     }
 }
 
-/// Every edge of `paths` as a whole proved centreline.
+/// Every edge of `paths` as a whole proved centreline with both caps.
 fn whole_edges<'p>(
     paths: impl Iterator<Item = &'p DepositionPath>,
+    allowance: f64,
     proved: &mut Vec<Donor>,
     owned_bytes: usize,
 ) -> Result<(), ManufacturingError> {
@@ -91,7 +296,11 @@ fn whole_edges<'p>(
         };
         for edge in edges {
             reserve_owned(proved, 1, owned_bytes)?;
-            proved.push(([edge.points_mm[0], edge.points_mm[1]], edge.width_mm));
+            proved.push(Donor {
+                ends: [edge.points_mm[0], edge.points_mm[1]],
+                radius: (edge.width_mm * 0.5).min(allowance),
+                caps: [true, true],
+            });
         }
     }
     Ok(())
@@ -106,11 +315,15 @@ pub(super) struct Establishment<'l> {
     next: usize,
     last: Layer,
     older: Bits,
+    /// Footprints of upcoming layers rasterized ahead in parallel, in layer
+    /// order; their bytes are held in the live counter until taken.
+    prefetched: std::collections::VecDeque<(usize, Bits)>,
 }
 
 impl Drop for Establishment<'_> {
     fn drop(&mut self) {
         self.retain(Layer::default(), Bits::default());
+        self.clear_prefetched();
     }
 }
 
@@ -121,7 +334,92 @@ impl<'l> Establishment<'l> {
             next: 0,
             last: Layer::default(),
             older: Bits::default(),
+            prefetched: std::collections::VecDeque::new(),
         }
+    }
+
+    fn release(&self, bits: &Bits) {
+        self.live.fetch_sub(
+            bits.bytes().min(self.live.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn clear_prefetched(&mut self) {
+        for (_, bits) in std::mem::take(&mut self.prefetched) {
+            self.release(&bits);
+        }
+    }
+
+    /// Rasterizes, in parallel and in layer order, the footprints of the
+    /// next layers up to `target` that do not repeat the roads one or two
+    /// layers below, as many as the pool has workers and the live byte
+    /// allowance admits at the frame's dense size.
+    fn prefetch(
+        &mut self,
+        step: &Step<'_, '_, '_>,
+        target: usize,
+    ) -> Result<(), ManufacturingError> {
+        use rayon::prelude::*;
+        let raster = step.raster;
+        let workers = rayon::current_num_threads().max(1);
+        let mut wanted = Vec::new();
+        let mut l = self.next;
+        while l <= target.min(step.layers.len() - 1) && wanted.len() < 2 * workers {
+            check_cancel(raster.cancel)?;
+            let layer = &step.layers[l];
+            let repeats = (l >= 1 && same_ordinary(raster, layer, &step.layers[l - 1]))
+                || (l >= 2 && same_ordinary(raster, layer, &step.layers[l - 2]));
+            if !repeats {
+                reserve_owned(&mut wanted, 1, step.owned_bytes)?;
+                wanted.push(l);
+            }
+            l += 1;
+        }
+        if wanted.len() < 2 {
+            return Ok(());
+        }
+        // Each concurrent footprint may hold up to a dense frame layer.
+        let dense = raster.frame.dense_bytes();
+        while wanted.len() > 1 && (raster.admit)(dense.saturating_mul(wanted.len())).is_err() {
+            wanted.pop();
+        }
+        if wanted.len() < 2 {
+            return Ok(());
+        }
+        let working_set = crate::working_set::current();
+        let built: Vec<Result<Bits, ManufacturingError>> = wanted
+            .par_iter()
+            .map(|&l| {
+                crate::working_set::scope(working_set, || {
+                    footprint(
+                        raster,
+                        ordinary_roads(&step.layers[l]),
+                        step.allowance,
+                        step.owned_bytes,
+                    )
+                })
+            })
+            .collect();
+        for (l, bits) in wanted.into_iter().zip(built) {
+            let bits = bits?;
+            self.live.fetch_add(bits.bytes(), Ordering::Relaxed);
+            self.prefetched.push_back((l, bits));
+        }
+        Ok(())
+    }
+
+    fn take_prefetched(&mut self, l: usize) -> Option<Bits> {
+        while self.prefetched.front().is_some_and(|(at, _)| *at < l) {
+            let (_, bits) = self.prefetched.pop_front()?;
+            self.release(&bits);
+        }
+        if self.prefetched.front().is_some_and(|(at, _)| *at == l) {
+            let (_, bits) = self.prefetched.pop_front()?;
+            self.release(&bits);
+            return Some(bits);
+        }
+        None
     }
 
     fn bytes(&self) -> usize {
@@ -142,19 +440,23 @@ impl<'l> Establishment<'l> {
     /// The cells of `target` that support may land on: established, and
     /// wholly under its ordinary (non-Bridge) model roads. Advances from the
     /// last layer established; a lower target restarts from the bed.
-    pub(super) fn landing<'s>(
+    pub(super) fn landing(
         &mut self,
-        step: &mut Step<'_, '_, 's>,
+        step: &Step<'_, '_, '_>,
         target: usize,
-        support: &mut dyn FnMut(usize) -> LowerSupport<'s>,
     ) -> Result<Bits, ManufacturingError> {
         if target + 1 < self.next {
             self.next = 0;
             self.retain(Layer::default(), Bits::default());
+            self.clear_prefetched();
         }
         while self.next <= target {
             check_cancel(step.raster.cancel)?;
-            let layer = self.layer(step, self.next, support)?;
+            if self.prefetched.is_empty() {
+                self.prefetch(step, step.horizon.max(target))?;
+            }
+            let precomputed = self.take_prefetched(self.next);
+            let layer = self.layer(step, self.next, precomputed)?;
             let older = std::mem::take(&mut self.last.model);
             self.retain(layer, older);
             self.next += 1;
@@ -163,13 +465,18 @@ impl<'l> Establishment<'l> {
     }
 
     /// Layer `l`'s established cells from the retained layer `l − 1`.
-    fn layer<'s>(
+    fn layer(
         &self,
-        step: &mut Step<'_, '_, 's>,
+        step: &Step<'_, '_, '_>,
         l: usize,
-        support: &mut dyn FnMut(usize) -> LowerSupport<'s>,
+        precomputed: Option<Bits>,
     ) -> Result<Layer, ManufacturingError> {
         let raster = step.raster;
+        let t = std::time::Instant::now();
+        TRACE[5].fetch_add(1, Ordering::Relaxed);
+        // Straight skin rows labelled Bridge are split after support at their
+        // genuine gaps, and the supported pieces take back their own role:
+        // establish the layer as it will print.
         let layer = &step.layers[l];
         // A layer repeating the ordinary roads of one or two layers below
         // reuses that footprint rather than rasterizing it again.
@@ -177,9 +484,17 @@ impl<'l> Establishment<'l> {
             raster.difference(&self.last.model, &Bits::default())?
         } else if l >= 2 && same_ordinary(raster, layer, &step.layers[l - 2]) {
             raster.difference(&self.older, &Bits::default())?
+        } else if let Some(model) = precomputed {
+            model
         } else {
-            footprint(raster, ordinary_roads(layer), step.owned_bytes)?
+            footprint(
+                raster,
+                ordinary_roads(layer),
+                step.allowance,
+                step.owned_bytes,
+            )?
         };
+        let t = trace(0, t);
         let bridges = || {
             layer
                 .paths
@@ -189,10 +504,11 @@ impl<'l> Establishment<'l> {
         let mut proved = Vec::new();
         if l == 0 {
             // The bed holds every first-layer road, a bridge included.
-            let chain = raster.union(&model, &bridge_cells(raster, bridges())?)?;
+            let chain = raster.union(&model, &bridge_cells(raster, bridges(), step.allowance)?)?;
             let landing = raster.difference(&model, &Bits::default())?;
             whole_edges(
                 layer.paths.iter().filter(|path| path.kind.is_model()),
+                step.allowance,
                 &mut proved,
                 step.owned_bytes,
             )?;
@@ -203,86 +519,214 @@ impl<'l> Establishment<'l> {
                 proved,
             });
         }
-        let below = support(l - 1);
-        let contact = match step.contact_tops.get(l).copied().flatten() {
-            Some(top) if top + 1 < l => Some(support(top)),
-            _ => None,
-        };
-        let mut lower = raster.union(&self.last.chain, &below)?;
-        if let Some(contact) = &contact {
-            lower = raster.union(&lower, contact)?;
-        }
+        let (support_cells, support) = (step.support)(raster, l)?;
+        let lower = &raster.union(&self.last.chain, &support_cells)?;
+        drop(support_cells);
         if lower.is_empty() {
             return Ok(Layer {
                 model,
                 ..Layer::default()
             });
         }
-        // Model cells off `L`: only centrelines meeting them need proof.
-        let holes = raster.difference(&model, &lower)?;
+        let below = Below {
+            cells: lower,
+            support: &support,
+        };
+        let t = trace(1, t);
+        // Model cells off the layer below: only centrelines meeting them need
+        // proof.
+        let holes = raster.difference(&model, lower)?;
+        let t = trace(2, t);
         let landing = if holes.is_empty() {
-            whole_edges(ordinary_roads(layer), &mut proved, step.owned_bytes)?;
+            whole_edges(
+                ordinary_roads(layer),
+                step.allowance,
+                &mut proved,
+                step.owned_bytes,
+            )?;
             raster.difference(&model, &Bits::default())?
         } else {
-            let (unproved, inside) = self.unproved(step, l, &lower, &holes, &mut proved)?;
-            // Cells off every unproved bead, or wholly inside one proved bead.
+            let (unproved, inside) = self.unproved(step, layer, &below, &holes, &mut proved)?;
+            // Cells off every unproved bead, or wholly inside one proved
+            // strip or real end cap.
             let kept = raster.difference(&model, &unproved)?;
             raster.union(&kept, &raster.intersection(&model, &inside)?)?
         };
         drop(holes);
-        // A bridge chains when both its ends are proved: in `L`'s cells, or
-        // by exact endpoint or interval contact with a proved lower subspan.
+        let t = trace(3, t);
+        // A bridge chains when it roots as an actual bridge stroke on the
+        // layer below: both ends bonded, and every unproved gap along each
+        // stroke run within the bridge limit (or a tolerated one-sided tip).
         let mut chained: Vec<&DepositionPath> = Vec::new();
+        let mut pieces = Vec::new();
+        let mut covered = Vec::new();
+        // A straight skin row labelled Bridge is split after support at its
+        // genuine gaps (the planner's own split rule, run here against the
+        // layer below): the pieces that stay Bridge chain as bridge strokes,
+        // and the supported remainders chain only where their centreline is
+        // proved and never donate. Any other Bridge chains as a whole stroke.
+        let mut split_strips: Vec<Polygon<f64>> = Vec::new();
+        let mut split_cells = Bits::default();
+        let mut split_anchors = AnchorWorkspace::default();
+        let mut split_caps: Vec<([f64; 2], [f64; 2], f64)> = Vec::new();
+        let mut spans: Vec<(f64, f64)> = Vec::new();
+        let diagonal = SUPPORT_CELL_MM * std::f64::consts::SQRT_2;
         for path in bridges() {
             check_cancel(raster.cancel)?;
-            let Ok(edges) = path.checked_edges() else {
-                continue;
+            let splits = match step.courses.get(l) {
+                Some(&course) => super::super::bridge_split::splittable(
+                    layer,
+                    path,
+                    &step.layers[l - 1],
+                    step.recipe,
+                    course,
+                )?
+                .is_some(),
+                None => true,
             };
-            let (Some(first), Some(last)) = (edges.clone().next(), edges.clone().next_back())
-            else {
-                continue;
-            };
-            raster.charge(1);
-            let mut ends = [false; 2];
-            for (end, edge, at) in [(0, &first, 0), (1, &last, 1)] {
-                let point = edge.points_mm[at];
-                if raster.holds_point(&lower, [point[0], point[1]]) {
-                    ends[end] = true;
-                    continue;
-                }
-                let [p, q] = [edge.points_mm[0], edge.points_mm[1]];
-                let gaps = step.anchors.gaps_edges(
-                    AnchorCandidate {
-                        endpoints_mm: [p, q],
-                        bead_width_mm: edge.width_mm,
-                    },
-                    self.last
-                        .proved
-                        .iter()
-                        .filter(|(donor, width)| {
-                            let by = edge.width_mm + width;
-                            donor[0][0].min(donor[1][0]) <= point[0] + by
-                                && point[0] - by <= donor[0][0].max(donor[1][0])
-                                && donor[0][1].min(donor[1][1]) <= point[1] + by
-                                && point[1] - by <= donor[0][1].max(donor[1][1])
-                        })
-                        .map(|&(donor, width)| (Ok(donor), true, width)),
-                    step.work,
+            let split = if splits {
+                let mut work = 0usize;
+                let pieces = super::super::bridge_split::split_path(
+                    layer,
+                    path,
+                    &step.layers[l - 1],
+                    step.recipe,
+                    step.courses[l],
+                    &mut split_anchors,
+                    &mut work,
                     raster.cancel,
                 )?;
-                ends[end] = if at == 0 {
-                    gaps.first().is_none_or(|gap| gap.start > 0.0 || gap.left)
-                } else {
-                    gaps.last().is_none_or(|gap| gap.end < 1.0 || gap.right)
-                };
+                raster.charge(work);
+                pieces
+            } else {
+                None
+            };
+            let Some(split) = split else {
+                if self.bridge_roots(step, path, &below, &mut pieces, &mut covered)? {
+                    reserve_owned(&mut chained, 1, step.owned_bytes)?;
+                    chained.push(path);
+                }
+                continue;
+            };
+            // The pieces that stay Bridge chain as bridge strokes; the
+            // supported remainders chain only where proved and never donate.
+            for piece in split
+                .iter()
+                .filter(|piece| piece.kind == DepositionKind::Bridge)
+            {
+                if self.bridge_roots(step, piece, &below, &mut pieces, &mut covered)? {
+                    whole_edges(
+                        std::iter::once(piece),
+                        step.allowance,
+                        &mut proved,
+                        step.owned_bytes,
+                    )?;
+                    let cells = bridge_cells(raster, std::iter::once(piece), step.allowance)?;
+                    split_cells = raster.union(&split_cells, &cells)?;
+                }
             }
-            if ends == [true, true] {
-                reserve_owned(&mut chained, 1, step.owned_bytes)?;
-                chained.push(path);
+            for edge in split
+                .iter()
+                .filter(|piece| piece.kind != DepositionKind::Bridge)
+                .filter_map(|piece| piece.checked_edges().ok())
+                .flatten()
+            {
+                let [p, q] = [edge.points_mm[0], edge.points_mm[1]];
+                let radius = (edge.width_mm * 0.5).min(step.allowance);
+                spans.clear();
+                raster.along(lower, lower, [p[0], p[1]], [q[0], q[1]], &mut pieces)?;
+                let mut start = 0.0;
+                for &(end, inside) in &pieces {
+                    if inside {
+                        reserve_owned(&mut spans, 1, step.owned_bytes)?;
+                        spans.push((start, end));
+                    }
+                    start = end;
+                }
+                let near = self.last.proved.iter().chain(below.support);
+                let extra = (step.allowance - radius).max(0.0);
+                exact_cover(raster, near, p, q, extra, &mut spans, step.owned_bytes)?;
+                spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                let mut merged: Option<(f64, f64)> = None;
+                let mut record = |span: (f64, f64)| -> Result<(), ManufacturingError> {
+                    let at3 = |t: f64| {
+                        [
+                            p[0] + (q[0] - p[0]) * t,
+                            p[1] + (q[1] - p[1]) * t,
+                            p[2] + (q[2] - p[2]) * t,
+                        ]
+                    };
+                    let caps = [span.0 <= 0.0, span.1 >= 1.0];
+                    reserve_owned(&mut proved, 1, step.owned_bytes)?;
+                    proved.push(Donor {
+                        ends: [at3(span.0), at3(span.1)],
+                        radius,
+                        caps,
+                    });
+                    let (a, b) = (at3(span.0), at3(span.1));
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let length = dx.hypot(dy);
+                    if length > 0.0 {
+                        let n = [-dy / length * radius, dx / length * radius];
+                        reserve_owned(&mut split_strips, 1, step.owned_bytes)?;
+                        split_strips.push(Polygon::new(
+                            geo::LineString::from(vec![
+                                (a[0] + n[0], a[1] + n[1]),
+                                (b[0] + n[0], b[1] + n[1]),
+                                (b[0] - n[0], b[1] - n[1]),
+                                (a[0] - n[0], a[1] - n[1]),
+                                (a[0] + n[0], a[1] + n[1]),
+                            ]),
+                            Vec::new(),
+                        ));
+                    }
+                    if radius > diagonal {
+                        for (cap, point) in caps.into_iter().zip([a, b]) {
+                            if cap {
+                                reserve_owned(&mut split_caps, 1, step.owned_bytes)?;
+                                split_caps.push((
+                                    [point[0], point[1]],
+                                    [point[0], point[1]],
+                                    radius - diagonal,
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+                for &(start, end) in &spans {
+                    match &mut merged {
+                        Some(span) if start <= span.1 => span.1 = span.1.max(end),
+                        _ => {
+                            if let Some(span) = merged.take() {
+                                record(span)?;
+                            }
+                            merged = Some((start, end));
+                        }
+                    }
+                }
+                if let Some(span) = merged.filter(|span| span.0 < span.1) {
+                    record(span)?;
+                }
             }
         }
-        whole_edges(chained.iter().copied(), &mut proved, step.owned_bytes)?;
-        let chain = raster.union(&landing, &bridge_cells(raster, chained.into_iter())?)?;
+        whole_edges(
+            chained.iter().copied(),
+            step.allowance,
+            &mut proved,
+            step.owned_bytes,
+        )?;
+        let mut chain = raster.union(
+            &landing,
+            &bridge_cells(raster, chained.into_iter(), step.allowance)?,
+        )?;
+        if !split_strips.is_empty() {
+            chain = raster.union(&chain, &raster.inward(&split_strips)?)?;
+            chain = raster.union(&chain, &raster.capsules(split_caps)?)?;
+        }
+        chain = raster.union(&chain, &split_cells)?;
+
+        trace(4, t);
         Ok(Layer {
             chain,
             landing,
@@ -291,22 +735,23 @@ impl<'l> Establishment<'l> {
         })
     }
 
-    /// The cells touched by the bead of every unproved centreline portion of
+    /// The cells touched by the bead of every unproved centreline stretch of
     /// layer `l`'s ordinary roads, and the cells wholly inside one proved
-    /// portion's bead of the same roads. A centreline lying wholly in `L`'s cells
-    /// is proved by the cells alone; one meeting a `holes` cell is proved
-    /// where it lies in `L`'s cells or where an exact capsule interval meets
-    /// the established centreline subspans of a lower road.
+    /// stretch's strip or real end cap. A centreline lying wholly in the
+    /// cells below is proved by the cells alone; one meeting a `holes` cell
+    /// is proved where it lies in those cells or inside the exact region of
+    /// a lower proved donor. Proved stretches are recorded as the donors of
+    /// the layer above.
     fn unproved(
         &self,
-        step: &mut Step<'_, '_, '_>,
-        l: usize,
-        lower: &Bits,
+        step: &Step<'_, '_, '_>,
+        layer: &PrintLayer,
+        below: &Below<'_>,
         holes: &Bits,
         proved_spans: &mut Vec<Donor>,
     ) -> Result<(Bits, Bits), ManufacturingError> {
         let raster = step.raster;
-        let layers = step.layers;
+        let lower = below.cells;
         let screen = raster.coarse(holes)?;
         let meets = |rect: [[f64; 2]; 2], by: f64| {
             let rect = [
@@ -321,26 +766,32 @@ impl<'l> Establishment<'l> {
                 [p[0].max(q[0]), p[1].max(q[1])],
             ]
         };
+        let diagonal = SUPPORT_CELL_MM * std::f64::consts::SQRT_2;
         // A centreline point lies in its own inward footprint only when the
         // bead is wider than a cell diagonal; thinner beads always take proof.
-        let thin = |width: f64| width * 0.5 <= SUPPORT_CELL_MM * std::f64::consts::SQRT_2;
+        let thin = |radius: f64| radius <= diagonal;
         let mut pieces = Vec::new();
         let mut donors: Option<Vec<Donor>> = None;
         let mut anchored: Vec<(f64, f64)> = Vec::new();
         let mut unproved: Vec<([f64; 2], [f64; 2], f64)> = Vec::new();
-        let mut proved: Vec<([f64; 2], [f64; 2], f64)> = Vec::new();
-        let diagonal = SUPPORT_CELL_MM * std::f64::consts::SQRT_2;
-        for path in ordinary_roads(&layers[l]) {
+        let mut strips: Vec<Polygon<f64>> = Vec::new();
+        let mut caps: Vec<([f64; 2], [f64; 2], f64)> = Vec::new();
+        for path in ordinary_roads(layer) {
             let Ok(edges) = path.checked_edges() else {
                 continue;
             };
             for edge in edges {
                 check_cancel(raster.cancel)?;
                 let [p, q] = [edge.points_mm[0], edge.points_mm[1]];
+                let radius = (edge.width_mm * 0.5).min(step.allowance);
                 raster.charge(1);
-                if !thin(edge.width_mm) && !meets(bounds(p, q), 0.0) {
+                if !thin(radius) && !meets(bounds(p, q), 0.0) {
                     reserve_owned(proved_spans, 1, step.owned_bytes)?;
-                    proved_spans.push(([p, q], edge.width_mm));
+                    proved_spans.push(Donor {
+                        ends: [p, q],
+                        radius,
+                        caps: [true, true],
+                    });
                     continue;
                 }
                 anchored.clear();
@@ -353,119 +804,285 @@ impl<'l> Establishment<'l> {
                     start = end;
                 }
                 if !(anchored.len() == 1 && anchored[0] == (0.0, 1.0)) {
-                    // Exact recovery of what cell rounding left.
+                    // Exact recovery of what cell rounding left, against the
+                    // donor regions of lower proved subspans.
                     let donors = match &mut donors {
                         Some(donors) => donors,
-                        None => donors.insert(self.donors(step, &meets)?),
+                        None => donors.insert(self.donors(step, below, &meets)?),
                     };
-                    let rect = bounds(p, q);
-                    let reach = edge.width_mm;
-                    let gaps = step.anchors.gaps_edges(
-                        AnchorCandidate {
-                            endpoints_mm: [p, q],
-                            bead_width_mm: edge.width_mm,
-                        },
-                        donors
-                            .iter()
-                            .filter(|(donor, width)| {
-                                let d = bounds(donor[0], donor[1]);
-                                let by = reach + width;
-                                d[0][0] <= rect[1][0] + by
-                                    && rect[0][0] <= d[1][0] + by
-                                    && d[0][1] <= rect[1][1] + by
-                                    && rect[0][1] <= d[1][1] + by
-                            })
-                            .map(|&(donor, width)| (Ok(donor), true, width)),
-                        step.work,
-                        raster.cancel,
+                    let extra = (step.allowance - radius).max(0.0);
+                    exact_cover(
+                        raster,
+                        donors.iter(),
+                        p,
+                        q,
+                        extra,
+                        &mut anchored,
+                        step.owned_bytes,
                     )?;
-                    let mut covered = 0.0_f64;
-                    for gap in gaps {
-                        if gap.start > covered {
-                            anchored.push((covered, gap.start));
-                        }
-                        covered = covered.max(gap.end);
-                    }
-                    if covered < 1.0 {
-                        anchored.push((covered, 1.0));
-                    }
                 }
-                // The unproved complement of the anchored intervals.
                 anchored.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
                 let at = |t: f64| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+                let at3 = |t: f64| {
+                    [
+                        p[0] + (q[0] - p[0]) * t,
+                        p[1] + (q[1] - p[1]) * t,
+                        p[2] + (q[2] - p[2]) * t,
+                    ]
+                };
                 let half = edge.width_mm * 0.5 + FOOTPRINT_JOIN_MM;
+                // Merge the anchored intervals; record each proved stretch
+                // and each unproved one between them.
                 let mut reached = 0.0_f64;
-                for &(start, end) in anchored.iter().chain([(1.0, 1.0)].iter()) {
+                let mut current: Option<(f64, f64)> = None;
+                let mut spans: Vec<(f64, f64)> = Vec::new();
+                for &(start, end) in &anchored {
+                    match &mut current {
+                        Some(span) if start <= span.1 => span.1 = span.1.max(end),
+                        _ => {
+                            if let Some(span) = current.take() {
+                                spans.push(span);
+                            }
+                            current = Some((start, end));
+                        }
+                    }
+                }
+                spans.extend(current);
+                for &(start, end) in &spans {
                     if start > reached {
                         reserve_owned(&mut unproved, 1, step.owned_bytes)?;
                         unproved.push((at(reached), at(start), half));
                     }
                     if end > start {
-                        let at3 = |t: f64| {
-                            [
-                                p[0] + (q[0] - p[0]) * t,
-                                p[1] + (q[1] - p[1]) * t,
-                                p[2] + (q[2] - p[2]) * t,
-                            ]
-                        };
+                        let caps_here = [start <= 0.0, end >= 1.0];
                         reserve_owned(proved_spans, 1, step.owned_bytes)?;
-                        proved_spans.push(([at3(start), at3(end)], edge.width_mm));
-                        if edge.width_mm * 0.5 > diagonal {
-                            reserve_owned(&mut proved, 1, step.owned_bytes)?;
-                            proved.push((at(start), at(end), edge.width_mm * 0.5 - diagonal));
+                        proved_spans.push(Donor {
+                            ends: [at3(start), at3(end)],
+                            radius,
+                            caps: caps_here,
+                        });
+                        // Cells wholly inside the flat strip, and inside the
+                        // cap at a real road end.
+                        let (a, b) = (at(start), at(end));
+                        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                        let length = dx.hypot(dy);
+                        if length > 0.0 {
+                            let n = [-dy / length * radius, dx / length * radius];
+                            reserve_owned(&mut strips, 1, step.owned_bytes)?;
+                            strips.push(Polygon::new(
+                                geo::LineString::from(vec![
+                                    (a[0] + n[0], a[1] + n[1]),
+                                    (b[0] + n[0], b[1] + n[1]),
+                                    (b[0] - n[0], b[1] - n[1]),
+                                    (a[0] - n[0], a[1] - n[1]),
+                                    (a[0] + n[0], a[1] + n[1]),
+                                ]),
+                                Vec::new(),
+                            ));
+                        }
+                        if radius > diagonal {
+                            for (cap, point) in caps_here.into_iter().zip([a, b]) {
+                                if cap {
+                                    reserve_owned(&mut caps, 1, step.owned_bytes)?;
+                                    caps.push((point, point, radius - diagonal));
+                                }
+                            }
                         }
                     }
                     reached = reached.max(end);
                 }
-                if anchored.is_empty() {
-                    // The whole edge, endpoint caps included.
+                if reached < 1.0 {
                     reserve_owned(&mut unproved, 1, step.owned_bytes)?;
-                    unproved.push((at(0.0), at(1.0), half));
+                    unproved.push((at(reached), at(1.0), half));
                 }
             }
         }
-        Ok((raster.capsules(unproved)?, raster.capsules(proved)?))
+        let inside = raster.union(&raster.inward(&strips)?, &raster.capsules(caps)?)?;
+        Ok((raster.capsules(unproved)?, inside))
+    }
+
+    /// Whether a Bridge road roots on the layer below as the verifier's
+    /// bridge stroke rule demands: per stroke run, centreline coverage from
+    /// the cells below or exact donor regions, both run ends bonded, and each
+    /// uncovered gap tolerated or a two-ended span within the bridge limit.
+    fn bridge_roots(
+        &self,
+        step: &Step<'_, '_, '_>,
+        path: &DepositionPath,
+        below: &Below<'_>,
+        pieces: &mut Vec<(f64, bool)>,
+        covered: &mut Vec<(f64, f64)>,
+    ) -> Result<bool, ManufacturingError> {
+        let raster = step.raster;
+        let lower = below.cells;
+        let edges: Vec<_> = match path.checked_edges() {
+            Ok(edges) => edges.collect(),
+            Err(_) => return Ok(false),
+        };
+        let Ok(runs) = StrokeRuns::for_path(path) else {
+            return Ok(false);
+        };
+        let tolerance = 2.0 * crate::planner::OFFSET_TOLERANCE_MM;
+        let mut spans = Vec::new();
+        for (first, last, width) in runs {
+            let count = if last > first {
+                last - first
+            } else {
+                edges.len() - first + last
+            };
+            covered.clear();
+            let mut length = 0.0_f64;
+            let mut ends = [false; 2];
+            for k in 0..count {
+                check_cancel(raster.cancel)?;
+                let edge = &edges[(first + k) % edges.len()];
+                let [p, q] = [edge.points_mm[0], edge.points_mm[1]];
+                let edge_length = (q[0] - p[0]).hypot(q[1] - p[1]);
+                spans.clear();
+                raster.along(lower, lower, [p[0], p[1]], [q[0], q[1]], pieces)?;
+                let mut start = 0.0;
+                for &(end, inside) in pieces.iter() {
+                    if inside {
+                        reserve_owned(&mut spans, 1, step.owned_bytes)?;
+                        spans.push((start, end));
+                    }
+                    start = end;
+                }
+                let near = self
+                    .last
+                    .proved
+                    .iter()
+                    .chain(below.support)
+                    .filter(|donor| {
+                        let d = donor.bounds(donor.radius + edge.width_mm);
+                        d[0][0] <= p[0].max(q[0])
+                            && p[0].min(q[0]) <= d[1][0]
+                            && d[0][1] <= p[1].max(q[1])
+                            && p[1].min(q[1]) <= d[1][1]
+                    });
+                exact_cover(
+                    raster,
+                    near.clone(),
+                    p,
+                    q,
+                    0.0,
+                    &mut spans,
+                    step.owned_bytes,
+                )?;
+                for (end, point) in [(0, p), (1, q)] {
+                    if (end == 0 && k == 0) || (end == 1 && k + 1 == count) {
+                        ends[end] |= raster.holds_point(lower, [point[0], point[1]])
+                            || near
+                                .clone()
+                                .any(|donor| donor.touches(point, edge.width_mm * 0.5));
+                    }
+                }
+                for &(start, end) in &spans {
+                    reserve_owned(covered, 1, step.owned_bytes)?;
+                    covered.push((length + start * edge_length, length + end * edge_length));
+                }
+                length += edge_length;
+            }
+            covered.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            if !ends[0] && covered.first().is_none_or(|span| span.0 > 0.0)
+                || !ends[1] && !covered.iter().any(|span| span.1 >= length)
+            {
+                return Ok(false);
+            }
+            let accepts = |span: f64, left: bool, right: bool| {
+                (left || right)
+                    && (span <= tolerance || (!(left && right) && span <= width * 0.5 + tolerance))
+                    || left && right && span <= step.bridge_limit
+            };
+            let mut reached = 0.0_f64;
+            for &(start, end) in covered.iter() {
+                if start > reached && !accepts(start - reached, reached > 0.0 || ends[0], true) {
+                    return Ok(false);
+                }
+                reached = reached.max(end);
+            }
+            if reached < length && !accepts(length - reached, reached > 0.0 || ends[0], ends[1]) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The proved centreline subspans of layer `l − 1` near a hole cell.
     fn donors(
         &self,
-        step: &mut Step<'_, '_, '_>,
+        step: &Step<'_, '_, '_>,
+        below: &Below<'_>,
         meets: &dyn Fn([[f64; 2]; 2], f64) -> bool,
     ) -> Result<Vec<Donor>, ManufacturingError> {
         let raster = step.raster;
         let mut donors = Vec::new();
-        for &([p, q], width) in &self.last.proved {
+        for donor in self.last.proved.iter().chain(below.support) {
             check_cancel(raster.cancel)?;
             raster.charge(1);
-            let rect = [
-                [p[0].min(q[0]), p[1].min(q[1])],
-                [p[0].max(q[0]), p[1].max(q[1])],
-            ];
-            if meets(rect, 2.0 * width) {
+            if meets(donor.bounds(0.0), 2.0 * donor.radius + 2.0 * step.allowance) {
                 reserve_owned(&mut donors, 1, step.owned_bytes)?;
-                donors.push(([p, q], width));
+                donors.push(*donor);
             }
         }
         Ok(donors)
     }
 }
 
-/// Cells wholly inside the beads of `paths`: each bead shrunk by a cell
-/// diagonal and rasterized outward, without a union overlay.
+/// Appends the parameter intervals of segment `pq` inside each donor's exact
+/// region widened by `extra`.
+fn exact_cover<'d>(
+    raster: &Raster<'_>,
+    donors: impl Iterator<Item = &'d Donor>,
+    p: [f64; 3],
+    q: [f64; 3],
+    extra: f64,
+    out: &mut Vec<(f64, f64)>,
+    owned_bytes: usize,
+) -> Result<(), ManufacturingError> {
+    let rect = [
+        [p[0].min(q[0]), p[1].min(q[1])],
+        [p[0].max(q[0]), p[1].max(q[1])],
+    ];
+    for donor in donors {
+        raster.charge(1);
+        let d = donor.bounds(donor.radius + extra);
+        if d[0][0] > rect[1][0]
+            || rect[0][0] > d[1][0]
+            || d[0][1] > rect[1][1]
+            || rect[0][1] > d[1][1]
+        {
+            continue;
+        }
+        if let Some(span) = donor.interval(p, q, extra) {
+            reserve_owned(out, 1, owned_bytes)?;
+            out.push(span);
+        }
+    }
+    Ok(())
+}
+
+/// Cells wholly inside the beads of `paths` (at most `allowance` from the
+/// centreline): each bead shrunk by a cell diagonal and rasterized outward,
+/// without a union overlay.
 fn bridge_cells<'p>(
     raster: &Raster<'_>,
     paths: impl Iterator<Item = &'p DepositionPath>,
+    allowance: f64,
 ) -> Result<Bits, ManufacturingError> {
     let shrink = SUPPORT_CELL_MM * std::f64::consts::SQRT_2;
     raster.capsules(
         paths
             .filter_map(|path| path.checked_edges().ok())
             .flatten()
-            .filter(|edge| edge.width_mm * 0.5 > shrink)
+            .filter(|edge| (edge.width_mm * 0.5).min(allowance) > shrink)
             .map(|edge| {
                 let [p, q] = [edge.points_mm[0], edge.points_mm[1]];
-                ([p[0], p[1]], [q[0], q[1]], edge.width_mm * 0.5 - shrink)
+                (
+                    [p[0], p[1]],
+                    [q[0], q[1]],
+                    (edge.width_mm * 0.5).min(allowance) - shrink,
+                )
             }),
     )
 }
@@ -502,11 +1119,12 @@ fn same_ordinary(raster: &Raster<'_>, a: &PrintLayer, b: &PrintLayer) -> bool {
 }
 
 /// Cells lying entirely inside the nominal footprint of `paths`: each edge's
-/// centreline dilated by half its bead width, unioned, then rasterized
-/// inward. Edges wholly outside the frame are skipped.
+/// centreline dilated by half its bead width (at most `allowance`), unioned,
+/// then rasterized inward. Edges wholly outside the frame are skipped.
 pub(super) fn footprint<'p>(
     raster: &Raster<'_>,
     paths: impl Iterator<Item = &'p DepositionPath>,
+    allowance: f64,
     owned_bytes: usize,
 ) -> Result<Bits, ManufacturingError> {
     let bounds = raster.frame.bounds();
@@ -521,7 +1139,7 @@ pub(super) fn footprint<'p>(
             let &[p, q] = edge.points_mm else {
                 continue;
             };
-            let half = edge.width_mm * 0.5 + FOOTPRINT_JOIN_MM;
+            let half = (edge.width_mm * 0.5).min(allowance) + FOOTPRINT_JOIN_MM;
             let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
             let reach = [
                 [a[0].min(b[0]) - half, a[1].min(b[1]) - half],
@@ -646,7 +1264,7 @@ pub(super) fn root_contacts(
     roots: &[Root],
     contacts: &[Option<Bits>],
     index: usize,
-    current: Option<(&[PrintLayer], usize)>,
+    current: Option<(&[PrintLayer], f64, usize)>,
 ) -> Result<Bits, ManufacturingError> {
     let mut union = Bits::default();
     for (root, cells) in roots.iter().zip(contacts) {
@@ -666,7 +1284,7 @@ pub(super) fn root_contacts(
             continue;
         }
         let cells = match current {
-            Some((layers, owned_bytes)) => {
+            Some((layers, allowance, owned_bytes)) => {
                 let Some(layer) = layers.get(object_layer) else {
                     continue;
                 };
@@ -676,11 +1294,12 @@ pub(super) fn root_contacts(
                         .paths
                         .iter()
                         .filter(|path| path.kind.is_model() && path.kind != DepositionKind::Bridge),
+                    allowance,
                     owned_bytes,
                 )?;
-                Cow::Owned(raster.intersection(cells, &ordinary)?)
+                std::borrow::Cow::Owned(raster.intersection(cells, &ordinary)?)
             }
-            None => Cow::Borrowed(cells),
+            None => std::borrow::Cow::Borrowed(cells),
         };
         union = raster.union(&union, &cells)?;
     }
@@ -741,19 +1360,20 @@ mod tests {
     fn landing(layers: &[PrintLayer], raster: &Raster<'_>, target: usize) -> Bits {
         let live = AtomicUsize::new(0);
         let mut establishment = Establishment::new(&live);
-        let mut anchors = AnchorWorkspace::default();
-        let contact_tops = vec![None; layers.len()];
-        let mut step = Step {
+        let step = Step {
             raster,
             layers,
-            contact_tops: &contact_tops,
-            anchors: &mut anchors,
-            work: &mut 0,
+            allowance: crate::planner::tests::recipe(1.0).bead_width_mm * 0.5,
+            bridge_limit: crate::planner::tests::recipe(1.0)
+                .process
+                .max_bridge_span_mm,
+            horizon: target,
+            recipe: &crate::planner::tests::recipe(1.0),
+            courses: &spiling_contracts::manufacturing::hatch_alternation_keys(layers),
+            support: &no_support,
             owned_bytes: 0,
         };
-        establishment
-            .landing(&mut step, target, &mut |_| Cow::Owned(Bits::default()))
-            .unwrap()
+        establishment.landing(&step, target).unwrap()
     }
 
     /// Interface strokes at layer `first` that survive anchoring on the part
@@ -878,8 +1498,10 @@ mod tests {
             vec![road(Perimeter, [0.0, 12.0], 0.0, 1)],
         ]);
         let cells = landing(&layers, &raster, 1);
-        // The lower bead ends at 10.3; the allowance is half a bead (0.3).
-        assert!(raster.holds_point(&cells, [10.4, 0.0]));
+        // The lower bead ends at 10.3, so the upper centreline is proved to
+        // there; a cut inside a road keeps no cap, so nothing past it holds.
+        assert!(raster.holds_point(&cells, [10.2, 0.0]));
+        assert!(!raster.holds_point(&cells, [10.4, 0.0]));
         assert!(!raster.holds_point(&cells, [10.7, 0.0]));
         assert!(!raster.holds_point(&cells, [11.5, 0.0]));
     }
@@ -922,7 +1544,8 @@ mod tests {
         ]);
         let cells = landing(&layers, &raster, 1);
         assert!(raster.holds_point(&cells, [0.5, 0.0]));
-        assert!(raster.holds_point(&cells, [1.4, 0.0]));
+        assert!(raster.holds_point(&cells, [1.2, 0.0]));
+        assert!(!raster.holds_point(&cells, [1.4, 0.0]));
         // Beside the parallel road, far from the anchor: not established.
         assert!(!raster.holds_point(&cells, [8.0, -0.25]));
         assert!(!raster.holds_point(&cells, [5.0, -0.25]));
@@ -977,5 +1600,69 @@ mod tests {
             ..road(SupportInterface, [0.0, 0.0], 0.0, 3)
         }];
         assert!(surviving(&layers, 1, 3, loop_).is_empty());
+    }
+
+    #[test]
+    fn part_over_kept_support_or_an_overlong_bridge_is_not_landing_ground() {
+        use DepositionKind::*;
+        let cancel = AtomicBool::new(false);
+        let raster = raster(&cancel);
+        // Part 19 L41 in small: part material standing on support below is
+        // never established here, since that support is not yet deposited.
+        let stacked = layers(vec![
+            vec![road(SupportInterface, [0.0, 10.0], 0.0, 0)],
+            vec![road(Perimeter, [0.0, 10.0], 0.0, 1)],
+            vec![road(SolidFill, [0.0, 10.0], 0.0, 2)],
+        ]);
+        assert!(landing(&stacked, &raster, 2).is_empty());
+        // A bridge whose unsupported middle exceeds the bridge limit (6 mm
+        // here) does not chain the layer above it, however its ends stand;
+        // one within the limit does.
+        for (gap, chains) in [(8.0, false), (4.0, true)] {
+            let bridged = layers(vec![
+                vec![
+                    road(Perimeter, [0.0, 2.0], 0.0, 0),
+                    road(Perimeter, [2.0 + gap, 4.0 + gap], 0.0, 0),
+                ],
+                vec![road(Bridge, [0.5, 3.5 + gap], 0.0, 1)],
+                vec![road(SolidFill, [0.5, 3.5 + gap], 0.0, 2)],
+            ]);
+            let above = landing(&bridged, &raster, 2);
+            assert_eq!(
+                raster.holds_point(&above, [2.0 + gap / 2.0, 0.0]),
+                chains,
+                "{gap}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_splittable_skin_bridge_chains_its_proved_stretches_and_genuine_gap() {
+        use DepositionKind::*;
+        let cancel = AtomicBool::new(false);
+        let raster = raster(&cancel);
+        // Part 26 L20 in small: a straight top-skin row labelled Bridge is
+        // split after support, and its supported remainders become top skin
+        // again, so they chain only where their centreline is proved.
+        let skin_bridge = DepositionPath {
+            owner: Some(DepositionOwner::MandatorySkin {
+                skin: ProcessSkinKind::TopSkin,
+            }),
+            ..road(Bridge, [0.5, 7.5], 0.0, 1)
+        };
+        let layers = layers(vec![
+            vec![
+                road(Perimeter, [0.0, 2.0], 0.0, 0),
+                road(Perimeter, [6.0, 8.0], 0.0, 0),
+            ],
+            vec![skin_bridge],
+            vec![road(SolidFill, [0.5, 7.5], 0.0, 2)],
+        ]);
+        // The proved stretches chain, and so does the genuine two-ended gap
+        // that stays Bridge after the split; the row itself never donates.
+        let above = landing(&layers, &raster, 2);
+        assert!(raster.holds_point(&above, [1.0, 0.0]));
+        assert!(raster.holds_point(&above, [4.0, 0.0]));
+        assert!(landing(&layers, &raster, 1).is_empty());
     }
 }

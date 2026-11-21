@@ -601,6 +601,35 @@ impl Raster<'_> {
         self.dilated(polygons.into_iter().map(|polygon| (polygon, distance)))
     }
 
+    /// [`Self::outward`] over many polygons, rasterized in parallel chunks
+    /// and unioned in order. Set union is order-free, so the cells equal the
+    /// sequential raster.
+    pub(super) fn outward_parallel(
+        &self,
+        polygons: &[&Polygon<f64>],
+        distance: f64,
+    ) -> Result<Bits, ManufacturingError> {
+        use rayon::prelude::*;
+        const CHUNK: usize = 64;
+        if polygons.len() <= CHUNK {
+            return self.outward(polygons.iter().copied(), distance);
+        }
+        let working_set = crate::working_set::current();
+        let parts: Vec<Result<Bits, ManufacturingError>> = polygons
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                crate::working_set::scope(working_set, || {
+                    self.outward(chunk.iter().copied(), distance)
+                })
+            })
+            .collect();
+        let mut union = Bits::default();
+        for part in parts {
+            union = self.union(&union, &part?)?;
+        }
+        Ok(union)
+    }
+
     /// [`Self::outward`] with a distance of its own for each polygon.
     pub(super) fn dilated<'p>(
         &self,

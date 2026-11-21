@@ -1525,7 +1525,7 @@ pub(super) fn realize(
         support_metadata_bytes += kept.bytes();
         // Established landing cells per part root, computed once by the
         // sweep; raster retention and final reconciliation anchor on them.
-        let part_contacts = output.part_contacts;
+        let mut part_contacts = output.part_contacts;
         support_metadata_bytes += part_contacts
             .iter()
             .flatten()
@@ -1649,6 +1649,14 @@ pub(super) fn realize(
             .flatten()
             .map(|(paths, _)| super::bonds::path_bytes(paths))
             .fold(vec_bytes(&prebuilt), usize::saturating_add);
+        let horizon = roots
+            .iter()
+            .filter_map(|root| match *root {
+                Root::Part { object_layer, .. } => Some(object_layer),
+                Root::Bed => None,
+            })
+            .max()
+            .unwrap_or(0);
         for i in 0..layers.len() {
             owned_bytes =
                 native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
@@ -1770,21 +1778,29 @@ pub(super) fn realize(
                 "support retained point accounting underflow",
             )
         })?;
+        let courses = hatch_alternation_keys(layers);
+        let requalify_live = std::sync::atomic::AtomicUsize::new(0);
+        let mut requalify = established::Establishment::new(&requalify_live);
         for index in 1..layers.len() {
             support_metadata_bytes += reconcile_layer_roots(
                 layers,
                 FinalSupportInput {
                     index,
                     roots: &roots,
-                    part_contacts: &part_contacts,
+                    part_contacts: &mut part_contacts,
+                    contact_tops: &contact_tops,
+                    courses: &courses,
+                    horizon,
                     frame: grid_frame,
                     wall_paths: &mut support_wall_paths,
                     recipe,
                     retained_units: retained_regions,
                     owned_bytes: native_owned_bytes
                         + support_metadata_bytes
-                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
+                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                        + requalify_live.load(std::sync::atomic::Ordering::Relaxed),
                 },
+                &mut requalify,
                 segments,
                 &mut anchors,
                 &mut anchor_work,
@@ -2245,8 +2261,14 @@ pub(super) fn realize(
 struct FinalSupportInput<'a> {
     index: usize,
     roots: &'a [Root],
-    /// Per root, the sweep's established landing cells.
-    part_contacts: &'a [Option<grid::Bits>],
+    /// Per root, the sweep's proposed landing cells, requalified in place at
+    /// the root's first support layer.
+    part_contacts: &'a mut [Option<grid::Bits>],
+    contact_tops: &'a [Option<usize>],
+    /// Per layer, its hatch alternation key.
+    courses: &'a [u32],
+    /// The highest part-root object layer.
+    horizon: usize,
     /// The support grid frame; `None` when the sweep had no demand.
     frame: Option<grid::CellFrame>,
     wall_paths: &'a mut [usize],
@@ -2258,6 +2280,7 @@ struct FinalSupportInput<'a> {
 fn reconcile_layer_roots(
     layers: &mut [PrintLayer],
     input: FinalSupportInput<'_>,
+    establishment: &mut established::Establishment<'_>,
     segments: &mut usize,
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
@@ -2268,6 +2291,9 @@ fn reconcile_layer_roots(
         index,
         roots,
         part_contacts,
+        contact_tops,
+        courses,
+        horizon,
         frame,
         wall_paths,
         recipe,
@@ -2336,12 +2362,56 @@ fn reconcile_layer_roots(
             // wholly under ordinary roads of each object layer.
             let contact_cells = match &contact_raster {
                 Some(raster) => {
+                    // The sweep's landings stand on kept support cells and the
+                    // roads before regeneration; requalify each against the
+                    // final roads and the support actually deposited below,
+                    // in layer order, before its first support layer commits.
+                    let final_layers: &[PrintLayer] = prior;
+                    let deposited = |raster: &grid::Raster<'_>, l: usize| {
+                        established::deposited_support(
+                            raster,
+                            final_layers,
+                            contact_tops[l],
+                            l,
+                            outside,
+                        )
+                    };
+                    let step = established::Step {
+                        raster,
+                        layers: final_layers,
+                        allowance: recipe.bead_width_mm * 0.5,
+                        recipe,
+                        courses,
+                        bridge_limit: recipe.process.max_bridge_span_mm,
+                        horizon: horizon.min(index - 1),
+                        support: &deposited,
+                        owned_bytes: outside,
+                    };
+                    for (root_index, root) in roots.iter().enumerate().rev() {
+                        let Root::Part {
+                            object_layer,
+                            first_support_layer,
+                            ..
+                        } = *root
+                        else {
+                            continue;
+                        };
+                        if first_support_layer != index || object_layer >= index {
+                            continue;
+                        }
+                        let Some(proposed) = part_contacts[root_index].take() else {
+                            continue;
+                        };
+                        let landing = establishment.landing(&step, object_layer)?;
+                        let kept_cells = raster.intersection(&proposed, &landing)?;
+                        part_contacts[root_index] = Some(kept_cells);
+                    }
                     let cells = established::root_contacts(
                         raster,
                         roots,
                         part_contacts,
                         index,
-                        Some((&*prior, outside)),
+                        Some((final_layers, recipe.bead_width_mm * 0.5, outside)),
                     )?;
                     *work = work.saturating_add(raster.take_work());
                     Some(cells)
@@ -3797,7 +3867,9 @@ mod tests {
             let frame = Some(cell_frame);
             // The sweep's landing cells: the bed-established object road.
             let admit = |_: usize| Ok(());
-            let part_contacts = [Some(
+            let contacts = [None, None, None, None, Some(2)];
+            let live = std::sync::atomic::AtomicUsize::new(0);
+            let mut part_contacts = [Some(
                 established::footprint(
                     &grid::Raster {
                         frame: cell_frame,
@@ -3806,6 +3878,7 @@ mod tests {
                         work: std::sync::atomic::AtomicUsize::new(0),
                     },
                     layers[0].paths.iter().filter(|path| path.kind.is_model()),
+                    recipe.bead_width_mm * 0.5,
                     0,
                 )
                 .unwrap(),
@@ -3830,13 +3903,17 @@ mod tests {
                     FinalSupportInput {
                         index,
                         roots: &roots,
-                        part_contacts: &part_contacts,
+                        part_contacts: &mut part_contacts,
+                        contact_tops: &contacts,
+                        courses: &[0, 1, 2, 3, 4],
+                        horizon: 0,
                         frame,
                         wall_paths: &mut wall_paths,
                         recipe: &recipe,
                         retained_units: 0,
                         owned_bytes: 0,
                     },
+                    &mut established::Establishment::new(&live),
                     &mut segments,
                     &mut anchors,
                     &mut 0,
@@ -3897,13 +3974,17 @@ mod tests {
                     FinalSupportInput {
                         index: 1,
                         roots: &roots,
-                        part_contacts: &part_contacts,
+                        part_contacts: &mut part_contacts,
+                        contact_tops: &contacts,
+                        courses: &[0, 1, 2, 3, 4],
+                        horizon: 0,
                         frame,
                         wall_paths: &mut wall_paths,
                         recipe: &recipe,
                         retained_units: 0,
                         owned_bytes: 0
                     },
+                    &mut established::Establishment::new(&live),
                     &mut segments,
                     &mut anchors,
                     &mut 0,

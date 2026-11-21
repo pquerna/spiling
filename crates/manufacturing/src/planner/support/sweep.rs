@@ -592,6 +592,13 @@ impl Sweep<'_> {
         let mut window: Vec<(usize, Vec<Piece>)> = Vec::new();
         let mut carried: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
         let mut voids: Vec<Option<Option<Bits>>> = vec![None; self.protected.0.len()];
+        let mut material_cells: Option<(usize, Bits)> = None;
+        let (mut down_load, mut down_fresh, mut down_seed, mut down_rest): (
+            std::time::Duration,
+            std::time::Duration,
+            std::time::Duration,
+            std::time::Duration,
+        ) = Default::default();
         for l in (0..=max_top).rev() {
             check_cancel(cancel)?;
             let seeds: Vec<Option<Bits>> = channels
@@ -602,54 +609,84 @@ impl Sweep<'_> {
                 continue;
             }
             let slab = bead_slab(&layers[l])?;
+            let t0 = std::time::Instant::now();
             self.load_pieces(l, &mut window, cell_bounds, distance, work, cancel)?;
+            down_load += t0.elapsed();
+            let t0 = std::time::Instant::now();
             // A carry already excludes every piece that touched a layer above
             // since it was seeded, and a piece's height scope is contiguous,
             // so only pieces newly touching this slab can change it.
             let touches = |piece: &Piece| piece.scope[0] <= slab[1] && piece.scope[1] >= slab[0];
             if carried.iter().any(|carry| !carry.is_empty()) {
-                let fresh: Vec<&Polygon<f64>> = window
-                    .iter()
-                    .flat_map(|(_, pieces)| pieces)
-                    .filter(|piece| !piece.applied && touches(piece))
-                    .filter(|piece| {
-                        carried
-                            .iter()
-                            .any(|carry| carry.meets_rect(&cells, piece.reach))
-                    })
-                    .map(|piece| &piece.polygon)
-                    .collect();
+                let fresh: Vec<&Polygon<f64>> = {
+                    use rayon::prelude::*;
+                    let candidates: Vec<&Piece> = window
+                        .iter()
+                        .flat_map(|(_, pieces)| pieces)
+                        .filter(|piece| !piece.applied && touches(piece))
+                        .collect();
+                    candidates
+                        .par_iter()
+                        .filter(|piece| {
+                            carried
+                                .iter()
+                                .any(|carry| carry.meets_rect(&cells, piece.reach))
+                        })
+                        .map(|piece| &piece.polygon)
+                        .collect()
+                };
                 if !fresh.is_empty() {
-                    let occupancy = raster.outward(fresh, distance)?;
+                    let occupancy = raster.outward_parallel(&fresh, distance)?;
                     for carry in &mut carried {
                         carry.subtract(&occupancy);
                     }
                 }
             }
+            down_fresh += t0.elapsed();
+            let t0 = std::time::Instant::now();
             if seeds.iter().any(Option::is_some) {
                 // The top layer's own material lies inside its occupancy
                 // clearance; removing it first keeps the piece set local to
                 // the seed's overhang band.
-                let material = &self.sections[span_at(self.sections, l as u32)].material;
-                let material = raster.outward(&material.0, 0.0)?;
+                // Every layer of a section shares its material: rasterize it
+                // once per section.
+                let span = span_at(self.sections, l as u32);
+                if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
+                    if let Some((_, old)) = material_cells.take() {
+                        release(&old);
+                    }
+                    let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                    hold(&bits)?;
+                    material_cells = Some((span, bits));
+                }
+                let material = &material_cells.as_ref().expect("section material cells").1;
                 for (carry, seed) in carried.iter_mut().zip(&seeds) {
                     let Some(seed) = seed else {
                         continue;
                     };
                     let mut entered = seed.clone();
-                    entered.subtract(&material);
-                    let near: Vec<&Polygon<f64>> = window
-                        .iter()
-                        .flat_map(|(_, pieces)| pieces)
-                        .filter(|piece| touches(piece) && entered.meets_rect(&cells, piece.reach))
-                        .map(|piece| &piece.polygon)
-                        .collect();
+                    entered.subtract(material);
+                    let near: Vec<&Polygon<f64>> = {
+                        use rayon::prelude::*;
+                        let candidates: Vec<&Piece> = window
+                            .iter()
+                            .flat_map(|(_, pieces)| pieces)
+                            .filter(|piece| touches(piece))
+                            .collect();
+                        candidates
+                            .par_iter()
+                            .filter(|piece| entered.meets_rect(&cells, piece.reach))
+                            .map(|piece| &piece.polygon)
+                            .collect()
+                    };
                     if !near.is_empty() {
-                        entered.subtract(&raster.outward(near, distance)?);
+                        entered.subtract(&raster.outward_parallel(&near, distance)?);
                     }
                     *carry = raster.union(carry, &entered)?;
                 }
             }
+            down_seed += t0.elapsed();
+            let t0 = std::time::Instant::now();
             for piece in window.iter_mut().flat_map(|(_, pieces)| pieces) {
                 if touches(piece) {
                     piece.applied = true;
@@ -691,6 +728,7 @@ impl Sweep<'_> {
                     }
                 }
             }
+            down_rest += t0.elapsed();
             for (channel, carry) in channels.iter_mut().zip(&carried) {
                 if !carry.is_empty() {
                     hold(carry)?;
@@ -701,10 +739,19 @@ impl Sweep<'_> {
         }
         drop(carried);
         drop(window);
+        if let Some((_, bits)) = material_cells.take() {
+            release(&bits);
+        }
         for bits in voids.into_iter().flatten().flatten() {
             release(&bits);
         }
         timing.mark("down_pass");
+        if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
+            eprintln!(
+                "{}",
+                serde_json::json!({"event": "support_down_detail", "load": down_load.as_secs_f64(), "fresh": down_fresh.as_secs_f64(), "seed": down_seed.as_secs_f64(), "rest": down_rest.as_secs_f64()})
+            );
+        }
 
         // Up pass: keep only grounded support, clipped by nominal clearance,
         // one layer at a time across every channel.
@@ -716,7 +763,11 @@ impl Sweep<'_> {
         // Part landings stand only on established cells, built bottom-up
         // with the kept support below standing in for deposited support.
         let mut establishment = established::Establishment::new(&live);
-        let mut anchors = AnchorWorkspace::default();
+        let mut courses = Vec::new();
+        reserve_owned(&mut courses, layers.len(), self.owned_bytes)?;
+        courses.extend(hatch_alternation_keys(layers));
+        let mut up_e = std::time::Duration::ZERO;
+        let mut up_nominal = std::time::Duration::ZERO;
         let mut part_contacts: Vec<Option<Bits>> = Vec::new();
         reserve_owned(&mut part_contacts, self.roots.len(), self.owned_bytes)?;
         part_contacts.resize_with(self.roots.len(), || None);
@@ -727,6 +778,7 @@ impl Sweep<'_> {
                 part_bands.iter_mut().for_each(Vec::clear);
                 continue;
             }
+            let tn = std::time::Instant::now();
             let reaching = self.prepare_nominal(
                 l,
                 &raster,
@@ -736,17 +788,19 @@ impl Sweep<'_> {
                 &release,
                 work,
             )?;
+            up_nominal += tn.elapsed();
+            let te = std::time::Instant::now();
             let landings = self.part_landings(
                 l,
                 &raster,
                 &channels,
                 &grids,
                 &contact_tops,
+                &courses,
                 &mut establishment,
-                &mut anchors,
                 &hold,
-                work,
             )?;
+            up_e += te.elapsed();
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
             for (c, channel) in channels.iter_mut().enumerate() {
@@ -848,6 +902,13 @@ impl Sweep<'_> {
             charge(work)?;
         }
         drop(establishment);
+        if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
+            eprintln!(
+                "{}",
+                serde_json::json!({"event": "support_sweep_detail", "establishment_seconds": up_e.as_secs_f64(), "nominal_seconds": up_nominal.as_secs_f64(),
+                "stages": established::TRACE_NAMES.iter().zip(&established::TRACE).map(|(n, v)| (n.to_string(), v.swap(0, std::sync::atomic::Ordering::Relaxed))).collect::<std::collections::BTreeMap<_, _>>()})
+            );
+        }
         drop(clearance);
         drop(channels);
         timing.mark("up_pass");
@@ -925,7 +986,10 @@ impl Sweep<'_> {
     /// land on: the inward landing that some ordinary channel reaches, met
     /// with the established cells of its object layer. Roots are taken in
     /// ascending object layer so the bottom-up establishment only advances.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the sweep's live grids, contact tops and byte owners stay explicit"
+    )]
     fn part_landings(
         &self,
         l: usize,
@@ -933,10 +997,9 @@ impl Sweep<'_> {
         channels: &[Channel],
         grids: &[Option<LayerGrid>],
         contact_tops: &[Option<usize>],
+        courses: &[u32],
         establishment: &mut established::Establishment<'_>,
-        anchors: &mut AnchorWorkspace,
         hold: &dyn Fn(&Bits) -> Result<(), ManufacturingError>,
-        work: &mut usize,
     ) -> Result<Vec<(usize, Bits)>, ManufacturingError> {
         let mut landings = Vec::new();
         for (index, root) in self.roots.iter().enumerate().rev() {
@@ -962,21 +1025,42 @@ impl Sweep<'_> {
             if !reached {
                 continue;
             }
-            anchors.set_budget(workspace_budget(self.retained, self.owned_bytes)?);
-            let mut step = established::Step {
+            // Kept support cells propose landings on part material standing on
+            // support; raster retention requalifies them against the support
+            // actually deposited.
+            let kept = |raster: &Raster<'_>, l: usize| {
+                let direct = grids[l - 1].as_ref().map(|grid| &grid.support);
+                let separated = contact_tops
+                    .get(l)
+                    .copied()
+                    .flatten()
+                    .filter(|top| top + 1 < l)
+                    .and_then(|top| grids[top].as_ref())
+                    .map(|grid| &grid.interface);
+                let empty = Bits::default();
+                let cells = raster.union(direct.unwrap_or(&empty), separated.unwrap_or(&empty))?;
+                Ok((cells, Vec::new()))
+            };
+            let step = established::Step {
                 raster,
                 layers: self.layers,
-                contact_tops,
-                anchors,
-                work,
+                allowance: self.recipe.bead_width_mm * 0.5,
+                recipe: self.recipe,
+                courses,
+                bridge_limit: self.recipe.process.max_bridge_span_mm,
+                horizon: self
+                    .roots
+                    .iter()
+                    .filter_map(|root| match *root {
+                        Root::Part { object_layer, .. } => Some(object_layer),
+                        Root::Bed => None,
+                    })
+                    .max()
+                    .unwrap_or(object_layer),
+                support: &kept,
                 owned_bytes: self.owned_bytes,
             };
-            let cells = establishment.landing(&mut step, object_layer, &mut |k| {
-                grids[k].as_ref().map_or_else(
-                    || std::borrow::Cow::Owned(Bits::default()),
-                    |grid| std::borrow::Cow::Borrowed(&grid.support),
-                )
-            })?;
+            let cells = establishment.landing(&step, object_layer)?;
             let accepted = raster.intersection(&landing, &cells)?;
             if accepted.is_empty() {
                 continue;
