@@ -2738,16 +2738,21 @@ fn image_support_contact_floor(
     // The contact stays in the event's own frame and keeps at least the gap
     // between the emitted heights, one lattice step higher if rounding would
     // shorten it.
+    // The same exact enclosed gap the contact selection checks.
     let emitted_gap = |floor: f64| -> Result<f64, ManufacturingError> {
-        Ok(project_xyz6_coordinate_mm(floor)? - project_xyz6_coordinate_mm(event)?)
+        program_coordinates::enclosed_vertical_gap_mm(
+            program_coordinates::project_xyz6_bead_height_mm(floor, 0.0)?[0],
+            program_coordinates::project_xyz6_bead_height_mm(event, 0.0)?[1],
+        )
     };
     let mut floor = event + z_gap_mm;
-    if emitted_gap(floor)? < z_gap_mm - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM {
+    for _ in 0..2 {
+        if emitted_gap(floor)? >= z_gap_mm {
+            break;
+        }
         floor += program_coordinates::XYZ6_QUANTUM_MM;
     }
-    if !floor.is_finite()
-        || emitted_gap(floor)? < z_gap_mm - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
-    {
+    if !floor.is_finite() || emitted_gap(floor)? < z_gap_mm {
         return Err(error(
             ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
             "image contact floor cannot enclose the emitter's coordinate representation",
@@ -2903,15 +2908,20 @@ fn scheduled_layers(
             if stop <= bed {
                 continue;
             }
+            // The same exact enclosed gap the contact selection checks.
             let emitted_gap = |stop: f64| -> Result<f64, ManufacturingError> {
-                Ok(project_xyz6_coordinate_mm(event)? - project_xyz6_coordinate_mm(stop)?)
+                program_coordinates::enclosed_vertical_gap_mm(
+                    program_coordinates::project_xyz6_bead_height_mm(event, 0.0)?[0],
+                    program_coordinates::project_xyz6_bead_height_mm(stop, 0.0)?[1],
+                )
             };
-            if emitted_gap(stop)? < z_gap_mm - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM {
+            for _ in 0..2 {
+                if emitted_gap(stop)? >= z_gap_mm {
+                    break;
+                }
                 stop -= program_coordinates::XYZ6_QUANTUM_MM;
             }
-            if !stop.is_finite()
-                || emitted_gap(stop)? < z_gap_mm - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
-            {
+            if !stop.is_finite() || emitted_gap(stop)? < z_gap_mm {
                 return Err(error(
                     ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
                     "support stop cannot enclose the emitter's coordinate representation",
@@ -2955,7 +2965,10 @@ fn scheduled_layers(
             } else {
                 events[position]
             };
-            let minimum = 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM;
+            // A stop within two lattice steps of an existing event would only
+            // make a sliver layer; keep the existing boundary instead.
+            let minimum = 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+                + 2.0 * program_coordinates::XYZ6_QUANTUM_MM;
             // Never move a true native/field event or manufacture a sub-process
             // layer to obtain a closer support contact. Retain the existing
             // partition and select its latest provably safe top instead; the

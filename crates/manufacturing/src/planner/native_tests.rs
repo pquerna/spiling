@@ -1182,7 +1182,7 @@ fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay()
     );
     assert!(
         actual_gap - z_gap_mm < 4.0 * LAYER_QUANTIZATION_MM,
-        "emitter-aware mandatory contact must not unnecessarily lose a whole scheduled layer"
+        "emitter-aware mandatory contact must not unnecessarily lose a whole scheduled layer: gap {actual_gap} vs {z_gap_mm}, support top {support_top}, object bottom {object_bottom}"
     );
     assert!(
         bundle
