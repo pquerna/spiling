@@ -941,6 +941,14 @@ impl Sweep<'_> {
             live.fetch_add(landing.bytes(), Ordering::Relaxed);
         }
         up_e += te.elapsed();
+        // Nominal scope grids depend only on their scope, so the scopes the
+        // next chunk of swept layers will first reach are built in parallel
+        // ahead of the serial pass, which still records them in its order.
+        let mut prebuilt: Vec<Option<(Bits, NominalRecord)>> = Vec::new();
+        reserve_owned(&mut prebuilt, self.nominal.len(), self.owned_bytes)?;
+        prebuilt.resize_with(self.nominal.len(), || None);
+        let mut scheduled = vec![false; self.nominal.len()];
+        let mut prebuilt_to = 0;
         for l in 0..=max_top {
             check_cancel(cancel)?;
             if channels.iter().all(|channel| channel.active[l].is_none()) {
@@ -949,15 +957,51 @@ impl Sweep<'_> {
                 continue;
             }
             let tn = std::time::Instant::now();
-            let reaching = self.prepare_nominal(
-                l,
-                &raster,
-                &mut clearance,
-                &mut records,
-                &hold,
-                &release,
-                work,
-            )?;
+            if l >= prebuilt_to {
+                const CHUNK: usize = 32;
+                prebuilt_to = (l + CHUNK).min(max_top + 1);
+                let mut wanted = Vec::new();
+                for ahead in l..prebuilt_to {
+                    if channels
+                        .iter()
+                        .all(|channel| channel.active[ahead].is_none())
+                    {
+                        continue;
+                    }
+                    for at in self.nominal_reach(ahead)?.0 {
+                        if !scheduled[at] {
+                            scheduled[at] = true;
+                            reserve_owned(&mut wanted, 1, self.owned_bytes)?;
+                            wanted.push(at);
+                        }
+                    }
+                }
+                let built = {
+                    use rayon::prelude::*;
+                    let builder = NominalBuilder {
+                        layers: self.layers,
+                        sections: self.sections,
+                        nominal: self.nominal,
+                        frame: self.frame,
+                        requested: self.requested,
+                        owned_bytes: self.owned_bytes,
+                        raster: &raster,
+                    };
+                    let working_set = crate::working_set::current();
+                    wanted
+                        .par_iter()
+                        .map(|&at| crate::working_set::scope(working_set, || builder.build(at)))
+                        .collect::<Vec<_>>()
+                };
+                for (&at, result) in wanted.iter().zip(built) {
+                    let (bits, record, spent) = result?;
+                    charge_owned_work(work, self.foreign_work, spent, cancel)?;
+                    hold(&bits)?;
+                    prebuilt[at] = Some((bits, record));
+                }
+            }
+            let reaching =
+                self.prepare_nominal(l, &mut clearance, &mut prebuilt, &mut records, &release)?;
             up_nominal += tn.elapsed();
             let landing = proposed[l].take();
             let mut layer_support = Bits::default();
@@ -1324,94 +1368,59 @@ impl Sweep<'_> {
         Ok(())
     }
 
-    /// Nominal clearance of every scope reaching layer `l`: each section
-    /// polygon dilated by its clearance distance, plus the actual object bead
-    /// edges outside it. Each scope's grid is built once; a scope the rising
-    /// pass has left for good is released. Each built scope is recorded for
-    /// final clearance.
-    #[expect(clippy::too_many_arguments)]
-    fn prepare_nominal(
-        &self,
-        l: usize,
-        raster: &Raster<'_>,
-        clearance: &mut [Option<Bits>],
-        records: &mut Vec<NominalRecord>,
-        hold: &impl Fn(&Bits) -> Result<(), ManufacturingError>,
-        release: &impl Fn(&Bits),
-        work: &mut usize,
-    ) -> Result<Vec<usize>, ManufacturingError> {
-        let cancel = raster.cancel;
+    /// The nominal scopes reaching layer `l`, and those whose ceiling the
+    /// rising pass has left for good. Scopes rise in floor order, so the
+    /// first scope above the band ends the search.
+    fn nominal_reach(&self, l: usize) -> Result<(Vec<usize>, Vec<usize>), ManufacturingError> {
         let [lower, upper] = nominal_band(self.layers, l)?;
-        let mut reaching = Vec::new();
+        let (mut reaching, mut passed) = (Vec::new(), Vec::new());
         for (at, scope) in self.nominal.iter().enumerate() {
-            check_cancel(cancel)?;
             if program_coordinates::enclosed_vertical_gap_mm(scope.floor, upper)? >= self.gap {
                 break;
             }
             if program_coordinates::enclosed_vertical_gap_mm(lower, scope.ceiling)? >= self.gap {
-                // Lower bands only rise, so this scope never reaches again.
-                if let Some(bits) = clearance[at].take() {
-                    release(&bits);
-                }
+                reserve_owned(&mut passed, 1, self.owned_bytes)?;
+                passed.push(at);
                 continue;
             }
+            reserve_owned(&mut reaching, 1, self.owned_bytes)?;
+            reaching.push(at);
+        }
+        Ok((reaching, passed))
+    }
+
+    /// Nominal clearance of every scope reaching layer `l`: each section
+    /// polygon dilated by its clearance distance, plus the actual object bead
+    /// edges outside it. Each scope's grid is built once, ahead of the pass;
+    /// a scope the rising pass has left for good is released. Each scope is
+    /// recorded for final clearance when the pass first reaches it.
+    fn prepare_nominal(
+        &self,
+        l: usize,
+        clearance: &mut [Option<Bits>],
+        prebuilt: &mut [Option<(Bits, NominalRecord)>],
+        records: &mut Vec<NominalRecord>,
+        release: &impl Fn(&Bits),
+    ) -> Result<Vec<usize>, ManufacturingError> {
+        let (reaching, passed) = self.nominal_reach(l)?;
+        for at in passed {
+            // Lower bands only rise, so this scope never reaches again.
+            if let Some(bits) = clearance[at].take() {
+                release(&bits);
+            }
+        }
+        for &at in &reaching {
             if clearance[at].is_none() {
-                let section = &self.sections[scope.index];
-                let distances = section
-                    .material
-                    .0
-                    .iter()
-                    .map(|polygon| {
-                        let rect = polygon.bounding_rect().ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                                "native outer operand has no finite bounds",
-                            )
-                        })?;
-                        clearance_distance_in_frame(
-                            [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]],
-                            self.frame.bounds,
-                            self.requested,
-                        )
-                    })
-                    .collect::<Result<Vec<f64>, ManufacturingError>>()?;
-                let mut bits = raster.dilated(section.material.0.iter().zip(distances))?;
-                let mut keys = Vec::new();
-                if scope.beads.is_some() {
-                    let objects = self
-                        .layers
-                        .get(section.start as usize..(section.end as usize).min(self.layers.len()))
-                        .unwrap_or(&[]);
-                    let edges = beads::outside_material(
-                        &section.material,
-                        objects.iter().flat_map(|layer| &layer.paths),
-                        BEAD_OUTSIDE_ALLOWANCE_MM,
-                        work,
-                        cancel,
-                    )?;
-                    let distance = self.frame.distance;
-                    let beads = raster.capsules(
-                        edges
-                            .iter()
-                            .map(|edge| (edge.a, edge.b, (edge.half + distance).next_up())),
-                    )?;
-                    bits = raster.union(&bits, &beads)?;
-                    reserve_owned(&mut keys, edges.len(), self.owned_bytes)?;
-                    keys.extend(edges.iter().map(edge_key));
-                    keys.sort_unstable();
-                    keys.dedup();
-                }
+                let (bits, record) = prebuilt[at].take().ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "support nominal scope was reached before it was built",
+                    )
+                })?;
                 reserve_owned(records, 1, self.owned_bytes)?;
-                records.push(NominalRecord {
-                    section: scope.index,
-                    floor: scope.floor,
-                    ceiling: scope.ceiling,
-                    edges: keys,
-                });
-                hold(&bits)?;
+                records.push(record);
                 clearance[at] = Some(bits);
             }
-            reaching.push(at);
         }
         Ok(reaching)
     }
@@ -1770,6 +1779,78 @@ impl<'e, 'a> SpanCache<'e, 'a> {
         )?;
         self.live.fetch_add(bytes, Ordering::Relaxed);
         Ok(loaded)
+    }
+}
+
+/// Builds one nominal scope's clearance grid; shared by parallel workers.
+struct NominalBuilder<'r, 'a> {
+    layers: &'r [PrintLayer],
+    sections: &'r [super::super::SectionSpan],
+    nominal: &'r [NominalScope],
+    frame: &'r projection::Frame,
+    requested: f64,
+    owned_bytes: usize,
+    raster: &'r Raster<'a>,
+}
+
+impl NominalBuilder<'_, '_> {
+    fn build(&self, at: usize) -> Result<(Bits, NominalRecord, usize), ManufacturingError> {
+        let raster = self.raster;
+        let cancel = raster.cancel;
+        let scope = &self.nominal[at];
+        let section = &self.sections[scope.index];
+        let distances = section
+            .material
+            .0
+            .iter()
+            .map(|polygon| {
+                let rect = polygon.bounding_rect().ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "native outer operand has no finite bounds",
+                    )
+                })?;
+                clearance_distance_in_frame(
+                    [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]],
+                    self.frame.bounds,
+                    self.requested,
+                )
+            })
+            .collect::<Result<Vec<f64>, ManufacturingError>>()?;
+        let mut bits = raster.dilated(section.material.0.iter().zip(distances))?;
+        let mut keys = Vec::new();
+        let mut work = 0;
+        if scope.beads.is_some() {
+            let objects = self
+                .layers
+                .get(section.start as usize..(section.end as usize).min(self.layers.len()))
+                .unwrap_or(&[]);
+            let edges = beads::outside_material(
+                &section.material,
+                objects.iter().flat_map(|layer| &layer.paths),
+                BEAD_OUTSIDE_ALLOWANCE_MM,
+                &mut work,
+                cancel,
+            )?;
+            let distance = self.frame.distance;
+            let beads = raster.capsules(
+                edges
+                    .iter()
+                    .map(|edge| (edge.a, edge.b, (edge.half + distance).next_up())),
+            )?;
+            bits = raster.union(&bits, &beads)?;
+            reserve_owned(&mut keys, edges.len(), self.owned_bytes)?;
+            keys.extend(edges.iter().map(edge_key));
+            keys.sort_unstable();
+            keys.dedup();
+        }
+        let record = NominalRecord {
+            section: scope.index,
+            floor: scope.floor,
+            ceiling: scope.ceiling,
+            edges: keys,
+        };
+        Ok((bits, record, work))
     }
 }
 
