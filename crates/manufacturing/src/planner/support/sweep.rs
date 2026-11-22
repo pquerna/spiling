@@ -716,7 +716,7 @@ impl Sweep<'_> {
         ) = Default::default();
         for l in (0..=max_top).rev() {
             check_cancel(cancel)?;
-            let seeds: Vec<Option<Bits>> = channels
+            let mut seeds: Vec<Option<Bits>> = channels
                 .iter_mut()
                 .map(|channel| channel.seeds[l].take())
                 .collect();
@@ -728,43 +728,9 @@ impl Sweep<'_> {
             self.load_pieces(l, &mut window, cell_bounds, distance, work, cancel)?;
             down_load += t0.elapsed();
             let t0 = std::time::Instant::now();
-            // A carry already excludes every piece that touched a layer above
-            // since it was seeded, and a piece's height scope is contiguous,
-            // so only pieces newly touching this slab can change it.
-            let touches = |piece: &Piece| piece.scope[0] <= slab[1] && piece.scope[1] >= slab[0];
-            if carried.iter().any(|carry| !carry.is_empty()) {
-                let fresh: Vec<&Polygon<f64>> = {
-                    use rayon::prelude::*;
-                    let candidates: Vec<&Piece> = window
-                        .iter()
-                        .flat_map(|(_, pieces)| pieces)
-                        .filter(|piece| !piece.applied && touches(piece))
-                        .collect();
-                    candidates
-                        .par_iter()
-                        .filter(|piece| {
-                            carried
-                                .iter()
-                                .any(|carry| carry.meets_rect(&cells, piece.reach))
-                        })
-                        .map(|piece| &piece.polygon)
-                        .collect()
-                };
-                if !fresh.is_empty() {
-                    let occupancy = raster.outward_parallel(&fresh, distance)?;
-                    for carry in &mut carried {
-                        carry.subtract(&occupancy);
-                    }
-                }
-            }
-            down_fresh += t0.elapsed();
-            let t0 = std::time::Instant::now();
             if seeds.iter().any(Option::is_some) {
-                // The top layer's own material lies inside its occupancy
-                // clearance; removing it first keeps the piece set local to
-                // the seed's overhang band.
-                // Every layer of a section shares its material: rasterize it
-                // once per section.
+                // Every layer in the same section shares the material used to
+                // trim its seed before sizing the occupancy query.
                 let span = span_at(self.sections, l as u32);
                 if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
                     if let Some((_, old)) = material_cells.take() {
@@ -775,39 +741,68 @@ impl Sweep<'_> {
                     material_cells = Some((span, bits));
                 }
                 let material = &material_cells.as_ref().expect("section material cells").1;
-                for (carry, seed) in carried.iter_mut().zip(&seeds) {
-                    let Some(seed) = seed else {
-                        continue;
-                    };
-                    let mut entered = seed.clone();
-                    entered.subtract(material);
-                    let near: Vec<&Polygon<f64>> = {
-                        use rayon::prelude::*;
-                        let candidates: Vec<&Piece> = window
-                            .iter()
-                            .flat_map(|(_, pieces)| pieces)
-                            .filter(|piece| touches(piece))
-                            .collect();
-                        candidates
-                            .par_iter()
-                            .filter(|piece| entered.meets_rect(&cells, piece.reach))
-                            .map(|piece| &piece.polygon)
-                            .collect()
-                    };
-                    if !near.is_empty() {
-                        entered.subtract(&raster.outward_parallel(&near, distance)?);
-                    }
-                    *carry = raster.union(carry, &entered)?;
+                for seed in seeds.iter_mut().flatten() {
+                    seed.subtract(material);
                 }
             }
             down_seed += t0.elapsed();
             let t0 = std::time::Instant::now();
+            // Carries already exclude applied pieces. Every entering seed needs
+            // those pieces as well as the fresh ones. Stamp each relevant piece
+            // once for this slab, regardless of the number of channels or seeds.
+            let mut fresh = Vec::new();
+            let mut old = Vec::new();
             for piece in window.iter_mut().flat_map(|(_, pieces)| pieces) {
-                if touches(piece) {
+                if piece.scope[0] > slab[1] || piece.scope[1] < slab[0] {
+                    continue;
+                }
+                let near_seed = seeds
+                    .iter()
+                    .flatten()
+                    .any(|seed| seed.meets_rect(&cells, piece.reach));
+                let list = if piece.applied {
+                    near_seed.then_some(&mut old)
+                } else {
                     piece.applied = true;
+                    (near_seed
+                        || carried
+                            .iter()
+                            .any(|carry| carry.meets_rect(&cells, piece.reach)))
+                    .then_some(&mut fresh)
+                };
+                if let Some(list) = list {
+                    let before = vec_bytes(list);
+                    raster.reserve(list, 1)?;
+                    live.fetch_add(vec_bytes(list) - before, Ordering::Relaxed);
+                    list.push(&piece.polygon);
                 }
             }
-            drop(seeds);
+            if !fresh.is_empty() {
+                let clearance = raster.outward_parallel(&fresh, distance)?;
+                for carry in &mut carried {
+                    carry.subtract(&clearance);
+                }
+                for seed in seeds.iter_mut().flatten() {
+                    seed.subtract(&clearance);
+                }
+            }
+            down_fresh += t0.elapsed();
+            let t0 = std::time::Instant::now();
+            if !old.is_empty() {
+                let clearance = raster.outward_parallel(&old, distance)?;
+                for seed in seeds.iter_mut().flatten() {
+                    seed.subtract(&clearance);
+                }
+            }
+            live.fetch_sub(vec_bytes(&fresh) + vec_bytes(&old), Ordering::Relaxed);
+            drop((fresh, old));
+            for (carry, seed) in carried.iter_mut().zip(seeds) {
+                if let Some(seed) = seed {
+                    *carry = raster.union(carry, &seed)?;
+                }
+            }
+            down_seed += t0.elapsed();
+            let t0 = std::time::Instant::now();
             for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
                 if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
                     continue;
