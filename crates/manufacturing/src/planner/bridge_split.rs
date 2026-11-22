@@ -11,7 +11,8 @@
 //! piece. Every piece is checked with the same actual-coordinate predicates
 //! the verifier applies to split rows (Bridge pieces: only supported or
 //! genuine Bridge gaps, at least one Bridge; other pieces: supported only);
-//! when any piece fails, the row stays whole, never refused.
+//! explicitly checked in either travel direction because routing can reverse
+//! a piece. When any piece fails, the row stays whole, never refused.
 
 use super::support::{AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges};
 use crate::{check_cancel, error};
@@ -434,7 +435,17 @@ fn split_row(
         }
         // The verifier's exact split-row predicates; any miss keeps it whole.
         let expected = Some(kind == DepositionKind::Bridge);
-        if classify_actual(stroke, width, previous, recipe, anchors, work, cancel)? != expected {
+        if classify_actual(stroke, width, previous, recipe, anchors, work, cancel)? != expected
+            || classify_actual(
+                [stroke[1], stroke[0]],
+                width,
+                previous,
+                recipe,
+                anchors,
+                work,
+                cancel,
+            )? != expected
+        {
             return Ok(None);
         }
         pieces.push(DepositionPath {
