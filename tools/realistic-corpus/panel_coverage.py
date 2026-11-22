@@ -1,12 +1,14 @@
 """Gate native located spans; report separate cross-slicer road observations."""
 
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
 import math
 from pathlib import Path
 
 import audit
 import located_spans
+
+SUPPORT_GRID_CELL_MM = 0.05
 
 
 def nonnegative(value):
@@ -112,79 +114,172 @@ def report_warning(reported, spans):
     return {"intervals_disagreeing": count, "largest": largest} if count else None
 
 
-def segment_key(points):
-    return tuple(sorted(map(tuple, points)))
-
-
 class GapIndex:
     def __init__(self):
-        self.segments = []
-        self.exact = set()
+        self.segments = {}
         self.buckets = defaultdict(list)
         self.large = set()
 
-    def add(self, points):
-        segment = segment_key(points)
-        if segment in self.exact:
-            return
-        self.exact.add(segment)
-        ordinal = len(self.segments)
-        self.segments.append(segment)
-        footprint = located_spans.cells(located_spans.footprint_box(*segment, located_spans.EPS))
+    def add(self, ordinal, points):
+        self.segments[ordinal] = points
+        footprint = located_spans.cells(located_spans.footprint_box(*points))
         if footprint is None:
             self.large.add(ordinal)
         else:
             for cell in footprint:
                 self.buckets[cell].append(ordinal)
 
-    def overlap(self, start, end, unit, length):
-        footprint = located_spans.cells(located_spans.footprint_box(start, end, located_spans.EPS))
+    def nearby(self, points, tolerance):
+        footprint = located_spans.cells(located_spans.footprint_box(*points, tolerance))
         if footprint is None:
-            candidates = range(len(self.segments))
-        else:
-            candidates = self.large.copy()
-            for cell in footprint:
-                candidates.update(self.buckets.get(cell, ()))
-        for ordinal in candidates:
-            offsets = [(point[0] - start[0], point[1] - start[1]) for point in self.segments[ordinal]]
-            if any(abs(dx * unit[1] - dy * unit[0]) > located_spans.EPS for dx, dy in offsets):
+            return self.segments.keys()
+        candidates = self.large.copy()
+        for cell in footprint:
+            candidates.update(self.buckets.get(cell, ()))
+        return candidates
+
+
+def registration_score(candidate, control, tolerance):
+    """Compare the common run along the direction bisector, not the closest points."""
+    def unit(points):
+        length = math.dist(*points)
+        return tuple((end - start) / length for start, end in zip(*points))
+
+    first, second = unit(candidate), unit(control)
+    dot = sum(left * right for left, right in zip(first, second))
+    if abs(dot) <= math.sqrt(0.5):
+        return None
+    axis_x, axis_y = (left + math.copysign(1, dot) * right for left, right in zip(first, second))
+    norm = math.hypot(axis_x, axis_y)
+    axis_x, axis_y = axis_x / norm, axis_y / norm
+
+    def project(points):
+        start_x, start_y = candidate[0]
+        return sorted(((xx - start_x) * axis_x + (yy - start_y) * axis_y,
+                       (yy - start_y) * axis_x - (xx - start_x) * axis_y) for xx, yy in points)
+
+    def lateral(run, along):
+        (start, left), (end, right) = run
+        return left + (along - start) / (end - start) * (right - left)
+
+    candidate_run, control_run = project(candidate), project(control)
+    left = max(candidate_run[0][0], control_run[0][0])
+    right = min(candidate_run[1][0], control_run[1][0])
+    overlap = right - left
+    if overlap <= located_spans.EPS:
+        return None
+    separation = max(abs(lateral(candidate_run, along) - lateral(control_run, along))
+                     for along in (left, right))
+    if separation > tolerance + located_spans.EPS:
+        return None
+    union = max(candidate_run[1][0], control_run[1][0]) - min(candidate_run[0][0], control_run[0][0])
+    return -overlap / union, separation
+
+
+def complete_registration(matched, owners, preferences, start):
+    """Find an alternating path to a free control without disturbing exact pairs."""
+    pending, came_from = deque([start]), {start: None}
+    while pending:
+        ordinal = pending.popleft()
+        for reference in preferences[ordinal]:
+            owner = owners.get(reference)
+            if owner is None:
+                while ordinal is not None:
+                    previous = matched.get(ordinal)
+                    matched[ordinal] = reference
+                    owners[reference] = ordinal
+                    ordinal, reference = came_from[ordinal], previous
+                return
+            if owner not in came_from:
+                came_from[owner] = ordinal
+                pending.append(owner)
+
+
+def register_group(before, after, tolerance):
+    """Reserve exact spans first, then pair as many remaining overlaps as possible by fit."""
+    if not before:
+        return {}, set()
+    control_points = [tuple(sorted(map(tuple, span["points_mm"]))) for span in before]
+    candidate_points = [tuple(sorted(map(tuple, span["points_mm"]))) for span in after]
+    exact = defaultdict(deque)
+    for ordinal, points in enumerate(control_points):
+        exact[points].append(ordinal)
+    matched = {}
+    for ordinal, points in enumerate(candidate_points):
+        if exact.get(points):
+            matched[ordinal] = exact[points].popleft()
+    exact_controls = set(matched.values())
+    index = GapIndex()
+    for ordinal, points in enumerate(control_points):
+        index.add(ordinal, points)
+    pairs, overlap_found = [], set()
+    for ordinal, points in enumerate(candidate_points):
+        if ordinal in matched:
+            continue
+        for reference in index.nearby(points, tolerance):
+            score = registration_score(points, control_points[reference], tolerance)
+            if score is not None:
+                overlap_found.add(ordinal)
+                if reference not in exact_controls:
+                    pairs.append((*score, ordinal, reference))
+    owners, preferences = {}, defaultdict(list)
+    for _, _, ordinal, reference in sorted(pairs):
+        preferences[ordinal].append(reference)
+        if ordinal not in matched and reference not in owners:
+            matched[ordinal] = reference
+            owners[reference] = ordinal
+    for ordinal in preferences:
+        if ordinal not in matched:
+            complete_registration(matched, owners, preferences, ordinal)
+    return matched, overlap_found
+
+
+def located_losses(before, after, tolerance):
+    def groups(spans):
+        result = defaultdict(list)
+        for span in spans:
+            result[tuple(span["physical_z_mm"]), span["role"]].append(span)
+        return result
+
+    controls = groups(before)
+    changes = []
+    for (interval, role), candidates in groups(after).items():
+        baseline = controls.get((interval, role), ())
+        matched, overlap_found = register_group(baseline, candidates, tolerance)
+        for ordinal, span in enumerate(candidates):
+            reference = baseline[matched[ordinal]] if ordinal in matched else None
+            increase = span["length_mm"] - (reference["length_mm"] if reference else 0.0)
+            if increase <= located_spans.EPS:
                 continue
-            left, right = sorted(dx * unit[0] + dy * unit[1] for dx, dy in offsets)
-            if max(left, 0.0) < min(right, length):
-                yield max(left, 0.0), min(right, length)
+            changes.append({"physical_z_mm": interval, "candidate_role": role,
+                            "candidate_layer": span["layer"], "candidate_road": span["road"],
+                            "candidate_span_mm": span["length_mm"], "candidate_points_mm": span["points_mm"],
+                            "increase_mm": increase, "control": reference,
+                            "registration": ("matched" if reference else
+                                             "contended" if ordinal in overlap_found else "no_overlap")})
+    return changes
 
 
-def located_losses(before, after):
-    controls = defaultdict(GapIndex)
-    for span in before:
-        controls[tuple(span["physical_z_mm"])].add(span["points_mm"])
-    changes = {}
-    lost_spans = 0
-    for span in after:
-        interval = tuple(span["physical_z_mm"])
-        control = controls.get(interval)
-        if control is not None and segment_key(span["points_mm"]) in control.exact:
-            continue
-        start, end = span["points_mm"]
-        length = math.dist(start, end)
-        if length <= located_spans.EPS:
-            continue
-        unit = tuple((finish - begin) / length for begin, finish in zip(start, end))
-        covered = control.overlap(start, end, unit, length) if control is not None else ()
-        missing = max(located_spans.missing_intervals(covered, length),
-                      key=lambda pair: pair[1] - pair[0], default=None)
-        if missing is None:
-            continue
-        lost_spans += 1
-        uncovered = missing[1] - missing[0]
-        if interval not in changes or uncovered > changes[interval]["uncovered_span_mm"]:
-            changes[interval] = {"physical_z_mm": interval, "candidate_span_mm": span["length_mm"],
-                                 "candidate_layer": span["layer"], "candidate_road": span["road"],
-                                 "candidate_role": span["role"], "uncovered_span_mm": uncovered,
-                                 "uncovered_points_mm": [tuple(axis + distance * step
-                                                                for axis, step in zip(start, unit))
-                                                         for distance in missing]}
-    return lost_spans, [changes[interval] for interval in sorted(changes)]
+def registration_tolerance(receipt):
+    bead_width = receipt["effective_intent"]["recipe"]["bead_width_mm"]
+    if not nonnegative(bead_width) or bead_width == 0:
+        raise ValueError("invalid nominal bead width for span registration")
+    return SUPPORT_GRID_CELL_MM + bead_width / 2
+
+
+def summarize_losses(changes):
+    ranked = sorted(changes, key=lambda loss: (-loss["increase_mm"], loss["physical_z_mm"],
+                                              loss["candidate_layer"], loss["candidate_road"]))
+    new = [loss for loss in ranked if loss["control"] is None]
+    increased = [loss for loss in ranked if loss["control"] is not None]
+    worst_by_interval = {}
+    for loss in ranked:
+        worst_by_interval.setdefault(loss["physical_z_mm"], loss)
+    return {"located_spans_with_losses": len(ranked),
+            "new_located_spans": len(new), "increased_located_spans": len(increased),
+            "unmatched_with_eligible_control": sum(loss["registration"] == "contended" for loss in new),
+            "top_new_located_spans": new[:3], "top_increased_located_spans": increased[:3],
+            "local_span_losses": [worst_by_interval[key] for key in sorted(worst_by_interval)]}
 
 
 def support_mm(row):
@@ -290,16 +385,17 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                 try:
                     before, control_observed, control_warning = native_coverage(control_corpus, name, control_receipt)
                     after, candidate_observed, candidate_warning = native_coverage(corpus, name, receipt)
-                    lost, local = located_losses(before, after)
+                    tolerance = registration_tolerance(receipt)
+                    changes = located_losses(before, after, tolerance)
                 except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
                     entry["failures"].append("missing_located_span_evidence")
                     entry["located_span_error"] = str(error)
                 else:
-                    if lost:
+                    if changes:
                         entry["failures"].append("new_or_increased_local_spans")
                     entry["span_metric"] = located_spans.METRIC
-                    entry["located_spans_with_losses"] = lost
-                    entry["local_span_losses"] = local
+                    entry["span_registration_tolerance_mm"] = tolerance
+                    entry.update(summarize_losses(changes))
                     entry["span_report_warnings"] = {"control": control_warning, "candidate": candidate_warning}
                     for field in ("unsupported_layers", "max_span_mm"):
                         entry[f"reported_{field}"] = entry[field]

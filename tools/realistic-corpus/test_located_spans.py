@@ -1,5 +1,6 @@
 import io
 import json
+import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -73,19 +74,44 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(summary["tagged_bounded_bridges"], 0)
         self.assertEqual(summary["max_span_mm"], 10)
 
-    def test_located_gate_accepts_reversed_and_split_gaps_but_not_a_different_locus(self):
-        def gap(start, end, layer=2, interval=(0.2, 0.4)):
-            road = spans.Road(layer, 0, "top_skin", False, False, interval, [start, end], [0.4])
-            return spans.describe_gap(road, road.points, abs(end[0] - start[0]), False, 10)
+    @staticmethod
+    def gap(start, end, interval=(1.0, 1.2), layer=8, road=0, role="top_skin"):
+        path = spans.Road(layer, road, role, False, False, interval, [start, end], [0.45])
+        return spans.describe_gap(path, path.points, math.dist(start, end), False, 10)
 
-        before = [gap((0, 0), (2, 0)), gap((2, 0), (4, 0))]
-        reversed_gap = gap((4, 0), (0, 0))
-        self.assertEqual(panel_coverage.located_losses(before, [reversed_gap]), (0, []))
-        shifted = gap((0, 1), (4, 1))
-        same_xy_new_z = gap((0, 0), (4, 0), layer=3, interval=(0.4, 0.6))
-        lost, changes = panel_coverage.located_losses(before, [shifted, same_xy_new_z])
-        self.assertEqual(lost, 2)
-        self.assertEqual([change["uncovered_span_mm"] for change in changes], [4, 4])
+    def test_located_gate_accepts_moved_reversed_gaps_and_only_counts_length_increase(self):
+        before = [self.gap((0, 0), (4, 0))]
+        moved = self.gap((4.1, 0.275), (0.1, 0.275), layer=9, road=2)
+        self.assertEqual(panel_coverage.located_losses(before, [moved], 0.275), [])
+        longer = self.gap((4.1, 0.2), (-0.15, 0.2), layer=9, road=3)
+        loss, = panel_coverage.located_losses(before, [longer], 0.275)
+        self.assertEqual(loss["candidate_road"], 3)
+        self.assertEqual(loss["increase_mm"], 0.25)
+        self.assertEqual(loss["control"], before[0])
+
+    def test_located_gate_keeps_spans_at_another_locus_role_or_z_new(self):
+        before = [self.gap((0, 0), (4, 0))]
+        after = [self.gap((0, 0.276), (4, 0.276)),
+                 self.gap((4, 0), (0, 0), interval=(1.2, 1.4)),
+                 self.gap((0, 0), (4, 0), role="bridge"),
+                 self.gap((4.1, 0), (5, 0)), self.gap((2, -2), (2, 2)),
+                 self.gap((0, 0), (4, 0.5))]
+        changes = panel_coverage.located_losses(before, after, 0.275)
+        self.assertEqual(len(changes), len(after))
+        self.assertTrue(all(change["registration"] == "no_overlap" for change in changes))
+
+    def test_located_gate_reserves_exact_span_and_never_reuses_control(self):
+        before = [self.gap((0, 0), (4, 0))]
+        adjacent = self.gap((0, 0.1), (4, 0.1), road=2)
+        exact = self.gap((4, 0), (0, 0), road=3)
+        loss, = panel_coverage.located_losses(before, [adjacent, exact], 0.275)
+        self.assertEqual(loss["candidate_road"], 2)
+        self.assertEqual(loss["registration"], "contended")
+
+    def test_located_gate_reassigns_a_pair_instead_of_inventing_a_new_span(self):
+        before = [self.gap((0, 0), (4, 0)), self.gap((0, 0.3), (4, 0.3))]
+        after = [self.gap((0, 0.1), (4, 0.1)), self.gap((0, -0.2), (4, -0.2))]
+        self.assertEqual(panel_coverage.located_losses(before, after, 0.275), [])
 
     def test_panel_binds_complete_comparison_to_both_inputs(self):
         with TemporaryDirectory() as directory:

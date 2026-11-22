@@ -30,8 +30,9 @@ both slicers' estimated print time and filament length and their ratio.
 
 --prusa-off-results OFF.ndjson estimates Prusa support filament from a matched
 supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS fails a
-candidate with new or extended observer-measured unsupported spans at matched
-physical Z and XY, using fresh exports from both runs. Plan-to-observer
+candidate with new or longer observer-measured unsupported spans, using fresh
+exports from both runs. One-to-one registration requires the same role and
+physical Z and XY overlap within one grid cell plus half a nominal bead. Plan-to-observer
 disagreements and support filament drops above 5% request review only.
 For breakaway runs the Prusa reference summary compares nominal spans and
 retains their layer, physical Z, XY extents and roles in each work directory's

@@ -17,7 +17,7 @@ CLI_DOUBLE = """#!/usr/bin/env python3
 import json, os, pathlib, sys
 args=sys.argv[1:]
 intent={"printer":{"build_envelope":{"min":[0,0,0],"max":[30,30,30]}},
-        "recipe":{"supports":{"kind":"disabled"},"process":{"max_bridge_span_mm":10}}}
+        "recipe":{"supports":{"kind":"disabled"},"process":{"max_bridge_span_mm":10},"bead_width_mm":0.45}}
 print(json.dumps(["instrumented_phase", "trace", 1]),file=sys.stderr)
 if args[0]=='diagnose':
     print(json.dumps({"command":"diagnose","hello":{"fixture":True}}))
@@ -128,8 +128,10 @@ class RunnerBoundaryTests(unittest.TestCase):
             self.assertEqual(coverage["located_spans_with_losses"], 1)
             loss, = coverage["local_span_losses"]
             self.assertEqual(loss["physical_z_mm"], [2, 3])
-            self.assertEqual(loss["uncovered_points_mm"], [[2, 20], [2.0001, 20]])
-            self.assertAlmostEqual(loss["uncovered_span_mm"], 0.0001)
+            self.assertEqual(coverage["span_registration_tolerance_mm"], 0.275)
+            self.assertEqual(loss["candidate_points_mm"], [[0, 20], [2.0001, 20]])
+            self.assertEqual(loss["control"]["points_mm"], [[0, 20], [2, 20]])
+            self.assertAlmostEqual(loss["increase_mm"], 0.0001)
             meta = json.loads((candidate / "results.ndjson.run.json").read_text())
             self.assertEqual(meta["comparisons"]["coverage_control"]["results_sha256"],
                              audit.digest(control / "results.ndjson"))
