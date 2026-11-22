@@ -114,10 +114,25 @@ class CorpusAuditTests(unittest.TestCase):
     def test_cohort2_requires_complete_source_absent_journeys(self):
         manifest = json.loads(Path(__file__).with_name("manifest-cohort2.json").read_text())
         cases = audit.select_cases(manifest)
+        excluded = {
+            "C2-07-SKR_E3_V3_Din_Mount.step": "#8735",
+            "C2-08-Fly_Gemini_V2_Din_Mount_2pc.step": "#15946",
+        }
+        self.assertTrue(excluded.keys() <= {case["file"] for case in cases})
         for case in cases:
             with self.subTest(part=case["file"]):
-                self.assertEqual(case["expectation"], {"kind": "complete"})
                 record = dict(self.record, part=case["file"], sha256=case["sha256"])
+                if case["file"] in excluded:
+                    expected_error = {"code": "unsupported_geometry", "domain": "geometry"}
+                    self.assertEqual(case["expectation"], {
+                        "kind": "refusal", **expected_error, "reason": case["expectation"]["reason"],
+                    })
+                    self.assertIn(excluded[case["file"]], case["expectation"]["reason"])
+                    refused = dict(record, spiling_compile={"ok": False, "error": expected_error})
+                    self.assertEqual(audit.assess(case, refused, self.intent)["status"], "expected_refusal")
+                    self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
+                    continue
+                self.assertEqual(case["expectation"], {"kind": "complete"})
                 self.assertEqual(audit.assess(case, record, self.intent)["status"], "complete")
                 for field in ("spiling_compile", "spiling_return"):
                     failed = dict(record, **{field: {"ok": False}})

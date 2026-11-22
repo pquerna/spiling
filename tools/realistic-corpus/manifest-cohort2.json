@@ -74,7 +74,12 @@
       "path": "CAD/Electronics Mounts/SKR_E3_V3_Din_Mount.step",
       "sha256": "690ff1a358f948ba4666fa5a7ca7faed102174d50c8b48e7cbb32d7c48f591fb",
       "bytes": 1836014,
-      "expectation": {"kind": "complete"}
+      "expectation": {
+        "kind": "refusal",
+        "code": "unsupported_geometry",
+        "domain": "geometry",
+        "reason": "Authored spline trim loop at face #8735 has a 0.018624 mm gap between adjacent 3D curve ends, beyond the 0.01 mm join tolerance."
+      }
     },
     {
       "file": "C2-08-Fly_Gemini_V2_Din_Mount_2pc.step",
@@ -83,7 +88,12 @@
       "path": "CAD/Electronics Mounts/Fly_Gemini_V2_Din_Mount_2pc.step",
       "sha256": "7d672b454a75d2fd84710507b41f611f6420eb1cb499b678e01f52c3a6d7f103",
       "bytes": 2333198,
-      "expectation": {"kind": "complete"}
+      "expectation": {
+        "kind": "refusal",
+        "code": "unsupported_geometry",
+        "domain": "geometry",
+        "reason": "Authored spline trim loop at face #15946 has a 0.018624 mm gap between adjacent 3D curve ends, beyond the 0.01 mm join tolerance."
+      }
     },
     {
       "file": "C2-09-RPi_or_BTT-Pico_Din_Mount.STEP",
