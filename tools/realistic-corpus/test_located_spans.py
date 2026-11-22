@@ -113,6 +113,46 @@ class LocatedSpanTests(unittest.TestCase):
         after = [self.gap((0, 0.1), (4, 0.1)), self.gap((0, -0.2), (4, -0.2))]
         self.assertEqual(panel_coverage.located_losses(before, after, 0.275), [])
 
+    def test_prusa_located_requires_referenced_placement_role_xy_and_both_z_bounds(self):
+        candidate = self.gap((10, 1), (14, 1), interval=(1.0, 1.2), role="bottom_skin")
+        frame = {"prusa_to_native_xy_mm": (10, 1)}
+        cases = [
+            ("Solid infill", (1.0005, 1.2), (4.5, 0), "acceptable"),
+            ("Solid infill", (1.0, 1.2), (3.5, 0), "longer_than_prusa"),
+            ("Solid infill", (1.0, 1.19), (4.5, 0), "no_common_observed_z"),
+            ("Bridge infill", (1.0, 1.2), (4.5, 0), "no_registered_prusa_span"),
+            ("Solid infill", (1.0, 1.2), (4.5, 1), "no_registered_prusa_span"),
+        ]
+        for role, interval, end, expected in cases:
+            with self.subTest(expected=expected, end=end):
+                control = self.gap((0, end[1]), end, interval=interval, role=role)
+                losses = panel_coverage.located_losses([], [candidate], 0.275)
+                result = panel_coverage.prusa_located_witnesses([control], [candidate], losses, frame, 0.275)
+                self.assertEqual(result["screen_loss_counts"], {expected: 1})
+                self.assertEqual(losses[0]["prusa_located"]["status"], expected)
+
+    def test_prusa_located_does_not_choose_between_ambiguous_z_intervals(self):
+        control = self.gap((0, 0), (4, 0), interval=(1.0, 1.2))
+        native = [self.gap((0, 0), (4, 0), interval=(low, 1.2)) for low in (0.9995, 1.0005)]
+        self.assertEqual(panel_coverage.common_prusa_intervals([control], native), {})
+
+    def test_prusa_frame_requires_congruent_xy_source_bounds(self):
+        with TemporaryDirectory() as directory:
+            work = Path(directory)
+            export = work / "return/out"
+            export.mkdir(parents=True)
+            step = work / "part.step"
+            step.write_text("fixture")
+            (export / "manifest.json").write_text(json.dumps({"scene": {"bounds_mm": {
+                "min": [100, 98, 0], "max": [120, 118, 5]}}}))
+            row = {"sha256": panel_coverage.audit.digest(step), "prusa": {
+                "import": {"ok": True, "command": ["--info", str(step)], "size_x": 20, "size_y": 20},
+                "slice": {"command": ["--center", "110,110", str(step)]}}}
+            self.assertEqual(panel_coverage.prusa_frame(row, work, 0.275)["prusa_to_native_xy_mm"], (0, -2))
+            row["prusa"]["import"]["size_x"] = 21
+            with self.assertRaisesRegex(ValueError, "extents disagree"):
+                panel_coverage.prusa_frame(row, work, 0.275)
+
     def test_panel_binds_complete_comparison_to_both_inputs(self):
         with TemporaryDirectory() as directory:
             corpus = Path(directory)
@@ -146,6 +186,13 @@ class LocatedSpanTests(unittest.TestCase):
             native, measured = spans.native_observation(plan, plan_path, evidence, 0.2, 8)
             self.assertEqual(len(native), 1)
             self.assertEqual(measured["max_span_mm"], 10)
+            prusa_path = work / "prusa.gcode"
+            inputs = {"prusa": prusa_path, "spiling": plan_path}
+            _, prusa_observed = spans.retained_observation(evidence, "prusa", inputs, 0.2, 8)
+            self.assertEqual(prusa_observed["max_span_mm"], 0)
+            prusa_path.write_text(PRUSA + "\n; different export\n")
+            with self.assertRaisesRegex(ValueError, "bind"):
+                spans.retained_observation(evidence, "prusa", inputs, 0.2, 8)
             with self.assertRaisesRegex(ValueError, "bind"):
                 spans.native_observation(plan, plan_path, evidence, 0.2, 9)
             evidence.write_text("\n".join(evidence.read_text().splitlines()[:-1]) + "\n")

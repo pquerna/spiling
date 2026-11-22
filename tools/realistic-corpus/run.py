@@ -37,9 +37,10 @@ disagreements and support filament drops above 5% request review only.
 For breakaway runs the Prusa reference summary compares nominal spans and
 retains their layer, physical Z, XY extents and roles in each work directory's
 located-spans.ndjson. The observer uses a common lower-bead capsule model and
-support gap bound and runs outside slice/reopen timings. The unregistered
-Prusa comparison is not a local parity gate; the part maximum and span count
-do not qualify printability.
+support gap bound and runs outside slice/reopen timings. With a coverage
+control, a reported loss is acceptable against Prusa only when a same-role
+span registers at the same physical interval and is at least as long. This
+does not waive the native control gate or qualify printability.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor
