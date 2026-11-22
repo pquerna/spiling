@@ -3523,8 +3523,10 @@ mod corner_width_tests {
 
     #[test]
     fn uneven_source_intervals_keep_neighbor_clearance_through_assembly_and_fitting() {
-        let widths = [0.45; 2];
-        let angles = [-0.01_f64, 0.0, 0.03];
+        // Keep the first interval shorter than a command and the rounded
+        // neighboring lanes close enough to need their full-radius reserve.
+        let widths = [0.451; 2];
+        let angles = [-0.012_f64, 0.0, 0.04];
         let lines = std::array::from_fn::<_, 2, _>(|interval| {
             [1.0, 1.45].map(|radius| {
                 let ends = [angles[interval], angles[interval + 1]]

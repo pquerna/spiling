@@ -708,13 +708,31 @@ fn native_section_consumer_preserves_hole_ownership_in_sparse_and_skin_paths() {
         let (paths, coverage) = output(&section, below, above, 0.25, 0);
         partition(&coverage);
         assert!((coverage.protected_hole_area_mm2 - 9.0 * std::f64::consts::PI).abs() < 0.1);
-        assert_eq!(
-            paths
-                .iter()
-                .filter(|p| p.kind == DepositionKind::Perimeter)
-                .count(),
-            2
-        );
+        let mut contours = [0; 2]; // Bore, then exterior.
+        for path in paths.iter().filter(|p| p.kind == DepositionKind::Perimeter) {
+            let points = &path.points_mm;
+            if points.first() == points.last() {
+                // The two original closed walls must survive. Open corner
+                // completion commands do not represent additional boundaries.
+                let ring = Polygon::new(
+                    LineString::from(points.iter().map(|p| (p[0], p[1])).collect::<Vec<_>>()),
+                    vec![],
+                );
+                assert!(geo::Contains::contains(&ring, &geo::Point::new(10.0, 10.0)));
+                let near_bore = |p: &[f64; 3]| (p[0] - 10.0).hypot(p[1] - 10.0) < 4.0;
+                let bore = points.iter().all(near_bore);
+                assert!(bore || points.iter().all(|p| !near_bore(p)));
+                contours[usize::from(!bore)] += 1;
+            }
+            for pair in points.windows(2) {
+                let [a, b] = [pair[0], pair[1]]
+                    .map(|p| program_coordinates::project_xyz6_point_mm(p).unwrap());
+                assert!(program_coordinates::meets_minimum_command(
+                    (a[0] - b[0]).hypot(a[1] - b[1])
+                ));
+            }
+        }
+        assert_eq!(contours, [1, 1]);
         for edge in paths.iter().flat_map(|path| path.points_mm.windows(2)) {
             let a = [edge[0][0] - 10.0, edge[0][1] - 10.0];
             let d = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];

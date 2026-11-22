@@ -1506,15 +1506,11 @@ mod tests {
 
     #[test]
     fn contained_gradient_directs_equal_rounded_bounds_inside_the_closed_predicate() {
-        let points = [
-            [100.675, 106.274126, 0.2],
-            [100.675, 106.305467, 0.2],
-            [100.675, 106.336808, 0.2],
-        ];
-        let fields = [
-            (0.4260406793175658, 0.42886136931756624, 0.4274510693175659),
-            (0.43168205931756665, 0.4345027493175671, 0.43309235931756634),
-        ];
+        // Two legal 30 µm commands on the output lattice. At these widths the
+        // rounded upper bound equals the wider command, but subtracting the
+        // narrower width gives a difference just outside the closed bound.
+        let points = [[0.0, 0.0, 0.2], [0.0, 0.03, 0.2], [0.0, 0.06, 0.2]];
+        let fields = [(0.426, 0.4288, 0.4274), (0.4314, 0.4345, 0.4328)];
         for reverse in [false, true] {
             let mut runs = std::array::from_fn::<_, 2, _>(|index| {
                 let (minimum, maximum, source_mean) =
@@ -1544,7 +1540,13 @@ mod tests {
             });
             // The sum rounds onto the proposed command, although the equivalent
             // subtraction lies strictly outside the same unchanged allowance.
-            assert!(!gradient_admitted(runs[0], runs[1]));
+            let [low, high] = if reverse { [runs[1], runs[0]] } else { runs };
+            let allowance = program_coordinates::MAX_WALL_WIDTH_GRADIENT
+                * 0.9
+                * (chord_length(low) + chord_length(high))
+                * 0.5;
+            assert_eq!(low.mean + allowance, high.mean);
+            assert!(!gradient_admitted(low, high));
             let original = runs;
             contained_gradient(&mut runs, false, 0.302, &mut 0, &AtomicBool::new(false)).unwrap();
             assert!(gradient_admitted(runs[0], runs[1]));
@@ -2035,13 +2037,16 @@ mod tests {
 
     #[test]
     fn dense_curved_proposals_fit_legal_commands_without_spending_more_enclosure() {
-        let count = 180;
-        let points = (0..=count)
+        let mut points = (0..=180)
             .map(|i| {
-                let angle = 0.4 * i as f64 / count as f64;
+                let angle = 0.4 * i as f64 / 180.0;
                 point(key([1.0 + 0.09 * angle.cos(), 1.0 + 0.09 * angle.sin()]).unwrap())
             })
             .collect::<Vec<_>>();
+        // Like the wall assembler, keep only distinct, consecutive
+        // command sites after projection to the program lattice.
+        points.dedup();
+        let count = points.len() - 1;
         let edges = points
             .windows(2)
             .map(|pair| BoundaryEdge {
@@ -2134,10 +2139,10 @@ mod tests {
         assert_eq!(correspondence.len() + 1, path.points_mm.len());
         for edge in path.checked_edges().unwrap() {
             assert_eq!(edge.width_mm, 0.45);
-            assert!(
-                norm(sub(xy(edge.points_mm[1]), xy(edge.points_mm[0])))
-                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            );
+            assert!(program_coordinates::meets_minimum_command(emitted_length(
+                edge.points_mm[0],
+                edge.points_mm[1]
+            )));
         }
         for p in points {
             let nearest = path
@@ -2159,14 +2164,18 @@ mod tests {
 
     #[test]
     fn minimum_commands_follow_small_curved_corners_within_the_declared_corridor() {
+        // Leave room for a legal lattice chord through the turn without
+        // granting more enclosure. The unpermitted inward fit still fails.
+        let radius = 0.03;
         let mut points = (0..=20)
-            .map(|i| [-0.02, -0.04 + 0.002 * i as f64])
+            .map(|i| [-radius, -0.04 + 0.002 * i as f64])
             .collect::<Vec<_>>();
         points.extend((1..=90).map(|i| {
             let angle = std::f64::consts::PI - (i as f64).to_radians();
-            point(key([0.02 * angle.cos(), 0.02 * angle.sin()]).unwrap())
+            point(key([radius * angle.cos(), radius * angle.sin()]).unwrap())
         }));
-        points.extend((1..=20).map(|i| [0.002 * i as f64, 0.02]));
+        points.extend((1..=20).map(|i| [0.002 * i as f64, radius]));
+        points.dedup();
         let edges = points
             .windows(2)
             .map(|p| BoundaryEdge {
@@ -2250,10 +2259,10 @@ mod tests {
         assert_eq!(xy(path.points_mm[0]), points[0]);
         assert_eq!(xy(*path.points_mm.last().unwrap()), *points.last().unwrap());
         for edge in path.checked_edges().unwrap() {
-            assert!(
-                norm(sub(xy(edge.points_mm[1]), xy(edge.points_mm[0])))
-                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            );
+            assert!(program_coordinates::meets_minimum_command(emitted_length(
+                edge.points_mm[0],
+                edge.points_mm[1]
+            )));
             assert!(edge.width_mm >= 0.302);
         }
         let distance = |p: [f64; 2], segment: [[f64; 2]; 2]| {
