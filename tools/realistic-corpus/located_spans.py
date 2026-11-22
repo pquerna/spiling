@@ -14,7 +14,7 @@ import audit
 import reference
 
 
-METRIC = "nominal-lower-road-centerline-v1"
+METRIC = "nominal-lower-road-endpoint-disks-v2"
 Z_EPSILON_MM = 0.001
 EPS = 1e-9
 CELL_MM = 4.0
@@ -242,6 +242,17 @@ class LowerEdges:
         for _, low, high, radius in self.intersecting_edges(start, end, top):
             yield from capsule_intervals(start, unit, length, low, high, radius)
 
+    def touches_endpoint(self, point, radius, top):
+        low = (point[0] - radius, point[1] - radius)
+        high = (point[0] + radius, point[1] + radius)
+        for _, start, end, donor_radius in self.intersecting_edges(low, high, top):
+            dx, dy = end[0] - start[0], end[1] - start[1]
+            px, py = point[0] - start[0], point[1] - start[1]
+            offset = max(0.0, min(1.0, (px * dx + py * dy) / (dx * dx + dy * dy)))
+            if math.hypot(px - offset * dx, py - offset * dy) < radius + donor_radius - EPS:
+                return True
+        return False
+
 
 def missing_intervals(covered, length):
     cursor = 0.0
@@ -296,7 +307,9 @@ def road_gaps(road, lower, bridge_limit):
         for low, high in gaps:
             points = [tuple(axis + distance * step for axis, step in zip(start, unit))
                       for distance in (low, high)]
-            yield describe_gap(road, points, high - low, low > EPS and high < length - EPS, bridge_limit), width
+            left = low > EPS or lower.touches_endpoint(start, width / 2, road.z[1])
+            right = high < length - EPS or lower.touches_endpoint(end, width / 2, road.z[1])
+            yield describe_gap(road, points, high - low, left and right, bridge_limit), width
 
 
 def model_layers(roads):

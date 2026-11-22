@@ -92,7 +92,27 @@ def native_coverage(corpus, part, receipt):
     gap = 0.0 if supports["kind"] == "disabled" else supports["z_gap_mm"]
     spans, measured = located_spans.native_observation(
         plan, plan_path, work / "located-spans.ndjson", gap, recipe["process"]["max_bridge_span_mm"])
-    return spans, measured, report_warning(span_layers(plan), spans)
+    reported = span_layers(plan)
+    locate_wall_reports(plan, reported, spans)
+    return spans, measured, report_warning(reported, spans)
+
+
+def locate_wall_reports(plan, reported, spans):
+    matches = defaultdict(list)
+    for span in spans:
+        span.pop("plan_reported_wall", None)
+        interval = tuple(span["physical_z_mm"])
+        declared = reported.get(interval, 0.0)
+        if declared > 0 and abs(span["length_mm"] - declared) <= located_spans.EPS:
+            matches[interval].append(span)
+    layers = {layer["index"]: layer for layer in plan["layers"]}
+    for interval, candidates in matches.items():
+        if len(candidates) != 1:
+            continue
+        span, = candidates
+        path = layers[span["layer"]]["paths"][span["road"]]
+        if (path.get("owner") or {}).get("kind") == "wall":
+            span["plan_reported_wall"] = reported[interval]
 
 
 def report_warning(reported, spans):
@@ -410,6 +430,7 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_ou
     if not spans:
         return {"status": "no_native_spans", "comparable_spans": 0,
                 "excess_tolerance_mm": tolerance, "failing_spans": 0,
+                "reported_wall_excess_spans": 0,
                 "positive_excess_at_or_below_tolerance_spans": 0}
     work = Path(corpus) / "work" / row["part"]
     try:
@@ -429,19 +450,28 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_ou
     assessments = Counter(witness["assessment"] for witness in witnesses if "assessment" in witness)
     within_tolerance = sum(witness.get("assessment") == "acceptable"
                            and witness["excess_mm"] > located_spans.EPS for witness in witnesses)
-    failures = [{"layer": span["layer"], "road": span["road"], "role": span["role"],
-                 "two_ended": span["two_ended"], "bridge_within_limit": span["bridge_within_limit"],
-                 "physical_z_mm": span["physical_z_mm"], "points_mm": span["points_mm"],
-                 "native_span_mm": span["length_mm"], "prusa_span_mm": witness["unsupported_span_mm"],
-                 "prusa_layer": witness["prusa_layer"], "excess_mm": witness["excess_mm"]}
-                for span, witness in zip(spans, witnesses, strict=True)
-                if witness.get("assessment") == "longer_than_prusa"]
-    failures.sort(key=lambda span: (-span["excess_mm"], span["layer"], span["road"]))
+    failures, reported_walls = [], []
+    for span, witness in zip(spans, witnesses, strict=True):
+        if witness.get("assessment") != "longer_than_prusa":
+            continue
+        located = {"layer": span["layer"], "road": span["road"], "role": span["role"],
+                   "two_ended": span["two_ended"], "bridge_within_limit": span["bridge_within_limit"],
+                   "physical_z_mm": span["physical_z_mm"], "points_mm": span["points_mm"],
+                   "native_span_mm": span["length_mm"], "prusa_span_mm": witness["unsupported_span_mm"],
+                   "prusa_layer": witness["prusa_layer"], "excess_mm": witness["excess_mm"]}
+        if "plan_reported_wall" in span:
+            located["plan_reported_wall"] = span["plan_reported_wall"]
+            reported_walls.append(located)
+        else:
+            failures.append(located)
+    for entries in (failures, reported_walls):
+        entries.sort(key=lambda span: (-span["excess_mm"], span["layer"], span["road"]))
     result = {"status": "compared", "span_counts": dict(counts),
               "comparable_spans": counts["supported"] + counts["unsupported"],
               "full_span_comparisons": assessments["acceptable"] + assessments["longer_than_prusa"],
               "assessments": dict(assessments), "excess_tolerance_mm": tolerance,
               "failing_spans": len(failures), "worst_longer_spans": failures[:3],
+              "reported_wall_excess_spans": len(reported_walls), "worst_reported_wall_spans": reported_walls[:3],
               "positive_excess_at_or_below_tolerance_spans": within_tolerance,
               "registration": "model_bead_footprints_within_one_layer_height", **frame}
     if failures and failure_output is not None:

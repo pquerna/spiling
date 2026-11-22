@@ -74,6 +74,34 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(summary["tagged_bounded_bridges"], 0)
         self.assertEqual(summary["max_span_mm"], 10)
 
+    def test_endpoint_disks_anchor_each_run_without_filling_its_centerline(self):
+        for role in ("bridge", "Bridge infill"):
+            with self.subTest(role=role):
+                candidate = spans.Road(1, 0, role, False, (0.2, 0.4),
+                                       [(0, 0), (4, 0), (4, 5)], [0.4, 0.4])
+                donors = [road(0, (0.0, 0.2), (0, -0.3), (4, -0.3))]
+                bounded, one_ended = [gap for gap, _ in spans.road_gaps(candidate, spans.LowerEdges(donors), 4)]
+                self.assertEqual(bounded["length_mm"], 4)
+                self.assertTrue(bounded["bridge_within_limit"])
+                self.assertEqual(one_ended["length_mm"], 5)
+                self.assertFalse(one_ended["two_ended"])
+                self.assertFalse(one_ended["bridge_within_limit"])
+                donors[0].points = [(0, -0.4), (4, -0.4)]
+                tangent, _ = next(spans.road_gaps(candidate, spans.LowerEdges(donors), 4))
+                self.assertFalse(tangent["two_ended"])
+
+    def test_wall_reports_do_not_exempt_other_runs_or_ambiguous_matches(self):
+        wall = self.gap((0, 0), (4, 0), role="bridge")
+        shorter = self.gap((0, 1), (3, 1), role="bridge")
+        tied = self.gap((0, 2), (4, 2), road=1, role="bottom_skin")
+        reports = {(1.0, 1.2): 4}
+        plan = {"layers": [{"index": 8, "paths": [{"owner": {"kind": "wall"}}, {}]}]}
+        panel_coverage.locate_wall_reports(plan, reports, [wall, shorter])
+        self.assertEqual(wall["plan_reported_wall"], 4)
+        self.assertNotIn("plan_reported_wall", shorter)
+        panel_coverage.locate_wall_reports(plan, reports, [wall, shorter, tied])
+        self.assertNotIn("plan_reported_wall", wall)
+
     @staticmethod
     def gap(start, end, interval=(1.0, 1.2), layer=8, road=0, role="top_skin"):
         path = spans.Road(layer, road, role, False, interval, [start, end], [0.45])
@@ -152,6 +180,7 @@ class LocatedSpanTests(unittest.TestCase):
         cases = [("longer", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
                  ("native_bounded", 8, 0, 4, True, None, None),
                  ("native_one_ended", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("reported_wall", 8, 0, 4, True, None, "supported"),
                  ("above", 8, 0, 2.001, True, "longer_registered_spans_than_prusa", "supported"),
                  ("equal", 8, 0, 2.0, True, None, "supported"),
                  ("below", 8, 0, 1.999, True, None, "supported"),
@@ -179,17 +208,18 @@ class LocatedSpanTests(unittest.TestCase):
                         "index": 1, "lower_z_mm": 0.2, "z_mm": 0.4,
                         "region_coverage": {"unsupported_overhang_mm": length}, "paths": [{
                             "kind": "bridge" if case.startswith("native_") else "bottom_skin",
+                            "owner": {"kind": "wall"} if case == "reported_wall" else None,
                             "physical_z_mm": [0.2, 0.4],
                             "points_mm": [[2, offset, 0.4], [2 + length, offset, 0.4]],
                             "width": {"kind": "constant", "width_mm": 0.4}}]}]}
                     if case.startswith("native_"):
-                        anchors = [(1.5, 2.2)] if case == "native_one_ended" else [(1.5, 2.2), (5.8, 6.5)]
+                        anchors = [(1.5, 2.2, 0)] if case == "native_one_ended" else [(1.5, 6.5, 0.3)]
                         plan["layers"].insert(0, {"index": 0, "lower_z_mm": 0.0, "z_mm": 0.2,
                             "region_coverage": {"unsupported_overhang_mm": 0}, "paths": [{
                                 "kind": "perimeter", "physical_z_mm": [0.0, 0.2],
-                                "points_mm": [[left, 0, 0.2], [right, 0, 0.2]],
+                                "points_mm": [[left, yy, 0.2], [right, yy, 0.2]],
                                 "width": {"kind": "constant", "width_mm": 0.4}}
-                                for left, right in anchors]})
+                                for left, right, yy in anchors]})
                     (export / "plan.json").write_text(json.dumps(plan))
                     row = {"part": "part.step", "sha256": sha, "source_absent": True,
                            "spiling_compile": {"ok": True}, "spiling_return": {"ok": True},
@@ -211,6 +241,7 @@ class LocatedSpanTests(unittest.TestCase):
                         comparison = result["prusa_located"]
                         self.assertEqual(comparison["span_counts"], {match: 1})
                         self.assertEqual(comparison["failing_spans"], int(bool(refusal)))
+                        self.assertEqual(comparison["reported_wall_excess_spans"], int(case == "reported_wall"))
                         self.assertEqual(comparison["positive_excess_at_or_below_tolerance_spans"],
                                          int(case in {"equal", "below"}))
                         if refusal:

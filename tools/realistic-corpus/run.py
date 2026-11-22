@@ -34,10 +34,12 @@ diagnostic native delta: one-to-one registration by role, physical Z and XY
 within one grid cell plus half a bead. Native deltas, plan disagreement and
 support filament drops above 5% are not coverage-gate failures.
 Breakaway Prusa runs exempt tagged two-ended bridges within the captured
-bridge limit on both slicers, then gate native spans against Prusa's model
+bridge limit on both slicers. Each straight run can use positive bead-footprint
+overlap as an endpoint anchor. The gate compares native spans against Prusa's model
 bead and unsupported footprints, using XY overlap on any single Prusa layer
 within the larger local layer height. A fully registered span fails when its
-excess over Prusa exceeds 2 mm. Positive excesses at or below 2 mm are counted
+excess over Prusa exceeds 2 mm, unless it uniquely matches a native layer's
+reported span and is wall-owned. Positive excesses at or below 2 mm are counted
 but do not fail. Partial registration and absent Prusa
 model geometry are reported without a parity claim. Located spans and each
 failing span's excess are kept in per-case NDJSON evidence.
