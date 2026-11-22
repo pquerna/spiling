@@ -125,8 +125,9 @@ fn joined_landing(
     )?;
     raster.charge(ledge_points.saturating_mul(road_points));
     let joined = ledges.intersection(&roads);
+    let ledge = raster.inward(&ledges.0)?;
     drop((ledges, roads));
-    raster.inward(&joined.0)
+    raster.landing(&ledge, &joined.0)
 }
 
 /// What the sweep built clear, for the final clearance assertion: each
@@ -1183,8 +1184,7 @@ impl Sweep<'_> {
                     return Ok(None);
                 }
                 let geometry = footprint(object_layer, ledge.bytes())?;
-                let roads = raster.inward(&geometry.0)?;
-                let cells = raster.intersection(&ledge, &roads)?;
+                let cells = raster.landing(&ledge, &geometry.0)?;
                 Ok((!cells.is_empty()).then_some(PartContact { cells, roots }))
             }
             _ => {
@@ -1794,5 +1794,46 @@ mod tests {
         );
         assert!(join(&right, 0.23).is_empty());
         assert!(join(&strip(0.226, 0.26), 0.28).is_empty());
+    }
+
+    #[test]
+    fn landing_recovers_only_centred_donor_seams_inside_full_ledge_cells() {
+        let cancel = AtomicBool::new(false);
+        let raster = Raster {
+            frame: CellFrame::new([[0.0, 0.0], [4.0, 4.0]], SUPPORT_CELL_MM).unwrap(),
+            cancel: &cancel,
+            admit: &|_| Ok(()),
+            work: AtomicUsize::new(0),
+        };
+        for transpose in [false, true] {
+            let strip = |low, high| {
+                let point = |along, across| {
+                    let [x, y] = if transpose {
+                        [across, along]
+                    } else {
+                        [along, across]
+                    };
+                    coord! { x: x, y: y }
+                };
+                Rect::new(point(low, 3.05), point(high, 3.60)).to_polygon()
+            };
+            let ledge = raster.inward(&[strip(3.0, 3.55)]).unwrap();
+            let pair = [strip(3.0, 3.201), strip(3.202, 3.55)];
+            let base = raster.inward(&pair).unwrap();
+            let repaired = raster.landing(&ledge, &pair).unwrap();
+            assert!(repaired.count() > base.count());
+            assert!(raster.difference(&base, &repaired).unwrap().is_empty());
+            assert!(raster.difference(&repaired, &ledge).unwrap().is_empty());
+
+            let no_ledge = raster.inward(&pair).unwrap();
+            assert_eq!(raster.landing(&no_ledge, &pair).unwrap(), base);
+            for split in [(3.224, 3.227), (3.201, 3.252)] {
+                let pair = [strip(3.0, split.0), strip(split.1, 3.55)];
+                assert_eq!(
+                    raster.landing(&ledge, &pair).unwrap(),
+                    raster.inward(&pair).unwrap()
+                );
+            }
+        }
     }
 }

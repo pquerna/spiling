@@ -639,6 +639,56 @@ impl Raster<'_> {
         &self,
         polygons: impl IntoIterator<Item = &'p Polygon<f64>>,
     ) -> Result<Bits, ManufacturingError> {
+        let (mut inside, boundary) = self.polygon_cells(polygons)?;
+        inside.subtract(&boundary);
+        Ok(inside)
+    }
+
+    /// Landing proposals keep inward road cells and may recover a one-cell
+    /// donor seam between opposing inward neighbours. The recovered cell
+    /// must be wholly in the ledge and its centre must be inside the road
+    /// footprint. Neither proposal grants contact to the emitted stroke.
+    pub(super) fn landing<'p>(
+        &self,
+        ledge: &Bits,
+        roads: impl IntoIterator<Item = &'p Polygon<f64>>,
+    ) -> Result<Bits, ManufacturingError> {
+        let (inside, boundary) = self.polygon_cells(roads)?;
+        (self.admit)(
+            ledge
+                .bytes()
+                .saturating_add(inside.bytes().saturating_mul(3))
+                .saturating_add(boundary.bytes()),
+        )?;
+        let mut eligible = self.intersection(ledge, &inside)?;
+        drop(inside);
+        let core = self.difference(&eligible, &boundary)?;
+        drop(boundary);
+        self.charge(eligible.data.len().saturating_mul(7));
+        for (local, words) in eligible.data.chunks_mut(eligible.width.max(1)).enumerate() {
+            check_cancel(self.cancel)?;
+            let row = eligible.row0 + local;
+            for (offset, value) in words.iter_mut().enumerate() {
+                let word = eligible.word0 + offset;
+                let middle = core.word(row, word);
+                let left = middle << 1
+                    | word
+                        .checked_sub(1)
+                        .map_or(0, |left| core.word(row, left) >> 63);
+                let right = middle >> 1 | core.word(row, word + 1) << 63;
+                let below = row.checked_sub(1).map_or(0, |below| core.word(below, word));
+                let above = core.word(row + 1, word);
+                *value = middle | (*value & ((left & right) | (below & above)));
+            }
+        }
+        eligible.shrink();
+        Ok(eligible)
+    }
+
+    fn polygon_cells<'p>(
+        &self,
+        polygons: impl IntoIterator<Item = &'p Polygon<f64>>,
+    ) -> Result<(Bits, Bits), ManufacturingError> {
         let mut inside = Vec::new();
         let mut boundary = Vec::new();
         let mut crossings = Vec::new();
@@ -649,10 +699,9 @@ impl Raster<'_> {
                 self.capsule(a, b, 0.0, &mut boundary)?;
             }
         }
-        let mut bits = self.bits_of(&inside)?;
+        let bits = self.bits_of(&inside)?;
         drop(inside);
-        bits.subtract(&self.bits_of(&boundary)?);
-        Ok(bits)
+        Ok((bits, self.bits_of(&boundary)?))
     }
 
     /// Cells whose centre lies inside one polygon (even-odd over its own
