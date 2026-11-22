@@ -53,7 +53,13 @@ impl Frame {
                 }
             }
         }
+        // Every support placement keeps the verifier's decoded-bead enclosure
+        // beyond the requested gap, as exact walls do; otherwise grid-placed
+        // support could clear the planned object bead but not its decoded
+        // (rounded, arc-replayed) one.
+        let enclosure = super::raster::exact::VERIFIER_ENCLOSURE_MM;
         let clearance_envelope = (clearance_distance_in_frame(bounds, bounds, requested)?
+            + enclosure
             + super::super::OFFSET_TOLERANCE_MM)
             .next_up();
         let margin = input.recipe.bead_width_mm / 2.0
@@ -83,7 +89,8 @@ impl Frame {
                 "support clearance work frame is too coarse for the offset tolerance",
             ));
         }
-        let distance = clearance_distance_in_frame(bounds, bounds, requested)?;
+        let distance =
+            (clearance_distance_in_frame(bounds, bounds, requested)? + enclosure).next_up();
         if distance > clearance_envelope {
             return Err(error(
                 ManufacturingErrorCode::NativeConditioningFailure,

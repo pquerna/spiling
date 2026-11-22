@@ -47,7 +47,7 @@ pub(super) const CONTOUR_MARGIN_MM: f64 = 0.001;
 /// Walls and row ends are placed, chord-checked and certified with this
 /// added to the support bead's own clearance, so a certificate implies the
 /// verifier's capsule-pair proof.
-pub(super) const VERIFIER_ENCLOSURE_MM: f64 = 2.0
+pub(in crate::planner::support) const VERIFIER_ENCLOSURE_MM: f64 = 2.0
     * program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
     + MAX_ARC_SAGITTA_MM
     + PROFILE_TOLERANCE_MM

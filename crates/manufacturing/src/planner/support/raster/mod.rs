@@ -7,7 +7,7 @@
 //! each lattice line, and walls follow E's traced boundary.
 
 mod commands;
-mod exact;
+pub(in crate::planner::support) mod exact;
 
 use super::field::{Field, FieldBuilder};
 use super::grid::{Bits, Raster};
