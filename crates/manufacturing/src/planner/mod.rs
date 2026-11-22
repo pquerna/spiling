@@ -2735,20 +2735,13 @@ fn refine_deposition_pair(
 fn image_support_contact_floor(
     event: f64,
     z_gap_mm: f64,
-    nominal_height_mm: f64,
+    _nominal_height_mm: f64,
 ) -> Result<f64, ManufacturingError> {
-    let scale = event.abs().max(nominal_height_mm).max(z_gap_mm).max(1.0);
-    let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-    let half_quantum =
-        (0.5 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM).next_up();
-    let lower = (((event + half_quantum).next_up() + arithmetic).next_up() + z_gap_mm).next_up();
-    let mut floor = project_xyz6_coordinate_mm(lower + half_quantum)?;
-    if project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
-        floor = project_xyz6_coordinate_mm(
-            floor + spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM,
-        )?;
-    }
-    if !floor.is_finite() || project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
+    // The contact sits on the lattice at least the gap above the event's
+    // emitted height; a gap that is exact on the lattice stays exact.
+    let floor =
+        program_coordinates::lattice_ceil_mm(project_xyz6_coordinate_mm(event)? + z_gap_mm)?;
+    if !floor.is_finite() {
         return Err(error(
             ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
             "image contact floor cannot enclose the emitter's coordinate representation",
@@ -2896,27 +2889,14 @@ fn scheduled_layers(
             {
                 continue;
             }
-            let scale = event
-                .abs()
-                .max(input.intent.select_layer_height()?.height_mm)
-                .max(z_gap_mm)
-                .max(1.0);
-            let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-            let half_quantum = (0.5
-                * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM)
-                .next_up();
-            let upper = (((event - half_quantum).next_down() - arithmetic).next_down() - z_gap_mm)
-                .next_down();
+            // Support stops on the lattice at least the gap below the event's
+            // emitted height; a gap that is exact on the lattice stays exact.
+            let upper = project_xyz6_coordinate_mm(event)? - z_gap_mm;
             if upper <= bed {
                 continue;
             }
-            let mut stop = project_xyz6_coordinate_mm(upper - half_quantum)?;
-            if project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
-                stop = project_xyz6_coordinate_mm(
-                    stop - spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM,
-                )?;
-            }
-            if !stop.is_finite() || project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
+            let stop = program_coordinates::lattice_floor_mm(upper)?;
+            if !stop.is_finite() {
                 return Err(error(
                     ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
                     "support stop cannot enclose the emitter's coordinate representation",

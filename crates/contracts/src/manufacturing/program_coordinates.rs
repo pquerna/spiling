@@ -42,6 +42,32 @@ pub const MIN_DEPOSITION_COMMAND_MM: f64 = 0.02;
 /// (10.014 - 9.994 < 0.02). A thousandth of a lattice step, so it never
 /// admits a different representable value.
 pub const LATTICE_ARITHMETIC_SLACK_MM: f64 = XYZ6_QUANTUM_MM / 1_000.0;
+/// The largest lattice coordinate at or below `value` (within the lattice
+/// arithmetic slack, so a value already on the lattice is itself).
+pub fn lattice_floor_mm(value: f64) -> Result<f64, ManufacturingError> {
+    if !value.is_finite() || value.abs() > MAX_XYZ6_COORDINATE_MM {
+        return Err(conditioning(
+            "lattice floor exceeds the certified numeric range",
+        ));
+    }
+    let floored =
+        ((value + LATTICE_ARITHMETIC_SLACK_MM) * PROGRAM_XYZ_SCALE).floor() / PROGRAM_XYZ_SCALE;
+    project_xyz6_coordinate_mm(floored)
+}
+
+/// The smallest lattice coordinate at or above `value` (within the lattice
+/// arithmetic slack, so a value already on the lattice is itself).
+pub fn lattice_ceil_mm(value: f64) -> Result<f64, ManufacturingError> {
+    if !value.is_finite() || value.abs() > MAX_XYZ6_COORDINATE_MM {
+        return Err(conditioning(
+            "lattice ceiling exceeds the certified numeric range",
+        ));
+    }
+    let ceiled =
+        ((value - LATTICE_ARITHMETIC_SLACK_MM) * PROGRAM_XYZ_SCALE).ceil() / PROGRAM_XYZ_SCALE;
+    project_xyz6_coordinate_mm(ceiled)
+}
+
 /// Whether a command between lattice points is at least the minimum length.
 pub fn meets_minimum_command(length_mm: f64) -> bool {
     length_mm >= MIN_DEPOSITION_COMMAND_MM - LATTICE_ARITHMETIC_SLACK_MM
