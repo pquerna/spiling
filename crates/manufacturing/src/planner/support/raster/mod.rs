@@ -24,7 +24,7 @@ pub(super) struct WallReceipt {
     pub(super) omitted_mm: f64,
     /// Cells beyond the kept set the exact field proves clear, for final
     /// clearance.
-    pub(super) certified: Bits,
+    pub(super) certified: Vec<super::sweep::CertifiedEdge>,
 }
 
 /// One layer's staged support walls and hatch rows from its kept support
@@ -85,12 +85,12 @@ pub(super) fn paths(
     let mut contour = raster.boundary(&centers)?;
     region::canonicalize(&mut contour);
     region::check_size(&contour)?;
-    let mut exact = exact::Exact::new(
-        layer.width_mm * 0.5 + 2.0 * program_coordinates::XYZ6_QUANTUM_MM,
+    let exact = exact::Exact::new(
+        layer.width_mm * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM,
         raster.frame.cell(),
     );
     let field = match exclusions {
-        Some(feed) if !contour.0.is_empty() => exact_field(raster, &mut contour, feed, &mut exact)?,
+        Some(feed) if !contour.0.is_empty() => exact_field(raster, &mut contour, feed, &exact)?,
         _ => None,
     };
     let retained = retained
@@ -170,11 +170,20 @@ pub(super) fn paths(
             cancel,
         )?;
     }
-    candidate_budget(&paths, retained, owned_bytes)?;
     let certified = match &field {
-        Some(field) => certify(raster, support, field, &paths, layer.width_mm)?,
-        None => Bits::default(),
+        Some(field) => {
+            split_row_ends(
+                raster,
+                &centers,
+                &mut paths[wall_paths..],
+                2.0 * exact.reach + 2.0 * exact.cell,
+                &mut segments,
+            )?;
+            certify(raster, &centers, field, &paths)?
+        }
+        None => Vec::new(),
     };
+    candidate_budget(&paths, retained, owned_bytes)?;
     Ok((
         paths,
         WallReceipt {
@@ -185,77 +194,95 @@ pub(super) fn paths(
     ))
 }
 
-/// Cells outside the kept set `support` that the staged beads reach and
-/// that the exact field proves clear in full: a cell whose centre clears
-/// every exclusion by half its diagonal clears at every point. The beads'
-/// centrelines lie outside every exclusion polygon with more than that
-/// margin (each was checked at the bead clearance), so the boundary
-/// distance is the true distance there. Final clearance treats these cells
-/// as kept; any bead beyond them still takes the exact proof.
+/// Splits each row whose end leaves E a wall reach and two cells inside
+/// that end, so the stretch that can leave the kept cells is an edge of its
+/// own: short enough for its exact certificate, while the rest of the row
+/// lies in E.
+fn split_row_ends(
+    raster: &Raster<'_>,
+    centers: &Bits,
+    rows: &mut [DepositionPath],
+    inset: f64,
+    segments: &mut usize,
+) -> Result<(), ManufacturingError> {
+    for path in rows {
+        if path.points_mm.len() != 2 {
+            continue;
+        }
+        let [a, b] = [path.points_mm[0], path.points_mm[1]];
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if length.is_nan() || length <= 2.0 * inset + program_coordinates::MIN_DEPOSITION_COMMAND_MM
+        {
+            continue;
+        }
+        let d = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
+        let at = |t: f64| [a[0] + d[0] * t, a[1] + d[1] * t, a[2]];
+        let mut points = Vec::new();
+        raster.reserve(&mut points, 4)?;
+        points.push(a);
+        if !raster.holds_all(centers, [a[0], a[1]]) {
+            points.push(at(inset));
+        }
+        if !raster.holds_all(centers, [b[0], b[1]]) {
+            points.push(at(length - inset));
+        }
+        points.push(b);
+        *segments += points.len() - 2;
+        path.points_mm = points;
+    }
+    Ok(())
+}
+
+/// The staged edges that can leave E, each proved against the exact field
+/// at its emitted XYZ6 segment: the largest bead radius whose capsule keeps
+/// every exclusion's full clearance. Every staged centreline lies outside
+/// the exclusion polygons (in E, or reached from E by clear steps), so the
+/// boundary distance is the true distance. Final clearance takes these
+/// instead of a second exact proof.
 fn certify(
     raster: &Raster<'_>,
-    support: &Bits,
+    centers: &Bits,
     field: &Field,
     paths: &[DepositionPath],
-    width: f64,
-) -> Result<Bits, ManufacturingError> {
-    let cell = raster.frame.cell();
-    let half_diagonal = (cell * std::f64::consts::FRAC_1_SQRT_2 * (1.0 + 1.0e-9)).next_up();
-    let slack = program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
-    // Every cell centre a bead touches is within `width / 2 + slack +
-    // half_diagonal` of its centreline, which clears every boundary edge by
-    // at least `min_radius + width / 2`: the centre is on the same (outer)
-    // side of every edge when the least radius exceeds the rest.
-    if field.min_radius().is_nan() || field.min_radius() <= cell + slack {
-        return Ok(Bits::default());
-    }
-    let mut beads = raster.capsules(paths.iter().flat_map(|path| {
-        path.points_mm.windows(2).map(move |edge| {
-            (
-                [edge[0][0], edge[0][1]],
-                [edge[1][0], edge[1][1]],
-                (width * 0.5 + slack).next_up(),
-            )
-        })
-    }))?;
-    beads.subtract(support);
-    let mut cells = Vec::new();
+) -> Result<Vec<super::sweep::CertifiedEdge>, ManufacturingError> {
+    let mut certified = Vec::new();
     let mut work = 0usize;
-    let mut failure = None;
-    raster.cell_centres(&beads, |at, centre| {
-        if failure.is_some() {
-            return;
-        }
-        if field.nearest(centre, &mut work).clearance >= half_diagonal {
-            if let Err(error) = raster.reserve(&mut cells, 1) {
-                failure = Some(error);
-                return;
+    for path in paths {
+        check_cancel(raster.cancel)?;
+        for edge in path.points_mm.windows(2) {
+            let [a, b] = [[edge[0][0], edge[0][1]], [edge[1][0], edge[1][1]]];
+            work += 1;
+            if raster.holds_all(centers, a) && raster.holds_all(centers, b) {
+                continue;
             }
-            cells.push(at);
+            let segment = [
+                [
+                    program_coordinates::project_xyz6_coordinate_mm(a[0])?,
+                    program_coordinates::project_xyz6_coordinate_mm(a[1])?,
+                ],
+                [
+                    program_coordinates::project_xyz6_coordinate_mm(b[0])?,
+                    program_coordinates::project_xyz6_coordinate_mm(b[1])?,
+                ],
+            ];
+            let radius = field.segment_clearance(segment[0], segment[1], &mut work);
+            if radius > 0.0 {
+                raster.reserve(&mut certified, 1)?;
+                certified.push(super::sweep::CertifiedEdge {
+                    key: super::sweep::segment_key(segment),
+                    radius,
+                });
+            }
         }
-    });
-    raster.charge(work);
-    if let Some(error) = failure {
-        return Err(error);
     }
-    raster.set_of_cells(&cells)
+    raster.charge(work);
+    Ok(certified)
 }
 
-/// How a layer's exclusion-bounded walls are placed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Placement {
-    /// On the exact offset: final clearance proves exactly the beads that
-    /// leave the kept cells. For contact tops, where part roads land.
-    Exact,
-    /// One cell diagonal farther, where every cell the beads touch is
-    /// proved clear in full, so final clearance needs no exact proof.
-    Certified,
-}
-
-/// One layer's exact exclusions, fed into a clearance field, and the
-/// layer's wall placement; `None` when the layer takes no field.
+/// One layer's exact exclusions, fed into a clearance field; `false` when
+/// the layer takes no field.
 pub(super) type Exclusions<'a> =
-    dyn Fn(&mut FieldBuilder<'_, '_>) -> Result<Option<Placement>, ManufacturingError> + Sync + 'a;
+    dyn Fn(&mut FieldBuilder<'_, '_>) -> Result<bool, ManufacturingError> + Sync + 'a;
 
 /// Builds the layer's exact clearance field over its wall contour and moves
 /// every exclusion-bounded wall onto the exact offset. `None` when the layer
@@ -264,17 +291,14 @@ fn exact_field(
     raster: &Raster<'_>,
     contour: &mut MultiPolygon<f64>,
     feed: &Exclusions<'_>,
-    exact: &mut exact::Exact,
+    exact: &exact::Exact,
 ) -> Result<Option<Field>, ManufacturingError> {
     let rings = exact::samples(raster, contour, exact.cell)?;
     let Some(mut builder) = exact::builder(raster, &rings, exact)? else {
         return Ok(None);
     };
-    let Some(placement) = feed(&mut builder)? else {
+    if !feed(&mut builder)? {
         return Ok(None);
-    };
-    if placement == Placement::Exact {
-        exact.place_walls_exactly();
     }
     let field = builder.finish()?;
     if let Some(placed) = exact::displace(raster, &rings, &field, exact)? {

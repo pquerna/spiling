@@ -25,21 +25,19 @@ use super::*;
 /// offsets and floating rounding; every chord is re-checked exactly.
 pub(super) const CONTOUR_MARGIN_MM: f64 = 0.001;
 
-/// Margin at which every cell a placed bead touches is proved clear in full
-/// (its centre clears by half a diagonal), so final clearance needs no exact
-/// proof for it: a full cell diagonal plus the XYZ6 endpoint enclosure.
-pub(super) fn certified_margin(cell: f64) -> f64 {
-    (cell * std::f64::consts::SQRT_2 * (1.0 + 1.0e-9)
-        + program_coordinates::XYZ6_PROJECTION_SCREEN_MM
-        + CONTOUR_MARGIN_MM)
-        .next_up()
-}
-
 /// Deviation allowed when simplifying a placed wall: well under the margin.
 const SIMPLIFY_MM: f64 = 0.0005;
 
 /// Deviation allowed when dropping a vertex beside a sub-command edge.
 const MERGE_MM: f64 = 0.02;
+
+/// Boundary sample spacing in cells. Every original vertex is a sample, so
+/// spacing only subdivides long chords; the field places each sample
+/// exactly and every chord between them is checked exactly.
+const SAMPLE_CELLS: f64 = 2.0;
+
+/// Smallest sample spacing, in cells, a failing chord is still split at.
+const MIN_SPLIT_CELLS: f64 = 0.25;
 
 /// Smallest cosine between a move and the boundary's outward normal: a
 /// nearest exclusion behind or beside the wall does not bound it.
@@ -48,14 +46,12 @@ const MIN_ALIGNMENT: f64 = 0.5;
 /// Placement parameters for one layer.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Exact {
-    /// Centre clearance every bead needs: half a bead plus the XYZ6
-    /// projection, the radius E is eroded by.
+    /// Centre clearance every placed bead keeps: half a bead plus the XYZ6
+    /// projection and endpoint enclosure, so the emitted bead it certifies
+    /// for final clearance clears too.
     pub(super) safe: f64,
-    /// Clearance walls are placed at.
+    /// Clearance walls and row ends are placed at.
     pub(super) level: f64,
-    /// Clearance row ends are placed at: always the certified margin, so
-    /// rows add no exact proofs (each ends under a wall bead anyway).
-    pub(super) row_level: f64,
     /// Farthest a wall centreline moves off the grid answer. It stays below
     /// `safe`, so every moved centre remains inside the kept cells.
     pub(super) reach: f64,
@@ -64,20 +60,14 @@ pub(super) struct Exact {
 }
 
 impl Exact {
-    /// Certified placement above the bead's centre clearance `safe`.
+    /// Placement just above the bead's centre clearance `safe`.
     pub(super) fn new(safe: f64, cell: f64) -> Self {
         Self {
             safe,
-            level: safe + certified_margin(cell),
-            row_level: safe + certified_margin(cell),
+            level: safe + CONTOUR_MARGIN_MM,
             reach: (4.0 * cell).min(safe - 2.0 * SIMPLIFY_MM).max(0.0),
             cell,
         }
-    }
-
-    /// Places walls on the exact offset; row ends stay certified.
-    pub(super) fn place_walls_exactly(&mut self) {
-        self.level = self.safe + CONTOUR_MARGIN_MM;
     }
 
     /// How far query points can land from the boundary samples: a moved
@@ -88,7 +78,7 @@ impl Exact {
 
     /// Clearance up to which the field must be exact.
     pub(super) fn field_reach(&self) -> f64 {
-        self.level.max(self.row_level) + 2.0 * self.reach
+        self.level + self.reach
     }
 }
 
@@ -149,7 +139,7 @@ pub(super) fn samples(
             for i in 0..n {
                 let (a, b) = (points[i], points[i + 1]);
                 let length = (b.x - a.x).hypot(b.y - a.y);
-                let pieces = (length / cell).ceil().max(1.0);
+                let pieces = (length / (SAMPLE_CELLS * cell)).ceil().max(1.0);
                 if !pieces.is_finite() {
                     return Err(error(
                         ManufacturingErrorCode::NativeConditioningFailure,
@@ -294,30 +284,6 @@ pub(super) fn displace(
                 }
             }
         }
-        // Every segment touching a moved point must keep the bead's exact
-        // clearance; revert both ends of any that does not, until stable.
-        // Segments between unmoved points lie on the grid contour.
-        if n >= 3 {
-            loop {
-                let mut reverted = false;
-                for i in 0..n {
-                    let j = (i + 1) % n;
-                    if !(moved[i] || moved[j]) {
-                        continue;
-                    }
-                    if field.segment_clearance(placed[i], placed[j], &mut work) < exact.safe {
-                        for k in [i, j] {
-                            placed[k] = ring[k].p;
-                            moved[k] = false;
-                        }
-                        reverted = true;
-                    }
-                }
-                if !reverted {
-                    break;
-                }
-            }
-        }
         if n < 3 || !moved.iter().any(|&m| m) {
             // Unchanged: keep the original vertices only.
             let mut original = Vec::new();
@@ -331,9 +297,95 @@ pub(super) fn displace(
             placed_rings.push(original);
             continue;
         }
-        any = true;
-        let simplified = simplify(raster, &placed, field, exact, &mut work)?;
-        placed_rings.push(simplified);
+        // Every kept chord touching a moved point keeps the bead's exact
+        // clearance. A sample pair that does not (a chord across a tight
+        // offset curve) gains its placed midpoint; one too short to split,
+        // or whose midpoint does not place, reverts both ends to the grid
+        // contour. Until no pair fails.
+        let mut local: Vec<Sample> = Vec::new();
+        raster.reserve(&mut local, n)?;
+        local.extend_from_slice(ring);
+        let simplified = loop {
+            match simplify(raster, &placed, &moved, field, exact, &mut work)? {
+                Ok(out) => break Some(out),
+                Err(failures) => {
+                    let count = local.len();
+                    let mut split = Vec::new();
+                    raster.reserve(&mut split, count)?;
+                    split.resize(count, None);
+                    for i in failures {
+                        let j = (i + 1) % count;
+                        let (a, b) = (local[i].p, local[j].p);
+                        let edge = local[i].normals[1];
+                        let mid = Sample {
+                            p: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
+                            normals: [edge, edge, local[i].normals[2]],
+                        };
+                        let spacing = (b[0] - a[0]).hypot(b[1] - a[1]);
+                        // Only a pair on one original edge splits, so an
+                        // unplaced midpoint would still lie on the contour.
+                        let same_edge = local[j].normals[0] == edge;
+                        let placed_mid = (same_edge && spacing > MIN_SPLIT_CELLS * exact.cell)
+                            .then(|| {
+                                let first = field.nearest(mid.p, &mut work);
+                                place(&mid, first, field, exact, &mut work)
+                            })
+                            .flatten();
+                        match placed_mid {
+                            Some(q) => split[i] = Some((mid, q)),
+                            None => {
+                                for k in [i, j] {
+                                    placed[k] = local[k].p;
+                                    moved[k] = false;
+                                }
+                            }
+                        }
+                    }
+                    if split.iter().any(Option::is_some) {
+                        let extra = split.iter().filter(|s| s.is_some()).count();
+                        let mut next_local = Vec::new();
+                        let mut next_placed = Vec::new();
+                        let mut next_moved = Vec::new();
+                        raster.reserve(&mut next_local, count + extra)?;
+                        raster.reserve(&mut next_placed, count + extra)?;
+                        raster.reserve(&mut next_moved, count + extra)?;
+                        for k in 0..count {
+                            next_local.push(local[k]);
+                            next_placed.push(placed[k]);
+                            next_moved.push(moved[k]);
+                            if let Some((mid, q)) = split[k] {
+                                next_local.push(mid);
+                                next_placed.push(q);
+                                next_moved.push(true);
+                            }
+                        }
+                        local = next_local;
+                        placed = next_placed;
+                        moved = next_moved;
+                    }
+                    if !moved.iter().any(|&m| m) {
+                        break None;
+                    }
+                }
+            }
+        };
+        match simplified {
+            Some(out) => {
+                any = true;
+                placed_rings.push(out);
+            }
+            None => {
+                let mut original = Vec::new();
+                raster.reserve(&mut original, n)?;
+                original.extend(
+                    ring.iter()
+                        .zip(0..)
+                        .filter(|(_, k)| is_vertex(ring, *k))
+                        .map(|(s, _)| s.p),
+                );
+                placed_rings.push(original);
+            }
+        }
     }
     raster.charge(work);
     if !any {
@@ -361,10 +413,11 @@ fn is_vertex(ring: &[Sample], k: usize) -> bool {
 fn simplify(
     raster: &Raster<'_>,
     points: &[[f64; 2]],
+    moved: &[bool],
     field: &Field,
     exact: &Exact,
     work: &mut usize,
-) -> Result<Vec<[f64; 2]>, ManufacturingError> {
+) -> Result<Result<Vec<[f64; 2]>, Vec<usize>>, ManufacturingError> {
     let n = points.len();
     let mut keep = Vec::new();
     raster.reserve(&mut keep, n)?;
@@ -383,8 +436,17 @@ fn simplify(
     stack.push((0, far));
     stack.push((far, n));
     let at = |k: usize| points[k % n];
+    let mut failures = Vec::new();
     while let Some((i, j)) = stack.pop() {
         if j <= i + 1 {
+            // A sample pair: kept as is, it must clear exactly when it
+            // leaves the grid contour.
+            if (moved[i % n] || moved[j % n])
+                && field.segment_clearance(at(i), at(j), work) < exact.safe
+            {
+                raster.reserve(&mut failures, 1)?;
+                failures.push(i % n);
+            }
             continue;
         }
         let (a, b) = (at(i), at(j));
@@ -410,11 +472,14 @@ fn simplify(
         stack.push((i, split));
         stack.push((split, j));
     }
+    if !failures.is_empty() {
+        return Ok(Err(failures));
+    }
     let mut out = Vec::new();
     raster.reserve(&mut out, keep.iter().filter(|&&k| k).count())?;
     out.extend((0..n).filter(|&k| keep[k]).map(|k| points[k]));
     merge_short(&mut out, field, exact, work);
-    Ok(out)
+    Ok(Ok(out))
 }
 
 /// Drops a vertex beside an edge shorter than a comfortable command when the
@@ -534,7 +599,7 @@ pub(super) fn extend_runs(
             }
             let p = point(from);
             let d = along(sign);
-            let Some(t) = field.first_hit(p, d, length, exact.row_level, &mut work) else {
+            let Some(t) = field.first_hit(p, d, length, exact.level, &mut work) else {
                 continue;
             };
             if t.is_nan() || t <= 0.0 {

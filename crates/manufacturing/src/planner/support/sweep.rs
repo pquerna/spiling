@@ -149,6 +149,28 @@ struct KeptLayer {
     layer: usize,
     band: [f64; 2],
     bits: Bits,
+    /// Emitted edges the raster proved clear exactly in its clearance
+    /// field, sorted by key.
+    edges: Vec<CertifiedEdge>,
+}
+
+/// One emitted support edge the raster proved clear of the layer's exact
+/// exclusions: its XYZ6 segment key and the largest bead radius (including
+/// endpoint enclosure) whose capsule keeps the exclusions' full clearance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct CertifiedEdge {
+    pub key: [u64; 4],
+    pub radius: f64,
+}
+
+/// The order-free key of an emitted XY segment.
+pub(super) fn segment_key([a, b]: [[f64; 2]; 2]) -> [u64; 4] {
+    let (p, q) = if (a[0], a[1]) <= (b[0], b[1]) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    [p[0], p[1], q[0], q[1]].map(f64::to_bits)
 }
 
 /// One nominal scope as the sweep excluded it: its section, the object
@@ -188,36 +210,25 @@ impl KeptSupport {
                     .map(|scope| vec_bytes(&scope.edges))
                     .fold(0, usize::saturating_add),
             )
+            .saturating_add(
+                self.layers
+                    .iter()
+                    .map(|layer| vec_bytes(&layer.edges))
+                    .fold(0, usize::saturating_add),
+            )
     }
 
-    /// Adds to `layer`'s kept cells the cells its raster proved clear of
-    /// the same exclusions exactly; returns the bytes added.
-    pub(super) fn certify(
-        &mut self,
-        layer: usize,
-        cells: &Bits,
-        cancel: &AtomicBool,
-        admit: &(dyn Fn(usize) -> Result<(), ManufacturingError> + Sync),
-    ) -> Result<usize, ManufacturingError> {
-        let Some(frame) = self.frame else {
-            return Ok(0);
-        };
-        if cells.is_empty() {
-            return Ok(0);
-        }
+    /// Records the edges `layer`'s raster proved clear of the same
+    /// exclusions exactly; returns the bytes now retained for them.
+    pub(super) fn certify(&mut self, layer: usize, mut edges: Vec<CertifiedEdge>) -> usize {
         let Ok(at) = self.layers.binary_search_by_key(&layer, |kept| kept.layer) else {
-            return Ok(0);
+            return 0;
         };
-        let raster = Raster {
-            frame,
-            cancel,
-            admit,
-            work: AtomicUsize::new(0),
-        };
+        edges.sort_unstable_by(|a, b| a.key.cmp(&b.key).then(b.radius.total_cmp(&a.radius)));
+        edges.dedup_by(|later, first| later.key == first.key);
         let kept = &mut self.layers[at];
-        let before = kept.bits.bytes();
-        kept.bits = raster.union(&kept.bits, cells)?;
-        Ok(kept.bits.bytes().saturating_sub(before))
+        kept.edges = edges;
+        vec_bytes(&kept.edges)
     }
 
     fn layer(&self, layer: usize) -> Option<&KeptLayer> {
@@ -260,11 +271,22 @@ impl KeptSupport {
             return Ok((Some(BeadEscape { cells: 0, bounds }), 1));
         };
         let empty = Bits::default();
-        let kept = self
+        let applicable = self
             .layer(layer)
-            .filter(|kept| kept.band[0] <= band[0] && band[1] <= kept.band[1])
-            .map_or(&empty, |kept| &kept.bits);
+            .filter(|kept| kept.band[0] <= band[0] && band[1] <= kept.band[1]);
+        let kept = applicable.map_or(&empty, |kept| &kept.bits);
         let (escape, work) = frame.escaped(kept, a, b, radius)?;
+        // Cells outside the kept set are clear when the raster proved this
+        // very emitted capsule against the layer's exact exclusions.
+        if escape.is_some()
+            && let Some(kept) = applicable
+            && let Ok(at) = kept
+                .edges
+                .binary_search_by(|edge| edge.key.cmp(&segment_key(segment)))
+            && radius <= kept.edges[at].radius
+        {
+            return Ok((None, work.saturating_add(1)));
+        }
         Ok((
             escape.map(|Escape { cells, bounds }| BeadEscape { cells, bounds }),
             work,
@@ -408,6 +430,7 @@ impl KeptSupport {
             layers: layers
                 .into_iter()
                 .map(|(layer, band, kept)| KeptLayer {
+                    edges: Vec::new(),
                     layer,
                     band,
                     bits: raster.inward(&kept.0).unwrap(),
@@ -1048,6 +1071,7 @@ impl Sweep<'_> {
             let slab = bead_slab(&layers[l])?;
             let nominal = nominal_band(layers, l)?;
             kept.layers.push(KeptLayer {
+                edges: Vec::new(),
                 layer: l,
                 band: [slab[0].max(nominal[0]), slab[1].min(nominal[1])],
                 bits,
@@ -1436,29 +1460,54 @@ pub(super) struct Exclusions<'a> {
     pub frame_bounds: [[f64; 2]; 2],
     pub requested: f64,
     pub gap: f64,
+    /// Live units and bytes span loading is admitted against.
+    pub retained: usize,
+    pub owned_bytes: usize,
+}
+
+/// One section span's occupied pieces near some support, with their raw
+/// height scopes, loaded once for every layer that reads them.
+pub(super) struct SpanPieces {
+    span: usize,
+    pieces: Vec<(Polygon<f64>, Option<[f64; 2]>)>,
+}
+
+impl SpanPieces {
+    pub(super) fn bytes(&self) -> usize {
+        vec_bytes(&self.pieces).saturating_add(
+            self.pieces
+                .iter()
+                .map(|(piece, _)| {
+                    std::iter::once(piece.exterior())
+                        .chain(piece.interiors())
+                        .map(|ring| ring.0.len())
+                        .sum::<usize>()
+                        .saturating_mul(std::mem::size_of::<geo::Coord<f64>>())
+                })
+                .fold(0, usize::saturating_add),
+        )
+    }
 }
 
 impl Exclusions<'_> {
-    /// Feeds layer `l`'s exclusions into `builder` and returns its wall
-    /// placement: exact at a contact top, where part roads land on the
-    /// support's top walls, certified elsewhere; `None` when the layer takes
-    /// no field.
+    /// Feeds layer `l`'s exclusions into `builder`; `false` when the layer
+    /// takes no field.
     pub(super) fn feed(
         &self,
         l: usize,
         builder: &mut super::field::FieldBuilder<'_, '_>,
+        spans: &[std::sync::Arc<SpanPieces>],
         cancel: &AtomicBool,
-    ) -> Result<Option<super::raster::Placement>, ManufacturingError> {
+    ) -> Result<bool, ManufacturingError> {
         let Some(frame) = &self.kept.frame else {
-            return Ok(None);
+            return Ok(false);
         };
         if self.relieved.get(l).is_none_or(|&relieved| relieved) || self.sections.is_empty() {
-            return Ok(None);
+            return Ok(false);
         }
         let layer = &self.layers[l];
         let slab = bead_slab(layer)?;
         let distance = self.distance;
-        let builder = std::cell::RefCell::new(builder);
         let here = span_at(self.sections, l as u32);
         let sheet = sheet_touches(layer)?;
         let last = self.sections.len() - 1;
@@ -1474,25 +1523,19 @@ impl Exclusions<'_> {
                     .is_some_and(|scope| scope[0] <= slab[1] && scope[1] >= slab[0])
                     || (top_sheet && sheet(height))
             };
-            let mut failure = None;
-            section.visit_occupied_screened(
-                cancel,
-                |bounds, height| Ok(applies(height) && builder.borrow().wants(bounds, distance)),
-                |piece, height| {
-                    if applies(height)
-                        && let Err(error) = builder.borrow_mut().polygon(piece, distance)
-                    {
-                        failure = Some(error);
-                        return Ok(false);
-                    }
-                    Ok(true)
-                },
-            )?;
-            if let Some(error) = failure {
-                return Err(error);
+            let Ok(at) = spans.binary_search_by_key(&span, |cached| cached.span) else {
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "support clearance field lost a loaded occupancy span",
+                ));
+            };
+            for (piece, height) in &spans[at].pieces {
+                check_cancel(cancel)?;
+                if applies(*height) {
+                    builder.polygon(piece, distance)?;
+                }
             }
         }
-        let builder = builder.into_inner();
         for &(mask, height) in self.voids {
             check_cancel(cancel)?;
             if !void_reaches_corridor(&height, slab[0], slab[1]) {
@@ -1526,11 +1569,159 @@ impl Exclusions<'_> {
                 builder.segment([ax, ay], [bx, by], (half + distance).next_up())?;
             }
         }
-        Ok(Some(if self.tops.get(l).is_some_and(|&top| top) {
-            super::raster::Placement::Exact
-        } else {
-            super::raster::Placement::Certified
-        }))
+        Ok(true)
+    }
+}
+
+/// Loads each section span's occupied pieces once, on first read, for the
+/// layers staging in parallel, and releases them after their last reader.
+/// A span's content does not depend on which layer loads it.
+pub(super) struct SpanCache<'e, 'a> {
+    exclusions: &'e Exclusions<'a>,
+    screen: [[f64; 2]; 2],
+    slots: Vec<std::sync::Mutex<SpanSlot>>,
+    /// Per span, the staging layers that have yet to release it.
+    readers: Vec<AtomicUsize>,
+    live: AtomicUsize,
+}
+
+enum SpanSlot {
+    Unread,
+    Loaded(std::sync::Arc<SpanPieces>),
+    Released,
+    Failed(ManufacturingError),
+}
+
+impl<'e, 'a> SpanCache<'e, 'a> {
+    /// A cache for the staging layers `layers`, whose field queries lie
+    /// within `bounds` widened by `reach`.
+    pub(super) fn new(
+        exclusions: &'e Exclusions<'a>,
+        layers: impl Iterator<Item = usize>,
+        bounds: [[f64; 2]; 2],
+        reach: f64,
+    ) -> Result<Self, ManufacturingError> {
+        let count = exclusions.sections.len();
+        let mut slots = Vec::new();
+        reserve_owned(&mut slots, count, exclusions.owned_bytes)?;
+        slots.resize_with(count, || std::sync::Mutex::new(SpanSlot::Unread));
+        let mut readers = Vec::new();
+        reserve_owned(&mut readers, count, exclusions.owned_bytes)?;
+        readers.resize_with(count, || AtomicUsize::new(0));
+        let mut cache = Self {
+            exclusions,
+            screen: expand(bounds, exclusions.distance + reach),
+            slots,
+            readers,
+            live: AtomicUsize::new(0),
+        };
+        for l in layers {
+            for span in cache.spans(l) {
+                *cache.readers[span].get_mut() += 1;
+            }
+        }
+        Ok(cache)
+    }
+
+    /// The spans layer `l` reads, its own and both neighbours.
+    fn spans(&self, l: usize) -> std::ops::Range<usize> {
+        let sections = self.exclusions.sections;
+        if sections.is_empty() {
+            return 0..0;
+        }
+        let here = span_at(sections, l as u32);
+        here.saturating_sub(1)..(here + 2).min(sections.len())
+    }
+
+    /// The loaded pieces of every span layer `l` reads, in span order.
+    pub(super) fn acquire(
+        &self,
+        l: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<std::sync::Arc<SpanPieces>>, ManufacturingError> {
+        let mut out = Vec::new();
+        reserve_owned(&mut out, 3, self.exclusions.owned_bytes)?;
+        for span in self.spans(l) {
+            let mut slot = self.slots[span].lock().map_err(|_| {
+                error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "support clearance span cache was poisoned",
+                )
+            })?;
+            if matches!(*slot, SpanSlot::Unread) {
+                *slot = match self.load(span, cancel) {
+                    Ok(pieces) => SpanSlot::Loaded(std::sync::Arc::new(pieces)),
+                    Err(failure) => SpanSlot::Failed(failure),
+                };
+            }
+            match &*slot {
+                SpanSlot::Loaded(pieces) => out.push(std::sync::Arc::clone(pieces)),
+                SpanSlot::Failed(failure) => return Err(failure.clone()),
+                SpanSlot::Unread | SpanSlot::Released => {
+                    return Err(error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "support clearance span was released before its last reader",
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Layer `l` has staged: drops each span it read once no staging layer
+    /// still needs it.
+    pub(super) fn release(&self, l: usize) {
+        for span in self.spans(l) {
+            if self.readers[span].fetch_sub(1, Ordering::AcqRel) != 1 {
+                continue;
+            }
+            if let Ok(mut slot) = self.slots[span].lock() {
+                if let SpanSlot::Loaded(pieces) = &*slot {
+                    let bytes = pieces.bytes();
+                    let _ = self
+                        .live
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                            Some(live.saturating_sub(bytes))
+                        });
+                }
+                *slot = SpanSlot::Released;
+            }
+        }
+    }
+
+    fn load(&self, span: usize, cancel: &AtomicBool) -> Result<SpanPieces, ManufacturingError> {
+        let exclusions = self.exclusions;
+        let mut pieces = Vec::new();
+        let mut failure = None;
+        let live = self.live.load(Ordering::Relaxed);
+        exclusions.sections[span].visit_occupied_screened(
+            cancel,
+            |piece, _| Ok(rects_meet(expand(piece, exclusions.distance), self.screen)),
+            |piece, height| {
+                if let Err(error) =
+                    reserve_owned(&mut pieces, 1, exclusions.owned_bytes.saturating_add(live))
+                {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+                pieces.push((piece.clone(), height));
+                Ok(true)
+            },
+        )?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let loaded = SpanPieces { span, pieces };
+        let bytes = loaded.bytes();
+        super::super::remaining_geometry_units(
+            exclusions.retained,
+            exclusions
+                .owned_bytes
+                .saturating_add(live)
+                .saturating_add(bytes),
+        )?;
+        self.live.fetch_add(bytes, Ordering::Relaxed);
+        Ok(loaded)
     }
 }
 

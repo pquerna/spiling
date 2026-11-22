@@ -877,43 +877,6 @@ impl Raster<'_> {
         })
     }
 
-    /// The centre of every set cell, in row then column order.
-    pub(super) fn cell_centres(&self, bits: &Bits, mut visit: impl FnMut([usize; 2], [f64; 2])) {
-        let frame = &self.frame;
-        for r in 0..bits.rows() {
-            let row = bits.row0 + r;
-            let words = &bits.data[r * bits.width..(r + 1) * bits.width];
-            for (w, &word) in words.iter().enumerate() {
-                let base = (bits.word0 + w) * 64;
-                for_bits(word, |b| {
-                    let col = base + b;
-                    visit(
-                        [col, row],
-                        [frame.x(col as f64 + 0.5), frame.y(row as f64 + 0.5)],
-                    );
-                });
-            }
-        }
-        self.charge(bits.data.len());
-    }
-
-    /// The set of the given `[col, row]` cells, in row then column order.
-    pub(super) fn set_of_cells(&self, cells: &[[usize; 2]]) -> Result<Bits, ManufacturingError> {
-        let mut spans: Vec<Span> = Vec::new();
-        self.reserve(&mut spans, cells.len())?;
-        for &[col, row] in cells {
-            match spans.last_mut() {
-                Some(span) if span.row as usize == row && span.to as usize == col => span.to += 1,
-                _ => spans.push(Span {
-                    row: row as u32,
-                    from: col as u32,
-                    to: col as u32 + 1,
-                }),
-            }
-        }
-        self.bits_of(&spans)
-    }
-
     /// Whether some closed cell holding `p` is set.
     pub(super) fn holds_any(&self, bits: &Bits, p: [f64; 2]) -> bool {
         let [cols, rows] = self.holding(p);

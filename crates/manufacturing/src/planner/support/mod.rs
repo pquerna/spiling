@@ -1589,6 +1589,8 @@ pub(super) fn realize(
                     .map(|_| ())
             };
             let exclusions = sweep::Exclusions {
+                retained: base_retained,
+                owned_bytes: base_owned,
                 layers,
                 sections,
                 schedule,
@@ -1611,6 +1613,35 @@ pub(super) fn realize(
                         work: std::sync::atomic::AtomicUsize::new(0),
                     };
                     let working_set = crate::working_set::current();
+                    // Each span's occupied pieces load once, on their first
+                    // reader, and drop after their last.
+                    let bounds =
+                        grids
+                            .iter()
+                            .flatten()
+                            .fold(None, |bounds: Option<[[f64; 2]; 2]>, grid| {
+                                let (Some(x), Some(y)) = (
+                                    grid.support.extent(&frame, 0),
+                                    grid.support.extent(&frame, 1),
+                                ) else {
+                                    return bounds;
+                                };
+                                let extent = [[x[0], y[0]], [x[1], y[1]]];
+                                Some(bounds.map_or(extent, |b| union_frame(Some(b), extent)))
+                            });
+                    let spans = match bounds {
+                        Some(bounds) => Some(sweep::SpanCache::new(
+                            &exclusions,
+                            grids
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, grid)| grid.is_some())
+                                .map(|(l, _)| l),
+                            bounds,
+                            FIELD_SCREEN_MM,
+                        )?),
+                        None => None,
+                    };
                     let built = grids
                         .par_iter()
                         .zip(&hatches)
@@ -1631,10 +1662,14 @@ pub(super) fn realize(
                                     top_axis: axis,
                                     recipe,
                                 };
-                                let feed = |builder: &mut field::FieldBuilder<'_, '_>| {
-                                    exclusions.feed(l, builder, cancel)
+                                let loaded = match &spans {
+                                    Some(cache) => cache.acquire(l, cancel)?,
+                                    None => Vec::new(),
                                 };
-                                raster::paths(
+                                let feed = |builder: &mut field::FieldBuilder<'_, '_>| {
+                                    exclusions.feed(l, builder, &loaded, cancel)
+                                };
+                                let staged = raster::paths(
                                     &raster,
                                     &grid.support,
                                     &grid.interface,
@@ -1648,10 +1683,16 @@ pub(super) fn realize(
                                     0,
                                     cancel,
                                 )
-                                .map(|(paths, receipt)| Some((paths, receipt, local)))
+                                .map(|(paths, receipt)| Some((paths, receipt, local)));
+                                drop(loaded);
+                                if let Some(cache) = &spans {
+                                    cache.release(l);
+                                }
+                                staged
                             })
                         })
                         .collect();
+                    drop(spans);
                     charge_owned_work(&mut work, foreign_work, raster.take_work(), cancel)?;
                     built
                 }
@@ -1668,7 +1709,7 @@ pub(super) fn realize(
                     });
                     bytes = bytes
                         .saturating_add(super::bonds::path_bytes(&paths))
-                        .saturating_add(receipt.certified.bytes());
+                        .saturating_add(vec_bytes(&receipt.certified));
                     (paths, receipt, local)
                 });
                 if let Some((_, _, local)) = &staged {
@@ -1765,19 +1806,8 @@ pub(super) fn realize(
                 wall_receipt.paths = kept.paths;
                 wall_receipt.omitted_mm += kept.omitted_mm;
             }
-            // Final clearance keeps the cells the raster proved clear exactly.
-            let certified = std::mem::take(&mut wall_receipt.certified);
-            if !certified.is_empty() {
-                let admit = |extra: usize| {
-                    super::remaining_geometry_units(
-                        retained_domains,
-                        live_bytes.saturating_add(extra),
-                    )
-                    .map(|_| ())
-                };
-                support_metadata_bytes += kept.certify(i, &certified, cancel, &admit)?;
-            }
-            drop(certified);
+            // Final clearance takes the edges the raster proved clear exactly.
+            support_metadata_bytes += kept.certify(i, std::mem::take(&mut wall_receipt.certified));
             layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
             support_wall_paths[i] = wall_receipt.paths;
             *segments = segments
@@ -3517,6 +3547,11 @@ fn bead_bounds(
         .all(|v| v.is_finite())
         .then_some(bounds))
 }
+
+/// How far beyond the kept support a loaded occupied piece's
+/// clearance may reach and still bound one of its walls: above any field
+/// query spread plus its exact reach.
+const FIELD_SCREEN_MM: f64 = 2.0;
 
 fn void_reaches_corridor(
     scope: &spiling_geometry::ProtectedVoidHeightScope,

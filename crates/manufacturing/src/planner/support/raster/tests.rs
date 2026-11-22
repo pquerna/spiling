@@ -674,8 +674,7 @@ fn segment_clearance(obstacles: &[([f64; 2], [f64; 2], f64)], a: [f64; 2], b: [f
 
 /// Stages a square support layer with `obstacles` excluded on the grid the
 /// way the sweep does (every touched cell), with or without the exact field;
-/// an `interface` layer is interface throughout and a contact top (exact
-/// walls). Returns the kept cells too.
+/// an `interface` layer is interface throughout. Returns the kept cells too.
 fn stage_around(
     raster: &Raster<'_>,
     obstacles: &[([f64; 2], [f64; 2], f64)],
@@ -691,11 +690,7 @@ fn stage_around(
         for &(a, b, r) in obstacles {
             builder.segment(a, b, r)?;
         }
-        Ok(Some(if interface {
-            Placement::Exact
-        } else {
-            Placement::Certified
-        }))
+        Ok(true)
     };
     let roles = if interface {
         support.clone()
@@ -720,67 +715,79 @@ fn stage_around(
     (paths, receipt, support)
 }
 
-/// The placement level of an interface layer (on the exact offset) or of an
-/// ordinary one (a cell diagonal farther, its bead cells certified).
-fn placement_level(safe: f64, interface: bool) -> f64 {
-    safe + if interface {
-        exact::CONTOUR_MARGIN_MM
-    } else {
-        exact::certified_margin(SUPPORT_CELL_MM)
-    }
+/// The clearance staged walls and row ends are placed at.
+fn placement_level(safe: f64) -> f64 {
+    safe + exact::CONTOUR_MARGIN_MM
 }
 
-/// Every cell an ordinary layer's beads touch is kept or certified, so final
-/// clearance needs no exact proof for them.
-fn assert_beads_certified(
+/// Every staged edge whose bead leaves the kept cells carries an exact
+/// certificate for its emitted capsule, so final clearance needs no second
+/// proof for it.
+fn assert_escapes_certified(
     raster: &Raster<'_>,
     paths: &[DepositionPath],
     support: &Bits,
-    certified: &Bits,
+    certified: &[super::super::sweep::CertifiedEdge],
 ) {
     let width = crate::planner::tests::recipe(1.0).bead_width_mm;
-    let mut beads = raster
-        .capsules(paths.iter().flat_map(|path| {
-            path.points_mm.windows(2).map(move |edge| {
-                (
-                    [edge[0][0], edge[0][1]],
-                    [edge[1][0], edge[1][1]],
-                    width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM,
-                )
-            })
-        }))
-        .unwrap();
-    beads.subtract(support);
-    beads.subtract(certified);
-    assert!(beads.is_empty(), "{} bead cells escape", beads.count());
+    let radius = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
+    let mut escapes = 0;
+    for path in paths {
+        for edge in path.points_mm.windows(2) {
+            let segment = [edge[0], edge[1]].map(|p| {
+                [
+                    project_xyz6_coordinate_mm(p[0]).unwrap(),
+                    project_xyz6_coordinate_mm(p[1]).unwrap(),
+                ]
+            });
+            let mut cells = raster.capsules([(segment[0], segment[1], radius)]).unwrap();
+            cells.subtract(support);
+            if cells.is_empty() {
+                continue;
+            }
+            escapes += 1;
+            let key = super::super::sweep::segment_key(segment);
+            assert!(
+                certified
+                    .iter()
+                    .any(|edge| edge.key == key && edge.radius >= radius),
+                "escaping edge {segment:?} has no certificate"
+            );
+        }
+    }
+    assert!(escapes > 0);
 }
 
-/// Wall vertices facing the obstacles (within `band` of the placement
+/// Wall points facing the obstacles (within `band` of the placement
 /// level, away from the square's own sides) and their worst deviation from
-/// the placement level (only beyond it when `one_sided`).
+/// the placement level.
 fn wall_deviation(
     paths: &[DepositionPath],
     walls: usize,
     obstacles: &[([f64; 2], [f64; 2], f64)],
     level: f64,
     band: f64,
-    one_sided: bool,
 ) -> (usize, f64) {
     let mut count = 0;
     let mut worst = 0.0f64;
+    // Every point a cell apart along each wall edge, so long chords count
+    // along their length.
     for path in &paths[..walls] {
-        for p in &path.points_mm {
-            let f = obstacle_clearance(obstacles, [p[0], p[1]]);
-            let sides = [p[0], p[1]].iter().any(|v| *v < 2.8 || *v > 17.2);
-            if f < level + band && !sides {
-                count += 1;
-                // A grid point already nearer than an ordinary layer's
-                // level is clear by construction and stays put.
-                worst = worst.max(if one_sided {
-                    f - level
-                } else {
-                    (f - level).abs()
-                });
+        for edge in path.points_mm.windows(2) {
+            let length = (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]);
+            let steps = (length / SUPPORT_CELL_MM).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let t = k as f64 / steps as f64;
+                let p = [
+                    edge[0][0] + (edge[1][0] - edge[0][0]) * t,
+                    edge[0][1] + (edge[1][1] - edge[0][1]) * t,
+                ];
+                let f = obstacle_clearance(obstacles, p);
+                let sides = p.iter().any(|v| *v < 2.8 || *v > 17.2);
+                if f < level + band && !sides {
+                    count += 1;
+                    worst = worst.max((f - level).abs());
+                }
             }
         }
     }
@@ -814,39 +821,29 @@ fn walls_follow_the_exact_offset_of_a_circle_within_a_fraction_of_a_cell() {
     // A disk of radius 1.3 (part plus clearance) inside the support square.
     let obstacles = [([10.03, 9.97], [10.03, 9.97], 1.3)];
     let width = crate::planner::tests::recipe(1.0).bead_width_mm;
-    let safe = width * 0.5 + 2.0 * program_coordinates::XYZ6_QUANTUM_MM;
+    let safe = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
     for interface in [true, false] {
-        let level = placement_level(safe, interface);
-        let row_level = placement_level(safe, false);
+        let level = placement_level(safe);
+        let row_level = level;
         for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
             let (grid, grid_walls, _) = stage_around(&raster, &obstacles, axis, false, interface);
             let (placed, placed_walls, support) =
                 stage_around(&raster, &obstacles, axis, true, interface);
-            let (_, grid_error) =
-                wall_deviation(&grid, grid_walls.paths, &obstacles, level, 0.3, false);
-            let (count, error) = wall_deviation(
-                &placed,
-                placed_walls.paths,
-                &obstacles,
-                level,
-                0.3,
-                !interface,
-            );
+            let (_, grid_error) = wall_deviation(&grid, grid_walls.paths, &obstacles, level, 0.3);
+            let (count, error) =
+                wall_deviation(&placed, placed_walls.paths, &obstacles, level, 0.3);
             assert!(count > 40, "the hole wall is sampled densely: {count}");
-            if interface {
-                assert!(
-                    grid_error > 0.04,
-                    "the grid staircase loses most of a cell: {grid_error}"
-                );
-            } else {
-                assert_beads_certified(&raster, &placed, &support, &placed_walls.certified);
-            }
+            assert!(
+                grid_error > 0.04,
+                "the grid staircase loses most of a cell: {grid_error}"
+            );
+            assert_escapes_certified(&raster, &placed, &support, &placed_walls.certified);
             assert!(
                 error < 0.1 * SUPPORT_CELL_MM,
                 "exact wall error {error} mm against grid {grid_error} mm"
             );
             assert_beads_clear(&placed, &obstacles, safe);
-            // Row ends bounded by the disk sit on its certified offset.
+            // Row ends bounded by the disk sit on its exact offset too.
             let row_ends: Vec<f64> = placed[placed_walls.paths..]
                 .iter()
                 .flat_map(|path| [path.points_mm[0], *path.points_mm.last().unwrap()])
@@ -873,29 +870,19 @@ fn walls_follow_the_exact_offset_of_a_shallow_diagonal() {
     // A shallow diagonal edge crossing the square, 0.9 mm clearance.
     let obstacles = [([1.0, 5.2], [19.0, 11.3], 0.9)];
     let width = crate::planner::tests::recipe(1.0).bead_width_mm;
-    let safe = width * 0.5 + 2.0 * program_coordinates::XYZ6_QUANTUM_MM;
+    let safe = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
     for interface in [true, false] {
-        let level = placement_level(safe, interface);
+        let level = placement_level(safe);
         for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
             let (grid, grid_walls, _) = stage_around(&raster, &obstacles, axis, false, interface);
             let (placed, placed_walls, support) =
                 stage_around(&raster, &obstacles, axis, true, interface);
-            let (_, grid_error) =
-                wall_deviation(&grid, grid_walls.paths, &obstacles, level, 0.3, false);
-            let (count, error) = wall_deviation(
-                &placed,
-                placed_walls.paths,
-                &obstacles,
-                level,
-                0.3,
-                !interface,
-            );
+            let (_, grid_error) = wall_deviation(&grid, grid_walls.paths, &obstacles, level, 0.3);
+            let (count, error) =
+                wall_deviation(&placed, placed_walls.paths, &obstacles, level, 0.3);
             assert!(count >= 4, "both diagonal walls face the edge: {count}");
-            if interface {
-                assert!(grid_error > 0.04, "grid staircase error {grid_error}");
-            } else {
-                assert_beads_certified(&raster, &placed, &support, &placed_walls.certified);
-            }
+            assert!(grid_error > 0.04, "grid staircase error {grid_error}");
+            assert_escapes_certified(&raster, &placed, &support, &placed_walls.certified);
             assert!(
                 error < 0.1 * SUPPORT_CELL_MM,
                 "exact wall error {error} mm against grid {grid_error} mm"
