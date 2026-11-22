@@ -2147,7 +2147,9 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
         })
         .unwrap();
     let end = usize::from(row.points_mm[0][0] > row.points_mm[1][0]);
-    row.points_mm[end][0] = translation[0] + 8. + recipe.recipe.bead_width_mm * 0.5 - 0.000001;
+    // Two emitted quanta past the bond allowance survive lattice rounding.
+    row.points_mm[end][0] = translation[0] + 8. + recipe.recipe.bead_width_mm * 0.5
+        - 2.0 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
     assert_reemitted_interface_refuses(excessive, &recipe);
     let mut floating = bundle.plan.clone();
     floating.layers[first - 1]

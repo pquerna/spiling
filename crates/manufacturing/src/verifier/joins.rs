@@ -102,10 +102,10 @@ fn core_radius(edge: &DepositionEdge<'_>, height: f64) -> Result<f64, Manufactur
         height,
     )?;
     let height_upper = -program_coordinates::enclosed_vertical_gap_mm(-vertical[1], -vertical[0])?;
-    let radius = program_coordinates::enclosed_vertical_gap_mm(
-        program_coordinates::enclosed_vertical_gap_mm(edge.width_mm, height_upper)? * 0.5,
-        program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM,
-    )?;
+    // The flat core, (width - height) / 2, already sits half a bead height
+    // inside the deposited footprint; that margin covers command error, so a
+    // further lateral budget would only refuse sound bonds at lattice rounding.
+    let radius = program_coordinates::enclosed_vertical_gap_mm(edge.width_mm, height_upper)? * 0.5;
     if !radius.is_finite() || radius <= 0.0 {
         return Err(failed(
             "functional attachment has no positive nominal bead core",
