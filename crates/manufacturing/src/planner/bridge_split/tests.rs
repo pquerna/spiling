@@ -84,6 +84,54 @@ fn summary(paths: &[DepositionPath]) -> Vec<(DepositionKind, f64, f64)> {
 }
 
 #[test]
+fn only_directly_supported_exact_fitted_skin_takes_back_its_authored_role() {
+    let fitted = stroke(DepositionKind::Bridge, TOP, [0.2, 0.4], [41.226, 41.248]);
+    let lower = stroke(DepositionKind::SolidFill, None, [0.0, 0.2], [40., 42.]);
+    let mut recipe = crate::planner::tests::recipe(0.15);
+    recipe.top_skin_axis = RectilinearAxisPolicy::X;
+    for (lower, bound, expected) in [
+        (Some(lower.clone()), true, DepositionKind::TopSkin),
+        (Some(lower), false, DepositionKind::Bridge),
+        (None, true, DepositionKind::Bridge),
+    ] {
+        let mut upper = layer(1, vec![fitted.clone()]);
+        if bound {
+            upper.skin_command_fits.push(SkinCommandFitDomain {
+                region_index: 0,
+                region: ProcessRegionCoverage {
+                    material_domain: None,
+                    functional_solid_zone: None,
+                    fraction: 0.15,
+                    area_mm2: 1.,
+                    contributions: Vec::new(),
+                },
+                skin: ProcessSkinKind::TopSkin,
+                regional: Vec::new(),
+                mandatory: Vec::new(),
+                source_owner: Vec::new(),
+                fits: vec![SkinCommandFit {
+                    required_mm: [[41.23, 5., 0.4], [41.24, 5., 0.4]],
+                    fitted_mm: [fitted.points_mm[0], fitted.points_mm[1]],
+                }],
+            });
+        }
+        let path = &upper.paths[0];
+        let restored = supported_fitted_skin(
+            &upper,
+            path,
+            &layer(0, lower.into_iter().collect()),
+            &recipe,
+            1,
+            &mut AnchorWorkspace::default(),
+            &mut 0,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(restored.unwrap_or(path.kind), expected);
+    }
+}
+
+#[test]
 fn only_the_bridged_span_and_its_anchors_stay_bridge() {
     let paths = split(&[[10.0, 14.0]], 10.0);
     let pieces = summary(&paths);
