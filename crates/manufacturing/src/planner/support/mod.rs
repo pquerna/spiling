@@ -1030,6 +1030,25 @@ pub(super) fn realize(
                         }
                         continue;
                     }
+                    let component_bridges = candidate
+                        .paths
+                        .iter()
+                        .any(|path| path.kind == DepositionKind::Bridge);
+                    if !joined
+                        && !component_bridges
+                        && admission.failure.as_ref().is_some_and(|failure| {
+                            candidate
+                                .paths
+                                .get(failure.path)
+                                .is_some_and(|path| layer.paths.get(failure.path) == Some(path))
+                        })
+                    {
+                        // The same failing stroke still reads the same lower
+                        // roads. This alternative can neither complete nor
+                        // offer a partial bridge improvement.
+                        check_cancel(cancel)?;
+                        continue;
+                    }
                     anchors.set_budget(candidate_budget(
                         &candidate.paths,
                         retained,
@@ -1067,10 +1086,6 @@ pub(super) fn realize(
                     // own direct-anchor proof. Keep that monotone improvement even
                     // when another stroke still needs support; do not demand a
                     // corridor for fragments that we can already anchor.
-                    let component_bridges = candidate
-                        .paths
-                        .iter()
-                        .any(|path| path.kind == DepositionKind::Bridge);
                     if complete || joined || component_bridges {
                         *segments = without_old + path_segments(&candidate.paths);
                         layer.paths = candidate.paths;
