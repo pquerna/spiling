@@ -150,9 +150,9 @@ class LocatedSpanTests(unittest.TestCase):
 
     def test_coverage_gate_uses_prusa_region_without_any_native_control(self):
         cases = [("longer", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
-                 ("above", 8, 0, 0.276, True, "longer_registered_spans_than_prusa", "supported"),
-                 ("equal", 8, 0, 0.275, True, None, "supported"),
-                 ("below", 8, 0, 0.274, True, None, "supported"),
+                 ("above", 8, 0, 2.001, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("equal", 8, 0, 2.0, True, None, "supported"),
+                 ("below", 8, 0, 1.999, True, None, "supported"),
                  ("same", 4, 0, 4, True, None, "unsupported"),
                  ("absent", 4, 2, 4, True, None, "no_geometry"),
                  ("missing", 4, 0, 4, False, "missing_registered_prusa_coverage", None)]
@@ -197,13 +197,14 @@ class LocatedSpanTests(unittest.TestCase):
                         comparison = result["prusa_located"]
                         self.assertEqual(comparison["span_counts"], {match: 1})
                         self.assertEqual(comparison["failing_spans"], int(bool(refusal)))
+                        self.assertEqual(comparison["positive_excess_at_or_below_tolerance_spans"],
+                                         int(case in {"equal", "below"}))
                         if refusal:
                             evidence = Path(comparison["failure_evidence"]["path"])
                             recorded, = map(json.loads, evidence.read_text().splitlines())
                             self.assertEqual(comparison["worst_longer_spans"], [recorded])
                             self.assertAlmostEqual(recorded["excess_mm"], length)
                             self.assertEqual(recorded["prusa_span_mm"], 0)
-                            self.assertEqual(comparison["all_failures_below_one_mm"], length < 1)
                     if match == "no_geometry":
                         self.assertEqual(result["prusa_coverage_warning"], "no_full_span_comparisons")
 
