@@ -75,7 +75,7 @@ pub(super) fn split_bridged_rows(
         let mut replacement: Option<Vec<DepositionPath>> = None;
         for path_index in 0..layer.paths.len() {
             check_cancel(cancel)?;
-            if let Some(role) = supported_fitted_skin(
+            if let Some(role) = fitted_skin_role(
                 layer,
                 &layer.paths[path_index],
                 previous,
@@ -127,11 +127,15 @@ pub(super) fn split_bridged_rows(
     Ok(())
 }
 
+/// The role a minimum-command fitted skin row takes from its projected
+/// command against the actual previous layer, in either routed direction:
+/// its ordinary skin role when fully supported on its authored axis, Bridge
+/// when it crosses a genuine anchored gap, otherwise unchanged.
 #[expect(
     clippy::too_many_arguments,
     reason = "A fitted row retains its exact witness, authored axis and earlier command support"
 )]
-fn supported_fitted_skin(
+fn fitted_skin_role(
     layer: &PrintLayer,
     path: &DepositionPath,
     previous: &PrintLayer,
@@ -147,7 +151,11 @@ fn supported_fitted_skin(
     let [start, end] = path.points_mm.as_slice() else {
         return Ok(None);
     };
-    if path.kind != DepositionKind::Bridge
+    let role = match skin {
+        ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
+        ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
+    };
+    if (path.kind != DepositionKind::Bridge && path.kind != role)
         || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
         || !path.arcs.is_empty()
         || !layer.skin_command_fits.iter().any(|domain| {
@@ -161,20 +169,19 @@ fn supported_fitted_skin(
     {
         return Ok(None);
     }
-    let role = match skin {
-        ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
-        ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
-    };
     let Some(width) = path.width.constant_width_mm() else {
         return Ok(None);
     };
-    if !on_authored_axis(path, role, recipe, course)? {
-        return Ok(None);
-    }
     let actual = [project_xyz6_point_mm(*start)?, project_xyz6_point_mm(*end)?];
-    let supported =
-        classify_actual(actual, width, previous, recipe, anchors, work, cancel)? == Some(false);
-    Ok(supported.then_some(role))
+    let mut classes = [None; 2];
+    for (class, stroke) in classes.iter_mut().zip([actual, [actual[1], actual[0]]]) {
+        *class = classify_actual(stroke, width, previous, recipe, anchors, work, cancel)?;
+    }
+    Ok(match classes {
+        [Some(false), Some(false)] if on_authored_axis(path, role, recipe, course)? => Some(role),
+        [Some(true), Some(true)] => Some(DepositionKind::Bridge),
+        _ => None,
+    })
 }
 
 /// The pieces one path of `layer` is split into against the previous layer,

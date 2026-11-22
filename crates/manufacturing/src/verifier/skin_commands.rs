@@ -676,9 +676,10 @@ pub(super) fn verify(
                             ),
                             GapKind::Supported
                         ) {
-                            return Err(failed(
-                                "ordinary fitted skin lacks physically earlier actual support",
-                            ));
+                            return Err(failed(format!(
+                                "ordinary fitted skin lacks physically earlier actual support: layer {index}, stroke {actual:?}, gap [{}, {}] left {} right {}",
+                                gap.start, gap.end, gap.left, gap.right,
+                            )));
                         }
                     }
                 }

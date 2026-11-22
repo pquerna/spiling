@@ -116,7 +116,7 @@ fn only_directly_supported_exact_fitted_skin_takes_back_its_authored_role() {
             });
         }
         let path = &upper.paths[0];
-        let restored = supported_fitted_skin(
+        let restored = fitted_skin_role(
             &upper,
             path,
             &layer(0, lower.into_iter().collect()),
