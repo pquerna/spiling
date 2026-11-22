@@ -26,7 +26,7 @@ type Failure = Box<dyn std::error::Error>;
 #[derive(Serialize, Deserialize)]
 struct Header {
     format: String,
-    planner: String,
+    producer: String,
     source: String,
     build_bounds: [[f64; 2]; 2],
     nominal_height_mm: f64,
@@ -267,7 +267,7 @@ fn capture(
     let snapshot = Snapshot {
         header: Header {
             format: FORMAT.into(),
-            planner: crate::PLANNER_VERSION.into(),
+            producer: SUPPORT_INPUT_PRODUCER.into(),
             source: source.clone(),
             build_bounds: input.support.build_bounds,
             nominal_height_mm: input.support.nominal_height_mm,
@@ -299,7 +299,7 @@ fn capture(
         cathedral_roads: input.cathedral_roads,
         void_memo,
     };
-    let path = dir.join(crate::PLANNER_VERSION).join(source);
+    let path = dir.join(SUPPORT_INPUT_PRODUCER).join(source);
     fs::create_dir_all(&path)?;
     // A capture cannot publish a partial blob. Concurrent writers of the same
     // exact content converge on the same final name.
@@ -382,8 +382,8 @@ pub(crate) fn replay(
     }
     file.rewind()?;
     let value: Owned = serde_json::from_reader(BufReader::new(file.take(size)))?;
-    if value.header.format != FORMAT || value.header.planner != crate::PLANNER_VERSION {
-        return Err("support snapshot format or planner identity differs; recapture input".into());
+    if value.header.format != FORMAT || value.header.producer != SUPPORT_INPUT_PRODUCER {
+        return Err("support input format or upstream producer differs; recapture input".into());
     }
     if value.header.working_bytes > working_set.bytes()
         || value.header.native_owned_bytes > value.header.working_bytes

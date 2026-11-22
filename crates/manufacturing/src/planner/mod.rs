@@ -48,6 +48,11 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+// Bump when sections, walls, skins/fill, or another upstream producer changes
+// the support stage's captured input. Support-only changes leave this alone,
+// even when they change the final plan and bump PLANNER_VERSION.
+const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-1";
+
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
 

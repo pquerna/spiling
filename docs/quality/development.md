@@ -338,10 +338,14 @@ cargo xtask stage run BLOB --runner /path/to/spiling-stage
 Build the runner with `cargo build --profile profiling -p spiling-manufacturing
 --bin spiling-stage`. Omitting `--runner` uses the existing profiling binary in the current
 checkout’s target directory. Neither run form starts a build. The `stage_capture` diagnostic names `BLOB` under
-`~/work/cache/stages/<planner>/<source>/<input-sha256>.json` and prints the
+`~/work/cache/stages/<upstream-producer>/<source>/<input-sha256>.json` and prints the
 full compile's support output hash and work counts. The replay prints the
 same fields and times only support execution, after reading and checking the
-blob. A capture that needs a different planner identity requires recapture.
+blob. The SHA-256 must match the file name. A support-only output change does
+not invalidate its input, even when `PLANNER_VERSION` changes. Bump
+`SUPPORT_INPUT_PRODUCER` when sections, walls, skins/fill, or another upstream
+producer changes the support input. Bump the capture format separately for
+changes in how the input is encoded.
 
 These are local developer inputs, not portable project artifacts. They contain
 prepared private source geometry. Keep them out of source control. Replay
