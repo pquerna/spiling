@@ -9,7 +9,8 @@
 //! the iso-contour `F = level` of the exact clearance field (half a bead,
 //! the XYZ6 projection and a small chord margin). Each densely sampled
 //! boundary point moves toward its nearest exclusion by `F(p) − level`,
-//! which the field's 1-Lipschitz bound keeps on the clear side; row ends
+//! which the field's 1-Lipschitz bound keeps on the clear side. Corners can
+//! follow that offset outward to a second exact exclusion. Row ends
 //! extend along their lattice line to the exact offset of the first
 //! exclusion they meet. A point whose clearance exceeds the level by more
 //! than [`Exact::reach`] is not bounded by an exclusion (a seed, ground or
@@ -42,6 +43,8 @@ const MIN_SPLIT_CELLS: f64 = 0.25;
 /// Smallest cosine between a move and the boundary's outward normal: a
 /// nearest exclusion behind or beside the wall does not bound it.
 const MIN_ALIGNMENT: f64 = 0.5;
+
+const PLACEMENT_EPS_MM: f64 = 1.0e-7;
 
 /// Placement parameters for one layer.
 #[derive(Clone, Copy, Debug)]
@@ -224,7 +227,7 @@ fn place(
             break;
         };
         let step = clearance - exact.level;
-        if step.is_nan() || step <= 1.0e-7 || moved + step > exact.reach {
+        if step.is_nan() || step <= PLACEMENT_EPS_MM || moved + step > exact.reach {
             break;
         }
         let away = [q[0] - c[0], q[1] - c[1]];
@@ -240,7 +243,69 @@ fn place(
         moved += step;
         nearest = field.nearest(q, work);
     }
-    (moved > 0.0 && nearest.clearance >= exact.safe).then_some(q)
+    (moved > 0.0 && nearest.clearance >= exact.safe)
+        .then(|| corner(sample, q, nearest, field, exact, work).unwrap_or(q))
+}
+
+/// At a corner, the first offset can stop one component of the move while
+/// the other is still inset. Follow its tangent to a second exact exclusion,
+/// not to the edge of the search band.
+fn corner(
+    sample: &Sample,
+    placed: [f64; 2],
+    nearest: Nearest,
+    field: &Field,
+    exact: &Exact,
+    work: &mut usize,
+) -> Option<[f64; 2]> {
+    let [before, after, _] = sample.normals;
+    if before == after || (nearest.clearance - exact.level).abs() > PLACEMENT_EPS_MM {
+        return None;
+    }
+    let closest = nearest.closest?;
+    let away = [placed[0] - closest[0], placed[1] - closest[1]];
+    let distance = away[0].hypot(away[1]);
+    if distance <= 0.0 {
+        return None;
+    }
+    let forward = [-away[1] / distance, away[0] / distance];
+    let reverse = [-forward[0], -forward[1]];
+    let alignment = |direction: [f64; 2]| {
+        [before, after]
+            .map(|normal| normal[0] * direction[0] + normal[1] * direction[1])
+            .into_iter()
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let direction = if alignment(forward) >= alignment(reverse) {
+        forward
+    } else {
+        reverse
+    };
+    if alignment(direction) < MIN_ALIGNMENT {
+        return None;
+    }
+    let offset = [placed[0] - sample.p[0], placed[1] - sample.p[1]];
+    let along = offset[0] * direction[0] + offset[1] * direction[1];
+    let across = offset[0] * direction[1] - offset[1] * direction[0];
+    let remaining = (exact.reach * exact.reach - across * across).sqrt() - along;
+    if !remaining.is_finite() || remaining <= PLACEMENT_EPS_MM {
+        return None;
+    }
+    let step = field.first_hit(
+        placed,
+        direction,
+        remaining,
+        exact.level - PLACEMENT_EPS_MM,
+        work,
+    )?;
+    if step <= PLACEMENT_EPS_MM {
+        return None;
+    }
+    let end = [
+        placed[0] + step * direction[0],
+        placed[1] + step * direction[1],
+    ];
+    (field.segment_clearance(placed, end, work) >= exact.safe).then_some(end)
 }
 
 /// The contour with every exclusion-bounded wall moved onto the exact

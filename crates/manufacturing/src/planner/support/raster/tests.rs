@@ -815,6 +815,31 @@ fn assert_beads_clear(
 }
 
 #[test]
+fn interface_wall_reaches_both_exclusions_at_an_offset_corner() {
+    let cancel = AtomicBool::new(false);
+    let raster = raster(&cancel);
+    let obstacles = [
+        ([10.016, 1.0], [10.016, 19.0], 0.0),
+        ([1.0, 10.035], [19.0, 10.035], 0.0),
+    ];
+    let width = crate::planner::tests::recipe(1.0).bead_width_mm;
+    let safe = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
+    let level = placement_level(safe);
+    let corner = [10.016 - level, 10.035 - level];
+    let (paths, walls, support) =
+        stage_around(&raster, &obstacles, region::HatchAxis::X, true, true);
+    assert!(paths[..walls.paths].iter().any(|path| {
+        path.kind == DepositionKind::SupportInterface
+            && path
+                .points_mm
+                .iter()
+                .any(|point| (point[0] - corner[0]).hypot(point[1] - corner[1]) < 0.001)
+    }));
+    assert_beads_clear(&paths, &obstacles, safe);
+    assert_escapes_certified(&raster, &paths, &support, &walls.certified);
+}
+
+#[test]
 fn walls_follow_the_exact_offset_of_a_circle_within_a_fraction_of_a_cell() {
     let cancel = AtomicBool::new(false);
     let raster = raster(&cancel);
