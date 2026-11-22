@@ -961,6 +961,7 @@ fn batch(
     let mut moment = 0.0;
     let mut count = 0usize;
     let mut error = 0.0_f64;
+    let mut straight_width = 0.0_f64;
     let constant_mean = runs
         .iter()
         .all(|run| run.source_mean == proposal.source_mean);
@@ -992,6 +993,14 @@ fn batch(
             chord_distance_bound(xy(run.a), xy(proposal.a), xy(proposal.b), chord, squared).max(
                 chord_distance_bound(xy(run.b), xy(proposal.a), xy(proposal.b), chord, squared),
             );
+        // This pass only saves commands: each input already meets the
+        // minimum length. Keep the width of a straight rail that spans at
+        // least one bead width when joining a shoulder would move it off
+        // its line. Otherwise a lattice step at the corner can narrow the
+        // whole rail, even though the corner is already printable on its own.
+        if departure > 0.0 && run.geometric_error == 0.0 && chord_length(run) >= run.mean {
+            straight_width = straight_width.max(run.mean);
+        }
         let bound = if departure == 0.0 {
             run.geometric_error
         } else {
@@ -1008,7 +1017,10 @@ fn batch(
     proposal.last_fraction = runs.last().unwrap().last_fraction;
     proposal.geometric_error = error;
     boolean::charge(work, permission_work)?;
-    fit_candidate(proposal, permissions, original, work, cancel)
+    Ok(
+        fit_candidate(proposal, permissions, original, work, cancel)?
+            .filter(|merged| merged.mean >= straight_width),
+    )
 }
 
 /// Minimum fitting first repairs every short tail. Aggregate only WHOLE legal
