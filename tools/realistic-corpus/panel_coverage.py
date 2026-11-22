@@ -403,6 +403,10 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_ou
     tolerance = located_spans.PRUSA_EXCESS_TOLERANCE_MM
     if comparison["status"] != "observed_unregistered":
         return {"status": comparison["status"], "comparable_spans": 0, "unresolved_spans": len(spans)}
+    recipe = receipt["effective_intent"]["recipe"]
+    gap, limit = recipe["supports"]["z_gap_mm"], recipe["process"]["max_bridge_span_mm"]
+    spans = [span for span in spans if not located_spans.exempt_bridge(
+        span["role"], span["two_ended"], span["length_mm"], limit)]
     if not spans:
         return {"status": "no_native_spans", "comparable_spans": 0,
                 "excess_tolerance_mm": tolerance, "failing_spans": 0,
@@ -411,8 +415,6 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_ou
     try:
         frame = prusa_frame(row, work, receipt)
         inputs = {"prusa": work / "prusa.gcode", "spiling": work / "return/out/plan.json"}
-        recipe = receipt["effective_intent"]["recipe"]
-        gap, limit = recipe["supports"]["z_gap_mm"], recipe["process"]["max_bridge_span_mm"]
         with (work / "located-spans.ndjson").open(encoding="utf-8") as stream:
             located_spans.require_observation_header(stream, inputs, gap, limit)
         with inputs["prusa"].open(encoding="utf-8") as stream:
@@ -428,6 +430,7 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_ou
     within_tolerance = sum(witness.get("assessment") == "acceptable"
                            and witness["excess_mm"] > located_spans.EPS for witness in witnesses)
     failures = [{"layer": span["layer"], "road": span["road"], "role": span["role"],
+                 "two_ended": span["two_ended"], "bridge_within_limit": span["bridge_within_limit"],
                  "physical_z_mm": span["physical_z_mm"], "points_mm": span["points_mm"],
                  "native_span_mm": span["length_mm"], "prusa_span_mm": witness["unsupported_span_mm"],
                  "prusa_layer": witness["prusa_layer"], "excess_mm": witness["excess_mm"]}

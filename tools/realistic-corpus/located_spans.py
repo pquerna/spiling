@@ -21,6 +21,7 @@ CELL_MM = 4.0
 PRUSA_EXCESS_TOLERANCE_MM = 2.0
 PRUSA_SUPPORT = {"Support material", "Support material interface"}
 PRUSA_BRIDGE = {"Bridge infill", "Internal bridge infill"}
+BRIDGE_ROLES = PRUSA_BRIDGE | {"bridge"}
 PRUSA_FLOW_HEIGHT = PRUSA_BRIDGE | {"Overhang perimeter"}
 PRUSA_COURSE_ROADS = {"External perimeter", "Perimeter", "Solid infill", "Top solid infill"}
 NATIVE_MODEL = {"perimeter", "solid_fill", "bottom_skin", "top_skin", "sparse_fill",
@@ -35,7 +36,6 @@ class Road:
     ordinal: int
     role: str
     support: bool
-    bridge: bool
     z: tuple
     points: list
     widths: list
@@ -63,7 +63,7 @@ def native_roads(plan):
                 widths = width["widths_mm"]
             else:
                 raise ValueError("unknown Spiling road width profile")
-            yield Road(layer["index"], ordinal, role, role in NATIVE_SUPPORT, role == "bridge",
+            yield Road(layer["index"], ordinal, role, role in NATIVE_SUPPORT,
                        physical(*path["physical_z_mm"]), points, widths)
 
 
@@ -133,7 +133,7 @@ def prusa_roads(lines):
                 or before[:2] == after[:2] or fresh + EPS < delta):
             raise ValueError(f"unresolved Prusa road geometry at line {ordinal}")
         if current is None or current.points[-1] != before[:2]:
-            current = Road(layer, ordinal, role, role in PRUSA_SUPPORT, role in PRUSA_BRIDGE,
+            current = Road(layer, ordinal, role, role in PRUSA_SUPPORT,
                            physical(top - height, top), [before[:2]], [])
             roads.append(current)
         current.points.append(after[:2])
@@ -259,7 +259,11 @@ def describe_gap(road, points, length, two_ends, bridge_limit):
             "bounds_xy_mm": [[min(point[axis] for point in points) for axis in (0, 1)],
                              [max(point[axis] for point in points) for axis in (0, 1)]],
             "length_mm": length, "two_ended": two_ends,
-            "bridge_within_limit": road.bridge and two_ends and length <= bridge_limit}
+            "bridge_within_limit": exempt_bridge(road.role, two_ends, length, bridge_limit)}
+
+
+def exempt_bridge(role, two_ended, length, bridge_limit):
+    return role in BRIDGE_ROLES and two_ended is True and length <= bridge_limit
 
 
 def straight_runs(road):
@@ -401,7 +405,7 @@ def prusa_regions(roads, spans, shift, support_gap, bridge_limit):
     references = defaultdict(list)
     upper = upper_floors(road for layer in queries for road in model[layer])
     for span, width in gaps_in(roads, upper, support_gap, bridge_limit):
-        if not span["bridge_within_limit"]:
+        if not exempt_bridge(span["role"], span["two_ended"], span["length_mm"], bridge_limit):
             references[span["layer"]].append((span, width))
 
     best = {}
@@ -409,7 +413,7 @@ def prusa_regions(roads, spans, shift, support_gap, bridge_limit):
         prusa_z = courses[layer]
         deposition = LowerEdges(model[layer])
         gaps = references[layer]
-        unsupported = LowerEdges(Road(layer, span["road"], span["role"], False, False,
+        unsupported = LowerEdges(Road(layer, span["road"], span["role"], False,
                                       span["physical_z_mm"], span["points_mm"], [width])
                                  for span, width in gaps)
         for ordinal in items:
@@ -530,9 +534,13 @@ def retained_observation(evidence, slicer, inputs, support_gap, bridge_limit):
                 if (not all(math.isfinite(value) for value in (from_x, from_y, to_x, to_y, length))
                         or length <= EPS
                         or abs(math.hypot(to_x - from_x, to_y - from_y) - length) > EPS
+                        or type(row["two_ended"]) is not bool
                         or type(row["bridge_within_limit"]) is not bool):
                     raise ValueError("invalid located span")
-                if row["bridge_within_limit"]:
+                bounded_bridge = exempt_bridge(row["role"], row["two_ended"], length, bridge_limit)
+                if row["bridge_within_limit"] != bounded_bridge:
+                    raise ValueError("inconsistent located bridge exemption")
+                if bounded_bridge:
                     bounded += 1
                 else:
                     row.pop("event")

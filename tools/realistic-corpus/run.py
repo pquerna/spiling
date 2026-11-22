@@ -33,7 +33,8 @@ supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS adds a
 diagnostic native delta: one-to-one registration by role, physical Z and XY
 within one grid cell plus half a bead. Native deltas, plan disagreement and
 support filament drops above 5% are not coverage-gate failures.
-Breakaway Prusa runs gate all native observer spans against Prusa's model
+Breakaway Prusa runs exempt tagged two-ended bridges within the captured
+bridge limit on both slicers, then gate native spans against Prusa's model
 bead and unsupported footprints, using XY overlap on any single Prusa layer
 within the larger local layer height. A fully registered span fails when its
 excess over Prusa exceeds 2 mm. Positive excesses at or below 2 mm are counted

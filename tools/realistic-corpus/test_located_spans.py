@@ -32,8 +32,8 @@ G1 X10 E4
 """
 
 
-def road(layer, z, start, end, *, support=False, bridge=False):
-    return spans.Road(layer, 0, "test", support, bridge, z, [start, end], [0.4])
+def road(layer, z, start, end, *, support=False):
+    return spans.Road(layer, 0, "test", support, z, [start, end], [0.4])
 
 
 class LocatedSpanTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class LocatedSpanTests(unittest.TestCase):
                 spans.prusa_roads(io.StringIO(program))
 
     def test_an_unbacked_turn_ends_the_straight_span(self):
-        candidate = spans.Road(1, 0, "test", False, True, (0.2, 0.4),
+        candidate = spans.Road(1, 0, "bridge", False, (0.2, 0.4),
                                [(0, 0), (10, 0), (10, 1), (0, 1)], [0.4] * 3)
         summary = spans.observe([candidate], 0.2, 20, list().append)
         self.assertEqual(summary["unsupported_spans"], 3)
@@ -76,7 +76,7 @@ class LocatedSpanTests(unittest.TestCase):
 
     @staticmethod
     def gap(start, end, interval=(1.0, 1.2), layer=8, road=0, role="top_skin"):
-        path = spans.Road(layer, road, role, False, False, interval, [start, end], [0.45])
+        path = spans.Road(layer, road, role, False, interval, [start, end], [0.45])
         return spans.describe_gap(path, path.points, math.dist(start, end), False, 10)
 
     def test_located_gate_accepts_moved_reversed_gaps_and_only_counts_length_increase(self):
@@ -115,7 +115,7 @@ class LocatedSpanTests(unittest.TestCase):
 
     def test_prusa_region_registers_shifted_transverse_bridge_without_matching_endpoints(self):
         candidate = self.gap((10, 1), (14, 1), interval=(1.0, 1.2), role="bottom_skin")
-        bridge = road(4, (1.22, 1.42), (2, -1), (2, 1), bridge=True)
+        bridge = road(4, (1.22, 1.42), (2, -1), (2, 1))
         bridge.role = "Bridge infill"
         witness, = spans.prusa_regions([bridge], [candidate], (10, 1), 0.2, 10)
         self.assertEqual(witness, {"status": "no_geometry"})
@@ -150,6 +150,8 @@ class LocatedSpanTests(unittest.TestCase):
 
     def test_coverage_gate_uses_prusa_region_without_any_native_control(self):
         cases = [("longer", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("native_bounded", 8, 0, 4, True, None, None),
+                 ("native_one_ended", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
                  ("above", 8, 0, 2.001, True, "longer_registered_spans_than_prusa", "supported"),
                  ("equal", 8, 0, 2.0, True, None, "supported"),
                  ("below", 8, 0, 1.999, True, None, "supported"),
@@ -173,12 +175,22 @@ class LocatedSpanTests(unittest.TestCase):
                     (export / "manifest.json").write_text(json.dumps({
                         "scene": {"bounds_mm": {"min": [0, 0, 0], "max": [10, 10, 1]}},
                         "definitions": [{"record": {"provenance": {"source_hash": sha}}}]}))
-                    (export / "plan.json").write_text(json.dumps({"layers": [{
+                    plan = {"layers": [{
                         "index": 1, "lower_z_mm": 0.2, "z_mm": 0.4,
                         "region_coverage": {"unsupported_overhang_mm": length}, "paths": [{
-                            "kind": "bottom_skin", "physical_z_mm": [0.2, 0.4],
+                            "kind": "bridge" if case.startswith("native_") else "bottom_skin",
+                            "physical_z_mm": [0.2, 0.4],
                             "points_mm": [[2, offset, 0.4], [2 + length, offset, 0.4]],
-                            "width": {"kind": "constant", "width_mm": 0.4}}]}]}))
+                            "width": {"kind": "constant", "width_mm": 0.4}}]}]}
+                    if case.startswith("native_"):
+                        anchors = [(1.5, 2.2)] if case == "native_one_ended" else [(1.5, 2.2), (5.8, 6.5)]
+                        plan["layers"].insert(0, {"index": 0, "lower_z_mm": 0.0, "z_mm": 0.2,
+                            "region_coverage": {"unsupported_overhang_mm": 0}, "paths": [{
+                                "kind": "perimeter", "physical_z_mm": [0.0, 0.2],
+                                "points_mm": [[left, 0, 0.2], [right, 0, 0.2]],
+                                "width": {"kind": "constant", "width_mm": 0.4}}
+                                for left, right in anchors]})
+                    (export / "plan.json").write_text(json.dumps(plan))
                     row = {"part": "part.step", "sha256": sha, "source_absent": True,
                            "spiling_compile": {"ok": True}, "spiling_return": {"ok": True},
                            "export_checks": {"fresh_verified": True}, "prusa": {"ok": reference,
@@ -193,6 +205,8 @@ class LocatedSpanTests(unittest.TestCase):
                     self.assertEqual(summary["ok"], refusal is None)
                     result, = summary["cases"]
                     self.assertEqual(result["failures"], [refusal] if refusal else [])
+                    if case == "native_bounded":
+                        self.assertEqual(result["prusa_located"]["status"], "no_native_spans")
                     if match:
                         comparison = result["prusa_located"]
                         self.assertEqual(comparison["span_counts"], {match: 1})
@@ -203,8 +217,10 @@ class LocatedSpanTests(unittest.TestCase):
                             evidence = Path(comparison["failure_evidence"]["path"])
                             recorded, = map(json.loads, evidence.read_text().splitlines())
                             self.assertEqual(comparison["worst_longer_spans"], [recorded])
-                            self.assertAlmostEqual(recorded["excess_mm"], length)
+                            self.assertAlmostEqual(recorded["excess_mm"],
+                                                   length - 0.4 if case == "native_one_ended" else length)
                             self.assertEqual(recorded["prusa_span_mm"], 0)
+                            self.assertFalse(recorded["bridge_within_limit"])
                     if match == "no_geometry":
                         self.assertEqual(result["prusa_coverage_warning"], "no_full_span_comparisons")
 
