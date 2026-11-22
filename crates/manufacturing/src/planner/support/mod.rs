@@ -1899,36 +1899,48 @@ pub(super) fn realize(
         })?;
         let mut split = crate::timing::Split::new("support.regeneration");
         let mut payload = PayloadLedger::new(layers)?;
+        let mut lower_support_unchanged = true; // Layer zero is bed-rooted.
         for index in 1..layers.len() {
-            let t = split.start();
-            support_metadata_bytes += reconcile_layer_roots(
-                layers,
-                &mut payload,
-                FinalSupportInput {
-                    index,
-                    roots: &roots,
-                    part_contact: part_contacts.get(index).and_then(Option::as_ref),
-                    contact_tops: &contact_tops,
-                    z_gap: z_gap_mm,
-                    frame: grid_frame,
-                    wall_paths: &mut support_wall_paths,
-                    recipe,
-                    retained_units: retained_regions,
-                    owned_bytes: native_owned_bytes
-                        + support_metadata_bytes
-                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
-                },
-                segments,
-                &mut anchors,
-                &mut anchor_work,
-                cancel,
-            )?;
-            split.stop("reconcile_roots", t);
-            object_start[index] = layers[index]
-                .paths
-                .iter()
-                .take_while(|path| support_role(path.kind))
-                .count();
+            check_cancel(cancel)?;
+            let part_contact = part_contacts.get(index).and_then(Option::as_ref);
+            if object_start[index] == 0 {
+                lower_support_unchanged = true;
+            } else if !lower_support_unchanged || part_contact.is_some() {
+                let t = split.start();
+                lower_support_unchanged = reconcile_layer_roots(
+                    layers,
+                    &mut payload,
+                    FinalSupportInput {
+                        index,
+                        roots: &roots,
+                        part_contact,
+                        contact_tops: &contact_tops,
+                        z_gap: z_gap_mm,
+                        frame: grid_frame,
+                        wall_paths: &mut support_wall_paths,
+                        recipe,
+                        retained_units: retained_regions,
+                        owned_bytes: native_owned_bytes
+                            + support_metadata_bytes
+                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
+                    },
+                    segments,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?;
+                if !lower_support_unchanged {
+                    object_start[index] = layers[index]
+                        .paths
+                        .iter()
+                        .take_while(|path| support_role(path.kind))
+                        .count();
+                }
+                split.stop("reconcile_roots", t);
+            }
+            // Otherwise the same ordered support-only lower prefix already
+            // admitted these roads in the raster pass, with no PART operands.
+            // Finalizing lower object geometry doesn't change that proof.
             let (original_roles, later_roles) = outstanding_roles
                 .split_at(outstanding_roles.partition_point(|&(layer, _, _)| layer == index));
             outstanding_roles = later_roles;
@@ -2427,8 +2439,7 @@ fn reconcile_layer_roots(
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<usize, ManufacturingError> {
-    check_cancel(cancel)?;
+) -> Result<bool, ManufacturingError> {
     let FinalSupportInput {
         index,
         roots,
@@ -2441,15 +2452,12 @@ fn reconcile_layer_roots(
         retained_units,
         owned_bytes,
     } = input;
-    let added_bytes = 0usize;
     {
         check_cancel(cancel)?;
         let payload_bytes = payload.refresh(index, &layers[index]);
         anchors.set_budget(workspace_budget(
             retained_units,
-            owned_bytes
-                .saturating_add(added_bytes)
-                .saturating_add(payload_bytes),
+            owned_bytes.saturating_add(payload_bytes),
         )?);
         let (prior, remaining) = layers.split_at_mut(index);
         let layer = remaining.first_mut().expect("final support layer");
@@ -2481,10 +2489,12 @@ fn reconcile_layer_roots(
                 }
             }
         }
-        if !continuing {
+        if continuing {
+            return Ok(true);
+        }
+        {
             let layer_bytes = super::bonds::path_bytes(&layer.paths);
             let outside = owned_bytes
-                .saturating_add(added_bytes)
                 .saturating_add(payload.others(index))
                 .saturating_add(layer_bytes);
             let admit = |extra: usize| {
@@ -2591,7 +2601,8 @@ fn reconcile_layer_roots(
             layer.region_coverage.support_nominal_deposition_volume_mm3
                 / (layer.z_mm - layer.lower_z_mm);
     }
-    Ok(added_bytes)
+    // The retention pass may have removed or fragmented a support road.
+    Ok(false)
 }
 
 fn contact_layer(
