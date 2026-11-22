@@ -2,7 +2,8 @@ use super::*;
 use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
 
 pub(in crate::planner) struct Frame {
-    pub(super) bounds: [[f64; 2]; 2],
+    #[cfg(test)]
+    bounds: [[f64; 2]; 2],
     pub(super) distance: f64,
 }
 
@@ -97,7 +98,11 @@ impl Frame {
                 "support clearance offset leaves its fixed work frame",
             ));
         }
-        Ok(Self { bounds, distance })
+        Ok(Self {
+            #[cfg(test)]
+            bounds,
+            distance,
+        })
     }
 
     /// The integer quantum of an overlay adapter over this frame.

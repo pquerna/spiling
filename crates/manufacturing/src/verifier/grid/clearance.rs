@@ -945,6 +945,32 @@ mod tests {
     }
 
     #[test]
+    fn virtual_arc_chord_uses_the_decoded_z_for_clearance() {
+        let cancel = AtomicBool::new(false);
+        for shortfall in [0, 1] {
+            let mut grid = clearance();
+            let mut arc = road(0, DepositionKind::Perimeter, 0, 250_000);
+            arc.to = super::super::virtual_arc_xyz6([1.000_123, 0.0, 0.250_486], 250_000);
+            assert_eq!(arc.to, [1_000_123, 0, 250_000]);
+            arc.arc_deviation_mm = 0.011;
+            grid.record(arc).unwrap();
+            grid.record(road(3, DepositionKind::Support, 0, 1_000_000 - shortfall))
+                .unwrap();
+            let result = grid.verify(&mut 0, &cancel);
+            if shortfall == 0 {
+                assert_eq!(result.unwrap().checked_pairs, 0);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .message
+                        .contains("violates object XY/Z clearance")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shared_cells_resolve_locally_and_count_each_pair_once() {
         let cancel = AtomicBool::new(false);
         for lateral in [499_999, 500_000, 500_001, 600_000] {

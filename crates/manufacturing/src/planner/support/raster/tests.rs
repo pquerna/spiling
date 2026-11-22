@@ -993,8 +993,8 @@ fn unbounded_interface_faces_recover_rounding_without_leaving_kept_cells() {
             };
             let shift = min_x(&grid[..grid_walls.paths]) - min_x(&placed[..walls.paths]);
             assert!(
-                shift >= 0.01 - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
-                    && shift <= SUPPORT_CELL_MM / 2.0,
+                (0.01 - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM..=SUPPORT_CELL_MM / 2.0)
+                    .contains(&shift),
                 "shift {shift}"
             );
             for path in &placed[..walls.paths] {

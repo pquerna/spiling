@@ -982,8 +982,7 @@ impl Sweep<'_> {
                         layers: self.layers,
                         sections: self.sections,
                         nominal: self.nominal,
-                        frame: self.frame,
-                        requested: self.requested,
+                        distance,
                         owned_bytes: self.owned_bytes,
                         raster: &raster,
                     };
@@ -1390,7 +1389,7 @@ impl Sweep<'_> {
     }
 
     /// Nominal clearance of every scope reaching layer `l`: each section
-    /// polygon dilated by its clearance distance, plus the actual object bead
+    /// polygon dilated by the frame's enclosed distance, plus the actual object bead
     /// edges outside it. Each scope's grid is built once, ahead of the pass;
     /// a scope the rising pass has left for good is released. Each scope is
     /// recorded for final clearance when the pass first reaches it.
@@ -1499,7 +1498,7 @@ fn piece_scope(height: Option<[f64; 2]>, interval: [f64; 2]) -> Option<[f64; 2]>
 /// layer's clearance field: occupancy pieces touching its bead slab (own and
 /// adjacent spans) at the clearance distance, protected voids reaching it at
 /// their candidate distance, every nominal scope within the Z gap (section
-/// material at its per-polygon distance and the bead edges it excluded), and
+/// material and excluded bead edges at the frame's enclosed distance), and
 /// at a contact top the next section's touching sheet. Exclusions carried
 /// down from higher layers are not clearance and are not fed. A layer that
 /// holds relieved roof-access support (which enters its void) takes no
@@ -1513,8 +1512,6 @@ pub(super) struct Exclusions<'a> {
     pub tops: &'a [bool],
     pub relieved: &'a [bool],
     pub distance: f64,
-    /// The projection frame nominal clearance distances are taken in.
-    pub frame_bounds: [[f64; 2]; 2],
     pub requested: f64,
     pub gap: f64,
     /// Live units and bytes span loading is admitted against.
@@ -1613,12 +1610,6 @@ impl Exclusions<'_> {
                 continue;
             }
             for polygon in &self.sections[record.section].material.0 {
-                let Some(rect) = polygon.bounding_rect() else {
-                    continue;
-                };
-                let rect = [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]];
-                let distance =
-                    clearance_distance_in_frame(rect, self.frame_bounds, self.requested)?;
                 builder.polygon(polygon, distance)?;
             }
             for key in &record.edges {
@@ -1787,8 +1778,7 @@ struct NominalBuilder<'r, 'a> {
     layers: &'r [PrintLayer],
     sections: &'r [super::super::SectionSpan],
     nominal: &'r [NominalScope],
-    frame: &'r projection::Frame,
-    requested: f64,
+    distance: f64,
     owned_bytes: usize,
     raster: &'r Raster<'a>,
 }
@@ -1799,25 +1789,18 @@ impl NominalBuilder<'_, '_> {
         let cancel = raster.cancel;
         let scope = &self.nominal[at];
         let section = &self.sections[scope.index];
-        let distances = section
+        if section
             .material
             .0
             .iter()
-            .map(|polygon| {
-                let rect = polygon.bounding_rect().ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                        "native outer operand has no finite bounds",
-                    )
-                })?;
-                clearance_distance_in_frame(
-                    [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]],
-                    self.frame.bounds,
-                    self.requested,
-                )
-            })
-            .collect::<Result<Vec<f64>, ManufacturingError>>()?;
-        let mut bits = raster.dilated(section.material.0.iter().zip(distances))?;
+            .any(|polygon| polygon.exterior().0.is_empty())
+        {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "native outer operand has no finite bounds",
+            ));
+        }
+        let mut bits = raster.outward(&section.material.0, self.distance)?;
         let mut keys = Vec::new();
         let mut work = 0;
         if scope.beads.is_some() {
@@ -1832,11 +1815,10 @@ impl NominalBuilder<'_, '_> {
                 &mut work,
                 cancel,
             )?;
-            let distance = self.frame.distance;
             let beads = raster.capsules(
                 edges
                     .iter()
-                    .map(|edge| (edge.a, edge.b, (edge.half + distance).next_up())),
+                    .map(|edge| (edge.a, edge.b, (edge.half + self.distance).next_up())),
             )?;
             bits = raster.union(&bits, &beads)?;
             reserve_owned(&mut keys, edges.len(), self.owned_bytes)?;
@@ -1942,6 +1924,49 @@ fn nominal_band(layers: &[PrintLayer], l: usize) -> Result<[f64; 2], Manufacturi
 mod tests {
     use super::*;
     use geo::{Rect, coord};
+
+    #[test]
+    fn nominal_material_excludes_the_decoded_bead_enclosure() {
+        let cancel = AtomicBool::new(false);
+        let bounds = [[0.0, 0.0], [2.0, 2.0]];
+        let raster = Raster {
+            frame: CellFrame::new(bounds, SUPPORT_CELL_MM).unwrap(),
+            cancel: &cancel,
+            admit: &|_| Ok(()),
+            work: AtomicUsize::new(0),
+        };
+        let polygon = Rect::new(coord! { x: 0.2, y: 0.2 }, coord! { x: 1.8, y: 0.68 }).to_polygon();
+        let material = MultiPolygon::new(vec![polygon]);
+        let nominal_distance = clearance_distance_in_frame(bounds, bounds, 0.3).unwrap();
+        let probe = [0.975, 1.025];
+        let nominal_only = raster.outward(&material.0, nominal_distance).unwrap();
+        assert!(!raster.holds_all(&nominal_only, probe));
+
+        let sections = [super::super::super::SectionSpan {
+            start: 0,
+            end: 1,
+            material: std::sync::Arc::new(material),
+            process_domains: Vec::new(),
+            occupied: None,
+            source_area_mm2: 0.0,
+        }];
+        let builder = NominalBuilder {
+            layers: &[],
+            sections: &sections,
+            nominal: &[NominalScope {
+                index: 0,
+                floor: 0.0,
+                ceiling: 0.2,
+                beads: None,
+            }],
+            distance: (nominal_distance + raster::exact::VERIFIER_ENCLOSURE_MM).next_up(),
+            owned_bytes: 0,
+            raster: &raster,
+        };
+        let (excluded, _, _) = builder.build(0).unwrap();
+        assert!(raster.holds_all(&excluded, probe));
+        assert!(!raster.holds_all(&excluded, [probe[0], 1.075]));
+    }
 
     #[test]
     fn same_layer_landing_union_keeps_only_the_covered_seam() {

@@ -1897,7 +1897,6 @@ pub(super) fn realize(
                 tops: &tops,
                 relieved: &relieved_layers,
                 distance: frame.distance,
-                frame_bounds: frame.bounds,
                 requested: xy_clearance_mm,
                 gap: selection_gap_mm,
             };

@@ -48,8 +48,10 @@ pub(super) fn xyz6_ticks(text: &str) -> Result<i64, &'static str> {
     Ok(if text.starts_with('-') { -ticks } else { ticks })
 }
 
-pub(super) fn virtual_xyz6(point: [f64; 3]) -> [i64; 3] {
-    point.map(|coordinate| (coordinate * 1_000_000.0).round() as i64)
+pub(super) fn virtual_arc_xyz6(point: [f64; 3], decoded_z: i64) -> [i64; 3] {
+    let [x, y, _] = point;
+    let [x, y] = [x, y].map(|coordinate| (coordinate * 1_000_000.0).round() as i64);
+    [x, y, decoded_z]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

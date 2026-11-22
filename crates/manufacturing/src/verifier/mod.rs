@@ -1274,12 +1274,11 @@ pub(crate) fn verify_actual(
                 }
                 None => (decoded, None),
             };
-            let grid_position =
-                if support_grid.is_some() && arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
-                    Some(grid::virtual_xyz6(target))
-                } else {
-                    command_ticks
-                };
+            let grid_position = if arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
+                command_ticks.map(|[_, _, z]| grid::virtual_arc_xyz6(target, z))
+            } else {
+                command_ticks
+            };
             if let Some(markers) = &bambu {
                 markers.before_layer_motion(layer_index)?;
             }
