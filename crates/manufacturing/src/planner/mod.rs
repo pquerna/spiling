@@ -39,9 +39,7 @@ mod tests;
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Area, Intersects, MultiPolygon, Point};
 use spiling_contracts::geometry::{GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM};
-use spiling_contracts::manufacturing::program_coordinates::{
-    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
-};
+use spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm;
 use spiling_contracts::manufacturing::*;
 use std::{
     collections::BTreeMap,

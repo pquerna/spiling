@@ -5,6 +5,7 @@
 use super::*;
 use classification::{ClassifiedRegions, WallPlan};
 use geo::{Coord, LineString, Polygon};
+use spiling_contracts::manufacturing::program_coordinates::project_xyz6_bead_height_mm;
 use std::collections::BTreeSet;
 
 #[test]
