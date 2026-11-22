@@ -66,6 +66,9 @@ pub(super) struct SweepOutput {
     pub kept: KeptSupport,
     /// Per first support layer, the common proposal and its original roots.
     pub part_contacts: Vec<Option<PartContact>>,
+    /// Per layer, whether it is some demand's contact top (where the next
+    /// section's touching sheet was excluded).
+    pub tops: Vec<bool>,
 }
 
 pub(super) struct PartContact {
@@ -185,6 +188,36 @@ impl KeptSupport {
                     .map(|scope| vec_bytes(&scope.edges))
                     .fold(0, usize::saturating_add),
             )
+    }
+
+    /// Adds to `layer`'s kept cells the cells its raster proved clear of
+    /// the same exclusions exactly; returns the bytes added.
+    pub(super) fn certify(
+        &mut self,
+        layer: usize,
+        cells: &Bits,
+        cancel: &AtomicBool,
+        admit: &(dyn Fn(usize) -> Result<(), ManufacturingError> + Sync),
+    ) -> Result<usize, ManufacturingError> {
+        let Some(frame) = self.frame else {
+            return Ok(0);
+        };
+        if cells.is_empty() {
+            return Ok(0);
+        }
+        let Ok(at) = self.layers.binary_search_by_key(&layer, |kept| kept.layer) else {
+            return Ok(0);
+        };
+        let raster = Raster {
+            frame,
+            cancel,
+            admit,
+            work: AtomicUsize::new(0),
+        };
+        let kept = &mut self.layers[at];
+        let before = kept.bits.bytes();
+        kept.bits = raster.union(&kept.bits, cells)?;
+        Ok(kept.bits.bytes().saturating_sub(before))
     }
 
     fn layer(&self, layer: usize) -> Option<&KeptLayer> {
@@ -572,6 +605,7 @@ impl Sweep<'_> {
                 access,
                 kept: KeptSupport::default(),
                 part_contacts: Vec::new(),
+                tops: Vec::new(),
             });
         };
         let cells = CellFrame::new(bounds, SUPPORT_CELL_MM)?;
@@ -950,6 +984,13 @@ impl Sweep<'_> {
             );
         }
         drop(clearance);
+        // Every demand's top is an ordinary-channel top.
+        let mut tops = Vec::new();
+        reserve_owned(&mut tops, layers.len(), self.owned_bytes)?;
+        tops.resize(layers.len(), false);
+        for &top in &channels[0].tops {
+            tops[top] = true;
+        }
         drop(channels);
         timing.mark("up_pass");
 
@@ -1019,6 +1060,7 @@ impl Sweep<'_> {
             access,
             kept,
             part_contacts,
+            tops,
         })
     }
 
@@ -1318,18 +1360,7 @@ impl Sweep<'_> {
         let Some(section) = self.sections.get(next) else {
             return Ok(Bits::default());
         };
-        let layer = &self.layers[top];
-        let upper = (program_coordinates::project_xyz6_segment_bead_height_mm(
-            layer.z_mm,
-            layer.z_mm,
-            layer.z_mm - layer.lower_z_mm,
-        )?[1]
-            + super::super::native::XYZ6_SCREEN_SLACK_MM)
-            .next_up();
-        let lower = layer.lower_z_mm;
-        let touches = |height: Option<[f64; 2]>| {
-            height.is_some_and(|[from, to]| from <= upper && to >= lower)
-        };
+        let touches = sheet_touches(&self.layers[top])?;
         let frame = &raster.frame;
         let mut pieces = Vec::new();
         let mut failure = None;
@@ -1353,6 +1384,153 @@ impl Sweep<'_> {
             return Err(error);
         }
         raster.outward(&pieces, distance)
+    }
+}
+
+/// Whether a next-section piece's height scope reaches the top support
+/// bead's actual upper height on `layer`. Unscoped invariant D spans its
+/// whole height and stays with the height-aware nominal exclusion.
+fn sheet_touches(
+    layer: &PrintLayer,
+) -> Result<impl Fn(Option<[f64; 2]>) -> bool + use<>, ManufacturingError> {
+    let upper = (program_coordinates::project_xyz6_segment_bead_height_mm(
+        layer.z_mm,
+        layer.z_mm,
+        layer.z_mm - layer.lower_z_mm,
+    )?[1]
+        + super::super::native::XYZ6_SCREEN_SLACK_MM)
+        .next_up();
+    let lower = layer.lower_z_mm;
+    Ok(move |height: Option<[f64; 2]>| {
+        height.is_some_and(|[from, to]: [f64; 2]| from <= upper && to >= lower)
+    })
+}
+
+/// A piece's height scope clipped to its span's interval, when nonempty.
+fn piece_scope(height: Option<[f64; 2]>, interval: [f64; 2]) -> Option<[f64; 2]> {
+    let scope = height.map_or(interval, |height| {
+        [height[0].max(interval[0]), height[1].min(interval[1])]
+    });
+    (scope[0] <= scope[1]).then_some(scope)
+}
+
+/// The exact exclusions the sweep subtracted directly on each layer, for the
+/// layer's clearance field: occupancy pieces touching its bead slab (own and
+/// adjacent spans) at the clearance distance, protected voids reaching it at
+/// their candidate distance, every nominal scope within the Z gap (section
+/// material at its per-polygon distance and the bead edges it excluded), and
+/// at a contact top the next section's touching sheet. Exclusions carried
+/// down from higher layers are not clearance and are not fed. A layer that
+/// holds relieved roof-access support (which enters its void) takes no
+/// field.
+pub(super) struct Exclusions<'a> {
+    pub layers: &'a [PrintLayer],
+    pub sections: &'a [super::super::SectionSpan],
+    pub schedule: &'a [super::super::LayerElevation],
+    pub kept: &'a KeptSupport,
+    pub voids: &'a [(&'a Polygon<f64>, spiling_geometry::ProtectedVoidHeightScope)],
+    pub tops: &'a [bool],
+    pub relieved: &'a [bool],
+    pub distance: f64,
+    /// The projection frame nominal clearance distances are taken in.
+    pub frame_bounds: [[f64; 2]; 2],
+    pub requested: f64,
+    pub gap: f64,
+}
+
+impl Exclusions<'_> {
+    /// Feeds layer `l`'s exclusions into `builder` and returns its wall
+    /// placement: exact at a contact top, where part roads land on the
+    /// support's top walls, certified elsewhere; `None` when the layer takes
+    /// no field.
+    pub(super) fn feed(
+        &self,
+        l: usize,
+        builder: &mut super::field::FieldBuilder<'_, '_>,
+        cancel: &AtomicBool,
+    ) -> Result<Option<super::raster::Placement>, ManufacturingError> {
+        let Some(frame) = &self.kept.frame else {
+            return Ok(None);
+        };
+        if self.relieved.get(l).is_none_or(|&relieved| relieved) || self.sections.is_empty() {
+            return Ok(None);
+        }
+        let layer = &self.layers[l];
+        let slab = bead_slab(layer)?;
+        let distance = self.distance;
+        let builder = std::cell::RefCell::new(builder);
+        let here = span_at(self.sections, l as u32);
+        let sheet = sheet_touches(layer)?;
+        let last = self.sections.len() - 1;
+        for span in here.saturating_sub(1)..=(here + 1).min(last) {
+            let section = &self.sections[span];
+            let interval = [
+                self.schedule[section.start as usize].lower_z,
+                self.schedule[(section.end - 1) as usize].z,
+            ];
+            let top_sheet = span == here + 1 && self.tops.get(l).is_some_and(|&top| top);
+            let applies = |height: Option<[f64; 2]>| {
+                piece_scope(height, interval)
+                    .is_some_and(|scope| scope[0] <= slab[1] && scope[1] >= slab[0])
+                    || (top_sheet && sheet(height))
+            };
+            let mut failure = None;
+            section.visit_occupied_screened(
+                cancel,
+                |bounds, height| Ok(applies(height) && builder.borrow().wants(bounds, distance)),
+                |piece, height| {
+                    if applies(height)
+                        && let Err(error) = builder.borrow_mut().polygon(piece, distance)
+                    {
+                        failure = Some(error);
+                        return Ok(false);
+                    }
+                    Ok(true)
+                },
+            )?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+        let builder = builder.into_inner();
+        for &(mask, height) in self.voids {
+            check_cancel(cancel)?;
+            if !void_reaches_corridor(&height, slab[0], slab[1]) {
+                continue;
+            }
+            if let Some(distance) =
+                candidate_clearance_distance_in_bounds(mask, Some(frame.bounds()), self.requested)?
+            {
+                builder.polygon(mask, distance)?;
+            }
+        }
+        let [lower, upper] = nominal_band(self.layers, l)?;
+        for record in &self.kept.scopes {
+            check_cancel(cancel)?;
+            if program_coordinates::enclosed_vertical_gap_mm(record.floor, upper)? >= self.gap
+                || program_coordinates::enclosed_vertical_gap_mm(lower, record.ceiling)? >= self.gap
+            {
+                continue;
+            }
+            for polygon in &self.sections[record.section].material.0 {
+                let Some(rect) = polygon.bounding_rect() else {
+                    continue;
+                };
+                let rect = [[rect.min().x, rect.min().y], [rect.max().x, rect.max().y]];
+                let distance =
+                    clearance_distance_in_frame(rect, self.frame_bounds, self.requested)?;
+                builder.polygon(polygon, distance)?;
+            }
+            for key in &record.edges {
+                let [ax, ay, bx, by, half] = key.map(f64::from_bits);
+                builder.segment([ax, ay], [bx, by], (half + distance).next_up())?;
+            }
+        }
+        Ok(Some(if self.tops.get(l).is_some_and(|&top| top) {
+            super::raster::Placement::Exact
+        } else {
+            super::raster::Placement::Certified
+        }))
     }
 }
 

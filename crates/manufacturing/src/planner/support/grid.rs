@@ -96,6 +96,11 @@ impl CellFrame {
         ]
     }
 
+    /// Cell edge in millimetres.
+    pub(super) fn cell(&self) -> f64 {
+        self.cell
+    }
+
     /// Bytes of one dense layer over the whole frame.
     pub(super) fn dense_bytes(&self) -> usize {
         self.cols
@@ -852,6 +857,82 @@ impl Raster<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The closed cells holding point `p` (two or four on a cell line, within
+    /// the raster guard), as frame columns and rows; cells beyond the frame
+    /// are `None`.
+    fn holding(&self, p: [f64; 2]) -> [[Option<usize>; 2]; 2] {
+        let frame = &self.frame;
+        [0, 1].map(|axis| {
+            let limit = if axis == 0 { frame.cols } else { frame.rows };
+            let u = (p[axis] - frame.origin[axis]) / frame.cell;
+            let near = u.round();
+            let pair = if (u - near).abs() <= GUARD_MM / frame.cell {
+                [near - 1.0, near]
+            } else {
+                [u.floor(), u.floor()]
+            };
+            pair.map(|v| (v.is_finite() && v >= 0.0 && v < limit as f64).then_some(v as usize))
+        })
+    }
+
+    /// The centre of every set cell, in row then column order.
+    pub(super) fn cell_centres(&self, bits: &Bits, mut visit: impl FnMut([usize; 2], [f64; 2])) {
+        let frame = &self.frame;
+        for r in 0..bits.rows() {
+            let row = bits.row0 + r;
+            let words = &bits.data[r * bits.width..(r + 1) * bits.width];
+            for (w, &word) in words.iter().enumerate() {
+                let base = (bits.word0 + w) * 64;
+                for_bits(word, |b| {
+                    let col = base + b;
+                    visit(
+                        [col, row],
+                        [frame.x(col as f64 + 0.5), frame.y(row as f64 + 0.5)],
+                    );
+                });
+            }
+        }
+        self.charge(bits.data.len());
+    }
+
+    /// The set of the given `[col, row]` cells, in row then column order.
+    pub(super) fn set_of_cells(&self, cells: &[[usize; 2]]) -> Result<Bits, ManufacturingError> {
+        let mut spans: Vec<Span> = Vec::new();
+        self.reserve(&mut spans, cells.len())?;
+        for &[col, row] in cells {
+            match spans.last_mut() {
+                Some(span) if span.row as usize == row && span.to as usize == col => span.to += 1,
+                _ => spans.push(Span {
+                    row: row as u32,
+                    from: col as u32,
+                    to: col as u32 + 1,
+                }),
+            }
+        }
+        self.bits_of(&spans)
+    }
+
+    /// Whether some closed cell holding `p` is set.
+    pub(super) fn holds_any(&self, bits: &Bits, p: [f64; 2]) -> bool {
+        let [cols, rows] = self.holding(p);
+        cols.iter().flatten().any(|&col| {
+            rows.iter()
+                .flatten()
+                .any(|&row| bits.word(row, col / 64) >> (col % 64) & 1 == 1)
+        })
+    }
+
+    /// Whether every closed cell holding `p` is set (none beyond the frame).
+    pub(super) fn holds_all(&self, bits: &Bits, p: [f64; 2]) -> bool {
+        let [cols, rows] = self.holding(p);
+        cols.iter().chain(&rows).all(Option::is_some)
+            && cols.iter().flatten().all(|&col| {
+                rows.iter()
+                    .flatten()
+                    .all(|&row| bits.word(row, col / 64) >> (col % 64) & 1 == 1)
+            })
     }
 
     /// Membership of `bits` along segment `ab` as consecutive pieces

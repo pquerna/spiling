@@ -7,7 +7,9 @@
 //! each lattice line, and walls follow E's traced boundary.
 
 mod commands;
+mod exact;
 
+use super::field::{Field, FieldBuilder};
 use super::grid::{Bits, Raster};
 use super::{AnchorCandidate, AnchorWorkspace, StrokeRuns, candidate_budget, region, strokes};
 use crate::{check_cancel, error};
@@ -20,6 +22,9 @@ use std::sync::atomic::AtomicBool;
 pub(super) struct WallReceipt {
     pub(super) paths: usize,
     pub(super) omitted_mm: f64,
+    /// Cells beyond the kept set the exact field proves clear, for final
+    /// clearance.
+    pub(super) certified: Bits,
 }
 
 /// One layer's staged support walls and hatch rows from its kept support
@@ -31,6 +36,11 @@ pub(super) struct WallReceipt {
 /// membership changes along them. `existing_segments` counts toward the
 /// segment allowance; `retained` and `owned_bytes` are the caller's live
 /// inventory.
+///
+/// `exclusions`, when given, feeds the exact exclusions the sweep subtracted
+/// on this layer into a clearance field and chooses the wall placement
+/// (`None` when the layer's cells cannot use a field); walls and row ends
+/// bounded by them then sit on a sub-cell offset instead of the staircase.
 #[expect(
     clippy::too_many_arguments,
     reason = "Grid operands, density and the actual layer stay explicit beside live inventory and cumulative work"
@@ -39,6 +49,7 @@ pub(super) fn paths(
     raster: &Raster<'_>,
     support: &Bits,
     interface: &Bits,
+    exclusions: Option<&Exclusions<'_>>,
     density: f64,
     layer: &region::HatchLayer<'_>,
     existing_segments: usize,
@@ -74,6 +85,14 @@ pub(super) fn paths(
     let mut contour = raster.boundary(&centers)?;
     region::canonicalize(&mut contour);
     region::check_size(&contour)?;
+    let mut exact = exact::Exact::new(
+        layer.width_mm * 0.5 + 2.0 * program_coordinates::XYZ6_QUANTUM_MM,
+        raster.frame.cell(),
+    );
+    let field = match exclusions {
+        Some(feed) if !contour.0.is_empty() => exact_field(raster, &mut contour, feed, &mut exact)?,
+        _ => None,
+    };
     let retained = retained
         .checked_add(region::point_count(&contour))
         .filter(|n| *n <= crate::working_set::units())
@@ -81,6 +100,7 @@ pub(super) fn paths(
     let owned_bytes = owned_bytes
         .saturating_add(super::super::native::material_bytes(&mut contour))
         .saturating_add(centers.bytes())
+        .saturating_add(field.as_ref().map_or(0, Field::bytes))
         .saturating_add(ordinary.bytes())
         .saturating_add(interface_centers.bytes());
     super::super::remaining_geometry_units(retained, owned_bytes)?;
@@ -139,19 +159,137 @@ pub(super) fn paths(
             kind,
             fraction,
             layer,
+            field.as_ref().map(|field| RowEnds {
+                field,
+                exact: &exact,
+                support,
+                centers: &centers,
+            }),
             &mut paths,
             &mut segments,
             cancel,
         )?;
     }
     candidate_budget(&paths, retained, owned_bytes)?;
+    let certified = match &field {
+        Some(field) => certify(raster, support, field, &paths, layer.width_mm)?,
+        None => Bits::default(),
+    };
     Ok((
         paths,
         WallReceipt {
             paths: wall_paths,
             omitted_mm: omitted_wall_mm,
+            certified,
         },
     ))
+}
+
+/// Cells outside the kept set `support` that the staged beads reach and
+/// that the exact field proves clear in full: a cell whose centre clears
+/// every exclusion by half its diagonal clears at every point. The beads'
+/// centrelines lie outside every exclusion polygon with more than that
+/// margin (each was checked at the bead clearance), so the boundary
+/// distance is the true distance there. Final clearance treats these cells
+/// as kept; any bead beyond them still takes the exact proof.
+fn certify(
+    raster: &Raster<'_>,
+    support: &Bits,
+    field: &Field,
+    paths: &[DepositionPath],
+    width: f64,
+) -> Result<Bits, ManufacturingError> {
+    let cell = raster.frame.cell();
+    let half_diagonal = (cell * std::f64::consts::FRAC_1_SQRT_2 * (1.0 + 1.0e-9)).next_up();
+    let slack = program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
+    // Every cell centre a bead touches is within `width / 2 + slack +
+    // half_diagonal` of its centreline, which clears every boundary edge by
+    // at least `min_radius + width / 2`: the centre is on the same (outer)
+    // side of every edge when the least radius exceeds the rest.
+    if field.min_radius().is_nan() || field.min_radius() <= cell + slack {
+        return Ok(Bits::default());
+    }
+    let mut beads = raster.capsules(paths.iter().flat_map(|path| {
+        path.points_mm.windows(2).map(move |edge| {
+            (
+                [edge[0][0], edge[0][1]],
+                [edge[1][0], edge[1][1]],
+                (width * 0.5 + slack).next_up(),
+            )
+        })
+    }))?;
+    beads.subtract(support);
+    let mut cells = Vec::new();
+    let mut work = 0usize;
+    let mut failure = None;
+    raster.cell_centres(&beads, |at, centre| {
+        if failure.is_some() {
+            return;
+        }
+        if field.nearest(centre, &mut work).clearance >= half_diagonal {
+            if let Err(error) = raster.reserve(&mut cells, 1) {
+                failure = Some(error);
+                return;
+            }
+            cells.push(at);
+        }
+    });
+    raster.charge(work);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    raster.set_of_cells(&cells)
+}
+
+/// How a layer's exclusion-bounded walls are placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Placement {
+    /// On the exact offset: final clearance proves exactly the beads that
+    /// leave the kept cells. For contact tops, where part roads land.
+    Exact,
+    /// One cell diagonal farther, where every cell the beads touch is
+    /// proved clear in full, so final clearance needs no exact proof.
+    Certified,
+}
+
+/// One layer's exact exclusions, fed into a clearance field, and the
+/// layer's wall placement; `None` when the layer takes no field.
+pub(super) type Exclusions<'a> =
+    dyn Fn(&mut FieldBuilder<'_, '_>) -> Result<Option<Placement>, ManufacturingError> + Sync + 'a;
+
+/// Builds the layer's exact clearance field over its wall contour and moves
+/// every exclusion-bounded wall onto the exact offset. `None` when the layer
+/// cannot use a field.
+fn exact_field(
+    raster: &Raster<'_>,
+    contour: &mut MultiPolygon<f64>,
+    feed: &Exclusions<'_>,
+    exact: &mut exact::Exact,
+) -> Result<Option<Field>, ManufacturingError> {
+    let rings = exact::samples(raster, contour, exact.cell)?;
+    let Some(mut builder) = exact::builder(raster, &rings, exact)? else {
+        return Ok(None);
+    };
+    let Some(placement) = feed(&mut builder)? else {
+        return Ok(None);
+    };
+    if placement == Placement::Exact {
+        exact.place_walls_exactly();
+    }
+    let field = builder.finish()?;
+    if let Some(placed) = exact::displace(raster, &rings, &field, exact)? {
+        *contour = placed;
+    }
+    Ok(Some(field))
+}
+
+/// What row ends extend against: the exact field and the layer's kept and
+/// centre cells.
+struct RowEnds<'f> {
+    field: &'f Field,
+    exact: &'f exact::Exact,
+    support: &'f Bits,
+    centers: &'f Bits,
 }
 
 /// Rows of the common build-frame support lattice: line `k` lies at
@@ -169,6 +307,7 @@ fn hatch(
     kind: DepositionKind,
     fraction: f64,
     layer: &region::HatchLayer<'_>,
+    ends: Option<RowEnds<'_>>,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     cancel: &AtomicBool,
@@ -216,6 +355,18 @@ fn hatch(
         let coordinate = index * spacing;
         hits.clear();
         raster.line_runs(domain, fixed, coordinate, &mut hits)?;
+        if let Some(ends) = &ends {
+            exact::extend_runs(
+                raster,
+                ends.support,
+                ends.centers,
+                ends.field,
+                ends.exact,
+                fixed,
+                coordinate,
+                &mut hits,
+            );
+        }
         region::append_hatch_row(
             &hits,
             coordinate,

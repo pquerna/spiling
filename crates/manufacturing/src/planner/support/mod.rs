@@ -25,6 +25,7 @@ pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
 mod contact_extensions;
 mod established;
+mod field;
 pub(in crate::planner) mod projection;
 mod raster;
 mod sweep;
@@ -1522,12 +1523,28 @@ pub(super) fn realize(
                 contact_tops[target] = top;
             }
         }
+        let tops = output.tops;
+        // A layer holding relieved roof-access support takes no exact
+        // clearance field: that support enters its void.
+        let mut relieved_layers = Vec::new();
+        reserve_owned(&mut relieved_layers, layers.len(), owned_bytes)?;
+        relieved_layers.resize(layers.len(), false);
         for (ordinal, layer, column) in output.access {
+            relieved_layers[layer] = true;
             scopes[ordinal].record_access(layer, column);
         }
+        let mut void_heights = Vec::new();
+        reserve_owned(&mut void_heights, scopes.len(), owned_bytes)?;
+        void_heights.extend(
+            protected
+                .0
+                .iter()
+                .zip(&scopes)
+                .map(|(mask, scope)| (mask, scope.height)),
+        );
         // Final clearance asserts emitted support against these kept cells;
         // they stay admitted until it consumes them.
-        let kept = output.kept;
+        let mut kept = output.kept;
         support_metadata_bytes += kept.bytes();
         // The sweep's proposals do not grant final landing authority.
         let part_contacts = output.part_contacts;
@@ -1571,6 +1588,19 @@ pub(super) fn realize(
                 super::remaining_geometry_units(base_retained, base_owned.saturating_add(extra))
                     .map(|_| ())
             };
+            let exclusions = sweep::Exclusions {
+                layers,
+                sections,
+                schedule,
+                kept: &kept,
+                voids: &void_heights,
+                tops: &tops,
+                relieved: &relieved_layers,
+                distance: frame.distance,
+                frame_bounds: frame.bounds,
+                requested: xy_clearance_mm,
+                gap: selection_gap_mm,
+            };
             let built: Vec<Result<Option<_>, ManufacturingError>> = match grid_frame {
                 None => Vec::new(),
                 Some(frame) => {
@@ -1584,7 +1614,8 @@ pub(super) fn realize(
                     let built = grids
                         .par_iter()
                         .zip(&hatches)
-                        .map(|(grid, &(z, lower_z, axis))| {
+                        .enumerate()
+                        .map(|(l, (grid, &(z, lower_z, axis)))| {
                             let Some(grid) = grid else {
                                 return Ok(None);
                             };
@@ -1600,10 +1631,14 @@ pub(super) fn realize(
                                     top_axis: axis,
                                     recipe,
                                 };
+                                let feed = |builder: &mut field::FieldBuilder<'_, '_>| {
+                                    exclusions.feed(l, builder, cancel)
+                                };
                                 raster::paths(
                                     &raster,
                                     &grid.support,
                                     &grid.interface,
+                                    Some(&feed),
                                     density,
                                     &hatch,
                                     0,
@@ -1631,7 +1666,9 @@ pub(super) fn realize(
                     units = paths.iter().fold(units, |total, path| {
                         total.saturating_add(path.points_mm.capacity())
                     });
-                    bytes = bytes.saturating_add(super::bonds::path_bytes(&paths));
+                    bytes = bytes
+                        .saturating_add(super::bonds::path_bytes(&paths))
+                        .saturating_add(receipt.certified.bytes());
                     (paths, receipt, local)
                 });
                 if let Some((_, _, local)) = &staged {
@@ -1728,6 +1765,19 @@ pub(super) fn realize(
                 wall_receipt.paths = kept.paths;
                 wall_receipt.omitted_mm += kept.omitted_mm;
             }
+            // Final clearance keeps the cells the raster proved clear exactly.
+            let certified = std::mem::take(&mut wall_receipt.certified);
+            if !certified.is_empty() {
+                let admit = |extra: usize| {
+                    super::remaining_geometry_units(
+                        retained_domains,
+                        live_bytes.saturating_add(extra),
+                    )
+                    .map(|_| ())
+                };
+                support_metadata_bytes += kept.certify(i, &certified, cancel, &admit)?;
+            }
+            drop(certified);
             layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
             support_wall_paths[i] = wall_receipt.paths;
             *segments = segments
