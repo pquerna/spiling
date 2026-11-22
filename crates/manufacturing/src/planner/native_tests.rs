@@ -2093,7 +2093,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             .split_whitespace()
             .map(|token| {
                 if let Some(value) = token.strip_prefix(field) {
-                    let decimals = if field == 'E' { 5 } else { 3 };
+                    let decimals = if field == 'E' { 6 } else { 3 };
                     format!(
                         "{field}{:.*}",
                         decimals,

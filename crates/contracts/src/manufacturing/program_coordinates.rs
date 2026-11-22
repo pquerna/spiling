@@ -4,7 +4,7 @@
 //! Coordinate representation explicitly adopted by CartesianAbsoluteGcodeV1,
 //! Marlin2SingleExtruderGcodeV1 and Marlin2FixedDualGcodeV1: Cartesian
 //! millimetres written with three decimal places (micrometres, finer than any
-//! supported printer's motor step), extrusion with five and feed with one.
+//! supported printer's motor step), extrusion with six and feed with one.
 //! This is not a generic plan-rounding policy for future output dialects.
 //! Serialization/planning remain manufacturing-backend responsibilities.
 
@@ -18,12 +18,12 @@ pub const PROGRAM_XYZ_SCALE: f64 = 1_000.0;
 /// is a multiple of its reciprocal is exactly representable in binary.
 const PROGRAM_XYZ_DYADIC: f64 = 8.0;
 /// Decimal places of an emitted E word.
-pub const PROGRAM_E_DECIMALS: usize = 5;
+pub const PROGRAM_E_DECIMALS: usize = 6;
 /// Extrusion lattice points per millimetre of filament.
-pub const PROGRAM_E_TICKS: u64 = 100_000;
+pub const PROGRAM_E_TICKS: u64 = 1_000_000;
 pub const PROGRAM_E_SCALE: f64 = PROGRAM_E_TICKS as f64;
 /// Largest power of two dividing [`PROGRAM_E_SCALE`].
-pub const PROGRAM_E_DYADIC: f64 = 32.0;
+pub const PROGRAM_E_DYADIC: f64 = 64.0;
 /// Decimal places of an emitted F word, and its lattice points per mm/min.
 pub const PROGRAM_F_DECIMALS: usize = 1;
 pub const PROGRAM_F_SCALE: f64 = 10.0;

@@ -1634,9 +1634,12 @@ pub(crate) fn verify_actual(
                 // A bead's lateral error is in XY; its Z is enclosed by the
                 // bead height checks.
                 let lateral = |a: [f64; 3], b: [f64; 3]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                // An arc replays through its rounded I/J centre, which moves
+                // the decoded curve up to half a step on each axis on its own.
+                let centre_rounding = std::f64::consts::SQRT_2 * XYZ_HALF_STEP;
                 let center_error = lateral(source, from)
                     .max(lateral(target, position))
-                    .max(arc_segment.map_or(0.0, |arc| arc.deviation));
+                    .max(arc_segment.map_or(0.0, |arc| (arc.deviation - centre_rounding).max(0.0)));
                 // The E words must be able to represent a width inside the
                 // printer's limits.
                 if represented[1] < printer.deposition_limits.min_bead_width_mm
@@ -1917,11 +1920,11 @@ pub(crate) fn verify_actual(
                 spiling_geometry::KERNEL_APPROXIMATION_TOLERANCE_MM,
             ),
             "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
-            "Ordered travel/deposition completeness; XYZ3 <=0.0005 mm/axis, E5 <=0.000005 mm absolute / 0.00001 mm delta, F1 <=0.05 mm/min; scale-aware floating roundoff only".into(),
+            "Ordered travel/deposition completeness; XYZ3 <=0.0005 mm/axis, E6 <=0.0000005 mm absolute / 0.000001 mm delta, F1 <=0.05 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
             "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); explicit Grid two-axis and Cathedral room construction; immutable closed-wall seam policy and deterministic projected tie ordering".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
-            "Actual XYZ3 minimum deposition length and independently inverted XYZ3/E5 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
+            "Actual XYZ3 minimum deposition length and independently inverted XYZ3/E6 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
             "Support roots (when present): matched actual XYZ6 bed, preceding support or established earlier-part capsules; separated lower contacts without source requery".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),

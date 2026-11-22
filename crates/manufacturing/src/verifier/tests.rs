@@ -658,7 +658,7 @@ fn actual_emitted_motion_rejects_independent_tampering() {
         .find(|word| word.starts_with('F'))
         .unwrap();
     for tampered in [
-        program.replacen(first_move, &first_move.replace(e, "E99999.00000"), 1),
+        program.replacen(first_move, &first_move.replace(e, "E99999.000000"), 1),
         program.replacen(first_move, &first_move.replace(x, "X99.000"), 1),
         program.replacen(first_move, &first_move.replace(f, "F0.0"), 1),
         program.replacen(&format!("{first_move}\n"), "", 1),
@@ -708,7 +708,7 @@ fn command_mutations_cannot_hide_behind_a_preview_or_verified_flag() {
         ("overextrusion", GOLDEN.replacen("E1 F600", "E1.1 F600", 1)),
         (
             "small E tampering",
-            GOLDEN.replacen("E1 F600", "E1.00001 F600", 1),
+            GOLDEN.replacen("E1 F600", "E1.000010 F600", 1),
         ),
         ("retraction", GOLDEN.replacen("E2 F600", "E0.5 F600", 1)),
         ("zero extrusion", GOLDEN.replacen("E2 F600", "E1 F600", 1)),
@@ -994,7 +994,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
     );
     let e = length * (0.25 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) / std::f64::consts::PI;
     let program = format!(
-        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.011 Y1.016 Z0.2 E{e:.5} F300\n"
+        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.011 Y1.016 Z0.2 E{e:.6} F300\n"
     );
     assert_eq!(
         verify(&program, &plan, &intent, &AtomicBool::new(false))
@@ -1017,10 +1017,10 @@ fn decoded_width_cannot_borrow_the_nominal_width_association() {
         exposed: false,
         connectors: Vec::new(),
     });
-    // The nominal 0.45 mm stroke needs E0.00777; E0.00816 inverts to about
+    // The nominal 0.45 mm stroke needs E0.007770; E0.008160 inverts to about
     // 0.47 mm, far beyond what E rounding could represent.
     let program =
-        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.3 Y1 Z0.2 E0.00816 F300\n";
+        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.3 Y1 Z0.2 E0.008160 F300\n";
     let error = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 }
@@ -1580,7 +1580,7 @@ fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations(
         ("M83\n", "M82\n"),
         ("M83\n", ""),
         ("G90\n", "G91\n"),
-        ("E1.00000", "E2.00000"),
+        ("E1.000000", "E2.000000"),
         ("G28", "START_PRINT"),
         ("M107", "M106 S255"),
     ] {
@@ -1897,7 +1897,7 @@ G1 E1.2 F900
 G1 X11 Y1 Z1 E1.8 F300
 M106 S220
 G0 X11 Y1 Z1.5 F1200
-G1 X15 Y1 Z1.5 E2.25465 F240
+G1 X15 Y1 Z1.5 E2.254650 F240
 ";
 
 fn packed_process_descriptor(
@@ -2026,8 +2026,8 @@ fn independently_rejects_cooling_recovery_first_layer_bridge_and_hop_mutations()
         ("Z1.25 F1200", "Z1.5 F1200"),
         ("E0.6 F300", "E0.6 F600"),
         ("E0.6 F300", "E0.5 F300"),
-        ("E2.25465 F240", "E2.25465 F600"),
-        ("E2.25465 F240", "E2.36831 F240"),
+        ("E2.254650 F240", "E2.254650 F600"),
+        ("E2.254650 F240", "E2.368310 F240"),
     ] {
         let mutated = PROCESS_GOLDEN.replacen(from, to, 1);
         assert_ne!(mutated, PROCESS_GOLDEN);
@@ -2719,7 +2719,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
         assert_eq!(report.filament_length_mm, 6.0);
         if minimum_travel_mm == 1.0 {
             assert_eq!(report.retraction_count, 2);
-            assert!(emitted.contains("G1 E-6.00000 F900.0\n"));
+            assert!(emitted.contains("G1 E-6.000000 F900.0\n"));
         } else {
             assert_eq!(report.retraction_count, 0);
         }
@@ -3515,7 +3515,7 @@ fn minimum_skin_command_preserves_required_material_and_replays_actual_extra_vol
     let (intent, mut plan) = minimum_skin_fixture();
     // Independent circular-bead numeric golden: E = commanded length / 4.
     let program =
-        "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2.022 Y2 Z1 E0.00550 F600\n";
+        "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2.022 Y2 Z1 E0.005500 F600\n";
     let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
     assert!((report.deposited_volume_mm3 - 0.022 * std::f64::consts::PI / 4.0).abs() < 1e-12);
     assert!(report.deposited_volume_mm3 > 0.01 * std::f64::consts::PI / 4.0);
@@ -4216,7 +4216,7 @@ fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_m
         ("G92 E0\n", ""),
         ("M109 T1 R200.0", "M104 T1 S200.0"),
         ("M109 T1 R200.0", "M109 T0 R200.0"),
-        ("G1 E0.60000 F1500.0", "G1 E0.50000 F1500.0"),
+        ("G1 E0.600000 F1500.0", "G1 E0.500000 F1500.0"),
         ("G1 X80.000 Y160.000", "G1 X80.000 Y159.000"),
         ("M104 T1 S0\n", ""),
     ] {

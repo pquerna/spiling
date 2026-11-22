@@ -3299,7 +3299,8 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         }
         assert_eq!(
             f64::from_le_bytes(record[24..32].try_into().unwrap()),
-            (expected_extrusion * spiling_contracts::manufacturing::program_coordinates::PROGRAM_E_SCALE)
+            (expected_extrusion
+                * spiling_contracts::manufacturing::program_coordinates::PROGRAM_E_SCALE)
                 .round()
                 / spiling_contracts::manufacturing::program_coordinates::PROGRAM_E_SCALE
         );
@@ -3868,7 +3869,7 @@ fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
             },
         ),
         // Material that does not match the arc's length.
-        swap(format!("E{e:.5}"), format!("E{:.5}", e + 0.001)),
+        swap(format!("E{e:.6}"), format!("E{:.6}", e + 0.001)),
         // The arc cut short: its chords would be skipped.
         swap(first_arc.clone(), String::new()),
     ];

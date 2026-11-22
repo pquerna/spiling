@@ -392,7 +392,7 @@ impl Clearance {
                                 GeometryErrorCode::ResourceLimit => return ManufacturingError::new(ManufacturingErrorCode::ResourceLimit, error.message),
                                 _ => {}
                             }
-                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}", support.layer, support.line, model.layer, model.line))
+                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}; support {:?} r={} e={}, model {:?} r={} e={}, gap {}", support.layer, support.line, model.layer, model.line, capsule.segment_xy_mm, capsule.radius_mm, capsule.endpoint_error_mm, model_capsule.segment_xy_mm, model_capsule.radius_mm, model_capsule.endpoint_error_mm, self.xy_gap))
                         })?;
                 }
             }

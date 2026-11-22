@@ -566,7 +566,7 @@ fn emit_body(
             count_event(&mut travels)?;
         }
         count_event(&mut process_events)?;
-        writeln!(program, "M400\nG1 E{rounded:.5} F{:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
+        writeln!(program, "M400\nG1 E{rounded:.6} F{:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
     if let Some(survey) = &bambu {
@@ -610,13 +610,13 @@ enum ExtrusionWord {
 impl fmt::Display for ExtrusionWord {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Absolute(target) => write!(out, "{target:.5}"),
+            Self::Absolute(target) => write!(out, "{target:.6}"),
             Self::Relative(units) => {
                 let sign = if units < 0 { "-" } else { "" };
                 let magnitude = units.unsigned_abs();
                 write!(
                     out,
-                    "{sign}{}.{:05}",
+                    "{sign}{}.{:06}",
                     magnitude / PROGRAM_E_TICKS,
                     magnitude % PROGRAM_E_TICKS
                 )
