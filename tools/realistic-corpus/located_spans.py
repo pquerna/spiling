@@ -18,6 +18,7 @@ METRIC = "nominal-lower-road-centerline-v1"
 Z_EPSILON_MM = 0.001
 EPS = 1e-9
 CELL_MM = 4.0
+PRUSA_EXCESS_TOLERANCE_MM = 0.275
 PRUSA_SUPPORT = {"Support material", "Support material interface"}
 PRUSA_BRIDGE = {"Bridge infill", "Internal bridge infill"}
 PRUSA_FLOW_HEIGHT = PRUSA_BRIDGE | {"Overhang perimeter"}
@@ -435,15 +436,19 @@ def prusa_regions(roads, spans, shift, support_gap, bridge_limit):
             rank = (unsupported_mm, model_mm, -abs(delta_z), -layer)
             if ordinal in best and best[ordinal][0] >= rank:
                 continue
+            excess = max(0.0, length - unsupported_mm)
             assessment = ("partial_reference_coverage" if model_mm + EPS < length else
-                          "acceptable" if unsupported_mm + EPS >= length else "longer_than_prusa")
-            best[ordinal] = rank, {
+                          "longer_than_prusa" if excess > PRUSA_EXCESS_TOLERANCE_MM + EPS else "acceptable")
+            match = {
                 "status": "unsupported" if unsupported_mm > EPS else "supported",
                 "prusa_layer": layer, "prusa_physical_z_mm": prusa_z,
                 "z_delta_mm": delta_z, "z_window_mm": window, "model_overlap_mm": model_mm,
                 "unsupported_span_mm": unsupported_mm, "assessment": assessment,
                 "reference_gap": gaps[-witness[2]][0] if witness is not None else None,
             }
+            if assessment == "longer_than_prusa":
+                match["excess_mm"] = excess
+            best[ordinal] = rank, match
     return [best[ordinal][1] if ordinal in best else {"status": "no_geometry"}
             for ordinal in range(len(spans))]
 

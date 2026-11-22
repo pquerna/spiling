@@ -149,16 +149,19 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(witness["status"], "supported")
 
     def test_coverage_gate_uses_prusa_region_without_any_native_control(self):
-        cases = [("longer", 8, 0, True, "longer_registered_spans_than_prusa", "supported"),
-                 ("same", 4, 0, True, None, "unsupported"),
-                 ("absent", 4, 2, True, None, "no_geometry"),
-                 ("missing", 4, 0, False, "missing_registered_prusa_coverage", None)]
+        cases = [("longer", 8, 0, 4, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("above", 8, 0, 0.276, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("equal", 8, 0, 0.275, True, None, "supported"),
+                 ("below", 8, 0, 0.274, True, None, "supported"),
+                 ("same", 4, 0, 4, True, None, "unsupported"),
+                 ("absent", 4, 2, 4, True, None, "no_geometry"),
+                 ("missing", 4, 0, 4, False, "missing_registered_prusa_coverage", None)]
         with TemporaryDirectory() as directory:
             corpus = Path(directory)
             step = corpus / "part.step"
             step.write_text("source")
             sha = panel_coverage.audit.digest(step)
-            for case, limit, offset, reference, refusal, match in cases:
+            for case, limit, offset, length, reference, refusal, match in cases:
                 with self.subTest(case=case):
                     work = corpus / case / "work/part.step"
                     export = work / "return/out"
@@ -172,9 +175,9 @@ class LocatedSpanTests(unittest.TestCase):
                         "definitions": [{"record": {"provenance": {"source_hash": sha}}}]}))
                     (export / "plan.json").write_text(json.dumps({"layers": [{
                         "index": 1, "lower_z_mm": 0.2, "z_mm": 0.4,
-                        "region_coverage": {"unsupported_overhang_mm": 4}, "paths": [{
+                        "region_coverage": {"unsupported_overhang_mm": length}, "paths": [{
                             "kind": "bottom_skin", "physical_z_mm": [0.2, 0.4],
-                            "points_mm": [[2, offset, 0.4], [6, offset, 0.4]],
+                            "points_mm": [[2, offset, 0.4], [2 + length, offset, 0.4]],
                             "width": {"kind": "constant", "width_mm": 0.4}}]}]}))
                     row = {"part": "part.step", "sha256": sha, "source_absent": True,
                            "spiling_compile": {"ok": True}, "spiling_return": {"ok": True},
@@ -191,7 +194,16 @@ class LocatedSpanTests(unittest.TestCase):
                     result, = summary["cases"]
                     self.assertEqual(result["failures"], [refusal] if refusal else [])
                     if match:
-                        self.assertEqual(result["prusa_located"]["span_counts"], {match: 1})
+                        comparison = result["prusa_located"]
+                        self.assertEqual(comparison["span_counts"], {match: 1})
+                        self.assertEqual(comparison["failing_spans"], int(bool(refusal)))
+                        if refusal:
+                            evidence = Path(comparison["failure_evidence"]["path"])
+                            recorded, = map(json.loads, evidence.read_text().splitlines())
+                            self.assertEqual(comparison["worst_longer_spans"], [recorded])
+                            self.assertAlmostEqual(recorded["excess_mm"], length)
+                            self.assertEqual(recorded["prusa_span_mm"], 0)
+                            self.assertEqual(comparison["all_failures_below_one_mm"], length < 1)
                     if match == "no_geometry":
                         self.assertEqual(result["prusa_coverage_warning"], "no_full_span_comparisons")
 

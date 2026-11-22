@@ -35,9 +35,10 @@ within one grid cell plus half a bead. Native deltas, plan disagreement and
 support filament drops above 5% are not coverage-gate failures.
 Breakaway Prusa runs gate all native observer spans against Prusa's model
 bead and unsupported footprints, using XY overlap on any single Prusa layer
-within the larger local layer height. A fully registered longer native span
-fails; partial registration and absent Prusa model geometry are reported
-without a parity claim. Located evidence is kept in located-spans.ndjson.
+within the larger local layer height. A fully registered span fails when its
+excess over Prusa exceeds 0.275 mm. Partial registration and absent Prusa
+model geometry are reported without a parity claim. Located spans and each
+failing span's excess are kept in per-case NDJSON evidence.
 The common lower-bead observer runs outside slice/reopen timings and does
 not qualify physical printability.
 """

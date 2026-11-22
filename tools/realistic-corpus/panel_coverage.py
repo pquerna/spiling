@@ -3,7 +3,9 @@
 from collections import Counter, defaultdict, deque
 import json
 import math
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import audit
 import located_spans
@@ -382,11 +384,28 @@ def prusa_frame(row, work, receipt):
             "xy_extent_difference_mm": extent_error, "placement": "recorded_bed_centers"}
 
 
-def prusa_located_comparison(corpus, row, receipt, spans, comparison):
+def write_prusa_failures(output, failures):
+    output = Path(output)
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            for span in failures:
+                stream.write(json.dumps(span, allow_nan=False, separators=(",", ":")) + "\n")
+        os.link(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"path": str(output.resolve()), "sha256": audit.digest(output)}
+
+
+def prusa_located_comparison(corpus, row, receipt, spans, comparison, failure_output=None):
+    tolerance = located_spans.PRUSA_EXCESS_TOLERANCE_MM
     if comparison["status"] != "observed_unregistered":
         return {"status": comparison["status"], "comparable_spans": 0, "unresolved_spans": len(spans)}
     if not spans:
-        return {"status": "no_native_spans", "comparable_spans": 0}
+        return {"status": "no_native_spans", "comparable_spans": 0,
+                "excess_tolerance_mm": tolerance, "failing_spans": 0}
     work = Path(corpus) / "work" / row["part"]
     try:
         frame = prusa_frame(row, work, receipt)
@@ -405,14 +424,25 @@ def prusa_located_comparison(corpus, row, receipt, spans, comparison):
         span["prusa_located"] = witness
     counts = Counter(witness["status"] for witness in witnesses)
     assessments = Counter(witness["assessment"] for witness in witnesses if "assessment" in witness)
-    worse = [span for span in spans if span["prusa_located"].get("assessment") == "longer_than_prusa"]
-    worse.sort(key=lambda span: (-(span["length_mm"] - span["prusa_located"]["unsupported_span_mm"]),
-                                 span["layer"], span["road"]))
-    return {"status": "compared", "span_counts": dict(counts),
-            "comparable_spans": counts["supported"] + counts["unsupported"],
-            "full_span_comparisons": assessments["acceptable"] + assessments["longer_than_prusa"],
-            "assessments": dict(assessments), "worst_longer_spans": worse[:3],
-            "registration": "model_bead_footprints_within_one_layer_height", **frame}
+    failures = [{"layer": span["layer"], "road": span["road"], "role": span["role"],
+                 "physical_z_mm": span["physical_z_mm"], "points_mm": span["points_mm"],
+                 "native_span_mm": span["length_mm"], "prusa_span_mm": witness["unsupported_span_mm"],
+                 "prusa_layer": witness["prusa_layer"], "excess_mm": witness["excess_mm"]}
+                for span, witness in zip(spans, witnesses, strict=True) if "excess_mm" in witness]
+    failures.sort(key=lambda span: (-span["excess_mm"], span["layer"], span["road"]))
+    result = {"status": "compared", "span_counts": dict(counts),
+              "comparable_spans": counts["supported"] + counts["unsupported"],
+              "full_span_comparisons": assessments["acceptable"] + assessments["longer_than_prusa"],
+              "assessments": dict(assessments), "excess_tolerance_mm": tolerance,
+              "failing_spans": len(failures), "worst_longer_spans": failures[:3],
+              "all_failures_below_one_mm": bool(failures) and failures[0]["excess_mm"] < 1,
+              "registration": "model_bead_footprints_within_one_layer_height", **frame}
+    if failures and failure_output is not None:
+        try:
+            result["failure_evidence"] = write_prusa_failures(failure_output, failures)
+        except OSError as error:
+            result.update(status="unresolved", detail=str(error))
+    return result
 
 
 def summary(cases, records, receipt, corpus, control_results=None, off_results=None):
@@ -471,11 +501,13 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                     entry[f"reported_{field}"] = entry[field]
                     entry[field] = candidate_observed[field]
         if prusa_gate and after is not None:
-            reference = prusa_located_comparison(corpus, row, receipt, after, entry["prusa_span_comparison"])
+            reference = prusa_located_comparison(
+                corpus, row, receipt, after, entry["prusa_span_comparison"],
+                Path(corpus) / "work" / name / "prusa-coverage-failures.ndjson")
             entry["prusa_located"] = reference
             if reference["status"] not in {"compared", "no_native_spans"}:
                 entry["failures"].append("missing_registered_prusa_coverage")
-            elif reference.get("worst_longer_spans"):
+            elif reference["failing_spans"]:
                 entry["failures"].append("longer_registered_spans_than_prusa")
             elif after and not reference["full_span_comparisons"]:
                 entry["prusa_coverage_warning"] = "no_full_span_comparisons"
