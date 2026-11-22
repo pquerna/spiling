@@ -237,6 +237,21 @@ where
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Admission, ManufacturingError> {
+        self.analyze_reusing(paths, recipe, anchors, work, cancel, |_, _| None)
+    }
+
+    /// `reuse` returns the bridge verdict only for an already admitted path
+    /// under these exact lower operands and recipe. Analyze every other path
+    /// in order so the failing-run selection is unchanged.
+    pub(super) fn analyze_reusing(
+        &mut self,
+        paths: &[DepositionPath],
+        recipe: &PlanarPrintRecipe,
+        anchors: &mut AnchorWorkspace,
+        work: &mut usize,
+        cancel: &AtomicBool,
+        mut reuse: impl FnMut(usize, &DepositionPath) -> Option<bool>,
+    ) -> Result<Admission, ManufacturingError> {
         let mut result = Admission {
             bridges: Vec::new(),
             unanchored: Vec::new(),
@@ -256,6 +271,12 @@ where
         let mut prepared = if admitted { inventory.as_mut() } else { None };
         for (path_index, path) in paths.iter().enumerate() {
             check_cancel(cancel)?;
+            if let Some(bridge) = reuse(path_index, path) {
+                if bridge {
+                    result.bridges.push(path_index);
+                }
+                continue;
+            }
             let mut has_bridge = false;
             let mut unanchored = false;
             // A curved Gyroid road cannot become a taut straight bridge merely

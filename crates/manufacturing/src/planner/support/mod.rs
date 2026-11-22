@@ -1142,15 +1142,22 @@ pub(super) fn realize(
                     let other = if candidate.paths == layer.paths {
                         admission.clone()
                     } else {
-                        strokes::analyze(
-                            &candidate.paths,
-                            previous.clone(),
-                            std::iter::empty(),
-                            recipe,
-                            &mut anchors,
-                            &mut anchor_work,
-                            cancel,
-                        )?
+                        let mut failed = admission.unanchored.iter().copied().peekable();
+                        let mut bridges = admission.bridges.iter().copied().peekable();
+                        strokes::LowerStrokes::new(previous.clone(), std::iter::empty())
+                            .analyze_reusing(
+                                &candidate.paths,
+                                recipe,
+                                &mut anchors,
+                                &mut anchor_work,
+                                cancel,
+                                |index, path| {
+                                    let failed = failed.next_if_eq(&index).is_some();
+                                    let bridge = bridges.next_if_eq(&index).is_some();
+                                    (!failed && layer.paths.get(index) == Some(path))
+                                        .then_some(bridge)
+                                },
+                            )?
                     };
                     split.stop(
                         if recover_components {
