@@ -718,7 +718,7 @@ fn stage_around(
 /// The clearance staged walls and row ends are placed at, for a bead whose
 /// own emitted centre clearance is `bead`.
 fn placement_level(bead: f64) -> f64 {
-    bead + exact::VERIFIER_ENCLOSURE_MM + exact::CONTOUR_MARGIN_MM
+    bead + exact::PROJECTION_MOVE_MM + exact::CONTOUR_MARGIN_MM
 }
 
 /// Every staged edge whose bead leaves the kept cells carries an exact

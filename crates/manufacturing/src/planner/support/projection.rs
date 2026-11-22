@@ -1,6 +1,18 @@
 use super::*;
 use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
 
+fn enclosed_gap(requested: f64) -> f64 {
+    (requested + raster::exact::VERIFIER_ENCLOSURE_MM).next_up()
+}
+
+pub(super) fn void_placement_distance(
+    mask: &Polygon<f64>,
+    bounds: [[f64; 2]; 2],
+    requested: f64,
+) -> Result<Option<f64>, ManufacturingError> {
+    candidate_clearance_distance_in_bounds(mask, Some(bounds), enclosed_gap(requested))
+}
+
 pub(in crate::planner) struct Frame {
     #[cfg(test)]
     bounds: [[f64; 2]; 2],
@@ -58,9 +70,8 @@ impl Frame {
         // beyond the requested gap, as exact walls do; otherwise grid-placed
         // support could clear the planned object bead but not its decoded
         // (rounded, arc-replayed) one.
-        let enclosure = super::raster::exact::VERIFIER_ENCLOSURE_MM;
-        let clearance_envelope = (clearance_distance_in_frame(bounds, bounds, requested)?
-            + enclosure
+        let gap = enclosed_gap(requested);
+        let clearance_envelope = (clearance_distance_in_frame(bounds, bounds, gap)?
             + super::super::OFFSET_TOLERANCE_MM)
             .next_up();
         let margin = input.recipe.bead_width_mm / 2.0
@@ -90,8 +101,7 @@ impl Frame {
                 "support clearance work frame is too coarse for the offset tolerance",
             ));
         }
-        let distance =
-            (clearance_distance_in_frame(bounds, bounds, requested)? + enclosure).next_up();
+        let distance = clearance_distance_in_frame(bounds, bounds, gap)?;
         if distance > clearance_envelope {
             return Err(error(
                 ManufacturingErrorCode::NativeConditioningFailure,

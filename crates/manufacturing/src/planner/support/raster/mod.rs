@@ -267,11 +267,7 @@ fn certify(
                     program_coordinates::project_xyz6_coordinate_mm(b[1])?,
                 ],
             ];
-            // A certificate covers a nominal radius (with its endpoint
-            // enclosure) only beyond the verifier's decoded enclosures of
-            // both beads.
-            let radius = field.segment_clearance(segment[0], segment[1], &mut work)
-                - exact::VERIFIER_ENCLOSURE_MM;
+            let radius = field.segment_clearance(segment[0], segment[1], &mut work);
             if radius > 0.0 {
                 raster.reserve(&mut certified, 1)?;
                 certified.push(super::sweep::CertifiedEdge {

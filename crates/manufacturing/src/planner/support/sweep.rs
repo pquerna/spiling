@@ -874,14 +874,10 @@ impl Sweep<'_> {
                     }
                     // A void's clearance depends only on the void; build it once.
                     if voids[ordinal].is_none() {
-                        let clearance = match candidate_clearance_distance_in_bounds(
-                            mask,
-                            Some(cell_bounds),
-                            self.requested,
-                        )? {
-                            Some(distance) => Some(raster.outward([mask], distance)?),
-                            None => None,
-                        };
+                        let clearance =
+                            projection::void_placement_distance(mask, cell_bounds, self.requested)?
+                                .map(|distance| raster.outward([mask], distance))
+                                .transpose()?;
                         if let Some(bits) = &clearance {
                             hold(bits)?;
                         }
@@ -1596,7 +1592,7 @@ impl Exclusions<'_> {
                 continue;
             }
             if let Some(distance) =
-                candidate_clearance_distance_in_bounds(mask, Some(frame.bounds()), self.requested)?
+                projection::void_placement_distance(mask, frame.bounds(), self.requested)?
             {
                 builder.polygon(mask, distance)?;
             }
@@ -1966,6 +1962,24 @@ mod tests {
         let (excluded, _, _) = builder.build(0).unwrap();
         assert!(raster.holds_all(&excluded, probe));
         assert!(!raster.holds_all(&excluded, [probe[0], 1.075]));
+    }
+
+    #[test]
+    fn void_boundary_screen_includes_exactly_one_decoded_enclosure() {
+        let mask = Rect::new(coord! { x: 0.0, y: 0.0 }, coord! { x: 1.0, y: 1.0 }).to_polygon();
+        let requested = 0.3;
+        let enclosure = raster::exact::VERIFIER_ENCLOSURE_MM;
+        let mask_bounds = [[0.0, 0.0], [1.0, 1.0]];
+        let near = [[1.0 + requested + enclosure * 0.5, 0.0], [2.0, 1.0]];
+        assert_eq!(
+            candidate_clearance_distance_in_bounds(&mask, Some(near), requested).unwrap(),
+            None
+        );
+        let distance = projection::void_placement_distance(&mask, near, requested)
+            .unwrap()
+            .unwrap();
+        let base = clearance_distance_in_frame(mask_bounds, near, requested).unwrap();
+        assert!((distance - base - enclosure).abs() < 1.0e-7);
     }
 
     #[test]
