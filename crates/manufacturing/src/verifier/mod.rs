@@ -895,6 +895,7 @@ pub(crate) fn verify_actual(
     let mut first_wall_edge = None;
     let mut previous_wall_edge = None;
 
+    let mut vclock = crate::timing::Clock::new("verifier");
     let mut lines = ProgramLines::new(program.reader());
     'lines: while let Some((line_index, line)) = lines.next()? {
         cancelled(cancel)?;
@@ -1738,6 +1739,7 @@ pub(crate) fn verify_actual(
         }
     }
     cancelled(cancel)?;
+    vclock.mark("decode");
     let remaining = expected.next().transpose()?;
     if setup_index != setup_len
         || remaining.is_some()
@@ -1763,55 +1765,82 @@ pub(crate) fn verify_actual(
         verify_region_volume(layer, 0.0, 0.0)?;
     }
     adhesion::verify(plan, recipe, cancel)?;
-    let mut geometry_work = 0usize;
-    let clearance_receipt = if let Some(grid) = support_grid {
-        grid.verify_ancestry(plan, recipe, &mut geometry_work, cancel)?;
-        Some(grid.verify(&mut geometry_work, cancel)?)
-    } else {
-        None
-    };
-    let mut anchors = crate::planner::support::AnchorWorkspace::default();
-    let mut plate_contacts = Vec::new();
-    interfaces::verify_two_axis_sparse(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    cathedral::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    connectors::verify(plan, &mut geometry_work, cancel)?;
-    interfaces::verify_projected_byte_geometry(
-        plan,
-        recipe,
-        &mut geometry_work,
-        &mut anchors,
-        cancel,
-    )?;
-    diaphragms::verify(
-        plan,
-        recipe,
-        &mut geometry_work,
-        &mut anchors,
-        &mut plate_contacts,
-        cancel,
-    )?;
-    drop(plate_contacts);
-    skin_bridges::verify(
-        plan,
-        recipe,
-        &alternation,
-        &mut geometry_work,
-        &mut anchors,
-        cancel,
-    )?;
-    skin_commands::verify(
-        plan,
-        recipe,
-        &alternation,
-        &mut geometry_work,
-        &mut anchors,
-        cancel,
-    )?;
-    construction::verify(plan, &mut geometry_work, cancel)?;
-    joins::verify(plan, intent, &alternation, &mut geometry_work, cancel)?;
-    // After row construction, so a missing or shifted row reports as such.
-    bridge_split::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    // The support grid's ancestry and clearance replay and the remaining
+    // geometry checks read the same decoded plan and nothing of each other,
+    // so they run concurrently; errors still report in this fixed order.
+    let working_set = crate::working_set::current();
+    let (grid_checked, geometry_checked) = rayon::join(
+        || {
+            crate::working_set::scope(working_set, || {
+                let mut work = 0usize;
+                let receipt = match support_grid {
+                    Some(grid) => {
+                        grid.verify_ancestry(plan, recipe, &mut work, cancel)?;
+                        Some(grid.verify(&mut work, cancel)?)
+                    }
+                    None => None,
+                };
+                Ok::<_, ManufacturingError>((receipt, work))
+            })
+        },
+        || {
+            crate::working_set::scope(working_set, || {
+                let mut geometry_work = 0usize;
+                let mut anchors = crate::planner::support::AnchorWorkspace::default();
+                let mut plate_contacts = Vec::new();
+                interfaces::verify_two_axis_sparse(
+                    plan,
+                    recipe,
+                    &mut geometry_work,
+                    &mut anchors,
+                    cancel,
+                )?;
+                gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+                cathedral::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+                connectors::verify(plan, &mut geometry_work, cancel)?;
+                interfaces::verify_projected_byte_geometry(
+                    plan,
+                    recipe,
+                    &mut geometry_work,
+                    &mut anchors,
+                    cancel,
+                )?;
+                diaphragms::verify(
+                    plan,
+                    recipe,
+                    &mut geometry_work,
+                    &mut anchors,
+                    &mut plate_contacts,
+                    cancel,
+                )?;
+                drop(plate_contacts);
+                skin_bridges::verify(
+                    plan,
+                    recipe,
+                    &alternation,
+                    &mut geometry_work,
+                    &mut anchors,
+                    cancel,
+                )?;
+                skin_commands::verify(
+                    plan,
+                    recipe,
+                    &alternation,
+                    &mut geometry_work,
+                    &mut anchors,
+                    cancel,
+                )?;
+                construction::verify(plan, &mut geometry_work, cancel)?;
+                joins::verify(plan, intent, &alternation, &mut geometry_work, cancel)?;
+                // After row construction, so a missing or shifted row reports as such.
+                bridge_split::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+                Ok::<_, ManufacturingError>(geometry_work)
+            })
+        },
+    );
+    let (clearance_receipt, _) = grid_checked?;
+    geometry_checked?;
+    vclock.mark("geometry_checks");
     let routing = if let Some(routed) = &mut route {
         travel_segments += routed.travel_segments;
         retraction_count += routed.retraction_count;
