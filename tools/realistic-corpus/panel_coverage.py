@@ -1,6 +1,5 @@
 """Gate native located spans; report separate cross-slicer road observations."""
 
-from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 import json
 import math
@@ -10,13 +9,6 @@ import audit
 import located_spans
 
 SUPPORT_GRID_CELL_MM = 0.05
-PRUSA_ROLES = {
-    "External perimeter": "perimeter", "Perimeter": "perimeter", "Overhang perimeter": "perimeter",
-    "Solid infill": "solid", "Top solid infill": "top_skin", "Internal infill": "sparse_fill",
-    "Bridge infill": "bridge", "Internal bridge infill": "bridge",
-}
-NATIVE_REFERENCE_ROLES = {"perimeter": "perimeter", "bottom_skin": "solid", "solid_fill": "solid",
-                          "top_skin": "top_skin", "sparse_fill": "sparse_fill", "bridge": "bridge"}
 
 
 def nonnegative(value):
@@ -339,7 +331,7 @@ def prusa_span_comparison(corpus, part, row, receipt):
         return {"status": "unresolved", "detail": str(error)}
 
 
-def prusa_frame(row, work, tolerance):
+def prusa_frame(row, work, receipt):
     """Use the recorded center placement, never align by fitting unsupported roads."""
     prusa = row["prusa"]
     command = prusa["slice"]["command"]
@@ -349,106 +341,73 @@ def prusa_frame(row, work, tolerance):
     if (command[-1] != prusa["import"]["command"][-1] or audit.digest(source) != row["sha256"]):
         raise ValueError("Prusa placement does not bind the case source")
     center = tuple(map(float, command[command.index("--center") + 1].split(",")))
+    with (work / "create.stdout.json").open(encoding="utf-8") as stream:
+        creation = json.load(stream)
+    steps = [operation["operation"] for operation in creation["operations"] if "operation" in operation]
+    if steps.count("import") != 1 or steps.count("center_all_on_bed") != 1 or steps[-3:] != [
+            "center_all_on_bed", "compile", "save"]:
+        raise ValueError("native centered placement was not captured")
+    intent = receipt["effective_intent"]
+    hardware = intent.get("hardware")
+    centered = next(operation for operation in creation["operations"]
+                    if operation.get("operation") == "center_all_on_bed")
+    if centered["project"].get("hardware") != hardware:
+        raise ValueError("native captured placement hardware disagrees with the run intent")
+    if hardware is None:
+        usable = intent["printer"]["build_envelope"]
+    else:
+        plate = hardware["plate"]
+        faces = [face for face in plate["faces"] if face["key"] == hardware["face"]]
+        if len(faces) != 1 or plate["surface_z_mm"] != 0:
+            raise ValueError("unresolved native plate frame")
+        usable = faces[0]["usable_mm"]
+    native_center = tuple((usable["min"][axis] + usable["max"][axis]) / 2 for axis in range(2))
     with (work / "return/out/manifest.json").open(encoding="utf-8") as source:
-        bounds = json.load(source)["scene"]["bounds_mm"]
+        manifest = json.load(source)
+    native_sources = {item["record"]["provenance"]["source_hash"] for item in manifest["definitions"]}
+    if native_sources != {row["sha256"]}:
+        raise ValueError("native placement does not bind the case source")
+    bounds = manifest["scene"]["bounds_mm"]
     native = tuple((bounds["min"][axis], bounds["max"][axis]) for axis in range(2))
     imported = tuple(prusa["import"][f"size_{axis}"] for axis in "xy")
     if (len(center) != 2 or not all(math.isfinite(value) for value in center)
             or any(not (math.isfinite(low) and math.isfinite(high) and low < high) for low, high in native)
+            or any(not low <= value <= high for (low, high), value in zip(native, native_center))
             or any(not nonnegative(size) or size == 0 for size in imported)):
         raise ValueError("invalid captured placement bounds")
     extent_error = tuple((high - low) - reference for (low, high), reference in zip(native, imported))
-    if any(abs(error) > tolerance for error in extent_error):
-        raise ValueError(f"XY source extents disagree: {extent_error} mm")
-    return {"prusa_to_native_xy_mm": tuple((low + high) / 2 - value
-                                          for (low, high), value in zip(native, center)),
-            "xy_extent_difference_mm": extent_error}
+    return {"prusa_to_native_xy_mm": tuple(value - target for value, target in zip(native_center, center)),
+            "xy_extent_difference_mm": extent_error, "placement": "recorded_bed_centers"}
 
 
-def common_prusa_intervals(before, after):
-    """Match both physical endpoints within G-code precision, and require an unambiguous pair."""
-    native_z = sorted({tuple(span["physical_z_mm"]) for span in after})
-    prusa_z = {tuple(span["physical_z_mm"]) for span in before}
-    low_z = [low for low, _ in native_z]
-    epsilon = located_spans.Z_EPSILON_MM + located_spans.EPS
-    eligible = {}
-    use = Counter()
-    for low, high in sorted(prusa_z):
-        start = bisect_left(low_z, low - epsilon)
-        end = bisect_right(low_z, low + epsilon)
-        matching = [pair for pair in native_z[start:end] if abs(pair[1] - high) <= epsilon]
-        use.update(matching)
-        if len(matching) == 1:
-            eligible[low, high] = matching[0]
-    return {interval: pair for interval, pair in eligible.items() if use[pair] == 1}
-
-
-def prusa_located_witnesses(before, after, changes, frame, tolerance):
-    def witness_key(layer, road, role, interval, points):
-        return layer, road, role, tuple(interval), tuple(map(tuple, points))
-
-    intervals = common_prusa_intervals(before, after)
-    matched_z = set(intervals.values())
-    shift = frame["prusa_to_native_xy_mm"]
-    controls, candidates = defaultdict(list), defaultdict(list)
-    for span in before:
-        interval = intervals.get(tuple(span["physical_z_mm"]))
-        role = PRUSA_ROLES.get(span["role"])
-        if interval is not None and role is not None:
-            points = [tuple(value + delta for value, delta in zip(point, shift)) for point in span["points_mm"]]
-            controls[interval, role].append((span, {"points_mm": points}))
-    for span in after:
-        interval = tuple(span["physical_z_mm"])
-        role = NATIVE_REFERENCE_ROLES.get(span["role"])
-        if interval in matched_z and role is not None:
-            candidates[interval, role].append(span)
-    matches = {}
-    for key, paths in candidates.items():
-        control = controls.get(key, ())
-        paired, _ = register_group([shifted for _, shifted in control], paths, tolerance)
-        for ordinal, reference in paired.items():
-            span = paths[ordinal]
-            key = witness_key(span["layer"], span["road"], span["role"], span["physical_z_mm"], span["points_mm"])
-            matches[key] = control[reference]
-    counts = Counter()
-    for loss in changes:
-        key = witness_key(loss["candidate_layer"], loss["candidate_road"], loss["candidate_role"],
-                          loss["physical_z_mm"], loss["candidate_points_mm"])
-        match = matches.get(key)
-        if match is not None:
-            span, shifted = match
-            delta = loss["candidate_span_mm"] - span["length_mm"]
-            status = "acceptable" if delta <= located_spans.EPS else "longer_than_prusa"
-            loss["prusa_located"] = {"status": status, "delta_mm": delta, "reference": span,
-                                     "registered_points_mm": shifted["points_mm"]}
-        else:
-            if key[3] not in matched_z:
-                status = "no_common_observed_z"
-            elif key[2] not in NATIVE_REFERENCE_ROLES:
-                status = "no_common_road_role"
-            else:
-                status = "no_registered_prusa_span"
-            loss["prusa_located"] = {"status": status}
-        counts[status] += 1
-    return {"status": "compared", "screen_loss_counts": dict(counts),
-            "common_observed_z_intervals": len(intervals), "xy_tolerance_mm": tolerance,
-            "z_tolerance_mm": located_spans.Z_EPSILON_MM, **frame}
-
-
-def prusa_located_comparison(corpus, row, receipt, after, changes, comparison, tolerance):
+def prusa_located_comparison(corpus, row, receipt, changes, comparison):
     if comparison["status"] != "observed_unregistered":
-        return {"status": comparison["status"]}
+        return {"status": comparison["status"], "comparable_spans": 0, "unresolved_spans": len(changes)}
+    if not changes:
+        return {"status": "no_flagged_spans", "comparable_spans": 0}
     work = Path(corpus) / "work" / row["part"]
     try:
-        frame = prusa_frame(row, work, tolerance)
+        frame = prusa_frame(row, work, receipt)
         inputs = {"prusa": work / "prusa.gcode", "spiling": work / "return/out/plan.json"}
         recipe = receipt["effective_intent"]["recipe"]
-        before, _ = located_spans.retained_observation(work / "located-spans.ndjson", "prusa", inputs,
-                                                       recipe["supports"]["z_gap_mm"],
-                                                       recipe["process"]["max_bridge_span_mm"])
-        return prusa_located_witnesses(before, after, changes, frame, tolerance)
+        gap, limit = recipe["supports"]["z_gap_mm"], recipe["process"]["max_bridge_span_mm"]
+        with (work / "located-spans.ndjson").open(encoding="utf-8") as stream:
+            located_spans.require_observation_header(stream, inputs, gap, limit)
+        with inputs["prusa"].open(encoding="utf-8") as stream:
+            roads = located_spans.prusa_roads(stream)
+        witnesses = located_spans.prusa_regions(roads, changes, frame["prusa_to_native_xy_mm"], gap, limit)
     except (OSError, ValueError, TypeError, KeyError, OverflowError, IndexError) as error:
-        return {"status": "unresolved", "detail": str(error)}
+        return {"status": "unresolved", "detail": str(error), "comparable_spans": 0,
+                "unresolved_spans": len(changes)}
+    for loss, witness in zip(changes, witnesses, strict=True):
+        loss["prusa_located"] = witness
+    counts = Counter(witness["status"] for witness in witnesses)
+    assessments = Counter(witness["assessment"] for witness in witnesses if "assessment" in witness)
+    return {"status": "compared", "screen_loss_counts": dict(counts),
+            "comparable_spans": counts["supported"] + counts["unsupported"],
+            "full_span_comparisons": assessments["acceptable"] + assessments["longer_than_prusa"],
+            "assessments": dict(assessments),
+            "registration": "model_bead_footprints_within_one_layer_height", **frame}
 
 
 def summary(cases, records, receipt, corpus, control_results=None, off_results=None):
@@ -516,7 +475,7 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                     entry["span_metric"] = located_spans.METRIC
                     entry["span_registration_tolerance_mm"] = tolerance
                     entry["prusa_located"] = prusa_located_comparison(
-                        corpus, row, receipt, after, changes, entry["prusa_span_comparison"], tolerance)
+                        corpus, row, receipt, changes, entry["prusa_span_comparison"])
                     entry.update(summarize_losses(changes))
                     entry["span_report_warnings"] = {"control": control_warning, "candidate": candidate_warning}
                     for field in ("unsupported_layers", "max_span_mm"):

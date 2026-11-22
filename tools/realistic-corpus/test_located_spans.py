@@ -113,45 +113,75 @@ class LocatedSpanTests(unittest.TestCase):
         after = [self.gap((0, 0.1), (4, 0.1)), self.gap((0, -0.2), (4, -0.2))]
         self.assertEqual(panel_coverage.located_losses(before, after, 0.275), [])
 
-    def test_prusa_located_requires_referenced_placement_role_xy_and_both_z_bounds(self):
+    def test_prusa_region_registers_shifted_transverse_bridge_without_matching_endpoints(self):
         candidate = self.gap((10, 1), (14, 1), interval=(1.0, 1.2), role="bottom_skin")
-        frame = {"prusa_to_native_xy_mm": (10, 1)}
-        cases = [
-            ("Solid infill", (1.0005, 1.2), (4.5, 0), "acceptable"),
-            ("Solid infill", (1.0, 1.2), (3.5, 0), "longer_than_prusa"),
-            ("Solid infill", (1.0, 1.19), (4.5, 0), "no_common_observed_z"),
-            ("Bridge infill", (1.0, 1.2), (4.5, 0), "no_registered_prusa_span"),
-            ("Solid infill", (1.0, 1.2), (4.5, 1), "no_registered_prusa_span"),
-        ]
-        for role, interval, end, expected in cases:
-            with self.subTest(expected=expected, end=end):
-                control = self.gap((0, end[1]), end, interval=interval, role=role)
-                losses = panel_coverage.located_losses([], [candidate], 0.275)
-                result = panel_coverage.prusa_located_witnesses([control], [candidate], losses, frame, 0.275)
-                self.assertEqual(result["screen_loss_counts"], {expected: 1})
-                self.assertEqual(losses[0]["prusa_located"]["status"], expected)
+        losses = panel_coverage.located_losses([], [candidate], 0.275)
+        bridge = road(4, (1.22, 1.42), (2, -1), (2, 1), bridge=True)
+        bridge.role = "Bridge infill"
+        witness, = spans.prusa_regions([bridge], losses, (10, 1), 0.2, 10)
+        self.assertEqual(witness, {"status": "no_geometry"})
+        bridge.z = (1.17, 1.42)
+        witness, = spans.prusa_regions([bridge], losses, (10, 1), 0.2, 10)
+        self.assertEqual(witness["status"], "unsupported")
+        self.assertEqual(witness["assessment"], "partial_reference_coverage")
+        self.assertAlmostEqual(witness["unsupported_span_mm"], 0.4)
+        self.assertAlmostEqual(witness["reference_gap"]["length_mm"], 2)
 
-    def test_prusa_located_does_not_choose_between_ambiguous_z_intervals(self):
-        control = self.gap((0, 0), (4, 0), interval=(1.0, 1.2))
-        native = [self.gap((0, 0), (4, 0), interval=(low, 1.2)) for low in (0.9995, 1.0005)]
-        self.assertEqual(panel_coverage.common_prusa_intervals([control], native), {})
+    def test_prusa_region_distinguishes_supported_model_from_support_without_model(self):
+        candidates = [self.gap((0, offset), (4, offset), interval=(0.9, 1.2), road=index)
+                      for index, offset in enumerate((0, 2))]
+        losses = panel_coverage.located_losses([], candidates, 0.275)
+        model = road(5, (1.31, 1.46), (-1, 0.1), (5, 0.1))
+        donors = [road(4, (0.96, 1.12), (-1, offset), (5, offset), support=True)
+                  for offset in (0.1, 2)]
+        supported, absent = spans.prusa_regions([model, *donors], losses, (0, 0), 0.2, 10)
+        self.assertEqual(supported["status"], "supported")
+        self.assertAlmostEqual(supported["model_overlap_mm"], 4)
+        self.assertEqual(supported["unsupported_span_mm"], 0)
+        self.assertEqual(absent, {"status": "no_geometry"})
 
-    def test_prusa_frame_requires_congruent_xy_source_bounds(self):
+    def test_prusa_regional_gaps_do_not_join_across_layers_or_count_bounded_bridges(self):
+        candidate = self.gap((0, 0), (4, 0), interval=(1.0, 1.2))
+        losses = panel_coverage.located_losses([], [candidate], 0.275)
+        paths = [road(4, (0.89, 1.09), (0, 0), (2, 0)),
+                 road(5, (1.11, 1.31), (2, 0), (4, 0))]
+        witness, = spans.prusa_regions(paths, losses, (0, 0), 0.2, 10)
+        self.assertEqual(witness["unsupported_span_mm"], 2)
+        witness, = spans.prusa_regions(spans.prusa_roads(io.StringIO(PRUSA)),
+                                     panel_coverage.located_losses([], [self.gap((2, 0), (6, 0),
+                                                                                interval=(0.23, 0.43))], 0.275),
+                                     (0, 0), 0.2, 8)
+        self.assertEqual(witness["status"], "supported")
+
+    def test_prusa_frame_uses_recorded_bed_center_instead_of_scene_extents(self):
         with TemporaryDirectory() as directory:
             work = Path(directory)
             export = work / "return/out"
             export.mkdir(parents=True)
             step = work / "part.step"
             step.write_text("fixture")
-            (export / "manifest.json").write_text(json.dumps({"scene": {"bounds_mm": {
-                "min": [100, 98, 0], "max": [120, 118, 5]}}}))
             row = {"sha256": panel_coverage.audit.digest(step), "prusa": {
                 "import": {"ok": True, "command": ["--info", str(step)], "size_x": 20, "size_y": 20},
                 "slice": {"command": ["--center", "110,110", str(step)]}}}
-            self.assertEqual(panel_coverage.prusa_frame(row, work, 0.275)["prusa_to_native_xy_mm"], (0, -2))
-            row["prusa"]["import"]["size_x"] = 21
-            with self.assertRaisesRegex(ValueError, "extents disagree"):
-                panel_coverage.prusa_frame(row, work, 0.275)
+            manifest = {"scene": {"bounds_mm": {"min": [100, 98, 0], "max": [120, 118, 5]}},
+                        "definitions": [{"record": {"provenance": {"source_hash": row["sha256"]}}}]}
+            (export / "manifest.json").write_text(json.dumps(manifest))
+            receipt = {"effective_intent": {"printer": {"build_envelope": {
+                "min": [0, 0, 0], "max": [220, 216, 220]}}}}
+            creation = work / "create.stdout.json"
+            creation.write_text(json.dumps({"operations": [{"operation": operation, "project": {}}
+                                            for operation in ("create", "import", "center_all_on_bed", "compile", "save")]}))
+            row["prusa"]["import"]["size_x"] = 17
+            frame = panel_coverage.prusa_frame(row, work, receipt)
+            self.assertEqual(frame["prusa_to_native_xy_mm"], (0, -2))
+            self.assertEqual(frame["xy_extent_difference_mm"], (3, 0))
+            manifest["definitions"][0]["record"]["provenance"]["source_hash"] = "different"
+            (export / "manifest.json").write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "native placement does not bind"):
+                panel_coverage.prusa_frame(row, work, receipt)
+            step.write_text("different fixture")
+            with self.assertRaisesRegex(ValueError, "does not bind the case source"):
+                panel_coverage.prusa_frame(row, work, receipt)
 
     def test_panel_binds_complete_comparison_to_both_inputs(self):
         with TemporaryDirectory() as directory:

@@ -167,8 +167,8 @@ def clip_axis(interval, coordinate, slope, low, high, strict=False):
     return (start, end) if start < end else None
 
 
-def capsule_intervals(start, unit, length, lower_start, lower_end, radius):
-    for center in (lower_start, lower_end):
+def capsule_intervals(start, unit, length, lower_start, lower_end, radius, *, round_ends=True):
+    for center in ((lower_start, lower_end) if round_ends else ()):
         dx, dy = center[0] - start[0], center[1] - start[1]
         perp = abs(dx * unit[1] - dy * unit[0])
         if perp < radius:
@@ -222,7 +222,7 @@ class LowerEdges:
                     for cell in footprint:
                         self.buckets[cell].append(ordinal)
 
-    def covered(self, start, end, unit, length, top):
+    def intersecting_edges(self, start, end, top=None):
         box = footprint_box(start, end, EPS)
         footprint = cells(box)
         if footprint is None:
@@ -233,9 +233,13 @@ class LowerEdges:
                 candidates.update(self.buckets.get(cell, ()))
         for ordinal in candidates:
             low, high, radius, lower_top, bounds = self.edges[ordinal]
-            if (lower_top < top - EPS and box[0] <= bounds[2] and bounds[0] <= box[2]
+            if ((top is None or lower_top < top - EPS) and box[0] <= bounds[2] and bounds[0] <= box[2]
                     and box[1] <= bounds[3] and bounds[1] <= box[3]):
-                yield from capsule_intervals(start, unit, length, low, high, radius)
+                yield ordinal, low, high, radius
+
+    def covered(self, start, end, unit, length, top):
+        for _, low, high, radius in self.intersecting_edges(start, end, top):
+            yield from capsule_intervals(start, unit, length, low, high, radius)
 
 
 def missing_intervals(covered, length):
@@ -271,14 +275,14 @@ def straight_runs(road):
                 end = right
                 continue
         if start is not None:
-            yield start, end
+            yield start, end, width
         start, end, width = left, right, edge_width
     if start is not None:
-        yield start, end
+        yield start, end, width
 
 
 def road_gaps(road, lower, bridge_limit):
-    for start, end in straight_runs(road):
+    for start, end, width in straight_runs(road):
         length = math.dist(start, end)
         if length <= EPS:
             continue
@@ -287,24 +291,32 @@ def road_gaps(road, lower, bridge_limit):
         for low, high in gaps:
             points = [tuple(axis + distance * step for axis, step in zip(start, unit))
                       for distance in (low, high)]
-            yield describe_gap(road, points, high - low, low > EPS and high < length - EPS, bridge_limit)
+            yield describe_gap(road, points, high - low, low > EPS and high < length - EPS, bridge_limit), width
 
 
-def observe(roads, support_gap, bridge_limit, emit):
-    roads = list(roads)
-    upper = defaultdict(list)
-    model_layers = set()
+def model_layers(roads):
+    layers = defaultdict(list)
     for road in roads:
         if (road.z[0] < -Z_EPSILON_MM or not road.widths or len(road.widths) + 1 != len(road.points)
                 or any(not math.isfinite(width) or width <= 0 for width in road.widths)
                 or any(not math.isfinite(axis) for point in road.points for axis in point)):
             raise ValueError("invalid road geometry")
         if not road.support:
-            model_layers.add(road.layer)
-            if road.z[0] > Z_EPSILON_MM:
-                upper[road.z[0]].append(road)
-    if not model_layers:
+            layers[road.layer].append(road)
+    if not layers:
         raise ValueError("no model roads to observe")
+    return layers
+
+
+def upper_floors(model):
+    upper = defaultdict(list)
+    for road in model:
+        if road.z[0] > Z_EPSILON_MM:
+            upper[road.z[0]].append(road)
+    return upper
+
+
+def gaps_in(roads, upper, support_gap, bridge_limit):
     floors = sorted(upper)
     lower = defaultdict(list)
     for road in roads:
@@ -313,24 +325,118 @@ def observe(roads, support_gap, bridge_limit, emit):
         last = bisect_right(floors, end + Z_EPSILON_MM + (support_gap if road.support else 0.0))
         for floor in floors[first:last]:
             lower[floor].append(road)
-    count = bridges = 0
-    by_layer = {}
     for floor, paths in upper.items():
         index = LowerEdges(lower[floor])
         for road in paths:
-            for span in road_gaps(road, index, bridge_limit):
-                emit(span)
-                if span["bridge_within_limit"]:
-                    bridges += 1
-                else:
-                    count += 1
-                    if road.layer not in by_layer or span["length_mm"] > by_layer[road.layer]["length_mm"]:
-                        by_layer[road.layer] = span
+            yield from road_gaps(road, index, bridge_limit)
+
+
+def observe(roads, support_gap, bridge_limit, emit):
+    roads = list(roads)
+    layers = model_layers(roads)
+    upper = upper_floors(road for road in roads if not road.support)
+    count = bridges = 0
+    by_layer = {}
+    for span, _ in gaps_in(roads, upper, support_gap, bridge_limit):
+        emit(span)
+        if span["bridge_within_limit"]:
+            bridges += 1
+        else:
+            count += 1
+            layer = span["layer"]
+            if layer not in by_layer or span["length_mm"] > by_layer[layer]["length_mm"]:
+                by_layer[layer] = span
     worst = max(by_layer.values(), key=lambda span: span["length_mm"], default=None)
-    return {"model_layers": len(model_layers), "non_bed_floors": len(floors),
+    return {"model_layers": len(layers), "non_bed_floors": len(upper),
             "unsupported_layers": len(by_layer), "unsupported_spans": count,
             "tagged_bounded_bridges": bridges, "max_span_mm": worst["length_mm"] if worst else 0.0,
             "worst": worst}
+
+
+def merged_intervals(intervals):
+    merged = []
+    for low, high in sorted(intervals):
+        if high <= low + EPS:
+            continue
+        if merged and low <= merged[-1][1] + EPS:
+            merged[-1] = (merged[-1][0], max(high, merged[-1][1]))
+        else:
+            merged.append((low, high))
+    return merged
+
+
+def prusa_regions(roads, changes, shift, support_gap, bridge_limit):
+    """Measure continuous unsupported overlap on one layer; bounded bridges are exempt.
+
+    No geometry means no overlapping model bead, not absence of CAD material.
+    A partial model overlap gives a local answer, not a full span comparison.
+    """
+    model = model_layers(roads)
+    courses = {layer: (min(road.z[0] for road in paths), paths[0].z[1])
+               for layer, paths in model.items()}
+    if any(road.z[1] != courses[layer][1] for layer, paths in model.items() for road in paths):
+        raise ValueError("ambiguous Prusa model layer top")
+    queries = defaultdict(list)
+    for ordinal, loss in enumerate(changes):
+        floor, top = physical(*loss["physical_z_mm"])
+        start, end = [tuple(axis - delta for axis, delta in zip(point, shift))
+                      for point in loss["candidate_points_mm"]]
+        length = math.dist(start, end)
+        if not math.isfinite(length) or length <= EPS:
+            raise ValueError("invalid native span for Prusa registration")
+        unit = tuple((finish - begin) / length for begin, finish in zip(start, end))
+        for layer, (prusa_floor, prusa_top) in courses.items():
+            window = max(top - floor, prusa_top - prusa_floor)
+            if abs(prusa_top - top) <= window + EPS:
+                queries[layer].append((ordinal, start, end, unit, length, top, window))
+
+    references = defaultdict(list)
+    upper = upper_floors(road for layer in queries for road in model[layer])
+    for span, width in gaps_in(roads, upper, support_gap, bridge_limit):
+        if not span["bridge_within_limit"]:
+            references[span["layer"]].append((span, width))
+
+    best = {}
+    for layer, items in queries.items():
+        prusa_z = courses[layer]
+        deposition = LowerEdges(model[layer])
+        gaps = references[layer]
+        unsupported = LowerEdges(Road(layer, span["road"], span["role"], False, False,
+                                      span["physical_z_mm"], span["points_mm"], [width])
+                                 for span, width in gaps)
+        for ordinal, start, end, unit, length, top, window in items:
+            intervals = (interval for _, low, high, radius in deposition.intersecting_edges(start, end)
+                         for interval in capsule_intervals(start, unit, length, low, high, radius))
+            model_mm = sum(high - low for low, high in merged_intervals(intervals))
+            if model_mm <= EPS:
+                continue
+            intersections = []
+            witness = None
+            for edge, low, high, radius in unsupported.intersecting_edges(start, end):
+                for left, right in capsule_intervals(start, unit, length, low, high, radius, round_ends=False):
+                    if right <= left + EPS:
+                        continue
+                    intersections.append((left, right))
+                    rank = (right - left, gaps[edge][0]["length_mm"], -edge)
+                    if witness is None or rank > witness:
+                        witness = rank
+            merged = merged_intervals(intersections)
+            unsupported_mm = max((high - low for low, high in merged), default=0.0)
+            delta_z = prusa_z[1] - top
+            rank = (unsupported_mm, model_mm, -abs(delta_z), -layer)
+            if ordinal in best and best[ordinal][0] >= rank:
+                continue
+            assessment = ("partial_reference_coverage" if model_mm + EPS < length else
+                          "acceptable" if unsupported_mm + EPS >= length else "longer_than_prusa")
+            best[ordinal] = rank, {
+                "status": "unsupported" if unsupported_mm > EPS else "supported",
+                "prusa_layer": layer, "prusa_physical_z_mm": prusa_z,
+                "z_delta_mm": delta_z, "z_window_mm": window, "model_overlap_mm": model_mm,
+                "unsupported_span_mm": unsupported_mm, "assessment": assessment,
+                "reference_gap": gaps[-witness[2]][0] if witness is not None else None,
+            }
+    return [best[ordinal][1] if ordinal in best else {"status": "no_geometry"}
+            for ordinal in range(len(changes))]
 
 
 def compare(prusa_path, plan_path, output, support_gap, bridge_limit):
@@ -377,15 +483,19 @@ def native_observation(plan, plan_path, evidence, support_gap, bridge_limit):
     return retained_observation(evidence, "spiling", {"spiling": plan_path}, support_gap, bridge_limit)
 
 
+def require_observation_header(stream, inputs, support_gap, bridge_limit):
+    header = json.loads(next(stream, "null"))
+    if (not isinstance(header, dict) or header.get("event") != "header"
+            or header.get("metric") != METRIC or header.get("z_epsilon_mm") != Z_EPSILON_MM
+            or header.get("support_gap_mm") != support_gap or header.get("bridge_limit_mm") != bridge_limit
+            or any(header["inputs_sha256"][name] != audit.digest(path) for name, path in inputs.items())):
+        raise ValueError("located evidence does not bind the current observation inputs")
+
+
 def retained_observation(evidence, slicer, inputs, support_gap, bridge_limit):
     spans = []
     with evidence.open(encoding="utf-8") as stream:
-        header = json.loads(next(stream, "null"))
-        if (not isinstance(header, dict) or header.get("event") != "header"
-                or header.get("metric") != METRIC or header.get("z_epsilon_mm") != Z_EPSILON_MM
-                or header.get("support_gap_mm") != support_gap or header.get("bridge_limit_mm") != bridge_limit
-                or any(header["inputs_sha256"][name] != audit.digest(path) for name, path in inputs.items())):
-            raise ValueError(f"located evidence does not bind the current {slicer} observation")
+        require_observation_header(stream, inputs, support_gap, bridge_limit)
         observed = None
         bounded = 0
         for line in stream:
