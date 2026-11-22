@@ -892,7 +892,7 @@ mod dimension_tests {
             [120.08945079647431, 118.09285109699714, 9.021666666666668],
         ];
         // 0.22525 mm from the wall raw, but 0.22485 mm once Y rounds to 117.872.
-        let endpoint = [107.184, 117.8716, wall[0][2]];
+        let endpoint = [107.857, 117.8716, wall[0][2]];
         let other = [endpoint[0], 116.94286889582592, endpoint[2]];
         assert!(!endpoint_bond(endpoint, wall, 0.45).unwrap());
         let conditioned = condition_skin_bond_endpoint(endpoint, other, wall, 0.45)

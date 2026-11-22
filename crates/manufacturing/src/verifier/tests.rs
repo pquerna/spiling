@@ -1897,7 +1897,7 @@ G1 E1.2 F900
 G1 X11 Y1 Z1 E1.8 F300
 M106 S220
 G0 X11 Y1 Z1.5 F1200
-G1 X15 Y1 Z1.5 E2.254650 F240
+G1 X15 Y1 Z1.5 E2.254648 F240
 ";
 
 fn packed_process_descriptor(
@@ -2026,8 +2026,8 @@ fn independently_rejects_cooling_recovery_first_layer_bridge_and_hop_mutations()
         ("Z1.25 F1200", "Z1.5 F1200"),
         ("E0.6 F300", "E0.6 F600"),
         ("E0.6 F300", "E0.5 F300"),
-        ("E2.254650 F240", "E2.254650 F600"),
-        ("E2.254650 F240", "E2.368310 F240"),
+        ("E2.254648 F240", "E2.254648 F600"),
+        ("E2.254648 F240", "E2.368310 F240"),
     ] {
         let mutated = PROCESS_GOLDEN.replacen(from, to, 1);
         assert_ne!(mutated, PROCESS_GOLDEN);

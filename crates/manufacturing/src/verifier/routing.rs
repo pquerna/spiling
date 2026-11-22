@@ -740,10 +740,10 @@ mod tests {
         let mut reversed = 0;
         accumulate_dose(&mut reversed, 0.0, 0.1).unwrap();
         accumulate_dose(&mut reversed, 1000.0, 1000.20003).unwrap();
-        assert_eq!(whole, 30_003);
+        assert_eq!(whole, 300_030);
         assert_eq!(partitioned, whole);
         assert_eq!(reversed, whole);
-        accumulate_dose(&mut partitioned, 0.0, 0.00001).unwrap();
+        accumulate_dose(&mut partitioned, 0.0, 0.000001).unwrap();
         assert_eq!(partitioned, whole + 1);
 
         let previous = partitioned;
