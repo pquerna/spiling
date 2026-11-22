@@ -26,6 +26,34 @@ use super::*;
 /// offsets and floating rounding; every chord is re-checked exactly.
 pub(super) const CONTOUR_MARGIN_MM: f64 = 0.001;
 
+/// How far the independent verifier's decoded capsules can reach beyond the
+/// nominal ones placement measures, summed over the support bead and the
+/// object bead it clears. The field measures the support's emitted XYZ6
+/// segment at its nominal half width against object geometry as planned; the
+/// verifier decodes both beads and widens them:
+/// - each bead's decoded width surplus plus centre displacement (XYZ6
+///   rounding, arc point deviation) is at most
+///   [`program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM`], which the
+///   verifier enforces per command: once for the support bead, once for the
+///   object bead;
+/// - an object wall bead can become part of an arc run after support
+///   planning; the verifier then widens its chord by the run's chord sagitta
+///   (at most [`MAX_ARC_SAGITTA_MM`]) plus its point deviation and firmware
+///   segmentation (together at most [`PROFILE_TOLERANCE_MM`]);
+/// - each decoded endpoint carries an XYZ6 enclosure under one quantum, and
+///   the verifier's interval arithmetic and tie-break add a few half quanta
+///   per bound (taken as eight quanta).
+///
+/// Walls and row ends are placed, chord-checked and certified with this
+/// added to the support bead's own clearance, so a certificate implies the
+/// verifier's capsule-pair proof.
+pub(super) const VERIFIER_ENCLOSURE_MM: f64 = 2.0
+    * program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
+    + MAX_ARC_SAGITTA_MM
+    + PROFILE_TOLERANCE_MM
+    + 2.0 * program_coordinates::XYZ6_QUANTUM_MM
+    + 8.0 * program_coordinates::XYZ6_QUANTUM_MM;
+
 /// Deviation allowed when simplifying a placed wall: well under the margin.
 const SIMPLIFY_MM: f64 = 0.0005;
 
@@ -50,8 +78,8 @@ const PLACEMENT_EPS_MM: f64 = 1.0e-7;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Exact {
     /// Centre clearance every placed bead keeps: half a bead plus the XYZ6
-    /// projection and endpoint enclosure, so the emitted bead it certifies
-    /// for final clearance clears too.
+    /// projection and endpoint enclosure plus [`VERIFIER_ENCLOSURE_MM`], so
+    /// the emitted bead it certifies clears the verifier's decoded capsules.
     pub(super) safe: f64,
     /// Clearance walls and row ends are placed at.
     pub(super) level: f64,
@@ -63,12 +91,16 @@ pub(super) struct Exact {
 }
 
 impl Exact {
-    /// Placement just above the bead's centre clearance `safe`.
-    pub(super) fn new(safe: f64, cell: f64) -> Self {
+    /// Placement for a bead whose emitted centre clearance is `bead` (half
+    /// its width plus the XYZ6 projection): just above `bead` plus the
+    /// verifier's enclosure. The reach stays below `bead` alone, so every
+    /// moved centre remains inside the kept cells.
+    pub(super) fn new(bead: f64, cell: f64) -> Self {
+        let safe = bead + VERIFIER_ENCLOSURE_MM;
         Self {
             safe,
             level: safe + CONTOUR_MARGIN_MM,
-            reach: (4.0 * cell).min(safe - 2.0 * SIMPLIFY_MM).max(0.0),
+            reach: (4.0 * cell).min(bead - 2.0 * SIMPLIFY_MM).max(0.0),
             cell,
         }
     }
