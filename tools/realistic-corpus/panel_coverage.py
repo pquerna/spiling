@@ -1,4 +1,4 @@
-"""Gate native located spans; report separate cross-slicer road observations."""
+"""Gate coverage against registered Prusa deposition; report native deltas separately."""
 
 from collections import Counter, defaultdict, deque
 import json
@@ -257,6 +257,8 @@ def located_losses(before, after, tolerance):
                             "increase_mm": increase, "control": reference,
                             "registration": ("matched" if reference else
                                              "contended" if ordinal in overlap_found else "no_overlap")})
+            if "prusa_located" in span:
+                changes[-1]["prusa_located"] = span["prusa_located"]
     return changes
 
 
@@ -380,11 +382,11 @@ def prusa_frame(row, work, receipt):
             "xy_extent_difference_mm": extent_error, "placement": "recorded_bed_centers"}
 
 
-def prusa_located_comparison(corpus, row, receipt, changes, comparison):
+def prusa_located_comparison(corpus, row, receipt, spans, comparison):
     if comparison["status"] != "observed_unregistered":
-        return {"status": comparison["status"], "comparable_spans": 0, "unresolved_spans": len(changes)}
-    if not changes:
-        return {"status": "no_flagged_spans", "comparable_spans": 0}
+        return {"status": comparison["status"], "comparable_spans": 0, "unresolved_spans": len(spans)}
+    if not spans:
+        return {"status": "no_native_spans", "comparable_spans": 0}
     work = Path(corpus) / "work" / row["part"]
     try:
         frame = prusa_frame(row, work, receipt)
@@ -395,23 +397,28 @@ def prusa_located_comparison(corpus, row, receipt, changes, comparison):
             located_spans.require_observation_header(stream, inputs, gap, limit)
         with inputs["prusa"].open(encoding="utf-8") as stream:
             roads = located_spans.prusa_roads(stream)
-        witnesses = located_spans.prusa_regions(roads, changes, frame["prusa_to_native_xy_mm"], gap, limit)
+        witnesses = located_spans.prusa_regions(roads, spans, frame["prusa_to_native_xy_mm"], gap, limit)
     except (OSError, ValueError, TypeError, KeyError, OverflowError, IndexError) as error:
         return {"status": "unresolved", "detail": str(error), "comparable_spans": 0,
-                "unresolved_spans": len(changes)}
-    for loss, witness in zip(changes, witnesses, strict=True):
-        loss["prusa_located"] = witness
+                "unresolved_spans": len(spans)}
+    for span, witness in zip(spans, witnesses, strict=True):
+        span["prusa_located"] = witness
     counts = Counter(witness["status"] for witness in witnesses)
     assessments = Counter(witness["assessment"] for witness in witnesses if "assessment" in witness)
-    return {"status": "compared", "screen_loss_counts": dict(counts),
+    worse = [span for span in spans if span["prusa_located"].get("assessment") == "longer_than_prusa"]
+    worse.sort(key=lambda span: (-(span["length_mm"] - span["prusa_located"]["unsupported_span_mm"]),
+                                 span["layer"], span["road"]))
+    return {"status": "compared", "span_counts": dict(counts),
             "comparable_spans": counts["supported"] + counts["unsupported"],
             "full_span_comparisons": assessments["acceptable"] + assessments["longer_than_prusa"],
-            "assessments": dict(assessments),
+            "assessments": dict(assessments), "worst_longer_spans": worse[:3],
             "registration": "model_bead_footprints_within_one_layer_height", **frame}
 
 
 def summary(cases, records, receipt, corpus, control_results=None, off_results=None):
     current = {row["part"]: row for row in records}
+    settings = receipt["settings"]
+    prusa_gate = settings["reference"] == "prusa" and settings["supports"] == "breakaway"
     control, control_corpus = None, None
     reference_off, off_issues = None, []
     if off_results is not None:
@@ -431,8 +438,7 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
         if row is None or not fresh(row):
             results.append({"part": name, "status": "no_fresh_candidate",
                             "prusa_span_comparison": {"status": "fresh_spiling_unavailable"},
-                            "failures": ["missing_candidate_coverage"]
-                            if baseline is not None and fresh(baseline) else []})
+                            "failures": ["missing_candidate_coverage"] if prusa_gate else []})
             continue
         material = support_mm(row)
         reference = None if reference_off is None else reference_off.get(name)
@@ -450,39 +456,55 @@ def summary(cases, records, receipt, corpus, control_results=None, off_results=N
                  "support_vs_prusa": material / prusa_support if material is not None and prusa_support else None,
                  "control_support_filament_mm": None, "support_drop_review": False,
                  "failures": []}
+        after = None
+        if prusa_gate or control is not None:
+            try:
+                after, candidate_observed, candidate_warning = native_coverage(corpus, name, receipt)
+            except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+                entry["located_span_error"] = str(error)
+                if prusa_gate:
+                    entry["failures"].append("missing_located_span_evidence")
+            else:
+                entry["span_metric"] = located_spans.METRIC
+                entry["span_report_warnings"] = {"candidate": candidate_warning}
+                for field in ("unsupported_layers", "max_span_mm"):
+                    entry[f"reported_{field}"] = entry[field]
+                    entry[field] = candidate_observed[field]
+        if prusa_gate and after is not None:
+            reference = prusa_located_comparison(corpus, row, receipt, after, entry["prusa_span_comparison"])
+            entry["prusa_located"] = reference
+            if reference["status"] not in {"compared", "no_native_spans"}:
+                entry["failures"].append("missing_registered_prusa_coverage")
+            elif reference.get("worst_longer_spans"):
+                entry["failures"].append("longer_registered_spans_than_prusa")
+            elif after and not reference["full_span_comparisons"]:
+                entry["prusa_coverage_warning"] = "no_full_span_comparisons"
         if control is not None:
-            if not matching_source(baseline, row) or not fresh(baseline):
-                entry["failures"].append("missing_matched_control_coverage")
+            if issues or not matching_source(baseline, row) or not fresh(baseline):
+                entry["native_control_warning"] = "missing_matched_control_coverage"
             else:
                 baseline_support = support_mm(baseline)
                 entry["control_support_filament_mm"] = baseline_support
                 if baseline_support is None or material is None:
-                    entry["failures"].append("missing_verified_support_filament")
+                    entry["native_control_warning"] = "missing_verified_support_filament"
                 elif baseline_support > 0:
                     entry["support_vs_control"] = material / baseline_support
                     entry["support_drop_review"] = entry["support_vs_control"] < 0.95
-                try:
-                    before, control_observed, control_warning = native_coverage(control_corpus, name, control_receipt)
-                    after, candidate_observed, candidate_warning = native_coverage(corpus, name, receipt)
-                    tolerance = registration_tolerance(receipt)
-                    changes = located_losses(before, after, tolerance)
-                except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
-                    entry["failures"].append("missing_located_span_evidence")
-                    entry["located_span_error"] = str(error)
-                else:
-                    if changes:
-                        entry["failures"].append("new_or_increased_local_spans")
-                    entry["span_metric"] = located_spans.METRIC
-                    entry["span_registration_tolerance_mm"] = tolerance
-                    entry["prusa_located"] = prusa_located_comparison(
-                        corpus, row, receipt, changes, entry["prusa_span_comparison"])
-                    entry.update(summarize_losses(changes))
-                    entry["span_report_warnings"] = {"control": control_warning, "candidate": candidate_warning}
-                    for field in ("unsupported_layers", "max_span_mm"):
-                        entry[f"reported_{field}"] = entry[field]
-                        entry[f"control_{field}"] = control_observed[field]
-                        entry[field] = candidate_observed[field]
+                if after is not None:
+                    try:
+                        before, control_observed, control_warning = native_coverage(control_corpus, name, control_receipt)
+                        tolerance = registration_tolerance(receipt)
+                        changes = located_losses(before, after, tolerance)
+                    except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+                        entry["native_control_error"] = str(error)
+                    else:
+                        entry["span_registration_tolerance_mm"] = tolerance
+                        entry.update(summarize_losses(changes))
+                        entry["span_report_warnings"]["control"] = control_warning
+                        for field in ("unsupported_layers", "max_span_mm"):
+                            entry[f"control_{field}"] = control_observed[field]
         results.append(entry)
-    return {"checked_against_control": control is not None,
-            "ok": not issues and not any(row["failures"] for row in results),
+    return {"coverage_control": "registered_prusa" if prusa_gate else "not_requested",
+            "checked_against_control": control is not None,
+            "ok": not any(row["failures"] for row in results),
             "control_mismatches": issues, "prusa_off_mismatches": off_issues, "cases": results}

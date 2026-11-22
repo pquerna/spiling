@@ -115,13 +115,12 @@ class LocatedSpanTests(unittest.TestCase):
 
     def test_prusa_region_registers_shifted_transverse_bridge_without_matching_endpoints(self):
         candidate = self.gap((10, 1), (14, 1), interval=(1.0, 1.2), role="bottom_skin")
-        losses = panel_coverage.located_losses([], [candidate], 0.275)
         bridge = road(4, (1.22, 1.42), (2, -1), (2, 1), bridge=True)
         bridge.role = "Bridge infill"
-        witness, = spans.prusa_regions([bridge], losses, (10, 1), 0.2, 10)
+        witness, = spans.prusa_regions([bridge], [candidate], (10, 1), 0.2, 10)
         self.assertEqual(witness, {"status": "no_geometry"})
         bridge.z = (1.17, 1.42)
-        witness, = spans.prusa_regions([bridge], losses, (10, 1), 0.2, 10)
+        witness, = spans.prusa_regions([bridge], [candidate], (10, 1), 0.2, 10)
         self.assertEqual(witness["status"], "unsupported")
         self.assertEqual(witness["assessment"], "partial_reference_coverage")
         self.assertAlmostEqual(witness["unsupported_span_mm"], 0.4)
@@ -130,11 +129,10 @@ class LocatedSpanTests(unittest.TestCase):
     def test_prusa_region_distinguishes_supported_model_from_support_without_model(self):
         candidates = [self.gap((0, offset), (4, offset), interval=(0.9, 1.2), road=index)
                       for index, offset in enumerate((0, 2))]
-        losses = panel_coverage.located_losses([], candidates, 0.275)
         model = road(5, (1.31, 1.46), (-1, 0.1), (5, 0.1))
         donors = [road(4, (0.96, 1.12), (-1, offset), (5, offset), support=True)
                   for offset in (0.1, 2)]
-        supported, absent = spans.prusa_regions([model, *donors], losses, (0, 0), 0.2, 10)
+        supported, absent = spans.prusa_regions([model, *donors], candidates, (0, 0), 0.2, 10)
         self.assertEqual(supported["status"], "supported")
         self.assertAlmostEqual(supported["model_overlap_mm"], 4)
         self.assertEqual(supported["unsupported_span_mm"], 0)
@@ -142,16 +140,60 @@ class LocatedSpanTests(unittest.TestCase):
 
     def test_prusa_regional_gaps_do_not_join_across_layers_or_count_bounded_bridges(self):
         candidate = self.gap((0, 0), (4, 0), interval=(1.0, 1.2))
-        losses = panel_coverage.located_losses([], [candidate], 0.275)
         paths = [road(4, (0.89, 1.09), (0, 0), (2, 0)),
                  road(5, (1.11, 1.31), (2, 0), (4, 0))]
-        witness, = spans.prusa_regions(paths, losses, (0, 0), 0.2, 10)
+        witness, = spans.prusa_regions(paths, [candidate], (0, 0), 0.2, 10)
         self.assertEqual(witness["unsupported_span_mm"], 2)
         witness, = spans.prusa_regions(spans.prusa_roads(io.StringIO(PRUSA)),
-                                     panel_coverage.located_losses([], [self.gap((2, 0), (6, 0),
-                                                                                interval=(0.23, 0.43))], 0.275),
-                                     (0, 0), 0.2, 8)
+                                     [self.gap((2, 0), (6, 0), interval=(0.23, 0.43))], (0, 0), 0.2, 8)
         self.assertEqual(witness["status"], "supported")
+
+    def test_coverage_gate_uses_prusa_region_without_any_native_control(self):
+        cases = [("longer", 8, 0, True, "longer_registered_spans_than_prusa", "supported"),
+                 ("same", 4, 0, True, None, "unsupported"),
+                 ("absent", 4, 2, True, None, "no_geometry"),
+                 ("missing", 4, 0, False, "missing_registered_prusa_coverage", None)]
+        with TemporaryDirectory() as directory:
+            corpus = Path(directory)
+            step = corpus / "part.step"
+            step.write_text("source")
+            sha = panel_coverage.audit.digest(step)
+            for case, limit, offset, reference, refusal, match in cases:
+                with self.subTest(case=case):
+                    work = corpus / case / "work/part.step"
+                    export = work / "return/out"
+                    export.mkdir(parents=True)
+                    (work / "prusa.gcode").write_text(PRUSA)
+                    (work / "create.stdout.json").write_text(json.dumps({"operations": [
+                        {"operation": operation, "project": {}} for operation in
+                        ("create", "import", "center_all_on_bed", "compile", "save")]}))
+                    (export / "manifest.json").write_text(json.dumps({
+                        "scene": {"bounds_mm": {"min": [0, 0, 0], "max": [10, 10, 1]}},
+                        "definitions": [{"record": {"provenance": {"source_hash": sha}}}]}))
+                    (export / "plan.json").write_text(json.dumps({"layers": [{
+                        "index": 1, "lower_z_mm": 0.2, "z_mm": 0.4,
+                        "region_coverage": {"unsupported_overhang_mm": 4}, "paths": [{
+                            "kind": "bottom_skin", "physical_z_mm": [0.2, 0.4],
+                            "points_mm": [[2, offset, 0.4], [6, offset, 0.4]],
+                            "width": {"kind": "constant", "width_mm": 0.4}}]}]}))
+                    row = {"part": "part.step", "sha256": sha, "source_absent": True,
+                           "spiling_compile": {"ok": True}, "spiling_return": {"ok": True},
+                           "export_checks": {"fresh_verified": True}, "prusa": {"ok": reference,
+                               "import": {"ok": True, "command": ["--info", str(step)], "size_x": 10, "size_y": 10},
+                               "slice": {"command": ["--center", "5,5", str(step)]}}}
+                    receipt = {"settings": {"reference": "prusa", "supports": "breakaway"}, "effective_intent": {
+                        "printer": {"build_envelope": {"min": [0, 0, 0], "max": [10, 10, 10]}},
+                        "recipe": {"supports": {"kind": "breakaway", "z_gap_mm": 0.2},
+                                   "process": {"max_bridge_span_mm": limit}}}}
+                    summary = panel_coverage.summary([{"file": "part.step"}], [row], receipt, corpus / case)
+                    self.assertEqual(summary["coverage_control"], "registered_prusa")
+                    self.assertEqual(summary["ok"], refusal is None)
+                    result, = summary["cases"]
+                    self.assertEqual(result["failures"], [refusal] if refusal else [])
+                    if match:
+                        self.assertEqual(result["prusa_located"]["span_counts"], {match: 1})
+                    if match == "no_geometry":
+                        self.assertEqual(result["prusa_coverage_warning"], "no_full_span_comparisons")
 
     def test_prusa_frame_uses_recorded_bed_center_instead_of_scene_extents(self):
         with TemporaryDirectory() as directory:

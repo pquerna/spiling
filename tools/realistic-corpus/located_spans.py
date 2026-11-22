@@ -365,7 +365,7 @@ def merged_intervals(intervals):
     return merged
 
 
-def prusa_regions(roads, changes, shift, support_gap, bridge_limit):
+def prusa_regions(roads, spans, shift, support_gap, bridge_limit):
     """Measure continuous unsupported overlap on one layer; bounded bridges are exempt.
 
     No geometry means no overlapping model bead, not absence of CAD material.
@@ -376,19 +376,26 @@ def prusa_regions(roads, changes, shift, support_gap, bridge_limit):
                for layer, paths in model.items()}
     if any(road.z[1] != courses[layer][1] for layer, paths in model.items() for road in paths):
         raise ValueError("ambiguous Prusa model layer top")
+    layers = sorted(courses, key=lambda layer: (courses[layer][1], layer))
+    tops = [courses[layer][1] for layer in layers]
+    max_height = max(top - floor for floor, top in courses.values())
     queries = defaultdict(list)
-    for ordinal, loss in enumerate(changes):
-        floor, top = physical(*loss["physical_z_mm"])
+    segments = []
+    for ordinal, span in enumerate(spans):
+        floor, top = physical(*span["physical_z_mm"])
         start, end = [tuple(axis - delta for axis, delta in zip(point, shift))
-                      for point in loss["candidate_points_mm"]]
+                      for point in span["points_mm"]]
         length = math.dist(start, end)
         if not math.isfinite(length) or length <= EPS:
             raise ValueError("invalid native span for Prusa registration")
         unit = tuple((finish - begin) / length for begin, finish in zip(start, end))
-        for layer, (prusa_floor, prusa_top) in courses.items():
+        segments.append((start, end, unit, length, top, top - floor))
+        extent = max(top - floor, max_height) + EPS
+        for layer in layers[bisect_left(tops, top - extent):bisect_right(tops, top + extent)]:
+            prusa_floor, prusa_top = courses[layer]
             window = max(top - floor, prusa_top - prusa_floor)
             if abs(prusa_top - top) <= window + EPS:
-                queries[layer].append((ordinal, start, end, unit, length, top, window))
+                queries[layer].append(ordinal)
 
     references = defaultdict(list)
     upper = upper_floors(road for layer in queries for road in model[layer])
@@ -404,7 +411,9 @@ def prusa_regions(roads, changes, shift, support_gap, bridge_limit):
         unsupported = LowerEdges(Road(layer, span["road"], span["role"], False, False,
                                       span["physical_z_mm"], span["points_mm"], [width])
                                  for span, width in gaps)
-        for ordinal, start, end, unit, length, top, window in items:
+        for ordinal in items:
+            start, end, unit, length, top, height = segments[ordinal]
+            window = max(height, prusa_z[1] - prusa_z[0])
             intervals = (interval for _, low, high, radius in deposition.intersecting_edges(start, end)
                          for interval in capsule_intervals(start, unit, length, low, high, radius))
             model_mm = sum(high - low for low, high in merged_intervals(intervals))
@@ -436,7 +445,7 @@ def prusa_regions(roads, changes, shift, support_gap, bridge_limit):
                 "reference_gap": gaps[-witness[2]][0] if witness is not None else None,
             }
     return [best[ordinal][1] if ordinal in best else {"status": "no_geometry"}
-            for ordinal in range(len(changes))]
+            for ordinal in range(len(spans))]
 
 
 def compare(prusa_path, plan_path, output, support_gap, bridge_limit):

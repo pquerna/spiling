@@ -29,18 +29,17 @@ derives one from the intent's printer, material and recipe. Each record keeps
 both slicers' estimated print time and filament length and their ratio.
 
 --prusa-off-results OFF.ndjson estimates Prusa support filament from a matched
-supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS fails a
-candidate with new or longer observer-measured unsupported spans, using fresh
-exports from both runs. One-to-one registration requires the same role and
-physical Z and XY overlap within one grid cell plus half a nominal bead. Plan-to-observer
-disagreements and support filament drops above 5% request review only.
-For breakaway runs the Prusa reference summary compares nominal spans and
-retains their layer, physical Z, XY extents and roles in each work directory's
-located-spans.ndjson. The observer uses a common lower-bead capsule model and
-support gap bound and runs outside slice/reopen timings. With a coverage
-control, a reported loss is acceptable against Prusa only when a same-role
-span registers at the same physical interval and is at least as long. This
-does not waive the native control gate or qualify printability.
+supports-off reference. --coverage-control ON.ndjson CONTROL_CORPUS adds a
+diagnostic native delta: one-to-one registration by role, physical Z and XY
+within one grid cell plus half a bead. Native deltas, plan disagreement and
+support filament drops above 5% are not coverage-gate failures.
+Breakaway Prusa runs gate all native observer spans against Prusa's model
+bead and unsupported footprints, using XY overlap on any single Prusa layer
+within the larger local layer height. A fully registered longer native span
+fails; partial registration and absent Prusa model geometry are reported
+without a parity claim. Located evidence is kept in located-spans.ndjson.
+The common lower-bead observer runs outside slice/reopen timings and does
+not qualify physical printability.
 """
 import argparse, json, os, re, shutil, signal, subprocess, sys, time, hashlib, threading
 from concurrent.futures import ThreadPoolExecutor

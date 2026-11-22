@@ -112,17 +112,18 @@ class RunnerBoundaryTests(unittest.TestCase):
             self.assertFalse((root / "work").exists())
             self.assertFalse((root / "results.ndjson").exists())
 
-    def test_control_gate_rejects_local_regression_with_equal_global_max_and_count(self):
+    def test_native_control_reports_local_regression_without_failing_the_prusa_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             result, control, _, _ = self.run_fixture(path / "control")
             self.assertEqual(result.returncode, 0, result.stderr)
             result, candidate, _, _ = self.run_fixture(path / "worse", control=control, local_length=2.0001)
-            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
             receipt = json.loads((candidate / "results.ndjson.summary.json").read_text())
-            self.assertFalse(receipt["ok"])
+            self.assertTrue(receipt["ok"])
+            self.assertEqual(receipt["coverage"]["coverage_control"], "not_requested")
             coverage = receipt["coverage"]["cases"][0]
-            self.assertEqual(coverage["failures"], ["new_or_increased_local_spans"])
+            self.assertEqual(coverage["failures"], [])
             self.assertEqual(coverage["control_max_span_mm"], coverage["max_span_mm"])
             self.assertEqual(coverage["control_unsupported_layers"], coverage["unsupported_layers"])
             self.assertEqual(coverage["located_spans_with_losses"], 1)
