@@ -94,39 +94,163 @@ struct LandingInputs<'a> {
 
 struct LandingProposal<'a> {
     ledge: &'a MultiPolygon<f64>,
-    roads: MultiPolygon<f64>,
+    roads: OwnedMaterial,
+}
+
+fn checked_landing_overlay<'a>(
+    raster: &Raster<'_>,
+    subject: impl Iterator<Item = &'a MultiPolygon<f64>> + Clone,
+    clip: Option<&'a MultiPolygon<f64>>,
+    live_bytes: usize,
+    phase: &str,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    use geo::{Winding, winding_order::WindingOrder};
+    use i_overlay::core::extract::CheckedExtractionError;
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay::{Overlay, ShapeType};
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
+
+    let rings = |material: &'a MultiPolygon<f64>| {
+        material
+            .0
+            .iter()
+            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+    };
+    let mut bounds = None::<FloatRect<f64>>;
+    let mut points = 0usize;
+    for ring in subject.clone().chain(clip).flat_map(rings) {
+        check_cancel(raster.cancel)?;
+        for point in ring.0.iter().take(ring.0.len().saturating_sub(1)) {
+            points = points.saturating_add(1);
+            let bounds = bounds.get_or_insert(FloatRect {
+                min_x: point.x,
+                min_y: point.y,
+                max_x: point.x,
+                max_y: point.y,
+            });
+            bounds.min_x = bounds.min_x.min(point.x);
+            bounds.min_y = bounds.min_y.min(point.y);
+            bounds.max_x = bounds.max_x.max(point.x);
+            bounds.max_y = bounds.max_y.max(point.y);
+        }
+    }
+    let Some(bounds) = bounds else {
+        return Ok(MultiPolygon::new(Vec::new()));
+    };
+    let (rule, fill) = if clip.is_some() {
+        (OverlayRule::Intersect, FillRule::EvenOdd)
+    } else {
+        let fill = match subject
+            .clone()
+            .flat_map(rings)
+            .find_map(Winding::winding_order)
+        {
+            Some(WindingOrder::CounterClockwise) => FillRule::Positive,
+            _ => FillRule::Negative,
+        };
+        (OverlayRule::Subject, fill)
+    };
+    let adapter = FloatPointAdapter::<[f64; 2], f64>::new(bounds);
+    let input_and_split = live_bytes.saturating_add(points.saturating_mul(128));
+    (raster.admit)(input_and_split)?;
+    let mut overlay = Overlay::new(points);
+    for (material, kind) in subject
+        .map(|material| (material, ShapeType::Subject))
+        .chain(clip.map(|material| (material, ShapeType::Clip)))
+    {
+        for ring in rings(material) {
+            check_cancel(raster.cancel)?;
+            overlay.add_path_iter(
+                ring.0
+                    .iter()
+                    .take(ring.0.len().saturating_sub(1))
+                    .map(|point| adapter.float_to_int(&[point.x, point.y])),
+                kind,
+            );
+        }
+    }
+    let shapes = overlay.overlay_checked(rule, fill, |links| {
+        !raster.cancel.load(Ordering::Relaxed)
+            && (raster.admit)(input_and_split.saturating_add(links.saturating_mul(256))).is_ok()
+    });
+    drop(overlay);
+    check_cancel(raster.cancel)?;
+    let shapes = shapes.map_err(|failure| {
+        let reason = match failure {
+            CheckedExtractionError::Admission => "extraction exceeds the working set",
+            CheckedExtractionError::OpenContour => {
+                "cannot close a contour with distinct incident links"
+            }
+        };
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            format!("support landing {phase}: {reason}"),
+        )
+    })?;
+    let mut polygons = Vec::new();
+    for shape in shapes {
+        check_cancel(raster.cancel)?;
+        let mut rings = shape.into_iter().map(|ring| {
+            let mut line = geo::LineString(
+                ring.iter()
+                    .map(|point| geo::Coord::from(adapter.int_to_float(point)))
+                    .collect(),
+            );
+            line.close();
+            line
+        });
+        if let Some(exterior) = rings.next() {
+            polygons.push(Polygon::new(exterior, rings.collect()));
+        }
+    }
+    Ok(MultiPolygon(polygons))
 }
 
 fn joined_landing(
     raster: &Raster<'_>,
-    proposals: &[LandingProposal<'_>],
+    proposals: Vec<LandingProposal<'_>>,
 ) -> Result<Bits, ManufacturingError> {
-    use geo::algorithm::unary_union;
-
     let points = proposals.iter().fold(0usize, |total, proposal| {
         total
             .saturating_add(region::point_count(proposal.ledge))
             .saturating_add(region::point_count(&proposal.roads))
     });
+    let road_bytes = proposals
+        .iter()
+        .fold(vec_bytes(&proposals), |bytes, proposal| {
+            bytes.saturating_add(proposal.roads.bytes)
+        });
     (raster.admit)(points.saturating_mul(128))?;
     raster.charge(points.saturating_mul(points.max(1).ilog2() as usize + 1));
     check_cancel(raster.cancel)?;
-    let ledges = unary_union(proposals.iter().map(|proposal| proposal.ledge));
-    check_cancel(raster.cancel)?;
-    let roads = unary_union(proposals.iter().map(|proposal| &proposal.roads));
-    boolean_budget(&ledges, &roads, raster.cancel)?;
-    let ledge_points = region::point_count(&ledges);
-    let road_points = region::point_count(&roads);
-    (raster.admit)(
-        points
-            .saturating_add(ledge_points)
-            .saturating_add(road_points)
-            .saturating_mul(128),
+    let ledges = OwnedMaterial::new(checked_landing_overlay(
+        raster,
+        proposals.iter().map(|proposal| proposal.ledge),
+        None,
+        road_bytes,
+        "ledge union",
+    )?);
+    let roads = OwnedMaterial::new(checked_landing_overlay(
+        raster,
+        proposals.iter().map(|proposal| &proposal.roads.material),
+        None,
+        road_bytes.saturating_add(ledges.bytes),
+        "road union",
+    )?);
+    drop(proposals);
+    boolean_budget(&ledges.material, &roads.material, raster.cancel)?;
+    raster.charge(region::point_count(&ledges).saturating_mul(region::point_count(&roads)));
+    let joined = checked_landing_overlay(
+        raster,
+        std::iter::once(&ledges.material),
+        Some(&roads.material),
+        ledges.bytes.saturating_add(roads.bytes),
+        "intersection",
     )?;
-    raster.charge(ledge_points.saturating_mul(road_points));
-    let joined = ledges.intersection(&roads);
-    let ledge = raster.inward(&ledges.0)?;
-    drop((ledges, roads));
+    drop(roads);
+    let ledge = raster.inward(&ledges.material.0)?;
+    drop(ledges);
     raster.landing(&ledge, &joined.0)
 }
 
@@ -1282,15 +1406,15 @@ impl Sweep<'_> {
             }
             _ => {
                 let mut proposals = Vec::new();
-                let mut points = 0usize;
+                let mut live_bytes = 0usize;
                 for &index in &roots {
                     let (object_layer, ledge) = root_geometry(index);
-                    let roads = footprint(object_layer, points.saturating_mul(64))?;
-                    points = points.saturating_add(region::point_count(&roads));
+                    let roads = OwnedMaterial::new(footprint(object_layer, live_bytes)?);
+                    live_bytes = live_bytes.saturating_add(roads.bytes);
                     raster.reserve(&mut proposals, 1)?;
                     proposals.push(LandingProposal { ledge, roads });
                 }
-                let joined = joined_landing(raster, &proposals)?;
+                let joined = joined_landing(raster, proposals)?;
                 let cells = raster.intersection(active, &joined)?;
                 Ok((!cells.is_empty()).then_some(PartContact { cells, roots }))
             }
@@ -1983,6 +2107,59 @@ mod tests {
     }
 
     #[test]
+    fn checked_landing_ledge_union_preserves_order_and_admits_extraction() {
+        use geo::algorithm::unary_union;
+        use geo::wkt;
+
+        let cancel = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let mut raster = Raster {
+            frame: CellFrame::new([[0.0, 0.0], [8.0, 8.0]], SUPPORT_CELL_MM).unwrap(),
+            cancel: &cancel,
+            admit: &|_| Ok(()),
+            work: AtomicUsize::new(0),
+        };
+        let first = MultiPolygon(vec![wkt!(POLYGON(
+            (0.0 0.0, 4.0 0.0, 4.0 4.0, 0.0 4.0, 0.0 0.0),
+            (1.0 1.0, 1.0 2.0, 2.0 2.0, 2.0 1.0, 1.0 1.0)
+        ))]);
+        let second = MultiPolygon(vec![
+            wkt!(POLYGON((3.0 0.0, 5.0 0.0, 5.0 4.0, 3.0 4.0, 3.0 0.0))),
+        ]);
+        let union = |raster: &Raster<'_>| {
+            checked_landing_overlay(raster, [&first, &second].into_iter(), None, 0, "test union")
+        };
+        assert_eq!(union(&raster).unwrap(), unary_union([&first, &second]),);
+        assert_eq!(
+            checked_landing_overlay(
+                &raster,
+                std::iter::once(&first),
+                Some(&second),
+                0,
+                "test intersection"
+            )
+            .unwrap(),
+            first.intersection(&second),
+        );
+
+        let decline_extraction = |_| {
+            if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(())
+            } else {
+                Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "test allowance",
+                ))
+            }
+        };
+        raster.admit = &decline_extraction;
+        let failure = union(&raster).unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+        assert!(failure.message.contains("union: extraction"));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn same_layer_landing_union_keeps_only_the_covered_seam() {
         let cancel = AtomicBool::new(false);
         let raster = Raster {
@@ -2003,14 +2180,14 @@ mod tests {
         let join = |right: &MultiPolygon<f64>, right_edge| {
             joined_landing(
                 &raster,
-                &[
+                vec![
                     LandingProposal {
                         ledge: &left,
-                        roads: strip(0.18, right_edge),
+                        roads: OwnedMaterial::new(strip(0.18, right_edge)),
                     },
                     LandingProposal {
                         ledge: right,
-                        roads: strip(0.24, 0.27),
+                        roads: OwnedMaterial::new(strip(0.24, 0.27)),
                     },
                 ],
             )

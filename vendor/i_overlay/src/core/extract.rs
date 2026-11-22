@@ -23,6 +23,12 @@ pub struct BooleanExtractionBuffer {
     pub(crate) visited: Vec<bool>
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckedExtractionError {
+    Admission,
+    OpenContour,
+}
+
 impl OverlayGraph<'_> {
     /// Extracts shapes from the overlay graph based on the specified overlay rule. This method is used to retrieve the final geometric shapes after boolean operations have been applied. It's suitable for most use cases where the minimum area of shapes is not a concern.
     /// - `overlay_rule`: The boolean operation rule to apply when extracting shapes from the graph, such as union or intersection.
@@ -38,7 +44,20 @@ impl OverlayGraph<'_> {
     #[inline]
     pub fn extract_shapes(&self, overlay_rule: OverlayRule, buffer: &mut BooleanExtractionBuffer) -> IntShapes {
         self.links.filter_by_overlay_into(overlay_rule, &mut buffer.visited);
-        self.extract(overlay_rule, buffer)
+        self.extract::<false>(overlay_rule, buffer).expect("unchecked extraction")
+    }
+
+    pub(crate) fn extract_shapes_checked(
+        &self,
+        overlay_rule: OverlayRule,
+        buffer: &mut BooleanExtractionBuffer,
+        admit: impl FnOnce(usize) -> bool,
+    ) -> Result<IntShapes, CheckedExtractionError> {
+        if !admit(self.links.len()) {
+            return Err(CheckedExtractionError::Admission);
+        }
+        self.links.filter_by_overlay_into(overlay_rule, &mut buffer.visited);
+        self.extract::<true>(overlay_rule, buffer)
     }
 
     /// Extracts the flat contours from the overlay graph based on the specified overlay rule.
@@ -58,11 +77,11 @@ impl OverlayGraph<'_> {
         self.extract_contours(overlay_rule, buffer, output);
     }
 
-    fn extract(
+    fn extract<const CHECKED: bool>(
         &self,
         overlay_rule: OverlayRule,
         buffer: &mut BooleanExtractionBuffer,
-    ) -> IntShapes {
+    ) -> Result<IntShapes, CheckedExtractionError> {
         let clockwise = self.options.output_direction == ContourDirection::Clockwise;
 
         let mut shapes = Vec::new();
@@ -80,13 +99,16 @@ impl OverlayGraph<'_> {
             }
 
             let left_top_link = GraphUtil::find_left_top_link(self.links, self.nodes, link_index, &buffer.visited);
+            if CHECKED && buffer.visited.is_visited(left_top_link) {
+                return Err(CheckedExtractionError::OpenContour);
+            }
             let link = unsafe { self.links.get_unchecked(left_top_link) };
             let is_hole = overlay_rule.is_fill_top(link.fill);
 
             let direction = is_hole == clockwise;
             let start_data = StartPathData::new(direction, link, left_top_link);
 
-            self.find_contour(&start_data, direction, buffer);
+            self.find_contour::<CHECKED>(&start_data, direction, buffer)?;
             let (is_valid, is_modified) =
                 buffer.points.validate(self.options.min_output_area, self.options.preserve_output_collinear);
 
@@ -132,15 +154,15 @@ impl OverlayGraph<'_> {
 
         shapes.join_sorted_holes(holes, anchors, clockwise);
 
-        shapes
+        Ok(shapes)
     }
 
-    fn find_contour(
+    fn find_contour<const CHECKED: bool>(
         &self,
         start_data: &StartPathData,
         clockwise: bool,
         buffer: &mut BooleanExtractionBuffer,
-    ) {
+    ) -> Result<(), CheckedExtractionError> {
         let mut link_id = start_data.link_id;
         let mut node_id = start_data.node_id;
         let last_node_id = start_data.last_node_id;
@@ -161,10 +183,14 @@ impl OverlayGraph<'_> {
             );
 
             let link = unsafe { self.links.get_unchecked(link_id) };
+            if CHECKED && (buffer.visited.is_visited(link_id) || (link.a.id != node_id && link.b.id != node_id)) {
+                return Err(CheckedExtractionError::OpenContour);
+            }
             node_id = buffer.points.push_node_and_get_other(link, node_id);
 
             buffer.visited.visit(link_id);
         }
+        Ok(())
     }
 
     fn extract_contours(
@@ -192,7 +218,7 @@ impl OverlayGraph<'_> {
             let direction = is_hole == clockwise;
             let start_data = StartPathData::new(direction, link, left_top_link);
 
-            self.find_contour(&start_data, direction, buffer);
+            self.find_contour::<false>(&start_data, direction, buffer).expect("unchecked extraction");
             let (is_valid, _) =
                 buffer.points.validate(self.options.min_output_area, self.options.preserve_output_collinear);
 

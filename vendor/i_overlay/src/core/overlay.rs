@@ -3,7 +3,7 @@
 //! manage subject and clip polygons and convert them into graphs for further operations.
 
 use crate::build::builder::GraphBuilder;
-use crate::core::extract::BooleanExtractionBuffer;
+use crate::core::extract::{BooleanExtractionBuffer, CheckedExtractionError};
 use crate::core::fill_rule::FillRule;
 use crate::core::overlay_rule::OverlayRule;
 use crate::core::solver::Solver;
@@ -360,6 +360,27 @@ impl Overlay {
                 &self.segments,
             )
             .extract_shapes(overlay_rule, &mut buffer);
+        self.boolean_buffer = Some(buffer);
+        shapes
+    }
+
+    /// The usual solver dispatch and contour order, but reject a walk that
+    /// cannot close using distinct incident links. `admit` receives the
+    /// split graph's link count before any extraction allocation.
+    pub fn overlay_checked(
+        &mut self,
+        overlay_rule: OverlayRule,
+        fill_rule: FillRule,
+        admit: impl FnOnce(usize) -> bool,
+    ) -> Result<IntShapes, CheckedExtractionError> {
+        self.split_solver.split_segments(&mut self.segments, &self.solver);
+        if self.segments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut buffer = self.boolean_buffer.take().unwrap_or_default();
+        let shapes = self.graph_builder.build_boolean_overlay(
+            fill_rule, overlay_rule, self.options, &self.solver, &self.segments,
+        ).extract_shapes_checked(overlay_rule, &mut buffer, admit);
         self.boolean_buffer = Some(buffer);
         shapes
     }

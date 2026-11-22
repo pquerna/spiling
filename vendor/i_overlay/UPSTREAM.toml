@@ -13,3 +13,7 @@ reason = "Keep the registry manifest's runtime targets and dependency resolution
 [[changes]]
 paths = ["src/float/overlay.rs", "src/split/solver.rs", "src/split/solver_tree.rs"]
 reason = "Optional strict integer Y-range check for tree candidates from coarse bins. Disjoint closed ranges cannot contribute a crossing or collinear mark. Reuse the existing list-split predicate; preserve pair and mark ordering, solver dispatch, snapping, fill, allocation growth and default behavior. Drop the patch upon migrating to a kernel with the same broadphase."
+
+[[changes]]
+paths = ["src/core/extract.rs", "src/core/overlay.rs"]
+reason = "Optional checked contour extraction for support landing union. Admit the split graph link count before extraction and refuse repeated or nonincident links instead of growing an unclosed contour. Preserve solver dispatch, successful contour order and existing callers."
