@@ -117,7 +117,7 @@ pub fn capture(
     .map_err(|error| format!("whole closed source leaf: {error:?}"))?;
     let shape_error_mm = leaf
         .closed_shape_error_mm()
-        .filter(|error| *error <= 0.001)
+        .filter(|error| *error <= profile_tolerance_mm())
         .ok_or("UnsupportedModel: whole closed source receipt unavailable")?;
     if !leaf.is_positive() {
         return Err("UnsupportedModel: empty native material".into());
@@ -295,8 +295,10 @@ fn capture_bored(
         cancel,
     )
     .map_err(|error| format!("whole closed bored-plate source leaf: {error:?}"))?;
-    let shape_error_mm = leaf.closed_shape_error_mm().filter(|error| *error <= 0.001)
-        .ok_or("UnsupportedModel: whole closed bored-plate source receipt exceeds the unchanged 0.001 mm allowance")?;
+    let shape_error_mm = leaf
+        .closed_shape_error_mm()
+        .filter(|error| *error <= profile_tolerance_mm())
+        .ok_or("UnsupportedModel: whole closed bored-plate source receipt exceeds the profile tolerance")?;
     if !leaf.is_positive() {
         return Err("UnsupportedModel: empty bored-plate material".into());
     }
@@ -359,4 +361,10 @@ impl NativePrism {
         }
         inside
     }
+}
+
+/// The one recorded XY profile tolerance (ADR012) a closed source receipt's
+/// shape error is admitted against.
+fn profile_tolerance_mm() -> f64 {
+    spiling_geometry::tolerant::TolerantPolicy::default().profile_mm
 }
