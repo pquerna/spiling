@@ -106,6 +106,12 @@ where
         }
     }
 
+    /// A second inventory over the same lower strokes, with its own index
+    /// and scratch, for queries on another thread.
+    pub(in crate::planner) fn fresh(&self) -> Self {
+        Self::new(self.previous.clone(), self.contacts.clone())
+    }
+
     fn admit_inventory(
         &mut self,
         anchors: &AnchorWorkspace,

@@ -755,8 +755,8 @@ pub(super) fn retain_anchored<'a>(
     wall_paths: usize,
     lower: &mut strokes::LowerStrokes<
         'a,
-        impl Iterator<Item = &'a DepositionPath> + Clone,
-        impl Iterator<Item = &'a DepositionPath> + Clone,
+        impl Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
+        impl Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
     >,
     cells: Option<&super::established::CellContacts<'_, '_>>,
     recipe: &PlanarPrintRecipe,
@@ -772,6 +772,18 @@ pub(super) fn retain_anchored<'a>(
         total.saturating_add(path.points_mm.capacity())
     });
     let original_bytes = owned_bytes.saturating_add(super::super::bonds::path_bytes(paths));
+    if let Some(parallel) = retain_in_groups(
+        paths,
+        wall_paths,
+        lower,
+        cells,
+        recipe,
+        [original_units, original_bytes],
+        work,
+        cancel,
+    )? {
+        return Ok(parallel);
+    }
     let original = std::mem::take(paths);
     // The caller's one lower inventory serves every candidate: it is
     // re-admitted against each candidate's budget and falls back to the
@@ -887,6 +899,248 @@ pub(super) fn retain_anchored<'a>(
         }
     }
     Ok(receipt)
+}
+
+/// Least support candidates per anchoring group.
+const ANCHOR_GROUP_PATHS: usize = 16;
+
+/// What anchoring decided for one staged path.
+enum Verdict {
+    /// Kept whole.
+    Keep,
+    /// Replaced by the anchored stroke runs `(first, last, width)`, possibly
+    /// none, with the edge lengths of the omitted runs in order.
+    Runs(Vec<(usize, usize, f64)>, Vec<f64>),
+}
+
+/// One group's verdicts, by staged path index, and its anchor work.
+struct GroupVerdicts {
+    verdicts: Vec<(usize, Verdict)>,
+    work: usize,
+}
+
+/// The stroke-run fragment `first..=last` of `path` at `width_mm`.
+fn run_fragment(path: &DepositionPath, first: usize, last: usize, width_mm: f64) -> DepositionPath {
+    DepositionPath {
+        material_domain: path.material_domain,
+        kind: path.kind,
+        width: WidthProfile::Constant { width_mm },
+        physical_z_mm: path.physical_z_mm,
+        owner: path.owner,
+        points_mm: if last >= first {
+            path.points_mm[first..=last].to_vec()
+        } else {
+            path.points_mm[first..path.points_mm.len() - 1]
+                .iter()
+                .chain(&path.points_mm[..=last])
+                .copied()
+                .collect()
+        },
+        arcs: Vec::new(),
+        exposed: path.exposed,
+        connectors: Vec::new(),
+    }
+}
+
+/// [`retain_anchored`] judged by groups of paths (every `groups`-th path)
+/// on separate threads, each with its own inventory over the same immutable
+/// lower strokes, then applied in path order. Each path's verdict depends
+/// only on that path and the lower strokes, so the result, the omitted
+/// length (summed in path order) and the charged work equal the serial
+/// pass. Groups are admitted as if every staged path were retained, the
+/// remaining records divided evenly between them; `None` (serial pass
+/// instead, with only its own charges) when the layer is too small to split
+/// or a group is not admitted.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The serial pass's operands stay explicit beside its live inventory"
+)]
+fn retain_in_groups<'a, P, C>(
+    paths: &mut Vec<DepositionPath>,
+    wall_paths: usize,
+    lower: &strokes::LowerStrokes<'a, P, C>,
+    cells: Option<&super::established::CellContacts<'_, '_>>,
+    recipe: &PlanarPrintRecipe,
+    [original_units, original_bytes]: [usize; 2],
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<WallReceipt>, ManufacturingError>
+where
+    P: Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
+    C: Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
+{
+    use rayon::prelude::*;
+    let candidates = paths
+        .iter()
+        .filter(|path| super::support_role(path.kind))
+        .count();
+    let groups = (candidates / ANCHOR_GROUP_PATHS).min(rayon::current_num_threads());
+    if groups < 2 {
+        return Ok(None);
+    }
+    // Every staged path counted as retained bounds what the serial pass
+    // holds beside any candidate.
+    let units = paths.iter().fold(original_units, |total, path| {
+        total.saturating_add(path.points_mm.capacity())
+    });
+    let bytes = original_bytes.saturating_add(super::super::bonds::path_bytes(paths));
+    let Ok(budget) = super::workspace_budget(units, bytes) else {
+        return Ok(None);
+    };
+    let share = budget / groups;
+    let contact_work =
+        cells.map(|cells| cells.raster.work.load(std::sync::atomic::Ordering::Relaxed));
+    let working_set = crate::working_set::current();
+    let staged: &[DepositionPath] = paths;
+    let judged: Vec<Result<Option<GroupVerdicts>, ManufacturingError>> = (0..groups)
+        .into_par_iter()
+        .map(|group| {
+            crate::working_set::scope(working_set, || {
+                let mut lower = lower.fresh();
+                let mut anchors = AnchorWorkspace::default();
+                let mut out = GroupVerdicts {
+                    verdicts: Vec::new(),
+                    work: 0,
+                };
+                out.verdicts
+                    .try_reserve_exact(staged.len().div_ceil(groups))
+                    .map_err(|_| resource("support anchoring verdicts allocation refused"))?;
+                for index in (group..staged.len()).step_by(groups) {
+                    let path = &staged[index];
+                    anchors.set_budget(share);
+                    if !super::support_role(path.kind)
+                        || scan_with_lower(
+                            std::slice::from_ref(path),
+                            &mut lower,
+                            cells,
+                            recipe,
+                            &mut anchors,
+                            &mut out.work,
+                            cancel,
+                            true,
+                        )?
+                        .is_none()
+                    {
+                        out.verdicts.push((index, Verdict::Keep));
+                        continue;
+                    }
+                    let (mut runs, mut omitted) = (Vec::new(), Vec::new());
+                    if index < wall_paths {
+                        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
+                            let fragment = run_fragment(path, first, last, width_mm);
+                            let extra = fragment.points_mm.capacity();
+                            if super::super::remaining_geometry_units(
+                                units.saturating_add(extra),
+                                bytes.saturating_add(
+                                    extra.saturating_mul(std::mem::size_of::<[f64; 3]>()),
+                                ),
+                            )
+                            .is_err()
+                            {
+                                return Ok(None);
+                            }
+                            anchors.set_budget(share);
+                            if scan_with_lower(
+                                std::slice::from_ref(&fragment),
+                                &mut lower,
+                                cells,
+                                recipe,
+                                &mut anchors,
+                                &mut out.work,
+                                cancel,
+                                true,
+                            )?
+                            .is_none()
+                            {
+                                runs.try_reserve(1).map_err(|_| {
+                                    resource("support anchoring runs allocation refused")
+                                })?;
+                                runs.push((first, last, width_mm));
+                            } else {
+                                for edge in fragment.checked_edges()? {
+                                    super::super::native::charge_support_clearance(
+                                        &mut out.work,
+                                        cancel,
+                                    )?;
+                                    let start = edge.points_mm[0];
+                                    let end = edge.points_mm[1];
+                                    omitted.try_reserve(1).map_err(|_| {
+                                        resource("support anchoring omission allocation refused")
+                                    })?;
+                                    omitted.push((end[0] - start[0]).hypot(end[1] - start[1]));
+                                }
+                            }
+                        }
+                    }
+                    out.verdicts.push((index, Verdict::Runs(runs, omitted)));
+                }
+                Ok(Some(out))
+            })
+        })
+        .collect();
+    let mut by_path: Vec<Option<Verdict>> = Vec::new();
+    by_path
+        .try_reserve_exact(paths.len())
+        .map_err(|_| resource("support anchoring verdicts allocation refused"))?;
+    by_path.resize_with(paths.len(), || None);
+    let mut group_work = 0usize;
+    for result in judged {
+        match result {
+            Ok(Some(group)) => {
+                group_work = group_work
+                    .checked_add(group.work)
+                    .ok_or_else(|| resource("support anchoring work counter overflow"))?;
+                for (index, verdict) in group.verdicts {
+                    by_path[index] = Some(verdict);
+                }
+            }
+            Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
+                return Err(failure);
+            }
+            // A group that is not admitted or refuses leaves the serial
+            // pass to decide, with its own charges only.
+            Ok(None) | Err(_) => {
+                if let (Some(cells), Some(before)) = (cells, contact_work) {
+                    cells
+                        .raster
+                        .work
+                        .store(before, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Ok(None);
+            }
+        }
+    }
+    let mut receipt = WallReceipt::default();
+    let original = std::mem::take(paths);
+    for ((path_index, path), verdict) in original.into_iter().enumerate().zip(by_path) {
+        match verdict {
+            Some(Verdict::Keep) => {
+                receipt.paths += usize::from(path_index < wall_paths);
+                super::reserve_owned(paths, 1, bytes)?;
+                paths.push(path);
+            }
+            Some(Verdict::Runs(runs, omitted)) => {
+                for (first, last, width_mm) in runs {
+                    super::reserve_owned(paths, 1, bytes)?;
+                    paths.push(run_fragment(&path, first, last, width_mm));
+                    receipt.paths += 1;
+                }
+                for length in omitted {
+                    receipt.omitted_mm += length;
+                }
+            }
+            None => {
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "support anchoring groups lost a verdict",
+                ));
+            }
+        }
+    }
+    *work = work
+        .checked_add(group_work)
+        .ok_or_else(|| resource("support anchoring work counter overflow"))?;
+    Ok(Some(receipt))
 }
 
 pub(super) fn nominal_volume(

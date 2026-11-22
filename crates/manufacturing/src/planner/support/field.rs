@@ -55,6 +55,9 @@ pub(super) struct FieldBuilder<'r, 'a> {
     rows: usize,
     /// Per bucket, whether a query can land in it.
     interest: Vec<bool>,
+    /// Summed-area table of `interest`, `(cols + 1) × (rows + 1)`, so
+    /// whether any bucket of a rectangle is of interest is four lookups.
+    interest_sums: Vec<u32>,
     reach: f64,
     obstacles: Vec<Obstacle>,
 }
@@ -117,6 +120,7 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
             cols,
             rows,
             interest,
+            interest_sums: Vec::new(),
             reach,
             obstacles: Vec::new(),
         };
@@ -127,6 +131,18 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
                 }
             }
         }
+        let stride = cols + 1;
+        let mut sums: Vec<u32> = Vec::new();
+        raster.reserve(&mut sums, stride.saturating_mul(rows + 1))?;
+        sums.resize(stride * (rows + 1), 0);
+        for row in 0..rows {
+            let mut run = 0u32;
+            for col in 0..cols {
+                run += u32::from(builder.interest[row * cols + col]);
+                sums[(row + 1) * stride + col + 1] = sums[row * stride + col + 1] + run;
+            }
+        }
+        builder.interest_sums = sums;
         raster.charge(points.len());
         Ok(Some(builder))
     }
@@ -161,8 +177,10 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
             return false;
         };
         self.raster.charge((c1 - c0 + 1) * (r1 - r0 + 1));
-        (r0..=r1)
-            .any(|row| self.interest[row * self.cols + c0..=row * self.cols + c1].contains(&true))
+        let stride = self.cols + 1;
+        let sums = &self.interest_sums;
+        let at = |row: usize, col: usize| sums[row * stride + col];
+        at(r1 + 1, c1 + 1) + at(r0, c0) > at(r0, c1 + 1) + at(r1 + 1, c0)
     }
 
     /// Adds the closed capsule `ab ⊕ radius` when it can reach a query.
@@ -245,9 +263,11 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
             cols,
             rows,
             interest,
+            interest_sums,
             reach,
             mut obstacles,
         } = self;
+        drop(interest_sums);
         // The same source edge often arrives from several exclusions (a
         // span's occupancy and its nominal scope, adjacent identical
         // spans): keep it once, at its largest radius, which dominates.
@@ -263,6 +283,12 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
         obstacles.sort_unstable_by(|x, y| key(x).cmp(&key(y)).then(y.radius.total_cmp(&x.radius)));
         obstacles.dedup_by(|later, first| key(later) == key(first));
         let buckets = cols * rows;
+        if u32::try_from(buckets).is_err() || u32::try_from(obstacles.len()).is_err() {
+            return Err(crate::error(
+                spiling_contracts::manufacturing::ManufacturingErrorCode::ResourceLimit,
+                "support clearance field index exceeds its integer range",
+            ));
+        }
         let mut starts: Vec<u32> = Vec::new();
         raster.reserve(&mut starts, buckets + 1)?;
         starts.resize(buckets + 1, 0);
@@ -300,13 +326,21 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
             ];
             point_segment(centre, o.a, o.b) - o.radius - half_diagonal
         };
-        let meets = |o: &Obstacle, row: usize, col: usize| floor(o, row, col) <= reach;
-        for o in &obstacles {
+        // Admitted (bucket, floor) pairs in obstacle order, so the fill
+        // below needs no second clearance evaluation.
+        let mut admitted: Vec<(u32, u32, f64)> = Vec::new();
+        for (index, o) in obstacles.iter().enumerate() {
             if let Some([c0, c1, r0, r1]) = ranges(o) {
                 for row in r0..=r1 {
                     for col in c0..=c1 {
-                        if interest[row * cols + col] && meets(o, row, col) {
-                            starts[row * cols + col + 1] += 1;
+                        let k = row * cols + col;
+                        if interest[k] {
+                            let bound = floor(o, row, col);
+                            if bound <= reach {
+                                starts[k + 1] += 1;
+                                raster.reserve(&mut admitted, 1)?;
+                                admitted.push((k as u32, index as u32, bound));
+                            }
                         }
                     }
                 }
@@ -329,24 +363,14 @@ impl<'r, 'a> FieldBuilder<'r, 'a> {
         raster.reserve(&mut floors, total)?;
         floors.resize(total, 0.0);
         let mut fill = starts.clone();
-        for (index, o) in obstacles.iter().enumerate() {
-            if let Some([c0, c1, r0, r1]) = ranges(o) {
-                for row in r0..=r1 {
-                    for col in c0..=c1 {
-                        let k = row * cols + col;
-                        if interest[k] {
-                            let bound = floor(o, row, col);
-                            if bound <= reach {
-                                members[fill[k] as usize] = index as u32;
-                                floors[fill[k] as usize] = bound;
-                                fill[k] += 1;
-                            }
-                        }
-                    }
-                }
-            }
+        for &(k, member, bound) in &admitted {
+            let slot = &mut fill[k as usize];
+            members[*slot as usize] = member;
+            floors[*slot as usize] = bound;
+            *slot += 1;
         }
         drop(fill);
+        drop(admitted);
         let mut order: Vec<(f64, u32)> = Vec::new();
         for k in 0..buckets {
             let range = starts[k] as usize..starts[k + 1] as usize;
