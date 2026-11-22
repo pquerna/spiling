@@ -2141,11 +2141,13 @@ fn admit_schedule<'model>(
         exposure::mark_exposed_top(&mut layers, &sections, cancel)?;
         timing.mark("tail_exposed_top");
         support::object_volumes(&mut layers, input.intent)?;
+        timing.mark("tail_volumes");
         let adhesion = adhesion::plan(&mut layers, &sections, input.intent, cancel)?;
+        timing.mark("tail_adhesion");
         for layer in &mut layers {
             bonds::refresh_witness_kinds(layer)?;
         }
-        timing.mark("tail_volumes_adhesion_witness");
+        timing.mark("tail_witness");
         if process_captures
             .iter()
             .map(|capture| capture.operations.len())

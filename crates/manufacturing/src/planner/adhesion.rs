@@ -106,10 +106,27 @@ pub(super) fn plan(
             }
             let loops = ((brim.width_mm / spacing).round() as u32).max(1);
             let mut planned = 0;
-            for k in 0..loops {
-                check_cancel(cancel)?;
-                let distance = brim.separation_mm + 0.5 * spacing + f64::from(k) * spacing;
-                let rings = offset_rings(&outline, distance, cancel)?;
+            // Every loop is its own offset of one outline, so they build in
+            // parallel; they are still taken in order up to the first that
+            // does not fit, and a later loop's failure never surfaces first.
+            let offsets: Vec<Result<Vec<LineString<f64>>, ManufacturingError>> = {
+                use rayon::prelude::*;
+                let working_set = crate::working_set::current();
+                let outline = &outline;
+                (0..loops)
+                    .into_par_iter()
+                    .map(|k| {
+                        crate::working_set::scope(working_set, || {
+                            check_cancel(cancel)?;
+                            let distance =
+                                brim.separation_mm + 0.5 * spacing + f64::from(k) * spacing;
+                            offset_rings(outline, distance, cancel)
+                        })
+                    })
+                    .collect()
+            };
+            for rings in offsets {
+                let rings = rings?;
                 if rings.iter().any(|ring| !fits(ring)) {
                     break;
                 }
