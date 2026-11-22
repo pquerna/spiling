@@ -18,9 +18,10 @@ rayon.workspace = true
 spiling-deposition-routing.workspace = true
 spiling-geometry.workspace = true
 spiling-surface-fields.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-geo.workspace = true
+geo = { workspace = true, features = ["serde"] }
 i_overlay.workspace = true
 boostvoronoi.workspace = true
 zip.workspace = true

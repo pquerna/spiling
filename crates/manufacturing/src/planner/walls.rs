@@ -52,6 +52,7 @@ pub(super) struct TransitionCorridor {
     pub(super) outgoing_count: usize,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct WallPlan {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) fill: MultiPolygon<f64>,
@@ -67,7 +68,7 @@ pub(super) struct WallPlan {
     pub(super) thin_omitted_area_mm2: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct BoundaryCorrespondence {
     pub(super) path_index: usize,
     pub(super) edge_index: usize,

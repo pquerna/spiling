@@ -57,14 +57,14 @@ fn partition_bytes(
     Ok(bytes)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Diaphragm {
     pub source_plane_mm: f64,
     pub thickness_mm: f64,
     pub physical_z_mm: [f64; 2],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Zone {
     pub axis: usize,
     pub coordinate: f64,

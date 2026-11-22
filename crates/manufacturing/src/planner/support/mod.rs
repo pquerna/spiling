@@ -621,6 +621,7 @@ impl std::ops::Deref for OwnedMaterial {
 }
 
 /// Realized object geometry and the retained native ownership used by support.
+#[derive(Clone, Copy)]
 pub(super) struct SupportInput<'a> {
     pub(super) build_bounds: [[f64; 2]; 2],
     pub(super) sections: &'a [SectionSpan],
@@ -642,6 +643,26 @@ pub(super) struct SupportWork {
     /// This receipt survives every compile-local schedule retry.
     pub(super) support_owned: usize,
     pub(super) anchors: usize,
+    pub(super) phases: Option<Vec<PhaseWork>>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct PhaseWork {
+    phase: &'static str,
+    planar: usize,
+    anchors: usize,
+    native: u64,
+}
+
+impl PhaseWork {
+    fn new(phase: &'static str, planar: usize, anchors: usize, native: u64) -> Self {
+        Self {
+            phase,
+            planar,
+            anchors,
+            native,
+        }
+    }
 }
 
 impl SupportWork {
@@ -752,6 +773,20 @@ pub(super) fn realize(
     let mut work = work_bank.planar;
     let mut anchor_work = work_bank.anchors;
     let mut foreign_work = work_bank.foreign_work()?;
+    let mut since = (work, anchor_work, native_work.consumed());
+    let mut phases = work_bank.phases.take();
+    let mut mark = |phase, planar: usize, anchors: usize, native: u64| {
+        timing.mark(phase);
+        if let Some(rows) = &mut phases {
+            rows.push(PhaseWork::new(
+                phase,
+                planar.saturating_sub(since.0),
+                anchors.saturating_sub(since.1),
+                native.saturating_sub(since.2),
+            ));
+            since = (planar, anchors, native);
+        }
+    };
     let outcome = (|| {
         let SupportInput {
             build_bounds: _,
@@ -1228,7 +1263,7 @@ pub(super) fn realize(
         }
         let native_points_before = native_points;
         let native_bytes_before = native_owned_bytes;
-        timing.mark("demand_layers");
+        mark("demand_layers", work, anchor_work, native_work.consumed());
         let projected = project_voids(
             &demand_bounds,
             retained,
@@ -1290,7 +1325,12 @@ pub(super) fn realize(
         let mut object_start = vec![0; layers.len()];
         let mut support_wall_paths = vec![0; layers.len()];
         trace.report("analysis_complete");
-        timing.mark("demand_and_void_analysis");
+        mark(
+            "demand_and_void_analysis",
+            work,
+            anchor_work,
+            native_work.consumed(),
+        );
         let mut contact_tops = vec![None; layers.len()];
         let mut roots = Vec::new();
         let mut root_landings = Vec::new();
@@ -1554,7 +1594,12 @@ pub(super) fn realize(
             .map(sweep::PartContact::bytes)
             .fold(vec_bytes(&part_contacts), usize::saturating_add);
         trace.report("corridors_complete");
-        timing.mark("roots_and_corridors");
+        mark(
+            "roots_and_corridors",
+            work,
+            anchor_work,
+            native_work.consumed(),
+        );
         drop(nominal);
         let mut retained = base_retained;
         // A layer's walls and rows depend only on its own kept cells and its
@@ -1838,7 +1883,7 @@ pub(super) fn realize(
         }
         drop(prebuilt);
         drop(payload);
-        timing.mark("support_raster");
+        mark("support_raster", work, anchor_work, native_work.consumed());
         let mut outstanding_roles = original_bridge_roles.as_slice();
         let mut outstanding_demands = demands.as_slice();
         let mut unchanged_lower = object_start[0] == 0;
@@ -2256,7 +2301,12 @@ pub(super) fn realize(
         // Contact selection is only a proposal until actual final paths exist.
         // Check the same closed, physical-decimal bead enclosure used by the XY
         // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
-        timing.mark("regeneration_and_anchor_reconciliation");
+        mark(
+            "regeneration_and_anchor_reconciliation",
+            work,
+            anchor_work,
+            native_work.consumed(),
+        );
         for (target, top) in contact_tops.iter().enumerate() {
             let Some(top) = *top else {
                 continue;
@@ -2313,7 +2363,7 @@ pub(super) fn realize(
         // Offset/overlay corridor masks only propose candidates. Certify every
         // final actual emitted support capsule against the unchanged raw all-Z C
         // and scoped positive void masks, after both raster/anchor alternatives.
-        timing.mark("contact_gap");
+        mark("contact_gap", work, anchor_work, native_work.consumed());
         let index_bytes = remaining_geometry_budget(
             retained,
             native_owned_bytes
@@ -2342,9 +2392,15 @@ pub(super) fn realize(
             &mut work,
             cancel,
         )?;
-        timing.mark("final_actual_clearance");
+        mark(
+            "final_actual_clearance",
+            work,
+            anchor_work,
+            native_work.consumed(),
+        );
         Ok(SupportAdmission::Complete(withdrawal))
     })();
+    work_bank.phases = phases;
     work_bank.finish(work, foreign_work, anchor_work)?;
     outcome
 }

@@ -45,7 +45,7 @@ pub struct ProtectedVoidPolicy {
     pub byte_limit: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProtectedVoidHeightScope {
     Bounded { lower_mm: f64, upper_mm: f64 },
     OpenBelow { upper_mm: f64 },

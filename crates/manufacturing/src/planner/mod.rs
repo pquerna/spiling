@@ -26,6 +26,7 @@ mod startup;
 mod tolerant;
 use startup::StartupWall;
 pub(crate) mod support;
+pub(crate) mod support_stage;
 mod surface;
 mod walls;
 mod zones;
@@ -1990,11 +1991,9 @@ fn admit_schedule<'model>(
             Vec::new()
         };
 
-        support_work.planar = *neighborhoods.work_mut();
         timing.mark("support_setup");
-        let support_admission = support::realize(
-            &mut layers,
-            &support::SupportInput {
+        let stage_input = support_stage::StageInput {
+            support: support::SupportInput {
                 build_bounds: [
                     [
                         input.intent.printer.build_envelope.min[0],
@@ -2017,281 +2016,41 @@ fn admit_schedule<'model>(
                     .map(|model| model.support_margin())
                     .fold(0.0, f64::max),
             },
-            &mut segments,
-            cancel,
+            classifications: &classifications,
+            phase_by_layer: &phase_by_layer,
+            models: &admission.models,
+            retained_points,
+            support_classified_bytes,
+            web_roof: web_roof.as_ref(),
+            cathedral_roads: &cathedral_roads,
+            tentative: probe.is_some(),
+        };
+        let capture = support_stage::Capture::start(
+            input.stored_definitions,
+            &layers,
+            &stage_input,
+            segments,
+            &mut neighborhoods,
+            void_memo,
             admission.geometry_work,
-            probe.is_some(),
             support_work,
-            |index,
-             axis,
-             segments,
-             retained_support_points,
-             retained_support_bytes,
-             anchor_owned_bytes,
-             planar_work,
-             recovery| {
-                *neighborhoods.work_mut() = *planar_work;
-                let outcome = (|| {
-                    let entry = classifications.partition_point(|entry| entry.0 <= index);
-                    let (_, classified, classified_points, classified_bytes) = classifications
-                        .get(entry.wrapping_sub(1))
-                        .expect("support reconstructs only classified object layers");
-                    let classified_bytes = *classified_bytes;
-                    let classified_points = *classified_points;
-                    let live_retained_points = (retained_points - classified_points)
-                        .checked_add(retained_support_points)
-                        .filter(|total| *total <= crate::working_set::units())
-                        .ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "support raster retained point limit exceeded",
-                            )
-                        })?;
-                    let outside_owned_bytes = geometry_bytes(&[
-                        support_classified_bytes - classified_bytes,
-                        retained_support_bytes,
-                    ])?;
-                    let mut live_owned_bytes =
-                        geometry_bytes(&[outside_owned_bytes, anchor_owned_bytes])?;
-                    let anchor_capacity = std::cell::Cell::new(anchor_owned_bytes);
-                    let elevation = &schedule[index];
-                    let current = span_at(&sections, index as u32);
-                    let hatch_layer = region::HatchLayer {
-                        roof: web_roof.as_ref().map(|field| {
-                            if cathedral_roads.get(index).is_some() {
-                                field.reused_roof()
-                            } else {
-                                field.roof()
-                            }
-                        }),
-                        width_mm: recipe.bead_width_mm,
-                        z: elevation.z,
-                        lower_z: elevation.lower_z,
-                        height: elevation.z - elevation.lower_z,
-                        axis,
-                        top_axis: region::HatchAxis::for_policy(
-                            recipe.top_skin_axis,
-                            hatch_key(schedule, index),
-                        ),
-                        recipe,
-                    };
-                    let recovering_components = recovery.is_some();
-                    let mut skin_bridge_domains = Vec::new();
-                    let mut skin_command_fits = Vec::new();
-                    let paths = if let Some(anchors) = recovery {
-                        let mut check_component =
-                            |candidate: &mut support::RasterCandidate,
-                             axis,
-                             scratch: usize,
-                             scratch_owned_bytes: usize| {
-                                let live =
-                                    scratch.checked_sub(classified_points).ok_or_else(|| {
-                                        error(
-                                            ManufacturingErrorCode::ResourceLimit,
-                                            "component scratch omits retained classification",
-                                        )
-                                    })?;
-                                let receipt = anchors(
-                                    candidate,
-                                    axis,
-                                    live,
-                                    scratch_owned_bytes.checked_sub(classified_bytes).ok_or_else(|| {
-                                        error(
-                                            ManufacturingErrorCode::ResourceLimit,
-                                            "component scratch omits retained classification bytes",
-                                        )
-                                    })?,
-                                )?;
-                                anchor_capacity.set(receipt.workspace_bytes);
-                                Ok(receipt)
-                            };
-                        classified.paths_with_bridge_recovery(
-                            &hatch_layer,
-                            phase_by_layer[index],
-                            &sections[current].process_domains,
-                            classified_bytes,
-                            anchor_owned_bytes,
-                            segments,
-                            |scratch, scratch_bytes, work| {
-                                boolean::charge(neighborhoods.work_mut(), work)?;
-                                admit_skin_scratch(
-                                    live_retained_points,
-                                    outside_owned_bytes,
-                                    &mut neighborhoods,
-                                    &[],
-                                    scratch,
-                                    scratch_bytes,
-                                    cancel,
-                                )
-                            },
-                            &mut check_component,
-                            &mut skin_bridge_domains,
-                            &mut skin_command_fits,
-                            cancel,
-                        )?
-                    } else {
-                        let (paths, _, fits) = classified.paths(
-                            elevation.z,
-                            elevation.lower_z,
-                            axis,
-                            region::HatchAxis::for_policy(
-                                recipe.top_skin_axis,
-                                hatch_key(schedule, index),
-                            ),
-                            recipe,
-                            web_roof.as_ref().map(|field| {
-                                if cathedral_roads.get(index).is_some() {
-                                    field.reused_roof()
-                                } else {
-                                    field.roof()
-                                }
-                            }),
-                            phase_by_layer[index],
-                            classified_bytes,
-                            &sections[current].process_domains,
-                            segments,
-                            |scratch, scratch_bytes, work| {
-                                boolean::charge(neighborhoods.work_mut(), work)?;
-                                admit_skin_scratch(
-                                    live_retained_points,
-                                    live_owned_bytes,
-                                    &mut neighborhoods,
-                                    &[],
-                                    scratch,
-                                    scratch_bytes,
-                                    cancel,
-                                )
-                            },
-                            cancel,
-                        )?;
-                        skin_command_fits = fits;
-                        paths
-                    };
-                    let paths = match cathedral_roads.get(index) {
-                        Some(built) => {
-                            let mut paths = paths;
-                            let count = |paths: &[DepositionPath]| -> usize {
-                                paths
-                                    .iter()
-                                    .filter(|path| cathedral::is_road(path))
-                                    .map(|path| path.points_mm.len().saturating_sub(1))
-                                    .sum()
-                            };
-                            *segments = segments
-                                .saturating_sub(count(&paths))
-                                .saturating_add(count(built));
-                            paths.retain(|path| !cathedral::is_road(path));
-                            paths.extend(built.iter().cloned());
-                            paths
-                        }
-                        None => paths,
-                    };
-                    // Recovery scratch carries the whole workspace receipt once.
-                    // Refresh its capacity before cloning interface metadata below.
-                    live_owned_bytes =
-                        geometry_bytes(&[outside_owned_bytes, anchor_capacity.get()])?;
-                    let base = skin_retained_points(live_retained_points, &neighborhoods, &[])?
-                        + classified.retained_points()
-                        + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
-                        + bonds::skin_bridge_points(&skin_bridge_domains)
-                        + bonds::skin_command_fit_points(&skin_command_fits);
-                    let live_bytes = geometry_bytes(&[
-                        skin_retained_bytes(live_owned_bytes, &neighborhoods, &[])?,
-                        classified_bytes,
-                        bonds::path_bytes(&paths),
-                        bonds::skin_bridge_bytes(&skin_bridge_domains),
-                        bonds::skin_command_fit_bytes(&skin_command_fits),
-                    ])?;
-                    let mut admit = classification::fixed_owned_budget(base, live_bytes);
-                    admit(
-                        bonds::interface_owned_bytes(&classified.coverage.process_interfaces)
-                            .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
-                        bonds::interface_owned_bytes(&classified.coverage.process_interfaces),
-                    )?;
-                    let process_interfaces = classified.coverage.process_interfaces.clone();
-                    let whole_rows = if recovering_components {
-                        // A bridge band and authored complement are disjoint owners.
-                        // Global row extension must not re-enter the selected band.
-                        Vec::new()
-                    } else {
-                        let outside_rows_bytes = geometry_bytes(&[
-                            live_bytes,
-                            bonds::interface_owned_bytes(&process_interfaces),
-                        ])?;
-                        let outside_rows_units = base
-                            + bonds::interface_owned_bytes(&process_interfaces)
-                                .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
-                        classified.whole_rows(
-                            &paths,
-                            &hatch_layer,
-                            segments,
-                            cancel,
-                            classification::fixed_owned_budget(
-                                outside_rows_units,
-                                outside_rows_bytes,
-                            ),
-                        )?
-                    };
-                    Ok(support::RasterCandidate {
-                        skin_bridge_domains,
-                        skin_command_fits,
-                        paths,
-                        whole_rows,
-                        process_interfaces,
-                    })
-                })();
-                *planar_work = *neighborhoods.work_mut();
-                outcome
+        )?;
+        let stage_started = capture.as_ref().map(|_| std::time::Instant::now());
+        let support_admission = support_stage::run(
+            &mut layers,
+            &stage_input,
+            support_stage::StageWork {
+                segments: &mut segments,
+                geometry: admission.geometry_work,
+                support: support_work,
+                neighborhoods: support_stage::RasterWork::Live(&mut neighborhoods),
+                void_memo,
             },
-            |demand_bounds,
-             retained_units,
-             live_bytes,
-             _native_points,
-             _native_owned_bytes,
-             _support_work,
-             _native_work| {
-                tolerant::project_protected_voids(
-                    &admission.models,
-                    void_memo,
-                    demand_bounds,
-                    retained_units,
-                    live_bytes,
-                    cancel,
-                )
-            },
-            |index, candidate, segments, work, outside_owned_bytes| {
-                let current = span_at(&sections, index as u32);
-                let base = support_native_points
-                    + bonds::skin_bridge_points(&candidate.skin_bridge_domains)
-                    + bonds::skin_command_fit_points(&candidate.skin_command_fits)
-                    + candidate
-                        .paths
-                        .iter()
-                        .map(|p| p.points_mm.capacity())
-                        .sum::<usize>();
-                let candidate_owned_bytes = geometry_bytes(&[
-                    bonds::path_bytes(&candidate.paths),
-                    bonds::path_bytes(&candidate.whole_rows),
-                    bonds::skin_bridge_bytes(&candidate.skin_bridge_domains),
-                    bonds::skin_command_fit_bytes(&candidate.skin_command_fits),
-                ])?;
-                bonds::construct(
-                    &mut candidate.process_interfaces,
-                    &sections[current].process_domains,
-                    &mut candidate.paths,
-                    schedule[index].z,
-                    schedule[index].lower_z,
-                    recipe,
-                    segments,
-                    classification::fixed_point_budget(
-                        base,
-                        geometry_bytes(&[outside_owned_bytes, candidate_owned_bytes])?,
-                    ),
-                    work,
-                    cancel,
-                )
-            },
+            cancel,
         );
+        if let Some((capture, started)) = capture.zip(stage_started) {
+            capture.finish(&layers, &support_admission, support_work, started.elapsed())?;
+        }
         timing.mark("support_realization");
         drop(classifications);
         retained_points -= classification_points;
@@ -2522,6 +2281,7 @@ struct SectionSpan {
     source_area_mm2: f64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ProcessDomain {
     material: Arc<MultiPolygon<f64>>,
     coverage: ProcessRegionCoverage,
@@ -2734,7 +2494,7 @@ struct TolerantOccupied {
     interval: [f64; 2],
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct OccupiedPiece {
     polygon: geo::Polygon<f64>,
     height_mm: [f64; 2],
@@ -2797,6 +2557,7 @@ fn native_error(
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LayerElevation {
     z: f64,
     lower_z: f64,

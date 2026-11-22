@@ -18,6 +18,7 @@ pub(super) use skin_commands::reserve_skin_fits;
 /// Wall centers are separate from the disjoint interior ownership domains. Holes
 /// remain excluded by every Boolean operation; sparse void is a nominal fraction
 /// of its interior domain, not a manufactured geometry or strength assertion.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct ClassifiedRegions {
     pub(super) layout: Arc<WallPlan>,
     pub(super) bottom: MultiPolygon<f64>,
@@ -31,6 +32,7 @@ pub(super) struct ClassifiedRegions {
     )>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct InteriorRegion {
     pub(super) bead_width_mm: Option<f64>,
     pub(super) source_material: Option<MultiPolygon<f64>>,

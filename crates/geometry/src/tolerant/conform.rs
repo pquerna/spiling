@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What conforming changed.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Conformed {
     /// Vertices inserted into an open mesh edge of a neighbouring face.
     pub vertices: usize,

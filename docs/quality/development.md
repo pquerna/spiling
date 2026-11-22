@@ -321,6 +321,35 @@ Passing focused tests is not a claim that the workspace passed, and test counts 
 not workflow coverage. Report exactly which commands ran, including ignored
 selections and real-part journeys, and name what was not run.
 
+## Replay one manufacturing stage
+
+Support development can capture the input from a normal compilation and replay
+only the support stage. Use matching CLI and engine binaries built from the
+checkout under test. Pass the normal project command after `--`:
+
+```sh
+cargo xtask stage capture -- /path/to/spiling-cli project create /tmp/stage.spil \
+  --engine /path/to/spiling-engine --import /path/to/part.step \
+  --printer spiling.reference.marlin.04 --material pla --quality standard \
+  --supports on --center-all-on-bed --compile --save
+cargo xtask stage run BLOB --runner /path/to/spiling-stage
+```
+
+Build the runner with `cargo build --profile profiling -p spiling-manufacturing
+--bin spiling-stage`. Omitting `--runner` uses the existing profiling binary in the current
+checkout’s target directory. Neither run form starts a build. The `stage_capture` diagnostic names `BLOB` under
+`~/work/cache/stages/<planner>/<source>/<input-sha256>.json` and prints the
+full compile's support output hash and work counts. The replay prints the
+same fields and times only support execution, after reading and checking the
+blob. A capture that needs a different planner identity requires recapture.
+
+These are local developer inputs, not portable project artifacts. They contain
+prepared private source geometry. Keep them out of source control. Replay
+retains the recorded skin-cache admission and refuses a stage that would need
+reclaiming that cache. The support output hash covers the resulting ordered
+layers and withdrawal beads; it does not imply later realization or independent
+program verification ran during stage replay.
+
 ## Native egui workbench
 
 [ADR006](../adr/006-native-egui-workbench.md) selects the permanent

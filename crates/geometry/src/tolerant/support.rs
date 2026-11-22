@@ -35,6 +35,7 @@ pub struct TolerantVoidProjection {
     pub roof: Option<TolerantVoidRoof>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TolerantVoidRoof {
     pub height_mm: [f64; 2],
     pub facets: Vec<[[f64; 2]; 3]>,

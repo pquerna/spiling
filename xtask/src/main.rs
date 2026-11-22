@@ -3,6 +3,7 @@
 mod macos;
 mod packaging;
 mod process;
+mod stage;
 use process::Runner;
 use serde_json::Value;
 use std::{
@@ -234,13 +235,14 @@ fn execute() -> Result<()> {
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("help");
     if matches!(command, "help" | "--help" | "-h") {
         println!(
-            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust, sccache and platform C/C++ tooling (see docs/quality/development.md for setup/bypass). Optional TypeScript/research tools live in tools/package.json."
+            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|stage|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust, sccache and platform C/C++ tooling (see docs/quality/development.md for setup/bypass). Optional TypeScript/research tools live in tools/package.json."
         );
         return Ok(());
     }
     let context = Context::new()?;
     let rest = &args[1..];
     match command {
+        "stage" => stage::execute(&context, rest),
         "bootstrap" => {
             require_empty(rest)?;
             context

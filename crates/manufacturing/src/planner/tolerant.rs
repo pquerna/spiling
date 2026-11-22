@@ -755,6 +755,7 @@ pub(super) fn polygon(points: Vec<[f64; 2]>) -> Polygon<f64> {
     Polygon::new(LineString(coords), Vec::new())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ProjectedVoid {
     outer: Polygon<f64>,
     bounds: geo::Rect<f64>,
@@ -766,7 +767,7 @@ struct ProjectedVoid {
 /// The facet inventory never changes across schedule retries of one lane, so
 /// a model is projected once, on its first relevant demand, and its admitted
 /// outer masks are reused by every later pass.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct VoidMemo {
     models: BTreeMap<OccurrenceId, Vec<ProjectedVoid>>,
     points: usize,

@@ -69,6 +69,7 @@ pub(super) fn is_road(path: &DepositionPath) -> bool {
         && matches!(path.owner, Some(DepositionOwner::Regional { .. }))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Field {
     frame_mm: [[f64; 2]; 2],
 }

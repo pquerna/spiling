@@ -84,6 +84,18 @@ impl Sweep {
         }
     }
 
+    pub(in crate::planner) fn hash_stage_output(
+        &self,
+        mut sink: impl std::io::Write,
+    ) -> std::io::Result<()> {
+        for bead in &self.beads {
+            for bits in bead.key().into_iter().chain([bead.upper.to_bits()]) {
+                sink.write_all(&bits.to_be_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::planner) fn retained_bytes(&self) -> usize {
         self.beads
             .capacity()

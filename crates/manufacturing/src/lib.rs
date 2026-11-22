@@ -22,6 +22,17 @@ mod surface_inspection;
 pub mod verifier;
 pub mod working_set;
 pub use planner::preflight;
+
+/// Re-execute a captured support stage without importing a source or running
+/// any other manufacturing stage. Developer captures are not plan authority.
+#[doc(hidden)]
+pub fn replay_support_stage(
+    blob: &std::path::Path,
+    working_set: WorkingSet,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    planner::support_stage::replay(blob, working_set, cancel)
+}
 pub use working_set::WorkingSet;
 
 use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord, SourceHash};

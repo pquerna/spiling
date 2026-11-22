@@ -172,7 +172,7 @@ pub struct TolerantSection {
 }
 
 /// The tolerances a tolerant section is built and admitted with.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TolerantPolicy {
     /// Largest source gap treated as one point.
     pub join_mm: f64,
@@ -189,7 +189,7 @@ impl Default for TolerantPolicy {
 }
 
 /// The definition's watertight tessellation, prepared once for many sections.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TolerantModel {
     positions: Vec<[f64; 3]>,
     triangles: Arc<Vec<[u32; 3]>>,
@@ -810,6 +810,36 @@ impl TolerantModel {
     }
 
     /// Heap held by the prepared tessellation.
+    /// Check the indexing invariants of a prepared model received from a
+    /// developer stage snapshot before invoking section or occupancy queries.
+    pub fn validate_stage_snapshot(&self) -> bool {
+        self.z_min.is_finite()
+            && self.reach.is_finite()
+            && self.reach >= 0.0
+            && self.support_enclosure_mm.is_finite()
+            && self.support_enclosure_mm >= 0.0
+            && self.policy.join_mm.is_finite()
+            && self.policy.join_mm > 0.0
+            && self.policy.profile_mm.is_finite()
+            && self.policy.profile_mm > 0.0
+            && self.positions.iter().flatten().all(|x| x.is_finite())
+            && self.faces.len() == self.triangles.len()
+            && self
+                .triangles
+                .iter()
+                .flatten()
+                .all(|&i| (i as usize) < self.positions.len())
+            && self
+                .faces
+                .iter()
+                .all(|&i| (i as usize) < self.surfaces.len())
+            && self
+                .buckets
+                .iter()
+                .flatten()
+                .all(|&i| (i as usize) < self.triangles.len())
+    }
+
     pub fn retained_bytes(&self) -> usize {
         self.positions.capacity() * 24
             + self.triangles.capacity() * 12

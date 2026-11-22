@@ -490,7 +490,7 @@ pub(super) struct HatchLayer<'a> {
 }
 
 /// Quarter-pitch residues relative to each ordinary polygon's centered lattice.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum OrdinaryHatchPhase {
     Centered,
     Quarter,

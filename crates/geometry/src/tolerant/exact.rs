@@ -41,7 +41,7 @@ fn unit(a: V3) -> Option<V3> {
 }
 
 /// An analytic face as a distance-like implicit function `f(p) = 0`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Implicit {
     Plane {
         origin: V3,
