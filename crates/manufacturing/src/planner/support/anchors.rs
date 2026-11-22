@@ -232,7 +232,7 @@ enum AnchorInput {
     Edge((Result<[[f64; 3]; 2], ManufacturingError>, bool, f64)),
     Skipped(usize),
 }
-fn charge_pairs(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
+pub(super) fn charge_pairs(work: &mut usize, count: usize) -> Result<(), ManufacturingError> {
     if let Some(next) = work.checked_add(count) {
         *work = next;
         return Ok(());

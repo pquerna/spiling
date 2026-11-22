@@ -380,7 +380,7 @@ pub(super) fn component_budget(
     )
 }
 
-/// Layers whose regeneration stroke analysis is speculated at once.
+/// Layers whose stroke analysis is speculated at once.
 const SPECULATION_LAYERS: usize = 32;
 
 /// A stroke analysis made ahead of the serial regeneration pass, with the
@@ -457,6 +457,118 @@ fn speculate_analyses(
         .collect();
     check_cancel(cancel)?;
     Ok(analyses)
+}
+
+// Limit the footprint of the optional lookahead. A proof whose indices do
+// not fit is recomputed in order; this imposes no limit on a printable layer.
+const DEMAND_INDEX_WORDS: usize = 16;
+struct DemandStrokeProof {
+    bridges: [u64; DEMAND_INDEX_WORDS],
+    unanchored: [u64; DEMAND_INDEX_WORDS],
+    failure: Option<strokes::Failure>,
+    worst_unanchored_mm: f64,
+}
+
+impl DemandStrokeProof {
+    fn pack(proof: strokes::Admission) -> Option<Self> {
+        fn encode(indices: &[usize]) -> Option<[u64; DEMAND_INDEX_WORDS]> {
+            let mut bits = [0; DEMAND_INDEX_WORDS];
+            for &index in indices {
+                *bits.get_mut(index / u64::BITS as usize)? |= 1 << (index % u64::BITS as usize);
+            }
+            Some(bits)
+        }
+        Some(Self {
+            bridges: encode(&proof.bridges)?,
+            unanchored: encode(&proof.unanchored)?,
+            failure: proof.failure,
+            worst_unanchored_mm: proof.worst_unanchored_mm,
+        })
+    }
+
+    fn unpack(self) -> strokes::Admission {
+        fn decode(bits: [u64; DEMAND_INDEX_WORDS]) -> Vec<usize> {
+            let count = bits.iter().map(|word| word.count_ones() as usize).sum();
+            let mut indices = Vec::with_capacity(count);
+            for (index, mut word) in bits.into_iter().enumerate() {
+                while word != 0 {
+                    indices.push(index * u64::BITS as usize + word.trailing_zeros() as usize);
+                    word &= word - 1;
+                }
+            }
+            indices
+        }
+        strokes::Admission {
+            bridges: decode(self.bridges),
+            unanchored: decode(self.unanchored),
+            failure: self.failure,
+            worst_unanchored_mm: self.worst_unanchored_mm,
+        }
+    }
+}
+
+/// Speculate over borrowed paths. The retained proofs have only inline
+/// indices, so ordinary demand recovery has no extra live heap ownership.
+fn speculate_demand_analyses(
+    layers: &[PrintLayer],
+    from: usize,
+    proofs: &mut [Option<DemandStrokeProof>; SPECULATION_LAYERS],
+    recipe: &PlanarPrintRecipe,
+    budget: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use rayon::prelude::*;
+
+    *proofs = [const { None }; SPECULATION_LAYERS];
+    let count = (layers.len() - from).min(proofs.len());
+    let workers = rayon::current_num_threads().min(count);
+    if workers <= 1 || budget == 0 {
+        return Ok(());
+    }
+    let working_set = crate::working_set::current();
+    let per_worker = budget / workers;
+    let mut charges = [0; SPECULATION_LAYERS];
+    proofs[..count]
+        .par_iter_mut()
+        .zip(&mut charges[..count])
+        .enumerate()
+        .for_each(|(offset, (proof, charge))| {
+            let index = from + offset;
+            let layer = &layers[index];
+            if !layer.region_coverage.process_interfaces.is_empty()
+                || (offset != 0
+                    && !layers[index - 1]
+                        .region_coverage
+                        .process_interfaces
+                        .is_empty())
+            {
+                return;
+            }
+            let reserve = stroke_proof_reservation(layer.paths.len());
+            let Some(scratch) = per_worker.checked_sub(reserve).filter(|&n| n != 0) else {
+                return;
+            };
+            *proof = crate::working_set::scope(working_set, || {
+                let mut anchors = AnchorWorkspace::default();
+                anchors.set_budget(scratch);
+                strokes::analyze(
+                    &layer.paths,
+                    layers[index - 1].paths.iter(),
+                    std::iter::empty(),
+                    recipe,
+                    &mut anchors,
+                    charge,
+                    cancel,
+                )
+                .ok()
+                .and_then(DemandStrokeProof::pack)
+            });
+        });
+    for charge in charges[..count].iter().copied() {
+        anchors::charge_pairs(work, charge)?;
+    }
+    check_cancel(cancel)
 }
 
 fn stroke_proof_reservation(paths: usize) -> usize {
@@ -936,6 +1048,8 @@ pub(super) fn realize(
         // Layer payload accounting is read many times per layer; only the
         // current layer changes, so keep a per-layer ledger.
         let mut payload = PayloadLedger::new(layers)?;
+        let mut speculated = [const { None }; SPECULATION_LAYERS];
+        let mut previous_unchanged = true;
         for index in 1..layers.len() {
             check_cancel(cancel)?;
             payload.refresh(index - 1, &layers[index - 1]);
@@ -945,11 +1059,34 @@ pub(super) fn realize(
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
             anchors.set_budget(workspace_budget(retained, owned_bytes)?);
+            let offset = (index - 1) % speculated.len();
+            if offset == 0 {
+                let t = split.start();
+                speculate_demand_analyses(
+                    layers,
+                    index,
+                    &mut speculated,
+                    recipe,
+                    workspace_budget(
+                        retained,
+                        owned_bytes.saturating_add(anchors.retained_bytes()),
+                    )
+                    .unwrap_or(0),
+                    &mut anchor_work,
+                    cancel,
+                )?;
+                split.stop("speculate_analyze", t);
+                // This lower layer was already committed at the batch read.
+                previous_unchanged = true;
+            }
             let (prior, remaining) = layers.split_at_mut(index);
             let layer = remaining.first_mut().expect("current support layer");
             check_cancel(cancel)?;
             layer.region_coverage.unsupported_overhang_mm = 0.0;
             let t = split.start();
+            // Until its interface callback or recovery replaces paths, this
+            // is the exact current layer read by the worker.
+            let mut paths_unchanged = layer.region_coverage.process_interfaces.is_empty();
             let mut interface_bound = finalize_layer_interface(
                 index,
                 layer,
@@ -975,16 +1112,26 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
             )?);
             let t = split.start();
-            let mut admission = strokes::analyze(
-                &layer.paths,
-                previous.clone(),
-                std::iter::empty(),
-                recipe,
-                &mut anchors,
-                &mut anchor_work,
-                cancel,
-            )?;
-            split.stop("analyze", t);
+            let mut admission = if let Some(proof) = speculated[offset]
+                .take()
+                .filter(|_| previous_unchanged && paths_unchanged)
+            {
+                let admission = proof.unpack();
+                split.stop("reuse_analyze", t);
+                admission
+            } else {
+                let admission = strokes::analyze(
+                    &layer.paths,
+                    previous.clone(),
+                    std::iter::empty(),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?;
+                split.stop("analyze", t);
+                admission
+            };
             let t = split.start();
             if admission.failure.is_some() || !interface_bound {
                 // Preserve ordinary authored hatch; only a finite demanded role
@@ -1173,6 +1320,7 @@ pub(super) fn realize(
                     // when another stroke still needs support; do not demand a
                     // corridor for fragments that we can already anchor.
                     if complete || joined || component_bridges {
+                        paths_unchanged = false;
                         *segments = without_old + path_segments(&candidate.paths);
                         layer.paths = candidate.paths;
                         layer.region_coverage.process_interfaces = candidate.process_interfaces;
@@ -1291,6 +1439,10 @@ pub(super) fn realize(
                 + vec_bytes(&admission.bridges)
                 + vec_bytes(&admission.unanchored);
             reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
+            // Only the candidate's role is read by stroke analysis. Lower
+            // roads enter through checked_edges and their explicit top Z;
+            // relabelling a lower road does not change either operand.
+            previous_unchanged = paths_unchanged;
             for path in admission.bridges {
                 original_bridge_roles.push((index, path, layer.paths[path].kind));
                 layer.paths[path].kind = DepositionKind::Bridge;
