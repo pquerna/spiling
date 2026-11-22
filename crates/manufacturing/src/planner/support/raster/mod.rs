@@ -309,6 +309,7 @@ fn exact_field(
         *contour = placed;
     }
     if !interface.is_empty() {
+        exact::extend_interface_turns(raster, kept, interface, contour, &field, exact)?;
         exact::refine_kept_faces(raster, kept, interface, contour, &field, exact)?;
     }
     Ok(Some(field))

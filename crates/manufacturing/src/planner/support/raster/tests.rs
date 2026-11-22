@@ -840,6 +840,57 @@ fn interface_wall_reaches_both_exclusions_at_an_offset_corner() {
 }
 
 #[test]
+fn a_long_interface_turn_requires_a_clear_kept_centerline() {
+    let cancel = AtomicBool::new(false);
+    let raster = raster(&cancel);
+    let width = crate::planner::tests::recipe(1.0).bead_width_mm;
+    let safe = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
+    let exact = exact::Exact::new(safe, SUPPORT_CELL_MM);
+    let original = MultiPolygon(vec![Polygon::new(
+        LineString::from(vec![
+            (8.4, 8.4),
+            (10.0, 8.4),
+            (10.0, 10.0),
+            (9.76, 10.04),
+            (8.4, 10.04),
+            (8.4, 8.4),
+        ]),
+        vec![],
+    )]);
+    let obstacles = [
+        ([10.0 + exact.level, 7.0], [10.0 + exact.level, 13.0], 0.0),
+        ([7.0, 10.3 + exact.level], [13.0, 10.3 + exact.level], 0.0),
+    ];
+    let samples = exact::samples(&raster, &original, exact.cell).unwrap();
+    let mut builder = exact::builder(&raster, &samples, &exact).unwrap().unwrap();
+    for (start, end, radius) in obstacles {
+        builder.segment(start, end, radius).unwrap();
+    }
+    let field = builder.finish().unwrap();
+    let mut kept = cells(&raster, &rectangle(8.0, 8.0, 4.0, 4.0));
+    kept.subtract(&raster.capsules(obstacles).unwrap());
+    let mut placed = original.clone();
+    exact::extend_interface_turns(&raster, &kept, &kept, &mut placed, &field, &exact).unwrap();
+    let ring = &placed.0[0].exterior().0;
+    assert!(
+        ring.iter()
+            .any(|point| (point.x - 10.0).abs() < 0.000002 && (point.y - 10.3).abs() < 0.000002)
+    );
+    for edge in ring.windows(2) {
+        assert!(segment_clearance(&obstacles, edge[0].into(), edge[1].into()) >= safe);
+    }
+    kept.subtract(
+        &raster
+            .outward(&rectangle(9.85, 10.12, 0.3, 0.08).0, 0.0)
+            .unwrap(),
+    );
+    assert!(!raster.holds_all(&kept, [10.0, 10.15]));
+    let mut refused = original.clone();
+    exact::extend_interface_turns(&raster, &kept, &kept, &mut refused, &field, &exact).unwrap();
+    assert_eq!(refused, original);
+}
+
+#[test]
 fn walls_follow_the_exact_offset_of_a_circle_within_a_fraction_of_a_cell() {
     let cancel = AtomicBool::new(false);
     let raster = raster(&cancel);

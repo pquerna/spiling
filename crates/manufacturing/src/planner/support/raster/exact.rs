@@ -542,6 +542,176 @@ pub(super) fn displace(
     Ok(Some(joined))
 }
 
+/// A long exact-offset rail may reach a second exclusion beyond the
+/// displacement bound of an individual grid sample. Its changed chords
+/// must prove both exact clearance and continuous kept centerlines.
+pub(super) fn extend_interface_turns(
+    raster: &Raster<'_>,
+    kept: &Bits,
+    interface: &Bits,
+    contour: &mut MultiPolygon<f64>,
+    field: &Field,
+    exact: &Exact,
+) -> Result<(), ManufacturingError> {
+    let mut work = 0;
+    let mut changed = false;
+    for polygon in &mut contour.0 {
+        let mut extend = |ring: &mut geo::LineString<f64>| {
+            changed |= extend_ring_turns(
+                raster,
+                kept,
+                interface,
+                &mut ring.0,
+                field,
+                exact,
+                &mut work,
+            )?;
+            Ok(())
+        };
+        polygon.try_exterior_mut(&mut extend)?;
+        polygon.try_interiors_mut(|rings| rings.iter_mut().try_for_each(&mut extend))?;
+    }
+    raster.charge(work);
+    if changed {
+        let mut rings = Vec::new();
+        for polygon in &contour.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                let count = ring.0.len().saturating_sub(1);
+                let mut points = Vec::new();
+                raster.reserve(&mut points, count)?;
+                points.extend(ring.0[..count].iter().copied().map(<[f64; 2]>::from));
+                raster.reserve(&mut rings, 1)?;
+                rings.push(points);
+            }
+        }
+        *contour = join(raster, &rings)?;
+    }
+    Ok(())
+}
+
+fn extend_ring_turns(
+    raster: &Raster<'_>,
+    kept: &Bits,
+    interface: &Bits,
+    ring: &mut Vec<Coord<f64>>,
+    field: &Field,
+    exact: &Exact,
+    work: &mut usize,
+) -> Result<bool, ManufacturingError> {
+    let count = ring.len().saturating_sub(1);
+    if count < 3 {
+        return Ok(false);
+    }
+    let mut rebuilt: Vec<Coord<f64>> = Vec::new();
+    for index in 0..count {
+        check_cancel(raster.cancel)?;
+        *work += 1;
+        let origin: [f64; 2] = ring[index].into();
+        let previous: [f64; 2] = rebuilt
+            .last()
+            .copied()
+            .unwrap_or(ring[(index + count - 1) % count])
+            .into();
+        let next: [f64; 2] = if index + 1 == count {
+            rebuilt.first().copied().unwrap_or(ring[0])
+        } else {
+            ring[index + 1]
+        }
+        .into();
+        let mut replacement = None;
+        for (rail, adjacent, bend_before) in [(previous, next, false), (next, previous, true)] {
+            let dx = origin[0] - rail[0];
+            let dy = origin[1] - rail[1];
+            let length = dx.abs() + dy.abs();
+            if (dx.abs() > PLACEMENT_EPS_MM && dy.abs() > PLACEMENT_EPS_MM)
+                || length <= 2.0 * exact.cell
+            {
+                continue;
+            }
+            if ((adjacent[0] - origin[0]) * dy - (adjacent[1] - origin[1]) * dx).abs()
+                <= PLACEMENT_EPS_MM * length
+            {
+                continue;
+            }
+            let direction = if dx.abs() <= PLACEMENT_EPS_MM {
+                [0.0, dy.signum()]
+            } else {
+                [dx.signum(), 0.0]
+            };
+            let nearest = field.nearest(origin, work);
+            let Some(closest) = nearest.closest else {
+                continue;
+            };
+            if (nearest.clearance - exact.level).abs() > PLACEMENT_EPS_MM
+                || ((origin[0] - closest[0]) * direction[0]
+                    + (origin[1] - closest[1]) * direction[1])
+                    .abs()
+                    > PLACEMENT_EPS_MM
+            {
+                continue;
+            }
+            let Some(step) = field.first_hit(
+                origin,
+                direction,
+                (2.0 * exact.safe).min(exact.spread()),
+                exact.level - PLACEMENT_EPS_MM,
+                work,
+            ) else {
+                continue;
+            };
+            if step <= exact.reach {
+                continue;
+            }
+            let end = [
+                origin[0] + step * direction[0],
+                origin[1] + step * direction[1],
+            ];
+            let enclosure = program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
+            let (escape, inspected) = raster.frame.escaped(interface, origin, end, enclosure)?;
+            *work += inspected;
+            if escape.is_some() {
+                continue;
+            }
+            let bend = [0, 1].map(|axis| (adjacent[axis] + end[axis]) * 0.25 + origin[axis] * 0.5);
+            let mut fits = true;
+            for (from, to) in [(rail, end), (end, bend), (bend, adjacent)] {
+                let (escape, inspected) = raster.frame.escaped(kept, from, to, enclosure)?;
+                *work += inspected;
+                if escape.is_some() || field.segment_clearance(from, to, work) < exact.safe {
+                    fits = false;
+                    break;
+                }
+            }
+            if fits {
+                replacement = Some(if bend_before {
+                    [Coord::from(bend), Coord::from(end)]
+                } else {
+                    [Coord::from(end), Coord::from(bend)]
+                });
+                break;
+            }
+        }
+        if let Some(replacement) = replacement {
+            if rebuilt.is_empty() {
+                raster.reserve(&mut rebuilt, ring.len() + 1)?;
+                rebuilt.extend_from_slice(&ring[..index]);
+            }
+            raster.reserve(&mut rebuilt, replacement.len())?;
+            rebuilt.extend(replacement);
+        } else if !rebuilt.is_empty() {
+            raster.reserve(&mut rebuilt, 1)?;
+            rebuilt.push(ring[index]);
+        }
+    }
+    let changed = !rebuilt.is_empty();
+    if changed {
+        raster.reserve(&mut rebuilt, 1)?;
+        rebuilt.push(rebuilt[0]);
+        *ring = rebuilt;
+    }
+    Ok(changed)
+}
+
 /// Whether sample `k` starts an original edge (its normal is the corner
 /// bisector). Samples within an edge share the edge normal and lie on it.
 fn is_vertex(ring: &[Sample], k: usize) -> bool {
