@@ -316,6 +316,25 @@ impl ManufacturingAsset {
         }
         Ok(bundle)
     }
+    /// The bundle's provenance, read without building its plan, bound to
+    /// this asset's identity and record input hash.
+    pub(crate) fn provenance(
+        &self,
+    ) -> Result<spiling_contracts::manufacturing::ManufacturingProvenance, ProjectError> {
+        self.validate_identity()?;
+        let provenance = spiling_contracts::manufacturing::decode_bundle_provenance_from(
+            self.bundle.len(),
+            || self.bundle.reader(),
+        )
+        .map_err(manufacturing_error)?;
+        if provenance.input_hash != self.record.input_hash {
+            return Err(error(
+                ProjectErrorCode::CorruptAsset,
+                "manufacturing record differs from bundle",
+            ));
+        }
+        Ok(provenance)
+    }
     /// Sizes, record validity and both content digests.
     fn validate_identity(&self) -> Result<(), ProjectError> {
         if self.bundle.is_empty() || self.bundle.len() > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
@@ -670,7 +689,7 @@ impl Project {
             appearance_palettes: loaded.appearance_palettes,
             materials: loaded.materials,
         };
-        validate_snapshot_with_manufacturing_check(&snapshot, &loaded.manifest, check)?;
+        validate_snapshot_with_manufacturing_check(&snapshot, &loaded.manifest, Some(check))?;
         hardware::share_capture(&mut snapshot);
         let mut project = Self::new();
         project.project_id = loaded.manifest.project_id.clone();
@@ -1476,14 +1495,20 @@ impl Project {
                 manufacturing_options::set_intent(&mut snapshot, intent)?;
             }
             Edit::PublishManufacturing { mut asset } => {
-                let bundle = asset.validate()?;
-                if bundle.provenance.input_revision != self.revision {
+                // The asset proved its bundle against its record when built.
+                let provenance = asset.provenance()?;
+                if provenance.input_revision != self.revision {
                     return Err(error(
                         ProjectErrorCode::StaleRevision,
                         "compiled input revision is stale",
                     ));
                 }
-                validate_manufacturing_input(&bundle, &snapshot, &self.project_id, self.revision)?;
+                validate_manufacturing_input(
+                    &provenance,
+                    &snapshot,
+                    &self.project_id,
+                    self.revision,
+                )?;
                 if let Some(retained) = std::iter::once(&self.current)
                     .chain(self.undo.iter())
                     .chain(self.redo.iter())
@@ -2505,13 +2530,15 @@ pub(crate) fn validate_snapshot(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
 ) -> Result<(), ProjectError> {
-    validate_snapshot_with_manufacturing_check(snapshot, manifest, |_, _| Ok(()))
+    validate_snapshot_with_manufacturing_check(snapshot, manifest, None::<NoCheck>)
 }
+
+type NoCheck = fn(&ManufacturingAsset, &ManufacturingBundle) -> Result<(), ProjectError>;
 
 fn validate_snapshot_with_manufacturing_check<Failure: From<ProjectError>>(
     snapshot: &Snapshot,
     manifest: &ProjectManifest,
-    mut check: impl FnMut(&ManufacturingAsset, &ManufacturingBundle) -> Result<(), Failure>,
+    mut check: Option<impl FnMut(&ManufacturingAsset, &ManufacturingBundle) -> Result<(), Failure>>,
 ) -> Result<(), Failure> {
     if manifest.materials.as_ref() != snapshot.materials.as_ref().map(|a| a.record()) {
         return Err(invalid("project material descriptor and captured asset disagree").into());
@@ -2548,28 +2575,39 @@ fn validate_snapshot_with_manufacturing_check<Failure: From<ProjectError>>(
     }
     for l in &snapshot.layouts {
         if let Some(asset) = &l.manufacturing_artifact {
-            let bundle = asset.validate()?;
+            // A caller check reads the whole bundle. Otherwise an asset's
+            // immutable, digest-bound bundle was already proved against its
+            // record when the asset was built, so only its provenance is read.
+            let (bundle, provenance) = match &check {
+                Some(_) => {
+                    let bundle = asset.validate()?;
+                    let provenance = bundle.provenance.clone();
+                    (Some(bundle), provenance)
+                }
+                None => (None, asset.provenance()?),
+            };
             let mut scoped = snapshot.clone();
             scoped.focused_layout = l.layout_id.clone();
             validate_manufacturing_input(
-                &bundle,
+                &provenance,
                 &scoped,
                 &manifest.project_id,
                 manifest.revision,
             )?;
             drop(scoped);
-            check(asset, &bundle)?;
+            if let (Some(check), Some(bundle)) = (&mut check, &bundle) {
+                check(asset, bundle)?;
+            }
         }
     }
     validate_pins(std::iter::once(snapshot)).map_err(Failure::from)
 }
 fn validate_manufacturing_input(
-    bundle: &ManufacturingBundle,
+    provenance: &spiling_contracts::manufacturing::ManufacturingProvenance,
     snapshot: &Snapshot,
     project_id: &ProjectId,
     revision: ProjectRevision,
 ) -> Result<(), ProjectError> {
-    let provenance = &bundle.provenance;
     let definitions: Vec<_> = snapshot
         .active_sources()
         .map(|a| a.record.clone())

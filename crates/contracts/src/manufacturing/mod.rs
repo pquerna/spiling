@@ -5646,15 +5646,49 @@ pub fn decode_bundle_from<R: std::io::Read>(
     let corrupt = |e: serde_json::Error| {
         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
     };
-    let version: BundleVersion =
-        serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
-    if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
+    // One full parse; only a bundle that fails it is read again to tell an
+    // unsupported schema from corruption.
+    let bundle: ManufacturingBundle = match serde_json::from_reader(std::io::BufReader::new(open()))
+    {
+        Ok(bundle) => bundle,
+        Err(failure) => {
+            let version: BundleVersion =
+                serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
+            if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
+                return Err(invalid("unsupported manufacturing bundle schema"));
+            }
+            return Err(corrupt(failure));
+        }
+    };
+    if bundle.schema_version != MANUFACTURING_SCHEMA_VERSION {
         return Err(invalid("unsupported manufacturing bundle schema"));
     }
-    let bundle: ManufacturingBundle =
-        serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
     bundle.validate()?;
     Ok(bundle)
+}
+
+/// The provenance of an encoded bundle, read in one pass that skips the
+/// plan and report rather than building them.
+pub fn decode_bundle_provenance_from<R: std::io::Read>(
+    len: u64,
+    open: impl FnOnce() -> R,
+) -> Result<ManufacturingProvenance, ManufacturingError> {
+    if len == 0 || len > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
+        return Err(resource("bundle byte limit exceeded"));
+    }
+    #[derive(Deserialize)]
+    struct BundleHead {
+        schema_version: u32,
+        provenance: ManufacturingProvenance,
+    }
+    let head: BundleHead =
+        serde_json::from_reader(std::io::BufReader::new(open())).map_err(|e| {
+            ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
+        })?;
+    if head.schema_version != MANUFACTURING_SCHEMA_VERSION {
+        return Err(invalid("unsupported manufacturing bundle schema"));
+    }
+    Ok(head.provenance)
 }
 
 /// Canonical compact JSON of explicit semantic input fields sorted by identity.
