@@ -714,14 +714,15 @@ impl OutputDialect {
     pub fn relative_extrusion(self) -> bool {
         self.single_extruder_lifecycle()
     }
-    /// Every current dialect parses XYZ6/E8/F6 decimals; XYZ6 is also the
-    /// planner's `program_coordinates` lattice. A dialect whose firmware
-    /// needs fewer decimals declares them here.
+    /// Every current dialect uses the `program_coordinates` lattice, which is
+    /// also the planner's coordinate contract. A dialect whose firmware needs
+    /// fewer decimals declares them here.
     pub fn precision(self) -> ProgramPrecision {
+        use super::program_coordinates as lattice;
         ProgramPrecision {
-            xyz_decimals: 6,
-            e_decimals: 8,
-            f_decimals: 6,
+            xyz_decimals: lattice::PROGRAM_XYZ_DECIMALS,
+            e_decimals: lattice::PROGRAM_E_DECIMALS,
+            f_decimals: lattice::PROGRAM_F_DECIMALS,
         }
     }
     /// Thermal waits use `R` (wait for heating or cooling) except on Klipper,
