@@ -380,6 +380,85 @@ pub(super) fn component_budget(
     )
 }
 
+/// Layers whose regeneration stroke analysis is speculated at once.
+const SPECULATION_LAYERS: usize = 32;
+
+/// A stroke analysis made ahead of the serial regeneration pass, with the
+/// exact inputs it read.
+struct SpeculatedAnalysis {
+    begin: usize,
+    object: Vec<DepositionPath>,
+    previous: Vec<DepositionPath>,
+    contact: Vec<DepositionPath>,
+    admission: strokes::Admission,
+}
+
+/// Analyzes each layer in `range` against its current lower layer and
+/// contact, in parallel, with the authored bridge roles restored as the
+/// serial pass restores them. A layer whose analysis fails or cannot be
+/// admitted is left to the serial pass.
+#[expect(clippy::too_many_arguments)]
+fn speculate_analyses(
+    layers: &[PrintLayer],
+    range: std::ops::Range<usize>,
+    object_start: &[usize],
+    contact_tops: &[Option<usize>],
+    roles: &[(usize, usize, DepositionKind)],
+    recipe: &PlanarPrintRecipe,
+    budget: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Option<SpeculatedAnalysis>>, ManufacturingError> {
+    use rayon::prelude::*;
+    let working_set = crate::working_set::current();
+    let analyses = range
+        .into_par_iter()
+        .map(|index| {
+            crate::working_set::scope(working_set, || {
+                let begin = object_start[index];
+                let mut object = layers[index].paths.get(begin..)?.to_vec();
+                let from = roles.partition_point(|&(layer, _, _)| layer < index);
+                let to = roles.partition_point(|&(layer, _, _)| layer <= index);
+                for &(_, path, kind) in &roles[from..to] {
+                    object.get_mut(path)?.kind = kind;
+                }
+                let previous = layers[index - 1].paths.clone();
+                let contact: Vec<DepositionPath> = contact_tops[index]
+                    .map(|top| {
+                        layers[top]
+                            .paths
+                            .iter()
+                            .filter(|path| support_role(path.kind))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut anchors = AnchorWorkspace::default();
+                anchors.set_budget(budget.saturating_sub(stroke_proof_reservation(object.len())));
+                let mut work = 0;
+                let admission = strokes::analyze(
+                    &object,
+                    previous.iter(),
+                    contact.iter(),
+                    recipe,
+                    &mut anchors,
+                    &mut work,
+                    cancel,
+                )
+                .ok()?;
+                Some(SpeculatedAnalysis {
+                    begin,
+                    object,
+                    previous,
+                    contact,
+                    admission,
+                })
+            })
+        })
+        .collect();
+    check_cancel(cancel)?;
+    Ok(analyses)
+}
+
 fn stroke_proof_reservation(paths: usize) -> usize {
     // The stroke analyzer grows two Vec<usize> of path indices (bridges and
     // unanchored). Reserve their old/new growth arrays; use actual capacity
@@ -1915,8 +1994,26 @@ pub(super) fn realize(
         let mut split = crate::timing::Split::new("support.regeneration");
         let mut payload = PayloadLedger::new(layers)?;
         let mut lower_support_unchanged = true; // Layer zero is bed-rooted.
+        // Stroke analysis of the coming layers runs speculatively in
+        // parallel; a result is used only if its exact inputs are unchanged
+        // when the serial pass reaches its layer.
+        let mut speculated: Vec<Option<SpeculatedAnalysis>> = Vec::new();
+        let mut speculated_from = 1;
         for index in 1..layers.len() {
             check_cancel(cancel)?;
+            if index >= speculated_from + speculated.len() {
+                speculated_from = index;
+                speculated = speculate_analyses(
+                    layers,
+                    index..(index + SPECULATION_LAYERS).min(layers.len()),
+                    &object_start,
+                    &contact_tops,
+                    outstanding_roles,
+                    recipe,
+                    workspace_budget(retained_regions, owned_bytes)?,
+                    cancel,
+                )?;
+            }
             let part_contact = part_contacts.get(index).and_then(Option::as_ref);
             if object_start[index] == 0 {
                 lower_support_unchanged = true;
@@ -2113,15 +2210,27 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
             )?);
             let t = split.start();
-            let mut admission = strokes::analyze(
-                &layer.paths[begin..],
-                previous.clone(),
-                contact.clone(),
-                recipe,
-                &mut anchors,
-                &mut anchor_work,
-                cancel,
-            )?;
+            let reuse = speculated
+                .get_mut(index - speculated_from)
+                .and_then(Option::take)
+                .filter(|spec| {
+                    spec.begin == begin
+                        && spec.object == layer.paths[begin..]
+                        && spec.previous == prior[index - 1].paths
+                        && spec.contact.iter().eq(contact.clone())
+                });
+            let mut admission = match reuse {
+                Some(spec) => spec.admission,
+                None => strokes::analyze(
+                    &layer.paths[begin..],
+                    previous.clone(),
+                    contact.clone(),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?,
+            };
             split.stop("analyze", t);
             let t = split.start();
             if admission.failure.is_some() {
