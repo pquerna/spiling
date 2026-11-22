@@ -11,6 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 mod connect;
 mod schedule;
+pub(crate) mod stage;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Event {
@@ -41,6 +42,7 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 /// Transient Bambu display data from the normalized order. It is not part of
 /// the serialized plan or used by independent replay.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct BambuEstimate {
     pub starts_s: Vec<f64>,
     pub total_s: f64,
@@ -73,6 +75,18 @@ pub(crate) fn canonicalize_with_tool_order(
     prepare_order(plan, intent, &hatch_keys, cancel, order).map(drop)
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct StageWork {
+    anchor: usize,
+    routing: u64,
+    arc_runs: usize,
+}
+
+pub(crate) struct StageOutput {
+    pub(crate) estimate: Option<BambuEstimate>,
+    work: StageWork,
+}
+
 /// Deposition order is stored in the normalized plan. The emitter receives
 /// only the display estimates in addition to the plan, never a motion buffer.
 pub(crate) fn prepare(
@@ -80,7 +94,7 @@ pub(crate) fn prepare(
     intent: &ManufacturingIntent,
     hatch_keys: &[u32],
     cancel: &AtomicBool,
-) -> Result<Option<BambuEstimate>, ManufacturingError> {
+) -> Result<StageOutput, ManufacturingError> {
     prepare_order(
         plan,
         intent,
@@ -96,7 +110,7 @@ fn prepare_order(
     hatch_keys: &[u32],
     cancel: &AtomicBool,
     order: spiling_deposition_routing::ToolOrder,
-) -> Result<Option<BambuEstimate>, ManufacturingError> {
+) -> Result<StageOutput, ManufacturingError> {
     let routed = match &intent.printer.workflow {
         JobWorkflow::FixedDualMarlin { job } => {
             crate::routing::validate_plan(plan, intent, job, cancel)?;
@@ -109,10 +123,17 @@ fn prepare_order(
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
-    connect::connect_roads(plan, intent, routed.is_some(), hatch_keys, cancel)?;
-    let mut estimate = schedule::apply(plan, intent, routed, position, cancel, order)?;
-    lower_arcs(plan, intent, estimate.as_mut(), cancel)?;
-    Ok(estimate)
+    let anchor = connect::connect_roads(plan, intent, routed.is_some(), hatch_keys, cancel)?;
+    let (mut estimate, routing) = schedule::apply(plan, intent, routed, position, cancel, order)?;
+    let arc_runs = lower_arcs(plan, intent, estimate.as_mut(), cancel)?;
+    Ok(StageOutput {
+        estimate,
+        work: StageWork {
+            anchor,
+            routing,
+            arc_runs,
+        },
+    })
 }
 
 fn filament_area(diameter_mm: f64) -> f64 {
@@ -157,7 +178,8 @@ fn lower_arcs(
     intent: &ManufacturingIntent,
     mut estimate: Option<&mut BambuEstimate>,
     cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
+) -> Result<usize, ManufacturingError> {
+    let mut runs = 0;
     let firmware = arc_firmware(intent);
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
@@ -165,6 +187,7 @@ fn lower_arcs(
             if path.arcs.is_empty() {
                 continue;
             }
+            runs += path.arcs.len();
             let Some(firmware) = firmware else {
                 path.arcs.clear();
                 continue;
@@ -215,7 +238,7 @@ fn lower_arcs(
             }
         }
     }
-    Ok(())
+    Ok(runs)
 }
 
 /// Streamed counts are u32 on the wire; their width is the only count limit.

@@ -18,6 +18,7 @@ pub use spiling_contracts::manufacturing::{QualityPreset, SupportChoice};
 pub mod planner;
 mod realization;
 mod routing;
+mod stage_io;
 mod surface_inspection;
 pub mod verifier;
 pub mod working_set;
@@ -32,6 +33,15 @@ pub fn replay_support_stage(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     planner::support_stage::replay(blob, working_set, cancel)
+}
+/// Replay the typed process realization boundary from a developer capture.
+#[doc(hidden)]
+pub fn replay_realization_stage(
+    blob: &std::path::Path,
+    working_set: WorkingSet,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    realization::stage::replay(blob, working_set, cancel)
 }
 pub use working_set::WorkingSet;
 

@@ -5,23 +5,21 @@
 //! Developer cache, separate from persisted manufacturing artifacts. The
 //! compiler remains the only producer of admitted stage inputs.
 use super::*;
+use crate::stage_io::{self, Failure, HashWriter, capture_dir, source_key};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spiling_contracts::geometry::{OccurrenceId, SourceHash};
+use spiling_contracts::geometry::OccurrenceId;
 use spiling_geometry::{GeometryWorkBudget, tolerant::TolerantModel};
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
-    io::{self, BufReader, BufWriter, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 const FORMAT: &str = "support-input-1";
-const CAPTURE_DIR: &str = "SPILING_STAGE_CAPTURE_DIR";
 type Models = BTreeMap<OccurrenceId, Arc<TolerantModel>>;
 type Classification = (usize, classification::ClassifiedRegions, usize, usize);
-type Failure = Box<dyn std::error::Error>;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -98,23 +96,6 @@ type Owned = Snapshot<
     tolerant::VoidMemo,
 >;
 
-struct HashWriter<W> {
-    writer: W,
-    hash: Sha256,
-}
-
-impl<W: Write> Write for HashWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let len = self.writer.write(bytes)?;
-        self.hash.update(&bytes[..len]);
-        Ok(len)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
-    }
-}
-
 pub(in crate::planner) struct Capture {
     blob: PathBuf,
 }
@@ -134,11 +115,11 @@ impl Capture {
         geometry: &GeometryWorkBudget,
         work: &mut support::SupportWork,
     ) -> Result<Option<Self>, ManufacturingError> {
-        let Some(dir) = std::env::var_os(CAPTURE_DIR).filter(|_| !input.tentative) else {
+        let Some(dir) = capture_dir("support").filter(|_| !input.tentative) else {
             return Ok(None);
         };
         capture(
-            Path::new(&dir),
+            &dir,
             definitions,
             layers,
             input,
@@ -202,17 +183,7 @@ fn capture(
     geometry: &GeometryWorkBudget,
     work: &mut support::SupportWork,
 ) -> Result<Capture, Failure> {
-    let mut hashes: Vec<&SourceHash> = definitions
-        .iter()
-        .map(|d| &d.provenance.source_hash)
-        .collect();
-    hashes.sort_unstable();
-    hashes.dedup();
-    let source = match hashes.as_slice() {
-        [hash] => hash.as_str().to_owned(),
-        [] => return Err("no source hashes for the support input".into()),
-        _ => digest(&hashes)?,
-    };
+    let source = source_key(definitions)?;
     let mut materials = Vec::new();
     let mut material_ids = HashMap::new();
     let mut occupied = Vec::new();
@@ -299,40 +270,9 @@ fn capture(
         cathedral_roads: input.cathedral_roads,
         void_memo,
     };
-    let path = dir.join(SUPPORT_INPUT_PRODUCER).join(source);
-    fs::create_dir_all(&path)?;
-    // A capture cannot publish a partial blob. Concurrent writers of the same
-    // exact content converge on the same final name.
-    let temp = path.join(format!(".{}.pending", std::process::id()));
-    let writer = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let blob = (|| -> Result<PathBuf, Failure> {
-        let mut writer = HashWriter {
-            writer: BufWriter::new(writer),
-            hash: Sha256::new(),
-        };
-        serde_json::to_writer(&mut writer, &snapshot)?;
-        writer.flush()?;
-        let blob = path.join(format!("{:x}.json", writer.hash.finalize()));
-        fs::rename(&temp, &blob)?;
-        Ok(blob)
-    })();
-    if blob.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
+    let blob = stage_io::write_blob(dir, SUPPORT_INPUT_PRODUCER, &source, &snapshot)?;
     work.phases = Some(Vec::new());
-    Ok(Capture { blob: blob? })
-}
-
-fn digest(value: &impl Serialize) -> Result<String, Failure> {
-    let mut w = HashWriter {
-        writer: io::sink(),
-        hash: Sha256::new(),
-    };
-    serde_json::to_writer(&mut w, value)?;
-    Ok(format!("{:x}", w.hash.finalize()))
+    Ok(Capture { blob })
 }
 
 fn report(
@@ -360,28 +300,7 @@ pub(crate) fn replay(
     working_set: crate::WorkingSet,
     cancel: &AtomicBool,
 ) -> Result<serde_json::Value, Failure> {
-    use io::{Read, Seek};
-    let mut file = File::open(path)?;
-    // Local dev artifacts are input, not an import or manufacturing authority.
-    // JSON decoding needs extra capacity for nested structs and grown vectors.
-    let limit = u64::try_from(working_set.bytes() / 16)?;
-    let size = file.metadata()?.len();
-    if size > limit {
-        return Err("stage blob exceeds replay decode admission".into());
-    }
-    // Check the content address in a streaming pass, then decode the same file.
-    file.rewind()?;
-    let mut writer = HashWriter {
-        writer: io::sink(),
-        hash: Sha256::new(),
-    };
-    io::copy(&mut (&mut file).take(size), &mut writer)?;
-    let name = format!("{:x}.json", writer.hash.finalize());
-    if path.file_name().and_then(|name| name.to_str()) != Some(name.as_str()) {
-        return Err("stage blob content address mismatch".into());
-    }
-    file.rewind()?;
-    let value: Owned = serde_json::from_reader(BufReader::new(file.take(size)))?;
+    let value: Owned = stage_io::read_blob(path, working_set)?;
     if value.header.format != FORMAT || value.header.producer != SUPPORT_INPUT_PRODUCER {
         return Err("support input format or upstream producer differs; recapture input".into());
     }

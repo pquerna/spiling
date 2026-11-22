@@ -52,6 +52,9 @@ use std::{
 // the support stage's captured input. Support-only changes leave this alone,
 // even when they change the final plan and bump PLANNER_VERSION.
 const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-1";
+// All construction through arc attachment, including support, produces the
+// realization input. Routing, connection and arc lowering do not.
+pub(crate) const REALIZATION_INPUT_PRODUCER: &str = "realization-upstream-1";
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
@@ -141,7 +144,17 @@ pub(crate) fn plan<'a>(
     }
     bed_exclusion::check(&plan, &input.intent.printer, cancel)?;
     timing.mark("arc_attachment_and_bed");
-    let emission = crate::realization::prepare(&mut plan, input.intent, &hatch_keys, cancel)?;
+    let capture = crate::realization::stage::Capture::start(
+        input.stored_definitions,
+        &plan,
+        input.intent,
+        &hatch_keys,
+    )?;
+    let realized = crate::realization::prepare(&mut plan, input.intent, &hatch_keys, cancel)?;
+    if let Some(capture) = capture {
+        capture.finish(&plan, &realized)?;
+    }
+    let emission = realized.estimate;
     timing.mark("realization");
     if let Some(withdrawal) = withdrawal {
         withdrawal.certify_realized(

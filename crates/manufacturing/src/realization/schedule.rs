@@ -89,7 +89,7 @@ pub(super) fn apply(
     start: Option<[f64; 3]>,
     cancel: &AtomicBool,
     order: routing::ToolOrder,
-) -> Result<Option<BambuEstimate>, ManufacturingError> {
+) -> Result<(Option<BambuEstimate>, u64), ManufacturingError> {
     let machine = machine(intent, routed, start)?;
     let router = routed.map(FixedDualJob::router).transpose()?;
     let count: usize = plan.layers.iter().map(|layer| layer.paths.len()).sum();
@@ -258,7 +258,7 @@ pub(super) fn apply(
         }
         offset += n;
     }
-    Ok(estimate)
+    Ok((estimate, scheduled.work))
 }
 
 /// A receipt names the actual stroke, not every path sharing a process role.

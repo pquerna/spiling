@@ -407,9 +407,9 @@ pub(super) fn connect_roads(
     routed: bool,
     alternation: &[u32],
     cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
+) -> Result<usize, ManufacturingError> {
     if routed || !plan.sparse_bands.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut work = 0usize;
@@ -448,7 +448,7 @@ pub(super) fn connect_roads(
                 .and_then(|bytes| bytes.checked_sub(before)?.checked_add(layer_bytes(layer)));
         }
     }
-    Ok(())
+    Ok(work)
 }
 
 fn layer_bytes(layer: &PrintLayer) -> usize {
