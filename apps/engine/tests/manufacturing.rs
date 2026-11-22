@@ -884,14 +884,23 @@ async fn distributed_seams_change_actual_closed_wall_starts_and_survive_fresh_re
         assert_eq!(observed.len(), closed_walls);
         assert_eq!(observed.len(), captured_bundle.plan.layers.len());
     }
-    assert_eq!(starts[0], baseline_starts[0]);
+    // A Distributed wall faces compass entry (7 * layer + loop identity)
+    // mod 16 on every layer, so its starts turn across layers and leave the
+    // Nearest seams; no seam history is carried.
     assert!(
         starts
             .iter()
             .zip(&baseline_starts)
-            .skip(1)
-            .any(|(distributed, nearest)| distributed != nearest),
-        "one closed wall per layer must carry seam history across layers"
+            .filter(|(distributed, nearest)| distributed != nearest)
+            .count()
+            > 1,
+        "distributed seams must turn across layers"
+    );
+    assert!(
+        starts
+            .windows(2)
+            .any(|pair| pair[0].2[..2] != pair[1].2[..2]),
+        "distributed seams must not repeat one start"
     );
     assert!((report.deposited_volume_mm3 - baseline_report.deposited_volume_mm3).abs() < 0.001);
     assert_eq!(
