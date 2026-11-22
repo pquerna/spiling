@@ -810,7 +810,13 @@ fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_materi
             .plan
             .layers
             .iter()
-            .find(|layer| (layer.z_mm - end[2]).abs() <= 0.000001)
+            .find(|layer| {
+                spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm(
+                    layer.z_mm,
+                )
+                .unwrap()
+                    == end[2]
+            })
             .expect("emitted object stroke belongs to a scheduled layer");
         let sample = layer.section_z_mm;
         if (1.13..1.61).contains(&sample) {
@@ -3545,7 +3551,13 @@ fn equivalent_analytic_and_rational_sources_preserve_sections_material_and_fresh
                         .plan
                         .layers
                         .iter()
-                        .find(|layer| (layer.z_mm - end[2]).abs() <= 0.000001)
+                        .find(|layer| {
+                            spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm(
+                    layer.z_mm,
+                )
+                .unwrap()
+                    == end[2]
+                        })
                         .unwrap();
                     if hole_radius > 0.0 && layer.section_z_mm > 4.0 {
                         let offset = [start[0] - 10.0, start[1] - 10.0];
