@@ -39,9 +39,7 @@ mod tests;
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Area, Intersects, MultiPolygon, Point};
 use spiling_contracts::geometry::{GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM};
-use spiling_contracts::manufacturing::program_coordinates::{
-    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
-};
+use spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm;
 use spiling_contracts::manufacturing::*;
 use std::{
     collections::BTreeMap,
@@ -56,7 +54,8 @@ const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-1";
 // realization input. Routing, connection and arc lowering do not.
 pub(crate) const REALIZATION_INPUT_PRODUCER: &str = "realization-upstream-1";
 
-pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
+pub const LAYER_QUANTIZATION_MM: f64 =
+    spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
 
 pub(crate) fn retained_coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
@@ -180,7 +179,7 @@ pub(crate) fn plan<'a>(
 /// slicers drop such fragments, rather than refuse the part. Walls are kept.
 fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingError> {
     use spiling_contracts::manufacturing::program_coordinates::{
-        MIN_DEPOSITION_COMMAND_MM, project_xyz6_point_mm,
+        meets_minimum_command, project_xyz6_point_mm,
     };
     for layer in layers {
         let mut failure = None;
@@ -197,7 +196,7 @@ fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingE
                 project_xyz6_point_mm(path.points_mm[0]),
                 project_xyz6_point_mm(path.points_mm[1]),
             ) {
-                (Ok(a), Ok(b)) => (b[0] - a[0]).hypot(b[1] - a[1]) >= MIN_DEPOSITION_COMMAND_MM,
+                (Ok(a), Ok(b)) => meets_minimum_command((b[0] - a[0]).hypot(b[1] - a[1])),
                 (Err(e), _) | (_, Err(e)) => {
                     failure.get_or_insert(e);
                     true
@@ -2734,17 +2733,26 @@ fn refine_deposition_pair(
 fn image_support_contact_floor(
     event: f64,
     z_gap_mm: f64,
-    nominal_height_mm: f64,
+    _nominal_height_mm: f64,
 ) -> Result<f64, ManufacturingError> {
-    let scale = event.abs().max(nominal_height_mm).max(z_gap_mm).max(1.0);
-    let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-    let half_quantum = (0.5 / 1_000_000.0f64).next_up();
-    let lower = (((event + half_quantum).next_up() + arithmetic).next_up() + z_gap_mm).next_up();
-    let mut floor = project_xyz6_coordinate_mm(lower + half_quantum)?;
-    if project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
-        floor = project_xyz6_coordinate_mm(floor + 1.0 / 1_000_000.0)?;
+    // The contact stays in the event's own frame and keeps at least the gap
+    // between the emitted heights, one lattice step higher if rounding would
+    // shorten it.
+    // The same exact enclosed gap the contact selection checks.
+    let emitted_gap = |floor: f64| -> Result<f64, ManufacturingError> {
+        program_coordinates::enclosed_vertical_gap_mm(
+            program_coordinates::project_xyz6_bead_height_mm(floor, 0.0)?[0],
+            program_coordinates::project_xyz6_bead_height_mm(event, 0.0)?[1],
+        )
+    };
+    let mut floor = event + z_gap_mm;
+    for _ in 0..2 {
+        if emitted_gap(floor)? >= z_gap_mm {
+            break;
+        }
+        floor += program_coordinates::XYZ6_QUANTUM_MM;
     }
-    if !floor.is_finite() || project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
+    if !floor.is_finite() || emitted_gap(floor)? < z_gap_mm {
         return Err(error(
             ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
             "image contact floor cannot enclose the emitter's coordinate representation",
@@ -2892,23 +2900,28 @@ fn scheduled_layers(
             {
                 continue;
             }
-            let scale = event
-                .abs()
-                .max(input.intent.select_layer_height()?.height_mm)
-                .max(z_gap_mm)
-                .max(1.0);
-            let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-            let half_quantum = (0.5 / 1_000_000.0f64).next_up();
-            let upper = (((event - half_quantum).next_down() - arithmetic).next_down() - z_gap_mm)
-                .next_down();
-            if upper <= bed {
+            // The stop stays in the event's own frame, so it lands on the
+            // schedule's existing boundaries; the gap is checked on the
+            // emitted heights and steps down one lattice step if rounding
+            // would shorten it.
+            let mut stop = event - z_gap_mm;
+            if stop <= bed {
                 continue;
             }
-            let mut stop = project_xyz6_coordinate_mm(upper - half_quantum)?;
-            if project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
-                stop = project_xyz6_coordinate_mm(stop - 1.0 / 1_000_000.0)?;
+            // The same exact enclosed gap the contact selection checks.
+            let emitted_gap = |stop: f64| -> Result<f64, ManufacturingError> {
+                program_coordinates::enclosed_vertical_gap_mm(
+                    program_coordinates::project_xyz6_bead_height_mm(event, 0.0)?[0],
+                    program_coordinates::project_xyz6_bead_height_mm(stop, 0.0)?[1],
+                )
+            };
+            for _ in 0..2 {
+                if emitted_gap(stop)? >= z_gap_mm {
+                    break;
+                }
+                stop -= program_coordinates::XYZ6_QUANTUM_MM;
             }
-            if !stop.is_finite() || project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
+            if !stop.is_finite() || emitted_gap(stop)? < z_gap_mm {
                 return Err(error(
                     ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
                     "support stop cannot enclose the emitter's coordinate representation",
@@ -2952,7 +2965,10 @@ fn scheduled_layers(
             } else {
                 events[position]
             };
-            let minimum = 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM;
+            // A stop within two lattice steps of an existing event would only
+            // make a sliver layer; keep the existing boundary instead.
+            let minimum = 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+                + 2.0 * program_coordinates::XYZ6_QUANTUM_MM;
             // Never move a true native/field event or manufacture a sub-process
             // layer to obtain a closer support contact. Retain the existing
             // partition and select its latest provably safe top instead; the
@@ -3198,10 +3214,11 @@ fn layer_schedule_with_bounds(
                     let height = z - previous;
                     let command_height =
                         project_xyz6_coordinate_mm(z)? - project_xyz6_coordinate_mm(previous)?;
-                    if height < minimum
-                        || height > maximum
-                        || command_height < minimum
-                        || command_height > maximum
+                    let slack = program_coordinates::LATTICE_ARITHMETIC_SLACK_MM;
+                    if height < minimum - slack
+                        || height > maximum + slack
+                        || command_height < minimum - slack
+                        || command_height > maximum + slack
                     {
                         return Ok(false);
                     }

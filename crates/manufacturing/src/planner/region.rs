@@ -755,10 +755,10 @@ pub(super) fn hatch_polygon(
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
+) -> Result<bool, ManufacturingError> {
     check_cancel(cancel)?;
     if rows.count == 0 {
-        return Ok(());
+        return Ok(false);
     }
     if rows.count > crate::working_set::units().saturating_sub(*segments) {
         return Err(resource("rectilinear hatch row limit exceeded"));
@@ -768,6 +768,7 @@ pub(super) fn hatch_polygon(
         .map_err(|_| resource("component hatch intersection allocation refused"))?;
     let prepared = hatch::PreparedHatch::new(polygon, rows, layer.axis, cancel)?;
     let tile_rows = prepared.as_ref().map_or(1, |batch| batch.tile_rows());
+    let mut had_clips = false;
     for first in (0..rows.count).step_by(tile_rows) {
         let count = tile_rows.min(rows.count - first);
         let mask = prepared
@@ -785,6 +786,7 @@ pub(super) fn hatch_polygon(
             } else {
                 row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
             }
+            had_clips |= !hits.is_empty();
             append_hatch_row(
                 &hits,
                 coordinate,
@@ -796,7 +798,7 @@ pub(super) fn hatch_polygon(
             )?;
         }
     }
-    Ok(())
+    Ok(had_clips)
 }
 
 /// Clip the positive perimeter-owned fill at actual classified hatch rows.

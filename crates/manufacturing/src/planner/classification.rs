@@ -1225,7 +1225,7 @@ impl ClassifiedRegions {
                         &mut segments,
                         cancel,
                     ) {
-                        Ok(()) => {}
+                        Ok(_) => {}
                         // A speculative phase may clip a degenerate row even
                         // when a later phase or ordinary recovery is usable.
                         Err(failure)
@@ -1762,7 +1762,7 @@ impl ClassifiedRegions {
                     whole_rows: Vec::new(),
                     process_interfaces: Vec::new(),
                 };
-                region::hatch_polygon(
+                let had_clips = region::hatch_polygon(
                     polygon,
                     kind,
                     &rows,
@@ -1771,7 +1771,12 @@ impl ClassifiedRegions {
                     segments,
                     cancel,
                 )?;
-                if owner.is_some() && frame.is_none() && component.paths.is_empty() {
+                let omitted_sparse_clips = kind == DepositionKind::SparseFill && had_clips;
+                if owner.is_some()
+                    && frame.is_none()
+                    && component.paths.is_empty()
+                    && !omitted_sparse_clips
+                {
                     return Err(error(
                         ManufacturingErrorCode::UnsupportedGeometry,
                         "frozen ordinary hatch phase emitted no polygon paths",
@@ -4632,6 +4637,108 @@ fn bridge_bands(
 mod ownership_tests {
     use super::*;
     use geo::polygon;
+
+    #[test]
+    fn frozen_recovery_preserves_ordinary_sparse_lattice_omissions() {
+        let cancel = AtomicBool::new(false);
+        let recipe = crate::planner::tests::recipe(0.15);
+        let quantum = program_coordinates::XYZ6_QUANTUM_MM;
+        let rectangle = |start, width| {
+            geo::Rect::new(
+                geo::Coord { x: start, y: 1. },
+                geo::Coord {
+                    x: start + width,
+                    y: 1.2,
+                },
+            )
+            .to_polygon()
+        };
+        let fill = MultiPolygon(vec![
+            rectangle(0.1 * quantum, 0.2 * quantum),
+            rectangle(2., 1.),
+        ]);
+        let mut classified = ClassifiedRegions::new(
+            Arc::new(WallPlan {
+                paths: Vec::new(),
+                correspondence: Vec::new(),
+                fill: fill.clone(),
+                section_area_mm2: fill.unsigned_area(),
+                wall_area_mm2: 0.,
+                protected_hole_area_mm2: 0.,
+                thin_widened_mm: 0.,
+                thin_omitted_area_mm2: 0.,
+                retained_points: 0,
+                retained_bytes: 0,
+            }),
+            &fill,
+            &fill,
+            |_, _| Ok(()),
+            &recipe,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(classified.interiors[0].domain.0.len(), 2);
+        let bytes = classified.retained_bytes();
+        let layer = region::HatchLayer {
+            roof: None,
+            width_mm: recipe.bead_width_mm,
+            z: recipe.layer_height_mm,
+            lower_z: 0.,
+            height: recipe.layer_height_mm,
+            axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::X,
+            recipe: &recipe,
+        };
+        let phase = region::OrdinaryHatchPhase::Centered;
+        let (ordinary, _, _) = classified
+            .paths(
+                layer.z,
+                layer.lower_z,
+                layer.axis,
+                layer.top_axis,
+                &recipe,
+                None,
+                phase,
+                bytes,
+                &[],
+                &mut 0,
+                |_, _, _| Ok(()),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(ordinary.len(), 1);
+        let mut workspace = super::super::support::AnchorWorkspace::default();
+        let mut work = 0;
+        let mut check = |candidate: &mut super::super::support::RasterCandidate, axis, _, _| {
+            super::super::support::component_admission(
+                (candidate, axis, 100_000, false),
+                std::iter::empty(),
+                std::iter::empty(),
+                &recipe,
+                &mut workspace,
+                &mut work,
+                &cancel,
+            )
+        };
+        let recovered = classified
+            .paths_with_bridge_recovery_unfitted(
+                &layer,
+                phase,
+                &[],
+                bytes,
+                0,
+                &mut 0,
+                |_, _, _| Ok(()),
+                &mut check,
+                &mut Vec::new(),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(recovered).unwrap(),
+            serde_json::to_value(ordinary).unwrap()
+        );
+    }
 
     #[test]
     fn classification_records_match_empty_and_positive_interior_ownership() {

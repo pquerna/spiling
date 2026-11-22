@@ -44,15 +44,17 @@ pub(super) const CONTOUR_MARGIN_MM: f64 = 0.001;
 ///   the verifier's interval arithmetic and tie-break add a few half quanta
 ///   per bound (taken as eight quanta).
 ///
-/// Walls and row ends are placed, chord-checked and certified with this
-/// added to the support bead's own clearance, so a certificate implies the
-/// verifier's capsule-pair proof.
-pub(super) const VERIFIER_ENCLOSURE_MM: f64 = 2.0
+/// The sweep includes this in every exclusion fed to the field, so a
+/// certificate against the field implies the verifier's capsule-pair proof.
+pub(in crate::planner::support) const VERIFIER_ENCLOSURE_MM: f64 = 2.0
     * program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
     + MAX_ARC_SAGITTA_MM
     + PROFILE_TOLERANCE_MM
     + 2.0 * program_coordinates::XYZ6_QUANTUM_MM
     + 8.0 * program_coordinates::XYZ6_QUANTUM_MM;
+
+pub(super) const PROJECTION_MOVE_MM: f64 =
+    std::f64::consts::FRAC_1_SQRT_2 * program_coordinates::XYZ6_QUANTUM_MM;
 
 /// Deviation allowed when simplifying a placed wall: well under the margin.
 const SIMPLIFY_MM: f64 = 0.0005;
@@ -77,9 +79,8 @@ const PLACEMENT_EPS_MM: f64 = 1.0e-7;
 /// Placement parameters for one layer.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Exact {
-    /// Centre clearance every placed bead keeps: half a bead plus the XYZ6
-    /// projection and endpoint enclosure plus [`VERIFIER_ENCLOSURE_MM`], so
-    /// the emitted bead it certifies clears the verifier's decoded capsules.
+    /// Raw centre clearance every placed chord keeps against the already
+    /// enclosed field, including its maximum movement onto the command lattice.
     pub(super) safe: f64,
     /// Clearance walls and row ends are placed at.
     pub(super) level: f64,
@@ -91,12 +92,11 @@ pub(super) struct Exact {
 }
 
 impl Exact {
-    /// Placement for a bead whose emitted centre clearance is `bead` (half
-    /// its width plus the XYZ6 projection): just above `bead` plus the
-    /// verifier's enclosure. The reach stays below `bead` alone, so every
-    /// moved centre remains inside the kept cells.
+    /// Placement for a bead whose projected centre clearance is `bead`
+    /// (half its width plus the endpoint screen). The reach stays below
+    /// `bead` alone, so every moved centre remains inside the kept cells.
     pub(super) fn new(bead: f64, cell: f64) -> Self {
-        let safe = bead + VERIFIER_ENCLOSURE_MM;
+        let safe = (bead + PROJECTION_MOVE_MM).next_up();
         Self {
             safe,
             level: safe + CONTOUR_MARGIN_MM,

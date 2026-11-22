@@ -11,7 +11,8 @@
 //! piece. Every piece is checked with the same actual-coordinate predicates
 //! the verifier applies to split rows (Bridge pieces: only supported or
 //! genuine Bridge gaps, at least one Bridge; other pieces: supported only);
-//! when any piece fails, the row stays whole, never refused.
+//! explicitly checked in either travel direction because routing can reverse
+//! a piece. When any piece fails, the row stays whole, never refused.
 
 use super::support::{AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges};
 use crate::{check_cancel, error};
@@ -74,6 +75,18 @@ pub(super) fn split_bridged_rows(
         let mut replacement: Option<Vec<DepositionPath>> = None;
         for path_index in 0..layer.paths.len() {
             check_cancel(cancel)?;
+            if let Some(role) = supported_fitted_skin(
+                layer,
+                &layer.paths[path_index],
+                previous,
+                recipe,
+                alternation[index],
+                &mut anchors,
+                work,
+                cancel,
+            )? {
+                layer.paths[path_index].kind = role;
+            }
             let path = &layer.paths[path_index];
             let pieces = split_path(
                 layer,
@@ -112,6 +125,56 @@ pub(super) fn split_bridged_rows(
         }
     }
     Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A fitted row retains its exact witness, authored axis and earlier command support"
+)]
+fn supported_fitted_skin(
+    layer: &PrintLayer,
+    path: &DepositionPath,
+    previous: &PrintLayer,
+    recipe: &PlanarPrintRecipe,
+    course: u32,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<DepositionKind>, ManufacturingError> {
+    let Some(DepositionOwner::MandatorySkin { skin }) = path.owner else {
+        return Ok(None);
+    };
+    let [start, end] = path.points_mm.as_slice() else {
+        return Ok(None);
+    };
+    if path.kind != DepositionKind::Bridge
+        || path.physical_z_mm != [layer.lower_z_mm, layer.z_mm]
+        || !path.arcs.is_empty()
+        || !layer.skin_command_fits.iter().any(|domain| {
+            domain.skin == skin
+                && domain
+                    .fits
+                    .iter()
+                    .any(|fit| fit.fitted_mm == [*start, *end] || fit.fitted_mm == [*end, *start])
+        })
+        || separator_witness(layer, path)
+    {
+        return Ok(None);
+    }
+    let role = match skin {
+        ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
+        ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
+    };
+    let Some(width) = path.width.constant_width_mm() else {
+        return Ok(None);
+    };
+    if !on_authored_axis(path, role, recipe, course)? {
+        return Ok(None);
+    }
+    let actual = [project_xyz6_point_mm(*start)?, project_xyz6_point_mm(*end)?];
+    let supported =
+        classify_actual(actual, width, previous, recipe, anchors, work, cancel)? == Some(false);
+    Ok(supported.then_some(role))
 }
 
 /// The pieces one path of `layer` is split into against the previous layer,
@@ -372,7 +435,17 @@ fn split_row(
         }
         // The verifier's exact split-row predicates; any miss keeps it whole.
         let expected = Some(kind == DepositionKind::Bridge);
-        if classify_actual(stroke, width, previous, recipe, anchors, work, cancel)? != expected {
+        if classify_actual(stroke, width, previous, recipe, anchors, work, cancel)? != expected
+            || classify_actual(
+                [stroke[1], stroke[0]],
+                width,
+                previous,
+                recipe,
+                anchors,
+                work,
+                cancel,
+            )? != expected
+        {
             return Ok(None);
         }
         pieces.push(DepositionPath {

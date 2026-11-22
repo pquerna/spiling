@@ -58,7 +58,12 @@ fn inward(value: f64, lower: bool) -> Result<f64, ManufacturingError> {
     let mut projected = program_coordinates::project_xyz6_coordinate_mm(value)?;
     if outside(projected) {
         projected = program_coordinates::project_xyz6_coordinate_mm(
-            projected + if lower { 0.000001 } else { -0.000001 },
+            projected
+                + if lower {
+                    program_coordinates::XYZ6_QUANTUM_MM
+                } else {
+                    -program_coordinates::XYZ6_QUANTUM_MM
+                },
         )?;
     }
     if outside(projected) {
@@ -768,10 +773,10 @@ mod tests {
         for mutation in 0..6 {
             let (mut plan, mut frame, request, recipe) = parent_fixture();
             match mutation {
-                0 => plan.layers[1].lower_z_mm += 0.000001,
-                1 => plan.layers[1].lower_z_mm -= 0.000001,
-                2 => plan.layers[1].paths[0].physical_z_mm[0] += 0.000001,
-                3 => plan.layers[1].paths[0].points_mm[0][2] += 0.000001,
+                0 => plan.layers[1].lower_z_mm += 0.001,
+                1 => plan.layers[1].lower_z_mm -= 0.001,
+                2 => plan.layers[1].paths[0].physical_z_mm[0] += 0.001,
+                3 => plan.layers[1].paths[0].points_mm[0][2] += 0.001,
                 4 => frame.region_z_mm[1] = plan.layers[0].z_mm,
                 5 => {
                     plan.layers[1].paths[0]
@@ -850,10 +855,10 @@ mod tests {
     fn functional_parent_window_cuts_stay_inside_the_finite_xyz6_belt() {
         let points = clip(
             [[0.0, 0.0, 1.0], [0.0, 10.0, 1.0]],
-            [[-1.0, 1.0], [5.0000004, 8.9999996]],
+            [[-1.0, 1.0], [5.0004, 8.9996]],
         )
         .unwrap()
         .unwrap();
-        assert_eq!(points, [[0.0, 5.000001, 1.0], [0.0, 8.999999, 1.0]]);
+        assert_eq!(points, [[0.0, 5.001, 1.0], [0.0, 8.999, 1.0]]);
     }
 }

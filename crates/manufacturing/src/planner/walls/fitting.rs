@@ -395,10 +395,12 @@ fn fit_corner(
     };
     let joins = [point(first), point(second)];
     let positions = [a, joins[0], joins[1], c];
-    if positions
-        .windows(2)
-        .any(|p| norm(sub(p[1], p[0])) < program_coordinates::MIN_DEPOSITION_COMMAND_MM)
-    {
+    if positions.windows(2).any(|p| {
+        !program_coordinates::meets_minimum_command(emitted_length(
+            [p[0][0], p[0][1], 0.0],
+            [p[1][0], p[1][1], 0.0],
+        ))
+    }) {
         return Ok(None);
     }
     // Interior projections propose ordered fractional cuts, not membership.
@@ -726,8 +728,24 @@ fn remember(
     Ok(())
 }
 
+/// Length of the chord as emitted: both ends on the program lattice.
 fn chord_length(run: Run) -> f64 {
-    norm(sub(xy(run.b), xy(run.a)))
+    emitted_length(run.a, run.b)
+}
+
+fn emitted_length(a: [f64; 3], b: [f64; 3]) -> f64 {
+    match (
+        program_coordinates::project_xyz6_point_mm(a),
+        program_coordinates::project_xyz6_point_mm(b),
+    ) {
+        (Ok(a), Ok(b)) => norm(sub(xy(b), xy(a))),
+        _ => norm(sub(xy(b), xy(a))),
+    }
+}
+
+/// Whether a chord meets the minimum command once emitted.
+fn long_enough(run: Run) -> bool {
+    program_coordinates::meets_minimum_command(chord_length(run))
 }
 fn gradient_admitted(a: Run, b: Run) -> bool {
     (a.mean - b.mean).abs()
@@ -878,9 +896,8 @@ fn repartition_suffix(
                 };
                 boolean::charge(work, permission_work)?;
                 let Some(candidate) =
-                    fit_candidate(candidate, permissions, original, work, cancel)?.filter(|run| {
-                        chord_length(*run) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-                    })
+                    fit_candidate(candidate, permissions, original, work, cancel)?
+                        .filter(|run| long_enough(*run))
                 else {
                     admitted = false;
                     break;
@@ -944,6 +961,7 @@ fn batch(
     let mut moment = 0.0;
     let mut count = 0usize;
     let mut error = 0.0_f64;
+    let mut straight_width = 0.0_f64;
     let constant_mean = runs
         .iter()
         .all(|run| run.source_mean == proposal.source_mean);
@@ -975,6 +993,14 @@ fn batch(
             chord_distance_bound(xy(run.a), xy(proposal.a), xy(proposal.b), chord, squared).max(
                 chord_distance_bound(xy(run.b), xy(proposal.a), xy(proposal.b), chord, squared),
             );
+        // This pass only saves commands: each input already meets the
+        // minimum length. Keep the width of a straight rail that spans at
+        // least one bead width when joining a shoulder would move it off
+        // its line. Otherwise a lattice step at the corner can narrow the
+        // whole rail, even though the corner is already printable on its own.
+        if departure > 0.0 && run.geometric_error == 0.0 && chord_length(run) >= run.mean {
+            straight_width = straight_width.max(run.mean);
+        }
         let bound = if departure == 0.0 {
             run.geometric_error
         } else {
@@ -991,7 +1017,10 @@ fn batch(
     proposal.last_fraction = runs.last().unwrap().last_fraction;
     proposal.geometric_error = error;
     boolean::charge(work, permission_work)?;
-    fit_candidate(proposal, permissions, original, work, cancel)
+    Ok(
+        fit_candidate(proposal, permissions, original, work, cancel)?
+            .filter(|merged| merged.mean >= straight_width),
+    )
 }
 
 /// Minimum fitting first repairs every short tail. Aggregate only WHOLE legal
@@ -1050,7 +1079,7 @@ fn maximize(
             .copied()
             .or_else(|| closed.then(|| first.unwrap_or(runs[0])));
         if let Some(run) = candidate.filter(|run| {
-            chord_length(*run) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+            long_enough(*run)
                 && left.is_none_or(|left| gradient_admitted(left, *run))
                 && right.is_none_or(|right| gradient_admitted(*run, right))
         }) {
@@ -1217,7 +1246,9 @@ pub(super) fn coalesce(
                 .map(|merged| (read, cursor, merged)),
             None => None,
         };
-        while norm(sub(xy(run.b), xy(run.a))) < TARGET_LENGTH_MM && read < count {
+        while (norm(sub(xy(run.b), xy(run.a))) < TARGET_LENGTH_MM || !long_enough(run))
+            && read < count
+        {
             check_cancel(cancel)?;
             boolean::charge(work, 1)?;
             let a = path.points_mm[read];
@@ -1255,7 +1286,7 @@ pub(super) fn coalesce(
                 checkpoint = Some((read, cursor, merged));
             }
         }
-        if norm(sub(xy(run.b), xy(run.a))) < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+        if !long_enough(run) {
             let Some(prior) = previous else {
                 return Err(unsupported(&format!(
                     "first wall command cannot fit minimum length and boundary enclosure: {:?}->{:?}, width={}..{}, error={}, owner={:?}, source_edges={}, consumed={}, next={:?}",
@@ -1361,7 +1392,7 @@ pub(super) fn coalesce(
                     None
                 };
                 if let Some(merged) = wrapped.filter(|merged| {
-                    chord_length(*merged) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                    long_enough(*merged)
                         && gradient_admitted(prior, *merged)
                         && legal
                             .get(1)
@@ -1396,9 +1427,7 @@ pub(super) fn coalesce(
             // piece beyond a sharp turn and then waiving the command policy.
             read = resume;
             cursor = resume_cursor;
-            if norm(sub(xy(merged.b), xy(merged.a)))
-                < program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            {
+            if !long_enough(merged) {
                 return Err(unsupported(
                     "wall stroke is shorter than the declared minimum deposition command",
                 ));
@@ -1489,15 +1518,11 @@ mod tests {
 
     #[test]
     fn contained_gradient_directs_equal_rounded_bounds_inside_the_closed_predicate() {
-        let points = [
-            [100.675, 106.274126, 0.2],
-            [100.675, 106.305467, 0.2],
-            [100.675, 106.336808, 0.2],
-        ];
-        let fields = [
-            (0.4260406793175658, 0.42886136931756624, 0.4274510693175659),
-            (0.43168205931756665, 0.4345027493175671, 0.43309235931756634),
-        ];
+        // Two legal 30 µm commands on the output lattice. At these widths the
+        // rounded upper bound equals the wider command, but subtracting the
+        // narrower width gives a difference just outside the closed bound.
+        let points = [[0.0, 0.0, 0.2], [0.0, 0.03, 0.2], [0.0, 0.06, 0.2]];
+        let fields = [(0.426, 0.4288, 0.4274), (0.4314, 0.4345, 0.4328)];
         for reverse in [false, true] {
             let mut runs = std::array::from_fn::<_, 2, _>(|index| {
                 let (minimum, maximum, source_mean) =
@@ -1527,7 +1552,13 @@ mod tests {
             });
             // The sum rounds onto the proposed command, although the equivalent
             // subtraction lies strictly outside the same unchanged allowance.
-            assert!(!gradient_admitted(runs[0], runs[1]));
+            let [low, high] = if reverse { [runs[1], runs[0]] } else { runs };
+            let allowance = program_coordinates::MAX_WALL_WIDTH_GRADIENT
+                * 0.9
+                * (chord_length(low) + chord_length(high))
+                * 0.5;
+            assert_eq!(low.mean + allowance, high.mean);
+            assert!(!gradient_admitted(low, high));
             let original = runs;
             contained_gradient(&mut runs, false, 0.302, &mut 0, &AtomicBool::new(false)).unwrap();
             assert!(gradient_admitted(runs[0], runs[1]));
@@ -2018,13 +2049,16 @@ mod tests {
 
     #[test]
     fn dense_curved_proposals_fit_legal_commands_without_spending_more_enclosure() {
-        let count = 180;
-        let points = (0..=count)
+        let mut points = (0..=180)
             .map(|i| {
-                let angle = 0.4 * i as f64 / count as f64;
+                let angle = 0.4 * i as f64 / 180.0;
                 point(key([1.0 + 0.09 * angle.cos(), 1.0 + 0.09 * angle.sin()]).unwrap())
             })
             .collect::<Vec<_>>();
+        // Like the wall assembler, keep only distinct, consecutive
+        // command sites after projection to the program lattice.
+        points.dedup();
+        let count = points.len() - 1;
         let edges = points
             .windows(2)
             .map(|pair| BoundaryEdge {
@@ -2117,10 +2151,10 @@ mod tests {
         assert_eq!(correspondence.len() + 1, path.points_mm.len());
         for edge in path.checked_edges().unwrap() {
             assert_eq!(edge.width_mm, 0.45);
-            assert!(
-                norm(sub(xy(edge.points_mm[1]), xy(edge.points_mm[0])))
-                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            );
+            assert!(program_coordinates::meets_minimum_command(emitted_length(
+                edge.points_mm[0],
+                edge.points_mm[1]
+            )));
         }
         for p in points {
             let nearest = path
@@ -2142,14 +2176,18 @@ mod tests {
 
     #[test]
     fn minimum_commands_follow_small_curved_corners_within_the_declared_corridor() {
+        // Leave room for a legal lattice chord through the turn without
+        // granting more enclosure. The unpermitted inward fit still fails.
+        let radius = 0.03;
         let mut points = (0..=20)
-            .map(|i| [-0.02, -0.04 + 0.002 * i as f64])
+            .map(|i| [-radius, -0.04 + 0.002 * i as f64])
             .collect::<Vec<_>>();
         points.extend((1..=90).map(|i| {
             let angle = std::f64::consts::PI - (i as f64).to_radians();
-            point(key([0.02 * angle.cos(), 0.02 * angle.sin()]).unwrap())
+            point(key([radius * angle.cos(), radius * angle.sin()]).unwrap())
         }));
-        points.extend((1..=20).map(|i| [0.002 * i as f64, 0.02]));
+        points.extend((1..=20).map(|i| [0.002 * i as f64, radius]));
+        points.dedup();
         let edges = points
             .windows(2)
             .map(|p| BoundaryEdge {
@@ -2233,10 +2271,10 @@ mod tests {
         assert_eq!(xy(path.points_mm[0]), points[0]);
         assert_eq!(xy(*path.points_mm.last().unwrap()), *points.last().unwrap());
         for edge in path.checked_edges().unwrap() {
-            assert!(
-                norm(sub(xy(edge.points_mm[1]), xy(edge.points_mm[0])))
-                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            );
+            assert!(program_coordinates::meets_minimum_command(emitted_length(
+                edge.points_mm[0],
+                edge.points_mm[1]
+            )));
             assert!(edge.width_mm >= 0.302);
         }
         let distance = |p: [f64; 2], segment: [[f64; 2]; 2]| {

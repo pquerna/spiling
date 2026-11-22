@@ -145,9 +145,9 @@ pub(super) fn partition(
 fn inward_xyz6(value: f64, lower: bool) -> Result<f64, ManufacturingError> {
     use spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm;
     project_xyz6_coordinate_mm(value)?;
-    let scaled = value * 1_000_000.0;
+    let scaled = value * spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE;
     let integer = if lower { scaled.ceil() } else { scaled.floor() };
-    let result = integer / 1_000_000.0;
+    let result = integer / spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE;
     if !integer.is_finite()
         || integer.abs() > (1u64 << 52) as f64
         || project_xyz6_coordinate_mm(result)? != result

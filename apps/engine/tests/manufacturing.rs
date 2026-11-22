@@ -1518,9 +1518,9 @@ async fn stale_cancelled_and_resource_limited_compilation_never_publish() {
         .unwrap();
     import(&mut client, &work.source("box-mm.step")).await;
     let mut many_layers = intent();
-    many_layers.printer.motion_resolution.z_mm = 0.000001;
-    many_layers.printer.deposition_limits.min_bead_height_mm = 0.000001;
-    many_layers.recipe.layer_height_mm = 0.0019;
+    many_layers.printer.motion_resolution.z_mm = 0.001;
+    many_layers.printer.deposition_limits.min_bead_height_mm = 0.001;
+    many_layers.recipe.layer_height_mm = 0.002;
     set_intent(&mut client, many_layers).await;
     let id = start_compile(&mut client).await;
     let job = wait(&mut client, id).await;
@@ -1798,7 +1798,10 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
             volume
         })
         .sum();
-    assert!((bundle.verification.deposited_volume_mm3 - nominal_volume).abs() < 0.001);
+    assert!(
+        (bundle.verification.deposited_volume_mm3 - nominal_volume).abs() < 1e-4 * nominal_volume,
+        "emitted volume follows nominal within E lattice rounding"
+    );
     assert!(record.summary.software_only);
     save(&mut writer, &checkpoint).await;
     writer.shutdown().await.unwrap();

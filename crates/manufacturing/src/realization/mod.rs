@@ -305,10 +305,11 @@ pub(crate) fn stream(
                 if switched {
                     let old = &job.tools[usize::from(active_tool)];
                     emit(Event::Barrier)?;
-                    let before = (extrusion * 100_000_000.0).round();
+                    let before = (extrusion * program_coordinates::PROGRAM_E_SCALE).round();
                     extrusion -= old.retract_filament_mm;
-                    let after = (extrusion * 100_000_000.0).round();
-                    debt[usize::from(active_tool)] += (before - after) / 100_000_000.0;
+                    let after = (extrusion * program_coordinates::PROGRAM_E_SCALE).round();
+                    debt[usize::from(active_tool)] +=
+                        (before - after) / program_coordinates::PROGRAM_E_SCALE;
                     emit(Event::Extrusion(extrusion, old.retract_speed_mm_s))?;
                     let from = position.unwrap();
                     let lifted = [from[0], from[1], safe_z.unwrap()];
@@ -525,7 +526,7 @@ pub(crate) fn stream(
                     let from = project_xyz6_point_mm(edge.points_mm[0])?;
                     let to = project_xyz6_point_mm(edge.points_mm[1])?;
                     let command_length = distance(from, to);
-                    if command_length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                    if !program_coordinates::meets_minimum_command(command_length) {
                         return Err(error(
                             ManufacturingErrorCode::UnsupportedGeometry,
                             format!(

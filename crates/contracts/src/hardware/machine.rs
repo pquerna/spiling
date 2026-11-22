@@ -182,7 +182,8 @@ impl MachineLimit {
             Self::MinBeadWidthPerNozzle | Self::MaxBeadWidthPerNozzle => 0.25..=4.0,
             Self::MaxBeadHeightPerNozzle => 0.05..=1.0,
             Self::XyResolutionMm | Self::ZResolutionMm => {
-                0.000_001..=crate::manufacturing::MAX_MOTION_RESOLUTION_MM
+                crate::manufacturing::program_coordinates::XYZ6_QUANTUM_MM
+                    ..=crate::manufacturing::MAX_MOTION_RESOLUTION_MM
             }
             Self::ToolheadRadiusMm | Self::ToolheadHeightMm => 0.1..=1000.0,
         };

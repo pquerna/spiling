@@ -9,8 +9,11 @@ use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
 /// Slack on the wall band beyond half wall plus half road: the recorded
-/// offset tolerance on each side, plus output rounding.
-const BAND_SLACK_MM: f64 = 0.010_002;
+/// offset tolerance on each side, plus output rounding of both the connector
+/// and the wall (half a lattice step on each axis of each).
+const BAND_SLACK_MM: f64 = 0.010
+    + std::f64::consts::SQRT_2
+        * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
 const CELL_MM: f64 = 2.0;
 
 struct Walls {

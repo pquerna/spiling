@@ -206,7 +206,7 @@ impl LayerHeightAssessment {
             result.realized_max_mm = result.realized_max_mm.max(height);
             // Ignore only one command quantum plus subtraction roundoff in this
             // descriptive comparison; it never relaxes deposition admission.
-            let comparison = 0.000001
+            let comparison = super::program_coordinates::XYZ6_QUANTUM_MM
                 + 4.0 * f64::EPSILON * layer.z_mm.abs().max(layer.lower_z_mm.abs()).max(1.0);
             if (height - result.requested_mm).abs() > comparison {
                 result.differing_layer_count += 1;

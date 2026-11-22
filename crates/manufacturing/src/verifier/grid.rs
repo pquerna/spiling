@@ -48,8 +48,10 @@ pub(super) fn xyz6_ticks(text: &str) -> Result<i64, &'static str> {
     Ok(if text.starts_with('-') { -ticks } else { ticks })
 }
 
-pub(super) fn virtual_xyz6(point: [f64; 3]) -> [i64; 3] {
-    point.map(|coordinate| (coordinate * 1_000_000.0).round() as i64)
+pub(super) fn virtual_arc_xyz6(point: [f64; 3], decoded_z: i64) -> [i64; 3] {
+    let [x, y, _] = point;
+    let [x, y] = [x, y].map(|coordinate| (coordinate * 1_000_000.0).round() as i64);
+    [x, y, decoded_z]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -594,16 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn decoded_xyz6_retains_a_tick_float_round_trip_loses() {
-        let line = "G1 X4503599627.270496 Y-0.050001 Z+1.2 E1 F1500";
-        let (command, ticks) = decoded_ticks(line);
+    fn decoded_coordinates_become_exact_ticks_at_the_numeric_limit() {
+        let line = "G1 X4503599627.270 Y-0.050 Z+1.2 E1 F1500";
+        let (_, ticks) = decoded_ticks(line);
         assert_eq!(
             ticks,
-            [Some(4_503_599_627_270_496), Some(-50_001), Some(1_200_000)]
-        );
-        assert_ne!(
-            (command.fields[0].unwrap() * 1_000_000.0).round() as i64,
-            ticks[0].unwrap()
+            [Some(4_503_599_627_270_000), Some(-50_000), Some(1_200_000)]
         );
     }
 

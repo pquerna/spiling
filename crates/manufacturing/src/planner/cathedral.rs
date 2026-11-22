@@ -29,7 +29,7 @@ use geo::{
     Area, BooleanOps, BoundingRect, ConvexHull, Coord, LineString, MinimumRotatedRect,
     MultiPolygon, Polygon, Rect,
 };
-use spiling_contracts::manufacturing::program_coordinates::MIN_DEPOSITION_COMMAND_MM;
+use spiling_contracts::manufacturing::program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM as MIN_DEPOSITION_COMMAND_MM;
 use spiling_contracts::manufacturing::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, atomic::AtomicBool};

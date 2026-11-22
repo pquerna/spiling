@@ -384,10 +384,12 @@ fn span(ends: [[f64; 3]; 2], along: usize) -> [f64; 2] {
     ]
 }
 fn grid(value: f64) -> Result<i64, ManufacturingError> {
-    Ok((project_xyz6_coordinate_mm(value)? * 1_000_000.0).round() as i64)
+    Ok((project_xyz6_coordinate_mm(value)?
+        * spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE)
+        .round() as i64)
 }
 fn raw(integer: i64) -> f64 {
-    integer as f64 / 1_000_000.0
+    integer as f64 / spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE
 }
 /// Never looser than the verifier's arithmetic slack: an end the verifier
 /// would place outside a row must not be admitted here.
@@ -508,7 +510,8 @@ fn choose(
         available[0] = available[0].max(left);
         available[1] = available[1].min(right);
     }
-    let target = MIN_DEPOSITION_COMMAND_MM + 0.000003;
+    let target =
+        spiling_contracts::manufacturing::program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
     let raw_low = bounds[0][0].max(required_span[1] - target);
     let raw_high = bounds[0][1].min(required_span[0] + target);
     if raw_low > required_span[0] || raw_high < required_span[1] {
@@ -516,8 +519,17 @@ fn choose(
     }
     let low = grid(raw_low)?.max(grid(bounds[1][0])?);
     let high = grid(raw_high)?.min(grid(bounds[1][1])?);
-    let minimum = (MIN_DEPOSITION_COMMAND_MM * 1_000_000.0).round() as i64;
-    let maximum = (minimum + 3).min(high - low);
+    let minimum = (MIN_DEPOSITION_COMMAND_MM
+        * spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE)
+        .round() as i64;
+    // Whole lattice steps above the minimum that still fit the raw reserve
+    // the verifier admits a fitted skin command within.
+    let reserve =
+        ((spiling_contracts::manufacturing::program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM
+            - MIN_DEPOSITION_COMMAND_MM)
+            * spiling_contracts::manufacturing::program_coordinates::PROGRAM_XYZ_SCALE)
+            .floor() as i64;
+    let maximum = (minimum + reserve).min(high - low);
     if maximum < minimum {
         return Ok(None);
     }

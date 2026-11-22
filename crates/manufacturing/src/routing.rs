@@ -229,7 +229,7 @@ pub(crate) fn validate_plan(
             let volume = length
                 * ((width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2))
                 * flow;
-            if length < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+            if !program_coordinates::meets_minimum_command(length)
                 || !volume.is_finite()
                 || volume < tool.minimum_reprime_volume_mm3
             {

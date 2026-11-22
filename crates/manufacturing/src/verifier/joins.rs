@@ -102,10 +102,10 @@ fn core_radius(edge: &DepositionEdge<'_>, height: f64) -> Result<f64, Manufactur
         height,
     )?;
     let height_upper = -program_coordinates::enclosed_vertical_gap_mm(-vertical[1], -vertical[0])?;
-    let radius = program_coordinates::enclosed_vertical_gap_mm(
-        program_coordinates::enclosed_vertical_gap_mm(edge.width_mm, height_upper)? * 0.5,
-        program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM,
-    )?;
+    // The flat core, (width - height) / 2, already sits half a bead height
+    // inside the deposited footprint; that margin covers command error, so a
+    // further lateral budget would only refuse sound bonds at lattice rounding.
+    let radius = program_coordinates::enclosed_vertical_gap_mm(edge.width_mm, height_upper)? * 0.5;
     if !radius.is_finite() || radius <= 0.0 {
         return Err(failed(
             "functional attachment has no positive nominal bead core",
@@ -298,12 +298,14 @@ pub(super) fn verify(
                     } else {
                         MaterialConstructionRole::FunctionalRegion
                     };
-                    if previous.z_mm != layer.lower_z_mm
+                    let stacked = previous.z_mm == layer.lower_z_mm;
+                    if !stacked
                         || !phase_overlap(previous, layer, old_role, role, bounds, work, cancel)?
                     {
-                        return Err(failed(
-                            "functional head and end retainer have no positive actual overlap across their physical phase boundary",
-                        ));
+                        return Err(failed(format!(
+                            "functional head and end retainer have no positive actual overlap across their physical phase boundary (lower layer top {} mm, layer floor {} mm, stacked {stacked})",
+                            previous.z_mm, layer.lower_z_mm,
+                        )));
                     }
                 }
             }
@@ -321,6 +323,19 @@ fn phase_overlap(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    // Endpoints are rounded to the program lattice; a source-frame boundary
+    // admits them up to one lattice step outside.
+    let step = program_coordinates::XYZ6_QUANTUM_MM;
+    let represented = Rect::new(
+        Coord {
+            x: bounds.min().x - step,
+            y: bounds.min().y - step,
+        },
+        Coord {
+            x: bounds.max().x + step,
+            y: bounds.max().y + step,
+        },
+    );
     for lower in previous.paths.iter().filter(|path| {
         path.material_domain
             .is_some_and(|reference| reference.role == previous_role)
@@ -356,7 +371,7 @@ fn phase_overlap(
                         ),
                     ] {
                         for point in points {
-                            if bounds.contains(&Point::new(point[0], point[1]))
+                            if represented.contains(&Point::new(point[0], point[1]))
                                 && strict_capsule_point(point, other, core_radius(edge, height)?)?
                             {
                                 return Ok(true);

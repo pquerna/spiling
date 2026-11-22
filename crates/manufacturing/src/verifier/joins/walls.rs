@@ -855,6 +855,15 @@ fn strip(
     command: &Command,
     budget: &mut Budget<'_>,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    strip_inset(command, 0.0, budget)
+}
+
+/// A command's strip narrowed by `inset` on each side.
+fn strip_inset(
+    command: &Command,
+    inset: f64,
+    budget: &mut Budget<'_>,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     budget.reserve(size_of::<Polygon<f64>>() + 5 * size_of::<Coord<f64>>())?;
     let delta = [
         command.points[1][0] - command.points[0][0],
@@ -862,30 +871,29 @@ fn strip(
     ];
     let length = delta[0].hypot(delta[1]);
     let normal = [
-        -delta[1] * command.width * 0.5 / length,
-        delta[0] * command.width * 0.5 / length,
+        -delta[1] * (command.width * 0.5 - inset) / length,
+        delta[0] * (command.width * 0.5 - inset) / length,
+    ];
+    // An inset also shortens both ends, so consecutive commands that meet
+    // at a vertex rounding has bent slightly don't overlap at the joint.
+    let along = [
+        delta[0] * inset.min(length * 0.5) / length,
+        delta[1] * inset.min(length * 0.5) / length,
+    ];
+    let start = [
+        command.points[0][0] + along[0],
+        command.points[0][1] + along[1],
+    ];
+    let end = [
+        command.points[1][0] - along[0],
+        command.points[1][1] - along[1],
     ];
     let corners = [
-        [
-            command.points[0][0] + normal[0],
-            command.points[0][1] + normal[1],
-        ],
-        [
-            command.points[1][0] + normal[0],
-            command.points[1][1] + normal[1],
-        ],
-        [
-            command.points[1][0] - normal[0],
-            command.points[1][1] - normal[1],
-        ],
-        [
-            command.points[0][0] - normal[0],
-            command.points[0][1] - normal[1],
-        ],
-        [
-            command.points[0][0] + normal[0],
-            command.points[0][1] + normal[1],
-        ],
+        [start[0] + normal[0], start[1] + normal[1]],
+        [end[0] + normal[0], end[1] + normal[1]],
+        [end[0] - normal[0], end[1] - normal[1]],
+        [start[0] - normal[0], start[1] - normal[1]],
+        [start[0] + normal[0], start[1] + normal[1]],
     ];
     budget.geometry(MultiPolygon(vec![Polygon::new(
         LineString::from(corners.to_vec()),
@@ -931,16 +939,25 @@ fn dose(
     }
     let mut prior = MultiPolygon(Vec::new());
     let mut overlaps = MultiPolygon(Vec::new());
+    // Decoded commands may sit up to the lateral command budget from their
+    // plan; overlap only counts beyond that representation error.
     for command in commands {
-        let current = strip(command, budget)?;
+        let current = strip_inset(
+            command,
+            program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM,
+            budget,
+        )?;
         let overlap = budget.intersection(&current, &prior)?;
         overlaps = budget.union(&overlaps, &overlap)?;
         prior = budget.union(&prior, &current)?;
     }
-    if budget.difference(&overlaps, &seen)?.unsigned_area() > AREA_ROUNDOFF {
-        return Err(failed(
-            "functional Wall strip overlap leaves its independently source-bound turn locations",
-        ));
+    let stray = budget.difference(&overlaps, &seen)?;
+    if stray.unsigned_area() > AREA_ROUNDOFF {
+        return Err(failed(format!(
+            "functional Wall strip overlap leaves its independently source-bound turn locations: {} mm2 at {:?}",
+            stray.unsigned_area(),
+            geo::BoundingRect::bounding_rect(&stray),
+        )));
     }
     budget.step(commands.len())?;
     let deposited = commands
@@ -1065,7 +1082,9 @@ pub(super) fn residual(
         ));
     }
     let nominal = occupancy(&commands, None, 0.0, &mut budget)?;
-    if budget.intersection(&nominal, &core)?.unsigned_area() > AREA_ROUNDOFF {
+    // Decoded beads may sit up to the lateral command budget from their plan;
+    // only what they occupy beyond that representation error invades.
+    if budget.intersection(&inner, &core)?.unsigned_area() > AREA_ROUNDOFF {
         return Err(failed(
             "functional Wall nominal occupancy invades original core without a proved source transition",
         ));

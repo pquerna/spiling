@@ -224,7 +224,10 @@ fn preferred_layer_goal_compiles_thicker_output_and_fresh_replay_preserves_the_a
     assert_eq!(assessment.requested_mm, 0.05);
     assert_eq!(assessment.selected_mm, 0.1);
     assert_eq!(assessment.reason, LayerHeightReason::ProcessMinimum);
-    assert!(assessment.realized_min_mm >= 0.1);
+    assert!(
+        assessment.realized_min_mm
+            >= 0.1 - spiling_contracts::manufacturing::program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
+    );
     assert!(assessment.realized_max_mm <= limits.max_bead_height_mm);
     assert_eq!(
         assessment.differing_layer_count,
@@ -1387,8 +1390,11 @@ fn assert_actual_sparse_row_pitch(
         );
         for pair in coordinates.windows(2) {
             let actual = (pair[1] - pair[0]) as f64 / 1_000_000.0;
+            // Rows are emitted on the micrometre lattice: one step of
+            // rounding, plus a little from rounded layer heights.
             assert!(
-                (actual - expected).abs() < 0.000005,
+                (actual - expected).abs()
+                    < 1.5 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM,
                 "actual row pitch {actual} at Z={} must be W/rho={expected}, rho={fraction}",
                 z as f64 / 1_000_000.0,
             );
@@ -2096,7 +2102,7 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
         let native_xy = if pair[1].0 == 1 {
             bundle.plan.sampling_tolerance_mm
                 + bundle.plan.offset_tolerance_mm
-                + 0.0000005 * std::f64::consts::SQRT_2
+                + 0.0005 * std::f64::consts::SQRT_2
         } else {
             0.
         };
@@ -2141,7 +2147,9 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
         })
         .unwrap();
     let end = usize::from(row.points_mm[0][0] > row.points_mm[1][0]);
-    row.points_mm[end][0] = translation[0] + 8. + recipe.recipe.bead_width_mm * 0.5 - 0.000001;
+    // Two emitted quanta past the bond allowance survive lattice rounding.
+    row.points_mm[end][0] = translation[0] + 8. + recipe.recipe.bead_width_mm * 0.5
+        - 2.0 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
     assert_reemitted_interface_refuses(excessive, &recipe);
     let mut floating = bundle.plan.clone();
     floating.layers[first - 1]
@@ -2630,14 +2638,14 @@ fn preferred_seams_use_build_sides_and_keep_actual_protected_holes() {
                 .iter()
                 .map(|p| p[0] * x)
                 .fold(f64::NEG_INFINITY, f64::max);
-            assert!((wall.points_mm[0][0] * x - extremum).abs() <= 0.0000005);
+            assert!((wall.points_mm[0][0] * x - extremum).abs() <= 0.0005);
             // The first routed path need not be a wall. Find this wall's actual
             // entry, retaining the byte-derived seam assertion for both rings.
             assert!(motion.windows(2).any(|pair| {
                 pair[1].0 == 1
                     && pair[1].1 == 0
-                    && (pair[0].2[0] - wall.points_mm[0][0]).abs() <= 0.0000005
-                    && (pair[0].2[1] - wall.points_mm[0][1]).abs() <= 0.0000005
+                    && (pair[0].2[0] - wall.points_mm[0][0]).abs() <= 0.0005
+                    && (pair[0].2[1] - wall.points_mm[0][1]).abs() <= 0.0005
             }));
         }
         for pair in motion.windows(2) {
@@ -2848,12 +2856,13 @@ fn native_box_preserves_material_and_replayed_extrusion_accounting() {
             volume
         })
         .sum::<f64>();
-    assert!((bundle.verification.deposited_volume_mm3 - expected).abs() < 0.001);
+    // Micrometre coordinates and five-decimal E: compare to 0.01%.
+    assert!((bundle.verification.deposited_volume_mm3 - expected).abs() < expected * 1e-4);
     assert!(
         (bundle.verification.filament_length_mm
             - expected / (std::f64::consts::PI * 0.875f64.powi(2)))
         .abs()
-            < 0.001
+            < expected / (std::f64::consts::PI * 0.875f64.powi(2)) * 1e-4
     );
     assert!(
         verify_bundle(&bundle, &AtomicBool::new(false))
@@ -3292,7 +3301,10 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         }
         assert_eq!(
             f64::from_le_bytes(record[24..32].try_into().unwrap()),
-            (expected_extrusion * 100_000_000.0).round() / 100_000_000.0
+            (expected_extrusion
+                * spiling_contracts::manufacturing::program_coordinates::PROGRAM_E_SCALE)
+                .round()
+                / spiling_contracts::manufacturing::program_coordinates::PROGRAM_E_SCALE
         );
     }
     let replay_hash = SourceHash::from_bytes(&replay_bytes);
@@ -3848,7 +3860,7 @@ fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
     let e = field('E');
     let mutations = [
         // Another center.
-        swap(format!("I{i:.6}"), format!("I{:.6}", i + 0.01)),
+        swap(format!("I{i:.3}"), format!("I{:.3}", i + 0.01)),
         // The other direction.
         swap(
             first_arc.clone(),
@@ -3859,7 +3871,7 @@ fn arc_printers_receive_exact_wall_arcs_that_replay_checks_independently() {
             },
         ),
         // Material that does not match the arc's length.
-        swap(format!("E{e:.8}"), format!("E{:.8}", e + 0.001)),
+        swap(format!("E{e:.6}"), format!("E{:.6}", e + 0.001)),
         // The arc cut short: its chords would be skipped.
         swap(first_arc.clone(), String::new()),
     ];

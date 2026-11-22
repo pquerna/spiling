@@ -3,24 +3,86 @@
 
 //! Coordinate representation explicitly adopted by CartesianAbsoluteGcodeV1,
 //! Marlin2SingleExtruderGcodeV1 and Marlin2FixedDualGcodeV1: Cartesian
-//! millimetres written with six decimal places. This is not a generic
-//! plan-rounding policy for future output dialects.
+//! millimetres written with three decimal places (micrometres, finer than any
+//! supported printer's motor step), extrusion with six and feed with one.
+//! This is not a generic plan-rounding policy for future output dialects.
 //! Serialization/planning remain manufacturing-backend responsibilities.
 
 use super::{ManufacturingError, ManufacturingErrorCode};
 
-/// Largest current XYZ6 coordinate whose rounded scaled integer is exact and
-/// whose adjacent decimal lattice points remain distinct under f64 decoding
-/// (about 4503.6 km). Raw multiplication still has its normal rounding error.
-pub const MAX_XYZ6_COORDINATE_MM: f64 = (1u64 << 52) as f64 / 1_000_000.0;
-/// One step of the XYZ6 coordinate lattice.
-pub const XYZ6_QUANTUM_MM: f64 = 0.000_001;
+/// Decimal places of an emitted X, Y, Z, I or J word.
+pub const PROGRAM_XYZ_DECIMALS: usize = 3;
+/// Coordinate lattice points per millimetre.
+pub const PROGRAM_XYZ_SCALE: f64 = 1_000.0;
+/// Largest power of two dividing [`PROGRAM_XYZ_SCALE`]: a lattice value that
+/// is a multiple of its reciprocal is exactly representable in binary.
+const PROGRAM_XYZ_DYADIC: f64 = 8.0;
+/// Decimal places of an emitted E word.
+pub const PROGRAM_E_DECIMALS: usize = 6;
+/// Extrusion lattice points per millimetre of filament.
+pub const PROGRAM_E_TICKS: u64 = 1_000_000;
+pub const PROGRAM_E_SCALE: f64 = PROGRAM_E_TICKS as f64;
+/// Largest power of two dividing [`PROGRAM_E_SCALE`].
+pub const PROGRAM_E_DYADIC: f64 = 64.0;
+/// Decimal places of an emitted F word, and its lattice points per mm/min.
+pub const PROGRAM_F_DECIMALS: usize = 1;
+pub const PROGRAM_F_SCALE: f64 = 10.0;
+/// Largest current coordinate whose rounded scaled integer is exact and
+/// whose adjacent decimal lattice points remain distinct under f64 decoding.
+/// Raw multiplication still has its normal rounding error.
+pub const MAX_XYZ6_COORDINATE_MM: f64 = (1u64 << 52) as f64 / PROGRAM_XYZ_SCALE;
+/// One step of the coordinate lattice.
+pub const XYZ6_QUANTUM_MM: f64 = 1.0 / PROGRAM_XYZ_SCALE;
 pub const XYZ6_PROJECTION_SCREEN_MM: f64 = 10.0 * XYZ6_QUANTUM_MM;
 
 /// Software deposition-resolution policy, not calibrated motion performance.
 pub const MIN_DEPOSITION_COMMAND_MM: f64 = 0.02;
-/// Reserved lateral budget for XYZ6/E8 nominal-width and coordinate enclosure.
-pub const MAX_BEAD_COMMAND_LATERAL_ERROR_MM: f64 = 0.001;
+/// Binary arithmetic slack for comparing lattice-derived lengths and heights
+/// with a limit: values exactly at a limit can subtract a hair past it
+/// (10.014 - 9.994 < 0.02). A thousandth of a lattice step, so it never
+/// admits a different representable value.
+pub const LATTICE_ARITHMETIC_SLACK_MM: f64 = XYZ6_QUANTUM_MM / 1_000.0;
+/// The largest lattice coordinate at or below `value` (within the lattice
+/// arithmetic slack, so a value already on the lattice is itself).
+pub fn lattice_floor_mm(value: f64) -> Result<f64, ManufacturingError> {
+    if !value.is_finite() || value.abs() > MAX_XYZ6_COORDINATE_MM {
+        return Err(conditioning(
+            "lattice floor exceeds the certified numeric range",
+        ));
+    }
+    let floored =
+        ((value + LATTICE_ARITHMETIC_SLACK_MM) * PROGRAM_XYZ_SCALE).floor() / PROGRAM_XYZ_SCALE;
+    project_xyz6_coordinate_mm(floored)
+}
+
+/// The smallest lattice coordinate at or above `value` (within the lattice
+/// arithmetic slack, so a value already on the lattice is itself).
+pub fn lattice_ceil_mm(value: f64) -> Result<f64, ManufacturingError> {
+    if !value.is_finite() || value.abs() > MAX_XYZ6_COORDINATE_MM {
+        return Err(conditioning(
+            "lattice ceiling exceeds the certified numeric range",
+        ));
+    }
+    let ceiled =
+        ((value - LATTICE_ARITHMETIC_SLACK_MM) * PROGRAM_XYZ_SCALE).ceil() / PROGRAM_XYZ_SCALE;
+    project_xyz6_coordinate_mm(ceiled)
+}
+
+/// Whether a command between lattice points is at least the minimum length.
+pub fn meets_minimum_command(length_mm: f64) -> bool {
+    length_mm >= MIN_DEPOSITION_COMMAND_MM - LATTICE_ARITHMETIC_SLACK_MM
+}
+/// Shortest raw (unrounded) edge that always rounds to a command at least
+/// [`MIN_DEPOSITION_COMMAND_MM`] long: projection moves each endpoint at most
+/// half a lattice step on each axis.
+pub const MIN_RAW_DEPOSITION_COMMAND_MM: f64 =
+    MIN_DEPOSITION_COMMAND_MM + 2.0 * std::f64::consts::SQRT_2 * XYZ6_QUANTUM_MM;
+/// Reserved lateral budget for command representation, two lattice steps:
+/// half a step on each axis moves a centreline at most 0.71 um, and an arc
+/// replayed through its rounded I/J centre deviates about one step more. The
+/// E word's own rounding is enclosed separately, where a width is inverted
+/// from it.
+pub const MAX_BEAD_COMMAND_LATERAL_ERROR_MM: f64 = 2.0 * XYZ6_QUANTUM_MM;
 /// Continuing-wall width change per millimetre of effective transition length.
 pub const MAX_WALL_WIDTH_GRADIENT: f64 = 0.20;
 
@@ -39,7 +101,7 @@ pub fn project_xyz6_coordinate_mm(value: f64) -> Result<f64, ManufacturingError>
             "Cartesian XYZ6 coordinate exceeds the certified numeric range",
         ));
     }
-    let value = (value * 1_000_000.0).round() / 1_000_000.0;
+    let value = (value * PROGRAM_XYZ_SCALE).round() / PROGRAM_XYZ_SCALE;
     Ok(if value == 0.0 { 0.0 } else { value })
 }
 
@@ -61,14 +123,14 @@ pub fn xyz6_coordinate_error_mm(rounded: f64) -> Result<f64, ManufacturingError>
             "Cartesian XYZ6 coordinate enclosure exceeds the certified numeric range",
         ));
     }
-    // A six-decimal number that is also an exact multiple of 1/64 has an
-    // exact binary representation: 10^6 / 64 is the integer 15625. This also
-    // covers integer/zero coordinates, without weakening non-dyadic bounds.
-    let binary_grid = rounded * 64.0;
+    // A lattice number that is also an exact multiple of 1/8 has an exact
+    // binary representation: 10^3 / 8 is the integer 125. This also covers
+    // integer/zero coordinates, without weakening non-dyadic bounds.
+    let binary_grid = rounded * PROGRAM_XYZ_DYADIC;
     if binary_grid.is_finite() && binary_grid.fract() == 0.0 {
         return Ok(0.0);
     }
-    let half_quantum = (0.5 / 1_000_000.0f64).next_up();
+    let half_quantum = (0.5 / PROGRAM_XYZ_SCALE).next_up();
     let ulp = (rounded.next_up() - rounded).max(rounded - rounded.next_down());
     Ok(if ulp < half_quantum {
         ulp.next_up()

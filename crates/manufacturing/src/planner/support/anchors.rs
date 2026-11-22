@@ -886,18 +886,19 @@ mod dimension_tests {
     use super::*;
 
     #[test]
-    fn skin_bond_conditioning_recovers_only_xyz6_rounding_loss() {
+    fn skin_bond_conditioning_recovers_only_lattice_rounding_loss() {
         let wall = [
             [101.02507516227035, 118.09875803040211, 9.021666666666668],
             [120.08945079647431, 118.09285109699714, 9.021666666666668],
         ];
-        let endpoint = [105.71464008675528, 117.87230499131718, wall[0][2]];
+        // 0.22525 mm from the wall raw, but 0.22485 mm once Y rounds to 117.872.
+        let endpoint = [107.857, 117.8716, wall[0][2]];
         let other = [endpoint[0], 116.94286889582592, endpoint[2]];
         assert!(!endpoint_bond(endpoint, wall, 0.45).unwrap());
         let conditioned = condition_skin_bond_endpoint(endpoint, other, wall, 0.45)
             .unwrap()
             .unwrap();
-        assert_eq!(conditioned, [endpoint[0], 117.872304, endpoint[2]]);
+        assert_eq!(conditioned, [endpoint[0], 117.871, endpoint[2]]);
         assert!(endpoint_bond(conditioned, wall, 0.45).unwrap());
         assert!(
             condition_skin_bond_endpoint(conditioned, other, wall, 0.45)
@@ -905,7 +906,7 @@ mod dimension_tests {
                 .is_none()
         );
         let outside = [endpoint[0], endpoint[1] - 0.3, endpoint[2]];
-        let excess_overlap = [endpoint[0], endpoint[1] + 0.0000001, endpoint[2]];
+        let excess_overlap = [endpoint[0], endpoint[1] + 0.0009, endpoint[2]];
         let too_short = [endpoint[0], endpoint[1] - 0.01, endpoint[2]];
         for (start, finish) in [
             (outside, other),

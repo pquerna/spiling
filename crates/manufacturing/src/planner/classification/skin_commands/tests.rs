@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 use super::*;
 use geo::Area;
+use spiling_contracts::manufacturing::program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
 use spiling_contracts::{
     geometry::{DefinitionId, OccurrenceId},
     process::{ProcessLayerId, ProcessOperationId, ProcessProvenance, ResolvedProcessValue},
@@ -87,7 +88,7 @@ fn minimum_skin_keeps_complete_requirement_and_extends_only_toward_ordinary_mate
         project_xyz6_point_mm(fitted[1]).unwrap(),
     ];
     assert!(commanded[1][0] - commanded[0][0] >= MIN_DEPOSITION_COMMAND_MM);
-    assert!(fitted[1][0] - fitted[0][0] <= MIN_DEPOSITION_COMMAND_MM + 0.000003 + 1e-14);
+    assert!(fitted[1][0] - fitted[0][0] <= MIN_RAW_DEPOSITION_COMMAND_MM + 1e-14);
     domain.fits.push(SkinCommandFit {
         required_mm: [paths[0].points_mm[0], paths[0].points_mm[1]],
         fitted_mm: fitted,
@@ -98,7 +99,7 @@ fn minimum_skin_keeps_complete_requirement_and_extends_only_toward_ordinary_mate
 #[test]
 fn regenerated_sparse_roads_reserve_existing_fitted_skin_once() {
     let mut paths = paths();
-    let fitted = [[2.0, 1.5, 0.4], [2.020003, 1.5, 0.4]];
+    let fitted = [[2.0, 1.5, 0.4], [2.022, 1.5, 0.4]];
     let mut capture = domain();
     capture.fits.push(SkinCommandFit {
         required_mm: [paths[0].points_mm[0], paths[0].points_mm[1]],
@@ -259,29 +260,29 @@ fn minimum_skin_searches_shorter_permitted_lengths_to_preserve_regional_material
         owner: Some(DepositionOwner::Regional { region_index: 0 }),
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.4],
-        points_mm: vec![[0.010, 1.5, 0.4], [0.040002, 1.5, 0.4]],
+        points_mm: vec![[0.010, 1.5, 0.4], [0.042, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
         connectors: Vec::new(),
     });
     let fitted = select(&domain, &paths).unwrap();
     assert!(fitted[0][0] <= 0.0 && fitted[1][0] >= 0.010);
-    assert!(fitted[1][0] < 0.020003);
+    assert!(fitted[1][0] <= MIN_RAW_DEPOSITION_COMMAND_MM);
     assert!(fitted[1][0] - fitted[0][0] >= MIN_DEPOSITION_COMMAND_MM);
-    assert!(0.040002 - fitted[1][0] >= MIN_DEPOSITION_COMMAND_MM);
+    assert!(0.042 - fitted[1][0] >= MIN_DEPOSITION_COMMAND_MM);
 }
 
 #[test]
 fn regional_reservation_consumes_complete_actual_stroke_without_a_zero_command_tail() {
     let mut paths = paths();
-    paths[0].points_mm = vec![[0.0, 1.5, 0.4], [0.000003, 1.5, 0.4]];
+    paths[0].points_mm = vec![[0.0, 1.5, 0.4], [0.003, 1.5, 0.4]];
     paths.push(DepositionPath {
         material_domain: None,
         kind: DepositionKind::SolidFill,
         owner: Some(DepositionOwner::Regional { region_index: 0 }),
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.4],
-        points_mm: vec![[0.000003, 1.5, 0.4], [0.0200034, 1.5, 0.4]],
+        points_mm: vec![[0.003, 1.5, 0.4], [0.0224, 1.5, 0.4]],
         arcs: Vec::new(),
         exposed: false,
         connectors: Vec::new(),
@@ -290,7 +291,7 @@ fn regional_reservation_consumes_complete_actual_stroke_without_a_zero_command_t
         project_xyz6_point_mm(paths[1].points_mm[0]).unwrap(),
         project_xyz6_point_mm(paths[1].points_mm[1]).unwrap(),
     ];
-    let fitted = [[0.0, 1.5, 0.4], [0.020003, 1.5, 0.4]];
+    let fitted = [[0.0, 1.5, 0.4], [0.022, 1.5, 0.4]];
     let mut budget = Budget {
         bytes: crate::planner::bonds::path_bytes(&paths),
     };
@@ -394,5 +395,5 @@ fn minimum_skin_keeps_nonrepresentable_unextended_endpoints_verbatim() {
         project_xyz6_point_mm(fitted[1]).unwrap(),
     ];
     assert!(actual[1][0] - actual[0][0] >= MIN_DEPOSITION_COMMAND_MM);
-    assert!(fitted[1][0] - fitted[0][0] <= MIN_DEPOSITION_COMMAND_MM + 0.000003 + 1e-14);
+    assert!(fitted[1][0] - fitted[0][0] <= MIN_RAW_DEPOSITION_COMMAND_MM + 1e-14);
 }

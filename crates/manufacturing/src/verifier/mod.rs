@@ -36,9 +36,9 @@ mod replay;
 mod supports;
 pub(crate) use replay::ReplaySink;
 
-const XYZ_HALF_STEP: f64 = 0.000_000_5;
-const E_HALF_STEP: f64 = 0.000_000_005;
-const F_HALF_STEP: f64 = 0.000_000_5;
+const XYZ_HALF_STEP: f64 = 0.5 / program_coordinates::PROGRAM_XYZ_SCALE;
+const E_HALF_STEP: f64 = 0.5 / program_coordinates::PROGRAM_E_SCALE;
+const F_HALF_STEP: f64 = 0.5 / program_coordinates::PROGRAM_F_SCALE;
 const MAX_LINE_BYTES: usize = 512;
 
 /// Bounded line reader over the actual program bytes, matching `str::lines`:
@@ -128,7 +128,9 @@ fn xyz_endpoint_error(point: [f64; 3]) -> Result<f64, ManufacturingError> {
 /// quantization bin of the producer's intended unrounded accumulator.
 /// G92 E0 and exactly represented stationary recovery remain exact.
 fn e8_endpoint_error(value: f64) -> f64 {
-    if value.abs() <= (1_u64 << 52) as f64 / 100_000_000.0 && (value * 256.0).fract() == 0.0 {
+    if value.abs() <= (1_u64 << 52) as f64 / program_coordinates::PROGRAM_E_SCALE
+        && (value * program_coordinates::PROGRAM_E_DYADIC).fract() == 0.0
+    {
         0.0
     } else {
         (value.next_up() - value)
@@ -147,10 +149,12 @@ fn verify_wall_gradient(
     previous: CommandedWallEdge,
     next: CommandedWallEdge,
 ) -> Result<(), ManufacturingError> {
-    // Compare every possible E-derived width across the half-edge transition.
-    // Lower actual-length bounds and outward arithmetic cannot grant extra slope.
-    let change = (previous.width[1] - next.width[0])
-        .max(next.width[1] - previous.width[0])
+    // Each width interval is what the decoded E words can represent, rounding
+    // included; the gradient holds when some width each edge represents is
+    // within it. Lower actual-length bounds cannot grant extra slope.
+    let change = (previous.width[0] - next.width[1])
+        .max(next.width[0] - previous.width[1])
+        .max(0.0)
         .next_up();
     let transition = ((previous.length_lower + next.length_lower).next_down() * 0.5).next_down();
     let allowed = (program_coordinates::MAX_WALL_WIDTH_GRADIENT * transition).next_down();
@@ -481,17 +485,21 @@ fn decode_with_xyz6(
     let mut coordinates = [None; 3];
     for word in words {
         let (index, precision) = match word.as_bytes().first() {
-            Some(b'X') => (0, 6),
-            Some(b'Y') => (1, 6),
-            Some(b'Z') => (2, 6),
-            Some(b'E') => (3, 8),
-            Some(b'F') => (4, 6),
+            Some(b'X') => (0, program_coordinates::PROGRAM_XYZ_DECIMALS),
+            Some(b'Y') => (1, program_coordinates::PROGRAM_XYZ_DECIMALS),
+            Some(b'Z') => (2, program_coordinates::PROGRAM_XYZ_DECIMALS),
+            Some(b'E') => (3, program_coordinates::PROGRAM_E_DECIMALS),
+            Some(b'F') => (4, program_coordinates::PROGRAM_F_DECIMALS),
             Some(b'S') => (5, 6),
             Some(b'R') => (6, 6),
             Some(b'D') => (7, 6),
             Some(b'T') if routed => (8, 0),
-            Some(b'I') if matches!(command, Command::Arc(_)) => (9, 6),
-            Some(b'J') if matches!(command, Command::Arc(_)) => (10, 6),
+            Some(b'I') if matches!(command, Command::Arc(_)) => {
+                (9, program_coordinates::PROGRAM_XYZ_DECIMALS)
+            }
+            Some(b'J') if matches!(command, Command::Arc(_)) => {
+                (10, program_coordinates::PROGRAM_XYZ_DECIMALS)
+            }
             _ => return Err("unsupported command field"),
         };
         if fields[index].is_some() {
@@ -572,7 +580,8 @@ fn decode_with_xyz6(
 /// same f64 an absolute E word of that decimal would decode to.
 fn relative_e8(position: f64, delta: f64) -> Result<f64, ManufacturingError> {
     const LIMIT: f64 = (1u64 << 52) as f64;
-    let (from, by) = (position * 100_000_000.0, delta * 100_000_000.0);
+    let scale = program_coordinates::PROGRAM_E_SCALE;
+    let (from, by) = (position * scale, delta * scale);
     if !from.is_finite() || !by.is_finite() || from.abs() >= LIMIT || by.abs() >= LIMIT {
         return Err(failed("relative extrusion exceeds the exact E8 lattice"));
     }
@@ -580,7 +589,7 @@ fn relative_e8(position: f64, delta: f64) -> Result<f64, ManufacturingError> {
     if sum.unsigned_abs() >= 1u64 << 52 {
         return Err(failed("relative extrusion exceeds the exact E8 lattice"));
     }
-    Ok(sum as f64 / 100_000_000.0)
+    Ok(sum as f64 / scale)
 }
 
 fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
@@ -951,7 +960,13 @@ pub(crate) fn verify_actual(
         } else {
             decode(line, route.is_some())
         }
-        .map_err(|reason| failed(format!("program line {}: {reason}", line_index + 1)))?;
+        .map_err(|reason| {
+            let shown: String = line.chars().take(96).collect();
+            failed(format!(
+                "program line {}: {reason}: {shown:?}",
+                line_index + 1
+            ))
+        })?;
         let command_ticks = match coordinate_ticks {
             [Some(x), Some(y), Some(z)] => Some([x, y, z]),
             _ => None,
@@ -1259,12 +1274,11 @@ pub(crate) fn verify_actual(
                 }
                 None => (decoded, None),
             };
-            let grid_position =
-                if support_grid.is_some() && arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
-                    Some(grid::virtual_xyz6(target))
-                } else {
-                    command_ticks
-                };
+            let grid_position = if arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
+                command_ticks.map(|[_, _, z]| grid::virtual_arc_xyz6(target, z))
+            } else {
+                command_ticks
+            };
             if let Some(markers) = &bambu {
                 markers.before_layer_motion(layer_index)?;
             }
@@ -1571,8 +1585,7 @@ pub(crate) fn verify_actual(
                 })?;
                 // The minimum governs commanded moves: a whole arc, not the
                 // planned edges replayed along it.
-                if arc_segment.is_none() && length < program_coordinates::MIN_DEPOSITION_COMMAND_MM
-                {
+                if arc_segment.is_none() && !program_coordinates::meets_minimum_command(length) {
                     return Err(failed(
                         "deposition command is below the declared software minimum length",
                     ));
@@ -1594,25 +1607,49 @@ pub(crate) fn verify_actual(
                     association.physical_z[1] - association.physical_z[0],
                     process_flow,
                 )?;
-                // Quantized E8 can give a width-equivalent value below height even
+                // Quantized E can give a width-equivalent value below height even
                 // for an admitted circular nominal target. Nominal geometry and the
-                // independent forward E8 volume check above own that model domain;
+                // independent forward E volume check above own that model domain;
                 // keep the FULL actual algebraic interval for all checks below.
-                let width_error = (bounds[0] - association.width)
-                    .abs()
-                    .max((bounds[1] - association.width).abs())
-                    * 0.5;
-                let center_error = distance(source, from)
-                    .max(distance(target, position))
-                    .max(arc_segment.map_or(0.0, |arc| arc.deviation));
-                if bounds[0] < printer.deposition_limits.min_bead_width_mm
-                    || bounds[1] > printer.deposition_limits.max_bead_width_mm
+                // The planned width must lie in the decoded interval widened by
+                // the E word's own rounding (half a step at each endpoint); only
+                // the remainder counts against the lateral command budget.
+                let represented = program_coordinates::commanded_stadium_width_enclosure_mm(
+                    length,
+                    length_error,
+                    delta_e,
+                    // An E delta below one step can represent any width
+                    // down to nearly zero; keep the interval positive.
+                    (extrusion_error + 2.0 * E_HALF_STEP)
+                        .next_up()
+                        .min(delta_e.abs() * (1.0 - 1e-9)),
+                    filament_area,
+                    association.physical_z[1] - association.physical_z[0],
+                    process_flow,
+                )?;
+                let width_error = (represented[0] - association.width)
+                    .max(association.width - represented[1])
+                    .max(0.0);
+                // A bead's lateral error is in XY; its Z is enclosed by the
+                // bead height checks.
+                let lateral = |a: [f64; 3], b: [f64; 3]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                // An arc replays through its rounded I/J centre, which moves
+                // the decoded curve up to half a step on each axis on its own.
+                let centre_rounding = std::f64::consts::SQRT_2 * XYZ_HALF_STEP;
+                let center_error = lateral(source, from)
+                    .max(lateral(target, position))
+                    .max(arc_segment.map_or(0.0, |arc| (arc.deviation - centre_rounding).max(0.0)));
+                // The E words must be able to represent a width inside the
+                // printer's limits.
+                if represented[1] < printer.deposition_limits.min_bead_width_mm
+                    || represented[0] > printer.deposition_limits.max_bead_width_mm
                     || width_error + center_error
                         > program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
                 {
-                    return Err(failed(
-                        "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure",
-                    ));
+                    return Err(failed(format!(
+                        "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure: width {} in [{}, {}], width error {}, centre error {}, length {}",
+                        association.width, bounds[0], bounds[1], width_error, center_error, length,
+                    )));
                 }
                 if let Some(grid) = &mut support_grid {
                     grid.record(grid::RoadInput {
@@ -1636,7 +1673,7 @@ pub(crate) fn verify_actual(
                 }
                 if association.owner == Some(DepositionOwner::Wall) {
                     let edge = CommandedWallEdge {
-                        width: bounds,
+                        width: represented,
                         length_lower: (length - length_error).next_down(),
                     };
                     if let Some(previous) = previous_wall_edge {
@@ -1882,11 +1919,11 @@ pub(crate) fn verify_actual(
                 spiling_geometry::KERNEL_APPROXIMATION_TOLERANCE_MM,
             ),
             "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
-            "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
+            "Ordered travel/deposition completeness; XYZ3 <=0.0005 mm/axis, E6 <=0.0000005 mm absolute / 0.000001 mm delta, F1 <=0.05 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
             "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); explicit Grid two-axis and Cathedral room construction; immutable closed-wall seam policy and deterministic projected tie ordering".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
-            "Actual XYZ6 minimum deposition length and independently inverted XYZ6/E8 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
+            "Actual XYZ3 minimum deposition length and independently inverted XYZ3/E6 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
             "Support roots (when present): matched actual XYZ6 bed, preceding support or established earlier-part capsules; separated lower contacts without source requery".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),

@@ -392,7 +392,7 @@ impl Clearance {
                                 GeometryErrorCode::ResourceLimit => return ManufacturingError::new(ManufacturingErrorCode::ResourceLimit, error.message),
                                 _ => {}
                             }
-                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}", support.layer, support.line, model.layer, model.line))
+                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}; support {:?} r={} e={}, model {:?} r={} e={}, gap {}", support.layer, support.line, model.layer, model.line, capsule.segment_xy_mm, capsule.radius_mm, capsule.endpoint_error_mm, model_capsule.segment_xy_mm, model_capsule.radius_mm, model_capsule.endpoint_error_mm, self.xy_gap))
                         })?;
                 }
             }
@@ -941,6 +941,32 @@ mod tests {
             minimum_width_mm: 0.25,
             length_upper_mm: 1.0,
             arc_deviation_mm: 0.0,
+        }
+    }
+
+    #[test]
+    fn virtual_arc_chord_uses_the_decoded_z_for_clearance() {
+        let cancel = AtomicBool::new(false);
+        for shortfall in [0, 1] {
+            let mut grid = clearance();
+            let mut arc = road(0, DepositionKind::Perimeter, 0, 250_000);
+            arc.to = super::super::virtual_arc_xyz6([1.000_123, 0.0, 0.250_486], 250_000);
+            assert_eq!(arc.to, [1_000_123, 0, 250_000]);
+            arc.arc_deviation_mm = 0.011;
+            grid.record(arc).unwrap();
+            grid.record(road(3, DepositionKind::Support, 0, 1_000_000 - shortfall))
+                .unwrap();
+            let result = grid.verify(&mut 0, &cancel);
+            if shortfall == 0 {
+                assert_eq!(result.unwrap().checked_pairs, 0);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .message
+                        .contains("violates object XY/Z clearance")
+                );
+            }
         }
     }
 
