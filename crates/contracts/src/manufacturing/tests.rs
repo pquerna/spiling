@@ -2307,11 +2307,11 @@ fn ordinary_axis_uses_exact_xyz6_projection_without_geometric_epsilon() {
     let mut data = intent();
     data.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
     let mut accepted = segmented_plan(&[&[1]]);
-    accepted.layers[0].paths[0].points_mm[0][1] = 10.0000004;
-    accepted.layers[0].paths[0].points_mm[1][1] = 10.00000049;
+    accepted.layers[0].paths[0].points_mm[0][1] = 10.0004;
+    accepted.layers[0].paths[0].points_mm[1][1] = 10.00049;
     accepted.validate(&data).unwrap();
     let mut changed = accepted.clone();
-    changed.layers[0].paths[0].points_mm[1][1] = 10.00000051;
+    changed.layers[0].paths[0].points_mm[1][1] = 10.00051;
     assert_eq!(
         changed.validate(&data).unwrap_err().message,
         "ordinary deposition segment violates the authored rectilinear axis"

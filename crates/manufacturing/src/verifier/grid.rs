@@ -594,16 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn decoded_xyz6_retains_a_tick_float_round_trip_loses() {
-        let line = "G1 X4503599627.270496 Y-0.050001 Z+1.2 E1 F1500";
-        let (command, ticks) = decoded_ticks(line);
+    fn decoded_coordinates_become_exact_ticks_at_the_numeric_limit() {
+        let line = "G1 X4503599627.270 Y-0.050 Z+1.2 E1 F1500";
+        let (_, ticks) = decoded_ticks(line);
         assert_eq!(
             ticks,
-            [Some(4_503_599_627_270_496), Some(-50_001), Some(1_200_000)]
-        );
-        assert_ne!(
-            (command.fields[0].unwrap() * 1_000_000.0).round() as i64,
-            ticks[0].unwrap()
+            [Some(4_503_599_627_270_000), Some(-50_000), Some(1_200_000)]
         );
     }
 

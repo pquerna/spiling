@@ -298,12 +298,14 @@ pub(super) fn verify(
                     } else {
                         MaterialConstructionRole::FunctionalRegion
                     };
-                    if previous.z_mm != layer.lower_z_mm
+                    let stacked = previous.z_mm == layer.lower_z_mm;
+                    if !stacked
                         || !phase_overlap(previous, layer, old_role, role, bounds, work, cancel)?
                     {
-                        return Err(failed(
-                            "functional head and end retainer have no positive actual overlap across their physical phase boundary",
-                        ));
+                        return Err(failed(format!(
+                            "functional head and end retainer have no positive actual overlap across their physical phase boundary (lower layer top {} mm, layer floor {} mm, stacked {stacked})",
+                            previous.z_mm, layer.lower_z_mm,
+                        )));
                     }
                 }
             }
@@ -321,6 +323,19 @@ fn phase_overlap(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    // Endpoints are rounded to the program lattice; a source-frame boundary
+    // admits them up to one lattice step outside.
+    let step = program_coordinates::XYZ6_QUANTUM_MM;
+    let represented = Rect::new(
+        Coord {
+            x: bounds.min().x - step,
+            y: bounds.min().y - step,
+        },
+        Coord {
+            x: bounds.max().x + step,
+            y: bounds.max().y + step,
+        },
+    );
     for lower in previous.paths.iter().filter(|path| {
         path.material_domain
             .is_some_and(|reference| reference.role == previous_role)
@@ -356,7 +371,7 @@ fn phase_overlap(
                         ),
                     ] {
                         for point in points {
-                            if bounds.contains(&Point::new(point[0], point[1]))
+                            if represented.contains(&Point::new(point[0], point[1]))
                                 && strict_capsule_point(point, other, core_radius(edge, height)?)?
                             {
                                 return Ok(true);

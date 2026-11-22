@@ -352,15 +352,15 @@ mod tests {
 
     #[test]
     fn a_rounded_end_to_end_joint_is_not_a_duplicate_stroke() {
-        // Observed on a real part: bridge from 6.777242, skin to 6.777243.
-        let bridge = [[6.777242, 150.707963, 1.2], [51.426919, 150.707963, 1.2]];
-        let skin = |end: f64| [[end, 150.707963, 1.2], [6.4, 150.707963, 1.2]];
-        assert!(!duplicates_collinear(bridge, skin(6.777243), 1, 0));
-        assert!(!duplicates_collinear(bridge, skin(6.777242), 1, 0));
-        assert!(duplicates_collinear(bridge, skin(6.777244), 1, 0));
+        // A bridge from 6.777 and a skin ending one lattice step past it.
+        let bridge = [[6.777, 150.708, 1.2], [51.427, 150.708, 1.2]];
+        let skin = |end: f64| [[end, 150.708, 1.2], [6.4, 150.708, 1.2]];
+        assert!(!duplicates_collinear(bridge, skin(6.778), 1, 0));
+        assert!(!duplicates_collinear(bridge, skin(6.777), 1, 0));
+        assert!(duplicates_collinear(bridge, skin(6.779), 1, 0));
         assert!(duplicates_collinear(bridge, skin(30.0), 1, 0));
         // Another row is never a duplicate, however long the overlap.
-        let other_row = [[0.0, 150.707964, 1.2], [60.0, 150.707964, 1.2]];
+        let other_row = [[0.0, 150.709, 1.2], [60.0, 150.709, 1.2]];
         assert!(!duplicates_collinear(bridge, other_row, 1, 0));
     }
 

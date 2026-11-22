@@ -374,7 +374,7 @@ fn visit_fresh_replayed_object_segments(
 // These fixtures have one actual contact height. Read the declared program
 // representation, not an assumed nominal/native floor or an exact stop value.
 fn actual_fixture_contact_gap(bundle: &ManufacturingBundle, source_floor: f64) -> f64 {
-    let xyz6 = |z: f64| format!("{z:.6}").parse::<f64>().unwrap();
+    let xyz6 = |z: f64| format!("{z:.3}").parse::<f64>().unwrap();
     let first_object = bundle
         .plan
         .layers
@@ -1633,7 +1633,7 @@ fn affine_rational_native_source_is_admitted_and_replayed_without_family_fallbac
 fn balanced_native_top_is_preserved_and_only_the_working_set_bounds_layers() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut intent = intent(false);
-    intent.recipe.layer_height_mm = 0.399995;
+    intent.recipe.layer_height_mm = 0.399;
     let bundle = compile(scene.input(&intent), &AtomicBool::new(false)).unwrap();
     assert_eq!(bundle.plan.layers.last().unwrap().z_mm, 8.0);
     assert!(
@@ -1641,7 +1641,7 @@ fn balanced_native_top_is_preserved_and_only_the_working_set_bounds_layers() {
             .plan
             .layers
             .iter()
-            .all(|layer| layer.height_mm <= 0.399995)
+            .all(|layer| layer.height_mm <= 0.399)
     );
     // Below the reference printer's Z step a layer is outside the process.
     intent.recipe.layer_height_mm = 0.0001;
@@ -1653,8 +1653,9 @@ fn balanced_native_top_is_preserved_and_only_the_working_set_bounds_layers() {
     );
     // On a printer that resolves it, there is no layer cap: only the host's
     // working-set allowance refuses, typed, before the schedule grows.
-    intent.printer.motion_resolution.z_mm = 0.000001;
-    intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
+    intent.printer.motion_resolution.z_mm = 0.001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.001;
+    intent.recipe.layer_height_mm = 0.001;
     let mut input = scene.input(&intent);
     input.working_set = crate::WorkingSet::new(1 << 20).unwrap();
     assert_eq!(
@@ -1669,9 +1670,9 @@ fn balanced_native_top_is_preserved_and_only_the_working_set_bounds_layers() {
 fn fine_layers_beyond_the_former_layer_ceiling_compile_and_verify() {
     let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut intent = intent(false);
-    intent.printer.motion_resolution.z_mm = 0.000001;
-    intent.printer.deposition_limits.min_bead_height_mm = 0.000001;
-    intent.recipe.layer_height_mm = 0.0019;
+    intent.printer.motion_resolution.z_mm = 0.001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.001;
+    intent.recipe.layer_height_mm = 0.001;
     let cancel = AtomicBool::new(false);
     let bundle = compile(scene.input(&intent), &cancel).unwrap();
     assert!(
@@ -2092,7 +2093,12 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             .split_whitespace()
             .map(|token| {
                 if let Some(value) = token.strip_prefix(field) {
-                    format!("{field}{:.8}", value.parse::<f64>().unwrap() + 0.02)
+                    let decimals = if field == 'E' { 5 } else { 3 };
+                    format!(
+                        "{field}{:.*}",
+                        decimals,
+                        value.parse::<f64>().unwrap() + 0.02
+                    )
                 } else {
                     token.to_owned()
                 }
@@ -4437,7 +4443,7 @@ fn material_profile_native_compile_replay_and_thermal_process_mutations() {
         text.replacen("\nM104 S210\n", "\nM104 S215\n", 1),
         text.replacen("\nM104 S210\n", "\n", 1),
         text.replacen("M106 S255", "M106 S128", 1),
-        text.replacen("F1260.000000", "F2100.000000", 1),
+        text.replacen("F1260.0", "F2100.0", 1),
     ] {
         assert_ne!(tampered, text);
         assert!(
@@ -4624,7 +4630,7 @@ fn mixed_width_native_bore_keeps_fine_walls_and_rejects_missing_or_doubled_actua
         .find(|line| {
             (line.starts_with("G1 X2") || line.starts_with("G1 X3"))
                 && line.contains(" E")
-                && line.ends_with("F2280.000000")
+                && line.ends_with("F2280.0")
         })
         .expect("bulk-tool model move");
     let missing = text.replacen(&format!("{line}\n"), "", 1);
@@ -5405,10 +5411,10 @@ fn default_intent_slows_to_flow_and_cooling_limits_and_reports_it() {
         "PLA's bed target is unchanged"
     );
     // Outer walls at 170 mm/s exist on later layers, first-layer walls at 40.
-    assert!(text.contains(" F10200.000000"), "outer wall feed");
-    assert!(text.contains(" F2400.000000"), "first-layer feed");
+    assert!(text.contains(" F10200.0"), "outer wall feed");
+    assert!(text.contains(" F2400.0"), "first-layer feed");
     for tampered in [
-        text.replacen(" F10200.000000", " F10260.000000", 1),
+        text.replacen(" F10200.0", " F10260.0", 1),
         text.replacen("\nM104 S215\n", "\n", 1),
         text.replacen("M109 R220", "M109 R215", 1),
     ] {

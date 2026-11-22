@@ -567,7 +567,8 @@ fn actual_backend_program_is_independently_replayed() {
     assert_eq!(report.deposition_segments, 6);
     assert_eq!(report.travel_segments, 3);
     // Independent numerical value for 24 mm of rounded 0.45 x 0.2 bead.
-    assert!((report.deposited_volume_mm3 - 1.953_982_236_861_550_5).abs() < 0.000_000_02);
+    // Micrometre coordinates and five-decimal E: compare to 0.01%.
+    assert!((report.deposited_volume_mm3 - 1.953_982_236_861_550_5).abs() < 1.953_982 * 1e-4);
     assert!(report.max_position_error_mm > 0.0);
     assert!(report.max_position_error_mm <= 3.0_f64.sqrt() * XYZ_HALF_STEP + 1e-12);
     assert!(report.max_extrusion_error_mm <= 2.0 * E_HALF_STEP + 1e-12);
@@ -583,7 +584,8 @@ fn actual_backend_program_is_independently_replayed() {
 #[test]
 fn actual_half_step_xyz_cannot_choose_the_other_lattice_neighbor() {
     let cancel = AtomicBool::new(false);
-    for offset in [0.0000005, -0.0000005] {
+    // Exactly half a lattice step: the encoder picks one neighbour.
+    for offset in [0.0005, -0.0005] {
         let (mut intent, mut plan) = fixture();
         intent.printer.build_envelope.min[0] = -10.0;
         for layer in &mut plan.layers {
@@ -597,11 +599,11 @@ fn actual_half_step_xyz_cannot_choose_the_other_lattice_neighbor() {
         let program = emit_text(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
         let actual = if offset > 0.0 {
-            "G0 X0.000001 "
+            "G0 X0.001 "
         } else {
-            "G0 X-0.000001 "
+            "G0 X-0.001 "
         };
-        let alternate = program.replacen(actual, "G0 X0.000000 ", 1);
+        let alternate = program.replacen(actual, "G0 X0.000 ", 1);
         assert_ne!(alternate, program);
         assert_eq!(
             verify(&alternate, &plan, &intent, &cancel)
@@ -656,9 +658,9 @@ fn actual_emitted_motion_rejects_independent_tampering() {
         .find(|word| word.starts_with('F'))
         .unwrap();
     for tampered in [
-        program.replacen(first_move, &first_move.replace(e, "E99999.00000000"), 1),
-        program.replacen(first_move, &first_move.replace(x, "X99.000000"), 1),
-        program.replacen(first_move, &first_move.replace(f, "F0.000000"), 1),
+        program.replacen(first_move, &first_move.replace(e, "E99999.00000"), 1),
+        program.replacen(first_move, &first_move.replace(x, "X99.000"), 1),
+        program.replacen(first_move, &first_move.replace(f, "F0.0"), 1),
         program.replacen(&format!("{first_move}\n"), "", 1),
         program.replacen("G90", "G91", 1),
         format!("{program}{first_move}\n"),
@@ -706,17 +708,14 @@ fn command_mutations_cannot_hide_behind_a_preview_or_verified_flag() {
         ("overextrusion", GOLDEN.replacen("E1 F600", "E1.1 F600", 1)),
         (
             "small E tampering",
-            GOLDEN.replacen("E1 F600", "E1.00000001 F600", 1),
+            GOLDEN.replacen("E1 F600", "E1.00001 F600", 1),
         ),
         ("retraction", GOLDEN.replacen("E2 F600", "E0.5 F600", 1)),
         ("zero extrusion", GOLDEN.replacen("E2 F600", "E1 F600", 1)),
         ("coordinate", GOLDEN.replacen("G1 X5 Y1", "G1 X5.001 Y1", 1)),
         ("Z", GOLDEN.replacen("G1 X5 Y1 Z1", "G1 X5 Y1 Z1.001", 1)),
         ("feed", GOLDEN.replacen("F600", "F601", 1)),
-        (
-            "small feed tampering",
-            GOLDEN.replacen("F600", "F600.000001", 1),
-        ),
+        ("small feed tampering", GOLDEN.replacen("F600", "F600.1", 1)),
         ("travel feed", GOLDEN.replacen("F1200", "F1201", 1)),
         ("zero feed", GOLDEN.replacen("F600", "F0", 1)),
         ("negative feed", GOLDEN.replacen("F600", "F-600", 1)),
@@ -809,7 +808,7 @@ fn command_mutations_cannot_hide_behind_a_preview_or_verified_flag() {
 fn permitted_comments_whitespace_and_numeric_forms_do_not_change_semantics() {
     let program = GOLDEN
         .replace("G21", "\tG21 ; inert units comment")
-        .replace("G92 E0", "G92 E+0.00000000")
+        .replace("G92 E0", "G92 E+0.00000")
         .replace("\n", "\r\n");
     let report = replay(&program).unwrap();
     assert_eq!(report.filament_length_mm, 6.0);
@@ -822,17 +821,18 @@ fn replay_thresholds_do_not_expand_to_plan_approximation_budget() {
     for layer in &mut plan.layers {
         for path in &mut layer.paths {
             for point in &mut path.points_mm {
-                point[0] += 0.000_000_4;
+                point[0] += 0.000_4;
             }
         }
     }
     let report = verify(GOLDEN, &plan, &intent, &cancel).unwrap();
-    assert!((report.max_position_error_mm - 0.000_000_4).abs() < 1e-14);
-    // The 5 um native sampling error does not authorize a 0.6 um replay error.
+    assert!((report.max_position_error_mm - 0.000_4).abs() < 1e-12);
+    // The 5 um native sampling error does not authorize a 0.6 um replay error,
+    // beyond the half lattice step.
     for layer in &mut plan.layers {
         for path in &mut layer.paths {
             for point in &mut path.points_mm {
-                point[0] += 0.000_000_2;
+                point[0] += 0.000_2;
             }
         }
     }
@@ -890,10 +890,10 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
 
 fn wall_command_fixture(path: DepositionPath) -> (ManufacturingIntent, NormalizedPrintPlan) {
     let (mut intent, mut plan) = fixture();
-    // Command-arithmetic fixtures build layers down to tens of nanometres; the
-    // declared printer resolves the XYZ6 lattice so they remain admissible.
-    intent.printer.motion_resolution.z_mm = 0.000_001;
-    intent.printer.deposition_limits.min_bead_height_mm = 0.000_001;
+    // Command-arithmetic fixtures build layers down to the command lattice; the
+    // declared printer resolves it so they remain admissible.
+    intent.printer.motion_resolution.z_mm = 0.001;
+    intent.printer.deposition_limits.min_bead_height_mm = 0.001;
     intent.recipe.layer_height_mm = path.height_mm();
     intent.recipe.bead_width_mm = 0.45;
     plan.layers.truncate(1);
@@ -948,13 +948,14 @@ fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process
     let expected_volume =
         4.0 * (0.265 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) * 4.0 * 1.1 * 0.8;
     assert_eq!(report.deposition_segments, 4);
-    assert!((report.deposited_volume_mm3 - expected_volume).abs() < 2e-8);
+    // Micrometre coordinates and five-decimal E: compare to 0.01%.
+    assert!((report.deposited_volume_mm3 - expected_volume).abs() < expected_volume * 1e-4);
     assert!(program.contains("M106 S255\n"));
     assert!(
         program
             .lines()
             .filter(|line| line.starts_with("G1 "))
-            .all(|line| line.ends_with("F300.000000"))
+            .all(|line| line.ends_with("F300.0"))
     );
 
     // Actual bytes retain their original edge-local widths, not whichever
@@ -977,7 +978,7 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.2],
-        points_mm: vec![[1.0, 1.0, 0.2], [1.011_999_49, 1.016_000_49, 0.2]],
+        points_mm: vec![[1.0, 1.0, 0.2], [1.011_499_9, 1.016_499_9, 0.2]],
         arcs: Vec::new(),
         exposed: false,
         connectors: Vec::new(),
@@ -988,12 +989,12 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
     );
     assert!(length > program_coordinates::MIN_DEPOSITION_COMMAND_MM);
     assert!(
-        distance([1.0, 1.0, 0.2], [1.011_999, 1.016, 0.2])
+        distance([1.0, 1.0, 0.2], [1.011, 1.016, 0.2])
             < program_coordinates::MIN_DEPOSITION_COMMAND_MM
     );
     let e = length * (0.25 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) / std::f64::consts::PI;
     let program = format!(
-        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.011999 Y1.016 Z0.2 E{e:.8} F300\n"
+        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.011 Y1.016 Z0.2 E{e:.5} F300\n"
     );
     assert_eq!(
         verify(&program, &plan, &intent, &AtomicBool::new(false))
@@ -1004,61 +1005,44 @@ fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
 }
 
 #[test]
-fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
+fn decoded_width_cannot_borrow_the_nominal_width_association() {
     let (intent, plan) = wall_command_fixture(DepositionPath {
         material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::Constant { width_mm: 0.45 },
-        physical_z_mm: [0.0, 0.000_01],
-        points_mm: vec![[1.0, 1.0, 0.000_01], [1.02, 1.0, 0.000_01]],
+        physical_z_mm: [0.0, 0.2],
+        points_mm: vec![[1.0, 1.0, 0.2], [1.3, 1.0, 0.2]],
         arcs: Vec::new(),
         exposed: false,
         connectors: Vec::new(),
     });
-    // E=3e-8 is the ordinary E8 rounding of this nominal stroke, but its
-    // independently inverted width is about 0.47124 rather than 0.45 mm.
-    let program = "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.00001 F1200\nG1 X1.02 Y1 Z0.00001 E0.00000003 F300\n";
+    // The nominal 0.45 mm stroke needs E0.00777; E0.00816 inverts to about
+    // 0.47 mm, far beyond what E rounding could represent.
+    let program =
+        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.3 Y1 Z0.2 E0.00816 F300\n";
     let error = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 }
 
 #[test]
-fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
+fn wall_gradient_checks_widths_across_the_closed_seam() {
     let cancel = AtomicBool::new(false);
+    // A width the E words can represent is never a gradient violation, so
+    // the check is on widths that really jump. On 0.3 mm edges E rounding
+    // leaves under 1 um of width ambiguity.
     let (intent, plan) = wall_command_fixture(DepositionPath {
         material_domain: None,
         kind: DepositionKind::Bridge,
         owner: Some(DepositionOwner::Wall),
         width: WidthProfile::PerEdge {
-            widths_mm: vec![0.451, 0.455],
-        },
-        physical_z_mm: [0.0, 0.2],
-        points_mm: vec![[1.0, 1.0, 0.2], [1.02, 1.0, 0.2], [1.0, 1.0, 0.2]],
-        arcs: Vec::new(),
-        exposed: false,
-        connectors: Vec::new(),
-    });
-    // Nominal widths meet 0.20/mm. Actual E8 commands invert to about
-    // 0.450997545 and 0.455003076: their gradient exceeds the frozen limit.
-    let program = "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.02 Y1 Z0.2 E0.00051958 F300\nG1 X1 Y1 Z0.2 E0.00104426 F300\n";
-    assert_eq!(
-        verify(program, &plan, &intent, &cancel).unwrap_err().code,
-        ManufacturingErrorCode::VerificationFailed
-    );
-
-    let (intent, plan) = wall_command_fixture(DepositionPath {
-        material_domain: None,
-        kind: DepositionKind::Bridge,
-        owner: Some(DepositionOwner::Wall),
-        width: WidthProfile::PerEdge {
-            widths_mm: vec![0.45, 0.455, 0.46],
+            widths_mm: vec![0.45, 0.485, 0.52],
         },
         physical_z_mm: [0.0, 0.2],
         points_mm: vec![
             [1.0, 1.0, 0.2],
-            [1.03, 1.0, 0.2],
-            [1.015, 1.025_981, 0.2],
+            [1.3, 1.0, 0.2],
+            [1.15, 1.259_808, 0.2],
             [1.0, 1.0, 0.2],
         ],
         arcs: Vec::new(),
@@ -1352,7 +1336,7 @@ fn role_speeds_flow_ceiling_and_cooling_slowdown_replay_independently() {
     let feed = line.split_ascii_whitespace().last().unwrap().to_string();
     let value: f64 = feed[1..].parse().unwrap();
     for wrong in [value * 1.01, value * 0.99] {
-        let mutated = program.replacen(&line, &line.replacen(&feed, &format!("F{wrong:.6}"), 1), 1);
+        let mutated = program.replacen(&line, &line.replacen(&feed, &format!("F{wrong:.1}"), 1), 1);
         assert!(
             verify(&mutated, &plan, &intent, &cancel).is_err(),
             "{wrong}"
@@ -1417,8 +1401,8 @@ fn exposed_top_skin_takes_top_speed_and_covered_top_skin_solid_speed() {
     surface.validate(&intent).unwrap();
     let exposed = emit_text(&surface, &intent, &cancel).unwrap();
     verify(&exposed, &surface, &intent, &cancel).unwrap();
-    assert!(covered.contains(" F3600.000000\n"), "{covered}");
-    assert!(exposed.contains(" F1500.000000\n"), "{exposed}");
+    assert!(covered.contains(" F3600.0\n"), "{covered}");
+    assert!(exposed.contains(" F1500.0\n"), "{exposed}");
     assert!(verify(&covered, &surface, &intent, &cancel).is_err());
     assert!(verify(&exposed, &plan, &intent, &cancel).is_err());
     // Exposure is a wall or mandatory top-skin declaration only.
@@ -1596,7 +1580,7 @@ fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations(
         ("M83\n", "M82\n"),
         ("M83\n", ""),
         ("G90\n", "G91\n"),
-        ("E1.00000000", "E2.00000000"),
+        ("E1.00000", "E2.00000"),
         ("G28", "START_PRINT"),
         ("M107", "M106 S255"),
     ] {
@@ -1616,7 +1600,7 @@ fn complete_jobs_command_exact_relative_extrusion() {
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(program.contains("\nG21\nG90\nM83\nG92 E0\n"), "{program}");
-    // Every E word is a small per-move delta; their exact E8 sum is the
+    // Every E word is a small per-move delta; their exact E lattice sum is the
     // replayed absolute filament, so no 32-bit absolute E ever accumulates.
     let mut units = 0i64;
     let mut largest = 0i64;
@@ -1632,17 +1616,25 @@ fn complete_jobs_command_exact_relative_extrusion() {
             continue;
         };
         let (whole, fraction) = word[1..].split_once('.').unwrap();
-        assert_eq!(fraction.len(), 8, "{line}");
+        assert_eq!(
+            fraction.len(),
+            program_coordinates::PROGRAM_E_DECIMALS,
+            "{line}"
+        );
         let negative = whole.starts_with('-');
-        let magnitude = whole.trim_start_matches('-').parse::<i64>().unwrap() * 100_000_000
+        let magnitude = whole.trim_start_matches('-').parse::<i64>().unwrap()
+            * program_coordinates::PROGRAM_E_TICKS as i64
             + fraction.parse::<i64>().unwrap();
         let delta = if negative { -magnitude } else { magnitude };
         largest = largest.max(delta.abs());
         units += delta;
     }
-    assert!(largest < 100 * 100_000_000, "largest delta {largest}");
+    assert!(
+        largest < 100 * program_coordinates::PROGRAM_E_TICKS as i64,
+        "largest delta {largest}"
+    );
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
-    let total = units as f64 / 100_000_000.0;
+    let total = units as f64 / program_coordinates::PROGRAM_E_SCALE;
     assert!(
         (total - report.filament_length_mm - report.priming_filament_length_mm).abs() < 1e-6,
         "{total} vs {} + {}",
@@ -1779,7 +1771,7 @@ fn priming_excludes_whole_object_xy_even_above_object_and_across_gaps() {
 fn priming_exclusion_accounts_for_emitted_rounding_at_boundary() {
     let (intent, plan) = complete_fixture();
     let cancel = AtomicBool::new(false);
-    for (y, admissible) in [(0.499998, true), (0.4999988, false), (0.5, false)] {
+    for (y, admissible) in [(0.498, true), (0.4988, false), (0.5, false)] {
         let mut candidate = intent.clone();
         if let JobWorkflow::CompleteMarlin { job } = &mut candidate.printer.workflow {
             job.prime_start_mm = [0.0, y, 1.0];
@@ -1791,7 +1783,7 @@ fn priming_exclusion_accounts_for_emitted_rounding_at_boundary() {
             crate::realization::canonicalize(&mut plan, &candidate, &cancel).unwrap();
             let program = emit_text(&plan, &candidate, &cancel).unwrap();
             verify(&program, &plan, &candidate, &cancel).unwrap();
-            let mutated = program.replace("Y0.499998", "Y0.500000");
+            let mutated = program.replace("Y0.498", "Y0.500");
             assert!(verify(&mutated, &plan, &candidate, &cancel).is_err());
         }
     }
@@ -1905,7 +1897,7 @@ G1 E1.2 F900
 G1 X11 Y1 Z1 E1.8 F300
 M106 S220
 G0 X11 Y1 Z1.5 F1200
-G1 X15 Y1 Z1.5 E2.25464791 F240
+G1 X15 Y1 Z1.5 E2.25465 F240
 ";
 
 fn packed_process_descriptor(
@@ -1977,7 +1969,10 @@ fn independent_process_golden_separates_support_object_and_stationary_recovery()
     assert!((report.retracted_filament_mm - 0.8).abs() < 1e-12);
     assert!((report.support_filament_length_mm - 1.2).abs() < 1e-12);
     assert!((report.support_deposited_volume_mm3 - 1.2 * std::f64::consts::PI).abs() < 1e-12);
-    assert!((report.deposited_volume_mm3 - (0.8 + 0.8 * std::f64::consts::PI)).abs() < 2e-8);
+    assert!(
+        (report.deposited_volume_mm3 - (0.8 + 0.8 * std::f64::consts::PI)).abs()
+            < (0.8 + 0.8 * std::f64::consts::PI) * 1e-4
+    );
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
@@ -2031,8 +2026,8 @@ fn independently_rejects_cooling_recovery_first_layer_bridge_and_hop_mutations()
         ("Z1.25 F1200", "Z1.5 F1200"),
         ("E0.6 F300", "E0.6 F600"),
         ("E0.6 F300", "E0.5 F300"),
-        ("E2.25464791 F240", "E2.25464791 F600"),
-        ("E2.25464791 F240", "E2.36830989 F240"),
+        ("E2.25465 F240", "E2.25465 F600"),
+        ("E2.25465 F240", "E2.36831 F240"),
     ] {
         let mutated = PROCESS_GOLDEN.replacen(from, to, 1);
         assert_ne!(mutated, PROCESS_GOLDEN);
@@ -2108,7 +2103,7 @@ fn cooling_transition_and_variable_height_properties_use_actual_bytes() {
                 .iter()
                 .map(|l| l.region_coverage.nominal_deposition_volume_mm3)
                 .sum::<f64>();
-            assert!((report.deposited_volume_mm3 - expected).abs() < 2e-8);
+            assert!((report.deposited_volume_mm3 - expected).abs() < expected * 1e-4);
             let wrong = emitted.replacen("M106 S173", "M106 S172", 1);
             assert!(verify(&wrong, &plan, &intent, &cancel).is_err());
         }
@@ -2245,17 +2240,17 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
 fn preferred_seam_score_has_no_proximity_epsilon_for_wall_bridges() {
     let (mut intent, mut plan) = complete_fixture();
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
-    // A one-XYZ6-step score advantage wins even though the prime endpoint is
+    // A one-lattice-step score advantage wins even though the prime endpoint is
     // much closer to the lower-scoring upper vertex.
     for point in &mut plan.layers[0].paths[0].points_mm {
         if point[0] == 5.0 && point[1] == 1.0 {
-            point[0] = 5.000_001;
+            point[0] = 5.001;
         }
     }
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.001, 1.0, 1.0]);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 
@@ -2274,7 +2269,7 @@ fn preferred_seam_score_has_no_proximity_epsilon_for_wall_bridges() {
         ManufacturingErrorCode::VerificationFailed
     );
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
-    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.001, 1.0, 1.0]);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 6);
@@ -2310,8 +2305,8 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [2.0, 2.0, 1.0]);
     assert_eq!(plan.layers[0].paths[2].points_mm[0], [2.0, 2.0, 1.0]);
     let emitted = emit_text(&plan, &intent, &cancel).unwrap();
-    assert!(emitted.contains("G0 X2.000000 Y2.000000 Z1.000000"));
-    assert!(!emitted.contains("G0 X20.000000 Y2.000000"));
+    assert!(emitted.contains("G0 X2.000 Y2.000 Z1.000"));
+    assert!(!emitted.contains("G0 X20.000 Y2.000"));
     verify(&emitted, &plan, &intent, &cancel).unwrap();
     assert_eq!(emitted, emit_text(&plan, &intent, &cancel).unwrap());
 }
@@ -2546,7 +2541,7 @@ fn distributed_seams_preserve_directed_edges_widths_and_wall_bridge_dose() {
     let program = emit_text(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 12);
-    assert!((report.deposited_volume_mm3 - volume).abs() < 2e-8);
+    assert!((report.deposited_volume_mm3 - volume).abs() < volume * 1e-4);
     assert!(program.contains("M106 S255\n"));
     if let WidthProfile::PerEdge { widths_mm } = &mut plan.layers[2].paths[0].width {
         widths_mm.rotate_left(1);
@@ -2564,11 +2559,7 @@ fn distributed_seams_reject_matching_rotated_program_and_byte_only_mutations() {
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let altered = program.replacen(
-        "G0 X5.000000 Y5.000000 Z3.000000",
-        "G0 X1.000000 Y1.000000 Z3.000000",
-        1,
-    );
+    let altered = program.replacen("G0 X5.000 Y5.000 Z3.000", "G0 X1.000 Y1.000 Z3.000", 1);
     assert_ne!(altered, program);
     assert!(verify(&altered, &plan, &intent, &cancel).is_err());
     plan.layers[2].paths[0].rotate_closed(2).unwrap();
@@ -2628,7 +2619,11 @@ fn support_only_layers_are_real_and_not_object_accounting() {
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
     assert_eq!(report.deposition_segments, 1);
     assert_eq!(report.support_deposition_segments, 2);
-    assert!((report.deposited_volume_mm3 - (0.8 + 0.2 * std::f64::consts::PI)).abs() < 2e-8);
+    // Micrometre coordinates and five-decimal E: compare to 0.01%.
+    assert!(
+        (report.deposited_volume_mm3 - (0.8 + 0.2 * std::f64::consts::PI)).abs()
+            < (0.8 + 0.2 * std::f64::consts::PI) * 1e-4
+    );
 }
 
 #[test]
@@ -2724,7 +2719,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
         assert_eq!(report.filament_length_mm, 6.0);
         if minimum_travel_mm == 1.0 {
             assert_eq!(report.retraction_count, 2);
-            assert!(emitted.contains("G1 E-6.00000000 F900.000000\n"));
+            assert!(emitted.contains("G1 E-6.00000 F900.0\n"));
         } else {
             assert_eq!(report.retraction_count, 0);
         }
@@ -2776,11 +2771,11 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     intent.recipe.layer_height_mm = 0.1;
     intent.recipe.bead_width_mm = 0.45;
     intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 };
-    intent.printer.motion_resolution.z_mm = 0.000_001;
+    intent.printer.motion_resolution.z_mm = 0.001;
     intent.printer.deposition_limits = DepositionLimits {
         min_bead_width_mm: 0.449,
         max_bead_width_mm: 0.451,
-        min_bead_height_mm: 0.000001,
+        min_bead_height_mm: 0.001,
         max_bead_height_mm: 0.3,
     };
     plan.layers.truncate(1);
@@ -2844,7 +2839,9 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     // Independently calculated capsule areas: three fine rows, one double-height row.
     let fine_area = 0.35 * 0.1 + std::f64::consts::PI * 0.05f64.powi(2);
     let coarse_area = 0.25 * 0.2 + std::f64::consts::PI * 0.1f64.powi(2);
-    assert!((report.deposited_volume_mm3 - 4.0 * (3.0 * fine_area + coarse_area)).abs() < 1e-7);
+    // Micrometre coordinates and five-decimal E: compare to 0.01%.
+    let expected = 4.0 * (3.0 * fine_area + coarse_area);
+    assert!((report.deposited_volume_mm3 - expected).abs() < expected * 1e-4);
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
     let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
@@ -3348,7 +3345,7 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     );
     // Both mutations still match newly emitted bytes. Admission must therefore
     // distinguish projected tangency from actual longitudinal ownership.
-    for intrusion in [0.000_001, 0.001] {
+    for intrusion in [0.001, 0.01] {
         let mut overlapping = plan.clone();
         let path = overlapping.layers[1]
             .paths
@@ -3471,7 +3468,7 @@ fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     };
     let fit = SkinCommandFit {
         required_mm: [[2.0, 2.0, 1.0], [2.01, 2.0, 1.0]],
-        fitted_mm: [[2.0, 2.0, 1.0], [2.020003, 2.0, 1.0]],
+        fitted_mm: [[2.0, 2.0, 1.0], [2.022, 2.0, 1.0]],
     };
     layer.paths = vec![DepositionPath {
         material_domain: None,
@@ -3518,9 +3515,9 @@ fn minimum_skin_command_preserves_required_material_and_replays_actual_extra_vol
     let (intent, mut plan) = minimum_skin_fixture();
     // Independent circular-bead numeric golden: E = commanded length / 4.
     let program =
-        "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2.020003 Y2 Z1 E0.00500075 F600\n";
+        "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2.022 Y2 Z1 E0.00550 F600\n";
     let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
-    assert!((report.deposited_volume_mm3 - 0.020003 * std::f64::consts::PI / 4.0).abs() < 1e-12);
+    assert!((report.deposited_volume_mm3 - 0.022 * std::f64::consts::PI / 4.0).abs() < 1e-12);
     assert!(report.deposited_volume_mm3 > 0.01 * std::f64::consts::PI / 4.0);
     assert_eq!(plan.layers[0].region_coverage.bottom_skin_area_mm2, 0.02);
     plan.layers[0].paths[0].points_mm.reverse();
@@ -3679,16 +3676,16 @@ fn projected_skin_just_below_command_minimum_still_receives_complete_fitted_mate
     let layer = &mut plan.layers[0];
     let domain = &mut layer.skin_command_fits[0];
     domain.fits[0] = SkinCommandFit {
-        required_mm: [[4.0, 2.0, 1.0], [4.02, 2.0, 1.0]],
-        fitted_mm: [[4.0, 2.0, 1.0], [4.020003, 2.0, 1.0]],
+        required_mm: [[4.0, 2.0, 1.0], [4.019, 2.0, 1.0]],
+        fitted_mm: [[4.0, 2.0, 1.0], [4.022, 2.0, 1.0]],
     };
-    domain.mandatory = vec![skin_fit_box([4.0, 4.02], [1.0, 3.0])];
-    domain.regional = vec![skin_fit_box([4.02, 9.0], [0.0, 4.0])];
+    domain.mandatory = vec![skin_fit_box([4.0, 4.019], [1.0, 3.0])];
+    domain.regional = vec![skin_fit_box([4.019, 9.0], [0.0, 4.0])];
     domain.source_owner = vec![skin_fit_box([1.0, 9.0], [0.0, 4.0])];
     layer.paths[0].points_mm = domain.fits[0].fitted_mm.to_vec();
-    layer.region_coverage.bottom_skin_area_mm2 = 0.04;
-    layer.region_coverage.solid_interior_area_mm2 = 15.96;
-    layer.region_coverage.process_regions[0].area_mm2 = 15.96;
+    layer.region_coverage.bottom_skin_area_mm2 = 0.038;
+    layer.region_coverage.solid_interior_area_mm2 = 15.962;
+    layer.region_coverage.process_regions[0].area_mm2 = 15.962;
     domain.region = layer.region_coverage.process_regions[0].clone();
     let required = domain.fits[0].required_mm;
     let a = project_xyz6_point_mm(required[0]).unwrap();
@@ -3727,8 +3724,10 @@ fn minimum_skin_replay_rejects_off_lattice_rows_inside_unchanged_captured_masks(
 #[test]
 fn minimum_skin_projects_the_authored_slanted_interval_but_rechecks_actual_source_ownership() {
     let (intent, mut plan) = minimum_skin_fixture();
-    let row = 2.0000004;
-    let y = [row - 0.2, row + 0.2];
+    let row = 2.0004;
+    // A steep slant: a sub-step row offset moves its boundary well beyond
+    // the lateral command budget.
+    let y = [row - 0.02, row + 0.02];
     let layer = &mut plan.layers[0];
     let domain = &mut layer.skin_command_fits[0];
     domain.mandatory = vec![DiaphragmPolygonMm {
@@ -3758,9 +3757,9 @@ fn minimum_skin_projects_the_authored_slanted_interval_but_rechecks_actual_sourc
     for point in &mut layer.paths[0].points_mm {
         point[1] = row;
     }
-    layer.region_coverage.bottom_skin_area_mm2 = 0.004;
-    layer.region_coverage.solid_interior_area_mm2 = 15.996;
-    layer.region_coverage.process_regions[0].area_mm2 = 15.996;
+    layer.region_coverage.bottom_skin_area_mm2 = 0.0004;
+    layer.region_coverage.solid_interior_area_mm2 = 15.9996;
+    layer.region_coverage.process_regions[0].area_mm2 = 15.9996;
     domain.region = layer.region_coverage.process_regions[0].clone();
     // Q(Y) is below the authored row: re-sectioning the slanted mandatory
     // mask there loses a micron from Q(required), despite correct projection.
@@ -3769,8 +3768,8 @@ fn minimum_skin_projects_the_authored_slanted_interval_but_rechecks_actual_sourc
     *source = vec![DiaphragmPolygonMm {
         outer: vec![
             [1.0, y[0]],
-            [1.420003, y[0]],
-            [2.620003, y[1]],
+            [1.426, y[0]],
+            [2.626, y[1]],
             [1.0, y[1]],
             [1.0, y[0]],
         ],
@@ -3785,7 +3784,7 @@ fn minimum_skin_projects_the_authored_slanted_interval_but_rechecks_actual_sourc
 fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     let (mut intent, mut plan) = fixture();
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
-    let row = 2.0000004;
+    let row = 2.0004;
     let y = [row - 0.2, row + 0.2];
     let boundary = 3.4 + (row - y[0]) * (4.6 - 3.4) / (y[1] - y[0]);
     plan.layers[0].paths = [[2.0, 2.1], [5.9, 6.0]]
@@ -3869,7 +3868,7 @@ fn mixed_skin_projects_original_classified_intervals_without_rehatching_the_roun
     replay_skin_fit(&intent, reversed).unwrap();
     let cancel = AtomicBool::new(false);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    let alternate = program.replacen("Y2.000000 ", "Y2.000001 ", 1);
+    let alternate = program.replacen("Y2.000 ", "Y2.001 ", 1);
     assert_ne!(alternate, program);
     assert!(
         verify(&alternate, &plan, &intent, &cancel).is_err(),
@@ -4096,7 +4095,7 @@ fn distributed_fixed_dual_seam_ties_use_actual_xyz6_waste_endpoint() {
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [25.0, 21.0, 1.0]);
     let program = emit_text(&plan, &intent, &cancel).unwrap();
-    assert!(program.contains("G1 X80.000000 Y23.000000 Z1.000000"));
+    assert!(program.contains("G1 X80.000 Y23.000 Z1.000"));
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 }
 
@@ -4210,15 +4209,15 @@ fn fixed_dual_independent_replay_rejects_tool_offset_epoch_wait_debt_and_waste_m
         ("T1 S1", "T0 S1"),
         ("T1 S1", "T1"),
         (
-            "M218 T1 X25.000000 Y0.000000 Z0.000000",
-            "M218 T1 X24.000000 Y0.000000 Z0.000000",
+            "M218 T1 X25.000 Y0.000 Z0.000",
+            "M218 T1 X24.000 Y0.000 Z0.000",
         ),
-        ("M218 T0 X0.000000 Y0.000000 Z0.000000\n", ""),
+        ("M218 T0 X0.000 Y0.000 Z0.000\n", ""),
         ("G92 E0\n", ""),
-        ("M109 T1 R200.000000", "M104 T1 S200.000000"),
-        ("M109 T1 R200.000000", "M109 T0 R200.000000"),
-        ("G1 E0.60000000 F1500.000000", "G1 E0.50000000 F1500.000000"),
-        ("G1 X80.000000 Y160.000000", "G1 X80.000000 Y159.000000"),
+        ("M109 T1 R200.0", "M104 T1 S200.0"),
+        ("M109 T1 R200.0", "M109 T0 R200.0"),
+        ("G1 E0.60000 F1500.0", "G1 E0.50000 F1500.0"),
+        ("G1 X80.000 Y160.000", "G1 X80.000 Y159.000"),
         ("M104 T1 S0\n", ""),
     ] {
         let changed = program.replacen(from, to, 1);
@@ -4253,7 +4252,7 @@ fn fixed_dual_waste_bead_must_fit_bed_not_only_centerline() {
         emit_text(&plan, &intent, &cancel).is_err(),
         "a legal centerline cannot authorize a waste bead extending beyond the bed"
     );
-    let changed = original.replace("Y160.000000", "Y0.000000");
+    let changed = original.replace("Y160.000", "Y0.000");
     assert!(
         verify(&changed, &plan, &intent, &cancel).is_err(),
         "independent replay must reject the actual out-of-bed waste footprint"
@@ -4449,11 +4448,9 @@ fn per_tool_profiles_drive_actual_feed_flow_cooling_and_reject_swapped_feed() {
     assert!(report.verified);
     let line = program
         .lines()
-        .find(|line| {
-            line.starts_with("G1 X12") && line.contains(" E") && line.ends_with("F240.000000")
-        })
+        .find(|line| line.starts_with("G1 X12") && line.contains(" E") && line.ends_with("F240.0"))
         .expect("tool one model move at4 mm/s");
-    let swapped = program.replacen(line, &line.replace("F240.000000", "F360.000000"), 1);
+    let swapped = program.replacen(line, &line.replace("F240.0", "F360.0"), 1);
     assert!(verify(&swapped, &plan, &intent, &cancel).is_err());
     let JobWorkflow::FixedDualMarlin { job } = &mut intent.printer.workflow else {
         unreachable!()
@@ -4794,7 +4791,7 @@ fn prusa_lifecycle_checks_printer_and_probes_at_standby() {
             "G29 P3.13",
             "G29 A",
             "M109 R200",
-            "G0 X10.000000 Y10.000000 Z1.000000 F1200.000000",
+            "G0 X10.000 Y10.000 Z1.000 F1200.0",
         ],
         "{program}"
     );
@@ -4991,7 +4988,7 @@ fn opaque_blocks_are_checked_by_declared_effects_and_reported_not_refused() {
     // re-establishes modes and E it may have changed.
     assert!(
         program.contains(
-            "M107\nSTART_PRINT BED_TEMP=60 EXTRUDER_TEMP=200\nG21\nG90\nM83\nG92 E0\nG0 X10.000000"
+            "M107\nSTART_PRINT BED_TEMP=60 EXTRUDER_TEMP=200\nG21\nG90\nM83\nG92 E0\nG0 X10.000"
         ),
         "{program}"
     );
@@ -5107,7 +5104,7 @@ fn park_lifts_a_clearance_above_the_highest_emitted_z_not_to_the_envelope_top() 
     assert_eq!(z(park[0]), Some(top));
     assert_eq!(z(park[1]), Some(top));
     // A forged lower lift is refused.
-    let mutated = program.replace(&format!("Z{top:.6}"), &format!("Z{:.6}", top - 5.0));
+    let mutated = program.replace(&format!("Z{top:.3}"), &format!("Z{:.3}", top - 5.0));
     assert!(verify(&mutated, &plan, &intent, &cancel).is_err());
 }
 

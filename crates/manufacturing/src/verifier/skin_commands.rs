@@ -510,7 +510,7 @@ pub(super) fn verify(
                     .iter()
                     .map(|p| p[along].abs())
                     .fold(1.0, f64::max);
-                let target = program_coordinates::MIN_DEPOSITION_COMMAND_MM + 0.000_003;
+                let target = program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
                 let endpoint_error = |ends: [[f64; 3]; 2]| -> Result<f64, ManufacturingError> {
                     Ok(
                         program_coordinates::xyz6_coordinate_error_mm(ends[0][along])?
@@ -523,13 +523,14 @@ pub(super) fn verify(
                 // band. The fitted construction still proves the closed lower
                 // length enclosure, without weakening that command minimum.
                 if required_length >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-                    || fitted_length - endpoint_error(fitted)?
-                        < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                    || !program_coordinates::meets_minimum_command(
+                        fitted_length - endpoint_error(fitted)?,
+                    )
                     || raw_length > target + arithmetic_slack(scale)
                 {
-                    return Err(failed(
-                        "skin fit is unnecessary, under minimum, or exceeds minimal construction/grid reserve",
-                    ));
+                    return Err(failed(format!(
+                        "skin fit is unnecessary, under minimum, or exceeds minimal construction/grid reserve: required {required_length}, fitted {fitted_length}, raw {raw_length}, reserve {target}",
+                    )));
                 }
                 let mut construction = None;
                 for (path_index, path) in layer.paths.iter().enumerate() {

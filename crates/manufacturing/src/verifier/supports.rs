@@ -1252,7 +1252,7 @@ mod tests {
             .unwrap();
         let block = &index.layer(4)[0];
         assert!(!block.clear([[0.0, 0.0], [2.0, 0.0]], 1.0, 0.5));
-        assert!(block.clear([[0.0, -0.001], [2.0, -0.001]], 1.0, 0.5));
+        assert!(block.clear([[0.0, -0.03], [2.0, -0.03]], 1.0, 0.5));
         assert!(
             build_object_clearance_index(&plan.layers, index.retained_bytes() - 1, &mut 0, &cancel)
                 .unwrap()
@@ -1399,7 +1399,7 @@ mod tests {
     fn separated_landing_retains_subcell_endpoint_overlap() {
         let (intent, mut plan) = fixture();
         for point in &mut plan.layers[0].paths[0].points_mm {
-            point[1] = 1.999_999;
+            point[1] = 1.999;
         }
         check(&intent, &plan).unwrap();
         for point in &mut plan.layers[0].paths[0].points_mm {

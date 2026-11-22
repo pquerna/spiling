@@ -1708,7 +1708,7 @@ fn corner_completion(
         ));
     }
     let width = admitted_width_range(request)?[0];
-    let minimum_length = program_coordinates::MIN_DEPOSITION_COMMAND_MM + 0.000003;
+    let minimum_length = program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
     let command_length_lower = |parameters: [f64; 2]| -> Result<f64, ManufacturingError> {
         let points = [
             point(key(curve.at(parameters[0]))?),
@@ -2911,7 +2911,7 @@ fn emit_junction_spines(
                 if !needed {
                     continue;
                 }
-                let minimum = program_coordinates::MIN_DEPOSITION_COMMAND_MM + 0.000003;
+                let minimum = program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
                 if end - begin < minimum {
                     return Err(unsupported(
                         "required junction completion has no unowned minimum-length command interval",

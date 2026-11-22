@@ -56,7 +56,8 @@ const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-1";
 // realization input. Routing, connection and arc lowering do not.
 pub(crate) const REALIZATION_INPUT_PRODUCER: &str = "realization-upstream-1";
 
-pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
+pub const LAYER_QUANTIZATION_MM: f64 =
+    spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
 
 pub(crate) fn retained_coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
@@ -180,7 +181,7 @@ pub(crate) fn plan<'a>(
 /// slicers drop such fragments, rather than refuse the part. Walls are kept.
 fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingError> {
     use spiling_contracts::manufacturing::program_coordinates::{
-        MIN_DEPOSITION_COMMAND_MM, project_xyz6_point_mm,
+        meets_minimum_command, project_xyz6_point_mm,
     };
     for layer in layers {
         let mut failure = None;
@@ -197,7 +198,7 @@ fn drop_unprintable_rows(layers: &mut [PrintLayer]) -> Result<(), ManufacturingE
                 project_xyz6_point_mm(path.points_mm[0]),
                 project_xyz6_point_mm(path.points_mm[1]),
             ) {
-                (Ok(a), Ok(b)) => (b[0] - a[0]).hypot(b[1] - a[1]) >= MIN_DEPOSITION_COMMAND_MM,
+                (Ok(a), Ok(b)) => meets_minimum_command((b[0] - a[0]).hypot(b[1] - a[1])),
                 (Err(e), _) | (_, Err(e)) => {
                     failure.get_or_insert(e);
                     true
@@ -2738,11 +2739,14 @@ fn image_support_contact_floor(
 ) -> Result<f64, ManufacturingError> {
     let scale = event.abs().max(nominal_height_mm).max(z_gap_mm).max(1.0);
     let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-    let half_quantum = (0.5 / 1_000_000.0f64).next_up();
+    let half_quantum =
+        (0.5 * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM).next_up();
     let lower = (((event + half_quantum).next_up() + arithmetic).next_up() + z_gap_mm).next_up();
     let mut floor = project_xyz6_coordinate_mm(lower + half_quantum)?;
     if project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
-        floor = project_xyz6_coordinate_mm(floor + 1.0 / 1_000_000.0)?;
+        floor = project_xyz6_coordinate_mm(
+            floor + spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM,
+        )?;
     }
     if !floor.is_finite() || project_xyz6_bead_height_mm(floor, 0.0)?[0] < lower {
         return Err(error(
@@ -2898,7 +2902,9 @@ fn scheduled_layers(
                 .max(z_gap_mm)
                 .max(1.0);
             let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
-            let half_quantum = (0.5 / 1_000_000.0f64).next_up();
+            let half_quantum = (0.5
+                * spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM)
+                .next_up();
             let upper = (((event - half_quantum).next_down() - arithmetic).next_down() - z_gap_mm)
                 .next_down();
             if upper <= bed {
@@ -2906,7 +2912,9 @@ fn scheduled_layers(
             }
             let mut stop = project_xyz6_coordinate_mm(upper - half_quantum)?;
             if project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
-                stop = project_xyz6_coordinate_mm(stop - 1.0 / 1_000_000.0)?;
+                stop = project_xyz6_coordinate_mm(
+                    stop - spiling_contracts::manufacturing::program_coordinates::XYZ6_QUANTUM_MM,
+                )?;
             }
             if !stop.is_finite() || project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
                 return Err(error(
@@ -3198,10 +3206,11 @@ fn layer_schedule_with_bounds(
                     let height = z - previous;
                     let command_height =
                         project_xyz6_coordinate_mm(z)? - project_xyz6_coordinate_mm(previous)?;
-                    if height < minimum
-                        || height > maximum
-                        || command_height < minimum
-                        || command_height > maximum
+                    let slack = program_coordinates::LATTICE_ARITHMETIC_SLACK_MM;
+                    if height < minimum - slack
+                        || height > maximum + slack
+                        || command_height < minimum - slack
+                        || command_height > maximum + slack
                     {
                         return Ok(false);
                     }

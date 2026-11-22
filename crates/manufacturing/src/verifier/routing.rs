@@ -56,7 +56,7 @@ pub(super) struct RouteState<'a> {
 }
 
 fn ticks(value: f64) -> Result<i64, ManufacturingError> {
-    let scaled = (value * 100_000_000.0).round();
+    let scaled = (value * program_coordinates::PROGRAM_E_SCALE).round();
     if !scaled.is_finite() || scaled.abs() > (1_u64 << 52) as f64 {
         return Err(failed(
             "routed E8 coordinate exceeds exact feeder-accounting range",
@@ -472,7 +472,7 @@ impl<'a> RouteState<'a> {
                 let wanted = if retract {
                     self.expected_e - policy.retract_filament_mm
                 } else {
-                    self.debt_ticks[tool] as f64 / 100_000_000.0
+                    self.debt_ticks[tool] as f64 / program_coordinates::PROGRAM_E_SCALE
                 };
                 if (next - wanted).abs() > E_HALF_STEP + arithmetic_slack(wanted)
                     || (feed - policy.retract_speed_mm_s * 60.0).abs()
@@ -491,7 +491,8 @@ impl<'a> RouteState<'a> {
                     }
                     self.debt_ticks[tool] = debt;
                     self.retraction_count += 1;
-                    self.retracted_filament_mm += debt as f64 / 100_000_000.0;
+                    self.retracted_filament_mm +=
+                        debt as f64 / program_coordinates::PROGRAM_E_SCALE;
                     self.expected_e -= policy.retract_filament_mm;
                 } else {
                     if ticks(next)? - ticks(motion.extrusion)? != self.debt_ticks[tool] {
@@ -622,7 +623,7 @@ impl<'a> RouteState<'a> {
                 let next = decoded.fields[3].unwrap();
                 self.expected_e += volume / self.filament_area();
                 let delta = next - motion.extrusion;
-                if length < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                if !program_coordinates::meets_minimum_command(length)
                     || delta <= 0.0
                     || !volume.is_finite()
                     || volume < self.job.tools[tool].minimum_reprime_volume_mm3
@@ -705,13 +706,15 @@ impl<'a> RouteState<'a> {
                 ));
             }
             self.accounting[tool].outstanding_retraction_mm =
-                self.debt_ticks[tool] as f64 / 100_000_000.0;
+                self.debt_ticks[tool] as f64 / program_coordinates::PROGRAM_E_SCALE;
             let filament_area =
                 std::f64::consts::PI * (self.job.tools[tool].filament_diameter_mm * 0.5).powi(2);
             let account = &mut self.accounting[tool];
-            account.model_filament_length_mm = self.model_ticks[tool] as f64 / 100_000_000.0;
+            account.model_filament_length_mm =
+                self.model_ticks[tool] as f64 / program_coordinates::PROGRAM_E_SCALE;
             account.model_volume_mm3 = account.model_filament_length_mm * filament_area;
-            account.waste_filament_length_mm = self.waste_ticks[tool] as f64 / 100_000_000.0;
+            account.waste_filament_length_mm =
+                self.waste_ticks[tool] as f64 / program_coordinates::PROGRAM_E_SCALE;
             account.waste_volume_mm3 = account.waste_filament_length_mm * filament_area;
         }
         let report = FixedDualVerification {
@@ -728,19 +731,19 @@ mod tests {
     use super::accumulate_dose;
 
     #[test]
-    fn actual_e8_dose_is_independent_of_partition_order_and_epoch() {
+    fn actual_extrusion_dose_is_independent_of_partition_order_and_epoch() {
         let mut whole = 0;
-        accumulate_dose(&mut whole, 100.0, 100.30000003).unwrap();
+        accumulate_dose(&mut whole, 100.0, 100.30003).unwrap();
         let mut partitioned = 0;
-        accumulate_dose(&mut partitioned, 1000.0, 1000.20000003).unwrap();
+        accumulate_dose(&mut partitioned, 1000.0, 1000.20003).unwrap();
         accumulate_dose(&mut partitioned, 0.0, 0.1).unwrap();
         let mut reversed = 0;
         accumulate_dose(&mut reversed, 0.0, 0.1).unwrap();
-        accumulate_dose(&mut reversed, 1000.0, 1000.20000003).unwrap();
-        assert_eq!(whole, 30_000_003);
+        accumulate_dose(&mut reversed, 1000.0, 1000.20003).unwrap();
+        assert_eq!(whole, 30_003);
         assert_eq!(partitioned, whole);
         assert_eq!(reversed, whole);
-        accumulate_dose(&mut partitioned, 0.0, 0.00000001).unwrap();
+        accumulate_dose(&mut partitioned, 0.0, 0.00001).unwrap();
         assert_eq!(partitioned, whole + 1);
 
         let previous = partitioned;

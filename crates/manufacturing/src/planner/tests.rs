@@ -14,7 +14,7 @@ fn image_contact_floor_encloses_post_event_physical_gap_without_moving_event() {
         let lower = project_xyz6_bead_height_mm(floor, 0.0).unwrap()[0];
         let upper = project_xyz6_bead_height_mm(event, 0.0).unwrap()[1];
         assert!(program_coordinates::enclosed_vertical_gap_mm(lower, upper).unwrap() >= 0.2);
-        assert!(floor > event + 0.2 && floor < event + 0.200003);
+        assert!(floor > event + 0.2 && floor < event + 0.203);
         let schedule = layer_schedule(event, event + 0.5, 0.6, &[event, floor]).unwrap();
         assert_eq!(schedule[0].lower_z, event);
         assert_eq!(schedule[0].z, floor);

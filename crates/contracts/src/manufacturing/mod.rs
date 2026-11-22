@@ -1083,8 +1083,8 @@ impl DepositionLimits {
             && height <= width
             && width >= self.min_bead_width_mm
             && width <= self.max_bead_width_mm
-            && height >= self.min_bead_height_mm
-            && height <= self.max_bead_height_mm
+            && height >= self.min_bead_height_mm - program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
+            && height <= self.max_bead_height_mm + program_coordinates::LATTICE_ARITHMETIC_SLACK_MM
     }
 }
 
@@ -1104,12 +1104,13 @@ impl MotionResolution {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         // Finer than the program's XYZ6 lattice is not realizable by any
         // emitted command; coarser than MAX_MOTION_RESOLUTION_MM is not FDM.
-        if [self.xy_mm, self.z_mm]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.000_001 || *v > MAX_MOTION_RESOLUTION_MM)
-        {
+        if [self.xy_mm, self.z_mm].iter().any(|v| {
+            !v.is_finite()
+                || *v < program_coordinates::XYZ6_QUANTUM_MM
+                || *v > MAX_MOTION_RESOLUTION_MM
+        }) {
             return Err(invalid(
-                "motion resolution must lie between the 0.000001 mm command lattice and 0.05 mm",
+                "motion resolution must lie between the 0.001 mm command lattice and 0.05 mm",
             ));
         }
         Ok(())
@@ -1766,8 +1767,12 @@ impl ManufacturingIntent {
                         process.policy.first_layer_flow_factor * process.policy.bridge_flow_factor,
                     ),
                 ] {
-                    let feed =
-                        (process.speed_mm_s * speed_factor * 60_000_000.0).round() / 1_000_000.0;
+                    let feed = (process.speed_mm_s
+                        * speed_factor
+                        * 60.0
+                        * program_coordinates::PROGRAM_F_SCALE)
+                        .round()
+                        / program_coordinates::PROGRAM_F_SCALE;
                     let flow = area * flow_factor * feed / 60.0;
                     if !feed.is_finite()
                         || feed < 0.000001
@@ -1806,7 +1811,9 @@ impl ManufacturingIntent {
             || r.travel_speed_mm_s > p.max_travel_feed_mm_s
             || !(r.travel_speed_mm_s * 60.0).is_finite()
             || r.travel_speed_mm_s * 60.0 < 0.000001
-            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0
+            || (r.travel_speed_mm_s * 60.0 * program_coordinates::PROGRAM_F_SCALE).round()
+                / program_coordinates::PROGRAM_F_SCALE
+                / 60.0
                 > p.max_travel_feed_mm_s
         {
             return Err(invalid(
@@ -4630,8 +4637,9 @@ impl NormalizedPrintPlan {
                     .max(1.0);
                 // Two independent XYZ6 half-steps (object and prime), plus
                 // the replay's scale-aware arithmetic allowance for each.
-                let padding =
-                    intent.recipe.bead_width_mm * 0.5 + 0.000001 + 64.0 * f64::EPSILON * scale;
+                let padding = intent.recipe.bead_width_mm * 0.5
+                    + program_coordinates::XYZ6_QUANTUM_MM
+                    + 64.0 * f64::EPSILON * scale;
                 *minimum -= padding;
                 *maximum += padding;
                 if !minimum.is_finite() || !maximum.is_finite() {

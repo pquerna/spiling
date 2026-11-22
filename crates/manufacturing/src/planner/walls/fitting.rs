@@ -395,10 +395,12 @@ fn fit_corner(
     };
     let joins = [point(first), point(second)];
     let positions = [a, joins[0], joins[1], c];
-    if positions
-        .windows(2)
-        .any(|p| norm(sub(p[1], p[0])) < program_coordinates::MIN_DEPOSITION_COMMAND_MM)
-    {
+    if positions.windows(2).any(|p| {
+        !program_coordinates::meets_minimum_command(emitted_length(
+            [p[0][0], p[0][1], 0.0],
+            [p[1][0], p[1][1], 0.0],
+        ))
+    }) {
         return Ok(None);
     }
     // Interior projections propose ordered fractional cuts, not membership.
@@ -726,8 +728,24 @@ fn remember(
     Ok(())
 }
 
+/// Length of the chord as emitted: both ends on the program lattice.
 fn chord_length(run: Run) -> f64 {
-    norm(sub(xy(run.b), xy(run.a)))
+    emitted_length(run.a, run.b)
+}
+
+fn emitted_length(a: [f64; 3], b: [f64; 3]) -> f64 {
+    match (
+        program_coordinates::project_xyz6_point_mm(a),
+        program_coordinates::project_xyz6_point_mm(b),
+    ) {
+        (Ok(a), Ok(b)) => norm(sub(xy(b), xy(a))),
+        _ => norm(sub(xy(b), xy(a))),
+    }
+}
+
+/// Whether a chord meets the minimum command once emitted.
+fn long_enough(run: Run) -> bool {
+    program_coordinates::meets_minimum_command(chord_length(run))
 }
 fn gradient_admitted(a: Run, b: Run) -> bool {
     (a.mean - b.mean).abs()
@@ -878,9 +896,8 @@ fn repartition_suffix(
                 };
                 boolean::charge(work, permission_work)?;
                 let Some(candidate) =
-                    fit_candidate(candidate, permissions, original, work, cancel)?.filter(|run| {
-                        chord_length(*run) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
-                    })
+                    fit_candidate(candidate, permissions, original, work, cancel)?
+                        .filter(|run| long_enough(*run))
                 else {
                     admitted = false;
                     break;
@@ -1050,7 +1067,7 @@ fn maximize(
             .copied()
             .or_else(|| closed.then(|| first.unwrap_or(runs[0])));
         if let Some(run) = candidate.filter(|run| {
-            chord_length(*run) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+            long_enough(*run)
                 && left.is_none_or(|left| gradient_admitted(left, *run))
                 && right.is_none_or(|right| gradient_admitted(*run, right))
         }) {
@@ -1217,7 +1234,9 @@ pub(super) fn coalesce(
                 .map(|merged| (read, cursor, merged)),
             None => None,
         };
-        while norm(sub(xy(run.b), xy(run.a))) < TARGET_LENGTH_MM && read < count {
+        while (norm(sub(xy(run.b), xy(run.a))) < TARGET_LENGTH_MM || !long_enough(run))
+            && read < count
+        {
             check_cancel(cancel)?;
             boolean::charge(work, 1)?;
             let a = path.points_mm[read];
@@ -1255,7 +1274,7 @@ pub(super) fn coalesce(
                 checkpoint = Some((read, cursor, merged));
             }
         }
-        if norm(sub(xy(run.b), xy(run.a))) < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+        if !long_enough(run) {
             let Some(prior) = previous else {
                 return Err(unsupported(&format!(
                     "first wall command cannot fit minimum length and boundary enclosure: {:?}->{:?}, width={}..{}, error={}, owner={:?}, source_edges={}, consumed={}, next={:?}",
@@ -1361,7 +1380,7 @@ pub(super) fn coalesce(
                     None
                 };
                 if let Some(merged) = wrapped.filter(|merged| {
-                    chord_length(*merged) >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                    long_enough(*merged)
                         && gradient_admitted(prior, *merged)
                         && legal
                             .get(1)
@@ -1396,9 +1415,7 @@ pub(super) fn coalesce(
             // piece beyond a sharp turn and then waiving the command policy.
             read = resume;
             cursor = resume_cursor;
-            if norm(sub(xy(merged.b), xy(merged.a)))
-                < program_coordinates::MIN_DEPOSITION_COMMAND_MM
-            {
+            if !long_enough(merged) {
                 return Err(unsupported(
                     "wall stroke is shorter than the declared minimum deposition command",
                 ));

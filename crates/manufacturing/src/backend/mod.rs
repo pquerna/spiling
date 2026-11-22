@@ -5,7 +5,8 @@
 use crate::{check_cancel, error};
 use spiling_chunks::{ChunkSource, ChunkWriter};
 use spiling_contracts::manufacturing::program_coordinates::{
-    self, project_xyz6_coordinate_mm, project_xyz6_point_mm,
+    self, PROGRAM_E_SCALE, PROGRAM_E_TICKS, PROGRAM_F_SCALE, project_xyz6_coordinate_mm,
+    project_xyz6_point_mm,
 };
 use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
@@ -134,7 +135,7 @@ fn emit_body(
     let mut process_events = 0u32;
     let mut deposits = 0u32;
     if let Some(job) = routed {
-        program.write_str("M149 C\nM200 D0\nM220 S100\nM221 T0 S100\nM221 T1 S100\nM107\nM218 T0 X0.000000 Y0.000000 Z0.000000\n").map_err(limit)?;
+        program.write_str("M149 C\nM200 D0\nM220 S100\nM221 T0 S100\nM221 T1 S100\nM107\nM218 T0 X0.000 Y0.000 Z0.000\n").map_err(limit)?;
         let offset = job.tools[1].offset_xy_mm;
         if offset
             .iter()
@@ -147,7 +148,7 @@ fn emit_body(
                 "hotend offsets must be exactly representable in the frozen XYZ6 dialect",
             ));
         }
-        writeln!(program, "M218 T1 X{:.6} Y{:.6} Z0.000000\nT0 S1\nG28\nM420 S0\nG92 E0\nM190 R{:.6}\nM104 T0 S{:.6}\nM104 T1 S{:.6}",
+        writeln!(program, "M218 T1 X{:.3} Y{:.3} Z0.000\nT0 S1\nG28\nM420 S0\nG92 E0\nM190 R{:.1}\nM104 T0 S{:.1}\nM104 T1 S{:.1}",
             offset[0], offset[1], job.bed_temperature_c, job.tools[0].standby_temperature_c, job.tools[1].standby_temperature_c).map_err(limit)?;
         let home = project_xyz6_point_mm(job.home_position_mm)?;
         crate::routing::check_motion(home, home, 0, built_top, intent, job, &reservations)?;
@@ -184,12 +185,12 @@ fn emit_body(
                     }
                     writeln!(
                         program,
-                        "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+                        "G0 X{:.3} Y{:.3} Z{:.3} F{:.1}",
                         start[0], start[1], start[2], travel_feed
                     )
                     .map_err(limit)?;
                     extrusion = job.prime_filament_length_mm;
-                    emitted_extrusion = (extrusion * 100_000_000.0).round() / 100_000_000.0;
+                    emitted_extrusion = (extrusion * PROGRAM_E_SCALE).round() / PROGRAM_E_SCALE;
                     if emitted_extrusion <= 0.0 {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -198,7 +199,7 @@ fn emit_body(
                     }
                     writeln!(
                         program,
-                        "G1 X{:.6} Y{:.6} Z{:.6} E{} F{:.6}",
+                        "G1 X{:.3} Y{:.3} Z{:.3} E{} F{:.1}",
                         end[0],
                         end[1],
                         end[2],
@@ -228,10 +229,10 @@ fn emit_body(
                 }
                 Event::Barrier => program.write_str("M400\n").map_err(limit)?,
                 Event::HotendTarget(tool, temperature) => {
-                    writeln!(program, "M104 T{tool} S{temperature:.6}").map_err(limit)?
+                    writeln!(program, "M104 T{tool} S{temperature:.1}").map_err(limit)?
                 }
                 Event::HotendWait(tool, temperature) => {
-                    writeln!(program, "M109 T{tool} R{temperature:.6}").map_err(limit)?
+                    writeln!(program, "M109 T{tool} R{temperature:.1}").map_err(limit)?
                 }
                 // Single-extruder later-layer targets, integral Celsius.
                 Event::NozzleTarget(temperature) => {
@@ -275,8 +276,8 @@ fn emit_body(
                 Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
                 Event::Extrusion(e, speed) => {
                     count_event(&mut process_events)?;
-                    let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
-                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    let rounded = (e * PROGRAM_E_SCALE).round() / PROGRAM_E_SCALE;
+                    let feed = (speed * 60.0 * PROGRAM_F_SCALE).round() / PROGRAM_F_SCALE;
                     if !feed.is_finite()
                         || feed <= 0.0
                         || feed / 60.0 > intent.printer.max_travel_feed_mm_s
@@ -295,7 +296,7 @@ fn emit_body(
                     let e = if routed.is_some() { rounded } else { e };
                     writeln!(
                         program,
-                        "G1 E{} F{feed:.6}",
+                        "G1 E{} F{feed:.1}",
                         e_word(e, rounded, emitted_extrusion, relative)
                     )
                     .map_err(limit)?;
@@ -318,7 +319,7 @@ fn emit_body(
                     writable_position([hi[0], hi[1], to[2]], intent)?;
                     count_event(&mut deposits)?;
                     built_top = built_top.max(to[2]);
-                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    let feed = (speed * 60.0 * PROGRAM_F_SCALE).round() / PROGRAM_F_SCALE;
                     if !feed.is_finite()
                         || feed <= 0.0
                         || feed / 60.0 > intent.printer.max_print_feed_mm_s
@@ -328,7 +329,7 @@ fn emit_body(
                             "actual emitted feed exceeds printer limit or precision",
                         ));
                     }
-                    let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
+                    let rounded = (e * PROGRAM_E_SCALE).round() / PROGRAM_E_SCALE;
                     let delta = rounded - emitted_extrusion;
                     if !rounded.is_finite()
                         || arc.length_mm < program_coordinates::MIN_DEPOSITION_COMMAND_MM
@@ -341,9 +342,8 @@ fn emit_body(
                     }
                     let flow_limit = intent.process_for_tool(None)?.max_volumetric_flow_mm3_s;
                     let flow = delta * filament_area * feed / 60.0 / arc.length_mm;
-                    let rounding_slack = (flow_limit * 0.000002
-                        + 0.00000001 * filament_area * speed)
-                        / arc.length_mm;
+                    let rounding_slack =
+                        emitted_flow_slack(flow_limit, filament_area, speed, feed, arc.length_mm);
                     if !flow.is_finite() || flow > flow_limit + rounding_slack {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -352,7 +352,7 @@ fn emit_body(
                     }
                     writeln!(
                         program,
-                        "{} X{:.6} Y{:.6} Z{:.6} I{:.6} J{:.6} E{} F{feed:.6}",
+                        "{} X{:.3} Y{:.3} Z{:.3} I{:.3} J{:.3} E{} F{feed:.1}",
                         if clockwise { "G2" } else { "G3" },
                         to[0],
                         to[1],
@@ -388,7 +388,7 @@ fn emit_body(
                             &reservations,
                         )?;
                     }
-                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    let feed = (speed * 60.0 * PROGRAM_F_SCALE).round() / PROGRAM_F_SCALE;
                     let feed_limit = if matches!(event, Event::Travel(..)) {
                         intent.printer.max_travel_feed_mm_s
                     } else {
@@ -410,7 +410,7 @@ fn emit_body(
                         let length = (to[0] - from[0])
                             .hypot(to[1] - from[1])
                             .hypot(to[2] - from[2]);
-                        let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
+                        let rounded = (e * PROGRAM_E_SCALE).round() / PROGRAM_E_SCALE;
                         let delta = rounded - emitted_extrusion;
                         if !rounded.is_finite() || length <= 0.0 || delta <= 0.0 {
                             return Err(error(
@@ -439,7 +439,7 @@ fn emit_body(
                             .max_volumetric_flow_mm3_s;
                         let flow = delta * filament_area * feed / 60.0 / length;
                         let rounding_slack =
-                            (flow_limit * 0.000002 + 0.00000001 * filament_area * speed) / length;
+                            emitted_flow_slack(flow_limit, filament_area, speed, feed, length);
                         if !flow.is_finite() || flow > flow_limit + rounding_slack {
                             return Err(error(
                                 ManufacturingErrorCode::InvalidSpecification,
@@ -449,7 +449,7 @@ fn emit_body(
                         let e = if routed.is_some() { rounded } else { e };
                         writeln!(
                             program,
-                            "G1 X{:.6} Y{:.6} Z{:.6} E{} F{feed:.6}",
+                            "G1 X{:.3} Y{:.3} Z{:.3} E{} F{feed:.1}",
                             to[0],
                             to[1],
                             to[2],
@@ -460,7 +460,7 @@ fn emit_body(
                     } else {
                         writeln!(
                             program,
-                            "G0 X{:.6} Y{:.6} Z{:.6} F{feed:.6}",
+                            "G0 X{:.3} Y{:.3} Z{:.3} F{feed:.1}",
                             to[0], to[1], to[2]
                         )
                         .map_err(limit)?;
@@ -510,7 +510,7 @@ fn emit_body(
                     for target in [lift, park] {
                         writeln!(
                             program,
-                            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+                            "G0 X{:.3} Y{:.3} Z{:.3} F{:.1}",
                             target[0], target[1], target[2], travel_feed
                         )
                         .map_err(limit)?;
@@ -524,7 +524,7 @@ fn emit_body(
         let last = position.unwrap();
         let tool = &job.tools[usize::from(active_tool)];
         let retract = last_extrusion - tool.retract_filament_mm;
-        let rounded = (retract * 100_000_000.0).round() / 100_000_000.0;
+        let rounded = (retract * PROGRAM_E_SCALE).round() / PROGRAM_E_SCALE;
         if !rounded.is_finite() || rounded >= emitted_extrusion {
             return Err(error(
                 ManufacturingErrorCode::InvalidSpecification,
@@ -533,7 +533,8 @@ fn emit_body(
         }
         let park = project_xyz6_point_mm(job.park_position_mm)?;
         let lift = [last[0], last[1], park[2]];
-        let retract_feed = (tool.retract_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
+        let retract_feed =
+            (tool.retract_speed_mm_s * 60.0 * PROGRAM_F_SCALE).round() / PROGRAM_F_SCALE;
         if !retract_feed.is_finite()
             || retract_feed <= 0.0
             || retract_feed / 60.0 > intent.printer.max_travel_feed_mm_s
@@ -565,7 +566,7 @@ fn emit_body(
             count_event(&mut travels)?;
         }
         count_event(&mut process_events)?;
-        writeln!(program, "M400\nG1 E{rounded:.8} F{:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nG0 X{:.6} Y{:.6} Z{:.6} F{travel_feed:.6}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
+        writeln!(program, "M400\nG1 E{rounded:.5} F{:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nG0 X{:.3} Y{:.3} Z{:.3} F{travel_feed:.1}\nM400\nM104 T0 S0\nM104 T1 S0\nM140 S0\nM107\nM84",
             retract_feed, lift[0], lift[1], lift[2], park[0], park[1], park[2]).map_err(limit)?;
     }
     if let Some(survey) = &bambu {
@@ -596,7 +597,8 @@ fn e_word(target: f64, rounded: f64, emitted: f64, relative: bool) -> ExtrusionW
     if !relative {
         return ExtrusionWord::Absolute(target);
     }
-    let units = (rounded * 100_000_000.0).round() as i64 - (emitted * 100_000_000.0).round() as i64;
+    let units =
+        (rounded * PROGRAM_E_SCALE).round() as i64 - (emitted * PROGRAM_E_SCALE).round() as i64;
     ExtrusionWord::Relative(units)
 }
 
@@ -608,20 +610,35 @@ enum ExtrusionWord {
 impl fmt::Display for ExtrusionWord {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Absolute(target) => write!(out, "{target:.8}"),
+            Self::Absolute(target) => write!(out, "{target:.5}"),
             Self::Relative(units) => {
                 let sign = if units < 0 { "-" } else { "" };
                 let magnitude = units.unsigned_abs();
                 write!(
                     out,
-                    "{sign}{}.{:08}",
-                    magnitude / 100_000_000,
-                    magnitude % 100_000_000
+                    "{sign}{}.{:05}",
+                    magnitude / PROGRAM_E_TICKS,
+                    magnitude % PROGRAM_E_TICKS
                 )
             }
         }
     }
 }
+/// Flow a command may exceed its limit by through the emitted words' own
+/// rounding alone: half an F step relative to the feed, two coordinate steps
+/// of length, and one E step of filament.
+fn emitted_flow_slack(
+    flow_limit: f64,
+    filament_area: f64,
+    speed: f64,
+    feed: f64,
+    length: f64,
+) -> f64 {
+    let relative = 0.5 / PROGRAM_F_SCALE / feed.max(f64::MIN_POSITIVE)
+        + 2.0 * std::f64::consts::SQRT_2 * program_coordinates::XYZ6_QUANTUM_MM / length;
+    flow_limit * relative + filament_area * speed / PROGRAM_E_SCALE / length
+}
+
 fn writable_position(
     point: [f64; 3],
     intent: &ManufacturingIntent,

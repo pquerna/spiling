@@ -114,12 +114,12 @@ fn evaluate_with_budget(
 }
 
 fn repeated_emitted_chord() -> [DepositionPath; 2] {
-    [0.0000001, 0.0000002].map(|drift| {
+    [0.0001, 0.0002].map(|drift| {
         let mut bead = path(1.5);
-        bead.points_mm = vec![[1.500001 + drift, 3.0, 0.2], [4.000001 + drift, 3.0, 0.2]];
+        bead.points_mm = vec![[1.501 + drift, 3.0, 0.2], [4.001 + drift, 3.0, 0.2]];
         assert_eq!(
             emitted_xy_segment(&bead.points_mm).unwrap().0,
-            [[1.500001, 3.0], [4.000001, 3.0]],
+            [[1.501, 3.0], [4.001, 3.0]],
         );
         bead
     })
@@ -533,7 +533,7 @@ fn escaped_object_screens_keep_the_widest_last_edge_at_threshold_in_both_z_direc
     let mut outcomes = Vec::new();
     for support_layer in 0..schedule.len() {
         for ordinate in [
-            threshold - 0.01,
+            threshold - 0.03,
             threshold.next_down(),
             threshold,
             threshold.next_up(),
@@ -891,7 +891,8 @@ fn withdrawal_checks_retained_arc_beyond_clear_planner_chord() {
     };
     let mut object = path(0.95);
     object.kind = DepositionKind::Perimeter;
-    object.points_mm = vec![[0.95, 1.104, 0.2], [1.05, 1.104, 0.2]];
+    // The chord clears by 10 um; the arc through (1.0, 1.21) dips past it.
+    object.points_mm = vec![[0.95, 1.11, 0.2], [1.05, 1.11, 0.2]];
     sweep
         .certify_realized(&[layer(vec![object.clone()])], &policy, &mut work, &cancel)
         .unwrap();
@@ -899,7 +900,7 @@ fn withdrawal_checks_retained_arc_beyond_clear_planner_chord() {
     object.arcs.push(spiling_contracts::manufacturing::ArcRun {
         first: 0,
         last: 1,
-        center_mm: [1.0, 1.404],
+        center_mm: [1.0, 1.21],
         clockwise: false,
     });
     let failure = sweep

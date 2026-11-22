@@ -215,7 +215,7 @@ pub(super) fn plan(
     chains.sort_by_key(|piece| piece.lane);
 
     // A margin over the minimum survives projection onto the program lattice.
-    let minimum = program_coordinates::MIN_DEPOSITION_COMMAND_MM + 0.000_01;
+    let minimum = program_coordinates::MIN_RAW_DEPOSITION_COMMAND_MM;
     let narrowest = admitted_width_range(&request)?[0];
     let mut paths = Vec::new();
     let mut correspondence = Vec::new();

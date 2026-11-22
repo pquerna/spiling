@@ -756,7 +756,7 @@ fn connect_layer(
         connector.extend(between.into_iter().map(|(_, q)| q));
         connector.push(pb);
         connector.dedup_by(|q, p| {
-            distance2([q[0], q[1]], [p[0], p[1]]) < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+            !program_coordinates::meets_minimum_command(emitted2([q[0], q[1]], [p[0], p[1]]))
         });
         // Keep the exact far end; ends closer than one command never join.
         *connector.last_mut().unwrap() = pb;
@@ -776,8 +776,10 @@ fn connect_layer(
             .sum();
         let mut ok = length <= MAX_CONNECTOR_LENGTH_MM
             && connector.windows(2).all(|e| {
-                distance2([e[0][0], e[0][1]], [e[1][0], e[1][1]])
-                    >= program_coordinates::MIN_DEPOSITION_COMMAND_MM
+                program_coordinates::meets_minimum_command(emitted2(
+                    [e[0][0], e[0][1]],
+                    [e[1][0], e[1][1]],
+                ))
             });
         for e in connector.windows(2) {
             if !ok {
@@ -879,4 +881,13 @@ fn connect_layer(
     kept.extend(chains);
     layer.paths = kept;
     Ok(true)
+}
+
+/// XY length of a connector edge once both ends are on the program lattice.
+fn emitted2(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let project = |v: f64| program_coordinates::project_xyz6_coordinate_mm(v).unwrap_or(v);
+    distance2(
+        [project(a[0]), project(a[1])],
+        [project(b[0]), project(b[1])],
+    )
 }

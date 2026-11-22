@@ -642,7 +642,11 @@ pub(super) fn combine(
                     } else {
                         1.0
                     };
-                let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                let feed = (speed
+                    * 60.0
+                    * spiling_contracts::manufacturing::program_coordinates::PROGRAM_F_SCALE)
+                    .round()
+                    / spiling_contracts::manufacturing::program_coordinates::PROGRAM_F_SCALE;
                 area * flow * feed / 60.0 > process.max_volumetric_flow_mm3_s
             }) {
                 record(

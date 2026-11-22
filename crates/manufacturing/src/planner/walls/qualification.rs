@@ -1422,7 +1422,15 @@ fn qualify_polygon_overlaps(
             .owned_bytes
             .checked_add(prior_bytes)
             .ok_or_else(|| resource("wall prior-occupancy ownership overflow"))?;
-        let mut tube = occupancy(std::slice::from_ref(path), 0.0, &live, work, cancel)?;
+        // Rounding may move a bead up to the lateral command budget, so
+        // lanes planned tangent are compared one budget inside nominal.
+        let mut tube = occupancy(
+            std::slice::from_ref(path),
+            -program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM,
+            &live,
+            work,
+            cancel,
+        )?;
         retain_region(&mut live, &mut tube)?;
         {
             let mut raw_overlap =

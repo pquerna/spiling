@@ -452,7 +452,8 @@ pub fn validate_replay_reader(
                 || !lower.is_finite()
                 || !upper.is_finite()
                 || lower >= upper
-                || (upper - position[2]).abs() > 0.000_000_500_001
+                || (upper - position[2]).abs()
+                    > 0.5 * super::program_coordinates::XYZ6_QUANTUM_MM + 0.000_000_000_001
                 || (owner < u32::MAX - 2 && owner as usize >= MAX_PROCESS_REGIONS)
             {
                 return Err(corrupt("invalid nominal deposition association"));
