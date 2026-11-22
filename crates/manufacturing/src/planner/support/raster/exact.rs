@@ -308,6 +308,88 @@ fn corner(
     (field.segment_clearance(placed, end, work) >= exact.safe).then_some(end)
 }
 
+/// Recover the rounding loss on straight interface faces not bounded by a nearby
+/// exact exclusion. The shifted run and both transitions must fit entirely
+/// inside the already grounded, clearance-certified cells.
+pub(super) fn refine_kept_faces(
+    raster: &Raster<'_>,
+    kept: &Bits,
+    interface: &Bits,
+    contour: &mut MultiPolygon<f64>,
+    field: &Field,
+    exact: &Exact,
+) -> Result<(), ManufacturingError> {
+    let shift = ((exact.safe / exact.cell).ceil() * exact.cell - exact.level)
+        .min(exact.cell * 0.5 - PLACEMENT_EPS_MM);
+    if shift <= PLACEMENT_EPS_MM {
+        return Ok(());
+    }
+    let mut work = 0usize;
+    let mut refine = |ring: &mut geo::LineString<f64>| -> Result<(), ManufacturingError> {
+        let mut points = Vec::new();
+        for (index, edge) in ring.0.windows(2).enumerate() {
+            check_cancel(raster.cancel)?;
+            work += 1;
+            let start: [f64; 2] = edge[0].into();
+            let end: [f64; 2] = edge[1].into();
+            let dx = end[0] - start[0];
+            let dy = end[1] - start[1];
+            let length = dx.abs() + dy.abs();
+            let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
+            let shifted = if (dx == 0.0 || dy == 0.0)
+                && length > 2.0 * exact.safe
+                && raster.holds_all(interface, midpoint)
+                && field.segment_clearance(start, end, &mut work) >= exact.level + exact.cell
+            {
+                let along = [dx / length * exact.cell, dy / length * exact.cell];
+                let outward = [dy / length * shift, -dx / length * shift];
+                let lead = [
+                    start[0] + along[0] + outward[0],
+                    start[1] + along[1] + outward[1],
+                ];
+                let trail = [
+                    end[0] - along[0] + outward[0],
+                    end[1] - along[1] + outward[1],
+                ];
+                let mut fits = true;
+                for (from, to) in [(start, lead), (lead, trail), (trail, end)] {
+                    let (escape, inspected) = raster.frame.escaped(kept, from, to, exact.safe)?;
+                    work += inspected;
+                    if escape.is_some() {
+                        fits = false;
+                        break;
+                    }
+                }
+                fits.then_some([Coord::from(lead), Coord::from(trail)])
+            } else {
+                None
+            };
+            if points.is_empty() {
+                let Some(shifted) = shifted else { continue };
+                raster.reserve(&mut points, ring.0.len() + shifted.len())?;
+                points.extend_from_slice(&ring.0[..=index]);
+                points.extend(shifted);
+            } else {
+                raster.reserve(&mut points, 1 + shifted.map_or(0, |pair| pair.len()))?;
+                points.push(edge[0]);
+                points.extend(shifted.into_iter().flatten());
+            }
+        }
+        if !points.is_empty() {
+            raster.reserve(&mut points, 1)?;
+            points.push(*ring.0.last().expect("a shifted ring has edges"));
+            ring.0 = points;
+        }
+        Ok(())
+    };
+    for polygon in &mut contour.0 {
+        polygon.try_exterior_mut(&mut refine)?;
+        polygon.try_interiors_mut(|rings| rings.iter_mut().try_for_each(&mut refine))?;
+    }
+    raster.charge(work);
+    Ok(())
+}
+
 /// The contour with every exclusion-bounded wall moved onto the exact
 /// placement level, or `None` when nothing moves. Changed rings are
 /// simplified within [`SIMPLIFY_MM`] by chords that keep the exact

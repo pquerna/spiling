@@ -918,16 +918,49 @@ fn walls_follow_the_exact_offset_of_a_shallow_diagonal() {
 }
 
 #[test]
-fn an_unbounded_support_edge_keeps_its_grid_wall() {
+fn unbounded_interface_faces_recover_rounding_without_leaving_kept_cells() {
     let cancel = AtomicBool::new(false);
     let raster = raster(&cancel);
-    // Far from the square: no wall moves, so the layer is unchanged.
     let obstacles = [([30.0, 30.0], [30.0, 30.0], 0.5)];
+    let width = crate::planner::tests::recipe(1.0).bead_width_mm;
+    let safe = width * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM;
     for interface in [true, false] {
         for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
-            let (grid, ..) = stage_around(&raster, &obstacles, axis, false, interface);
-            let (placed, ..) = stage_around(&raster, &obstacles, axis, true, interface);
-            assert_eq!(grid, placed);
+            let (grid, grid_walls, _) = stage_around(&raster, &obstacles, axis, false, interface);
+            let (placed, walls, kept) = stage_around(&raster, &obstacles, axis, true, interface);
+            if !interface {
+                assert_eq!(grid, placed);
+                continue;
+            }
+            let min_x = |paths: &[DepositionPath]| {
+                paths
+                    .iter()
+                    .flat_map(|path| &path.points_mm)
+                    .map(|p| p[0])
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let shift = min_x(&grid[..grid_walls.paths]) - min_x(&placed[..walls.paths]);
+            assert!(
+                shift > 0.01 && shift <= SUPPORT_CELL_MM / 2.0,
+                "shift {shift}"
+            );
+            for path in &placed[..walls.paths] {
+                for edge in path.points_mm.windows(2) {
+                    assert!(
+                        raster
+                            .frame
+                            .escaped(
+                                &kept,
+                                [edge[0][0], edge[0][1]],
+                                [edge[1][0], edge[1][1]],
+                                safe,
+                            )
+                            .unwrap()
+                            .0
+                            .is_none()
+                    );
+                }
+            }
         }
     }
 }

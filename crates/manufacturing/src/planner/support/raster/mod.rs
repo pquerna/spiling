@@ -90,7 +90,9 @@ pub(super) fn paths(
         raster.frame.cell(),
     );
     let field = match exclusions {
-        Some(feed) if !contour.0.is_empty() => exact_field(raster, &mut contour, feed, &exact)?,
+        Some(feed) if !contour.0.is_empty() => {
+            exact_field(raster, support, interface, &mut contour, feed, &exact)?
+        }
         _ => None,
     };
     let retained = retained
@@ -289,6 +291,8 @@ pub(super) type Exclusions<'a> =
 /// cannot use a field.
 fn exact_field(
     raster: &Raster<'_>,
+    kept: &Bits,
+    interface: &Bits,
     contour: &mut MultiPolygon<f64>,
     feed: &Exclusions<'_>,
     exact: &exact::Exact,
@@ -303,6 +307,9 @@ fn exact_field(
     let field = builder.finish()?;
     if let Some(placed) = exact::displace(raster, &rings, &field, exact)? {
         *contour = placed;
+    }
+    if !interface.is_empty() {
+        exact::refine_kept_faces(raster, kept, interface, contour, &field, exact)?;
     }
     Ok(Some(field))
 }
