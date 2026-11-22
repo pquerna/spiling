@@ -2156,7 +2156,7 @@ fn compile(
         cancel,
     )?;
     let encoded_at = std::time::Instant::now();
-    let asset = ManufacturingAsset::new(record, bundle, program)
+    let asset = ManufacturingAsset::sealed(record, bundle, program)
         .map_err(super::manufacturing::project_error)
         .map_err(JobError::from)?;
     if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {

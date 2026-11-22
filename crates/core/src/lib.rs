@@ -255,6 +255,23 @@ impl ManufacturingAsset {
         asset.validate()?;
         Ok(asset)
     }
+    /// An asset sealed by the compiler in this process. Its record was built
+    /// from the same in-memory bundle document it encodes, so this checks
+    /// sizes, the record, and both content digests, but doesn't parse the
+    /// bundle back. Reopening a stored asset goes through [`Self::new`].
+    pub fn sealed(
+        record: ManufacturingArtifactRecord,
+        bundle: spiling_chunks::ChunkSource,
+        program: spiling_chunks::ChunkSource,
+    ) -> Result<Self, ProjectError> {
+        let asset = Self {
+            record,
+            bundle,
+            program,
+        };
+        asset.validate_identity()?;
+        Ok(asset)
+    }
     /// Frame bundle bytes; for callers holding a whole encoded bundle.
     pub fn from_bytes(
         record: ManufacturingArtifactRecord,
@@ -286,6 +303,21 @@ impl ManufacturingAsset {
         self.record == other.record && self.bundle == other.bundle && self.program == other.program
     }
     pub(crate) fn validate(&self) -> Result<ManufacturingBundle, ProjectError> {
+        self.validate_identity()?;
+        let bundle = self.decode().map_err(manufacturing_error)?;
+        if bundle.provenance.input_hash != self.record.input_hash
+            || bundle.summary() != self.record.summary
+            || bundle.program != self.record.program
+        {
+            return Err(error(
+                ProjectErrorCode::CorruptAsset,
+                "manufacturing record differs from bundle",
+            ));
+        }
+        Ok(bundle)
+    }
+    /// Sizes, record validity and both content digests.
+    fn validate_identity(&self) -> Result<(), ProjectError> {
         if self.bundle.is_empty() || self.bundle.len() > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
@@ -311,17 +343,7 @@ impl ManufacturingAsset {
                 "manufacturing program hash or byte count mismatch",
             ));
         }
-        let bundle = self.decode().map_err(manufacturing_error)?;
-        if bundle.provenance.input_hash != self.record.input_hash
-            || bundle.summary() != self.record.summary
-            || bundle.program != self.record.program
-        {
-            return Err(error(
-                ProjectErrorCode::CorruptAsset,
-                "manufacturing record differs from bundle",
-            ));
-        }
-        Ok(bundle)
+        Ok(())
     }
 }
 fn manufacturing_error(value: ManufacturingError) -> ProjectError {
