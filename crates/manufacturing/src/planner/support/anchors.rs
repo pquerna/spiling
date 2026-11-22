@@ -689,6 +689,47 @@ pub(crate) fn endpoint_bond(
     Ok(distance + enclosure < width && distance - enclosure >= width * 0.5)
 }
 
+pub(in crate::planner) fn condition_skin_bond_endpoint(
+    endpoint: [f64; 3],
+    other: [f64; 3],
+    wall: [[f64; 3]; 2],
+    width: f64,
+) -> Result<Option<[f64; 3]>, ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::{
+        MIN_DEPOSITION_COMMAND_MM, XYZ6_QUANTUM_MM, project_xyz6_coordinate_mm,
+    };
+    let along = if endpoint[0] == other[0] {
+        1
+    } else if endpoint[1] == other[1] {
+        0
+    } else {
+        return Ok(None);
+    };
+    let (distance, enclosure) = endpoint_distance_enclosed(endpoint, wall)?;
+    if distance + enclosure >= width * 0.5 || distance < width * 0.5 - 2.0 * XYZ6_QUANTUM_MM {
+        return Ok(None);
+    }
+    let raw_distance =
+        SegmentCapsule::new([wall[0][0], wall[0][1]], [wall[1][0], wall[1][1]], 0.0)?
+            .endpoint_distance([endpoint[0], endpoint[1]])?;
+    if raw_distance < width * 0.5 || raw_distance >= width {
+        return Ok(None);
+    }
+    let start = project_xyz6_coordinate_mm(endpoint[along])?;
+    let limit = project_xyz6_coordinate_mm(other[along])?;
+    let direction = (limit - start).signum();
+    for steps in [1.0, 2.0] {
+        let mut candidate = endpoint;
+        candidate[along] = project_xyz6_coordinate_mm(start + direction * steps * XYZ6_QUANTUM_MM)?;
+        if direction * (limit - candidate[along]) >= MIN_DEPOSITION_COMMAND_MM
+            && endpoint_bond(candidate, wall, width)?
+        {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
 pub(in crate::planner) fn inward_bond_endpoint(
     endpoint: [f64; 3],
     other: [f64; 3],
@@ -843,6 +884,41 @@ fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
 #[cfg(test)]
 mod dimension_tests {
     use super::*;
+
+    #[test]
+    fn skin_bond_conditioning_recovers_only_xyz6_rounding_loss() {
+        let wall = [
+            [101.02507516227035, 118.09875803040211, 9.021666666666668],
+            [120.08945079647431, 118.09285109699714, 9.021666666666668],
+        ];
+        let endpoint = [105.71464008675528, 117.87230499131718, wall[0][2]];
+        let other = [endpoint[0], 116.94286889582592, endpoint[2]];
+        assert!(!endpoint_bond(endpoint, wall, 0.45).unwrap());
+        let conditioned = condition_skin_bond_endpoint(endpoint, other, wall, 0.45)
+            .unwrap()
+            .unwrap();
+        assert_eq!(conditioned, [endpoint[0], 117.872304, endpoint[2]]);
+        assert!(endpoint_bond(conditioned, wall, 0.45).unwrap());
+        assert!(
+            condition_skin_bond_endpoint(conditioned, other, wall, 0.45)
+                .unwrap()
+                .is_none()
+        );
+        let outside = [endpoint[0], endpoint[1] - 0.3, endpoint[2]];
+        let excess_overlap = [endpoint[0], endpoint[1] + 0.0000001, endpoint[2]];
+        let too_short = [endpoint[0], endpoint[1] - 0.01, endpoint[2]];
+        for (start, finish) in [
+            (outside, other),
+            (excess_overlap, other),
+            (endpoint, too_short),
+        ] {
+            assert!(
+                condition_skin_bond_endpoint(start, finish, wall, 0.45)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn projected_screens_preserve_contact_provenance_and_invalid_far_edges() {

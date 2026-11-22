@@ -125,6 +125,7 @@ pub(super) fn construct(
     interfaces: &mut Vec<ProcessInterfaceCoverage>,
     domains: &[ProcessDomain],
     paths: &mut Vec<DepositionPath>,
+    fits: &[SkinCommandFitDomain],
     z: f64,
     lower_z: f64,
     recipe: &PlanarPrintRecipe,
@@ -147,7 +148,7 @@ pub(super) fn construct(
         .checked_add(
             paths
                 .len()
-                .checked_mul(2 * std::mem::size_of::<usize>())
+                .checked_mul(2 * std::mem::size_of::<usize>() + std::mem::size_of::<bool>())
                 .ok_or_else(|| resource("bond index accounting overflow"))?,
         )
         .and_then(|bytes| bytes.checked_add(rib_bytes))
@@ -158,6 +159,11 @@ pub(super) fn construct(
         .map_err(|_| resource("separator path allocation refused"))?;
     let mut walls = Vec::new();
     let mut skins = Vec::new();
+    let mut bound_skins = Vec::new();
+    bound_skins
+        .try_reserve_exact(paths.len())
+        .map_err(|_| resource("bound skin index allocation refused"))?;
+    bound_skins.resize(paths.len(), false);
     walls
         .try_reserve_exact(paths.len())
         .map_err(|_| resource("wall witness index allocation refused"))?;
@@ -208,6 +214,8 @@ pub(super) fn construct(
                 paths,
                 &walls,
                 &skins,
+                &mut bound_skins,
+                fits,
                 recipe.bead_width_mm,
                 work,
                 cancel,
@@ -218,6 +226,8 @@ pub(super) fn construct(
                 paths,
                 &walls,
                 &skins,
+                &mut bound_skins,
+                fits,
                 recipe.bead_width_mm,
                 work,
                 cancel,
@@ -298,9 +308,11 @@ pub(super) fn construct(
 fn terminal(
     endpoint: [f64; 3],
     other: [f64; 3],
-    paths: &[DepositionPath],
+    paths: &mut [DepositionPath],
     walls: &[usize],
     skins: &[usize],
+    bound_skins: &mut [bool],
+    fits: &[SkinCommandFitDomain],
     width: f64,
     work: &mut usize,
     cancel: &AtomicBool,
@@ -325,45 +337,98 @@ fn terminal(
             }
         }
     }
+    let mut conditioned = None;
     for &index in skins {
         let skin = &paths[index];
         if skin.points_mm.len() != 2 {
             continue;
         }
         let stroke = [skin.points_mm[0], skin.points_mm[1]];
+        let skin_width = region::constant_width(skin)?;
+        let skin_kind = skin
+            .owner
+            .and_then(DepositionOwner::skin_kind)
+            .ok_or_else(|| invalid("surrounding stroke lost immutable mandatory-skin ownership"))?;
+        let process_kind = skin.kind;
         check_cancel(cancel)?;
         boolean::charge(work, 1)?;
-        let Some(point) = support::inward_bond_endpoint(
-            endpoint,
-            other,
-            stroke,
-            (width + region::constant_width(skin)?) * 0.5,
-        )?
+        let Some(point) =
+            support::inward_bond_endpoint(endpoint, other, stroke, (width + skin_width) * 0.5)?
         else {
             continue;
         };
         for &wall in walls {
             for local in paths[wall].checked_edges()? {
-                let edge = local.points_mm;
-                for &skin_end in &stroke {
+                let edge = [local.points_mm[0], local.points_mm[1]];
+                let wall_width = (skin_width + local.width_mm) * 0.5;
+                for end in 0..2 {
                     check_cancel(cancel)?;
                     boolean::charge(work, 1)?;
-                    if support::endpoint_bond(
-                        skin_end,
-                        [edge[0], edge[1]],
-                        (region::constant_width(skin)? + local.width_mm) * 0.5,
+                    let receipt = |actual| ProcessEndpointBond::Skin {
+                        skin_kind,
+                        process_kind,
+                        skin_segment_mm: xy(actual),
+                        wall_segment_mm: xy(edge),
+                    };
+                    if support::endpoint_bond(stroke[end], edge, wall_width)? {
+                        bound_skins[index] = true;
+                        return Ok(Some((point, receipt(stroke))));
+                    }
+                    if conditioned.is_some()
+                        || bound_skins[index]
+                        || !matches!(
+                            process_kind,
+                            DepositionKind::TopSkin | DepositionKind::BottomSkin
+                        )
+                        || !skin.arcs.is_empty()
+                        || !skin.connectors.is_empty()
+                    {
+                        continue;
+                    }
+                    let Some(shortened) = support::condition_skin_bond_endpoint(
+                        stroke[end],
+                        stroke[1 - end],
+                        edge,
+                        wall_width,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let mut fitted = false;
+                    for fit in fits
+                        .iter()
+                        .filter(|domain| domain.skin == skin_kind)
+                        .flat_map(|domain| &domain.fits)
+                    {
+                        check_cancel(cancel)?;
+                        boolean::charge(work, 1)?;
+                        if fit.fitted_mm == stroke || fit.fitted_mm == [stroke[1], stroke[0]] {
+                            fitted = true;
+                            break;
+                        }
+                    }
+                    if fitted {
+                        continue;
+                    }
+                    let mut actual = stroke;
+                    actual[end] = shortened;
+                    if let Some(point) = support::inward_bond_endpoint(
+                        endpoint,
+                        other,
+                        actual,
+                        (width + skin_width) * 0.5,
                     )? {
-                        return Ok(Some((point,ProcessEndpointBond::Skin{
-                            skin_kind:skin.owner.and_then(DepositionOwner::skin_kind).ok_or_else(||invalid("surrounding stroke lost immutable mandatory-skin ownership"))?,
-                            process_kind:skin.kind,
-                            skin_segment_mm:xy(stroke),wall_segment_mm:xy([edge[0],edge[1]]),
-                        })));
+                        conditioned = Some((index, actual, point, receipt(actual)));
                     }
                 }
             }
         }
     }
-    Ok(None)
+    Ok(conditioned.map(|(index, actual, point, receipt)| {
+        paths[index].points_mm.copy_from_slice(&actual);
+        bound_skins[index] = true;
+        (point, receipt)
+    }))
 }
 
 pub(super) fn unresolved(layer: &PrintLayer) -> ManufacturingError {

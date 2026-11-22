@@ -383,6 +383,7 @@ pub(super) fn run(
                 &mut candidate.process_interfaces,
                 &sections[current].process_domains,
                 &mut candidate.paths,
+                &candidate.skin_command_fits,
                 schedule[index].z,
                 schedule[index].lower_z,
                 recipe,
