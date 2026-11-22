@@ -524,12 +524,13 @@ impl Channel {
 }
 
 /// A raw occupied piece, its height scope clipped to its span, the bounds
-/// its clearance can reach, and whether every live carry already excludes it.
+/// its clearance can reach, and the highest swept layer whose bead slab it
+/// meets: the layer where the descending carry first excludes it.
 struct Piece {
     polygon: Polygon<f64>,
     scope: [f64; 2],
     reach: [[f64; 2]; 2],
-    applied: bool,
+    first: Option<usize>,
 }
 
 /// One demand before rasterization: its contact top, target and relief.
@@ -702,8 +703,30 @@ impl Sweep<'_> {
         drop(seed);
         timing.mark("seeds");
 
-        // Down pass: carry every channel's candidate through occupancy and voids.
+        // Down pass: carry every channel's candidate through occupancy and
+        // voids, A[l] = (A[l+1] ∪ S[l]) − O[l] − V[l]. Occupancy O[l] depends
+        // only on the layer, so each chunk of layers rasterizes it in
+        // parallel and the carry stays cheap set algebra in layer order.
+        // Subtracting a piece again at every layer it occupies changes no
+        // cell: the carry already lacks it, and each entering seed needs it.
         let distance = self.frame.distance;
+        // The carry at layer `l` lies inside the seeds at or above `l`, so a
+        // piece outside their running envelope cannot change any cell.
+        let mut envelope: Vec<Option<[[f64; 2]; 2]>> = Vec::new();
+        reserve_owned(&mut envelope, max_top + 1, self.owned_bytes)?;
+        envelope.resize(max_top + 1, None);
+        let mut running: Option<[[f64; 2]; 2]> = None;
+        for l in (0..=max_top).rev() {
+            for channel in &channels {
+                if let Some(seed) = &channel.seeds[l]
+                    && let (Some(x), Some(y)) = (seed.extent(&cells, 0), seed.extent(&cells, 1))
+                {
+                    let rect = [[x[0], y[0]], [x[1], y[1]]];
+                    running = Some(union_frame(running, rect));
+                }
+            }
+            envelope[l] = running;
+        }
         let mut window: Vec<(usize, Vec<Piece>)> = Vec::new();
         let mut carried: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
         let mut voids: Vec<Option<Option<Bits>>> = vec![None; self.protected.0.len()];
@@ -714,138 +737,174 @@ impl Sweep<'_> {
             std::time::Duration,
             std::time::Duration,
         ) = Default::default();
-        for l in (0..=max_top).rev() {
+        let mut slabs = Vec::new();
+        reserve_owned(&mut slabs, max_top + 1, self.owned_bytes)?;
+        for layer in &layers[..=max_top] {
+            slabs.push(bead_slab(layer)?);
+        }
+        let working_set = crate::working_set::current();
+        const CHUNK: usize = 32;
+        let mut next = Some(max_top);
+        while let Some(hi) = next {
+            let lo = hi.saturating_sub(CHUNK - 1);
+            next = lo.checked_sub(1);
             check_cancel(cancel)?;
-            let mut seeds: Vec<Option<Bits>> = channels
-                .iter_mut()
-                .map(|channel| channel.seeds[l].take())
-                .collect();
-            if carried.iter().all(Bits::is_empty) && seeds.iter().all(Option::is_none) {
-                continue;
-            }
-            let slab = bead_slab(&layers[l])?;
             let t0 = std::time::Instant::now();
-            self.load_pieces(l, &mut window, cell_bounds, distance, work, cancel)?;
+            self.load_spans(
+                lo,
+                hi,
+                &mut window,
+                &slabs,
+                cell_bounds,
+                distance,
+                work,
+                cancel,
+            )?;
             down_load += t0.elapsed();
+            // Each piece is rasterized once, in the batch of the layer where
+            // the carry first meets it; batches build in parallel.
             let t0 = std::time::Instant::now();
-            if seeds.iter().any(Option::is_some) {
-                // Every layer in the same section shares the material used to
-                // trim its seed before sizing the occupancy query.
-                let span = span_at(self.sections, l as u32);
-                if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
-                    if let Some((_, old)) = material_cells.take() {
-                        release(&old);
+            let mut fresh: Vec<Option<Bits>> = {
+                use rayon::prelude::*;
+                let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); hi - lo + 1];
+                for piece in window.iter().flat_map(|(_, pieces)| pieces) {
+                    if let Some(first) = piece.first
+                        && (lo..=hi).contains(&first)
+                        && envelope[first].is_some_and(|reach| rects_meet(piece.reach, reach))
+                    {
+                        raster.reserve(&mut batches[first - lo], 1)?;
+                        batches[first - lo].push(&piece.polygon);
                     }
-                    let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
-                    hold(&bits)?;
-                    material_cells = Some((span, bits));
                 }
-                let material = &material_cells.as_ref().expect("section material cells").1;
-                for seed in seeds.iter_mut().flatten() {
-                    seed.subtract(material);
-                }
-            }
-            down_seed += t0.elapsed();
-            let t0 = std::time::Instant::now();
-            // Carries already exclude applied pieces. Every entering seed needs
-            // those pieces as well as the fresh ones. Stamp each relevant piece
-            // once for this slab, regardless of the number of channels or seeds.
-            let mut fresh = Vec::new();
-            let mut old = Vec::new();
-            for piece in window.iter_mut().flat_map(|(_, pieces)| pieces) {
-                if piece.scope[0] > slab[1] || piece.scope[1] < slab[0] {
-                    continue;
-                }
-                let near_seed = seeds
-                    .iter()
-                    .flatten()
-                    .any(|seed| seed.meets_rect(&cells, piece.reach));
-                let list = if piece.applied {
-                    near_seed.then_some(&mut old)
-                } else {
-                    piece.applied = true;
-                    (near_seed
-                        || carried
-                            .iter()
-                            .any(|carry| carry.meets_rect(&cells, piece.reach)))
-                    .then_some(&mut fresh)
-                };
-                if let Some(list) = list {
-                    let before = vec_bytes(list);
-                    raster.reserve(list, 1)?;
-                    live.fetch_add(vec_bytes(list) - before, Ordering::Relaxed);
-                    list.push(&piece.polygon);
-                }
-            }
-            if !fresh.is_empty() {
-                let clearance = raster.outward_parallel(&fresh, distance)?;
-                for carry in &mut carried {
-                    carry.subtract(&clearance);
-                }
-                for seed in seeds.iter_mut().flatten() {
-                    seed.subtract(&clearance);
-                }
+                let raster = &raster;
+                let built: Vec<Result<Option<Bits>, ManufacturingError>> = batches
+                    .par_iter()
+                    .map(|batch| {
+                        crate::working_set::scope(working_set, || {
+                            if batch.is_empty() {
+                                return Ok(None);
+                            }
+                            raster.outward_parallel(batch, distance).map(Some)
+                        })
+                    })
+                    .collect();
+                built.into_iter().collect::<Result<_, _>>()?
+            };
+            for bits in fresh.iter().flatten() {
+                hold(bits)?;
             }
             down_fresh += t0.elapsed();
-            let t0 = std::time::Instant::now();
-            if !old.is_empty() {
-                let clearance = raster.outward_parallel(&old, distance)?;
-                for seed in seeds.iter_mut().flatten() {
-                    seed.subtract(&clearance);
+            for l in (lo..=hi).rev() {
+                check_cancel(cancel)?;
+                let fresh = fresh[l - lo].take();
+                let mut seeds: Vec<Option<Bits>> = channels
+                    .iter_mut()
+                    .map(|channel| channel.seeds[l].take())
+                    .collect();
+                let skip = carried.iter().all(Bits::is_empty) && seeds.iter().all(Option::is_none);
+                if let Some(bits) = &fresh {
+                    // Carries already exclude every earlier piece.
+                    for carry in &mut carried {
+                        carry.subtract(bits);
+                    }
+                    release(bits);
                 }
-            }
-            live.fetch_sub(vec_bytes(&fresh) + vec_bytes(&old), Ordering::Relaxed);
-            drop((fresh, old));
-            for (carry, seed) in carried.iter_mut().zip(seeds) {
-                if let Some(seed) = seed {
-                    *carry = raster.union(carry, &seed)?;
-                }
-            }
-            down_seed += t0.elapsed();
-            let t0 = std::time::Instant::now();
-            for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
-                if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
+                if skip {
                     continue;
                 }
-                if channels
-                    .iter()
-                    .zip(&carried)
-                    .all(|(channel, carry)| carry.is_empty() || channel.relieved == Some(ordinal))
-                {
-                    continue;
+                let slab = slabs[l];
+                let t0 = std::time::Instant::now();
+                if seeds.iter().any(Option::is_some) {
+                    // Every layer in the same section shares the material used to
+                    // trim its seed before sizing the occupancy query.
+                    let span = span_at(self.sections, l as u32);
+                    if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
+                        if let Some((_, old)) = material_cells.take() {
+                            release(&old);
+                        }
+                        let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                        hold(&bits)?;
+                        material_cells = Some((span, bits));
+                    }
+                    let material = &material_cells.as_ref().expect("section material cells").1;
+                    for seed in seeds.iter_mut().flatten() {
+                        seed.subtract(material);
+                    }
+                    // An entering seed needs every piece of this slab.
+                    let spans = slab_spans(self.sections, l);
+                    let mut near = Vec::new();
+                    for piece in window
+                        .iter()
+                        .filter(|(span, _)| spans.contains(span))
+                        .flat_map(|(_, pieces)| pieces)
+                    {
+                        if piece.scope[0] <= slab[1]
+                            && piece.scope[1] >= slab[0]
+                            && seeds
+                                .iter()
+                                .flatten()
+                                .any(|seed| seed.meets_rect(&cells, piece.reach))
+                        {
+                            raster.reserve(&mut near, 1)?;
+                            near.push(&piece.polygon);
+                        }
+                    }
+                    if !near.is_empty() {
+                        let clearance = raster.outward_parallel(&near, distance)?;
+                        for seed in seeds.iter_mut().flatten() {
+                            seed.subtract(&clearance);
+                        }
+                    }
                 }
-                // A void's clearance depends only on the void; build it once.
-                if voids[ordinal].is_none() {
-                    let clearance = match candidate_clearance_distance_in_bounds(
-                        mask,
-                        Some(cell_bounds),
-                        self.requested,
-                    )? {
-                        Some(distance) => Some(raster.outward([mask], distance)?),
-                        None => None,
+                for (carry, seed) in carried.iter_mut().zip(seeds) {
+                    if let Some(seed) = seed {
+                        *carry = raster.union(carry, &seed)?;
+                    }
+                }
+                down_seed += t0.elapsed();
+                let t0 = std::time::Instant::now();
+                for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
+                    if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
+                        continue;
+                    }
+                    if channels.iter().zip(&carried).all(|(channel, carry)| {
+                        carry.is_empty() || channel.relieved == Some(ordinal)
+                    }) {
+                        continue;
+                    }
+                    // A void's clearance depends only on the void; build it once.
+                    if voids[ordinal].is_none() {
+                        let clearance = match candidate_clearance_distance_in_bounds(
+                            mask,
+                            Some(cell_bounds),
+                            self.requested,
+                        )? {
+                            Some(distance) => Some(raster.outward([mask], distance)?),
+                            None => None,
+                        };
+                        if let Some(bits) = &clearance {
+                            hold(bits)?;
+                        }
+                        voids[ordinal] = Some(clearance);
+                    }
+                    let Some(Some(clearance)) = &voids[ordinal] else {
+                        continue;
                     };
-                    if let Some(bits) = &clearance {
-                        hold(bits)?;
-                    }
-                    voids[ordinal] = Some(clearance);
-                }
-                let Some(Some(clearance)) = &voids[ordinal] else {
-                    continue;
-                };
-                for (channel, carry) in channels.iter().zip(&mut carried) {
-                    if channel.relieved != Some(ordinal) {
-                        carry.subtract(clearance);
+                    for (channel, carry) in channels.iter().zip(&mut carried) {
+                        if channel.relieved != Some(ordinal) {
+                            carry.subtract(clearance);
+                        }
                     }
                 }
-            }
-            down_rest += t0.elapsed();
-            for (channel, carry) in channels.iter_mut().zip(&carried) {
-                if !carry.is_empty() {
-                    hold(carry)?;
-                    channel.active[l] = Some(carry.clone());
+                down_rest += t0.elapsed();
+                for (channel, carry) in channels.iter_mut().zip(&carried) {
+                    if !carry.is_empty() {
+                        hold(carry)?;
+                        channel.active[l] = Some(carry.clone());
+                    }
                 }
+                charge(work)?;
             }
-            charge(work)?;
         }
         drop(carried);
         drop(window);
@@ -1199,76 +1258,70 @@ impl Sweep<'_> {
         }
     }
 
-    /// Keep the raw occupied pieces of the spans a bead slab at layer `l` can
-    /// touch (its own and both neighbours), each span collected once while
-    /// the descending pass is inside it. Pieces whose clearance cannot reach
-    /// the grid are never collected.
-    fn load_pieces(
+    /// Keep the raw occupied pieces of every span the layers `lo..=hi` can
+    /// touch, each span collected once while the descending pass is inside
+    /// it and loaded in parallel. Pieces whose clearance cannot reach the
+    /// grid are never collected.
+    #[expect(clippy::too_many_arguments)]
+    fn load_spans(
         &self,
-        l: usize,
+        lo: usize,
+        hi: usize,
         window: &mut Vec<(usize, Vec<Piece>)>,
+        slabs: &[[f64; 2]],
         cell_bounds: [[f64; 2]; 2],
         distance: f64,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
-        let here = span_at(self.sections, l as u32);
-        // The pass descends: spans above the next one up are finished.
-        window.retain(|(span, _)| *span <= here + 1);
-        for span in here.saturating_sub(1)..=(here + 1).min(self.sections.len() - 1) {
-            if window.iter().any(|(cached, _)| *cached == span) {
-                continue;
-            }
-            let section = &self.sections[span];
-            let interval = self.span_interval(span);
-            let mut pieces = Vec::new();
-            let mut failure = None;
-            section.visit_occupied_screened(
-                cancel,
-                |bounds, _| Ok(rects_meet(expand(bounds, distance), cell_bounds)),
-                |piece, height| {
-                    let scope = height.map_or(interval, |height| {
-                        [height[0].max(interval[0]), height[1].min(interval[1])]
-                    });
-                    if scope[0] <= scope[1]
-                        && let Some(bounds) = piece.bounding_rect()
-                    {
-                        if let Err(error) = reserve_owned(&mut pieces, 1, self.owned_bytes) {
-                            failure = Some(error);
-                            return Ok(false);
-                        }
-                        pieces.push(Piece {
-                            polygon: piece.clone(),
-                            scope,
-                            reach: expand(
-                                [
-                                    [bounds.min().x, bounds.min().y],
-                                    [bounds.max().x, bounds.max().y],
-                                ],
-                                distance,
-                            ),
-                            applied: false,
+        use rayon::prelude::*;
+        let sections = self.sections;
+        let needed = *slab_spans(sections, lo).start()..=*slab_spans(sections, hi).end();
+        // The pass descends: spans above the chunk's reach are finished.
+        window.retain(|(span, _)| needed.contains(span));
+        let missing: Vec<usize> = needed
+            .filter(|span| !window.iter().any(|(cached, _)| cached == span))
+            .collect();
+        let working_set = crate::working_set::current();
+        let (schedule, owned_bytes) = (self.schedule, self.owned_bytes);
+        let loaded: Vec<Result<Vec<Piece>, ManufacturingError>> = missing
+            .par_iter()
+            .map(|&span| {
+                crate::working_set::scope(working_set, || {
+                    let mut pieces = span_pieces(
+                        sections,
+                        schedule,
+                        owned_bytes,
+                        span,
+                        cell_bounds,
+                        distance,
+                        cancel,
+                    )?;
+                    // Layers reading this span: those whose own span is it or
+                    // a neighbour. Slabs rise with the layer, so the highest
+                    // one meeting a piece is found by bisection.
+                    let from = sections[span.saturating_sub(1)].start as usize;
+                    let to = (sections[(span + 1).min(sections.len() - 1)].end as usize)
+                        .min(slabs.len());
+                    for piece in &mut pieces {
+                        let below = slabs.get(from..to).map_or(0, |run| {
+                            run.partition_point(|slab| slab[0] <= piece.scope[1])
                         });
+                        piece.first = below
+                            .checked_sub(1)
+                            .map(|at| from + at)
+                            .filter(|&l| slabs[l][1] >= piece.scope[0]);
                     }
-                    Ok(true)
-                },
-            )?;
-            if let Some(error) = failure {
-                return Err(error);
-            }
+                    Ok(pieces)
+                })
+            })
+            .collect();
+        for (span, pieces) in missing.into_iter().zip(loaded) {
+            let pieces = pieces?;
             charge_owned_work(work, self.foreign_work, pieces.len(), cancel)?;
             window.push((span, pieces));
         }
         Ok(())
-    }
-
-    /// The closed Z interval a section span's layers occupy.
-    fn span_interval(&self, span: usize) -> [f64; 2] {
-        let section = &self.sections[span];
-        [
-            self.schedule[section.start as usize].lower_z,
-            self.schedule[(section.end - 1) as usize].z,
-        ]
     }
 
     /// Nominal clearance of every scope reaching layer `l`: each section
@@ -1718,6 +1771,66 @@ impl<'e, 'a> SpanCache<'e, 'a> {
         self.live.fetch_add(bytes, Ordering::Relaxed);
         Ok(loaded)
     }
+}
+
+/// The section spans a bead slab at layer `l` can touch: its own and both
+/// neighbours.
+fn slab_spans(sections: &[super::super::SectionSpan], l: usize) -> std::ops::RangeInclusive<usize> {
+    let here = span_at(sections, l as u32);
+    here.saturating_sub(1)..=(here + 1).min(sections.len() - 1)
+}
+
+/// One section span's occupied pieces whose clearance can reach the grid.
+fn span_pieces(
+    sections: &[super::super::SectionSpan],
+    schedule: &[super::super::LayerElevation],
+    owned_bytes: usize,
+    span: usize,
+    cell_bounds: [[f64; 2]; 2],
+    distance: f64,
+    cancel: &AtomicBool,
+) -> Result<Vec<Piece>, ManufacturingError> {
+    let section = &sections[span];
+    let interval = [
+        schedule[section.start as usize].lower_z,
+        schedule[(section.end - 1) as usize].z,
+    ];
+    let mut pieces = Vec::new();
+    let mut failure = None;
+    section.visit_occupied_screened(
+        cancel,
+        |bounds, _| Ok(rects_meet(expand(bounds, distance), cell_bounds)),
+        |piece, height| {
+            let scope = height.map_or(interval, |height| {
+                [height[0].max(interval[0]), height[1].min(interval[1])]
+            });
+            if scope[0] <= scope[1]
+                && let Some(bounds) = piece.bounding_rect()
+            {
+                if let Err(error) = reserve_owned(&mut pieces, 1, owned_bytes) {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+                pieces.push(Piece {
+                    polygon: piece.clone(),
+                    scope,
+                    reach: expand(
+                        [
+                            [bounds.min().x, bounds.min().y],
+                            [bounds.max().x, bounds.max().y],
+                        ],
+                        distance,
+                    ),
+                    first: None,
+                });
+            }
+            Ok(true)
+        },
+    )?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(pieces)
 }
 
 /// The closed full-bead slab of a layer's beads. A road's height is its

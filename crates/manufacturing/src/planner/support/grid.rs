@@ -610,13 +610,15 @@ impl Raster<'_> {
     ) -> Result<Bits, ManufacturingError> {
         let mut spans = Vec::new();
         let mut crossings = Vec::new();
+        let mut charged = 0;
         for (polygon, distance) in polygons {
             check_cancel(self.cancel)?;
             self.interior(polygon, &mut crossings, &mut spans)?;
             for [a, b] in edges(polygon) {
-                self.capsule(a, b, distance, &mut spans)?;
+                self.capsule(a, b, distance, &mut spans, &mut charged)?;
             }
         }
+        self.charge(charged);
         self.bits_of(&spans)
     }
 
@@ -626,10 +628,12 @@ impl Raster<'_> {
         segments: impl IntoIterator<Item = ([f64; 2], [f64; 2], f64)>,
     ) -> Result<Bits, ManufacturingError> {
         let mut spans = Vec::new();
+        let mut charged = 0;
         for (a, b, radius) in segments {
             check_cancel(self.cancel)?;
-            self.capsule(a, b, radius, &mut spans)?;
+            self.capsule(a, b, radius, &mut spans, &mut charged)?;
         }
+        self.charge(charged);
         self.bits_of(&spans)
     }
 
@@ -692,13 +696,15 @@ impl Raster<'_> {
         let mut inside = Vec::new();
         let mut boundary = Vec::new();
         let mut crossings = Vec::new();
+        let mut charged = 0;
         for polygon in polygons {
             check_cancel(self.cancel)?;
             self.interior(polygon, &mut crossings, &mut inside)?;
             for [a, b] in edges(polygon) {
-                self.capsule(a, b, 0.0, &mut boundary)?;
+                self.capsule(a, b, 0.0, &mut boundary, &mut charged)?;
             }
         }
+        self.charge(charged);
         let bits = self.bits_of(&inside)?;
         drop(inside);
         Ok((bits, self.bits_of(&boundary)?))
@@ -773,6 +779,7 @@ impl Raster<'_> {
         b: [f64; 2],
         radius: f64,
         spans: &mut Vec<Span>,
+        charged: &mut usize,
     ) -> Result<(), ManufacturingError> {
         let frame = &self.frame;
         if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0) {
@@ -786,7 +793,9 @@ impl Raster<'_> {
             return Ok(());
         };
         self.reserve(spans, r1 - r0 + 1)?;
-        self.charge(r1 - r0 + 1);
+        // Counted by the caller once per batch: a shared counter bumped for
+        // every capsule serializes parallel rasters on one cache line.
+        *charged += r1 - r0 + 1;
         for row in r0..=r1 {
             let band = [
                 frame.y(row as f64) - GUARD_MM,
