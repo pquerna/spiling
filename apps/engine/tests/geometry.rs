@@ -1865,6 +1865,45 @@ async fn source_capture_and_saved_return_exceed_retired_byte_quotas_without_reme
 }
 
 #[tokio::test]
+async fn source_without_a_solid_is_refused_clearly_and_leaves_the_scene() {
+    // Exporters can write a valid STEP that only carries material and density
+    // records, with no placed MANIFOLD_SOLID_BREP; there is nothing to print.
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = EngineClient::spawn_command(
+        tokio::process::Command::new(ENGINE),
+        directory.path().join("ledger"),
+    )
+    .await
+    .unwrap();
+    let before = scene(&mut client).await;
+    let template =
+        String::from_utf8(include_bytes!("../../../fixtures/geometry/box-mm.step").to_vec())
+            .unwrap();
+    let header = &template[..template.find("DATA;").unwrap()];
+    let path = directory.path().join("no-solid.step");
+    std::fs::write(
+        &path,
+        format!("{header}DATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\nEND-ISO-10303-21;\n"),
+    )
+    .unwrap();
+    let operation = start_import(
+        &mut client,
+        NativePath::from_os_str(path.as_os_str()).unwrap(),
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let job = wait_job(&mut client, operation).await;
+    assert_eq!(job.status, JobStatus::Failed, "{job:?}");
+    assert!(job.outputs.is_empty());
+    assert_eq!(
+        geometry_job_error(job),
+        GeometryErrorCode::UnsupportedGeometry
+    );
+    assert_eq!(scene(&mut client).await, before);
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn explicit_source_memory_refusal_preserves_scene_and_allows_following_work() {
     let directory = tempfile::tempdir().unwrap();
     let mut launch = tokio::process::Command::new(ENGINE);

@@ -27,7 +27,7 @@ def select_cases(manifest, prefixes=(), cohort="full"):
             raise ValueError(f"case is not a source basename: {name}")
         expectation = case.get("expectation", {"kind": "complete"})
         if not isinstance(expectation, dict) or expectation.get("kind") not in (
-                "complete", "refusal", "complete_or_envelope_refusal"):
+                "complete", "refusal"):
             raise ValueError(f"invalid case expectation: {name}")
         if expectation["kind"] == "refusal" and any(
                 not isinstance(expectation.get(field), str) or not expectation[field]
@@ -75,26 +75,6 @@ def export_checks(directory):
     return checks
 
 
-def envelope_refusal(error, intent):
-    if error.get("code") != "build_envelope_exceeded" or error.get("domain") != "placement":
-        return False
-    details = error.get("details", {})
-    placed = details.get("placed_bounds_mm", {})
-    envelope = details.get("build_envelope")
-    if envelope != intent["printer"]["build_envelope"]:
-        return False
-    try:
-        minimum, maximum = placed["min"], placed["max"]
-        values = [*minimum, *maximum, *envelope["min"], *envelope["max"]]
-        return (len(minimum) == len(maximum) == 3
-                and all(math.isfinite(value) for value in values)
-                and all(minimum[axis] <= maximum[axis] for axis in range(3))
-                and any(minimum[axis] < envelope["min"][axis]
-                        or maximum[axis] > envelope["max"][axis] for axis in range(3)))
-    except (KeyError, TypeError, ValueError, IndexError):
-        return False
-
-
 def assess(case, record, intent):
     failures = []
     if record.get("sha256") != case["sha256"]:
@@ -106,11 +86,7 @@ def assess(case, record, intent):
         if compiled.get("ok") is not False or error.get("code") != expectation["code"] or error.get("domain") != expectation["domain"]:
             failures.append("expected_refusal")
         status = "expected_refusal"
-    elif expectation["kind"] == "complete_or_envelope_refusal" and compiled.get("ok") is False:
-        if not envelope_refusal(error, intent):
-            failures.append("expected_envelope_refusal")
-        status = "expected_refusal"
-    elif expectation["kind"] in ("complete", "complete_or_envelope_refusal"):
+    elif expectation["kind"] == "complete":
         if compiled.get("ok") is not True:
             failures.append("compile")
         if record.get("spiling_return", {}).get("ok") is not True:

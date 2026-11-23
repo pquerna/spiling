@@ -53,19 +53,6 @@ class CorpusAuditTests(unittest.TestCase):
             self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
         self.assertEqual(audit.assess(case, self.record, self.intent)["status"], "failed")
 
-    def test_envelope_case_accepts_complete_journey_or_a_real_captured_exclusion(self):
-        case = dict(self.case, expectation={"kind": "complete_or_envelope_refusal"})
-        self.assertEqual(audit.assess(case, self.record, self.intent)["status"], "complete")
-        error = {"code": "build_envelope_exceeded", "domain": "placement", "details": {
-            "placed_bounds_mm": {"min": [-1, 0, 0], "max": [21, 10, 8]},
-            "build_envelope": copy.deepcopy(self.intent["printer"]["build_envelope"])}}
-        record = dict(self.record, spiling_compile={"ok": False, "error": error})
-        self.assertEqual(audit.assess(case, record, self.intent)["status"], "expected_refusal")
-        error["details"]["placed_bounds_mm"] = {"min": [1, 1, 0], "max": [10, 10, 8]}
-        self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
-        error["details"]["placed_bounds_mm"]["min"][0] = float("nan")
-        self.assertEqual(audit.assess(case, record, self.intent)["status"], "failed")
-
     def test_input_identity_is_checked_before_native_work(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, self.case["file"])

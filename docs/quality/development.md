@@ -207,7 +207,7 @@ support change needs actual rooted deposition, explicit Off, clearance and fresh
 replay, including an affected real part. Contracts/protobuf changes also require
 generated drift checks. Run strict touched-crate Clippy and scoped formatting.
 
-The complete 30-source census remains the broad integration/release gate; run
+The complete source census remains the broad integration/release gate; run
 both Off/breakaway when manufacturing semantics are affected. Keep every source
 accounted for, including expensive assemblies and failures. Do not repeat that
 cross product for unrelated display/tooling edits or describe a focused run as a

@@ -2,7 +2,7 @@
   "repository": "VoronDesign/VoronUsers",
   "commit": "8e5067f4f6457da8a552983dd210ec48c40be2ca",
   "license": "GPL-3.0 (third-party; fetched, never committed)",
-  "selection": "STEP/STP files under 6 MB sorted by size, every 18th, first 30",
+  "selection": "STEP/STP files under 6 MB sorted by size, every 18th, first 30; 00 (a STEP with no solid) is dropped and its refusal is an engine test",
   "cohorts": {
     "canary": [
       "02-Rear_Cover_120+.step",
@@ -17,22 +17,10 @@
   },
   "parts": [
     {
-      "file": "00-canable_pro_clip.step",
-      "path": "printer_mods/reapola/MKS_CANable_Pro_mount/CAD/canable_pro_clip.step",
-      "sha256": "1694681f51edd250b8a873302fb223b7e1ffa1893bcf28aaac93aacf66f3bc2c",
-      "bytes": 3415,
-      "expectation": {
-        "kind": "refusal",
-        "code": "unsupported_geometry",
-        "domain": "geometry"
-      }
-    },
-    {
       "file": "01-300_top_skirt_270.stp",
       "path": "printer_mods/Printopal/Magnetic_top_panel/STEP/300_top_skirt_270.stp",
       "sha256": "a66ff7369e804c7dbf362262dd677caa0b5d56673fd02bc92d3aabd7d371e236",
-      "bytes": 31525,
-      "expectation": {"kind": "complete_or_envelope_refusal"}
+      "bytes": 31525
     },
     {
       "file": "02-Rear_Cover_120+.step",
