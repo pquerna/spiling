@@ -104,8 +104,6 @@ impl TryFrom<rpc::InteriorPolicyOpportunity> for InteriorPolicyOpportunity {
                 .edit
                 .ok_or("missing interior policy opportunity edit")?
                 .try_into()?,
-            context_hash: crate::geometry::SourceHash::parse(v.context_hash)
-                .map_err(|e| e.to_string())?,
             input_hash: crate::geometry::SourceHash::parse(v.input_hash)
                 .map_err(|e| e.to_string())?,
         })
@@ -116,7 +114,6 @@ impl TryFrom<InteriorPolicyOpportunity> for rpc::InteriorPolicyOpportunity {
     fn try_from(v: InteriorPolicyOpportunity) -> Result<Self, String> {
         Ok(Self {
             edit: Some(v.edit.try_into()?),
-            context_hash: v.context_hash.as_str().into(),
             input_hash: v.input_hash.as_str().into(),
         })
     }
@@ -258,7 +255,6 @@ mod tests {
                     }),
                     value: None,
                 },
-                context_hash: SourceHash::from_bytes(b"context"),
                 input_hash: SourceHash::from_bytes(b"input"),
             },
         };

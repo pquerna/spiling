@@ -383,11 +383,7 @@ impl SurfaceOverlays {
             + self
                 .images
                 .iter()
-                .map(|image| {
-                    image.source_name.capacity()
-                        + image.image_hash.allocated_bytes()
-                        + image.source_hash.allocated_bytes()
-                })
+                .map(|image| image.source_name.capacity() + image.image_hash.allocated_bytes())
                 .sum::<usize>()
             + strings
     }

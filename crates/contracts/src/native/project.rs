@@ -1503,7 +1503,6 @@ impl TryFrom<rpc::SurfaceImageRecord> for SurfaceImageRecord {
             width: v.width,
             height: v.height,
             byte_count: v.byte_count,
-            source_hash: SourceHash::parse(v.source_hash).map_err(|e| e.to_string())?,
             source_name: v.source_name,
         };
         record.validate().map_err(|e| e.to_string())?;
@@ -1519,7 +1518,6 @@ impl TryFrom<SurfaceImageRecord> for rpc::SurfaceImageRecord {
             width: v.width,
             height: v.height,
             byte_count: v.byte_count,
-            source_hash: v.source_hash.into(),
             source_name: v.source_name,
         })
     }

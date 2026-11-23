@@ -33,7 +33,6 @@ pub struct SurfaceImageRecord {
     pub height: u32,
     #[ts(type = "number")]
     pub byte_count: u64,
-    pub source_hash: SourceHash,
     pub source_name: String,
 }
 #[derive(Deserialize)]
@@ -43,7 +42,6 @@ struct RawSurfaceImageRecord {
     width: u32,
     height: u32,
     byte_count: u64,
-    source_hash: SourceHash,
     #[serde(deserialize_with = "source_name")]
     source_name: String,
 }
@@ -74,7 +72,6 @@ impl<'de> Deserialize<'de> for SurfaceImageRecord {
             width: raw.width,
             height: raw.height,
             byte_count: raw.byte_count,
-            source_hash: raw.source_hash,
             source_name: raw.source_name,
         };
         record.validate().map_err(serde::de::Error::custom)?;

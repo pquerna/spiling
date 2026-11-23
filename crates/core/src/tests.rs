@@ -40,7 +40,6 @@ fn image_asset_with_capacity(
         width: 2,
         height: 2,
         byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(name.as_bytes()),
         source_name: name.to_owned(),
     };
     Arc::new(SurfaceImageAsset::new(record, bytes).unwrap())
@@ -1297,7 +1296,6 @@ fn image_factory_validates_exact_canonical_content_without_copying() {
         width: 2,
         height: 2,
         byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(b"original PNG"),
         source_name: "source.png".into(),
     };
     let image = SurfaceImageAsset::new(record.clone(), bytes).unwrap();
@@ -1596,7 +1594,6 @@ fn live_image_count_and_payload_are_independent_bounded_admission_gates() {
             width: 256,
             height: 256,
             byte_count: bytes.len() as u64,
-            source_hash: SourceHash::from_bytes(&[tag]),
             source_name: "maximum.pgm".into(),
         };
         let asset = Arc::new(SurfaceImageAsset::new(record, bytes).unwrap());

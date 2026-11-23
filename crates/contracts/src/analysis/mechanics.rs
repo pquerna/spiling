@@ -169,8 +169,6 @@ pub struct AnalysisRunSummary {
     pub case: AnalysisCaseRecord,
     pub captured_revision: ProjectRevision,
     pub input_hash: SourceHash,
-    pub operator_hash: SourceHash,
-    pub source_hash: SourceHash,
     pub pose: RigidPoseMm,
     pub settings: AnalysisRunSettings,
     pub native_shape_error_mm: f64,
@@ -213,7 +211,7 @@ impl AnalysisRunSummary {
         Ok(SourceHash::from_bytes(
             &serde_json::to_vec(&(
                 ANALYSIS_PRODUCER,
-                &self.operator_hash,
+                &self.expected_operator_hash()?,
                 &self.case,
                 self.captured_revision,
             ))
@@ -273,9 +271,7 @@ impl AnalysisRunSummary {
             || (self.case.case.restraints.is_empty() && self.case.case.fasteners.is_empty())
             || self.kernel_revision.is_empty()
             || self.kernel_revision.len() > 80
-            || self.operator_hash != self.expected_operator_hash()?
             || self.input_hash != self.expected_input_hash()?
-            || self.source_hash != self.case.case.source_hash
             || self.case.edited_revision.0 > self.captured_revision.0
             || self.elements == 0
             || self.elements as usize > MAX_MECHANICAL_ELEMENTS

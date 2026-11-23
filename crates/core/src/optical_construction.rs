@@ -117,11 +117,9 @@ pub fn prepare_optical_construction(
     let mut materials = Vec::new();
     for (index, binding) in application.bindings.iter().enumerate() {
         check_cancel()?;
-        if binding.evidence_key != study.request.materials[index]
-            || binding.evidence_hash != report.material_evidence_hashes[index]
-        {
+        if binding.evidence_key != study.request.materials[index] {
             return Err(invalid(
-                "explicit evidence keys/hashes must match retained study material order",
+                "explicit evidence keys must match retained study material order",
             ));
         }
         let row = palette_asset
@@ -135,16 +133,11 @@ pub fn prepare_optical_construction(
                 .map_err(manufacturing_error)?,
         )]
         .material;
-        if loaded.declaration_hash != binding.loaded_declaration_hash
-            || row.evidence_hash()? != binding.evidence_hash
-        {
-            return Err(invalid(
-                "explicit loaded-material declaration or optical evidence changed",
-            ));
+        if row.evidence_hash()? != report.material_evidence_hashes[index] {
+            return Err(invalid("retained optical evidence changed"));
         }
         materials.push(AppliedOpticalMaterial {
             evidence: row.clone(),
-            evidence_hash: binding.evidence_hash.clone(),
             loaded_material: loaded.clone(),
         });
     }
@@ -154,7 +147,6 @@ pub fn prepare_optical_construction(
     let material_ids = materials.each_ref().map(|m| m.loaded_material.id.clone());
     let origin = OpticalConstructionOrigin {
         report: record.clone(),
-        palette_hash: palette.canonical_hash.clone(),
         selection: application.selection,
         model: study.request.model,
         observation: study.request.observation,
@@ -204,9 +196,7 @@ mod tests {
         construction.source_hash = source.record.provenance.source_hash.clone();
         let bindings = std::array::from_fn(|i| OpticalMaterialBinding {
             evidence_key: report.request.materials[i].clone(),
-            evidence_hash: report.material_evidence_hashes[i].clone(),
             loaded_material_id: job.tools[i].material.id.clone(),
-            loaded_declaration_hash: job.tools[i].material.declaration_hash.clone(),
         });
         commit_appearance(
             &mut project,
@@ -250,8 +240,8 @@ mod tests {
             .unwrap();
         assert_eq!(origin.report.hash, application.report_hash);
         assert_eq!(
-            origin.materials[0].evidence_hash,
-            application.bindings[0].evidence_hash
+            origin.materials[0].evidence.key,
+            application.bindings[0].evidence_key
         );
         assert_eq!(origin.materials[1].loaded_material, job.tools[1].material);
         let wire =
@@ -346,11 +336,8 @@ mod tests {
             let mut wrong = application.clone();
             match mutation {
                 0 => wrong.report_hash = SourceHash::from_bytes(b"other report"),
-                1 => wrong.bindings[0].evidence_hash = SourceHash::from_bytes(b"other evidence"),
-                2 => {
-                    wrong.bindings[0].loaded_declaration_hash =
-                        SourceHash::from_bytes(b"other loaded material")
-                }
+                1 => wrong.bindings[0].evidence_key = "other evidence".into(),
+                2 => wrong.bindings[0].loaded_material_id = "other loaded material".into(),
                 3 => wrong.bindings.swap(0, 1),
                 _ => wrong.selection = OpticalSelection::Candidate { index: 0 },
             }

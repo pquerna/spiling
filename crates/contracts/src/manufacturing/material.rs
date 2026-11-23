@@ -63,7 +63,6 @@ pub struct MaterialProfileSource {
     pub kind: MaterialProfileSourceKind,
     pub source_id: String,
     pub source_revision: String,
-    pub source_hash: SourceHash,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]

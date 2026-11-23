@@ -282,8 +282,8 @@ explicit; a failed/cancelled/stale solve cannot replace attached fields.
 
 Core stores the exact SPLA bytes in the existing immutable PTAC graph, role 7,
 with the complete captured project/case, pose, recipe, assumed tensors, source
-identity, kernel/producer and native-sample identities, original operator/input
-fingerprints, assessment and numerical costs. The retained nodes/connectivity,
+identity, kernel/producer and native-sample identities, original input
+fingerprint, assessment and numerical costs. The retained nodes/connectivity,
 region roles, full-order formulation and captured directional laws define the
 original operator; numerical factors/JIT caches are disposable, not durable
 references. The source bytes remain in the same project's source closure. Live,

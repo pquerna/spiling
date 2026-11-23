@@ -77,7 +77,6 @@ impl ColorNamingRequest {
 #[serde(deny_unknown_fields)]
 pub struct ColorNamingResponse {
     pub algorithm_version: u32,
-    pub dataset_sha256: String,
     pub mode: ColorNamingMode,
     pub colors: Vec<NamedColor>,
 }
@@ -88,10 +87,8 @@ impl ColorNamingResponse {
             colors: self.colors.iter().map(|v| v.srgb8).collect(),
         }
         .validate()?;
-        if self.algorithm_version != COLOR_NAMING_VERSION
-            || self.dataset_sha256 != COLOR_NAMING_DATASET_SHA256
-        {
-            return Err("unknown color naming algorithm or dataset".into());
+        if self.algorithm_version != COLOR_NAMING_VERSION {
+            return Err("unknown color naming algorithm".into());
         }
         for color in &self.colors {
             if color.hex != srgb8_hex(color.srgb8) {

@@ -100,7 +100,7 @@ impl Input {
             && scene
                 .definition(&case.definition_id)
                 .is_some_and(|definition| {
-                    definition.record.provenance.source_hash == summary.source_hash
+                    definition.record.provenance.source_hash == case.source_hash
                 })
             && scene.occurrences.iter().any(|occurrence| {
                 occurrence.occurrence_id == case.occurrence_id

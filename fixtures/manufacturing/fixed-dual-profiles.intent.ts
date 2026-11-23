@@ -50,7 +50,6 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
       kind: "synthetic_test",
       source_id: "material-profile-test-source.txt",
       source_revision: "1",
-      source_hash: "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865",
     },
   },
   setup: {

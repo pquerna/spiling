@@ -94,7 +94,6 @@ impl TryFrom<rpc::OpticalConstructionOrigin> for OpticalConstructionOrigin {
             .map(|m| {
                 Ok(AppliedOpticalMaterial {
                     evidence: required(m.evidence, "applied palette row")?.try_into()?,
-                    evidence_hash: SourceHash::parse(m.evidence_hash).map_err(|e| e.to_string())?,
                     loaded_material: required(m.loaded_material, "applied loaded material")?
                         .try_into()?,
                 })
@@ -104,7 +103,6 @@ impl TryFrom<rpc::OpticalConstructionOrigin> for OpticalConstructionOrigin {
             .map_err(|_| "optical capture count changed")?;
         let result = Self {
             report: required(v.report, "applied optical report")?.try_into()?,
-            palette_hash: SourceHash::parse(v.palette_hash).map_err(|e| e.to_string())?,
             selection: required(v.selection, "applied optical selection")?.try_into()?,
             model,
             observation: super::optical::observation(required(
@@ -138,7 +136,6 @@ impl TryFrom<OpticalConstructionOrigin> for rpc::OpticalConstructionOrigin {
         let [x, y, z] = patch.origin_mm;
         Ok(Self {
             report: Some(v.report.try_into()?),
-            palette_hash: v.palette_hash.into(),
             selection: Some(v.selection.try_into()?),
             model: match v.model {
                 OpticalModel::PrusaV7_007bb922 => rpc::OpticalModel::PrusaV7Reference,
@@ -163,7 +160,6 @@ impl TryFrom<OpticalConstructionOrigin> for rpc::OpticalConstructionOrigin {
                 .map(|m| {
                     Ok(rpc::AppliedOpticalMaterial {
                         evidence: Some(m.evidence.try_into()?),
-                        evidence_hash: m.evidence_hash.into(),
                         loaded_material: Some(m.loaded_material.try_into()?),
                     })
                 })
@@ -192,11 +188,7 @@ impl TryFrom<rpc::ApplyOpticalConstructionParameters> for ApplyOpticalConstructi
                 .map(|m| {
                     Ok(OpticalMaterialBinding {
                         evidence_key: m.evidence_key,
-                        evidence_hash: SourceHash::parse(m.evidence_hash)
-                            .map_err(|e| e.to_string())?,
                         loaded_material_id: m.loaded_material_id,
-                        loaded_declaration_hash: SourceHash::parse(m.loaded_declaration_hash)
-                            .map_err(|e| e.to_string())?,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?
@@ -220,9 +212,7 @@ impl TryFrom<ApplyOpticalConstruction> for rpc::ApplyOpticalConstructionParamete
                 .into_iter()
                 .map(|m| rpc::OpticalMaterialBinding {
                     evidence_key: m.evidence_key,
-                    evidence_hash: m.evidence_hash.into(),
                     loaded_material_id: m.loaded_material_id,
-                    loaded_declaration_hash: m.loaded_declaration_hash.into(),
                 })
                 .collect(),
         })

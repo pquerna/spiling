@@ -278,7 +278,7 @@ test("replay rejects descriptor tampering, hash mismatch and trailing/truncated 
       value.info.process_count = 100001;
     },
     (value: ReplayDisplayDescriptor) => {
-      value.info.program_hash = "not-a-hash";
+      value.info.bundle_hash = "not-a-hash";
     },
     (value: ReplayDisplayDescriptor) => {
       value.resource.media_type = "application/octet-stream";

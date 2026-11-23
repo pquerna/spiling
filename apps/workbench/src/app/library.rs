@@ -189,7 +189,6 @@ impl LibraryUi {
         {
             definition.source = DefinitionSource::Imported {
                 name: origin.origin.provider.clone(),
-                sha256: origin.origin.content.clone(),
             };
         }
         definition.name = self.name.trim().into();
@@ -209,7 +208,7 @@ impl LibraryUi {
                     color: AppearanceColor::Srgb {
                         channels: rgb.map(|v| f64::from(v) / 255.0),
                     },
-                    source: self.catalog_origin.as_ref().filter(|r|matches!(r.item,spiling_contracts::catalog::CatalogItem::Filament{srgb,..} if srgb==rgb)).map_or(DefinitionSource::Operator,|r|DefinitionSource::Imported{name:r.origin.provider.clone(),sha256:r.origin.content.clone()}),
+                    source: self.catalog_origin.as_ref().filter(|r|matches!(r.item,spiling_contracts::catalog::CatalogItem::Filament{srgb,..} if srgb==rgb)).map_or(DefinitionSource::Operator,|r|DefinitionSource::Imported{name:r.origin.provider.clone()}),
                 })
             };
         }
@@ -1016,7 +1015,7 @@ impl Workbench {
                 DefinitionSource::Operator => {
                     ui.label("Entered by the operator");
                 }
-                DefinitionSource::Imported { name, .. } => {
+                DefinitionSource::Imported { name } => {
                     ui.label(format!("Imported from {name}"));
                 }
             }
@@ -1515,7 +1514,6 @@ mod tests {
                 },
                 source: DefinitionSource::Imported {
                     name: "Source color".into(),
-                    sha256: SourceHash::from_bytes(b"source"),
                 },
             }),
             profiles: vec![],

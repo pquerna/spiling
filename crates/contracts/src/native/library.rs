@@ -61,10 +61,7 @@ impl TryFrom<rpc::LibraryDefinitionSource> for DefinitionSource {
                 {
                     return Err("invalid imported library source name".into());
                 }
-                Self::Imported {
-                    name: v.name,
-                    sha256: SourceHash::parse(v.sha256).map_err(|e| e.to_string())?,
-                }
+                Self::Imported { name: v.name }
             }
         })
     }
@@ -76,11 +73,8 @@ impl TryFrom<DefinitionSource> for rpc::LibraryDefinitionSource {
         let value = Self {
             kind: Some(match v {
                 DefinitionSource::Operator => Kind::Operator(()),
-                DefinitionSource::Imported { name, sha256 } => {
-                    Kind::Imported(rpc::LibraryImportedSource {
-                        name,
-                        sha256: sha256.as_str().into(),
-                    })
+                DefinitionSource::Imported { name } => {
+                    Kind::Imported(rpc::LibraryImportedSource { name })
                 }
             }),
         };

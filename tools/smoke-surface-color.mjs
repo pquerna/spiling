@@ -223,17 +223,15 @@ for (const [sourceName, mode] of cases) {
       "requested",
       "--save",
     ]);
-    const evidence = retained.optical[0].report;
+    assert.equal(retained.optical[0].report.material_evidence_hashes.length, 2);
     const bindings = study.materials.map((key, index) => ({
       evidence_key: key,
-      evidence_hash: evidence.material_evidence_hashes[index],
       loaded_material_id: job.tools[index].material.id,
-      loaded_declaration_hash: job.tools[index].material.declaration_hash,
     }));
     bindingsFile = join(output, `${name}.bindings.json`);
     await writeFile(bindingsFile, JSON.stringify(bindings));
     const wrong = structuredClone(bindings);
-    wrong[0].evidence_hash = "0".repeat(64);
+    wrong[0].evidence_key = "absent-evidence";
     const wrongFile = join(output, `${name}-wrong-binding.json`);
     await writeFile(wrongFile, JSON.stringify(wrong));
     await invoke(["project", "edit", project, "--apply-optical", "0", wrongFile], true, "project");

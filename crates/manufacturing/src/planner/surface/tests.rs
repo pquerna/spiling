@@ -14,8 +14,7 @@ pub(super) fn mapping(depth: f64, margin: f64) -> ImageMapping {
     bytes.extend([0, 0, 0, 255, 32, 170, 0, 0, 0]);
     let hash = SourceHash::from_bytes(&bytes);
     let record = SurfaceImageRecord {
-        image_hash: hash.clone(),
-        source_hash: hash,
+        image_hash: hash,
         width: 3,
         height: 3,
         byte_count: bytes.len() as u64,

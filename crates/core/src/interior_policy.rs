@@ -144,7 +144,6 @@ pub fn interior_policy_opportunity(
                 expected: binding.policy_override,
                 value: None,
             },
-            context_hash,
             input_hash,
         }));
     }

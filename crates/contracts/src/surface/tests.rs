@@ -234,7 +234,6 @@ fn image_fixture() -> (SurfaceImageRecord, Vec<u8>) {
             width: 2,
             height: 2,
             byte_count: bytes.len() as u64,
-            source_hash: SourceHash::from_bytes(b"encoded source"),
             source_name: "height.png".into(),
         },
         bytes,
@@ -268,7 +267,6 @@ fn canonical_image_hash_includes_dimensions_and_borrows_exact_pixels() {
     let b = [b"P5\n3 2\n255\n".as_slice(), &pixels].concat();
     assert_ne!(SourceHash::from_bytes(&a), SourceHash::from_bytes(&b));
     let mut provenance = record.clone();
-    provenance.source_hash = SourceHash::from_bytes(b"different PNG color/alpha encoding");
     provenance.source_name = "normalized-equivalent.pgm".into();
     assert_eq!(
         provenance.validate_content(&bytes).unwrap().pixels,
@@ -343,8 +341,8 @@ fn image_metadata_is_exact_sorted_used_authority_even_for_disabled_layers() {
     doc.layers[0].enabled = false;
     let mut inflated = doc.clone();
     let mut hash_storage = String::with_capacity(MAX_SURFACE_DOCUMENT_BYTES + 1);
-    hash_storage.push_str(record.source_hash.as_str());
-    inflated.images[0].source_hash = SourceHash::parse(hash_storage).unwrap();
+    hash_storage.push_str(record.image_hash.as_str());
+    inflated.images[0].image_hash = SourceHash::parse(hash_storage).unwrap();
     assert_eq!(
         inflated.validate().unwrap_err().code,
         ProjectErrorCode::ResourceLimit

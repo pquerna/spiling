@@ -173,8 +173,7 @@
                   "source": {
                     "kind": "synthetic_test",
                     "source_id": "material-profile-test-source.txt",
-                    "source_revision": "1",
-                    "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
+                    "source_revision": "1"
                   }
                 },
                 "setup": {
@@ -199,7 +198,6 @@
             "material": {
               "id": "software-pla-a",
               "revision": "1",
-              "declaration_hash": "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111",
               "polymer_family": "PLA"
             },
             "offset_xy_mm": [
@@ -295,8 +293,7 @@
                   "source": {
                     "kind": "synthetic_test",
                     "source_id": "material-profile-test-source.txt",
-                    "source_revision": "1",
-                    "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
+                    "source_revision": "1"
                   }
                 },
                 "setup": {
@@ -321,7 +318,6 @@
             "material": {
               "id": "software-pla-a",
               "revision": "1",
-              "declaration_hash": "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111",
               "polymer_family": "PLA"
             },
             "offset_xy_mm": [

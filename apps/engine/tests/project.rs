@@ -261,9 +261,9 @@ async fn force_tool_check() {
         let fields = AnalysisFields::decode(&bytes).unwrap();
         assert_eq!(fields.summary.costs.operator_reused, index > 0);
         if let Some(hash) = &operator {
-            assert_eq!(hash, &fields.summary.operator_hash);
+            assert_eq!(hash, &fields.summary.expected_operator_hash().unwrap());
         }
-        operator = Some(fields.summary.operator_hash.clone());
+        operator = Some(fields.summary.expected_operator_hash().unwrap());
         let area: f64 = (0..fields.patch_count)
             .map(|index| fields.patch(index).unwrap().area_mm2)
             .sum();
@@ -717,7 +717,10 @@ async fn whole_hook_service_check() {
     let (_, warm) = run(&mut client, &case.id, &settings).await;
     let second = AnalysisFields::decode(&warm).unwrap();
     assert!(second.summary.costs.operator_reused);
-    assert_eq!(second.summary.operator_hash, first.summary.operator_hash);
+    assert_eq!(
+        second.summary.expected_operator_hash().unwrap(),
+        first.summary.expected_operator_hash().unwrap()
+    );
     assert_ne!(second.summary.input_hash, first.summary.input_hash);
     assert_eq!(second.summary.costs.operator_setup_ms, 0.0);
     assert!(
@@ -739,7 +742,10 @@ async fn whole_hook_service_check() {
     let (_, moved) = run(&mut client, &case.id, &settings).await;
     let moved = AnalysisFields::decode(&moved).unwrap();
     assert!(moved.summary.costs.operator_reused);
-    assert_eq!(moved.summary.operator_hash, first.summary.operator_hash);
+    assert_eq!(
+        moved.summary.expected_operator_hash().unwrap(),
+        first.summary.expected_operator_hash().unwrap()
+    );
     assert_ne!(moved.summary.input_hash, second.summary.input_hash);
     assert!(moved.summary.assessment.patch_moment_error_n_mm < 1e-9);
     case.loads[0].face_id = original_face;
@@ -794,7 +800,10 @@ async fn whole_hook_service_check() {
         .unwrap();
     let (_, oriented_bytes) = run(&mut client, &case.id, &settings).await;
     let oriented = AnalysisFields::decode(&oriented_bytes).unwrap();
-    assert_ne!(oriented.summary.operator_hash, second.summary.operator_hash);
+    assert_ne!(
+        oriented.summary.expected_operator_hash().unwrap(),
+        second.summary.expected_operator_hash().unwrap()
+    );
     assert_ne!(
         oriented.summary.region_volume_mm3,
         second.summary.region_volume_mm3
@@ -1067,8 +1076,8 @@ async fn whole_hook_service_check() {
                     if variant == 5 {
                         summary["project_id"] = serde_json::json!(ProjectId::new());
                     } else if variant == 6 {
-                        summary["operator_hash"] =
-                            serde_json::json!(SourceHash::from_bytes(b"invented operator"));
+                        summary["input_hash"] =
+                            serde_json::json!(SourceHash::from_bytes(b"invented input"));
                     } else {
                         let mut captured: AnalysisRunSummary =
                             serde_json::from_value(summary).unwrap();
@@ -1078,7 +1087,6 @@ async fn whole_hook_service_check() {
                         } else {
                             captured.case.case.restraints[0].face_id = absent;
                         }
-                        captured.operator_hash = captured.expected_operator_hash().unwrap();
                         captured.input_hash = captured.expected_input_hash().unwrap();
                         root.analysis.results[0].input_hash = captured.input_hash.clone();
                         summary = serde_json::to_value(captured).unwrap();
@@ -4077,6 +4085,7 @@ async fn optical_application_uses_ack_revision_fences_and_no_scene_outputs() {
     };
     let rpc = client.rpc();
     let report = rpc.fetch_optical_report(&record, &resource).await.unwrap();
+    assert_eq!(report.material_evidence_hashes.len(), 2);
     client
         .project(ProjectCommand::AcceptOpticalReport {
             session_id: session.clone(),
@@ -4092,9 +4101,7 @@ async fn optical_application_uses_ack_revision_fences_and_no_scene_outputs() {
         selection: OpticalSelection::Requested,
         bindings: std::array::from_fn(|i| OpticalMaterialBinding {
             evidence_key: request.materials[i].clone(),
-            evidence_hash: report.material_evidence_hashes[i].clone(),
             loaded_material_id: tools[i].material.id.clone(),
-            loaded_declaration_hash: tools[i].material.declaration_hash.clone(),
         }),
     };
     let original_scene = scene(&mut client).await;

@@ -75,9 +75,7 @@ impl AnalysisResultAsset {
             || !snapshot
                 .sources
                 .get(&case.definition_id)
-                .is_some_and(|source| {
-                    source.record.provenance.source_hash == self.summary.source_hash
-                })
+                .is_some_and(|source| source.record.provenance.source_hash == case.source_hash)
         {
             return Err(invalid(
                 "retained analysis source/project/case closure mismatch",

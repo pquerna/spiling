@@ -590,9 +590,7 @@ async fn matched_stock_recipe_reaches_actual_replay_export_and_source_free_recom
         selection: OpticalSelection::Requested,
         bindings: std::array::from_fn(|i| OpticalMaterialBinding {
             evidence_key: fresh.request.materials[i].clone(),
-            evidence_hash: fresh.material_evidence_hashes[i].clone(),
             loaded_material_id: tools[i].material.id.clone(),
-            loaded_declaration_hash: tools[i].material.declaration_hash.clone(),
         }),
     };
     let ProjectResponse::OperationAccepted { operation } = c

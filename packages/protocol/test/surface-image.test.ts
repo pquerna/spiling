@@ -142,7 +142,7 @@ test("metadata and resource identities, exact MIME and complete byte counts are 
   }
   for (const change of [
     { image_hash: "F".repeat(64) },
-    { source_hash: "bad" },
+    { image_hash: "bad" },
     { byte_count: 0 },
     { source_name: "" },
     { source_name: "a\u0000b" },

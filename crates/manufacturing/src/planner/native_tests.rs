@@ -2835,7 +2835,6 @@ fn install_image(
         width,
         height,
         byte_count: bytes.len() as u64,
-        source_hash: image_hash.clone(),
         source_name: "independent image samples.pgm".into(),
     };
     let image = Arc::new(

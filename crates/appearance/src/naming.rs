@@ -244,7 +244,6 @@ pub fn name_colors(request: &ColorNamingRequest) -> Result<ColorNamingResponse, 
     request.validate()?;
     Ok(ColorNamingResponse {
         algorithm_version: COLOR_NAMING_VERSION,
-        dataset_sha256: COLOR_NAMING_DATASET_SHA256.into(),
         mode: request.mode,
         colors: request
             .colors

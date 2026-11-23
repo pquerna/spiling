@@ -92,8 +92,6 @@ export async function decodeReplayDisplay(
     [
       "schema_version",
       "bundle_hash",
-      "input_hash",
-      "program_hash",
       "verifier_version",
       "frame",
       "event_count",
@@ -110,8 +108,6 @@ export async function decodeReplayDisplay(
   );
   keys(resource, ["name", "size_bytes", "sha256", "media_type"], fail);
   hash(info.bundle_hash, fail);
-  hash(info.input_hash, fail);
-  hash(info.program_hash, fail);
   hash(resource.sha256, fail);
   if (info.schema_version !== 7 || info.frame !== "right_handed_millimetres")
     fail("unsupported schema or coordinate frame");

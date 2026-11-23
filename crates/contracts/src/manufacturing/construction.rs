@@ -443,9 +443,7 @@ pub(super) fn constructions<'de, D: serde::Deserializer<'de>>(
 #[serde(deny_unknown_fields)]
 pub struct OpticalMaterialBinding {
     pub evidence_key: String,
-    pub evidence_hash: SourceHash,
     pub loaded_material_id: String,
-    pub loaded_declaration_hash: SourceHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -491,7 +489,6 @@ impl ApplyOpticalConstruction {
 #[serde(deny_unknown_fields)]
 pub struct AppliedOpticalMaterial {
     pub evidence: crate::appearance::PaletteRow,
-    pub evidence_hash: SourceHash,
     pub loaded_material: LoadedMaterial,
 }
 
@@ -499,7 +496,6 @@ pub struct AppliedOpticalMaterial {
 #[serde(deny_unknown_fields)]
 pub struct OpticalConstructionOrigin {
     pub report: crate::optical::OpticalReportRecord,
-    pub palette_hash: SourceHash,
     pub selection: crate::optical::OpticalSelection,
     pub model: crate::optical::OpticalModel,
     pub observation: crate::optical::OpticalObservation,
@@ -537,11 +533,6 @@ impl OpticalConstructionOrigin {
         }
         for material in &self.materials {
             material.evidence.validate().map_err(convert)?;
-            if material.evidence.evidence_hash().map_err(convert)? != material.evidence_hash {
-                return Err(invalid(
-                    "optical construction evidence content hash changed",
-                ));
-            }
             for value in [
                 &material.loaded_material.id,
                 &material.loaded_material.revision,

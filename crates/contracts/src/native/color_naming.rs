@@ -112,7 +112,6 @@ impl TryFrom<rpc::NameColorsReply> for ColorNamingResponse {
             .collect::<Result<_, String>>()?;
         let result = Self {
             algorithm_version: v.algorithm_version,
-            dataset_sha256: v.dataset_sha256,
             mode: mode(v.mode)?,
             colors,
         };
@@ -126,7 +125,6 @@ impl TryFrom<&ColorNamingResponse> for rpc::NameColorsReply {
         v.validate()?;
         Ok(Self {
             algorithm_version: v.algorithm_version,
-            dataset_sha256: v.dataset_sha256.clone(),
             mode: wire_mode(v.mode),
             colors: v
                 .colors
@@ -169,7 +167,6 @@ mod tests {
         assert!(ColorNamingRequest::try_from(bad).is_err());
         let response = ColorNamingResponse {
             algorithm_version: COLOR_NAMING_VERSION,
-            dataset_sha256: COLOR_NAMING_DATASET_SHA256.into(),
             mode: ColorNamingMode::Exact,
             colors: vec![NamedColor {
                 srgb8: [255, 0, 0],

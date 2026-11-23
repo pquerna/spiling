@@ -122,7 +122,7 @@ message SurfaceCylindricalRibs { double depth_mm = 1; uint32 rib_count = 2; doub
 // Millimetres are explicit; U is repeat-cycle fraction, Z phase is physical source Z.
 message ImageReliefParameters { double depth_mm = 1; uint32 u_repeats = 2; double u_phase_fraction = 3; double z_period_mm = 4; double z_phase_mm = 5; double edge_margin_mm = 6; double vertical_error_mm = 7; }
 message SurfaceImageRelief { string image_hash = 1; ImageReliefParameters parameters = 2; }
-message SurfaceImageRecord { string image_hash = 1; uint32 width = 2; uint32 height = 3; uint64 byte_count = 4; string source_hash = 5; string source_name = 6; }
+message SurfaceImageRecord { string image_hash = 1; uint32 width = 2; uint32 height = 3; uint64 byte_count = 4; string source_name = 6; }
 message SurfaceFinish { oneof kind { SurfaceSmooth smooth = 1; SurfaceVerticalRibs vertical_ribs = 2; SurfaceCylindricalRibs cylindrical_ribs = 3; SurfaceImageRelief image_relief = 4; } }
 message SurfaceLayer { uint32 layer_id = 1; bool enabled = 2; SurfaceScope scope = 3; string face_id = 4; SurfaceFinish finish = 5; }
 message SurfaceOverlays { uint32 schema_version = 1; repeated SurfaceLayer layers = 2; repeated SurfaceImageRecord images = 3; }
@@ -225,9 +225,7 @@ message OpticalComparedResult { string project_id = 1; uint32 captured_revision 
 
 message OpticalMaterialBinding {
  string evidence_key = 1;
- string evidence_hash = 2;
  string loaded_material_id = 3;
- string loaded_declaration_hash = 4;
 }
 message ApplyOpticalConstructionParameters {
  uint32 construction_index = 1;

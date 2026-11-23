@@ -267,7 +267,6 @@ impl Workbench {
                     ui.label(format!("Native shape allowance {:.6} mm", summary.native_shape_error_mm));
                     ui.label(&summary.settings.laws.name); ui.label(&summary.settings.laws.justification);
                     ui.monospace(format!("input {}", summary.input_hash.as_str()));
-                    ui.monospace(format!("operator {}", summary.operator_hash.as_str()));
                     ui.label("Attach, then Save retains these fields and assumptions in .spil. Reopen restores without solving; changed inputs retain stale evidence.");
                     if let Some(previous) = self.state.mechanics_previous.as_ref().filter(|previous| previous.project == capture.project) {
                         ui.separator(); ui.label("Previous result (check captured loads/model before comparing)");

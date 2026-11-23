@@ -166,7 +166,6 @@ impl CatalogRecord {
         };
         let source = crate::library::DefinitionSource::Imported {
             name: self.origin.provider.clone(),
-            sha256: self.origin.content.clone(),
         };
         // A recognised polymer family and a declared diameter make the
         // catalog filament usable: it carries a material identity and the

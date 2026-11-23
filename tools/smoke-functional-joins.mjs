@@ -544,7 +544,7 @@ async function checkReplay(file, directory, report, intent, plan) {
   assert.equal(replay.verification.verified, true);
   assert.equal(replay.replay_display.info.bundle_hash, report.manufacturing.artifact.hash);
   assert.equal(
-    replay.replay_display.info.program_hash,
+    report.manufacturing.artifact.program.hash,
     hash(await readFile(join(directory, "program.gcode"))),
   );
   const bytes = await readFile(file);
@@ -741,7 +741,6 @@ try {
   job.surface_constructions = [];
   job.tools[0].material.id = "software-tpu";
   job.tools[0].material.polymer_family = "TPU";
-  job.tools[0].material.declaration_hash = hash(Buffer.from("software TPU declaration"));
   job.tools[0].filament_diameter_mm = 2.85;
   job.tools[0].nozzle_temperature_c = 220;
   assert.equal(job.tools[1].material.polymer_family, "PLA", "mixed-family smoke requires TPU/PLA");

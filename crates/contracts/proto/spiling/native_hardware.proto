@@ -363,7 +363,6 @@ enum FixedDualConfiguration {
 message LoadedMaterial {
   string id = 1;
   string revision = 2;
-  string declaration_hash = 3;
   string polymer_family = 4;
 }
 message FixedDualTool {
@@ -557,12 +556,10 @@ message SurfaceColorConstruction {
 }
 message AppliedOpticalMaterial {
  AppearancePaletteRow evidence = 1;
- string evidence_hash = 2;
  LoadedMaterial loaded_material = 3;
 }
 message OpticalConstructionOrigin {
  OpticalReportRecord report = 1;
- string palette_hash = 2;
  OpticalSelection selection = 3;
  OpticalModel model = 4;
  OpticalObservation observation = 5;

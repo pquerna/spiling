@@ -836,7 +836,6 @@ fn captured_construction_reassesses_realized_exposure_and_preserves_unknowns() {
     let report = compare(&palette, Arc::new(request.clone()), &|| false).unwrap();
     let mut origin = OpticalConstructionOrigin {
         report: report.canonical_record().unwrap(),
-        palette_hash: palette.canonical_hash().clone(),
         selection: OpticalSelection::Requested,
         model: request.model,
         observation: request.observation,
@@ -845,11 +844,9 @@ fn captured_construction_reassesses_realized_exposure_and_preserves_unknowns() {
         recipe: request.recipe,
         materials: std::array::from_fn(|i| AppliedOpticalMaterial {
             evidence: document.rows[i].clone(),
-            evidence_hash: palette.evidence_hashes()[i].clone(),
             loaded_material: LoadedMaterial {
                 id: format!("loaded-{i}"),
                 revision: "1".into(),
-                declaration_hash: SourceHash::from_bytes(&[i as u8]),
                 polymer_family: "PLA".into(),
             },
         }),
@@ -892,7 +889,6 @@ fn captured_construction_reassesses_realized_exposure_and_preserves_unknowns() {
     origin.materials[0].evidence.evidence = AppearanceEvidence::Unknown {
         reason: "no acquisition".into(),
     };
-    origin.materials[0].evidence_hash = origin.materials[0].evidence.evidence_hash().unwrap();
     assert!(matches!(
         assess_construction(&origin, &patch(0.0, 8.0), [4.0, 4.0], true)
             .unwrap()

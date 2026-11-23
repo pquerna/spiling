@@ -766,7 +766,6 @@ fn canonical_image_record() -> spiling_contracts::surface::SurfaceImageRecord {
         width: 2,
         height: 2,
         byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(b"original png"),
         source_name: "height.png".into(),
     }
 }

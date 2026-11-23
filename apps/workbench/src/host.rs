@@ -1461,7 +1461,8 @@ impl Actor {
                 });
                 self.state.mechanics_previous = self.state.mechanics.clone().filter(|previous| {
                     previous.project == report.project
-                        && previous.summary.source_hash == report.summary.source_hash
+                        && previous.summary.case.case.source_hash
+                            == report.summary.case.case.source_hash
                         && previous.summary.case.case.id == report.summary.case.case.id
                         && previous.summary.case.case.loads == report.summary.case.case.loads
                         && previous.summary.case.case.restraints

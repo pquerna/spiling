@@ -2809,8 +2809,6 @@ impl TryFrom<rpc::LoadedMaterial> for LoadedMaterial {
         let result = Self {
             id: value.id,
             revision: value.revision,
-            declaration_hash: SourceHash::parse(value.declaration_hash)
-                .map_err(|e| e.to_string())?,
             polymer_family: value.polymer_family,
         };
         validate_loaded_material(&result)?;
@@ -2824,7 +2822,6 @@ impl TryFrom<LoadedMaterial> for rpc::LoadedMaterial {
         Ok(Self {
             id: value.id,
             revision: value.revision,
-            declaration_hash: value.declaration_hash.into(),
             polymer_family: value.polymer_family,
         })
     }
@@ -3767,7 +3764,6 @@ mod fixed_dual_wire_tests {
             material: LoadedMaterial {
                 id: format!("material-{index}"),
                 revision: "declared-1".into(),
-                declaration_hash: SourceHash::from_bytes(&[index as u8]),
                 polymer_family: "PLA".into(),
             },
             offset_xy_mm: [index as f64 * 20.0, 0.0],
@@ -4383,7 +4379,6 @@ impl TryFrom<rpc::MaterialProfileSource> for MaterialProfileSource {
                 kind: MaterialProfileSourceKind::try_from(value.kind)?,
                 source_id: value.source_id,
                 source_revision: value.source_revision,
-                source_hash: SourceHash::parse(value.source_hash).map_err(|e| e.to_string())?,
             },
             Self::validate,
         )
@@ -4401,7 +4396,6 @@ impl TryFrom<MaterialProfileSource> for rpc::MaterialProfileSource {
             },
             source_id: value.source_id,
             source_revision: value.source_revision,
-            source_hash: value.source_hash.as_str().to_owned(),
         })
     }
 }

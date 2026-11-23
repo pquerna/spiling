@@ -43,7 +43,6 @@ pub fn normalize(
         width,
         height,
         byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(encoded),
         source_name,
     };
     record.validate_content(&bytes)?;

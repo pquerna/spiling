@@ -466,7 +466,7 @@ fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
         let bytes = bytes.to_vec().unwrap();
         validate_replay_display(
             &bytes,
-            &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+            &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
         )
         .unwrap();
     }
@@ -1155,7 +1155,7 @@ fn packed_sink_retains_all_motion_beyond_the_retired_preview_ceiling() {
     let (bytes, bounds) = sink.finish().unwrap();
     assert!(bytes.len() > 32 * 1024 * 1024);
     let bytes = bytes.to_vec().unwrap();
-    let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
+    let descriptor = packed_process_descriptor(&bytes, bounds, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     assert_eq!(
         bytes.len(),
@@ -1208,7 +1208,7 @@ fn hop_expansion_over_one_hundred_thousand_travels_keeps_exact_replay() {
     );
     validate_replay_display(
         &bytes,
-        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+        &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
     )
     .unwrap();
 }
@@ -1249,7 +1249,7 @@ fn worst_case_hop_estimate_does_not_refuse_a_small_actual_stream() {
     let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
-        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+        &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
     )
     .unwrap();
 }
@@ -1514,8 +1514,6 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
         info: ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"test bundle"),
-            input_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"test intent"),
-            program_hash: spiling_contracts::geometry::SourceHash::from_bytes(program.as_bytes()),
             verifier_version: "test".into(),
             frame: intent.printer.coordinate_frame,
             event_count: 13,
@@ -1897,7 +1895,6 @@ G1 X15 Y1 Z1.5 E2.254648 F240
 fn packed_process_descriptor(
     bytes: &[u8],
     bounds: AabbMm,
-    program: &str,
     intent: &ManufacturingIntent,
     plan: &NormalizedPrintPlan,
     report: &VerificationReport,
@@ -1915,10 +1912,6 @@ fn packed_process_descriptor(
             bundle_hash: spiling_contracts::geometry::SourceHash::from_bytes(
                 b"standalone software fixture",
             ),
-            input_hash: spiling_contracts::geometry::SourceHash::from_bytes(
-                &serde_json::to_vec(intent).unwrap(),
-            ),
-            program_hash: spiling_contracts::geometry::SourceHash::from_bytes(program.as_bytes()),
             verifier_version: crate::VERIFIER_VERSION.into(),
             frame: intent.printer.coordinate_frame,
             event_count: report.deposition_segments
@@ -1971,7 +1964,7 @@ fn independent_process_golden_separates_support_object_and_stationary_recovery()
     let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
-        &packed_process_descriptor(&bytes, bounds, PROCESS_GOLDEN, &intent, &plan, &report),
+        &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
     )
     .unwrap();
     assert_eq!(&bytes[88..92], &4u32.to_le_bytes());
@@ -2706,7 +2699,7 @@ fn threshold_and_zero_hop_recovery_preserve_absolute_extrusion_without_extra_xyz
         let bytes = bytes.to_vec().unwrap();
         validate_replay_display(
             &bytes,
-            &packed_process_descriptor(&bytes, bounds, &emitted, &intent, &plan, &report),
+            &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
         )
         .unwrap();
         assert_eq!(report.travel_segments, 3);
@@ -2754,7 +2747,7 @@ fn complete_prime_to_first_body_can_retract_at_known_stationary_position() {
     assert!((report.filament_length_mm - 6.0).abs() < 1e-12);
     validate_replay_display(
         &bytes,
-        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+        &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
     )
     .unwrap();
 }
@@ -2838,7 +2831,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     assert!((report.deposited_volume_mm3 - expected).abs() < expected * 1e-4);
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
-    let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
+    let descriptor = packed_process_descriptor(&bytes, bounds, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     let sparse = bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
@@ -2911,10 +2904,9 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         let mut actual = fixture.clone();
         // Producer freshness is validated against captured provenance elsewhere;
         // an ABI golden owns motion bytes, dimensions, association and layout,
-        // not an incidental producer literal or its semantic-input fingerprint.
+        // not an incidental producer literal.
         for value in [&mut committed, &mut actual] {
             let info = value["descriptor"]["info"].as_object_mut().unwrap();
-            info.remove("input_hash");
             info.remove("verifier_version");
         }
         assert_eq!(
@@ -4138,7 +4130,7 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
     }
     let (bytes, bounds) = sink.finish().unwrap();
     let bytes = bytes.to_vec().unwrap();
-    let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
+    let descriptor = packed_process_descriptor(&bytes, bounds, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
     let records = bytes[REPLAY_HEADER_BYTES..]
         .as_chunks::<REPLAY_RECORD_BYTES>()
@@ -4184,7 +4176,6 @@ fn fixed_dual_golden(model_tool: Option<usize>) {
         let mut golden = golden;
         for value in [&mut committed, &mut golden] {
             let info = value["descriptor"]["info"].as_object_mut().unwrap();
-            info.remove("input_hash");
             info.remove("verifier_version");
         }
         assert_eq!(
@@ -4512,7 +4503,7 @@ fn motion_beyond_display_capacity_is_omitted_without_failing_verification() {
     let bytes = bytes.to_vec().unwrap();
     validate_replay_display(
         &bytes,
-        &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+        &packed_process_descriptor(&bytes, bounds, &intent, &plan, &report),
     )
     .unwrap();
 }

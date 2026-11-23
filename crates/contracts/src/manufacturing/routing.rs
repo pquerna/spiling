@@ -21,8 +21,6 @@ pub enum FixedDualConfiguration {
 pub struct LoadedMaterial {
     pub id: String,
     pub revision: String,
-    /// Identity of the inert material declaration, not a measured color model.
-    pub declaration_hash: SourceHash,
     pub polymer_family: String,
 }
 

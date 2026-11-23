@@ -87,7 +87,6 @@ message MaterialProfileSource {
   MaterialProfileSourceKind kind = 1;
   string source_id = 2;
   string source_revision = 3;
-  string source_hash = 4;
 }
 
 message MaterialProcessProfile {

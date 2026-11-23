@@ -862,7 +862,6 @@ fn mechanical_capture_replays_distinct_polymers_temperatures_and_filament_diamet
         .interface_policy = FunctionalInterfacePolicy::MechanicalCapture;
     job.tools[0].material.polymer_family = "TPU".into();
     job.tools[0].material.id = "software-tpu".into();
-    job.tools[0].material.declaration_hash = SourceHash::from_bytes(b"software TPU declaration");
     job.functional_construction.as_mut().unwrap().material_id = job.tools[0].material.id.clone();
     job.tools[0].filament_diameter_mm = 2.85;
     job.tools[0].nozzle_temperature_c = 220.0;
@@ -3389,7 +3388,6 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             // require replacing unchanged motion bytes or decoded dimensions.
             let info = value["descriptor"]["info"].as_object_mut().unwrap();
             info.remove("bundle_hash");
-            info.remove("input_hash");
             info.remove("verifier_version");
         }
         assert_eq!(committed, fixture, "native replay ABI golden drift");

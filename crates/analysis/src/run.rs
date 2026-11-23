@@ -130,8 +130,6 @@ pub fn execute(
         case: capture.case.clone(),
         captured_revision: capture.revision,
         input_hash,
-        operator_hash: cached.hash.clone(),
-        source_hash: capture.case.case.source_hash.clone(),
         pose: capture.pose,
         settings: capture.settings.clone(),
         native_shape_error_mm: cached.shape_error_mm,

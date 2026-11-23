@@ -155,7 +155,7 @@ impl StockUi {
                     spiling_contracts::library::DefinitionSource::Operator => {
                         "Operator-declared color".into()
                     }
-                    spiling_contracts::library::DefinitionSource::Imported { name, .. } => {
+                    spiling_contracts::library::DefinitionSource::Imported { name } => {
                         format!("Declared color · {name}")
                     }
                 });
@@ -177,13 +177,6 @@ impl StockUi {
                     ui.label("Physical stock not recorded");
                 } else {
                     ui.label(format!("{} physical spools on hand", c.on_hand_spools));
-                }
-                if let Some(spiling_contracts::library::DeclaredAppearance {
-                    source: spiling_contracts::library::DefinitionSource::Imported { sha256, .. },
-                    ..
-                }) = &c.appearance
-                {
-                    ui.label(format!("Color source {}", sha256.as_str()));
                 }
                 ui.label(c.hueforge_td_mm.map_or("HueForge TD unknown".into(), |v| {
                     format!("HueForge TD {v} mm · retained declaration")

@@ -364,7 +364,6 @@ impl Workbench {
                 "Source {} / {}",
                 p.source.source_id, p.source.source_revision
             ));
-            ui.label(format!("Source hash {}", p.source.source_hash.as_str()));
             ui.label(format!(
                 "Declared material flow ceiling {:.3} mm³/s",
                 p.max_volumetric_flow_mm3_s

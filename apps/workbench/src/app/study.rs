@@ -258,11 +258,7 @@ impl Workbench {
                         ui.selectable_value(
                             &mut self.study.bindings[i],
                             Some(index),
-                            format!(
-                                "{} · declaration {}",
-                                tool.material.id,
-                                tool.material.declaration_hash.as_str()
-                            ),
+                            format!("{} · revision {}", tool.material.id, tool.material.revision),
                         );
                     }
                 });
@@ -308,9 +304,7 @@ impl Workbench {
                     let tool = &job.tools[[a, b][i]];
                     OpticalMaterialBinding {
                         evidence_key: study.request.materials[i].clone(),
-                        evidence_hash: capture.report.material_evidence_hashes[i].clone(),
                         loaded_material_id: tool.material.id.clone(),
-                        loaded_declaration_hash: tool.material.declaration_hash.clone(),
                     }
                 }),
             });

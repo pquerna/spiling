@@ -3440,7 +3440,6 @@ fn image_bundle() -> ManufacturingBundle {
         width: 2,
         height: 2,
         byte_count: bytes.len() as u64,
-        source_hash: SourceHash::from_bytes(b"encoded png"),
         source_name: "height.png".into(),
     };
     let parameters = ImageReliefParameters {
@@ -3634,9 +3633,6 @@ fn image_fingerprint_binds_every_mapping_and_first_admission_provenance_even_dis
         }
         assert_ne!(fingerprint(&changed), disabled_hash);
     }
-    let mut changed = disabled.clone();
-    changed.images[0].source_hash = SourceHash::from_bytes(b"different encoded alpha provenance");
-    assert_ne!(fingerprint(&changed), disabled_hash);
     let mut changed = disabled;
     changed.images[0].source_name = "renamed.png".into();
     assert_ne!(fingerprint(&changed), disabled_hash);

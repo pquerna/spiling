@@ -265,9 +265,7 @@ try {
     "bindings.json",
     request.materials.map((key, i) => ({
       evidence_key: key,
-      evidence_hash: evidence.material_evidence_hashes[i],
       loaded_material_id: job.tools[i].material.id,
-      loaded_declaration_hash: job.tools[i].material.declaration_hash,
     })),
   );
   await unlink(source);

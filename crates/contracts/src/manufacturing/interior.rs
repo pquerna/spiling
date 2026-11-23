@@ -359,7 +359,6 @@ impl NormalizedPrintPlan {
 #[serde(deny_unknown_fields)]
 pub struct InteriorPolicyOpportunity {
     pub edit: InteriorToolPolicyEdit,
-    pub context_hash: SourceHash,
     pub input_hash: SourceHash,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]

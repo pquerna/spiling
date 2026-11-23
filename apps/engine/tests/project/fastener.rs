@@ -312,7 +312,10 @@ async fn fastener_service_check() {
     let first = AnalysisFields::decode(&cold).unwrap();
     let second = AnalysisFields::decode(&warm).unwrap();
     assert!(second.summary.costs.operator_reused);
-    assert_eq!(second.summary.operator_hash, first.summary.operator_hash);
+    assert_eq!(
+        second.summary.expected_operator_hash().unwrap(),
+        first.summary.expected_operator_hash().unwrap()
+    );
     assert_ne!(second.summary.input_hash, first.summary.input_hash);
     assert!(
         (second.summary.strain_energy_n_mm / first.summary.strain_energy_n_mm - 4.0).abs() < 1e-7

@@ -22,9 +22,6 @@ const NOZZLES = [0.25, 0.4, 0.5, 0.6, 0.8];
 const pwm = (percent: number) => Math.round((percent / 100) * 255);
 const round6 = (v: number) => Math.round(v * 1e6) / 1e6;
 
-// SHA-256 of the exact bundled profile files the values cite.
-const PRUSA_RESEARCH_INI = "51f65fdc4c7d142a20b57c3e5914d2bafd23d0d16c1a30c0a620713617cf776c";
-
 type Family = {
   family: string;
   label: string;
@@ -213,7 +210,6 @@ const profiles: MaterialProcessProfile[] = families.flatMap((f) =>
       kind: "imported_recommendation",
       source_id: `PrusaSlicer 2.9.4 PrusaResearch.ini ${f.cite}`,
       source_revision: "2.4.0",
-      source_hash: PRUSA_RESEARCH_INI,
     },
   })),
 );

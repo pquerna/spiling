@@ -101,7 +101,6 @@ message DiagnosticMetadata {
   uint32 completed_units = 4;
   uint32 total_units = 5;
   string input_revision = 6;
-  string input_digest = 7;
   // Append-only, complete immutable artifacts. Bounded to 64 entries.
   repeated Artifact outputs = 8;
   google.protobuf.Timestamp create_time = 9;
@@ -207,7 +206,6 @@ message NamedColorSample {
 }
 message NameColorsReply {
   uint32 algorithm_version = 1;
-  string dataset_sha256 = 2;
   ColorNamingMode mode = 3;
   repeated NamedColorSample colors = 4;
 }

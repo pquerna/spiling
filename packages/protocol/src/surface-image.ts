@@ -34,10 +34,9 @@ export async function decodeSurfaceImage(
   record: SurfaceImageRecord,
   resource: ArtifactView,
 ): Promise<DecodedSurfaceImage> {
-  keys(record, ["image_hash", "width", "height", "byte_count", "source_hash", "source_name"], fail);
+  keys(record, ["image_hash", "width", "height", "byte_count", "source_name"], fail);
   keys(resource, ["name", "size_bytes", "sha256", "media_type"], fail);
   hash(record.image_hash, fail);
-  hash(record.source_hash, fail);
   uint(record.width, "image width", fail, 2, 256);
   uint(record.height, "image height", fail, 2, 256);
   if (

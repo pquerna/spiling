@@ -353,7 +353,6 @@ impl Jobs {
                     completed_units: 0,
                     total_units: request.chunk_count,
                     input_revision: request.input_revision.clone(),
-                    input_digest: digest.clone(),
                     outputs: vec![],
                     create_time: Some(now()),
                     update_time: Some(now()),

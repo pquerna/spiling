@@ -162,8 +162,6 @@ impl From<&ManufacturingProvenance> for ManufacturingInspectionProvenance {
 pub struct ReplayDisplayInfo {
     pub schema_version: u32,
     pub bundle_hash: SourceHash,
-    pub input_hash: SourceHash,
-    pub program_hash: SourceHash,
     pub verifier_version: String,
     pub frame: PrinterCoordinateFrame,
     pub event_count: u32,
@@ -255,7 +253,6 @@ impl ReplayDisplayDescriptor {
         self.validate()?;
         record.validate()?;
         if self.info.bundle_hash != record.hash
-            || self.info.input_hash != record.input_hash
             || self.info.layer_count != record.summary.layers
             || self.info.deposition_count
                 != record.summary.deposition_segments
@@ -749,8 +746,6 @@ mod tests {
             info: ReplayDisplayInfo {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 bundle_hash: SourceHash::from_bytes(b"bundle"),
-                input_hash: SourceHash::from_bytes(b"input"),
-                program_hash: SourceHash::from_bytes(b"program"),
                 verifier_version: "1".into(),
                 frame: PrinterCoordinateFrame::RightHandedMillimetres,
                 event_count: 4,

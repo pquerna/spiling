@@ -435,8 +435,6 @@ fn finish_inspection(
         let info = ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: bundle_hash.clone(),
-            input_hash: bundle.provenance.input_hash.clone(),
-            program_hash: bundle.program.hash.clone(),
             verifier_version: VERIFIER_VERSION.into(),
             frame: bundle.provenance.intent.printer.coordinate_frame,
             event_count: report.deposition_segments

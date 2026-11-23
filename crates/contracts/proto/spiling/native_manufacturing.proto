@@ -261,8 +261,6 @@ message ManufacturingInspectionProvenance {
 message ReplayDisplayInfo {
   uint32 schema_version = 1;
   string bundle_hash = 2;
-  string input_hash = 3;
-  string program_hash = 4;
   string verifier_version = 5;
   PrinterCoordinateFrame frame = 6;
   uint32 event_count = 7;
@@ -595,7 +593,6 @@ message EditInteriorPolicyRequest {
 
 message InteriorPolicyOpportunity {
   InteriorToolPolicyEdit edit = 1;
-  string context_hash = 2;
   string input_hash = 3;
 }
 message InteriorPolicyAssessment {

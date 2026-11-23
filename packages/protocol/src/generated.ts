@@ -62,7 +62,7 @@ export type AnalysisResultRecord = { case_id: AnalysisCaseId, hash: SourceHash, 
 
 export type AnalysisRunSettings = { recipe: PlanarPrintRecipe, laws: AssumedPrintedLaws, maximum_span_mm: number, maximum_seconds: number, };
 
-export type AnalysisRunSummary = { mesh_geometry: AnalysisMeshGeometry, fastener_responses: Array<AnalysisFastenerResponse>, project_id: ProjectId, kernel_revision: string, native_sample_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], model_scope: AnalysisModelScope, accuracy_evidence: AnalysisAccuracyEvidence, producer: string, case: AnalysisCaseRecord, captured_revision: ProjectRevision, input_hash: SourceHash, operator_hash: SourceHash, source_hash: SourceHash, pose: RigidPoseMm, settings: AnalysisRunSettings, native_shape_error_mm: number, elements: number, dofs: number, components: number, region_volume_mm3: [number, number, number], nominal_material_volume_mm3: number, region_energy_n_mm: [number, number, number], strain_energy_n_mm: number, maximum_displacement_mm: number, maximum_macro_von_mises_mpa: number, maximum_macro_layer_normal_mpa: number, concentration_radius_mm: number, assessment: AnalysisNumericalAssessment, costs: AnalysisCosts, };
+export type AnalysisRunSummary = { mesh_geometry: AnalysisMeshGeometry, fastener_responses: Array<AnalysisFastenerResponse>, project_id: ProjectId, kernel_revision: string, native_sample_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], model_scope: AnalysisModelScope, accuracy_evidence: AnalysisAccuracyEvidence, producer: string, case: AnalysisCaseRecord, captured_revision: ProjectRevision, input_hash: SourceHash, pose: RigidPoseMm, settings: AnalysisRunSettings, native_shape_error_mm: number, elements: number, dofs: number, components: number, region_volume_mm3: [number, number, number], nominal_material_volume_mm3: number, region_energy_n_mm: [number, number, number], strain_energy_n_mm: number, maximum_displacement_mm: number, maximum_macro_von_mises_mpa: number, maximum_macro_layer_normal_mpa: number, concentration_radius_mm: number, assessment: AnalysisNumericalAssessment, costs: AnalysisCosts, };
 
 export type AnalyticSurfaceDescription = { "kind": "plane", origin_mm: [number, number, number], normal: [number, number, number], } | { "kind": "cylinder", axis_origin_mm: [number, number, number], axis_direction: [number, number, number], radius_mm: number, } | { "kind": "cone", frame: PlaneFrameMm, reference_radius_mm: number, semi_angle_radians: number, } | { "kind": "sphere", frame: PlaneFrameMm, radius_mm: number, } | { "kind": "torus", frame: PlaneFrameMm, major_radius_mm: number, minor_radius_mm: number, torus_kind: TorusKind, };
 
@@ -103,7 +103,7 @@ export type AppearanceTarget = { color: AppearanceColor, delta_e00_tolerance: nu
 
 export type AppearanceVisit = { k: string, e: SourceHash, a: RowAssessment, };
 
-export type AppliedOpticalMaterial = { evidence: PaletteRow, evidence_hash: SourceHash, loaded_material: LoadedMaterial, };
+export type AppliedOpticalMaterial = { evidence: PaletteRow, loaded_material: LoadedMaterial, };
 
 export type ApplyOpticalConstruction = { construction_index: number, report_hash: SourceHash, selection: OpticalSelection, bindings: [OpticalMaterialBinding, OpticalMaterialBinding], };
 
@@ -192,7 +192,7 @@ export type ColorNamingMode = "exact" | "nearest" | "descriptive";
 
 export type ColorNamingRequest = { mode: ColorNamingMode, colors: Array<[number, number, number]>, };
 
-export type ColorNamingResponse = { algorithm_version: number, dataset_sha256: string, mode: ColorNamingMode, colors: Array<NamedColor>, };
+export type ColorNamingResponse = { algorithm_version: number, mode: ColorNamingMode, colors: Array<NamedColor>, };
 
 export type ComputeBackend = "auto" | "cpu" | "vulkan";
 
@@ -228,7 +228,7 @@ export type DefinitionId = string;
 
 export type DefinitionRecord = { definition_id: DefinitionId, provenance: SourceProvenance, face_count: number, bounds_mm: AabbMm, display: DefinitionDisplay, };
 
-export type DefinitionSource = { "kind": "operator" } | { "kind": "imported", name: string, sha256: SourceHash, };
+export type DefinitionSource = { "kind": "operator" } | { "kind": "imported", name: string, };
 
 export type DeliveryPackage = { "kind": "bambu_gcode3mf",
 /**
@@ -487,7 +487,7 @@ export type InteriorCandidateOutcome = { "kind": "qualified", work: QualifiedInt
 
 export type InteriorPolicyAssessment = { opportunity: InteriorPolicyOpportunity, primary: QualifiedInteriorWork, automatic: QualifiedInteriorWork, strategy: InteriorStrategy, reason: InteriorSelectionReason, };
 
-export type InteriorPolicyOpportunity = { edit: InteriorToolPolicyEdit, context_hash: SourceHash, input_hash: SourceHash, };
+export type InteriorPolicyOpportunity = { edit: InteriorToolPolicyEdit, input_hash: SourceHash, };
 
 export type InteriorSelection = { selected: InteriorStrategy, reason: InteriorSelectionReason, candidates: [InteriorCandidateAssessment, InteriorCandidateAssessment, InteriorCandidateAssessment], };
 
@@ -624,11 +624,7 @@ export type LifecycleBlock = { label: string, lines: Array<string>, effects: Blo
 
 export type LifecycleStep = { "kind": "celsius_units" } | { "kind": "volumetric_off" } | { "kind": "feed_scale_reset" } | { "kind": "flow_scale_reset" } | { "kind": "fan_off" } | { "kind": "nozzle_check" } | { "kind": "model_check", model: string, } | { "kind": "bed_target" } | { "kind": "bed_wait" } | { "kind": "nozzle_target", standby_c: number | null, } | { "kind": "nozzle_wait", standby_c: number | null, } | { "kind": "home" } | { "kind": "probe_mesh" } | { "kind": "restore_mesh" } | { "kind": "levelling_off" } | { "kind": "restore_modes" } | { "kind": "reset_extrusion" } | { "kind": "prime" } | { "kind": "barrier" } | { "kind": "park" } | { "kind": "nozzle_off" } | { "kind": "bed_off" } | { "kind": "motors_off" } | { "kind": "block", block: LifecycleBlock, };
 
-export type LoadedMaterial = { id: string, revision: string,
-/**
- * Identity of the inert material declaration, not a measured color model.
- */
-declaration_hash: SourceHash, polymer_family: string, };
+export type LoadedMaterial = { id: string, revision: string, polymer_family: string, };
 
 export type LocalProjectHardwareBinding = { layout_id: PrintLayoutId, project_id: string, attachment: NativePath, capture_hash: SourceHash, machine_id: string, plate_id: string, machine_generation: bigint, };
 
@@ -800,7 +796,7 @@ export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, be
 
 export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup: MaterialToolSetup, overrides: MaterialProfileOverrides, };
 
-export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, source_hash: SourceHash, };
+export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, };
 
 export type MaterialProfileSourceKind = "synthetic_test" | "imported_recommendation" | "operator_declaration";
 
@@ -895,13 +891,13 @@ tool_id: string | null, interior: InteriorToolBinding | null, material: Occurren
 
 export type OccurrenceRecord = { occurrence_id: OccurrenceId, definition_id: DefinitionId, pose: RigidPoseMm, };
 
-export type OperationView = { name: string, done: boolean, state_version: string, state: string, create_time: string | null, update_time: string | null, end_time: string | null, phase: string, completed_units: number, total_units: number, input_revision: string, input_digest: string, outputs: Array<ArtifactView>, error_code: number | null, error_message: string | null, };
+export type OperationView = { name: string, done: boolean, state_version: string, state: string, create_time: string | null, update_time: string | null, end_time: string | null, phase: string, completed_units: number, total_units: number, input_revision: string, outputs: Array<ArtifactView>, error_code: number | null, error_message: string | null, };
 
 export type OpticalAssessment = { "kind": "filtered_phase" } | { "kind": "unassessed", reason: OpticalUnknownReason, exposure: CycleExposure, } | { "kind": "estimate", exposure: CycleExposure, predicted_lab: [number, number, number], display_srgb8: [number, number, number], delta_e00: number, delta_lightness: number, within_tolerance: boolean, };
 
 export type OpticalBackingModel = "unmodelled";
 
-export type OpticalConstructionOrigin = { report: OpticalReportRecord, palette_hash: SourceHash, selection: OpticalSelection, model: OpticalModel, observation: OpticalObservation, target: OpticalTarget, requested_patch: OpticalPatch, recipe: LayerCycle, materials: [AppliedOpticalMaterial, AppliedOpticalMaterial], applied_pose: RigidPoseMm, };
+export type OpticalConstructionOrigin = { report: OpticalReportRecord, selection: OpticalSelection, model: OpticalModel, observation: OpticalObservation, target: OpticalTarget, requested_patch: OpticalPatch, recipe: LayerCycle, materials: [AppliedOpticalMaterial, AppliedOpticalMaterial], applied_pose: RigidPoseMm, };
 
 export type OpticalEvidence = "reference_estimate";
 
@@ -909,7 +905,7 @@ export type OpticalExecution = "study_only_not_routed";
 
 export type OpticalInspectionAssessment = { producer: string, backing_model: OpticalBackingModel, patch_matches_request: boolean, pose_matches_application: boolean, requested: OpticalAssessment, realized: OpticalAssessment, };
 
-export type OpticalMaterialBinding = { evidence_key: string, evidence_hash: SourceHash, loaded_material_id: string, loaded_declaration_hash: SourceHash, };
+export type OpticalMaterialBinding = { evidence_key: string, loaded_material_id: string, };
 
 export type OpticalModel = "prusa_v7_007bb922";
 
@@ -1207,7 +1203,7 @@ export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_
 
 export type ReplayDisplayDescriptor = { pages: Array<ReplayPage>, info: ReplayDisplayInfo, resource: ArtifactView, };
 
-export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, tool_epoch_count: number, waste_count: number, bounds_mm: AabbMm, };
+export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, process_count: number, tool_epoch_count: number, waste_count: number, bounds_mm: AabbMm, };
 
 export type ReplayPage = {
 /**
@@ -1433,7 +1429,7 @@ export type SurfaceFinish = { "kind": "smooth" } | { "kind": "vertical_ribs", de
 
 export type SurfaceImageContent = { image_hash: SourceHash, bytes: Array<number>, };
 
-export type SurfaceImageRecord = { image_hash: SourceHash, width: number, height: number, byte_count: number, source_hash: SourceHash, source_name: string, };
+export type SurfaceImageRecord = { image_hash: SourceHash, width: number, height: number, byte_count: number, source_name: string, };
 
 export type SurfaceLayer = { layer_id: SurfaceLayerId, enabled: boolean, scope: SurfaceScope, face_id: FaceId, finish: SurfaceFinish, };
 

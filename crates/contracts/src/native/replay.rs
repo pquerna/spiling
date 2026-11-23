@@ -94,8 +94,6 @@ impl TryFrom<rpc::ReplayDisplayInfo> for ReplayDisplayInfo {
         let value = Self {
             schema_version: v.schema_version,
             bundle_hash: SourceHash::parse(v.bundle_hash).map_err(|e| e.to_string())?,
-            input_hash: SourceHash::parse(v.input_hash).map_err(|e| e.to_string())?,
-            program_hash: SourceHash::parse(v.program_hash).map_err(|e| e.to_string())?,
             verifier_version: v.verifier_version,
             frame: rpc::PrinterCoordinateFrame::try_from(v.frame)
                 .map_err(|_| "unknown replay frame")?
@@ -121,8 +119,6 @@ impl TryFrom<ReplayDisplayInfo> for rpc::ReplayDisplayInfo {
         Ok(Self {
             schema_version: v.schema_version,
             bundle_hash: v.bundle_hash.into(),
-            input_hash: v.input_hash.into(),
-            program_hash: v.program_hash.into(),
             verifier_version: v.verifier_version,
             frame: rpc::PrinterCoordinateFrame::try_from(v.frame)? as i32,
             event_count: v.event_count,
@@ -351,8 +347,6 @@ mod tests {
             info: ReplayDisplayInfo {
                 schema_version: REPLAY_SCHEMA_VERSION,
                 bundle_hash: SourceHash::from_bytes(b"bundle"),
-                input_hash: SourceHash::from_bytes(b"input"),
-                program_hash: SourceHash::from_bytes(b"program"),
                 verifier_version: "1".into(),
                 frame: PrinterCoordinateFrame::RightHandedMillimetres,
                 event_count: 4,
@@ -414,7 +408,7 @@ mod tests {
         invalid.info.as_mut().unwrap().frame = 0;
         assert!(ReplayDisplayDescriptor::try_from(invalid).is_err());
         let mut invalid = wire.clone();
-        invalid.info.as_mut().unwrap().program_hash = "BAD".into();
+        invalid.info.as_mut().unwrap().bundle_hash = "BAD".into();
         assert!(ReplayDisplayDescriptor::try_from(invalid).is_err());
         let mut invalid = wire.clone();
         invalid.info.as_mut().unwrap().event_count = 200_001;
@@ -439,7 +433,7 @@ mod tests {
         let descriptor = display();
         let record = ManufacturingArtifactRecord {
             hash: descriptor.info.bundle_hash.clone(),
-            input_hash: descriptor.info.input_hash.clone(),
+            input_hash: SourceHash::from_bytes(b"input"),
             byte_count: 10,
             program: crate::manufacturing::ProgramDescriptor {
                 hash: SourceHash::from_bytes(b"program"),
@@ -608,7 +602,6 @@ mod tests {
         );
         let mut wrong_record = record;
         wrong_record.input_hash = SourceHash::from_bytes(b"other");
-        assert!(descriptor.validate_for_record(&wrong_record).is_err());
         assert!(provenance.validate_for_record(&wrong_record).is_err());
     }
 }
@@ -623,8 +616,6 @@ mod routed_display_wire_tests {
         let info = ReplayDisplayInfo {
             schema_version: REPLAY_SCHEMA_VERSION,
             bundle_hash: SourceHash::from_bytes(b"bundle"),
-            input_hash: SourceHash::from_bytes(b"input"),
-            program_hash: SourceHash::from_bytes(b"program"),
             verifier_version: "wire-test".into(),
             frame: PrinterCoordinateFrame::RightHandedMillimetres,
             event_count: 12,

@@ -71,13 +71,13 @@ fn optional_text(value: &Option<String>, max: usize) -> Result<(), String> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DefinitionSource {
     Operator,
-    Imported { name: String, sha256: SourceHash },
+    Imported { name: String },
 }
 impl DefinitionSource {
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::Operator => Ok(()),
-            Self::Imported { name, .. } => text(name, 256),
+            Self::Imported { name } => text(name, 256),
         }
     }
 }

@@ -1850,7 +1850,6 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     );
     assert_eq!(provenance.input_hash, record.input_hash);
     assert_eq!(provenance.input_revision, bundle.provenance.input_revision);
-    assert_eq!(display.info.program_hash, bundle.program.hash);
     let program_text = fetch_program_text(&reader, &record).await;
     assert!(completed.outputs.iter().any(|out| out == &display.resource));
     assert!(completed.outputs.iter().any(|out| out == resource));
@@ -2504,7 +2503,6 @@ async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fr
         assert!(report.verified);
         assert_eq!(provenance.input_hash, record.input_hash);
         assert_eq!(provenance.process_document, authored.process_document);
-        assert_eq!(display.info.program_hash, bundle.program.hash);
         let motion = client
             .fetch_replay_display(&record, &display)
             .await

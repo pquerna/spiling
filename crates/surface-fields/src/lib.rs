@@ -344,7 +344,6 @@ mod tests {
             width: 3,
             height: 2,
             byte_count: bytes.len() as u64,
-            source_hash: SourceHash::from_bytes(&bytes),
             source_name: "golden.pgm".into(),
         };
         assert_eq!(
@@ -413,7 +412,6 @@ mod tests {
         bytes.extend([0, 0, 255, 17, 0, 0, 0, 0]);
         let record = SurfaceImageRecord {
             image_hash: SourceHash::from_bytes(&bytes),
-            source_hash: SourceHash::from_bytes(&bytes),
             width: 2,
             height: 4,
             byte_count: bytes.len() as u64,

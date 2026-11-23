@@ -620,9 +620,7 @@ async fn dropping_process_owner_reaps_actual_child() {
 
 #[tokio::test]
 async fn color_naming_is_repeatable_bounded_and_preserves_session_liveness() {
-    use spiling_contracts::color_naming::{
-        COLOR_NAMING_DATASET_SHA256, ColorNamingMode, ColorNamingRequest,
-    };
+    use spiling_contracts::color_naming::{ColorNamingMode, ColorNamingRequest};
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     let request = ColorNamingRequest {
         mode: ColorNamingMode::Descriptive,
@@ -631,7 +629,6 @@ async fn color_naming_is_repeatable_bounded_and_preserves_session_liveness() {
     let rpc = client.rpc();
     let first = rpc.name_colors(&request).await.unwrap();
     assert_eq!(first, rpc.name_colors(&request).await.unwrap());
-    assert_eq!(first.dataset_sha256, COLOR_NAMING_DATASET_SHA256);
     assert_eq!(first.colors[0].name.as_ref().unwrap().label, "Dark coral");
     assert!(
         rpc.name_colors(&ColorNamingRequest {

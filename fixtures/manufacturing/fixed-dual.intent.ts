@@ -13,10 +13,6 @@ const tool = (index: 0 | 1): FixedDualTool => ({
   material: {
     id: index === 0 ? "software-pla-a" : "software-pla-b",
     revision: "1",
-    declaration_hash:
-      index === 0
-        ? "883b1eaa92941d652997e2092ad5f5cf9aabeba3991c8654782a281dbfbf0111"
-        : "fabb4a0c776b0f4d2c0448b562bd106abe5cf10aee2a8e31fca120a1d2cc2f89",
     polymer_family: "PLA",
   },
   offset_xy_mm: index === 0 ? [0, 0] : [25, 0],
