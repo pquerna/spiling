@@ -200,7 +200,37 @@ pub(super) fn component_admission<'a>(
     cancel: &AtomicBool,
 ) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError> {
     // One borrowed lower set for every endpoint, row and stroke query below.
-    let mut lower = strokes::LowerStrokes::new(previous.clone(), contacts.clone());
+    let mut lower = strokes::LowerStrokes::new(previous, contacts);
+    component_admission_with(
+        (candidate, axis, budget, contact_bridge),
+        &mut lower,
+        recipe,
+        anchors,
+        work,
+        cancel,
+    )
+}
+
+/// [`component_admission`] against a caller's lower set, so repeated
+/// components over one lower layer share its prepared inventory.
+pub(super) fn component_admission_with<'a, P, C>(
+    (candidate, axis, budget, contact_bridge): (
+        &mut RasterCandidate,
+        region::HatchAxis,
+        usize,
+        bool,
+    ),
+    lower: &mut strokes::LowerStrokes<'a, P, C>,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError>
+where
+    P: Iterator<Item = &'a DepositionPath> + Clone,
+    C: Iterator<Item = &'a DepositionPath> + Clone,
+{
+    let (previous, contacts) = lower.operands();
     for path in &mut candidate.paths {
         let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) = path.owner else {
             continue;
@@ -270,9 +300,9 @@ pub(super) fn component_admission<'a>(
                 owned_bytes: 0,
                 recipe,
             },
-            previous.clone(),
-            contacts.clone(),
-            &mut lower,
+            previous,
+            contacts,
+            lower,
             anchors,
             work,
             cancel,
@@ -1137,6 +1167,9 @@ pub(super) fn realize(
                 // Preserve ordinary authored hatch; only a finite demanded role
                 // component may acquire an independently proved Bridge construction.
                 let without_old = *segments - path_segments(&layer.paths);
+                // One lower set for every component checked on this layer.
+                let mut layer_lower =
+                    strokes::LowerStrokes::new(previous.clone(), std::iter::empty());
                 for recover_components in [false, true] {
                     let axis = authored_axis;
                     let mut staged_segments = without_old;
@@ -1164,10 +1197,9 @@ pub(super) fn realize(
                                 scratch_owned_bytes
                                     .saturating_add(candidate_owned_bytes(candidate)),
                             )?;
-                            component_admission(
+                            component_admission_with(
                                 (candidate, axis, budget, contact_bridge),
-                                previous.clone(),
-                                std::iter::empty(),
+                                &mut layer_lower,
                                 recipe,
                                 &mut anchors,
                                 &mut anchor_work,

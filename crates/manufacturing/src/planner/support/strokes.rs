@@ -106,6 +106,11 @@ where
         }
     }
 
+    /// The borrowed previous and contact strokes this set queries.
+    pub(in crate::planner) fn operands(&self) -> (P, C) {
+        (self.previous.clone(), self.contacts.clone())
+    }
+
     /// A second inventory over the same lower strokes, with its own index
     /// and scratch, for queries on another thread.
     pub(in crate::planner) fn fresh(&self) -> Self {
