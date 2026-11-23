@@ -364,7 +364,7 @@ export type FirmwareLifecycle = { start: Array<LifecycleStep>, end: Array<Lifecy
 
 export type FixedDualConfiguration = "marlin2125_native_fixed_hotends";
 
-export type FixedDualJob = { interior_goal: InteriorSelectionGoal | null, timing_model: DeclaredJobTimeModel | null, machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
+export type FixedDualJob = { interior_goal: InteriorSelectionGoal | null, timing_model: DeclaredJobTimeModel | null, machine_id: string, configuration: FixedDualConfiguration, firmware_revision: string, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], bed_temperature_c: number, maximum_bed_temperature_c: number, tools: [FixedDualTool, FixedDualTool], assignments: Array<OccurrenceMaterialAssignment>, surface_constructions: Array<SurfaceColorConstruction>, functional_construction: FunctionalMaterialConstruction | null, transition_lift_mm: number,
 /**
  * Allowed tool-zero reference positions, including negative carriage X/Y.
  */
@@ -1279,7 +1279,7 @@ export type SectionSummary = { session_id: SessionId, artifact_id: ArtifactId, r
 
 export type SessionId = string;
 
-export type SingleExtruderJob = { machine_id: string, firmware_version: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number,
+export type SingleExtruderJob = { machine_id: string, firmware_version: string, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number,
 /**
  * Priming is excluded from conservative all-layer object XY ownership,
  * independent of Z, protected holes or gaps; plan admission checks rounding.

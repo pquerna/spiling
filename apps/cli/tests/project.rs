@@ -1433,34 +1433,35 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
         report(cli("inspect", &project).arg("--verify").output().unwrap())["manufacturing"]["artifact"],
         artifact
     );
-    let mut too_many_layers: Value =
+    let mut sub_lattice: Value =
         serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
-    too_many_layers["recipe"]["layer_height_mm"] = serde_json::json!(0.001);
-    // A printer that resolves 1 um layers, so the layer budget is the limit.
-    too_many_layers["printer"]["motion_resolution"]["z_mm"] = serde_json::json!(0.000001);
-    too_many_layers["printer"]["deposition_limits"]["min_bead_height_mm"] =
+    sub_lattice["recipe"]["layer_height_mm"] = serde_json::json!(0.001);
+    // A printer finer than the 0.001 mm command lattice: compilation refuses it.
+    sub_lattice["printer"]["motion_resolution"]["z_mm"] = serde_json::json!(0.000001);
+    sub_lattice["printer"]["deposition_limits"]["min_bead_height_mm"] =
         serde_json::json!(0.000001);
-    let limited_intent = root.join("limited-intent.json");
+    let refused_intent_path = root.join("sub-lattice-intent.json");
     std::fs::write(
-        &limited_intent,
-        serde_json::to_vec(&too_many_layers).unwrap(),
+        &refused_intent_path,
+        serde_json::to_vec(&sub_lattice).unwrap(),
     )
     .unwrap();
-    let limited_output = root.join("limited-export");
-    let resource_failure = terminal_error(
+    let refused_output = root.join("refused-export");
+    let refused_intent = terminal_error(
         cli("open", &project)
             .arg("--intent")
-            .arg(&limited_intent)
+            .arg(&refused_intent_path)
             .arg("--compile")
             .arg("--manufacturing-out")
-            .arg(&limited_output)
+            .arg(&refused_output)
             .output()
             .unwrap(),
     );
-    assert_eq!(resource_failure["domain"], "manufacturing");
-    assert_eq!(resource_failure["error"]["code"], "resource_limit");
-    assert!(resource_failure["manufacturing"]["artifact"].is_null());
-    assert!(!limited_output.exists());
+    assert_eq!(refused_intent["domain"], "manufacturing");
+    assert_eq!(refused_intent["error"]["code"], "invalid_specification");
+    // The refused intent is never applied; the existing artifact stays current.
+    assert_eq!(refused_intent["manufacturing"]["artifact"], artifact);
+    assert!(!refused_output.exists());
     assert_eq!(
         report(cli("inspect", &project).arg("--verify").output().unwrap())["manufacturing"]["artifact"],
         artifact
@@ -3282,9 +3283,9 @@ fn bed_placement_accepts_parts_on_the_envelope_edge_and_centres_off_bed_groups()
             .unwrap(),
     );
     let pose = &off["occurrences"][0]["pose"]["translation_mm"];
-    // box-mm is 20 x 10 x 8 mm; centred on a 220 mm bed.
-    assert!((pose[0].as_f64().unwrap() - 100.0).abs() < 0.01, "{pose}");
-    assert!((pose[1].as_f64().unwrap() - 105.0).abs() < 0.01, "{pose}");
+    // box-mm is 20 x 10 x 8 mm; centred on the 300 mm reference bed.
+    assert!((pose[0].as_f64().unwrap() - 140.0).abs() < 0.01, "{pose}");
+    assert!((pose[1].as_f64().unwrap() - 145.0).abs() < 0.01, "{pose}");
     assert!(pose[2].as_f64().unwrap().abs() < 0.01, "{pose}");
     assert_eq!(off["manufacturing"]["preflight"]["disposition"], "admitted");
     // A shipped printer also has a plate face usable region; placement asks

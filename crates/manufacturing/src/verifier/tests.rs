@@ -1261,12 +1261,6 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         job: SingleExtruderJob {
             machine_id: "unqualified-software-test-machine".into(),
             firmware_version: "2.1.2.5".into(),
-            configuration_hash: spiling_contracts::geometry::SourceHash::from_bytes(
-                b"test configuration declaration",
-            ),
-            calibration_record_hash: spiling_contracts::geometry::SourceHash::from_bytes(
-                b"test calibration declaration, not a measurement",
-            ),
             homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
             home_position_mm: [0.0; 3],
             nozzle_temperature_c: 200.0,

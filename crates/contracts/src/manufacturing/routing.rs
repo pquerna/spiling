@@ -328,8 +328,6 @@ pub struct FixedDualJob {
     pub machine_id: String,
     pub configuration: FixedDualConfiguration,
     pub firmware_revision: String,
-    pub configuration_hash: SourceHash,
-    pub calibration_record_hash: SourceHash,
     pub homing_contract: HomingCoordinateContract,
     pub home_position_mm: [f64; 3],
     pub bed_temperature_c: f64,

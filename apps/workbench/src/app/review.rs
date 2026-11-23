@@ -342,11 +342,14 @@ pub(super) fn unsupported_layers(
         ui.weak("Actual-program layer preview unavailable.");
     }
     ui.collapsing("Support details", |ui| {
-        ui.label("Each affected layer records its largest unsupported span, without an exact location.");
+        ui.label(
+            "Each affected layer records its largest unsupported span, without an exact location.",
+        );
         ui.label("Show layer reveals all actual paths on that layer, not an individual span.");
         ui.weak(format!(
             "Largest recorded span {:.3} mm · layer {}",
-            featured.region_coverage.unsupported_overhang_mm, u64::from(featured.index) + 1
+            featured.region_coverage.unsupported_overhang_mm,
+            u64::from(featured.index) + 1
         ));
         if count > 1 {
             let row_height = ui.spacing().interact_size.y
@@ -356,7 +359,11 @@ pub(super) fn unsupported_layers(
                 .id_salt("unsupported-layers")
                 .max_height(180.0)
                 .show_rows(ui, row_height, count - 1, |ui, rows| {
-                    for layer in unsupported().filter(|layer| layer.index != featured.index).skip(rows.start).take(rows.len()) {
+                    for layer in unsupported()
+                        .filter(|layer| layer.index != featured.index)
+                        .skip(rows.start)
+                        .take(rows.len())
+                    {
                         unsupported_layer_row(ui, layer, display, view);
                         ui.weak(format!(
                             "Index {} · span {:.6} mm",
@@ -504,10 +511,7 @@ pub(super) fn layer(ui: &mut egui::Ui, layer: &PrintLayer) {
     if r.support_omitted_wall_mm > 0.0 {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            format!(
-                "Support wall omitted · {:.4} mm",
-                r.support_omitted_wall_mm
-            ),
+            format!("Support wall omitted · {:.4} mm", r.support_omitted_wall_mm),
         );
     }
     ui.label(format!(

@@ -87,8 +87,6 @@
       "job": {
         "machine_id": "software-marlin2-reference",
         "firmware_version": "2.1.2.5-software-contract-fixture",
-        "configuration_hash": "c46cf9a35f2916b3109dbbae2a06dc0cb212d4fe611b511bf1c72220bbcc147c",
-        "calibration_record_hash": "322df893a20557507671a732334464bebf7164d9c547e6ef09eea356e99b3a8b",
         "homing_contract": "marlin_native_cartesian",
         "home_position_mm": [
           0,

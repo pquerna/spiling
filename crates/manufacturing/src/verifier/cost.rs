@@ -28,8 +28,6 @@ impl JobTimeBuilder {
             &job.machine_id,
             job.configuration,
             &job.firmware_revision,
-            &job.configuration_hash,
-            &job.calibration_record_hash,
             job.homing_contract,
             job.home_position_mm,
             job.bed_temperature_c,

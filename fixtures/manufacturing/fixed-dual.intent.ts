@@ -66,8 +66,6 @@ const intent = {
         machine_id: "software-fixed-dual-marlin-reference",
         configuration: "marlin2125_native_fixed_hotends",
         firmware_revision: "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
-        configuration_hash: "7baa388a82815c8388f786b0c03e7d73fc8df1a1a9e859989e42174ba188b654",
-        calibration_record_hash: "cfa5864bc575b22bd8131af8bc480d983f67e2cda796a90f5f7f5b7890a776b4",
         homing_contract: "marlin_native_cartesian",
         home_position_mm: [0, 0, 0],
         bed_temperature_c: 60,

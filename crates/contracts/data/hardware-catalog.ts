@@ -16,7 +16,7 @@ const model = {
   vendor: "Spiling",
   model: "Cartesian software reference",
   source: "Spiling software declarations; no physical qualification",
-  mounting_interface: "spiling.reference.220",
+  mounting_interface: "spiling.reference.300",
   declared_volume_mm: cartesian.build_envelope,
 } satisfies HardwareModelDefinition;
 const box = (x: number, y: number, z: number): AabbMm => ({
@@ -113,8 +113,8 @@ const described = [
   },
 ] satisfies HardwareModelDefinition[];
 const plate = {
-  id: "spiling.reference.220.plate",
-  label: "220 mm reference sheet",
+  id: "spiling.reference.300.plate",
+  label: "300 mm reference sheet",
   mounting_interface: model.mounting_interface,
   thickness_mm: 1,
   surface_z_mm: 0,

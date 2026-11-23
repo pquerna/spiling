@@ -14,9 +14,9 @@
         0
       ],
       "max": [
-        220,
-        220,
-        220
+        300,
+        300,
+        300
       ]
     },
     "components": [
@@ -45,8 +45,8 @@
               -4
             ],
             "max": [
-              220,
-              220,
+              300,
+              300,
               0
             ]
           }
@@ -90,8 +90,6 @@
         "machine_id": "software-fixed-dual-marlin-reference",
         "configuration": "marlin2125_native_fixed_hotends",
         "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
-        "configuration_hash": "7baa388a82815c8388f786b0c03e7d73fc8df1a1a9e859989e42174ba188b654",
-        "calibration_record_hash": "cfa5864bc575b22bd8131af8bc480d983f67e2cda796a90f5f7f5b7890a776b4",
         "homing_contract": "marlin_native_cartesian",
         "home_position_mm": [
           0,
@@ -126,11 +124,15 @@
                   "deposition_limits": {
                     "min_bead_width_mm": 0.3,
                     "max_bead_width_mm": 0.75,
-                    "min_bead_height_mm": 1e-06,
+                    "min_bead_height_mm": 0.0025,
                     "max_bead_height_mm": 0.3
                   },
                   "nozzle_temperature_c": 200,
                   "bed_temperature_c": 60,
+                  "first_layer_nozzle_temperature_c": 200,
+                  "first_layer_bed_temperature_c": 60,
+                  "standby_nozzle_temperature_c": 150,
+                  "requires_heated_bed": false,
                   "print_speed_mm_s": 30,
                   "flow_multiplier": 1,
                   "max_volumetric_flow_mm3_s": 6,
@@ -151,18 +153,14 @@
                     "fan_short_layer_time_s": 0,
                     "fan_short_layer_pwm": 255
                   },
+                  "bowden_retraction": {
+                    "kind": "disabled"
+                  },
                   "source": {
                     "kind": "synthetic_test",
                     "source_id": "material-profile-test-source.txt",
                     "source_revision": "1",
                     "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
-                  },
-                  "first_layer_nozzle_temperature_c": 200,
-                  "first_layer_bed_temperature_c": 60,
-                  "standby_nozzle_temperature_c": 150,
-                  "requires_heated_bed": false,
-                  "bowden_retraction": {
-                    "kind": "disabled"
                   }
                 },
                 "setup": {
@@ -248,11 +246,15 @@
                   "deposition_limits": {
                     "min_bead_width_mm": 0.3,
                     "max_bead_width_mm": 0.75,
-                    "min_bead_height_mm": 1e-06,
+                    "min_bead_height_mm": 0.0025,
                     "max_bead_height_mm": 0.3
                   },
                   "nozzle_temperature_c": 205,
                   "bed_temperature_c": 60,
+                  "first_layer_nozzle_temperature_c": 205,
+                  "first_layer_bed_temperature_c": 60,
+                  "standby_nozzle_temperature_c": 150,
+                  "requires_heated_bed": false,
                   "print_speed_mm_s": 18,
                   "flow_multiplier": 1,
                   "max_volumetric_flow_mm3_s": 6,
@@ -273,18 +275,14 @@
                     "fan_short_layer_time_s": 0,
                     "fan_short_layer_pwm": 255
                   },
+                  "bowden_retraction": {
+                    "kind": "disabled"
+                  },
                   "source": {
                     "kind": "synthetic_test",
                     "source_id": "material-profile-test-source.txt",
                     "source_revision": "1",
                     "source_hash": "95c80eb53239470982522fdb2bcf56168a6fa279790d057fe2d62fdf1978d865"
-                  },
-                  "first_layer_nozzle_temperature_c": 205,
-                  "first_layer_bed_temperature_c": 60,
-                  "standby_nozzle_temperature_c": 150,
-                  "requires_heated_bed": false,
-                  "bowden_retraction": {
-                    "kind": "disabled"
                   }
                 },
                 "setup": {

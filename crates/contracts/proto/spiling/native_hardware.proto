@@ -219,8 +219,6 @@ message JobWorkflow {
 message SingleExtruderJob {
   string machine_id = 1;
   string firmware_version = 2;
-  string configuration_hash = 3;
-  string calibration_record_hash = 4;
   HomingCoordinateContract homing_contract = 5;
   Vec3 home_position_mm = 6;
   // Temperature targets/limits are finite positive integral Celsius degrees.
@@ -442,8 +440,6 @@ message FixedDualJob {
   string machine_id = 1;
   FixedDualConfiguration configuration = 2;
   string firmware_revision = 3;
-  string configuration_hash = 4;
-  string calibration_record_hash = 5;
   HomingCoordinateContract homing_contract = 6;
   Vec3 home_position_mm = 7;
   double bed_temperature_c = 8;

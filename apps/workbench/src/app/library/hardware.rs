@@ -487,7 +487,7 @@ impl Workbench {
                         definition: AccessoryDefinition {
                             id: format!("custom.{}", uuid::Uuid::new_v4()),
                             label: "0.4 mm nozzle".into(),
-                            mounting_interface: "spiling.reference.220".into(),
+                            mounting_interface: "spiling.reference.300".into(),
                             effect: AccessoryEffect::Nozzle {
                                 diameter_mm: 0.4,
                                 material: "Hardened steel".into(),
@@ -503,7 +503,7 @@ impl Workbench {
                         definition: AccessoryDefinition {
                             id: format!("custom.{}", uuid::Uuid::new_v4()),
                             label: "Rectangular fixture".into(),
-                            mounting_interface: "spiling.reference.220".into(),
+                            mounting_interface: "spiling.reference.300".into(),
                             effect: AccessoryEffect::Fixture {
                                 bounds_mm: AabbMm {
                                     min: [100., 100., 0.],

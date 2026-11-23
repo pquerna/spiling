@@ -84,7 +84,7 @@ validation refuses a printer that differs from the derivation:
 | Feed / flow ceilings  | Print feed bounds every extruding command (deposition, priming, waste); travel feed bounds travel, lifecycle motion and retraction; declared volumetric flow                                                                                        |
 | Thermal limits        | Declared maxima and minimum extrusion temperature; starting targets 200/60 °C clamped to them, replaced by a captured material profile. A machine without a heated bed declares maximum bed 0 °C: its bed is off and its lifecycle has no bed steps |
 | Print-time model      | `timing_model` from the declared acceleration and Marlin's 0.013 mm junction deviation, for the verifier's estimate only                                                                                                                            |
-| Identity              | Printer revision and configuration hash are the description hash; no calibration record                                                                                                                                                             |
+| Identity              | Printer revision is the description hash                                                                                                                                                                                                              |
 
 Firmware families map to dialects: `marlin2` → Marlin 2, `prusa_buddy` →
 Prusa Buddy, `klipper` → Klipper, `bambu_lab` → Bambu Lab, whose program is

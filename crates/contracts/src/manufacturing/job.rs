@@ -25,17 +25,13 @@ pub enum HomingCoordinateContract {
     MarlinNativeCartesian,
 }
 
-/// Declared provenance is not measured qualification. Hashes identify externally
-/// supplied firmware configuration and calibration records, not engine approval.
-/// The printer's output dialect renders the declared `lifecycle`; temperatures
+/// Declared machine facts are not measured qualification. The printer's output dialect renders the declared `lifecycle`; temperatures
 /// below are integral Celsius targets despite their f64 wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SingleExtruderJob {
     pub machine_id: String,
     pub firmware_version: String,
-    pub configuration_hash: SourceHash,
-    pub calibration_record_hash: SourceHash,
     pub homing_contract: HomingCoordinateContract,
     pub home_position_mm: [f64; 3],
     pub nozzle_temperature_c: f64,

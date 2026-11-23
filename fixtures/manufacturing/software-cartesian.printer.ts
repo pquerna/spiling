@@ -10,13 +10,13 @@ const printer = {
   revision: "11",
   name: "Software Cartesian reference — not machine-ready",
   coordinate_frame: "right_handed_millimetres",
-  build_envelope: { min: [0, 0, 0], max: [220, 220, 220] },
+  build_envelope: { min: [0, 0, 0], max: [300, 300, 300] },
   components: [
     {
       id: "bed",
       role: "bed",
       pose: { translation_mm: [0, 0, 0], rotation_xyzw: [0, 0, 0, 1] },
-      shape: { kind: "box", bounds_mm: { min: [0, 0, -4], max: [220, 220, 0] } },
+      shape: { kind: "box", bounds_mm: { min: [0, 0, -4], max: [300, 300, 0] } },
     },
     {
       id: "toolhead-envelope",

@@ -63,8 +63,6 @@ pnpm-lock.yaml
 ../fixtures/manufacturing/native/tilted-cap-offset.points.json
 ../fixtures/manufacturing/native/tilted-cylinder-complete.intent.json
 ../fixtures/manufacturing/rounded-housing-bed-occurrence.json
-../fixtures/manufacturing/software-fixed-dual.calibration.json
-../fixtures/manufacturing/software-fixed-dual.configuration.json
 ../fixtures/manufacturing/surface-color-box.intent.json
 ../fixtures/manufacturing/surface-color-regional.intent.json
 ../fixtures/manufacturing/surface-color-window.intent.json

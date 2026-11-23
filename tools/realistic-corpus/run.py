@@ -328,8 +328,12 @@ def prusa(step, cwd, brimmed=False):
     elif PRUSA_INI:
         args = ["--load", PRUSA_INI]
     else:
+        env = INTENT["printer"]["build_envelope"]
+        x, y, z = (env["max"][i] - env["min"][i] for i in range(3))
+        # The same bed as the engine's printer, never PrusaSlicer's 200 mm default.
         args = ["--layer-height", str(layer), "--fill-density", f"{fraction * 100:.8g}%",
-                "--fill-pattern", prusa_pattern(recipe)]
+                "--fill-pattern", prusa_pattern(recipe),
+                "--bed-shape", f"0x0,{x:g}x0,{x:g}x{y:g},0x{y:g}", "--max-print-height", f"{z:g}"]
     args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
     info = {"fill_pattern": prusa_pattern(recipe), "threads": 1}

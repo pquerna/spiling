@@ -1708,10 +1708,6 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
         job: SingleExtruderJob {
             machine_id: "software-declaration-not-qualified".into(),
             firmware_version: "2.1.2.5".into(),
-            configuration_hash: SourceHash::from_bytes(b"software fixture configuration"),
-            calibration_record_hash: SourceHash::from_bytes(
-                b"software fixture declaration, not measured calibration",
-            ),
             homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
             home_position_mm: [0.0, 0.0, 0.0],
             nozzle_temperature_c: 200.0,

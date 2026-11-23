@@ -565,14 +565,6 @@ impl MachineDescription {
                 job: SingleExtruderJob {
                     machine_id: id.into(),
                     firmware_version: self.firmware_label().into(),
-                    configuration_hash: description.clone(),
-                    calibration_record_hash: SourceHash::from_bytes(
-                        format!(
-                            "spiling.uncalibrated-machine-description\n{}",
-                            description.as_str()
-                        )
-                        .as_bytes(),
-                    ),
                     homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
                     home_position_mm: [0.0; 3],
                     // Generic starting targets; a captured material profile owns

@@ -1053,10 +1053,6 @@ impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
                     job: SingleExtruderJob {
                         machine_id: job.machine_id,
                         firmware_version: job.firmware_version,
-                        configuration_hash: SourceHash::parse(job.configuration_hash)
-                            .map_err(|e| e.to_string())?,
-                        calibration_record_hash: SourceHash::parse(job.calibration_record_hash)
-                            .map_err(|e| e.to_string())?,
                         homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
                         home_position_mm: required(job.home_position_mm, "home position")?
                             .try_into()?,
@@ -1110,8 +1106,6 @@ impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
                     Workflow::CompleteMarlin(rpc::SingleExtruderJob {
                         machine_id: job.machine_id,
                         firmware_version: job.firmware_version,
-                        configuration_hash: job.configuration_hash.as_str().into(),
-                        calibration_record_hash: job.calibration_record_hash.as_str().into(),
                         homing_contract: rpc::HomingCoordinateContract::MarlinNativeCartesian
                             as i32,
                         home_position_mm: Some(job.home_position_mm.try_into()?),
@@ -2687,8 +2681,6 @@ mod job_wire_tests {
             job: SingleExtruderJob {
                 machine_id: "unqualified-wire-test".into(),
                 firmware_version: "2.1.2.5".into(),
-                configuration_hash: SourceHash::from_bytes(b"declared test config"),
-                calibration_record_hash: SourceHash::from_bytes(b"declared test record"),
                 homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
                 home_position_mm: low,
                 nozzle_temperature_c: 200.0,
@@ -3348,10 +3340,6 @@ impl TryFrom<rpc::FixedDualJob> for FixedDualJob {
                 .map_err(|e| e.to_string())?
                 .try_into()?,
             firmware_revision: value.firmware_revision,
-            configuration_hash: SourceHash::parse(value.configuration_hash)
-                .map_err(|e| e.to_string())?,
-            calibration_record_hash: SourceHash::parse(value.calibration_record_hash)
-                .map_err(|e| e.to_string())?,
             homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
             home_position_mm: required(value.home_position_mm, "fixed-dual home")?.try_into()?,
             bed_temperature_c: value.bed_temperature_c,
@@ -3405,8 +3393,6 @@ impl TryFrom<FixedDualJob> for rpc::FixedDualJob {
             machine_id: value.machine_id,
             configuration: rpc::FixedDualConfiguration::try_from(value.configuration)? as i32,
             firmware_revision: value.firmware_revision,
-            configuration_hash: value.configuration_hash.into(),
-            calibration_record_hash: value.calibration_record_hash.into(),
             homing_contract: match value.homing_contract {
                 HomingCoordinateContract::MarlinNativeCartesian => {
                     rpc::HomingCoordinateContract::MarlinNativeCartesian as i32
@@ -3808,8 +3794,6 @@ mod fixed_dual_wire_tests {
             machine_id: "software-wire-test".into(),
             configuration: FixedDualConfiguration::Marlin2125NativeFixedHotends,
             firmware_revision: FIXED_DUAL_FIRMWARE_REVISION.into(),
-            configuration_hash: SourceHash::from_bytes(b"configuration"),
-            calibration_record_hash: SourceHash::from_bytes(b"declared-record"),
             homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
             home_position_mm: [0.0; 3],
             bed_temperature_c: 60.0,

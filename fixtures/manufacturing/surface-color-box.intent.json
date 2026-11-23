@@ -14,9 +14,9 @@
         0
       ],
       "max": [
-        220,
-        220,
-        220
+        300,
+        300,
+        300
       ]
     },
     "components": [
@@ -45,8 +45,8 @@
               -4
             ],
             "max": [
-              220,
-              220,
+              300,
+              300,
               0
             ]
           }
@@ -90,8 +90,6 @@
         "machine_id": "software-fixed-dual-marlin-reference",
         "configuration": "marlin2125_native_fixed_hotends",
         "firmware_revision": "e5a167aaa0a671ea6d9b9d98dc0518c88d5caed7",
-        "configuration_hash": "7baa388a82815c8388f786b0c03e7d73fc8df1a1a9e859989e42174ba188b654",
-        "calibration_record_hash": "cfa5864bc575b22bd8131af8bc480d983f67e2cda796a90f5f7f5b7890a776b4",
         "homing_contract": "marlin_native_cartesian",
         "home_position_mm": [
           0,
@@ -103,6 +101,7 @@
         "tools": [
           {
             "id": "fixed-hotend-0",
+            "material_profile": null,
             "feeder_id": "direct-feeder-0",
             "material": {
               "id": "software-pla-a",
@@ -116,6 +115,7 @@
             ],
             "nozzle_diameter_mm": 0.4,
             "filament_diameter_mm": 1.75,
+            "waste_bead_width_mm": 0.45,
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
@@ -140,12 +140,11 @@
                 80,
                 160
               ]
-            ],
-            "material_profile": null,
-            "waste_bead_width_mm": 0.45
+            ]
           },
           {
             "id": "fixed-hotend-1",
+            "material_profile": null,
             "feeder_id": "direct-feeder-1",
             "material": {
               "id": "software-pla-b",
@@ -159,6 +158,7 @@
             ],
             "nozzle_diameter_mm": 0.4,
             "filament_diameter_mm": 1.75,
+            "waste_bead_width_mm": 0.45,
             "deposition_limits": {
               "min_bead_width_mm": 0.3,
               "max_bead_width_mm": 0.75,
@@ -183,14 +183,12 @@
                 180,
                 160
               ]
-            ],
-            "material_profile": null,
-            "waste_bead_width_mm": 0.45
+            ]
           }
         ],
-        "functional_construction": null,
         "surface_constructions": [
           {
+            "optical_origin": null,
             "occurrence_id": 1,
             "definition_id": "ff6a13679b0d6c958f4bbd9716249290a72e4cec9c5df3a61cb4c4f3f93e2495",
             "source_hash": "1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98",
@@ -206,13 +204,15 @@
               "kind": "uniform",
               "material_id": "software-pla-a"
             },
-            "white_material_id": "software-pla-b",
-            "optical_origin": null
+            "white_material_id": "software-pla-b"
           }
         ],
+        "functional_construction": null,
         "assignments": [
           {
             "occurrence_id": 1,
+            "tool_id": null,
+            "interior": null,
             "material": {
               "kind": "uniform",
               "material_id": "software-pla-b"
@@ -228,9 +228,7 @@
                 31,
                 9
               ]
-            },
-            "tool_id": null,
-            "interior": null
+            }
           }
         ],
         "transition_lift_mm": 0.5,
