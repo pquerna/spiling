@@ -148,6 +148,12 @@ fn split_where_thinner_anchors(
 ) -> Result<usize, ManufacturingError> {
     let before = schedule.len();
     let least = floor - FLOOR_ROUNDOFF_MM;
+    let pairs: Vec<(f64, f64)> = schedule
+        .windows(2)
+        .map(|pair| (pair[0].sample, pair[1].sample))
+        .collect();
+    analysis.prefetch(&pairs)?;
+    drop(pairs);
     let mut settled = Vec::new();
     let mut index = 1;
     while index < schedule.len() {
@@ -338,6 +344,11 @@ trait Analysis {
     fn retain(&mut self, bytes: usize) -> Result<(), ManufacturingError>;
     fn charge(&mut self, amount: usize) -> Result<(), ManufacturingError>;
     fn excess(&mut self, lower: f64, upper: f64) -> Result<f64, ManufacturingError>;
+    /// Optionally compute the excess of these pairs ahead of the serial
+    /// search. Values must equal [`Analysis::excess`]; failures are left to it.
+    fn prefetch(&mut self, _pairs: &[(f64, f64)]) -> Result<(), ManufacturingError> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -734,6 +745,83 @@ impl Analysis for Steps<'_> {
         self.cache_excess(key, area)?;
         Ok(area)
     }
+
+    fn prefetch(&mut self, pairs: &[(f64, f64)]) -> Result<(), ManufacturingError> {
+        use rayon::prelude::*;
+        if !self.cache_enabled {
+            return Ok(());
+        }
+        let mut wanted = Vec::new();
+        for &(lower, upper) in pairs {
+            let key = (lower.to_bits(), upper.to_bits());
+            if self
+                .excess
+                .binary_search_by_key(&key, |(pair, _)| *pair)
+                .is_err()
+            {
+                wanted.push((lower, upper));
+            }
+        }
+        let (models, width, noise, cancel) = (self.models, self.width, self.noise_mm2, self.cancel);
+        let working_set = crate::working_set::current();
+        let areas: Vec<Result<f64, ManufacturingError>> = wanted
+            .par_iter()
+            .map(|&(lower, upper)| {
+                crate::working_set::scope(working_set, || {
+                    parallel_excess(models, lower, upper, width, noise, cancel)
+                })
+            })
+            .collect();
+        for (&(lower, upper), area) in wanted.iter().zip(areas) {
+            match area {
+                Ok(area) => self.cache_excess((lower.to_bits(), upper.to_bits()), area)?,
+                Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
+                    return Err(failure);
+                }
+                // The serial search recomputes it and reports its own failure.
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// [`Steps::excess`] for one pair, without the shared caches: the same
+/// sampled rows, union order, canonical form, carried offset and threshold.
+fn parallel_excess(
+    models: &std::collections::BTreeMap<
+        spiling_contracts::geometry::OccurrenceId,
+        std::sync::Arc<spiling_geometry::tolerant::TolerantModel>,
+    >,
+    lower: f64,
+    upper: f64,
+    width: f64,
+    noise_mm2: f64,
+    cancel: &AtomicBool,
+) -> Result<f64, ManufacturingError> {
+    let at = |z: f64| -> Result<MultiPolygon<f64>, ManufacturingError> {
+        let row = super::tolerant::sample_row(models, z, crate::working_set::bytes(), cancel)?;
+        let mut section = MultiPolygon(Vec::new());
+        for placed in &row.sections {
+            check_cancel(cancel)?;
+            section = if section.0.is_empty() {
+                placed.clone()
+            } else {
+                section.union(placed)
+            };
+        }
+        region::canonicalize(&mut section);
+        Ok(section)
+    };
+    let below = at(lower)?;
+    let above = at(upper)?;
+    let area = if above.0.is_empty() {
+        0.0
+    } else {
+        let carried = region::offset_admitted(&below, width * 0.5, |_, _, _| Ok(()), cancel)?;
+        above.difference(&carried).unsigned_area()
+    };
+    Ok(if area > noise_mm2 { area } else { 0.0 })
 }
 
 #[cfg(test)]

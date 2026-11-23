@@ -294,7 +294,7 @@ impl SectionStore {
     }
 }
 
-fn sample_row(
+pub(super) fn sample_row(
     models: &Models,
     z: f64,
     allowance: usize,
