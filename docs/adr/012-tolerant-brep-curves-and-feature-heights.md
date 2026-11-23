@@ -58,12 +58,12 @@ does. The selected printer declares the smallest position change it realizes
 from that declaration and the recipe, not from fixed constants, and every plan
 records the values it used:
 
-| Tolerance      | Value                                             | Governs                                                      |
-| -------------- | ------------------------------------------------- | ------------------------------------------------------------ |
-| Join `τ`       | max(source uncertainty, 1e-6 mm), at most 0.01 mm | Treating vertices, edge ends and seam gaps as the same point |
-| Profile `ε_xy` | 0.01 mm, at most bead width / 20                  | Curve-to-segment approximation and section deviation         |
-| Sparse road `ε_sparse` | 0.05 mm                                   | Curve-to-segment approximation of hidden sparse-infill roads only |
-| Height `ε_z`   | the printer's Z motion resolution                 | Merging near-coincident feature heights into one event       |
+| Tolerance              | Value                                             | Governs                                                           |
+| ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- |
+| Join `τ`               | max(source uncertainty, 1e-6 mm), at most 0.01 mm | Treating vertices, edge ends and seam gaps as the same point      |
+| Profile `ε_xy`         | 0.01 mm, at most bead width / 20                  | Curve-to-segment approximation and section deviation              |
+| Sparse road `ε_sparse` | 0.05 mm                                           | Curve-to-segment approximation of hidden sparse-infill roads only |
+| Height `ε_z`           | the printer's Z motion resolution                 | Merging near-coincident feature heights into one event            |
 
 Two heights closer than one Z step are one commanded height, so they are one
 layer boundary; no layer is thinner than a

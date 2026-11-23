@@ -20,7 +20,7 @@
       "path": "CAD/Hotend Mounts/Standard/Hotend_Mount_Revo_Voron.step",
       "sha256": "43d1bb1262cbd30a62f29d41ce7509265606ff09bda991a9ffa3135d4334c507",
       "bytes": 251208,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-02-FS_Hotend_Mount_Dragon.step",
@@ -29,7 +29,7 @@
       "path": "CAD/Hotend Mounts/Fan_Saver/FS_Hotend_Mount_Dragon.step",
       "sha256": "0f2dcb5ddb3ae8bf7983cf31d3e9b307f15374885ccffda82d555638aff40c50",
       "bytes": 463593,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-03-Hotend_Mount_Bambu_X1C.step",
@@ -38,7 +38,7 @@
       "path": "CAD/Hotend Mounts/Standard/Hotend_Mount_Bambu_X1C.step",
       "sha256": "a3f8b742fa2e6072c4658bac12ca1733a63133b8539bacb5f2fc4ad42dcb58bf",
       "bytes": 3248948,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-04-VHB_DIN_Mount.STEP",
@@ -47,7 +47,7 @@
       "path": "CAD/Electronics Mounts/VHB DIN Mount.STEP",
       "sha256": "29120c49e31134f4b8a29afa42ec695d53cca20c178abcc7c3c42988197e60d8",
       "bytes": 309891,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-05-Manta_M4P_Din_Mount_2pc.step",
@@ -56,7 +56,7 @@
       "path": "CAD/Electronics Mounts/Manta_M4P_Din_Mount_2pc.step",
       "sha256": "e721951b8eaa091b78bb5d6202152956e83767955d7c30b121d0bd7f65f56427",
       "bytes": 592347,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-06-SKR_3_Din_Mount.step",
@@ -65,7 +65,7 @@
       "path": "CAD/Electronics Mounts/SKR_3_Din_Mount.step",
       "sha256": "15bc0a5a4d0f57d102b8a80ef09d21c9dd55b0788c36d4516baa3dbf44056d31",
       "bytes": 1132825,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-07-SKR_E3_V3_Din_Mount.step",
@@ -102,7 +102,7 @@
       "path": "CAD/Electronics Mounts/RPi_or_BTT-Pico_Din_Mount.STEP",
       "sha256": "d2a37c8481e1ba8ba2e568e882ac1c044f7079d4dcf629b1b3cd63485d84a99a",
       "bytes": 2338038,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-10-MiniSB_adxl_mount_adafruit_19mm_c_c.step",
@@ -111,7 +111,7 @@
       "path": "CAD/ADXL_Mounts/MiniSB_adxl_mount_adafruit_19mm_c_c.step",
       "sha256": "b05ef95b24d53812192d32643d8eefd01c933526b99193d640b10cf47a505e8d",
       "bytes": 8162303,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-11-Stealthburner_Printhead_Dragon.step",
@@ -120,7 +120,7 @@
       "path": "CAD/Printheads/Stealthburner_Printhead_Dragon.step",
       "sha256": "7aac3531653de7c9b2f7cc15afce0bafbc063e0a075c85225cad53b33484df09",
       "bytes": 4987101,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-12-Stealthburner_Printhead_Phaetus_BMO.step",
@@ -129,7 +129,7 @@
       "path": "CAD/Printheads/Stealthburner_Printhead_Phaetus_BMO.step",
       "sha256": "6c1570dabded9a83b6fb9049c12267bc0941133ed6945c25500fd211ad9e5aa9",
       "bytes": 5381846,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-13-Stealthburner_Printhead_Rapido.step",
@@ -138,7 +138,7 @@
       "path": "CAD/Printheads/Stealthburner_Printhead_Rapido.step",
       "sha256": "2308d30775478dbf769bb4947d28ed2b337f6a50b63f0c861e475e91bf0d82dc",
       "bytes": 5057060,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-14-Stealthburner_Printhead_Rapido_V2.step",
@@ -147,7 +147,7 @@
       "path": "CAD/Printheads/Stealthburner_Printhead_Rapido_V2.step",
       "sha256": "d967163ec269305725adf210c9e46de4f6299d585652aa7d1c024865b0487ac9",
       "bytes": 5554635,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     },
     {
       "file": "C2-15-Bowden_Module.step",
@@ -156,7 +156,7 @@
       "path": "Superseded_Parts/CAD/Bowden_Module/Bowden_Module.step",
       "sha256": "508daa3f5b64b6194aab1418b91f333eb5b8295d18e38923d4690ba9f08e0801",
       "bytes": 2443946,
-      "expectation": {"kind": "complete"}
+      "expectation": { "kind": "complete" }
     }
   ]
 }
