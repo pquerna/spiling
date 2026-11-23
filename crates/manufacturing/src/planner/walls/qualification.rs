@@ -431,9 +431,6 @@ pub(super) fn qualify(
             regions.push((region, bounds, ordinal));
         }
         drop(seen);
-        drop(nominal_prepared);
-        drop(material_prepared);
-        drop(workspace);
         request.owned_bytes = request
             .owned_bytes
             .checked_sub(prepared_metadata)

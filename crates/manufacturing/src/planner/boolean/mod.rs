@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Carrier-independent conservative overlay work admission. Coarse safe inputs
-//! allocate nothing; sampled boundary neighborhoods use an explicitly charged
-//! edge sweep, not whole-capsule Cartesian products. No material is changed.
+//! Linear planar Boolean admission: count and charge every input point for
+//! cancellation, refuse nonfinite or unconditioned coordinate frames. The
+//! overlay result is admitted by its consumer (`region::check_size`). No
+//! material is changed.
 use crate::{check_cancel, error};
 use geo::{MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
@@ -12,15 +13,8 @@ use std::sync::atomic::AtomicBool;
 mod prepared;
 #[cfg(test)]
 mod sift_tests;
-#[cfg(test)]
-mod sweep_tests;
 pub(super) use prepared::{Prepared, Workspace};
 
-#[derive(Clone, Copy)]
-struct EdgeBounds {
-    min: [f64; 2],
-    max: [f64; 2],
-}
 fn resource(message: &str) -> ManufacturingError {
     error(ManufacturingErrorCode::ResourceLimit, message)
 }
@@ -148,53 +142,6 @@ pub(super) fn sort_by<T>(
     Ok(())
 }
 
-fn sweep_active<T>(
-    active: &mut Vec<T>,
-    edge: EdgeBounds,
-    bounds: impl Fn(&T) -> EdgeBounds,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    if active
-        .len()
-        .checked_mul(2)
-        .and_then(|allowance| work.checked_add(allowance))
-        .is_some()
-    {
-        let mut consumed = 0;
-        let result = sweep_active_inner::<_, true>(active, edge, bounds, &mut consumed, cancel);
-        charge(work, consumed)?;
-        result
-    } else {
-        sweep_active_inner::<_, false>(active, edge, bounds, work, cancel)
-    }
-}
-
-fn sweep_active_inner<T, const BATCHED: bool>(
-    active: &mut Vec<T>,
-    edge: EdgeBounds,
-    bounds: impl Fn(&T) -> EdgeBounds,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    let mut position = 0;
-    while position < active.len() {
-        check_cancel(cancel)?;
-        charge_one::<BATCHED>(work)?;
-        let previous = bounds(&active[position]);
-        if previous.max[0] < edge.min[0] {
-            charge_one::<BATCHED>(work)?;
-            active.swap_remove(position);
-            continue;
-        }
-        if previous.min[1] <= edge.max[1] && edge.min[1] <= previous.max[1] {
-            charge_one::<BATCHED>(work)?;
-        }
-        position += 1;
-    }
-    Ok(())
-}
-
 pub(super) fn budget(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
@@ -208,7 +155,7 @@ pub(super) fn budget(
     } else {
         &b.0[..]
     };
-    polygon_budget(a.0.iter().chain(other.iter()), &mut 0, usize::MAX, cancel)
+    polygon_budget(a.0.iter().chain(other.iter()), &mut 0, cancel)
 }
 
 /// Charge a sequence of overlays against one ceiling without billing remote
@@ -224,41 +171,17 @@ pub(super) fn budget_accumulated(
     } else {
         &b.0[..]
     };
-    polygon_budget(a.0.iter().chain(other.iter()), work, 256, cancel)
+    polygon_budget(a.0.iter().chain(other.iter()), work, cancel)
 }
 
 pub(crate) fn budget_limited(
     left: &MultiPolygon<f64>,
     right: &MultiPolygon<f64>,
     work: &mut usize,
-    available_bytes: usize,
+    _available_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    check_cancel(cancel)?;
-    // Ring inventory is published with the sweep, not before byte admission.
-    let mut counted = *work;
-    let other = if std::ptr::eq(left, right) {
-        &right.0[..0]
-    } else {
-        &right.0[..]
-    };
-    let polygons = left.0.iter().chain(other.iter());
-    let mut count = 0usize;
-    for polygon in polygons.clone() {
-        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            charge(&mut counted, 1)?;
-            count = count
-                .checked_add(ring.0.len().saturating_sub(1))
-                .ok_or_else(|| resource("Boolean caller edge count overflow"))?;
-        }
-    }
-    count
-        .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
-        .filter(|bytes| *bytes <= available_bytes)
-        .ok_or_else(|| resource("Boolean caller scratch byte limit exceeded"))?;
-    let result = polygon_budget(polygons, &mut counted, 256, cancel);
-    *work = counted;
-    result
+    budget_accumulated(left, right, work, cancel)
 }
 
 /// Borrowed required-material pieces share the ordinary Boolean admission proof.
@@ -268,12 +191,7 @@ pub(super) fn budget_parts_accumulated(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    polygon_budget(
-        parts.iter().copied().chain(other.0.iter()),
-        work,
-        256,
-        cancel,
-    )
+    polygon_budget(parts.iter().copied().chain(other.0.iter()), work, cancel)
 }
 
 #[derive(Clone, Copy)]
@@ -330,141 +248,16 @@ fn inspect<'a>(
     Ok(inventory)
 }
 
-fn sort_work(count: usize) -> Result<usize, ManufacturingError> {
-    let levels = usize::BITS as usize - count.leading_zeros() as usize;
-    count
-        .checked_mul(6 * levels + 8)
-        .ok_or_else(|| resource("Boolean broad-phase sort work overflow"))
-}
-
 fn polygon_budget<'a>(
-    polygons: impl Iterator<Item = &'a Polygon<f64>> + Clone,
+    polygons: impl Iterator<Item = &'a Polygon<f64>>,
     work: &mut usize,
-    coarse_pair_limit: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let Inventory {
         count, min, max, ..
-    } = inspect(polygons.clone(), work, cancel)?;
-    if count == 0 {
-        return Ok(());
-    }
-    let padding = overlay_padding(min, max)?;
-    if let Some(pairs) = count
-        .checked_mul(count)
-        .filter(|pairs| *pairs <= coarse_pair_limit && work.checked_add(*pairs).is_some())
-    {
-        charge(work, pairs)?;
-        return Ok(()); // Every unordered candidate is covered by this coarse bound.
-    }
-    if count > crate::working_set::units() {
-        return Err(resource("Boolean broad-phase staging point limit exceeded"));
-    }
-    // Two bounded scratch arrays only: edge bounds and active indices. Their
-    // total retained entries, byte products and construction/sort allowance are
-    // admitted BEFORE growth. Heap depth <= ceil(log2(count)); at most three
-    // charged operations per level plus extraction, with generous linear slack.
-    count
-        .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
-        .filter(|bytes| *bytes <= crate::working_set::bytes())
-        .ok_or_else(|| resource("Boolean broad-phase scratch byte limit exceeded"))?;
-    let sort_bound = sort_work(count)?;
-    if work.checked_add(sort_bound).is_none() {
-        return Err(resource(
-            "Boolean broad-phase construction/sort work counter overflow",
-        ));
-    }
-    let mut edges = Vec::with_capacity(count);
-    for polygon in polygons.clone() {
-        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            for edge in ring.0.windows(2) {
-                check_cancel(cancel)?;
-                charge(work, 2)?; // Construct the box and its eventual active index.
-                let [p, q] = [edge[0], edge[1]];
-                let lo = [
-                    (p.x.min(q.x) - padding).next_down(),
-                    (p.y.min(q.y) - padding).next_down(),
-                ];
-                let hi = [
-                    (p.x.max(q.x) + padding).next_up(),
-                    (p.y.max(q.y) + padding).next_up(),
-                ];
-                if lo.into_iter().chain(hi).any(|v| !v.is_finite()) {
-                    return Err(resource("Boolean broad-phase box overflow"));
-                }
-                edges.push(EdgeBounds { min: lo, max: hi });
-            }
-        }
-    }
-    sort_by(&mut edges, |edge| edge.min[0], work, cancel)?;
-    let mut active = Vec::<usize>::with_capacity(count);
-    for (index, edge) in edges.iter().enumerate() {
-        sweep_active(&mut active, *edge, |index| edges[*index], work, cancel)?;
-        active.push(index);
+    } = inspect(polygons, work, cancel)?;
+    if count > 0 {
+        overlay_padding(min, max)?;
     }
     check_cancel(cancel)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use geo::{Coord, LineString, Polygon};
-
-    #[test]
-    fn boolean_broad_phase_refuses_dense_intra_operand_and_quantized_candidate_work() {
-        for (spacing, width) in [(0.0, 1.0), (1e-12, 0.5e-12)] {
-            // Slightly separated thin boxes collapse/overlap on the consuming
-            // overlay's common grid. Floating X separation must not hide work.
-            let dense = MultiPolygon(
-                (0..6000)
-                    .map(|i| {
-                        let x = i as f64 * spacing;
-                        Polygon::new(
-                            LineString(vec![
-                                Coord { x, y: 0.0 },
-                                Coord {
-                                    x: x + width,
-                                    y: 0.5,
-                                },
-                                Coord { x, y: 1.0 },
-                                Coord { x, y: 0.0 },
-                            ]),
-                            Vec::new(),
-                        )
-                    })
-                    .chain(std::iter::once(Polygon::new(
-                        LineString(vec![
-                            Coord { x: -10.0, y: -10.0 },
-                            Coord { x: 10.0, y: -10.0 },
-                            Coord { x: 10.0, y: 10.0 },
-                            Coord { x: -10.0, y: -10.0 },
-                        ]),
-                        Vec::new(),
-                    )))
-                    .collect(),
-            );
-            // Exercise the counter overflow boundary. Leave enough for preparation; dense
-            // intra-operand pairs must still exhaust the cumulative allowance.
-            let edges: usize = dense.0.iter().map(|p| p.exterior().0.len() - 1).sum();
-            let allowance = (edges * edges / 4).min(usize::MAX / 2);
-            let mut work = usize::MAX - allowance;
-            assert_eq!(
-                budget_accumulated(
-                    &dense,
-                    &MultiPolygon(Vec::new()),
-                    &mut work,
-                    &AtomicBool::new(false)
-                )
-                .unwrap_err()
-                .code,
-                ManufacturingErrorCode::ResourceLimit
-            );
-            assert_eq!(
-                budget(&dense, &dense, &AtomicBool::new(true))
-                    .unwrap_err()
-                    .code,
-                ManufacturingErrorCode::Cancelled
-            );
-        }
-    }
 }
