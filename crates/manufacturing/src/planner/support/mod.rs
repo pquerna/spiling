@@ -3494,7 +3494,9 @@ where
                 let mut start = ((required_start - extension_start) / length).clamp(0.0, 1.0);
                 let mut end = ((required_end - extension_start) / length).clamp(0.0, 1.0);
                 let mut anchored = true;
-                let gaps = if contact_extension {
+                // Without contact strokes the extension query is the
+                // ordinary lower query, which may use the lower inventory.
+                let gaps = if contact_extension && contacts.clone().next().is_some() {
                     anchors.gaps(
                         whole,
                         previous

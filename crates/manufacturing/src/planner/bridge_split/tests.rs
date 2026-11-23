@@ -116,13 +116,14 @@ fn only_directly_supported_exact_fitted_skin_takes_back_its_authored_role() {
             });
         }
         let path = &upper.paths[0];
+        let previous = layer(0, lower.into_iter().collect());
         let restored = fitted_skin_role(
             &upper,
             path,
-            &layer(0, lower.into_iter().collect()),
             &recipe,
             1,
             &mut AnchorWorkspace::default(),
+            &mut LowerLayer::new(&previous),
             &mut 0,
             &AtomicBool::new(false),
         )

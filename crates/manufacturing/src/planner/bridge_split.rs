@@ -14,7 +14,7 @@
 //! explicitly checked in either travel direction because routing can reverse
 //! a piece. When any piece fails, the row stays whole, never refused.
 
-use super::support::{AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges};
+use super::support::{AnchorCandidate, AnchorWorkspace, GapKind, PreparedAnchorPaths, gap_kind};
 use crate::{check_cancel, error};
 use spiling_contracts::manufacturing::program_coordinates::{
     MIN_DEPOSITION_COMMAND_MM, project_xyz6_point_mm,
@@ -73,15 +73,16 @@ pub(super) fn split_bridged_rows(
             continue;
         }
         let mut replacement: Option<Vec<DepositionPath>> = None;
+        let mut lower_layer = LowerLayer::new(previous);
         for path_index in 0..layer.paths.len() {
             check_cancel(cancel)?;
             if let Some(role) = fitted_skin_role(
                 layer,
                 &layer.paths[path_index],
-                previous,
                 recipe,
                 alternation[index],
                 &mut anchors,
+                &mut lower_layer,
                 work,
                 cancel,
             )? {
@@ -91,10 +92,10 @@ pub(super) fn split_bridged_rows(
             let pieces = split_path(
                 layer,
                 path,
-                previous,
                 recipe,
                 alternation[index],
                 &mut anchors,
+                &mut lower_layer,
                 work,
                 cancel,
             )?;
@@ -135,13 +136,13 @@ pub(super) fn split_bridged_rows(
     clippy::too_many_arguments,
     reason = "A fitted row retains its exact witness, authored axis and earlier command support"
 )]
-fn fitted_skin_role(
+fn fitted_skin_role<'p>(
     layer: &PrintLayer,
     path: &DepositionPath,
-    previous: &PrintLayer,
     recipe: &PlanarPrintRecipe,
     course: u32,
     anchors: &mut AnchorWorkspace,
+    lower: &mut LowerLayer<'p>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<DepositionKind>, ManufacturingError> {
@@ -175,7 +176,7 @@ fn fitted_skin_role(
     let actual = [project_xyz6_point_mm(*start)?, project_xyz6_point_mm(*end)?];
     let mut classes = [None; 2];
     for (class, stroke) in classes.iter_mut().zip([actual, [actual[1], actual[0]]]) {
-        *class = classify_actual(stroke, width, previous, recipe, anchors, work, cancel)?;
+        *class = classify_actual(stroke, width, recipe, anchors, lower, work, cancel)?;
     }
     Ok(match classes {
         [Some(false), Some(false)] if on_authored_axis(path, role, recipe, course)? => Some(role),
@@ -190,18 +191,18 @@ fn fitted_skin_role(
     clippy::too_many_arguments,
     reason = "the split binds its layer, lower layer, recipe, course and caller-owned proof resources"
 )]
-pub(super) fn split_path(
+pub(super) fn split_path<'p>(
     layer: &PrintLayer,
     path: &DepositionPath,
-    previous: &PrintLayer,
     recipe: &PlanarPrintRecipe,
     course: u32,
     anchors: &mut AnchorWorkspace,
+    lower: &mut LowerLayer<'p>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<Vec<DepositionPath>>, ManufacturingError> {
-    match splittable(layer, path, previous, recipe, course)? {
-        Some(role) => split_row(path, role, previous, recipe, anchors, work, cancel),
+    match splittable(layer, path, lower.layer, recipe, course)? {
+        Some(role) => split_row(path, role, recipe, anchors, lower, work, cancel),
         None => Ok(None),
     }
 }
@@ -301,23 +302,51 @@ fn fitted(layer: &PrintLayer, path: &DepositionPath) -> bool {
 /// Classify one actual stroke against the previous layer's actual strokes:
 /// Some(true) has a genuine Bridge gap and otherwise only supported gaps,
 /// Some(false) is fully supported, None crosses any other gap.
-fn classify_actual(
+/// The previous layer and its actual model paths, prepared on first query.
+pub(super) struct LowerLayer<'p> {
+    layer: &'p PrintLayer,
+    prepared: Option<PreparedAnchorPaths<'p>>,
+}
+
+impl<'p> LowerLayer<'p> {
+    pub(super) fn new(layer: &'p PrintLayer) -> Self {
+        Self {
+            layer,
+            prepared: None,
+        }
+    }
+
+    fn prepared(
+        &mut self,
+        cancel: &AtomicBool,
+    ) -> Result<&PreparedAnchorPaths<'p>, ManufacturingError> {
+        if self.prepared.is_none() {
+            self.prepared = Some(PreparedAnchorPaths::new(
+                self.layer.paths.iter().filter(|p| p.kind.is_model()),
+                cancel,
+            )?);
+        }
+        Ok(self.prepared.as_ref().expect("just prepared"))
+    }
+}
+
+fn classify_actual<'p>(
     stroke: [[f64; 3]; 2],
     width: f64,
-    previous: &PrintLayer,
     recipe: &PlanarPrintRecipe,
     anchors: &mut AnchorWorkspace,
+    lower: &mut LowerLayer<'p>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<bool>, ManufacturingError> {
     let length = (stroke[1][0] - stroke[0][0]).hypot(stroke[1][1] - stroke[0][1]);
     let mut genuine = false;
-    for gap in anchors.gaps_edges(
+    for gap in anchors.gaps_prepared(
         AnchorCandidate {
             endpoints_mm: stroke,
             bead_width_mm: width,
         },
-        projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true),
+        lower.prepared(cancel)?,
         work,
         cancel,
     )? {
@@ -335,12 +364,12 @@ fn classify_actual(
     Ok(Some(genuine))
 }
 
-fn split_row(
+fn split_row<'p>(
     path: &DepositionPath,
     role: DepositionKind,
-    previous: &PrintLayer,
     recipe: &PlanarPrintRecipe,
     anchors: &mut AnchorWorkspace,
+    lower: &mut LowerLayer<'p>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<Vec<DepositionPath>>, ManufacturingError> {
@@ -357,12 +386,12 @@ fn split_row(
     // Bridged intervals in parameter along the actual row, each grown by its
     // anchor and merged across remainders shorter than one anchor.
     let mut spans: Vec<[f64; 2]> = Vec::new();
-    for gap in anchors.gaps_edges(
+    for gap in anchors.gaps_prepared(
         AnchorCandidate {
             endpoints_mm: actual,
             bead_width_mm: width,
         },
-        projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true),
+        lower.prepared(cancel)?,
         work,
         cancel,
     )? {
@@ -442,13 +471,13 @@ fn split_row(
         }
         // The verifier's exact split-row predicates; any miss keeps it whole.
         let expected = Some(kind == DepositionKind::Bridge);
-        if classify_actual(stroke, width, previous, recipe, anchors, work, cancel)? != expected
+        if classify_actual(stroke, width, recipe, anchors, lower, work, cancel)? != expected
             || classify_actual(
                 [stroke[1], stroke[0]],
                 width,
-                previous,
                 recipe,
                 anchors,
+                lower,
                 work,
                 cancel,
             )? != expected
