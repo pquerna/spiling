@@ -242,6 +242,13 @@ fn fixed_axis(policy: RectilinearAxisPolicy, course: u32) -> usize {
         RectilinearAxisPolicy::AlternatingYX => usize::from(!course.is_multiple_of(2)),
     }
 }
+type LineEdge = (u64, usize, usize, [[f64; 3]; 2]);
+
+/// Equal coordinates share a key (both zeros included); others never do.
+fn line_key(value: f64) -> u64 {
+    if value == 0.0 { 0 } else { value.to_bits() }
+}
+
 fn same_ends(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
     a == b || a == [b[1], b[0]]
 }
@@ -451,7 +458,30 @@ pub(super) fn verify(
                 .map_err(|_| resource())?;
         }
         claimed.resize(layer.paths.len(), false);
+        // Separator centerlines in actual coordinates, projected once per layer.
+        let mut walls = Vec::new();
+        for interface in &layer.region_coverage.process_interfaces {
+            for line in &interface.centerlines_mm {
+                cancelled(cancel)?;
+                walls.try_reserve(1).map_err(|_| resource())?;
+                walls.push((
+                    [
+                        project_xyz6_point_mm([line[0][0], line[0][1], layer.z_mm])?,
+                        project_xyz6_point_mm([line[1][0], line[1][1], layer.z_mm])?,
+                    ],
+                    usize::from(interface.axis),
+                    interface.thickness_mm * 0.5,
+                ));
+            }
+        }
+        // Actual axis-parallel edges per fixed axis, built on first use:
+        // (fixed coordinate key, path, edge, ends) in path and edge order.
+        let mut lines: [Option<Vec<LineEdge>>; 2] = [None, None];
         live = retained;
+        add_bytes(
+            &mut live,
+            walls.capacity() * size_of::<([[f64; 3]; 2], usize, f64)>(),
+        )?;
         add_bytes(&mut live, claimed.capacity())?;
         add_bytes(&mut live, anchors.retained_bytes())?;
         for domain in &layer.skin_command_fits {
@@ -480,12 +510,35 @@ pub(super) fn verify(
             };
             let fixed = fixed_axis(policy, alternation[index]);
             let along = 1 - fixed;
+            if lines[fixed].is_none() {
+                let mut line = Vec::new();
+                for (path_index, path) in layer.paths.iter().enumerate() {
+                    charge(work, path.points_mm.len())?;
+                    for (edge_index, edge) in path.points_mm.windows(2).enumerate() {
+                        cancelled(cancel)?;
+                        let a = project_xyz6_point_mm(edge[0])?;
+                        let b = project_xyz6_point_mm(edge[1])?;
+                        if a[fixed] == b[fixed] && a[2] == b[2] {
+                            line.try_reserve(1).map_err(|_| resource())?;
+                            line.push((line_key(a[fixed]), path_index, edge_index, [a, b]));
+                        }
+                    }
+                }
+                line.sort_unstable_by_key(|entry| (entry.0, entry.1, entry.2));
+                lines[fixed] = Some(line);
+            }
+            let line_bytes = lines
+                .iter()
+                .flatten()
+                .map(|line| line.capacity() * size_of::<LineEdge>())
+                .sum::<usize>();
             for fit in &domain.fits {
                 cancelled(cancel)?;
                 charge(work, 1)?;
                 live = retained;
                 add_bytes(&mut live, claimed.capacity())?;
                 add_bytes(&mut live, anchors.retained_bytes())?;
+                add_bytes(&mut live, line_bytes)?;
                 rows.admit(live, 0, 0)?;
                 if fit.required_mm[0][fixed] != fit.required_mm[1][fixed]
                     || fit.required_mm[0][2] != layer.z_mm
@@ -615,21 +668,10 @@ pub(super) fn verify(
                         return Err(failed("skin fit duplicates permanent plate ownership"));
                     }
                 }
-                for interface in &layer.region_coverage.process_interfaces {
-                    for line in &interface.centerlines_mm {
-                        charge(work, 1)?;
-                        let wall = [
-                            project_xyz6_point_mm([line[0][0], line[0][1], layer.z_mm])?,
-                            project_xyz6_point_mm([line[1][0], line[1][1], layer.z_mm])?,
-                        ];
-                        if super::interfaces::enters_finite_band(
-                            actual,
-                            wall,
-                            usize::from(interface.axis),
-                            interface.thickness_mm * 0.5,
-                        ) {
-                            return Err(failed("skin fit enters reserved separator material"));
-                        }
+                for &(wall, axis, half) in &walls {
+                    charge(work, 1)?;
+                    if super::interfaces::enters_finite_band(actual, wall, axis, half) {
+                        return Err(failed("skin fit enters reserved separator material"));
                     }
                 }
                 if path.kind == DepositionKind::Bridge {
@@ -686,16 +728,20 @@ pub(super) fn verify(
                 live = retained;
                 add_bytes(&mut live, claimed.capacity())?;
                 add_bytes(&mut live, anchors.retained_bytes())?;
+                add_bytes(&mut live, line_bytes)?;
                 rows.admit(live, 0, 0)?;
-                for (other_index, other) in layer.paths.iter().enumerate() {
+                let line = lines[fixed].as_deref().expect("fixed-axis edges indexed");
+                let key = line_key(actual[0][fixed]);
+                let first = line.partition_point(|entry| entry.0 < key);
+                let last = line.partition_point(|entry| entry.0 <= key);
+                for &(_, other_index, _, [a, b]) in &line[first..last] {
+                    let other = &layer.paths[other_index];
                     if other_index == path_index {
                         continue;
                     }
-                    charge(work, other.points_mm.len())?;
-                    for edge in other.points_mm.windows(2) {
-                        cancelled(cancel)?;
-                        let a = project_xyz6_point_mm(edge[0])?;
-                        let b = project_xyz6_point_mm(edge[1])?;
+                    cancelled(cancel)?;
+                    charge(work, 1)?;
+                    {
                         if a[fixed] == actual[0][fixed]
                             && b[fixed] == actual[0][fixed]
                             && a[2] == actual[0][2]

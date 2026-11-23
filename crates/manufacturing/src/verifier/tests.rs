@@ -3564,7 +3564,13 @@ fn minimum_skin_replay_rejects_duplicate_witnesses_and_positive_collinear_extrus
     other.owner = Some(DepositionOwner::Regional { region_index: 0 });
     other.points_mm = vec![[2.015, 2.0, 1.0], [2.035003, 2.0, 1.0]];
     duplicate.layers[0].paths.push(other);
-    assert!(replay_skin_fit(&intent, duplicate).is_err());
+    let failure = replay_skin_fit(&intent, duplicate).unwrap_err();
+    assert!(
+        failure
+            .message
+            .contains("duplicates positive collinear commanded extrusion"),
+        "{failure:?}"
+    );
 }
 
 #[test]
