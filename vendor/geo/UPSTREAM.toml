@@ -1,0 +1,15 @@
+repository = "https://github.com/georust/geo"
+registry = "crates.io"
+version = "0.32.0"
+snapshot_revision = "240f203818c978a87f3fe3376aa5e4155caf6634"
+registry_checksum = "3f3901269ec6d4f6068d3f09e5f02f995bd076398dcd1dfec407cd230b02d11b"
+license = "MIT OR Apache-2.0"
+consumer = "manufacturing planar Boolean operations; built on the workspace's single i_overlay"
+
+[[changes]]
+paths = ["Cargo.toml"]
+reason = "Require i_overlay 9.2.0 instead of 4.0.x. The 4.x tree/fragment split solver at default precision builds an inconsistent graph on large overlapping-ring unions (a 2,898-ring support landing road union), so contour extraction never closes and memory grows without bound; i_overlay 8.x fixed it, and every published geo release still pins 4.x. Keep the registry manifest's runtime dependencies and features, omitting unvendored examples and dev dependencies. Allow the deprecated lint: geo 0.32.0 reads Triangle tuple fields that geo-types 0.7.20 deprecates. Preserve the original manifest, README, changelog and both license texts from the exact source revision."
+
+[[changes]]
+paths = ["src/algorithm/bool_ops/i_overlay_integration.rs", "src/algorithm/buffer.rs"]
+reason = "Port to the i_overlay 9 API: FloatPointCompatible carries its scalar as an associated type, mesh stroke/outline/style moved under mesh::float, and LineCap/StrokeStyle take only the point type. Operations, default fill rules, the i32 integer engine, conversion and output order are otherwise unchanged. Drop this snapshot when a published geo release requires i_overlay >= 8."

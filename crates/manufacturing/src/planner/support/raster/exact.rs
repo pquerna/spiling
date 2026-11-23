@@ -871,7 +871,7 @@ fn join(
         return Ok(MultiPolygon(Vec::new()));
     }
     let [lo, hi] = raster.frame.bounds();
-    let adapter = FloatPointAdapter::new(FloatRect {
+    let adapter = FloatPointAdapter::<[f64; 2], i32>::new(FloatRect {
         min_x: lo[0],
         min_y: lo[1],
         max_x: hi[0],

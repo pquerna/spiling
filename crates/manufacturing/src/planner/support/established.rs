@@ -177,7 +177,7 @@ pub(super) fn proposal_geometry<'p>(
     use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
     let points: usize = capsules.iter().map(Vec::len).sum();
     (raster.admit)(live_bytes.saturating_add(points.saturating_mul(64)))?;
-    let adapter = FloatPointAdapter::new(FloatRect {
+    let adapter = FloatPointAdapter::<[f64; 2], i32>::new(FloatRect {
         min_x: extent[0][0],
         min_y: extent[0][1],
         max_x: extent[1][0],

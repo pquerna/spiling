@@ -27,7 +27,7 @@ use super::*;
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::overlay::FloatOverlay;
-use i_overlay::i_shape::source::resource::ShapeResource;
+use i_overlay::i_shape::source::float::resource::ShapeResource;
 use std::mem::size_of;
 
 /// Offset `polygons` by the (symmetric, convex, counterclockwise) `disk`.
@@ -435,7 +435,7 @@ struct Paths {
     ends: Vec<usize>,
 }
 
-impl ShapeResource<[f64; 2], f64> for Paths {
+impl ShapeResource<[f64; 2]> for Paths {
     type ResourceIter<'a> = Rings<'a>;
 
     fn iter_paths(&self) -> Rings<'_> {

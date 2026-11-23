@@ -105,7 +105,6 @@ fn checked_landing_overlay<'a>(
     phase: &str,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     use geo::{Winding, winding_order::WindingOrder};
-    use i_overlay::core::extract::CheckedExtractionError;
     use i_overlay::core::fill_rule::FillRule;
     use i_overlay::core::overlay::{Overlay, ShapeType};
     use i_overlay::core::overlay_rule::OverlayRule;
@@ -151,7 +150,7 @@ fn checked_landing_overlay<'a>(
         };
         (OverlayRule::Subject, fill)
     };
-    let adapter = FloatPointAdapter::<[f64; 2], f64>::new(bounds);
+    let adapter = FloatPointAdapter::<[f64; 2], i32>::new(bounds);
     let input_and_split = live_bytes.saturating_add(points.saturating_mul(128));
     (raster.admit)(input_and_split)?;
     let mut overlay = Overlay::new(points);
@@ -170,24 +169,19 @@ fn checked_landing_overlay<'a>(
             );
         }
     }
-    let shapes = overlay.overlay_checked(rule, fill, |links| {
-        !raster.cancel.load(Ordering::Relaxed)
-            && (raster.admit)(input_and_split.saturating_add(links.saturating_mul(256))).is_ok()
-    });
+    let shapes = overlay.overlay(rule, fill);
     drop(overlay);
     check_cancel(raster.cancel)?;
-    let shapes = shapes.map_err(|failure| {
-        let reason = match failure {
-            CheckedExtractionError::Admission => "extraction exceeds the working set",
-            CheckedExtractionError::OpenContour => {
-                "cannot close a contour with distinct incident links"
-            }
-        };
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            format!("support landing {phase}: {reason}"),
-        )
-    })?;
+    // The result and its geo copy are live together until conversion ends.
+    let result_points = shapes.iter().flatten().map(Vec::len).sum::<usize>();
+    (raster.admit)(input_and_split.saturating_add(result_points.saturating_mul(48))).map_err(
+        |_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                format!("support landing {phase}: result exceeds the working set"),
+            )
+        },
+    )?;
     let mut polygons = Vec::new();
     for shape in shapes {
         check_cancel(raster.cancel)?;
@@ -2107,7 +2101,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_landing_ledge_union_preserves_order_and_admits_extraction() {
+    fn checked_landing_ledge_union_preserves_order_and_admits_result() {
         use geo::algorithm::unary_union;
         use geo::wkt;
 
@@ -2155,7 +2149,7 @@ mod tests {
         raster.admit = &decline_extraction;
         let failure = union(&raster).unwrap_err();
         assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
-        assert!(failure.message.contains("union: extraction"));
+        assert!(failure.message.contains("union: result"));
         assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 

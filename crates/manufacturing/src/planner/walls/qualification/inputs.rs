@@ -8,7 +8,7 @@ use geo::{BooleanOps, Coord, LineString, MultiPolygon, Polygon};
 use i_overlay::{
     core::{fill_rule::FillRule, overlay_rule::OverlayRule},
     float::overlay::FloatOverlay,
-    i_shape::source::resource::ShapeResource,
+    i_shape::source::float::resource::ShapeResource,
 };
 use spiling_contracts::manufacturing::ManufacturingError;
 use std::{mem::size_of, sync::atomic::AtomicBool};
@@ -102,7 +102,7 @@ impl Paths {
     }
 }
 
-impl ShapeResource<[f64; 2], f64> for Paths {
+impl ShapeResource<[f64; 2]> for Paths {
     type ResourceIter<'a> = Rings<'a>;
 
     fn iter_paths(&self) -> Rings<'_> {

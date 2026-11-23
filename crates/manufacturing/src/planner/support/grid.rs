@@ -1163,7 +1163,7 @@ impl Raster<'_> {
         use i_overlay::float::overlay::FloatOverlay;
         use i_overlay::i_float::{adapter::FloatPointAdapter, float::rect::FloatRect};
         let [lo, hi] = frame.bounds();
-        let adapter = FloatPointAdapter::new(FloatRect {
+        let adapter = FloatPointAdapter::<[f64; 2], i32>::new(FloatRect {
             min_x: lo[0],
             min_y: lo[1],
             max_x: hi[0],

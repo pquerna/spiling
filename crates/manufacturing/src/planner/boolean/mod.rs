@@ -44,8 +44,8 @@ fn charge_exceeded(before: usize, amount: usize) -> ManufacturingError {
     ))
 }
 
-// Pinned geo0.32/i_overlay4/i_float1.15 uses bbox midpoint and
-// 2^(29-round(log2(half_span))) for float->integer conversion. Thus a grid
+// Pinned geo0.32/i_overlay9/i_float5 (i32 engine) uses bbox midpoint and
+// 2^(29-trunc(log2(half_span))) for float->integer conversion. Thus a grid
 // step is <= span/2^29, and endpoint rounding <= half a step. This deliberately
 // wider work-only pad includes conversion/intersection rounding and midpoint /
 // subtraction arithmetic. Directed rounding encloses its own arithmetic too.

@@ -87,14 +87,14 @@ impl Frame {
                 "support clearance work frame has non-finite bounds",
             ));
         }
-        let adapter = FloatPointAdapter::<[f64; 2], f64>::new(FloatRect {
+        let adapter = FloatPointAdapter::<[f64; 2], i32>::new(FloatRect {
             min_x: bounds[0][0],
             min_y: bounds[0][1],
             max_x: bounds[1][0],
             max_y: bounds[1][1],
         });
-        if !adapter.inv_scale.is_finite()
-            || adapter.inv_scale * 2.0f64.sqrt() > super::super::OFFSET_TOLERANCE_MM * 0.5
+        if !adapter.inv_scale().is_finite()
+            || adapter.inv_scale() * 2.0f64.sqrt() > super::super::OFFSET_TOLERANCE_MM * 0.5
         {
             return Err(error(
                 ManufacturingErrorCode::NativeConditioningFailure,
@@ -118,13 +118,13 @@ impl Frame {
     /// The integer quantum of an overlay adapter over this frame.
     #[cfg(test)]
     pub(super) fn quantum(&self) -> f64 {
-        FloatPointAdapter::<[f64; 2], f64>::new(FloatRect {
+        FloatPointAdapter::<[f64; 2], i32>::new(FloatRect {
             min_x: self.bounds[0][0],
             min_y: self.bounds[0][1],
             max_x: self.bounds[1][0],
             max_y: self.bounds[1][1],
         })
-        .inv_scale
+        .inv_scale()
     }
 
     #[cfg(test)]
@@ -142,46 +142,6 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use i_overlay::core::overlay::ShapeType;
-    use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
-    use i_overlay::float::overlay::FloatOverlay;
-
-    #[test]
-    fn tree_y_screen_preserves_closed_contacts_and_rounded_crossings() {
-        let mut paths = Vec::new();
-        for row in 0..64 {
-            for column in 0..20 {
-                let left = f64::from(column) * 64.0;
-                let bottom = f64::from(row) * 0.125;
-                paths.push(vec![
-                    [left, bottom],
-                    [left + 62.0, bottom],
-                    [left + 62.0, bottom + 0.0625],
-                    [left, bottom + 0.0625],
-                ]);
-            }
-        }
-        paths.extend([
-            vec![[3.0, 0.0625], [59.0, 0.0625], [31.0, 0.125]],
-            vec![[2.0, -1.0], [47.0, 2.1], [4.0, 2.4]],
-            vec![[61.0, 2.2], [0.0, 1.9], [2.0, 0.01]],
-        ]);
-        let frame = FloatPointAdapter::new(FloatRect {
-            min_x: -1.0,
-            min_y: -2.0,
-            max_x: 1281.0,
-            max_y: 10.0,
-        });
-        let capacity = paths.iter().map(Vec::len).sum();
-        let unscreened = FloatOverlay::with_adapter(frame.clone(), capacity)
-            .unsafe_add_source(&paths, ShapeType::Subject)
-            .overlay(OverlayRule::Subject, FillRule::Positive);
-        let screened = FloatOverlay::with_adapter(frame, capacity)
-            .with_exact_y_screen()
-            .unsafe_add_source(&paths, ShapeType::Subject)
-            .overlay(OverlayRule::Subject, FillRule::Positive);
-        assert_eq!(screened, unscreened);
-    }
 
     fn support_input<'a>(
         sections: &'a [SectionSpan],

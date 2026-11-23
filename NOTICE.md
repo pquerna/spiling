@@ -37,7 +37,7 @@ The native `apps/workbench` frontend consumes the unmodified upstream egui/efram
 
 Boolmesh 0.2.2 (Saki Komikado), MPL-2.0, is retained in vendor/boolmesh with a cooperative cancellation extension. Its LICENSE and UPSTREAM.toml identify the source and changes.
 
-`vendor/i_overlay/` retains Nail Sharipov's MIT-licensed `i_overlay` 4.0.7 with an opt-in integer range screen for support projection. Its `LICENSE` and `UPSTREAM.toml` record the exact source, attribution and changes; packaged notices include both.
+`vendor/geo/` retains the georust contributors' MIT OR Apache-2.0 `geo` 0.32.0, ported to `i_overlay` 9.2. Its `LICENSE-MIT`, `LICENSE-APACHE` and `UPSTREAM.toml` record the exact source, attribution and changes; packaged notices include them.
 
 The vendored tracel-llvm-bundler build helper is derived from Tracel Technologies
 Inc.'s MIT OR Apache-2.0 source. Its licenses, exact source revision and local
