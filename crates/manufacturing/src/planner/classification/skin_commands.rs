@@ -91,6 +91,10 @@ impl RowEdges {
     }
 
     /// Adds paths appended at `from..` (on rows already indexed) in order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Index growth is admitted against the caller's live scratch"
+    )]
     fn insert_paths(
         &mut self,
         paths: &[DepositionPath],
@@ -844,10 +848,6 @@ fn choose(
 }
 
 /// Reserve actual Regional extrusion, not an unprintable raw-coordinate tail.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Regional ownership replacement must explicitly charge paths, segments and simultaneous fit scratch"
-)]
 #[expect(
     clippy::too_many_arguments,
     reason = "Regional ownership replacement must explicitly charge paths, segments, its row index and simultaneous fit scratch"

@@ -138,6 +138,28 @@ fn half_samples(layer: &LayerElevation) -> [f64; 2] {
 /// Halve layers while it shrinks the hanging-wall excess between sampled
 /// sections. `excess(lower_sample, upper_sample)` is that area; each pair
 /// that cannot progress is settled once.
+/// The thicker eligible layer of the pair ending at `index`; the first
+/// rests on the bed.
+fn split_target(
+    schedule: &[LayerElevation],
+    index: usize,
+    least: f64,
+    admits: &impl Fn(f64) -> bool,
+) -> Option<usize> {
+    let height = |layer: &LayerElevation| layer.z - layer.lower_z;
+    [index - 1, index]
+        .into_iter()
+        .filter(|&k| {
+            let half = height(&schedule[k]) * 0.5;
+            k >= 1 && half >= least && admits(half)
+        })
+        .max_by(|&a, &b| {
+            height(&schedule[a])
+                .total_cmp(&height(&schedule[b]))
+                .then(a.cmp(&b))
+        })
+}
+
 fn split_where_thinner_anchors(
     schedule: &mut Vec<LayerElevation>,
     floor: f64,
@@ -154,6 +176,38 @@ fn split_where_thinner_anchors(
         .collect();
     analysis.prefetch(&pairs)?;
     drop(pairs);
+    // Each pair that hangs and can split needs the excess of its split
+    // halves too; warm those in parallel as well. The serial pass below
+    // computes anything still missing, so this changes no decision.
+    let mut wanted = Vec::new();
+    for index in 1..schedule.len() {
+        check_cancel(cancel)?;
+        let Some(hanging) = analysis.known(schedule[index - 1].sample, schedule[index].sample)?
+        else {
+            continue;
+        };
+        if hanging <= noise_mm2 {
+            continue;
+        }
+        let Some(target) = split_target(schedule, index, least, &admits) else {
+            continue;
+        };
+        let below = schedule[target - 1].sample;
+        let middle = schedule[target].sample;
+        let [lower, upper] = half_samples(&schedule[target]);
+        analysis.charge(5)?;
+        wanted.extend([(below, middle), (below, lower), (lower, upper)]);
+        if let Some(above) = schedule.get(target + 1).map(|layer| layer.sample) {
+            wanted.extend([(middle, above), (upper, above)]);
+        }
+    }
+    analysis
+        .retain(state_bytes(schedule, &Vec::new()) + wanted.capacity() * size_of::<(f64, f64)>())?;
+    analysis.charge(lookup_work(wanted.len()).saturating_mul(wanted.len()))?;
+    wanted.sort_unstable_by_key(|&(lower, upper)| (lower.to_bits(), upper.to_bits()));
+    wanted.dedup_by_key(|&mut (lower, upper)| (lower.to_bits(), upper.to_bits()));
+    analysis.prefetch(&wanted)?;
+    drop(wanted);
     let mut settled = Vec::new();
     let mut index = 1;
     while index < schedule.len() {
@@ -169,19 +223,7 @@ fn split_where_thinner_anchors(
             continue;
         }
         let hanging = analysis.excess(schedule[index - 1].sample, schedule[index].sample)?;
-        // The thicker eligible layer of the pair; the first rests on the bed.
-        let height = |layer: &LayerElevation| layer.z - layer.lower_z;
-        let target = [index - 1, index]
-            .into_iter()
-            .filter(|&k| {
-                let half = height(&schedule[k]) * 0.5;
-                k >= 1 && half >= least && admits(half)
-            })
-            .max_by(|&a, &b| {
-                height(&schedule[a])
-                    .total_cmp(&height(&schedule[b]))
-                    .then(a.cmp(&b))
-            });
+        let target = split_target(schedule, index, least, &admits);
         let Some(target) = target.filter(|_| hanging > noise_mm2) else {
             settle(&mut settled, pair, schedule, analysis)?;
             index += 1;
@@ -348,6 +390,10 @@ trait Analysis {
     /// search. Values must equal [`Analysis::excess`]; failures are left to it.
     fn prefetch(&mut self, _pairs: &[(f64, f64)]) -> Result<(), ManufacturingError> {
         Ok(())
+    }
+    /// An already-known excess, without computing it.
+    fn known(&mut self, _lower: f64, _upper: f64) -> Result<Option<f64>, ManufacturingError> {
+        Ok(None)
     }
 }
 
@@ -744,6 +790,16 @@ impl Analysis for Steps<'_> {
         let area = if area > self.noise_mm2 { area } else { 0.0 };
         self.cache_excess(key, area)?;
         Ok(area)
+    }
+
+    fn known(&mut self, lower: f64, upper: f64) -> Result<Option<f64>, ManufacturingError> {
+        let key = (lower.to_bits(), upper.to_bits());
+        self.charge(lookup_work(self.excess.len()))?;
+        Ok(self
+            .excess
+            .binary_search_by_key(&key, |(pair, _)| *pair)
+            .ok()
+            .map(|position| self.excess[position].1))
     }
 
     fn prefetch(&mut self, pairs: &[(f64, f64)]) -> Result<(), ManufacturingError> {
