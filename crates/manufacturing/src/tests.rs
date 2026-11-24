@@ -1443,6 +1443,12 @@ fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore()
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
     intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
+    // Structure lowering keeps inner-wall points exact beside the connectors
+    // of the fill they bound, so local fractions would legitimately change
+    // which inner-wall points it drops. Pin the exact-perimeter invariant with
+    // no structure budget.
+    intent.recipe.road_tolerances.structure_mm =
+        spiling_geometry::tolerant::TolerantPolicy::default().profile_mm;
     assert_eq!(
         preflight(&scene.input(&intent), &AtomicBool::new(false))
             .unwrap()

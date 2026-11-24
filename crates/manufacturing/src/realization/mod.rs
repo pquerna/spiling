@@ -10,6 +10,7 @@ use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
 mod connect;
+mod lower;
 mod schedule;
 pub(crate) mod stage;
 
@@ -80,6 +81,7 @@ pub(crate) struct StageWork {
     anchor: usize,
     routing: u64,
     arc_runs: usize,
+    lowered_edges: usize,
 }
 
 pub(crate) struct StageOutput {
@@ -124,6 +126,16 @@ fn prepare_order(
         JobWorkflow::FixedDualMarlin { .. } => None,
     };
     let anchor = connect::connect_roads(plan, intent, routed.is_some(), hatch_keys, cancel)?;
+    // Hidden walls, skins, bridges and interface are the structure class:
+    // their lowering budget is the class tolerance less the section's own
+    // profile tolerance (RFC 11). Exposed walls and top skin are the surface
+    // class and keep every point.
+    let lowered = lower::structure_roads(
+        plan,
+        intent,
+        intent.recipe.road_tolerances.structure_mm - PROFILE_TOLERANCE_MM,
+        cancel,
+    )?;
     let (mut estimate, routing) = schedule::apply(plan, intent, routed, position, cancel, order)?;
     let arc_runs = lower_arcs(plan, intent, estimate.as_mut(), cancel)?;
     Ok(StageOutput {
@@ -132,6 +144,7 @@ fn prepare_order(
             anchor,
             routing,
             arc_runs,
+            lowered_edges: lowered,
         },
     })
 }
