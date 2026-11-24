@@ -2158,11 +2158,11 @@ fn import_bounds_are_tight_and_contain_the_mesh() {
         crate::analysis::test_source::nurbs_cylinder(),
     );
     let b = &definition.bounds;
-    let slack = 2.0 * super::BOUNDS_SLACK_MM + 1e-9;
     for (axis, [lo, hi]) in [[-5.0, 5.0], [-5.0, 5.0], [0.0, 8.0]]
         .into_iter()
         .enumerate()
     {
+        let slack = 2.0 * super::BOUNDS_SLACK_MM[axis] + 1e-9;
         assert!(
             b.min[axis] <= lo + 1e-9 && b.min[axis] >= lo - slack,
             "{axis}: {b:?}"

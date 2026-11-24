@@ -1107,9 +1107,10 @@ fn within_hull(
     Ok(out)
 }
 
-/// Import bounds are tight to this (mm): a piece reaching at most this far past the bounds so
-/// far is taken whole, rather than split further.
-const BOUNDS_SLACK_MM: f64 = 1e-3;
+/// Import bounds are tight to this per axis (mm): a piece reaching at most this far past the
+/// bounds so far is taken whole, rather than split further. X/Y bounds only place and admit the
+/// part, so they use the profile tolerance (ADR012); Z sets bed contact and keeps the height one.
+const BOUNDS_SLACK_MM: [f64; 3] = [1e-2, 1e-2, 1e-3];
 
 /// The running box, grown only by sound enclosures.
 struct Box3 {
@@ -1126,13 +1127,15 @@ impl Box3 {
         }
         Ok(())
     }
-    /// How far `position` reaches past the box on any side (0 inside it).
+    /// How far `position` reaches past the box on any side, in units of that axis's
+    /// [`BOUNDS_SLACK_MM`] (0 inside it).
     fn excess(&self, position: &[crate::parametric::Interval; 3]) -> f64 {
         (0..3)
             .map(|axis| {
                 (self.minimum[axis] - position[axis].lo)
                     .max(position[axis].hi - self.maximum[axis])
                     .max(0.0)
+                    / BOUNDS_SLACK_MM[axis]
             })
             .fold(0.0, f64::max)
     }
@@ -1140,7 +1143,7 @@ impl Box3 {
 
 /// Grow `bounds` by the image of `domain` (one or two parameter ranges): a piece whose sound
 /// enclosure (`enclose`) lies inside the bounds so far adds nothing; one reaching past them by at
-/// most [`BOUNDS_SLACK_MM`], or too small to split, is taken whole; any other is halved in each
+/// most [`BOUNDS_SLACK_MM`] on every axis, or too small to split, is taken whole; any other is halved in each
 /// range. Vertices and edges seed the bounds, so only pieces holding a body extreme split.
 fn refine_bounds<const N: usize>(
     bounds: &mut Box3,
@@ -1164,7 +1167,7 @@ fn refine_bounds<const N: usize>(
             let m = 0.5 * (a + b);
             a < &m && &m < b
         });
-        if excess <= BOUNDS_SLACK_MM || !splittable {
+        if excess <= 1.0 || !splittable {
             bounds.include(position)?;
             continue;
         }
