@@ -240,7 +240,8 @@ export async function decodeReplayDisplay(
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_PROGRAM_BYTES);
     // One arc command replays as its planned edges: consecutive depositions
     // may share its line. Lines never go back.
-    const deposits = (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13;
+    const deposits =
+      (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13 || kind === 15;
     if (line < lastLine || (line === lastLine && !(lastDeposits && deposits)))
       fail("source line sequence is not increasing");
     const associated =

@@ -302,8 +302,11 @@ fn e8_ticks(value: f64) -> Result<i64, ManufacturingError> {
 
 /// Validate one bounded immutable artifact without allocating event objects.
 /// Model, support, interface and separator deposition records.
+/// Kinds that deposit material, including non-model waste and adhesion (15):
+/// the same set the flags rule marks as depositions, so an arc command on any
+/// of them may replay as several records sharing its line.
 fn deposits(kind: u8) -> bool {
-    matches!(kind, 1..=5 | 8..=10 | 13)
+    matches!(kind, 1..=5 | 8..=10 | 13 | 15)
 }
 
 pub fn validate_replay_display(

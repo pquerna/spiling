@@ -5583,12 +5583,15 @@ fn skirt_and_brim_are_first_layer_non_model_loops_checked_independently() {
         .clone();
     let mut over = plan.clone();
     over.layers[0].paths[skirt].points_mm = wall;
+    // Tampered points no longer lie on their fitted arcs.
+    over.layers[0].paths[skirt].arcs.clear();
     let mut inside = plan.clone();
     inside.adhesion = AdhesionSummary {
         skirt_paths: 1,
         ..adhesion
     };
     inside.layers[0].paths.drain(1..skirt);
+    inside.layers[0].paths[0].arcs.clear();
     let ring = &mut inside.layers[0].paths[0].points_mm;
     let center = [110.0, 105.0];
     for p in ring.iter_mut() {
