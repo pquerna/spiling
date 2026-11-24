@@ -9,7 +9,7 @@ import diagnosticPrinter from "./software-cartesian.printer.ts";
 const printer = {
   ...diagnosticPrinter,
   id: "software-marlin2-reference",
-  revision: "10",
+  revision: "11",
   name: "Complete Marlin 2 software reference — physically unqualified",
   capabilities: {
     ...diagnosticPrinter.capabilities,
@@ -38,9 +38,9 @@ const printer = {
       park_clearance_mm: 10,
       first_layer_nozzle_temperature_c: 200,
       first_layer_bed_temperature_c: 60,
-      // Marlin's default acceleration and junction deviation, for the
-      // print-time estimate only.
-      timing_model: { acceleration_mm_s2: 3000, junction_deviation_mm: 0.013 },
+      // Current-generation acceleration with Marlin's default junction
+      // deviation, for the print-time estimate only.
+      timing_model: { acceleration_mm_s2: 10000, junction_deviation_mm: 0.013 },
       // A plain G-code file; no delivery package.
       delivery: null,
       // The generic Marlin 2 table without a firmware mesh.

@@ -7,7 +7,7 @@ import type { PrinterSpecification } from "../../packages/protocol/src/generated
 const printer = {
   schema_version: 11,
   id: "software-cartesian-reference",
-  revision: "11",
+  revision: "12",
   name: "Software Cartesian reference — not machine-ready",
   coordinate_frame: "right_handed_millimetres",
   build_envelope: { min: [0, 0, 0], max: [300, 300, 300] },
@@ -43,9 +43,11 @@ const printer = {
     min_bead_height_mm: 0.0025,
     max_bead_height_mm: 0.3,
   },
-  max_print_feed_mm_s: 150,
-  max_travel_feed_mm_s: 150,
-  max_volumetric_flow_mm3_s: 12,
+  // A current-generation reference (Bambu X1 / Prusa Core One class):
+  // declared software limits, not a measured machine.
+  max_print_feed_mm_s: 500,
+  max_travel_feed_mm_s: 600,
+  max_volumetric_flow_mm3_s: 24,
   bed_exclusions: [],
 } satisfies PrinterSpecification;
 

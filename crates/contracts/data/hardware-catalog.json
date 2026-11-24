@@ -245,7 +245,7 @@
       "printer": {
         "schema_version": 11,
         "id": "software-cartesian-reference",
-        "revision": "11",
+        "revision": "12",
         "name": "Software Cartesian reference — not machine-ready",
         "coordinate_frame": "right_handed_millimetres",
         "build_envelope": {
@@ -337,9 +337,9 @@
           "min_bead_height_mm": 0.0025,
           "max_bead_height_mm": 0.3
         },
-        "max_print_feed_mm_s": 150,
-        "max_travel_feed_mm_s": 150,
-        "max_volumetric_flow_mm3_s": 12,
+        "max_print_feed_mm_s": 500,
+        "max_travel_feed_mm_s": 600,
+        "max_volumetric_flow_mm3_s": 24,
         "bed_exclusions": []
       }
     },
@@ -369,7 +369,7 @@
       "printer": {
         "schema_version": 11,
         "id": "software-marlin2-reference",
-        "revision": "10",
+        "revision": "11",
         "name": "Complete Marlin 2 software reference — physically unqualified",
         "coordinate_frame": "right_handed_millimetres",
         "build_envelope": {
@@ -483,7 +483,7 @@
             "first_layer_nozzle_temperature_c": 200,
             "first_layer_bed_temperature_c": 60,
             "timing_model": {
-              "acceleration_mm_s2": 3000,
+              "acceleration_mm_s2": 10000,
               "junction_deviation_mm": 0.013
             },
             "delivery": null,
@@ -559,9 +559,9 @@
           "min_bead_height_mm": 0.0025,
           "max_bead_height_mm": 0.3
         },
-        "max_print_feed_mm_s": 150,
-        "max_travel_feed_mm_s": 150,
-        "max_volumetric_flow_mm3_s": 12,
+        "max_print_feed_mm_s": 500,
+        "max_travel_feed_mm_s": 600,
+        "max_volumetric_flow_mm3_s": 24,
         "bed_exclusions": []
       }
     }

@@ -199,8 +199,8 @@
               "min_bead_height_mm": 0.0025,
               "max_bead_height_mm": 0.3
             },
-            "max_feed_mm_s": 150,
-            "max_volumetric_flow_mm3_s": 12,
+            "max_feed_mm_s": 600,
+            "max_volumetric_flow_mm3_s": 24,
             "nozzle_temperature_c": 200,
             "standby_temperature_c": 150,
             "minimum_extrusion_temperature_c": 170,
@@ -319,8 +319,8 @@
               "min_bead_height_mm": 0.0025,
               "max_bead_height_mm": 0.3
             },
-            "max_feed_mm_s": 150,
-            "max_volumetric_flow_mm3_s": 12,
+            "max_feed_mm_s": 600,
+            "max_volumetric_flow_mm3_s": 24,
             "nozzle_temperature_c": 205,
             "standby_temperature_c": 150,
             "minimum_extrusion_temperature_c": 170,
@@ -430,9 +430,9 @@
       "min_bead_height_mm": 0.0025,
       "max_bead_height_mm": 0.3
     },
-    "max_print_feed_mm_s": 150,
-    "max_travel_feed_mm_s": 150,
-    "max_volumetric_flow_mm3_s": 12,
+    "max_print_feed_mm_s": 500,
+    "max_travel_feed_mm_s": 600,
+    "max_volumetric_flow_mm3_s": 24,
     "bed_exclusions": []
   },
   "recipe": {
