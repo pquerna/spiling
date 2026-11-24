@@ -104,6 +104,14 @@ pub(super) fn plan(
                 boolean_budget(&outline, &support, cancel)?;
                 outline = geo::BooleanOps::union(&outline, &support);
             }
+            // Pockets that only support encloses never receive a loop; a pocket
+            // the part reaches keeps its loops, which attach the brim to a part
+            // surrounded by its support base.
+            let part: Vec<Rect<f64>> = islands
+                .iter()
+                .filter_map(|&i| material.0[i].bounding_rect())
+                .collect();
+            outline = outer_boundaries(outline, &part, cancel)?;
             let loops = ((brim.width_mm / spacing).round() as u32).max(1);
             let mut planned = 0;
             // Every loop is its own offset of one outline, so they build in
@@ -263,6 +271,46 @@ fn collinear_bead_outline(
         ]),
         Vec::new(),
     ))
+}
+
+/// `outline` with only the holes whose bounds meet a part island's bounds,
+/// dropping any polygon that lies inside another polygon and outside its
+/// kept holes (its offset adds no loop).
+fn outer_boundaries(
+    outline: MultiPolygon<f64>,
+    part: &[Rect<f64>],
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    use geo::{Contains, Intersects};
+    let pruned: Vec<Polygon<f64>> = outline
+        .0
+        .into_iter()
+        .map(|polygon| {
+            let (exterior, holes) = polygon.into_inner();
+            let holes = holes
+                .into_iter()
+                .filter(|hole| {
+                    hole.bounding_rect()
+                        .is_some_and(|bounds| part.iter().any(|island| island.intersects(&bounds)))
+                })
+                .collect();
+            Polygon::new(exterior, holes)
+        })
+        .collect();
+    let mut kept = Vec::with_capacity(pruned.len());
+    for (index, polygon) in pruned.iter().enumerate() {
+        check_cancel(cancel)?;
+        let inside = polygon.exterior().0.first().is_some_and(|first| {
+            pruned
+                .iter()
+                .enumerate()
+                .any(|(other, outer)| other != index && outer.contains(&geo::Point::from(*first)))
+        });
+        if !inside {
+            kept.push(polygon.clone());
+        }
+    }
+    Ok(MultiPolygon(kept))
 }
 
 /// Closed rings of the exact outward offset of `outline` (outer boundaries
