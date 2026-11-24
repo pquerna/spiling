@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
+mod disk;
 mod macos;
 mod packaging;
 mod process;
@@ -235,12 +236,15 @@ fn execute() -> Result<()> {
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("help");
     if matches!(command, "help" | "--help" | "-h") {
         println!(
-            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|stage|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust, sccache and platform C/C++ tooling (see docs/quality/development.md for setup/bypass). Optional TypeScript/research tools live in tools/package.json."
+            "cargo xtask bootstrap|build|dev|check|test|test-native|gallery|stage|disk [--apply]|contracts [--check]|package [--profile dev|release]|provenance|macos ...\nNative tasks require Rust, sccache and platform C/C++ tooling (see docs/quality/development.md for setup/bypass). Optional TypeScript/research tools live in tools/package.json."
         );
         return Ok(());
     }
-    let context = Context::new()?;
     let rest = &args[1..];
+    if command == "disk" {
+        return disk::execute(&env::current_dir()?, rest);
+    }
+    let context = Context::new()?;
     match command {
         "stage" => stage::execute(&context, rest),
         "bootstrap" => {

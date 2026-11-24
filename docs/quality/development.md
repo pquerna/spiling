@@ -818,6 +818,43 @@ changes. Preserve old published pins and branch history.
 This cadence is an integration-owner duty, not an installed unattended timer.
 Fork maintenance does not re-enable Spiling's disabled remote CI.
 
+### Host disk layout and retention
+
+A shared development host keeps all disposable output on one work volume
+(`~/work`, or `SPILING_WORK`) in one layout, so retention is a rule, not a
+cleanup project:
+
+| Path                         | Holds                                                   | Retention                               |
+| ---------------------------- | ------------------------------------------------------- | --------------------------------------- |
+| `worktrees/<repo>/<task>/`   | source, its one `target/` (or `target-*`), `.cache/`    | target removed after 2 idle days        |
+| `<checkout>/.cache/`         | small receipts (JSON, Markdown) and large study outputs | files ≥ 2 MiB removed after 2 days      |
+| `corpus/<run>`               | corpus runs and their `.ndjson`/`.log` siblings         | removed after 3 idle days unless pinned |
+| `cache/sccache/`             | the one compiler cache                                  | sccache's own size bound (50 GiB)       |
+| `cache/fp-*`, `cache/stages` | profiling binaries, stage captures                      | newest 3; captures older than 7 days    |
+
+Rules:
+
+- Receipts that evidence cites stay small (under 2 MiB) or are copied into the
+  brain's evidence; anything large is reproducible output and is disposable.
+- Pin a corpus baseline by naming it in `corpus/KEEP` (one exact name,
+  `prefix*` or `*suffix` per line). A pinned directory with its own `KEEP`
+  is a group (for example a standing panel) and is pruned by the same rules inside.
+- Write scratch output into a corpus run, `.cache/` or the session scratchpad,
+  never as new top-level directories under the work root.
+- The corpus runner refuses to start below a 60 GiB free floor.
+- Finish a task by deleting what it alone produced (study outputs, one-off
+  corpus runs, a target the next task will not reuse), and run
+  `cargo xtask disk` before starting heavy work.
+
+```sh
+cargo xtask disk                                   # dry run: lists every candidate and the free space
+cargo xtask disk --apply                           # removes them
+cargo xtask disk --checkout ~/src/spiling --apply  # also a checkout outside worktrees/
+```
+
+The checkout running the task keeps its own target. The policy lives in
+`xtask/src/disk.rs`; change it there, not in ad hoc cleanup scripts.
+
 ## Resources and test inputs
 
 Root tools take Cargo's job and test-thread defaults; set `CARGO_BUILD_JOBS` for a shared

@@ -443,6 +443,10 @@ def part(case, intent, results):
 
 
 
+# Matches xtask/src/disk.rs FREE_FLOOR_BYTES: heavy jobs refuse to start below it.
+FREE_FLOOR_BYTES = 60 * 2**30
+
+
 def main():
     global INTENT
     manifest = json.load(open(ARGS.manifest))
@@ -456,6 +460,10 @@ def main():
     for path in (OUT, OUT + ".run.json", OUT + ".summary.json", WORK):
         if os.path.exists(path):
             raise ValueError(f"refusing to overwrite prior run: {path}; use a new corpus run directory")
+    free = shutil.disk_usage(os.path.dirname(os.path.abspath(WORK))).free
+    if free < FREE_FLOOR_BYTES:
+        raise ValueError(f"only {free / 2**30:.1f} GiB free for {WORK}; the floor is "
+                         f"{FREE_FLOOR_BYTES / 2**30:.0f} GiB. Run `cargo xtask disk` (then --apply) first")
     comparisons = {}
     if ARGS.coverage_control:
         path, corpus = ARGS.coverage_control
