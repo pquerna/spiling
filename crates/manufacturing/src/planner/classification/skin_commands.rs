@@ -46,14 +46,153 @@ impl Budget {
     }
 }
 
+/// Axis-aligned actual edges of the layer's paths keyed by their projected
+/// row and Z, so a skin fit reads only its own row instead of every path.
+/// Entries may go stale when a fit clears or trims a path; each is checked
+/// against the current path when read. A fit only moves coordinates along
+/// its own row and appends paths on that row, which are inserted.
+#[derive(Default)]
+struct RowEdges {
+    /// `(fixed axis, row bits, z bits)`, path, edge; sorted.
+    entries: Vec<([u64; 3], u32, u32)>,
+    current: bool,
+}
+
+/// One projected coordinate as an exact key; `-0.0` and `0.0` compare equal.
+fn key_bits(value: f64) -> u64 {
+    (value + 0.0).to_bits()
+}
+
+impl RowEdges {
+    fn rebuild(
+        &mut self,
+        paths: &[DepositionPath],
+        budget: &Budget,
+        extra: usize,
+        work: &mut usize,
+        admit: &mut impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        self.entries.clear();
+        for (index, path) in paths.iter().enumerate() {
+            self.push_path(index, path, budget, extra, work, admit, cancel)?;
+        }
+        budget.charge(
+            extra + capacity_bytes(&self.entries),
+            self.entries.len().saturating_mul(
+                (usize::BITS - self.entries.len().max(1).leading_zeros()) as usize + 1,
+            ),
+            work,
+            admit,
+        )?;
+        self.entries.sort_unstable();
+        self.current = true;
+        Ok(())
+    }
+
+    /// Adds paths appended at `from..` (on rows already indexed) in order.
+    fn insert_paths(
+        &mut self,
+        paths: &[DepositionPath],
+        from: usize,
+        budget: &Budget,
+        extra: usize,
+        work: &mut usize,
+        admit: &mut impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let start = self.entries.len();
+        for (index, path) in paths.iter().enumerate().skip(from) {
+            self.push_path(index, path, budget, extra, work, admit, cancel)?;
+        }
+        budget.charge(
+            extra + capacity_bytes(&self.entries),
+            (self.entries.len() - start).saturating_mul(self.entries.len()),
+            work,
+            admit,
+        )?;
+        for at in start..self.entries.len() {
+            let entry = self.entries[at];
+            let to = self.entries[..at].partition_point(|e| *e <= entry);
+            self.entries[to..=at].rotate_right(1);
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Index growth is admitted against the caller's live scratch"
+    )]
+    fn push_path(
+        &mut self,
+        index: usize,
+        path: &DepositionPath,
+        budget: &Budget,
+        extra: usize,
+        work: &mut usize,
+        admit: &mut impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        budget.charge(
+            extra + capacity_bytes(&self.entries),
+            path.points_mm.len(),
+            work,
+            admit,
+        )?;
+        for (edge, ends) in path.points_mm.windows(2).enumerate() {
+            let ends = [
+                project_xyz6_point_mm(ends[0])?,
+                project_xyz6_point_mm(ends[1])?,
+            ];
+            if ends[0][2] != ends[1][2] || !ends[0][2].is_finite() {
+                continue;
+            }
+            for fixed in 0..2 {
+                if ends[0][fixed] != ends[1][fixed] || !ends[0][fixed].is_finite() {
+                    continue;
+                }
+                if self.entries.len() == self.entries.capacity() {
+                    let target = record_target(&self.entries, 1);
+                    budget.admit(extra + target * size_of::<([u64; 3], u32, u32)>(), 0, admit)?;
+                    self.entries
+                        .try_reserve_exact(target - self.entries.len())
+                        .map_err(|_| resource("skin fit row index allocation refused"))?;
+                }
+                let index = u32::try_from(index)
+                    .map_err(|_| resource("skin fit row index exceeds u32 paths"))?;
+                let edge = u32::try_from(edge)
+                    .map_err(|_| resource("skin fit row index exceeds u32 edges"))?;
+                self.entries.push((
+                    [fixed as u64, key_bits(ends[0][fixed]), key_bits(ends[0][2])],
+                    index,
+                    edge,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Entries on one row, possibly stale.
+    fn row(&self, fixed: usize, row: f64, z: f64) -> &[([u64; 3], u32, u32)] {
+        let key = [fixed as u64, key_bits(row), key_bits(z)];
+        let start = self.entries.partition_point(|entry| entry.0 < key);
+        let end = start + self.entries[start..].partition_point(|entry| entry.0 == key);
+        &self.entries[start..end]
+    }
+}
+
 #[derive(Default)]
 struct Rows {
     hits: Vec<f64>,
     intervals: Vec<[f64; 2]>,
+    edges: RowEdges,
 }
 impl Rows {
     fn bytes(&self) -> usize {
-        capacity_bytes(&self.hits) + capacity_bytes(&self.intervals)
+        capacity_bytes(&self.hits)
+            + capacity_bytes(&self.intervals)
+            + capacity_bytes(&self.edges.entries)
     }
     #[expect(
         clippy::too_many_arguments,
@@ -543,17 +682,28 @@ fn choose(
         forbidden.clear();
         let actual_row = project_xyz6_coordinate_mm(required[0][fixed])?;
         let actual_z = project_xyz6_coordinate_mm(required[0][2])?;
-        for (index, path) in paths.iter().enumerate() {
-            check_cancel(cancel)?;
-            budget.charge(
-                extra + rows.bytes() + capacity_bytes(forbidden),
-                path.points_mm.len(),
-                work,
-                admit,
-            )?;
+        if !rows.edges.current {
+            let extra = extra + rows.bytes() + capacity_bytes(forbidden);
+            rows.edges
+                .rebuild(paths, budget, extra, work, admit, cancel)?;
+        }
+        let candidates = rows.edges.row(fixed, actual_row, actual_z);
+        check_cancel(cancel)?;
+        budget.charge(
+            extra + rows.bytes() + capacity_bytes(forbidden),
+            candidates.len(),
+            work,
+            admit,
+        )?;
+        for &(_, index, edge) in candidates {
+            let (index, edge) = (index as usize, edge as usize);
             if index == path_index {
                 continue;
             }
+            let path = &paths[index];
+            let Some(edge) = path.points_mm.get(edge..edge + 2) else {
+                continue;
+            };
             let regional = path.points_mm.len() == 2
                 && path.owner
                     == Some(DepositionOwner::Regional {
@@ -565,7 +715,7 @@ fn choose(
                 )
                 && path.width.constant_width_mm() == paths[path_index].width.constant_width_mm()
                 && path.physical_z_mm == paths[path_index].physical_z_mm;
-            for edge in path.points_mm.windows(2) {
+            {
                 let ends = [
                     project_xyz6_point_mm(edge[0])?,
                     project_xyz6_point_mm(edge[1])?,
@@ -698,8 +848,13 @@ fn choose(
     clippy::too_many_arguments,
     reason = "Regional ownership replacement must explicitly charge paths, segments and simultaneous fit scratch"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Regional ownership replacement must explicitly charge paths, segments, its row index and simultaneous fit scratch"
+)]
 fn reserve_regional_material(
     paths: &mut Vec<DepositionPath>,
+    edges: &mut RowEdges,
     index: usize,
     region_index: u16,
     fitted: [[f64; 3]; 2],
@@ -723,7 +878,23 @@ fn reserve_regional_material(
     let actual_row = project_xyz6_coordinate_mm(fitted[0][fixed])?;
     let actual_z = project_xyz6_coordinate_mm(fitted[0][2])?;
     let before_clip = paths.len();
-    for other in 0..before_clip {
+    if !edges.current {
+        edges.rebuild(paths, budget, scratch_bytes, work, admit, cancel)?;
+    }
+    let scratch_bytes = scratch_bytes + capacity_bytes(&edges.entries);
+    // Every path this can change has both ends on this row: an indexed
+    // edge, in path order.
+    let row = edges.row(fixed, actual_row, actual_z);
+    let mut others = Vec::new();
+    budget.charge(scratch_bytes, row.len(), work, admit)?;
+    budget.admit(scratch_bytes + row.len() * size_of::<usize>(), 0, admit)?;
+    others
+        .try_reserve_exact(row.len())
+        .map_err(|_| resource("skin fit row candidate allocation refused"))?;
+    others.extend(row.iter().filter(|e| e.2 == 0).map(|e| e.1 as usize));
+    others.dedup();
+    let scratch_bytes = scratch_bytes + capacity_bytes(&others);
+    for other in others {
         check_cancel(cancel)?;
         budget.charge(scratch_bytes, paths[other].points_mm.len(), work, admit)?;
         if other == index || paths[other].points_mm.len() != 2 {
@@ -813,7 +984,15 @@ fn reserve_regional_material(
             paths[other].points_mm[low_index][along] = fitted_span[1];
         }
     }
-    Ok(())
+    edges.insert_paths(
+        paths,
+        before_clip,
+        budget,
+        scratch_bytes,
+        work,
+        admit,
+        cancel,
+    )
 }
 
 pub(in crate::planner) fn reserve_skin_fits(
@@ -826,6 +1005,7 @@ pub(in crate::planner) fn reserve_skin_fits(
         bytes: retained_bytes,
     };
     let mut work = 0;
+    let mut edges = RowEdges::default();
     for domain in &layer.skin_command_fits {
         for fit in &domain.fits {
             check_cancel(cancel)?;
@@ -844,6 +1024,7 @@ pub(in crate::planner) fn reserve_skin_fits(
             let along = usize::from(fit.fitted_mm[0][0] == fit.fitted_mm[1][0]);
             reserve_regional_material(
                 &mut layer.paths,
+                &mut edges,
                 index,
                 domain.region_index,
                 fit.fitted_mm,
@@ -863,6 +1044,10 @@ pub(in crate::planner) fn reserve_skin_fits(
     Ok(())
 }
 
+/// A candidate captured owner for one (region, skin), or `None` when the
+/// region has no matching source material.
+type PreparedOwner = (usize, ProcessSkinKind, Option<SkinCommandFitDomain>);
+
 impl ClassifiedRegions {
     pub(super) fn fit_skin_commands(
         &self,
@@ -880,6 +1065,7 @@ impl ClassifiedRegions {
         let mut rows = Rows::default();
         let mut forbidden = Vec::new();
         let mut work = 0usize;
+        let mut prepared = Vec::<PreparedOwner>::new();
         let original_count = paths.len();
         for index in 0..original_count {
             check_cancel(cancel)?;
@@ -928,55 +1114,87 @@ impl ClassifiedRegions {
                 let existing = domains
                     .iter()
                     .position(|d| usize::from(d.region_index) == region_index && d.skin == skin);
-                let mut pending = None;
+                // A candidate owner depends only on (region, skin), so it is
+                // built once per call and kept, empty or not, until a fit
+                // adopts it.
+                let mut slot = None;
                 if existing.is_none() {
-                    let mut source = source_owner(
-                        &interior.coverage,
-                        sources,
-                        &budget,
-                        rows.bytes() + capacity_bytes(&forbidden),
-                        &mut work,
-                        admit,
-                        cancel,
-                    )?;
-                    let source_bytes = match &mut source {
-                        Cow::Borrowed(_) => 0,
-                        Cow::Owned(material) => super::super::native::material_bytes(material),
+                    let found = prepared
+                        .iter()
+                        .position(|(r, k, _)| *r == region_index && *k == skin);
+                    let at = if let Some(at) = found {
+                        at
+                    } else {
+                        let mut source = source_owner(
+                            &interior.coverage,
+                            sources,
+                            &budget,
+                            rows.bytes() + capacity_bytes(&forbidden),
+                            &mut work,
+                            admit,
+                            cancel,
+                        )?;
+                        let source_bytes = match &mut source {
+                            Cow::Borrowed(_) => 0,
+                            Cow::Owned(material) => super::super::native::material_bytes(material),
+                        };
+                        let candidate = if source.0.is_empty() {
+                            None
+                        } else {
+                            let mandatory = if skin == ProcessSkinKind::TopSkin {
+                                &self.top
+                            } else {
+                                &self.bottom
+                            };
+                            let expected = encoded_domain_bytes(&interior.domain)
+                                + encoded_domain_bytes(mandatory)
+                                + encoded_domain_bytes(&source)
+                                + contribution_clone_bytes(&interior.coverage.contributions);
+                            budget.admit(
+                                rows.bytes() + capacity_bytes(&forbidden) + expected + source_bytes,
+                                0,
+                                admit,
+                            )?;
+                            let domain = SkinCommandFitDomain {
+                                region_index: region_index as u16,
+                                region: interior.coverage.clone(),
+                                skin,
+                                regional: encode(&interior.domain),
+                                mandatory: encode(mandatory),
+                                source_owner: encode(&source),
+                                fits: Vec::new(),
+                            };
+                            budget.retain(domain.allocated_bytes())?;
+                            Some(domain)
+                        };
+                        if prepared.len() == prepared.capacity() {
+                            let old = prepared.capacity();
+                            let target = record_target(&prepared, 1);
+                            budget.admit(
+                                rows.bytes()
+                                    + capacity_bytes(&forbidden)
+                                    + target * size_of::<PreparedOwner>(),
+                                0,
+                                admit,
+                            )?;
+                            prepared
+                                .try_reserve_exact(target - prepared.len())
+                                .map_err(|_| resource("skin fit owner allocation refused"))?;
+                            budget
+                                .retain((prepared.capacity() - old) * size_of::<PreparedOwner>())?;
+                        }
+                        prepared.push((region_index, skin, candidate));
+                        prepared.len() - 1
                     };
-                    if source.0.is_empty() {
+                    if prepared[at].2.is_none() {
                         continue;
                     }
-                    let mandatory = if skin == ProcessSkinKind::TopSkin {
-                        &self.top
-                    } else {
-                        &self.bottom
-                    };
-                    let expected = encoded_domain_bytes(&interior.domain)
-                        + encoded_domain_bytes(mandatory)
-                        + encoded_domain_bytes(&source)
-                        + contribution_clone_bytes(&interior.coverage.contributions);
-                    budget.admit(
-                        rows.bytes() + capacity_bytes(&forbidden) + expected + source_bytes,
-                        0,
-                        admit,
-                    )?;
-                    pending = Some(SkinCommandFitDomain {
-                        region_index: region_index as u16,
-                        region: interior.coverage.clone(),
-                        skin,
-                        regional: encode(&interior.domain),
-                        mandatory: encode(mandatory),
-                        source_owner: encode(&source),
-                        fits: Vec::new(),
-                    });
+                    slot = Some(at);
                 }
                 let domain = existing
                     .map(|i| &domains[i])
-                    .or(pending.as_ref())
-                    .expect("existing or pending owner");
-                let extra = pending
-                    .as_ref()
-                    .map_or(0, SkinCommandFitDomain::allocated_bytes);
+                    .or_else(|| slot.and_then(|at| prepared[at].2.as_ref()))
+                    .expect("existing or prepared owner");
                 if let Some(fitted) = choose(
                     domain,
                     required,
@@ -986,16 +1204,16 @@ impl ClassifiedRegions {
                     &mut rows,
                     &mut forbidden,
                     &budget,
-                    extra,
+                    0,
                     &mut work,
                     admit,
                     cancel,
                 )? {
-                    chosen = Some((existing, pending, fitted));
+                    chosen = Some((existing, slot, fitted));
                     break;
                 }
             }
-            let Some((existing, pending, fitted)) = chosen else {
+            let Some((existing, slot, fitted)) = chosen else {
                 // No regional owner can lengthen this row to a printable
                 // command. It holds less than a minimum command of skin, far
                 // below the profile tolerance, so omit it as other slicers do
@@ -1006,7 +1224,10 @@ impl ClassifiedRegions {
             let domain_index = if let Some(index) = existing {
                 index
             } else {
-                let domain = pending.expect("new captured owner");
+                // Its bytes were retained when it was prepared.
+                let domain = slot
+                    .and_then(|at| prepared[at].2.take())
+                    .expect("new captured owner");
                 let old = domains.capacity();
                 if domains.len() == old {
                     budget.admit(
@@ -1023,7 +1244,6 @@ impl ClassifiedRegions {
                     budget
                         .retain((domains.capacity() - old) * size_of::<SkinCommandFitDomain>())?;
                 }
-                budget.retain(domain.allocated_bytes())?;
                 domains.push(domain);
                 domains.len() - 1
             };
@@ -1049,15 +1269,19 @@ impl ClassifiedRegions {
                 fitted_mm: fitted,
             });
             let region_index = domain.region_index;
+            // The index's own bytes are added inside.
+            let scratch =
+                rows.bytes() - capacity_bytes(&rows.edges.entries) + capacity_bytes(&forbidden);
             reserve_regional_material(
                 paths,
+                &mut rows.edges,
                 index,
                 region_index,
                 fitted,
                 along,
                 segments,
                 &mut budget,
-                rows.bytes() + capacity_bytes(&forbidden),
+                scratch,
                 &mut work,
                 admit,
                 cancel,

@@ -298,6 +298,7 @@ fn regional_reservation_consumes_complete_actual_stroke_without_a_zero_command_t
     let mut segments = 2;
     reserve_regional_material(
         &mut paths,
+        &mut RowEdges::default(),
         0,
         0,
         fitted,
