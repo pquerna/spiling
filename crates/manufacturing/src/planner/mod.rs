@@ -21,7 +21,6 @@ mod native;
 mod partition;
 mod preflight;
 mod region;
-pub(crate) use region::nominal_volume;
 mod slopes;
 mod startup;
 mod tolerant;

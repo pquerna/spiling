@@ -1110,21 +1110,27 @@ impl Raster<'_> {
     /// within one cell of the eroded set, hence inside the original set.
     pub(super) fn contour(&self, bits: &Bits) -> Result<MultiPolygon<f64>, ManufacturingError> {
         let core = self.erode(bits, self.frame.cell)?;
-        self.polygons(&core, false)
+        self.polygons(&core, false, 1.0)
     }
 
     /// Polygons on the boundary of the cell set itself: trace cell-edge
-    /// boundaries and Douglas–Peucker at one cell, keeping only chords that
-    /// stay inside the closed set cells, then resolve crossings by even-odd
-    /// overlay. Every output point lies in a closed set cell.
-    pub(super) fn boundary(&self, bits: &Bits) -> Result<MultiPolygon<f64>, ManufacturingError> {
-        self.polygons(bits, true)
+    /// boundaries and Douglas–Peucker within `tolerance_mm` (at least one
+    /// cell), keeping only chords that stay inside the closed set cells, then
+    /// resolve crossings by even-odd overlay. Every output point lies in a
+    /// closed set cell.
+    pub(super) fn boundary(
+        &self,
+        bits: &Bits,
+        tolerance_mm: f64,
+    ) -> Result<MultiPolygon<f64>, ManufacturingError> {
+        self.polygons(bits, true, (tolerance_mm / self.frame.cell).max(1.0))
     }
 
     fn polygons(
         &self,
         core: &Bits,
         constrained: bool,
+        tolerance_cells: f64,
     ) -> Result<MultiPolygon<f64>, ManufacturingError> {
         if core.is_empty() {
             return Ok(MultiPolygon(Vec::new()));
@@ -1135,7 +1141,7 @@ impl Raster<'_> {
         self.reserve(&mut contours, rings.len())?;
         for ring in &rings {
             check_cancel(self.cancel)?;
-            let simplified = simplify_ring(ring, 1.0, |a, b| {
+            let simplified = simplify_ring(ring, tolerance_cells, |a, b| {
                 if !constrained {
                     return true;
                 }

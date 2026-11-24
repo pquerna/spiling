@@ -343,7 +343,7 @@ fn boundaries_reach_the_set_edge_and_every_edge_stays_in_set_cells() {
     let [lo, _] = frame.bounds();
     for polygon in cases() {
         let bits = &raster.outward([&polygon], 0.1).unwrap();
-        let boundary = raster.boundary(bits).unwrap();
+        let boundary = raster.boundary(bits, 0.0).unwrap();
         let contour = raster.contour(bits).unwrap();
         assert!(boundary.unsigned_area() >= contour.unsigned_area());
         // Every boundary edge, sampled densely, stays in closed set cells.

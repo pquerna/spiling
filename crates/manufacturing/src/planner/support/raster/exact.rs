@@ -89,6 +89,8 @@ pub(super) struct Exact {
     pub(super) reach: f64,
     /// Grid cell edge.
     pub(super) cell: f64,
+    /// Deviation allowed when simplifying a placed wall ring.
+    pub(super) simplify: f64,
 }
 
 impl Exact {
@@ -102,7 +104,15 @@ impl Exact {
             level: safe + CONTOUR_MARGIN_MM,
             reach: (4.0 * cell).min(bead - 2.0 * SIMPLIFY_MM).max(0.0),
             cell,
+            simplify: SIMPLIFY_MM,
         }
+    }
+
+    /// The same placement, simplifying placed rings within `budget_mm`
+    /// (never below the default). Every chord still keeps exact clearance.
+    pub(super) fn simplifying_within(mut self, budget_mm: f64) -> Self {
+        self.simplify = self.simplify.max(budget_mm);
+        self
     }
 
     /// How far query points can land from the boundary samples: a moved
@@ -757,7 +767,7 @@ fn is_vertex(ring: &[Sample], k: usize) -> bool {
 }
 
 /// Douglas–Peucker on a closed ring of placed points, admitting only chords
-/// within [`SIMPLIFY_MM`] of the points they replace that keep the bead's
+/// within `exact.simplify` of the points they replace that keep the bead's
 /// exact clearance.
 fn simplify(
     raster: &Raster<'_>,
@@ -808,10 +818,10 @@ fn simplify(
             }
         }
         *work += j - i;
-        if worst.0 <= SIMPLIFY_MM && field.segment_clearance(a, b, work) >= exact.safe {
+        if worst.0 <= exact.simplify && field.segment_clearance(a, b, work) >= exact.safe {
             continue;
         }
-        let split = if worst.0 > SIMPLIFY_MM {
+        let split = if worst.0 > exact.simplify {
             worst.1
         } else {
             (i + j) / 2

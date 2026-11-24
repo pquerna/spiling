@@ -82,13 +82,22 @@ pub(super) fn paths(
         None if all_interface => (&empty, &centers),
         None => (&centers, &empty),
     };
-    let mut contour = raster.boundary(&centers)?;
+    // Support walls simplify within the support road budget (interface walls
+    // within the structure budget); every chord still stays inside kept
+    // cells and, where exact, keeps the bead's exact clearance (RFC 11).
+    let tolerances = &layer.recipe.road_tolerances;
+    let mut budget = tolerances.support_mm - PROFILE_TOLERANCE_MM;
+    if !interface.is_empty() {
+        budget = budget.min(tolerances.structure_mm - PROFILE_TOLERANCE_MM);
+    }
+    let mut contour = raster.boundary(&centers, budget)?;
     region::canonicalize(&mut contour);
     region::check_size(&contour)?;
     let exact = exact::Exact::new(
         layer.width_mm * 0.5 + program_coordinates::XYZ6_PROJECTION_SCREEN_MM,
         raster.frame.cell(),
-    );
+    )
+    .simplifying_within(budget);
     let field = match exclusions {
         Some(feed) if !contour.0.is_empty() => {
             exact_field(raster, support, interface, &mut contour, feed, &exact)?
