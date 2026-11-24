@@ -11,7 +11,8 @@ use geo::line_intersection::{LineIntersection, line_intersection};
 use geo::{Distance, Euclidean, Intersects, Line, Point};
 use std::f64::consts::{FRAC_PI_4, PI, TAU};
 
-/// Shares of [`SPARSE_ROAD_TOLERANCE_MM`]: profile sampling and the merge of
+/// Shares of the recipe's Gyroid road tolerance
+/// ([`PlanarPrintRecipe::gyroid_road_tolerance_mm`]): profile sampling and the merge of
 /// short clip artifacts. Their sum stays below one for the check's margin.
 const PROFILE_SHARE: f64 = 0.7;
 const MERGE_SHARE: f64 = 0.2;
@@ -25,6 +26,7 @@ struct Wave {
     cosine_z: f64,
     along_x: bool,
     scale: f64,
+    tolerance_mm: f64,
 }
 
 impl Wave {
@@ -95,12 +97,11 @@ impl Wave {
             let v = self.ordinate(u, branch);
             error.max((du * (v - a[1]) - dv * (u - a[0])).abs() / length)
         });
-        // Hidden sparse roads use the recorded sparse road tolerance. The
-        // independent field check allows the full SPARSE_ROAD_TOLERANCE_MM
-        // through an upper gradient bound. Sampling takes PROFILE_SHARE of it,
+        // Hidden sparse roads use the recipe's Gyroid road tolerance. The
+        // independent field check allows all of it through an upper gradient bound. Sampling takes PROFILE_SHARE of it,
         // clip merges at most MERGE_SHARE, leaving a margin for that bound
         // and output rounding.
-        if error * self.scale <= SPARSE_ROAD_TOLERANCE_MM * PROFILE_SHARE {
+        if error * self.scale <= self.tolerance_mm * PROFILE_SHARE {
             reserve_points(output, 1)?;
             output.push(b);
             return Ok(());
@@ -145,6 +146,7 @@ pub(super) fn hatch(
         cosine_z,
         along_x: cosine_z.abs() >= sine_z.abs(),
         scale,
+        tolerance_mm: layer.recipe.gyroid_road_tolerance_mm(),
     };
     let bounds = fill
         .bounding_rect()
@@ -476,7 +478,8 @@ fn finish(
             let along = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (length * length);
             let deviation = (dx * (p[1] - a[1]) - dy * (p[0] - a[0])).abs() / length;
             let error_bound = deviation + fit_errors[middle - 1].max(fit_errors[middle]);
-            if !(0.0..=1.0).contains(&along) || error_bound > SPARSE_ROAD_TOLERANCE_MM * MERGE_SHARE
+            if !(0.0..=1.0).contains(&along)
+                || error_bound > layer.recipe.gyroid_road_tolerance_mm() * MERGE_SHARE
             {
                 continue;
             }
@@ -609,6 +612,7 @@ mod tests {
                 cosine_z,
                 along_x: cosine_z.abs() >= sine_z.abs(),
                 scale: 1.0,
+                tolerance_mm: GYROID_SAMPLING_TOLERANCE_MM,
             };
             for branch in 0..2 {
                 for sample in 0..101 {

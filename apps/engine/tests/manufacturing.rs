@@ -88,7 +88,7 @@ fn intent() -> ManufacturingIntent {
         "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2, "layer_height_policy": "protected_maximum","bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
             "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"},"minimum_layer_time_s":0.0,"minimum_print_speed_mm_s":10.0,"fan_short_layer_time_s":0.0,"fan_short_layer_pwm":255},
             "supports":{"kind":"disabled"},
-            "seam_policy":{"kind":"nearest"},"rectilinear_axis":"alternating_xy","top_skin_axis":"alternating_xy","sparse_infill":{"kind":"fine"},"role_speeds":null,"first_layer_height_mm":null,"skirt":null,"brim":null}
+            "seam_policy":{"kind":"nearest"},"rectilinear_axis":"alternating_xy","top_skin_axis":"alternating_xy","sparse_infill":{"kind":"fine"},"role_speeds":null,"first_layer_height_mm":null,"skirt":null,"brim":null,"road_tolerances":{"surface_mm":0.01,"structure_mm":0.05,"sparse_mm":0.1,"support_mm":0.2}}
     })).unwrap()
 }
 async fn spawn() -> EngineClient {

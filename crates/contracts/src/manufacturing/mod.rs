@@ -1395,6 +1395,8 @@ pub struct PlanarPrintRecipe {
     /// First-layer brim; null prints none.
     #[serde(deserialize_with = "required_option")]
     pub brim: Option<BrimPolicy>,
+    /// Total lateral tolerance of each road class; see [`RoadTolerances`].
+    pub road_tolerances: RoadTolerances,
 }
 /// Closed loops of recipe bead width around the convex outline of all
 /// first-layer deposition (part, brim and support), printed before anything
@@ -1517,11 +1519,12 @@ pub mod speeds;
 /// ADR012 profile tolerance `ε_xy`: the one recorded bound on section
 /// deviation from the true surface, never a per-recipe choice.
 pub const PROFILE_TOLERANCE_MM: f64 = 0.01;
-/// Curve-to-segment approximation of hidden sparse-infill roads (ADR012).
-/// Sparse roads are never seen and carry no section, wall or skin
-/// obligation, so their sampling may be coarser than the profile tolerance.
-/// It never decides admission: geometry already finer is left alone.
-pub const SPARSE_ROAD_TOLERANCE_MM: f64 = 0.05;
+/// Cap on the Gyroid curve-to-segment sampling tolerance, below the sparse
+/// road class ([`RoadTolerances::sparse_mm`]). It keeps today's 0.05 mm Gyroid
+/// sampling while the FDM sparse class is 0.1 mm; RFC 11 slice 3 removes it
+/// so Gyroid samples at the class itself. It never decides admission:
+/// geometry already finer is left alone.
+pub const GYROID_SAMPLING_TOLERANCE_MM: f64 = 0.05;
 /// Longest continuous unanchored run of a curved sparse-infill road, in bead
 /// widths, that prints without support. Support admission demands nothing
 /// for a shorter run, and independent replay accepts it.
@@ -1532,11 +1535,67 @@ pub const MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS: f64 = 3.0;
 pub const SUPPORT_GRID_CELL_XYZ6: u32 = 50_000;
 /// [`SUPPORT_GRID_CELL_XYZ6`] in millimetres, correctly rounded.
 pub const SUPPORT_GRID_CELL_MM: f64 = SUPPORT_GRID_CELL_XYZ6 as f64 / 1_000_000.0;
+/// Total lateral tolerance of a printed road from its intended line, by road
+/// class (brain RFC 11). Each value is the whole budget for that class:
+/// section deviation (at most [`PROFILE_TOLERANCE_MM`]) plus any later
+/// sampling or lowering. These are process parameters filled by the quality
+/// preset for the process (the FDM presets today; finer processes such as
+/// resin later), not FDM constants. Each is finite, positive and at most half
+/// the bead width; no ordering between classes is required.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RoadTolerances {
+    /// Exposed walls and exposed top skin: the external fitting surfaces.
+    pub surface_mm: f64,
+    /// Other walls, skins, bridges, solid fill and support interface.
+    pub structure_mm: f64,
+    /// Sparse infill.
+    pub sparse_mm: f64,
+    /// Bulk support, brim and skirt.
+    pub support_mm: f64,
+}
+impl RoadTolerances {
+    /// The FDM quality presets' classes: surface 0.01, structure 0.05,
+    /// sparse 0.1, support 0.2 mm.
+    pub const FDM: Self = Self {
+        surface_mm: 0.01,
+        structure_mm: 0.05,
+        sparse_mm: 0.1,
+        support_mm: 0.2,
+    };
+    pub fn all(&self) -> [f64; 4] {
+        [
+            self.surface_mm,
+            self.structure_mm,
+            self.sparse_mm,
+            self.support_mm,
+        ]
+    }
+    pub fn validate(&self, bead_width_mm: f64) -> Result<(), ManufacturingError> {
+        if self
+            .all()
+            .iter()
+            .any(|t| !t.is_finite() || *t <= 0.0 || *t > bead_width_mm / 2.0)
+        {
+            return Err(invalid(
+                "road tolerances must be finite, positive and at most half the bead width",
+            ));
+        }
+        Ok(())
+    }
+}
 impl PlanarPrintRecipe {
     /// The native shape error this recipe requests: the recorded profile
     /// tolerance, at most a twentieth of the bead width (ADR012).
     pub fn native_shape_error_mm(&self) -> f64 {
         PROFILE_TOLERANCE_MM.min(self.bead_width_mm / 20.0)
+    }
+    /// Total lateral tolerance of a Gyroid sparse road from its implicit
+    /// surface: the sparse class, capped at [`GYROID_SAMPLING_TOLERANCE_MM`].
+    pub fn gyroid_road_tolerance_mm(&self) -> f64 {
+        self.road_tolerances
+            .sparse_mm
+            .min(GYROID_SAMPLING_TOLERANCE_MM)
     }
     /// Captured process-derived automatic roof contact spacing, or an explicit
     /// tighter override. This does not establish actual bridge support.
@@ -1593,6 +1652,7 @@ impl PlanarPrintRecipe {
         if let Some(brim) = &self.brim {
             brim.validate(self.bead_width_mm)?;
         }
+        self.road_tolerances.validate(self.bead_width_mm)?;
         if let Some(first) = self.first_layer_height_mm
             && (!first.is_finite()
                 || first <= 0.0

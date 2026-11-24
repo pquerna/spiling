@@ -1067,6 +1067,46 @@ fn layer_preferences_resolve_without_changing_limits_and_protections_do_not() {
     assert!(value.select_layer_height().is_err());
 }
 
+#[test]
+fn road_tolerances_are_required_validated_and_round_trip() {
+    let value = intent();
+    value.validate().unwrap();
+    for quality in QualityPreset::ALL {
+        assert_eq!(quality.road_tolerances(), RoadTolerances::FDM);
+    }
+    let mut encoded = serde_json::to_value(&value.recipe).unwrap();
+    encoded.as_object_mut().unwrap().remove("road_tolerances");
+    assert!(serde_json::from_value::<PlanarPrintRecipe>(encoded).is_err());
+    let mut unknown = serde_json::to_value(&value.recipe).unwrap();
+    unknown["road_tolerances"]["extra_mm"] = serde_json::json!(0.1);
+    assert!(serde_json::from_value::<PlanarPrintRecipe>(unknown).is_err());
+    let native = crate::rpc::PlanarPrintRecipe::try_from(value.recipe.clone()).unwrap();
+    assert_eq!(
+        PlanarPrintRecipe::try_from(native.clone()).unwrap(),
+        value.recipe
+    );
+    let mut absent = native;
+    absent.road_tolerances = None;
+    assert!(PlanarPrintRecipe::try_from(absent).is_err());
+    // No ordering between classes is required.
+    let mut unordered = value.clone();
+    unordered.recipe.road_tolerances.surface_mm = 0.2;
+    unordered.recipe.road_tolerances.support_mm = 0.01;
+    unordered.validate().unwrap();
+    let half = value.recipe.bead_width_mm / 2.0;
+    for bad in [0.0, -0.01, f64::NAN, f64::INFINITY, half + 0.001] {
+        let mut wrong = value.clone();
+        wrong.recipe.road_tolerances.sparse_mm = bad;
+        assert!(wrong.validate().is_err(), "{bad}");
+    }
+    let mut edge = value;
+    edge.recipe.road_tolerances.support_mm = half;
+    edge.validate().unwrap();
+    assert_eq!(edge.recipe.gyroid_road_tolerance_mm(), 0.05);
+    edge.recipe.road_tolerances.sparse_mm = 0.02;
+    assert_eq!(edge.recipe.gyroid_road_tolerance_mm(), 0.02);
+}
+
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
         hardware: None,
@@ -1167,6 +1207,7 @@ fn intent() -> ManufacturingIntent {
             first_layer_height_mm: None,
             skirt: None,
             brim: None,
+            road_tolerances: crate::manufacturing::RoadTolerances::FDM,
         },
     }
 }

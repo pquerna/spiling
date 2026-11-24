@@ -1159,6 +1159,7 @@ mod tests {
             first_layer_height_mm: None,
             skirt: None,
             brim: None,
+            road_tolerances: spiling_contracts::manufacturing::RoadTolerances::FDM,
         }
     }
 

@@ -77,8 +77,9 @@ pub(super) fn verify(
                 // Independent equation in physical build coordinates. The
                 // generator uses roots/atan and clipping, not this residual.
                 // |grad F| <= 2 sqrt(3); include XYZ6 projection in the same
-                // recorded sparse road tolerance, not a new site epsilon.
-                let allowance = 2.0 * 3.0_f64.sqrt() * frequency * SPARSE_ROAD_TOLERANCE_MM;
+                // recipe's Gyroid road tolerance, not a new site epsilon.
+                let allowance =
+                    2.0 * 3.0_f64.sqrt() * frequency * recipe.gyroid_road_tolerance_mm();
                 for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
                     let x = (a[0] + t * (b[0] - a[0])) * frequency;
                     let y = (a[1] + t * (b[1] - a[1])) * frequency;

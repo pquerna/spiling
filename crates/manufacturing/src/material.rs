@@ -284,6 +284,7 @@ pub fn create_default_intent(
                 separation_mm: 0.0,
                 placement: default_brim_placement(&material.polymer_family),
             }),
+            road_tolerances: quality.road_tolerances(),
         },
         printer,
     };

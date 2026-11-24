@@ -38,6 +38,11 @@ impl QualityPreset {
     pub fn bead_width_mm(self, nozzle_mm: f64) -> f64 {
         (1.125 * nozzle_mm * 1_000_000.0).round() / 1_000_000.0
     }
+    /// Road-class tolerances: every FDM preset uses the same classes
+    /// ([`RoadTolerances::FDM`]); quality changes layers, not fit.
+    pub fn road_tolerances(self) -> super::RoadTolerances {
+        super::RoadTolerances::FDM
+    }
     pub fn key(self) -> &'static str {
         match self {
             Self::Draft => "draft",

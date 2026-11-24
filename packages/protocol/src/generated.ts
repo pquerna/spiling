@@ -977,7 +977,11 @@ skirt: SkirtPolicy | null,
 /**
  * First-layer brim; null prints none.
  */
-brim: BrimPolicy | null, };
+brim: BrimPolicy | null,
+/**
+ * Total lateral tolerance of each road class; see [`RoadTolerances`].
+ */
+road_tolerances: RoadTolerances, };
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number,
 /**
@@ -1234,6 +1238,24 @@ export type ResolvedProcessValue = { fraction: number, provenance: ProcessProven
 export type RetractionPolicy = { "kind": "disabled" } | { "kind": "enabled", distance_mm: number, speed_mm_s: number, minimum_travel_mm: number, z_hop_mm: number, };
 
 export type RigidPoseMm = { translation_mm: [number, number, number], rotation_xyzw: [number, number, number, number], };
+
+export type RoadTolerances = {
+/**
+ * Exposed walls and exposed top skin: the external fitting surfaces.
+ */
+surface_mm: number,
+/**
+ * Other walls, skins, bridges, solid fill and support interface.
+ */
+structure_mm: number,
+/**
+ * Sparse infill.
+ */
+sparse_mm: number,
+/**
+ * Bulk support, brim and skirt.
+ */
+support_mm: number, };
 
 export type RoleSpeeds = {
 /**

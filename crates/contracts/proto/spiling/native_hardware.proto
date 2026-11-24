@@ -47,6 +47,14 @@ message PlanarPrintRecipe {
   // Absent: no skirt / no brim.
   SkirtPolicy skirt = 26;
   BrimPolicy brim = 27;
+  RoadTolerances road_tolerances = 28;
+}
+// Total lateral road tolerance by class, mm.
+message RoadTolerances {
+  double surface_mm = 1;
+  double structure_mm = 2;
+  double sparse_mm = 3;
+  double support_mm = 4;
 }
 message SkirtPolicy {
   uint32 loops = 1;

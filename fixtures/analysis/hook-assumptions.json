@@ -46,7 +46,13 @@
     "role_speeds": null,
     "first_layer_height_mm": null,
     "skirt": null,
-    "brim": null
+    "brim": null,
+    "road_tolerances": {
+      "surface_mm": 0.01,
+      "structure_mm": 0.05,
+      "sparse_mm": 0.1,
+      "support_mm": 0.2
+    }
   },
   "laws": {
     "name": "Explicit orthotropic planned-hook hypothesis; uncalibrated effective core at 30%",
@@ -248,7 +254,13 @@
       "role_speeds": null,
       "first_layer_height_mm": null,
       "skirt": null,
-      "brim": null
+      "brim": null,
+      "road_tolerances": {
+        "surface_mm": 0.01,
+        "structure_mm": 0.05,
+        "sparse_mm": 0.1,
+        "support_mm": 0.2
+      }
     }
   },
   "maximum_span_mm": 12,

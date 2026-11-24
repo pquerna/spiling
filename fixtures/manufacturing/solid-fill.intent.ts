@@ -55,6 +55,7 @@ const intent = {
     first_layer_height_mm: null,
     skirt: null,
     brim: null,
+    road_tolerances: { surface_mm: 0.01, structure_mm: 0.05, sparse_mm: 0.1, support_mm: 0.2 },
   },
 } satisfies ManufacturingIntent;
 

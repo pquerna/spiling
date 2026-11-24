@@ -1549,6 +1549,15 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                         })
                     })
                     .transpose()?,
+                road_tolerances: {
+                    let t = required(value.road_tolerances, "road tolerances")?;
+                    RoadTolerances {
+                        surface_mm: t.surface_mm,
+                        structure_mm: t.structure_mm,
+                        sparse_mm: t.sparse_mm,
+                        support_mm: t.support_mm,
+                    }
+                },
             },
             Self::validate,
         )
@@ -1604,6 +1613,12 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
                     BrimPlacement::Always => rpc::BrimPlacement::Always,
                     BrimPlacement::NarrowTall => rpc::BrimPlacement::NarrowTall,
                 } as i32,
+            }),
+            road_tolerances: Some(rpc::RoadTolerances {
+                surface_mm: value.road_tolerances.surface_mm,
+                structure_mm: value.road_tolerances.structure_mm,
+                sparse_mm: value.road_tolerances.sparse_mm,
+                support_mm: value.road_tolerances.support_mm,
             }),
         })
     }

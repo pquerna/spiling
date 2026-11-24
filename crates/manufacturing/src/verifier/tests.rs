@@ -218,6 +218,7 @@ pub(super) fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             first_layer_height_mm: None,
             skirt: None,
             brim: None,
+            road_tolerances: spiling_contracts::manufacturing::RoadTolerances::FDM,
         },
     };
     let mut plan = NormalizedPrintPlan {
