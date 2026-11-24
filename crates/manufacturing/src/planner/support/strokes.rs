@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 
 /// Lower capsule edges above which a nominal inventory replaces the
 /// per-run linear scan. Selection only; both routes give identical results.
-const MIN_ANCHOR_INVENTORY_EDGES: usize = 512;
+const MIN_ANCHOR_INVENTORY_EDGES: usize = 64;
 
 pub(crate) enum GapKind {
     Supported,
