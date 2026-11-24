@@ -1880,7 +1880,9 @@ fn admit_schedule<'model>(
                     physical_z_mm: [elevation.lower_z, z],
                     points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
                     arcs: Vec::new(),
-                    exposed: false,
+                    // A reused layer keeps its outer-wall surface marking:
+                    // outer-wall speed and surface-class lowering depend on it.
+                    exposed: path.exposed,
                     connectors: Vec::new(),
                 });
             }
