@@ -30,6 +30,9 @@ const SAGITTA_LIMIT_MM: f64 = MAX_ARC_SAGITTA_MM * 0.9;
 const SWEEP_LIMIT_RADIANS: f64 = MAX_ARC_SWEEP_RADIANS * 0.99;
 /// Largest offset of a wall from the section circle it follows.
 const WALL_BAND_MM: f64 = 5.0;
+/// Fewest edges a fitted run spans: any three points lie on a circle, so a
+/// fitted circle needs at least one point more to be evidence of a curve.
+const MIN_FITTED_RUN_EDGES: usize = 3;
 /// Largest turn of one edge in a run; a sharper turn is a corner.
 const MAX_EDGE_TURN_RADIANS: f64 = PI / 4.0;
 
@@ -48,9 +51,6 @@ pub(super) fn attach(
     sources: &[CircleSource],
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if sources.iter().all(CircleSource::is_empty) {
-        return Ok(());
-    }
     let working_set = crate::working_set::current();
     // Each layer reads the same immutable source and only writes its own
     // paths. If several layers fail, return the first failure in plan order.
@@ -77,11 +77,9 @@ fn attach_layer(
         source.circles_at(layer.section_z_mm, circles);
     }
     dedupe(circles);
-    if !circles.is_empty() {
-        for path in &mut layer.paths {
-            if path.owner == Some(DepositionOwner::Wall) && path.points_mm.len() >= 3 {
-                path.arcs = runs(path, circles, cancel)?;
-            }
+    for path in &mut layer.paths {
+        if path.owner == Some(DepositionOwner::Wall) && path.points_mm.len() >= 3 {
+            path.arcs = runs(path, circles, cancel)?;
         }
     }
     Ok(())
@@ -148,6 +146,21 @@ fn runs(
         }
     }
     chosen.sort_by_key(|c| c.first);
+    // Between the source-circle runs, fit runs to the wall's own points: the
+    // points stay the geometry, so a fitted run moves no printed surface.
+    let mut fitted = Vec::new();
+    let mut from = 0;
+    for c in chosen
+        .iter()
+        .map(|c| (c.first, c.last))
+        .chain([(points.len() - 1, points.len() - 1)])
+    {
+        check_cancel(cancel)?;
+        fit_runs(path, from, c.0, &mut fitted);
+        from = c.1;
+    }
+    chosen.extend(fitted);
+    chosen.sort_by_key(|c| c.first);
     chosen
         .into_iter()
         .map(|c| {
@@ -159,6 +172,119 @@ fn runs(
             })
         })
         .collect()
+}
+
+/// Greedy circle runs over points `from..=to` of a wall path: from each start,
+/// grow the run while the circle through its first, middle and last points
+/// keeps every point in the run band and every edge within the same turning,
+/// sagitta, sweep, width and Z rules the source-circle runs follow.
+fn fit_runs(path: &DepositionPath, from: usize, to: usize, found: &mut Vec<Candidate>) {
+    let points = &path.points_mm;
+    let width = |edge: usize| match &path.width {
+        WidthProfile::Constant { width_mm } => *width_mm,
+        WidthProfile::PerEdge { widths_mm } => widths_mm[edge],
+    };
+    let mut i = from;
+    while i + 2 <= to {
+        let mut best: Option<Candidate> = None;
+        let mut j = i + 2;
+        while j <= to {
+            let confirmed = j - i >= MIN_FITTED_RUN_EDGES;
+            let Some(center) = circle_through(points[i], points[(i + j) / 2], points[j]) else {
+                break;
+            };
+            if !valid_run(points, i, j, center, &width) {
+                break;
+            }
+            let step = |k: usize| {
+                let (a, b) = (points[k], points[k + 1]);
+                let (ax, ay) = (a[0] - center[0], a[1] - center[1]);
+                let (bx, by) = (b[0] - center[0], b[1] - center[1]);
+                (ax * by - ay * bx).atan2(ax * bx + ay * by)
+            };
+            if confirmed {
+                best = Some(Candidate {
+                    first: i,
+                    last: j,
+                    center,
+                    clockwise: step(i) < 0.0,
+                });
+            }
+            j += 1;
+        }
+        match best {
+            Some(run) => {
+                i = run.last;
+                found.push(run);
+            }
+            None => i += 1,
+        }
+    }
+}
+
+/// Whether points `i..=j` form one run about `center` under the contract's
+/// run rules (with this module's planning margins).
+fn valid_run(
+    points: &[[f64; 3]],
+    i: usize,
+    j: usize,
+    center: [f64; 2],
+    width: &impl Fn(usize) -> f64,
+) -> bool {
+    let distance = |p: [f64; 3]| (p[0] - center[0]).hypot(p[1] - center[1]);
+    let radius = distance(points[i]);
+    if !(MIN_ARC_RADIUS_MM..=MAX_ARC_RADIUS_MM).contains(&radius) {
+        return false;
+    }
+    let (mut lo, mut hi) = (radius, radius);
+    let mut direction = 0.0f64;
+    let mut sweep = 0.0;
+    for k in i..j {
+        let (a, b) = (points[k], points[k + 1]);
+        let (ax, ay) = (a[0] - center[0], a[1] - center[1]);
+        let (bx, by) = (b[0] - center[0], b[1] - center[1]);
+        let step = (ax * by - ay * bx).atan2(ax * bx + ay * by);
+        let half = (b[0] - a[0]).hypot(b[1] - a[1]) * 0.5;
+        let sagitta = radius - (radius * radius - half * half).max(0.0).sqrt();
+        let d = distance(b);
+        lo = lo.min(d);
+        hi = hi.max(d);
+        if step.abs() <= 1e-12
+            || step.abs() >= MAX_EDGE_TURN_RADIANS
+            || (direction != 0.0 && step.signum() != direction)
+            || hi - lo > RUN_BAND_MM
+            || b[2] != points[i][2]
+            || sagitta > SAGITTA_LIMIT_MM
+            || width(k) != width(i)
+        {
+            return false;
+        }
+        direction = step.signum();
+        sweep += step.abs();
+        if sweep > SWEEP_LIMIT_RADIANS {
+            return false;
+        }
+    }
+    true
+}
+
+/// Centre of the circle through three points, or None when they are
+/// (nearly) collinear.
+fn circle_through(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<[f64; 2]> {
+    let (ax, ay, bx, by, cx, cy) = (a[0], a[1], b[0], b[1], c[0], c[1]);
+    let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    let scale = [ax, ay, bx, by, cx, cy]
+        .iter()
+        .fold(1.0f64, |m, v| m.max(v.abs()));
+    if d.abs() <= 1e-12 * scale * scale {
+        return None;
+    }
+    let (a2, b2, c2) = (ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy);
+    let center = [
+        (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d,
+        (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d,
+    ];
+    center.iter().all(|v| v.is_finite()).then_some(center)
 }
 
 fn too_long() -> ManufacturingError {
@@ -318,5 +444,47 @@ mod tests {
         bent.points_mm[5][0] += 0.01;
         let arcs = runs(&bent, &[circle(corner, 2.0)], &AtomicBool::new(false)).unwrap();
         assert!(!arcs.is_empty() && arcs.iter().all(|a| a.last < 5 || a.first > 5));
+    }
+
+    #[test]
+    fn walls_on_circles_the_source_does_not_name_get_fitted_runs() {
+        // A half circle of radius 3 about (5, 5) with no source circles.
+        let points: Vec<[f64; 3]> = (0..=48)
+            .map(|k| {
+                let t = PI * k as f64 / 48.0;
+                [5.0 + 3.0 * t.cos(), 5.0 + 3.0 * t.sin(), 0.2]
+            })
+            .collect();
+        let arcs = runs(&wall(points), &[], &AtomicBool::new(false)).unwrap();
+        assert_eq!(arcs.len(), 1, "{arcs:?}");
+        assert_eq!((arcs[0].first, arcs[0].last), (0, 48));
+        assert!(
+            (arcs[0].center_mm[0] - 5.0).abs() < 1e-9 && (arcs[0].center_mm[1] - 5.0).abs() < 1e-9
+        );
+        assert!(!arcs[0].clockwise);
+    }
+
+    #[test]
+    fn zigzags_and_kinks_are_not_fitted() {
+        let zigzag: Vec<[f64; 3]> = (0..12)
+            .map(|k| [k as f64 * 0.5, if k % 2 == 0 { 0.0 } else { 0.3 }, 0.2])
+            .collect();
+        assert!(
+            runs(&wall(zigzag), &[], &AtomicBool::new(false))
+                .unwrap()
+                .is_empty()
+        );
+        // Three points always lie on a circle; one kink is not a curve.
+        let kink = vec![
+            [0.0, 0.0, 0.2],
+            [1.0, 0.0, 0.2],
+            [2.0, 0.1, 0.2],
+            [3.0, 0.1, 0.2],
+        ];
+        assert!(
+            runs(&wall(kink), &[], &AtomicBool::new(false))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
