@@ -200,7 +200,9 @@ impl ClassifiedRegions {
                 region::cloned_polygons_bytes(&layout.fill.0)?,
             )?;
         }
-        let mut bottom = difference(&layout.fill, survives_below, cancel)?;
+        // Both sides of each split come from one overlay graph of the
+        // original operands and coordinate frame.
+        let (mut bottom, below_part) = split(&layout.fill, survives_below, cancel)?;
         let bottom_bytes = super::native::material_bytes(&mut bottom);
         admit_scratch(scratch_points(&[&bottom])?, bottom_bytes)?;
         let mut remaining = if bottom.0.is_empty() {
@@ -214,11 +216,11 @@ impl ClassifiedRegions {
                     )
                 })?,
             )?;
+            drop(below_part);
             layout.fill.clone()
         } else {
-            // Both sides of a split use the original operands and coordinate
-            // frame, never a newly quantized subtraction of the rounded mask.
-            intersection(&layout.fill, survives_below, cancel)?
+            // Never a newly quantized subtraction of the rounded mask.
+            below_part
         };
         let remaining_bytes = super::native::material_bytes(&mut remaining);
         admit_scratch(
@@ -240,7 +242,7 @@ impl ClassifiedRegions {
                 )?,
             )?;
         }
-        let mut top = difference(&remaining, survives_above, cancel)?;
+        let (mut top, mut above_part) = split(&remaining, survives_above, cancel)?;
         let top_bytes = super::native::material_bytes(&mut top);
         let split_bytes = bottom_bytes
             .checked_add(top_bytes)
@@ -253,12 +255,14 @@ impl ClassifiedRegions {
             })?;
         admit_scratch(scratch_points(&[&bottom, &remaining, &top])?, split_bytes)?;
         let mut interior = if top.0.is_empty() {
+            drop(above_part);
             remaining
         } else {
-            // Intersect the original operands of the top split. Subtracting its
-            // already rounded result would introduce a second, different grid.
-            let mut result = intersection(&remaining, survives_above, cancel)?;
-            let result_bytes = super::native::material_bytes(&mut result);
+            // The intersection side of the top split's original operands.
+            // Subtracting its already rounded result would introduce a
+            // second, different grid.
+            let result_bytes = super::native::material_bytes(&mut above_part);
+            let result = above_part;
             admit_scratch(
                 scratch_points(&[&bottom, &top, &remaining, &result])?,
                 split_bytes.checked_add(result_bytes).ok_or_else(|| {
@@ -3904,6 +3908,71 @@ fn difference(
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     operation(a, b, false, None, cancel)
 }
+/// `(a minus b, a ∩ b)` from one overlay graph: the same operands, frame, fill
+/// rule and result checks as [`difference`] and [`intersection`].
+fn split(
+    a: &MultiPolygon<f64>,
+    b: &MultiPolygon<f64>,
+    cancel: &AtomicBool,
+) -> Result<(MultiPolygon<f64>, MultiPolygon<f64>), ManufacturingError> {
+    use i_overlay::core::{fill_rule::FillRule, overlay_rule::OverlayRule};
+    use i_overlay::float::overlay::FloatOverlay;
+    check_cancel(cancel)?;
+    if a.0.is_empty() || b.0.is_empty() {
+        return Ok((
+            operation(a, b, false, None, cancel)?,
+            operation(a, b, true, None, cancel)?,
+        ));
+    }
+    boolean_budget(a, b, cancel)?;
+    let paths = |m: &MultiPolygon<f64>| -> Vec<Vec<[f64; 2]>> {
+        m.0.iter()
+            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+            .filter(|ring| !ring.0.is_empty())
+            .map(|ring| {
+                ring.0[..ring.0.len() - 1]
+                    .iter()
+                    .map(|c| [c.x, c.y])
+                    .collect()
+            })
+            .collect()
+    };
+    let (subject, clip) = (paths(a), paths(b));
+    let mut overlay = FloatOverlay::<[f64; 2]>::with_subj_and_clip(&subject, &clip);
+    let (mut difference, mut intersection) = match overlay.build_graph_view(FillRule::EvenOdd) {
+        Some(graph) => {
+            let mut buffer = Default::default();
+            let to_geo = |shapes: Vec<Vec<Vec<[f64; 2]>>>| {
+                MultiPolygon(
+                    shapes
+                        .into_iter()
+                        .map(|shape| {
+                            let mut rings = shape.into_iter().map(|path| {
+                                let mut ring = geo::LineString::from(path);
+                                ring.close();
+                                ring
+                            });
+                            let exterior = rings.next().unwrap_or(geo::LineString::new(Vec::new()));
+                            geo::Polygon::new(exterior, rings.collect())
+                        })
+                        .collect(),
+                )
+            };
+            (
+                to_geo(graph.extract_shapes(OverlayRule::Difference, &mut buffer)),
+                to_geo(graph.extract_shapes(OverlayRule::Intersect, &mut buffer)),
+            )
+        }
+        None => (MultiPolygon(Vec::new()), MultiPolygon(Vec::new())),
+    };
+    check_cancel(cancel)?;
+    for result in [&mut difference, &mut intersection] {
+        region::check_size(result)?;
+        region::canonicalize(result);
+    }
+    Ok((difference, intersection))
+}
+
 fn operation(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
