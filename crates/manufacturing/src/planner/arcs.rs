@@ -44,8 +44,9 @@ struct Candidate {
     clockwise: bool,
 }
 
-/// Attach arc runs to every wall path of `plan` from the circle sources of
-/// its occurrences.
+/// Attach arc runs to every wall, brim and skirt path of `plan`: runs on the
+/// circle sources of its occurrences, then runs fitted to the path's own
+/// points.
 pub(super) fn attach(
     plan: &mut NormalizedPrintPlan,
     sources: &[CircleSource],
@@ -78,7 +79,9 @@ fn attach_layer(
     }
     dedupe(circles);
     for path in &mut layer.paths {
-        if path.owner == Some(DepositionOwner::Wall) && path.points_mm.len() >= 3 {
+        let curved = path.owner == Some(DepositionOwner::Wall)
+            || matches!(path.kind, DepositionKind::Brim | DepositionKind::Skirt);
+        if curved && path.points_mm.len() >= 3 && path.arcs.is_empty() {
             path.arcs = runs(path, circles, cancel)?;
         }
     }
