@@ -971,6 +971,55 @@ pub(super) fn verify_bridge_lower(
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    let previous = bridge_lower_layer(plan, index)?;
+    let edges = projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true);
+    let gaps = anchors.gaps_edges(
+        AnchorCandidate {
+            endpoints_mm: stroke,
+            bead_width_mm: width,
+        },
+        edges,
+        work,
+        cancel,
+    )?;
+    judge_bridge_lower(gaps, stroke, width, recipe, require_span)
+}
+
+/// [`verify_bridge_lower`] against the lower layer's model paths prepared once
+/// (`PreparedAnchorPaths` over `plan.layers[index - 1]`'s model paths).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Actual lower support requires explicit width, recipe and genuine-gap policy beside anchor work"
+)]
+pub(super) fn verify_bridge_lower_prepared(
+    plan: &NormalizedPrintPlan,
+    index: usize,
+    stroke: [[f64; 3]; 2],
+    width: f64,
+    recipe: &PlanarPrintRecipe,
+    require_span: bool,
+    lower: &PreparedAnchorPaths<'_>,
+    work: &mut usize,
+    anchors: &mut AnchorWorkspace,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    bridge_lower_layer(plan, index)?;
+    let gaps = anchors.gaps_prepared(
+        AnchorCandidate {
+            endpoints_mm: stroke,
+            bead_width_mm: width,
+        },
+        lower,
+        work,
+        cancel,
+    )?;
+    judge_bridge_lower(gaps, stroke, width, recipe, require_span)
+}
+
+fn bridge_lower_layer(
+    plan: &NormalizedPrintPlan,
+    index: usize,
+) -> Result<&PrintLayer, ManufacturingError> {
     let layer = &plan.layers[index];
     let previous = index
         .checked_sub(1)
@@ -980,18 +1029,19 @@ pub(super) fn verify_bridge_lower(
     if (layer.lower_z_mm - previous.z_mm).abs() > arithmetic {
         return Err(failed("actual Bridge crosses a lower deposition gap"));
     }
-    let edges = projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true);
+    Ok(previous)
+}
+
+fn judge_bridge_lower(
+    gaps: &[crate::planner::support::AnchorGap],
+    stroke: [[f64; 3]; 2],
+    width: f64,
+    recipe: &PlanarPrintRecipe,
+    require_span: bool,
+) -> Result<bool, ManufacturingError> {
     let length = (stroke[1][0] - stroke[0][0]).hypot(stroke[1][1] - stroke[0][1]);
     let mut genuine = false;
-    for gap in anchors.gaps_edges(
-        AnchorCandidate {
-            endpoints_mm: stroke,
-            bead_width_mm: width,
-        },
-        edges,
-        work,
-        cancel,
-    )? {
+    for gap in gaps {
         match gap_kind(
             gap,
             (gap.end - gap.start) * length,

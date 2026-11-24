@@ -6,7 +6,7 @@
 //! neither a fit nor its extra extrusion enlarges the mandatory-skin area.
 use super::{arithmetic_slack, cancelled, constant_width, failed, project_xyz6_point_mm};
 use crate::planner::support::{
-    AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
+    AnchorCandidate, AnchorWorkspace, GapKind, PreparedAnchorPaths, gap_kind,
 };
 use spiling_contracts::manufacturing::*;
 use std::{mem::size_of, sync::atomic::AtomicBool};
@@ -477,6 +477,10 @@ pub(super) fn verify(
         // Actual axis-parallel edges per fixed axis, built on first use:
         // (fixed coordinate key, path, edge, ends) in path and edge order.
         let mut lines: [Option<Vec<LineEdge>>; 2] = [None, None];
+        // The previous layer's model paths, and those ending at its top, each
+        // prepared on first use by a fitted Bridge or ordinary skin row.
+        let mut lower_model: Option<PreparedAnchorPaths<'_>> = None;
+        let mut lower_floor: Option<PreparedAnchorPaths<'_>> = None;
         live = retained;
         add_bytes(
             &mut live,
@@ -674,7 +678,30 @@ pub(super) fn verify(
                         return Err(failed("skin fit enters reserved separator material"));
                     }
                 }
-                if path.kind == DepositionKind::Bridge {
+                if path.kind == DepositionKind::Bridge && index > 0 {
+                    if lower_model.is_none() {
+                        lower_model = PreparedAnchorPaths::new(
+                            plan.layers[index - 1]
+                                .paths
+                                .iter()
+                                .filter(|p| p.kind.is_model()),
+                            cancel,
+                        )
+                        .map(Some)?;
+                    }
+                    super::interfaces::verify_bridge_lower_prepared(
+                        plan,
+                        index,
+                        actual,
+                        constant_width(path)?,
+                        recipe,
+                        true,
+                        lower_model.as_ref().expect("prepared lower model"),
+                        work,
+                        anchors,
+                        cancel,
+                    )?;
+                } else if path.kind == DepositionKind::Bridge {
                     super::interfaces::verify_bridge_lower(
                         plan,
                         index,
@@ -693,19 +720,24 @@ pub(super) fn verify(
                             "ordinary fitted skin crosses a physical lower-deposition gap",
                         ));
                     }
-                    let earlier = projected_edges(
-                        previous.paths.iter().filter(|lower| {
-                            lower.kind.is_model() && lower.physical_z_mm[1] == path.physical_z_mm[0]
-                        }),
-                        true,
-                    );
+                    // previous.z_mm == path.physical_z_mm[0], checked above.
+                    if lower_floor.is_none() {
+                        let floor = previous.z_mm;
+                        lower_floor = PreparedAnchorPaths::new(
+                            previous.paths.iter().filter(move |lower| {
+                                lower.kind.is_model() && lower.physical_z_mm[1] == floor
+                            }),
+                            cancel,
+                        )
+                        .map(Some)?;
+                    }
                     let length = (actual[1][along] - actual[0][along]).abs();
-                    for gap in anchors.gaps_edges(
+                    for gap in anchors.gaps_prepared(
                         AnchorCandidate {
                             endpoints_mm: actual,
                             bead_width_mm: constant_width(path)?,
                         },
-                        earlier,
+                        lower_floor.as_ref().expect("prepared lower floor"),
                         work,
                         cancel,
                     )? {

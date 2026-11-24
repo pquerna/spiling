@@ -16,7 +16,8 @@ mod grid;
 pub(crate) use anchors::ProjectedAnchorPaths;
 pub(crate) use anchors::strict_capsule_point;
 pub(crate) use anchors::{
-    AnchorCandidate, AnchorWorkspace, PreparedAnchorPaths, endpoint_bond, projected_edges,
+    AnchorCandidate, AnchorGap, AnchorWorkspace, PreparedAnchorPaths, endpoint_bond,
+    projected_edges,
 };
 pub(super) use anchors::{condition_skin_bond_endpoint, inward_bond_endpoint};
 pub(in crate::planner) mod strokes;

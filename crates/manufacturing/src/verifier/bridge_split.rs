@@ -11,7 +11,7 @@
 //! endpoints after the emitted-byte/path bijection.
 use super::{cancelled, failed, project_xyz6_point_mm};
 use crate::planner::support::{
-    AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
+    AnchorCandidate, AnchorWorkspace, GapKind, PreparedAnchorPaths, gap_kind,
 };
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
@@ -83,6 +83,8 @@ pub(super) fn verify(
             .try_reserve(layer.paths.len())
             .map_err(|_| failed("split bridge scratch allocation failed"))?;
         checked.resize(layer.paths.len(), false);
+        // The previous layer's model paths, prepared once for this layer.
+        let mut lower: Option<PreparedAnchorPaths<'_>> = None;
         for (bridge_index, bridge) in layer.paths.iter().enumerate() {
             cancelled(cancel)?;
             let Some(role) = (bridge.kind == DepositionKind::Bridge)
@@ -109,8 +111,9 @@ pub(super) fn verify(
                 split = true;
                 if !checked[piece_index] {
                     checked[piece_index] = true;
+                    let lower = prepared_lower(&mut lower, plan, index, cancel)?;
                     supported(
-                        plan, index, piece, piece_ends, recipe, work, anchors, cancel,
+                        plan, index, piece, piece_ends, recipe, lower, work, anchors, cancel,
                     )?;
                 }
             }
@@ -126,13 +129,32 @@ pub(super) fn verify(
                     project_xyz6_point_mm(bridge_ends[0])?,
                     project_xyz6_point_mm(bridge_ends[1])?,
                 ];
-                super::interfaces::verify_bridge_lower(
-                    plan, index, actual, width, recipe, true, work, anchors, cancel,
+                let lower = prepared_lower(&mut lower, plan, index, cancel)?;
+                super::interfaces::verify_bridge_lower_prepared(
+                    plan, index, actual, width, recipe, true, lower, work, anchors, cancel,
                 )?;
             }
         }
     }
     Ok(())
+}
+
+fn prepared_lower<'a, 'p>(
+    slot: &'a mut Option<PreparedAnchorPaths<'p>>,
+    plan: &'p NormalizedPrintPlan,
+    index: usize,
+    cancel: &AtomicBool,
+) -> Result<&'a PreparedAnchorPaths<'p>, ManufacturingError> {
+    if slot.is_none() {
+        *slot = Some(PreparedAnchorPaths::new(
+            plan.layers[index - 1]
+                .paths
+                .iter()
+                .filter(|p| p.kind.is_model()),
+            cancel,
+        )?);
+    }
+    Ok(slot.as_ref().expect("prepared lower layer"))
 }
 
 #[expect(
@@ -145,6 +167,7 @@ fn supported(
     piece: &DepositionPath,
     ends: [[f64; 3]; 2],
     recipe: &PlanarPrintRecipe,
+    lower: &PreparedAnchorPaths<'_>,
     work: &mut usize,
     anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
@@ -164,12 +187,12 @@ fn supported(
         project_xyz6_point_mm(ends[1])?,
     ];
     let length = (actual[1][0] - actual[0][0]).hypot(actual[1][1] - actual[0][1]);
-    for gap in anchors.gaps_edges(
+    for gap in anchors.gaps_prepared(
         AnchorCandidate {
             endpoints_mm: actual,
             bead_width_mm: width,
         },
-        projected_edges(previous.paths.iter().filter(|p| p.kind.is_model()), true),
+        lower,
         work,
         cancel,
     )? {
