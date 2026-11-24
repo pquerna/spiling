@@ -478,7 +478,7 @@ impl MachineDescription {
     /// The machine's per-role deposition speeds, each within its print feed.
     pub fn role_speeds(&self) -> crate::manufacturing::RoleSpeeds {
         let cap = self.limit(MachineLimit::MaxPrintFeedMmS);
-        let v = |k| self.limit(k).min(cap);
+        let v = |k| self.limit(k);
         crate::manufacturing::RoleSpeeds {
             first_layer_mm_s: v(MachineLimit::FirstLayerSpeedMmS),
             outer_wall_mm_s: v(MachineLimit::OuterWallSpeedMmS),
@@ -490,6 +490,7 @@ impl MachineDescription {
             bridge_mm_s: v(MachineLimit::BridgeSpeedMmS),
             first_layer_infill_mm_s: v(MachineLimit::FirstLayerInfillSpeedMmS),
         }
+        .capped(cap)
     }
     pub fn build_envelope(&self) -> AabbMm {
         AabbMm {

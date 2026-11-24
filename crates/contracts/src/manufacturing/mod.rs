@@ -1489,6 +1489,37 @@ pub struct RoleSpeeds {
     pub bridge_mm_s: f64,
 }
 impl RoleSpeeds {
+    /// These speeds under a printer's print-feed cap, keeping their order:
+    /// speeds up to half the cap stay as declared; faster ones are compressed
+    /// linearly between half the cap and the cap, the fastest role landing on
+    /// it. A slow-feed printer still prints outer walls slower than inner
+    /// walls and top skin slower than solid infill, as the description says,
+    /// instead of every fast role collapsing to the same cap.
+    pub fn capped(&self, cap_mm_s: f64) -> Self {
+        let fastest = self.all().into_iter().fold(0.0f64, f64::max);
+        if fastest.is_nan() || cap_mm_s.is_nan() || fastest <= cap_mm_s || cap_mm_s <= 0.0 {
+            return *self;
+        }
+        let knee = 0.5 * cap_mm_s;
+        let fit = |s: f64| {
+            if s <= knee {
+                s
+            } else {
+                (knee + (s - knee) * (cap_mm_s - knee) / (fastest - knee)).min(cap_mm_s)
+            }
+        };
+        Self {
+            first_layer_mm_s: fit(self.first_layer_mm_s),
+            first_layer_infill_mm_s: fit(self.first_layer_infill_mm_s),
+            outer_wall_mm_s: fit(self.outer_wall_mm_s),
+            inner_wall_mm_s: fit(self.inner_wall_mm_s),
+            sparse_infill_mm_s: fit(self.sparse_infill_mm_s),
+            solid_infill_mm_s: fit(self.solid_infill_mm_s),
+            top_skin_mm_s: fit(self.top_skin_mm_s),
+            support_mm_s: fit(self.support_mm_s),
+            bridge_mm_s: fit(self.bridge_mm_s),
+        }
+    }
     pub fn all(&self) -> [f64; 9] {
         [
             self.first_layer_mm_s,

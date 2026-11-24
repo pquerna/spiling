@@ -5176,3 +5176,26 @@ fn support_default_follows_the_printer_capability() {
     printer.capabilities.generated_supports = false;
     assert_eq!(SupportChoice::default_for(&printer), SupportChoice::Off);
 }
+
+#[test]
+fn capped_role_speeds_keep_their_order_under_a_slow_print_feed() {
+    let generic = RoleSpeeds {
+        first_layer_mm_s: 50.0,
+        first_layer_infill_mm_s: 100.0,
+        outer_wall_mm_s: 200.0,
+        inner_wall_mm_s: 300.0,
+        sparse_infill_mm_s: 300.0,
+        solid_infill_mm_s: 250.0,
+        top_skin_mm_s: 200.0,
+        support_mm_s: 150.0,
+        bridge_mm_s: 50.0,
+    };
+    let capped = generic.capped(150.0);
+    assert!(capped.all().iter().all(|s| *s <= 150.0));
+    assert_eq!(capped.inner_wall_mm_s, 150.0);
+    assert!(capped.outer_wall_mm_s < capped.inner_wall_mm_s);
+    assert!(capped.top_skin_mm_s < capped.solid_infill_mm_s);
+    assert_eq!((capped.first_layer_mm_s, capped.bridge_mm_s), (50.0, 50.0));
+    // Speeds already within the feed are unchanged.
+    assert_eq!(generic.capped(600.0), generic);
+}

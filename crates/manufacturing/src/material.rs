@@ -226,23 +226,11 @@ pub fn create_default_intent(
     let first = quality
         .first_layer_height_mm(nozzle)
         .clamp(min_height, max_height.min(width));
-    let mut speeds = match &hardware.setup.machine {
+    let speeds = match &hardware.setup.machine {
         Some(machine) => machine.role_speeds(),
         None => spiling_contracts::hardware::generic_role_speeds().map_err(invalid)?,
-    };
-    for speed in [
-        &mut speeds.first_layer_mm_s,
-        &mut speeds.first_layer_infill_mm_s,
-        &mut speeds.outer_wall_mm_s,
-        &mut speeds.inner_wall_mm_s,
-        &mut speeds.sparse_infill_mm_s,
-        &mut speeds.solid_infill_mm_s,
-        &mut speeds.top_skin_mm_s,
-        &mut speeds.support_mm_s,
-        &mut speeds.bridge_mm_s,
-    ] {
-        *speed = speed.min(printer.max_print_feed_mm_s);
     }
+    .capped(printer.max_print_feed_mm_s);
     let material = &selection.profile.material;
     let mut intent = ManufacturingIntent {
         hardware: Some(hardware),
