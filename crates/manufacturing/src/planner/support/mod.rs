@@ -21,6 +21,7 @@ pub(crate) use anchors::{
 };
 pub(super) use anchors::{condition_skin_bond_endpoint, inward_bond_endpoint};
 pub(in crate::planner) mod strokes;
+pub(crate) use established::part_root_max_separation;
 pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 #[cfg(test)]
@@ -152,6 +153,8 @@ enum Root {
     Part {
         object_layer: usize,
         first_support_layer: usize,
+        /// Highest layer still within [`established::part_root_separation`].
+        last_support_layer: usize,
         landing: usize,
     },
 }
@@ -1657,6 +1660,23 @@ pub(super) fn realize(
                     program_coordinates::project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm)?
                         [0];
                 if program_coordinates::enclosed_vertical_gap_mm(floor, object_top)? >= z_gap_mm {
+                    // Support may root on this top up to the bead-width
+                    // separation band: on a slope a cell first clears the
+                    // rising surface beside it some layers higher.
+                    let mut last_support_layer = first_support_layer;
+                    for (next, upper) in layers.iter().enumerate().skip(first_support_layer + 1) {
+                        super::native::charge_support_clearance(&mut work, cancel)?;
+                        let floor = program_coordinates::project_xyz6_bead_height_mm(
+                            upper.z_mm,
+                            upper.height_mm,
+                        )?[0];
+                        if !established::within_part_root_separation(
+                            floor, object_top, z_gap_mm, recipe,
+                        )? {
+                            break;
+                        }
+                        last_support_layer = next;
+                    }
                     let live_bytes = owned_bytes
                         .saturating_add(vec_bytes(&roots))
                         .saturating_add(vec_bytes(&root_landings))
@@ -1678,6 +1698,7 @@ pub(super) fn realize(
                     roots.push(Root::Part {
                         object_layer,
                         first_support_layer,
+                        last_support_layer,
                         landing: root_landings.len(),
                     });
                     root_landings.push(landing);
@@ -2829,14 +2850,21 @@ fn reconcile_layer_roots(
                         let Root::Part {
                             object_layer,
                             first_support_layer,
+                            last_support_layer,
                             ..
                         } = roots[root_index]
                         else {
                             continue;
                         };
-                        if first_support_layer != index
+                        if !(first_support_layer..=last_support_layer).contains(&index)
                             || object_layer >= index
-                            || !established::new_contact_band(prior, layer, object_layer, z_gap)?
+                            || !established::separated_contact(
+                                prior,
+                                layer,
+                                object_layer,
+                                z_gap,
+                                recipe,
+                            )?
                         {
                             continue;
                         }
@@ -4356,6 +4384,7 @@ mod tests {
             let roots = [Root::Part {
                 object_layer: 0,
                 first_support_layer: 2,
+                last_support_layer: 2,
                 landing: 0,
             }];
             let cell_frame =
@@ -4383,6 +4412,7 @@ mod tests {
                         .0,
                     )
                     .unwrap(),
+                first: grid::Bits::default(),
                 roots: vec![0],
             };
             let mut segments = layers.iter().map(|layer| path_segments(&layer.paths)).sum();

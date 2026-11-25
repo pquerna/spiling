@@ -233,20 +233,38 @@ pub(super) fn ordinary(path: &DepositionPath) -> bool {
     path.kind.is_model() && path.kind != DepositionKind::Bridge
 }
 
-pub(super) fn new_contact_band(
+/// Whether a support root at `floor` may stand on a part top at `top`: at
+/// least the Z gap above it and at most one bead width more, the drop a first
+/// support bead bridges onto the surface. Replay checks the same band.
+pub(crate) fn within_part_root_separation(
+    floor: f64,
+    top: f64,
+    gap: f64,
+    recipe: &PlanarPrintRecipe,
+) -> Result<bool, ManufacturingError> {
+    let separation = program_coordinates::enclosed_vertical_gap_mm(floor, top)?;
+    Ok(separation >= gap && separation <= part_root_max_separation(gap, recipe))
+}
+
+/// Largest vertical separation at which support may root on a part top.
+pub(crate) fn part_root_max_separation(gap: f64, recipe: &PlanarPrintRecipe) -> f64 {
+    gap + recipe.bead_width_mm
+}
+
+pub(super) fn separated_contact(
     prior: &[PrintLayer],
     receiver: &PrintLayer,
     target: usize,
     gap: f64,
+    recipe: &PlanarPrintRecipe,
 ) -> Result<bool, ManufacturingError> {
-    use program_coordinates::{enclosed_vertical_gap_mm, project_xyz6_bead_height_mm};
+    use program_coordinates::project_xyz6_bead_height_mm;
     let height = |layer: &PrintLayer| project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm);
-    let top = height(&prior[target])?[1];
-    let floor = height(receiver)?[0];
-    let before = height(prior.last().expect("a separated root has an earlier layer"))?[0];
-    Ok(
-        enclosed_vertical_gap_mm(floor, top)? >= gap
-            && enclosed_vertical_gap_mm(before, top)? < gap,
+    within_part_root_separation(
+        height(receiver)?[0],
+        height(&prior[target])?[1],
+        gap,
+        recipe,
     )
 }
 

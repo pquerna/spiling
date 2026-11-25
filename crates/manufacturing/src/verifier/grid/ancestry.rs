@@ -89,6 +89,8 @@ struct Band {
 struct LayerWindow {
     top: f64,
     separated_end: usize,
+    /// First layer close enough below for a support root to stand on.
+    landing_start: usize,
     road_end: usize,
     reads_landing: bool,
     deposited_read: DepositedRead,
@@ -728,6 +730,7 @@ fn layer_windows(
     roads: &[Road],
     layers: &[PrintLayer],
     z_gap: f64,
+    max_separation: f64,
     admission: &mut Admission,
     work: &mut usize,
     cancel: &AtomicBool,
@@ -742,7 +745,11 @@ fn layer_windows(
         let end = separated_end(&windows, floor, z_gap, work, cancel)?;
         let road_end =
             road_start + roads[road_start..].partition_point(|road| road.layer as usize == index);
-        let start = previous_end.min(end);
+        // A support root may stand on any part top separated by the Z gap up
+        // to the planner's bead-width band, not only the newly separated one.
+        let landing_start =
+            separated_end(&windows, floor, max_separation.next_up(), work, cancel)?.min(end);
+        let start = previous_end.min(landing_start);
         let mut reads_continuation = false;
         for road in &roads[road_start..road_end] {
             debit(work, 1, cancel)?;
@@ -764,6 +771,7 @@ fn layer_windows(
         windows.push(LayerWindow {
             top,
             separated_end: end,
+            landing_start,
             road_end,
             reads_landing: false,
             deposited_read: DepositedRead::Unused,
@@ -819,6 +827,7 @@ pub(super) fn verify(
         roads,
         selected_layers,
         z_gap,
+        crate::planner::support::part_root_max_separation(z_gap, recipe),
         &mut replay.admission,
         replay.work,
         cancel,
@@ -835,7 +844,7 @@ pub(super) fn verify(
         let current = &roads[road_start..use_window.road_end];
         road_start = use_window.road_end;
         let end = use_window.separated_end;
-        let support_start = last_separated_end.min(end);
+        let support_start = last_separated_end.min(use_window.landing_start);
         let contact_index = end.saturating_sub(1);
         let oldest = support_start
             .min(contact_index)
@@ -1025,8 +1034,13 @@ pub(super) fn verify(
                 next += 1;
                 if is_support && !unsupported.is_empty() {
                     return Err(failed(format!(
-                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact",
-                        first_road.line
+                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact: {:?} at Z {:.3}, {} unsupported intervals, separated bands {}..{}",
+                        first_road.line,
+                        first_road.role,
+                        layer.z_mm,
+                        unsupported.len(),
+                        support_start,
+                        end
                     )));
                 }
                 if land {
@@ -1155,6 +1169,7 @@ mod tests {
             &roads,
             &layers,
             Z_STEP,
+            Z_STEP,
             &mut Admission::default(),
             &mut 0,
             &AtomicBool::new(false),
@@ -1185,6 +1200,7 @@ mod tests {
         let windows = layer_windows(
             &roads,
             &layers,
+            Z_STEP,
             Z_STEP,
             &mut Admission::default(),
             &mut 0,
