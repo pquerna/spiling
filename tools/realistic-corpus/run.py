@@ -444,7 +444,8 @@ def part(case, intent, results):
 
 
 # Matches xtask/src/disk.rs FREE_FLOOR_BYTES: heavy jobs refuse to start below it.
-FREE_FLOOR_BYTES = 60 * 2**30
+# SPILING_CORPUS_FREE_FLOOR_GIB overrides it for tiny fixture runs (tests).
+FREE_FLOOR_BYTES = int(float(os.environ.get("SPILING_CORPUS_FREE_FLOOR_GIB", "60")) * 2**30)
 
 
 def main():

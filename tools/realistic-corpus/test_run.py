@@ -67,6 +67,7 @@ class RunnerBoundaryTests(unittest.TestCase):
             case["expectation"] = None
         manifest.write_text(json.dumps({"parts": [case]}))
         environment = dict(os.environ, SPILING_CORPUS_JOBS="1", SPILING_CORPUS_SUPPORTS="disabled",
+                           SPILING_CORPUS_FREE_FLOOR_GIB="0",
                            CORPUS_DOUBLE_SPANS=json.dumps(spans), CORPUS_DOUBLE_SUPPORT=str(support),
                            CORPUS_DOUBLE_LOCAL_LENGTH=str(local_length))
         if failure:

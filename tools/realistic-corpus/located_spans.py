@@ -14,7 +14,8 @@ import audit
 import reference
 
 
-METRIC = "nominal-lower-road-endpoint-disks-v2"
+METRIC = "nominal-lower-road-endpoint-disks-flanks-v3"
+FLANK_PARALLEL_SINE = 0.05
 Z_EPSILON_MM = 0.001
 EPS = 1e-9
 CELL_MM = 4.0
@@ -192,6 +193,48 @@ def capsule_intervals(start, unit, length, lower_start, lower_end, radius, *, ro
                 yield interval
 
 
+def flank(start, unit, length, lower_start, lower_end, radius, half):
+    """A near-parallel lower bead beside the centerline that reaches the
+    road's cross-section: its straight body's extent along the road, its
+    side, and how far its edge stands from the centerline along the
+    cross-section (negative when it covers the centerline)."""
+    dx, dy = lower_end[0] - lower_start[0], lower_end[1] - lower_start[1]
+    full = math.hypot(dx, dy)
+    if full == 0:
+        return None
+    sine = abs(unit[0] * dy / full - unit[1] * dx / full)
+    if sine > FLANK_PARALLEL_SINE:
+        return None
+    cosine = math.sqrt(1 - sine * sine)
+    offsets = [unit[0] * (point[1] - start[1]) - unit[1] * (point[0] - start[0])
+               for point in (lower_start, lower_end)]
+    if offsets[0] * offsets[1] <= 0:
+        return None
+    offset = max(offsets, key=abs)
+    # A band tilted by the angle meets the cross-section line over a
+    # 1/cosine longer span; its reach in from that side, at the farther
+    # end's offset, is the conservative share it holds.
+    reach = (abs(offset) - radius) / cosine
+    if reach >= half:
+        return None
+    along = sorted((point[0] - start[0]) * unit[0] + (point[1] - start[1]) * unit[1]
+                   for point in (lower_start, lower_end))
+    low, high = max(0.0, along[0]), min(length, along[1])
+    return (low, high, math.copysign(1.0, offset), reach) if low < high else None
+
+
+def flank_intervals(flanks, half):
+    """Two lower beads, one on each side, anchor the road where together they
+    hold at least half of its cross-section: their edges stand less than the
+    road's half width apart in total."""
+    for index, first in enumerate(flanks):
+        for second in flanks[index + 1:]:
+            if first[2] * second[2] < 0 and first[3] + second[3] < half:
+                low, high = max(first[0], second[0]), min(first[1], second[1])
+                if low < high:
+                    yield low, high
+
+
 def footprint_box(start, end, pad=0):
     return (min(start[0], end[0]) - pad, min(start[1], end[1]) - pad,
             max(start[0], end[0]) + pad, max(start[1], end[1]) + pad)
@@ -223,8 +266,8 @@ class LowerEdges:
                     for cell in footprint:
                         self.buckets[cell].append(ordinal)
 
-    def intersecting_edges(self, start, end, top=None):
-        box = footprint_box(start, end, EPS)
+    def intersecting_edges(self, start, end, top=None, pad=EPS):
+        box = footprint_box(start, end, pad)
         footprint = cells(box)
         if footprint is None:
             candidates = range(len(self.edges))
@@ -238,9 +281,14 @@ class LowerEdges:
                     and box[1] <= bounds[3] and bounds[1] <= box[3]):
                 yield ordinal, low, high, radius
 
-    def covered(self, start, end, unit, length, top):
-        for _, low, high, radius in self.intersecting_edges(start, end, top):
+    def covered(self, start, end, unit, length, top, half):
+        flanks = []
+        for _, low, high, radius in self.intersecting_edges(start, end, top, half + EPS):
             yield from capsule_intervals(start, unit, length, low, high, radius)
+            beside = flank(start, unit, length, low, high, radius, half)
+            if beside is not None:
+                flanks.append(beside)
+        yield from flank_intervals(flanks, half)
 
     def touches_endpoint(self, point, radius, top):
         low = (point[0] - radius, point[1] - radius)
@@ -303,7 +351,8 @@ def road_gaps(road, lower, bridge_limit):
         if length <= EPS:
             continue
         unit = tuple((finish - begin) / length for begin, finish in zip(start, end))
-        gaps = missing_intervals(lower.covered(start, end, unit, length, road.z[1]), length)
+        gaps = missing_intervals(
+            lower.covered(start, end, unit, length, road.z[1], width / 2), length)
         for low, high in gaps:
             points = [tuple(axis + distance * step for axis, step in zip(start, unit))
                       for distance in (low, high)]

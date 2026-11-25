@@ -59,6 +59,25 @@ class LocatedSpanTests(unittest.TestCase):
         later = road(1, (0.2, 0.4), (0, 0.2), (10, 0.2))
         self.assertEqual(spans.observe([later, candidate], 0.2, 10, list().append)["max_span_mm"], 10)
 
+    def test_two_flanking_beads_anchor_a_road_they_hold_by_half_its_width(self):
+        candidate = road(1, (0.2, 0.4), (0, 0), (10, 0))
+        below = road(0, (0.0, 0.2), (0, 0.28), (10, 0.28))
+        above = road(0, (0.0, 0.2), (0, -0.28), (10, -0.28))
+        observe = lambda roads: spans.observe(roads, 0.2, 1, list().append)["max_span_mm"]
+        # Either flank alone leaves the centerline outside its bead.
+        self.assertEqual(observe([below, candidate]), 10)
+        # Together they hold 0.32 of the 0.4 mm cross-section.
+        self.assertEqual(observe([below, above, candidate]), 0)
+        # Two beads on the same side do not add up.
+        same = road(0, (0.0, 0.2), (0, 0.5), (10, 0.5))
+        self.assertEqual(observe([below, same, candidate]), 10)
+        # Too far apart to hold half of it.
+        wide = road(0, (0.0, 0.2), (0, -0.35), (10, -0.35))
+        self.assertEqual(observe([below, wide, candidate]), 10)
+        # Only where both flank the road.
+        short = road(0, (0.0, 0.2), (0, -0.28), (4, -0.28))
+        self.assertAlmostEqual(observe([below, short, candidate]), 6)
+
     def test_unsupported_reference_modes_are_not_reported_as_zero(self):
         for program in (PRUSA.replace("G1 X5 E3", "G2 X5 E3 I1"),
                         PRUSA.replace(";TYPE:Bridge infill", ";TYPE:Unknown"),
