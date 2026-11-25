@@ -180,10 +180,7 @@ pub(super) fn run(
                     lower_z: elevation.lower_z,
                     height: elevation.z - elevation.lower_z,
                     axis,
-                    top_axis: region::HatchAxis::for_policy(
-                        recipe.top_skin_axis,
-                        hatch_key(schedule, index),
-                    ),
+                    top_axis: region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(index)),
                     recipe,
                 };
                 let recovering_components = recovery.is_some();
@@ -244,10 +241,7 @@ pub(super) fn run(
                         elevation.z,
                         elevation.lower_z,
                         axis,
-                        region::HatchAxis::for_policy(
-                            recipe.top_skin_axis,
-                            hatch_key(schedule, index),
-                        ),
+                        region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(index)),
                         recipe,
                         web_roof.map(|field| {
                             if cathedral_roads.get(index).is_some() {

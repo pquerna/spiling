@@ -3198,6 +3198,51 @@ impl ClassifiedRegions {
                                 if chosen.is_some() {
                                     continue 'rows;
                                 }
+                                // The bridge exists to anchor the regional
+                                // core's demanded terminal, as replay
+                                // checks: the core alone must still leave a
+                                // demand gap at the transition. Probe a
+                                // profile tolerance past it, so a lower bead
+                                // tangent there counts as the anchor replay's
+                                // emitted coordinates may find.
+                                let direction = if transition[along] > core[along] {
+                                    1.0
+                                } else {
+                                    -1.0
+                                };
+                                let mut beyond = transition;
+                                beyond[along] += direction
+                                    * spiling_contracts::manufacturing::PROFILE_TOLERANCE_MM;
+                                let mut core_probe = super::support::RasterCandidate {
+                                    skin_command_fits: Vec::new(),
+                                    paths: vec![DepositionPath {
+                                        points_mm: vec![core, beyond],
+                                        ..path.clone()
+                                    }],
+                                    whole_rows: Vec::new(),
+                                    process_interfaces: Vec::new(),
+                                    skin_bridge_domains: Vec::new(),
+                                };
+                                let core_proof = anchors(
+                                    &mut core_probe,
+                                    layer.axis,
+                                    retained + selected_points,
+                                    scratch_bytes,
+                                )?;
+                                *workspace_bytes = core_proof.workspace_bytes;
+                                let terminal = grid(beyond[along])?;
+                                let mut demanded = false;
+                                for gap in &core_proof.demands {
+                                    if grid(gap[0][along])? == terminal
+                                        || grid(gap[1][along])? == terminal
+                                    {
+                                        demanded = true;
+                                        break;
+                                    }
+                                }
+                                if !demanded {
+                                    continue;
+                                }
                                 chosen = Some(proposal.paths.remove(0));
                             }
                         }

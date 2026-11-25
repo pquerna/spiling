@@ -1199,10 +1199,8 @@ fn admit_schedule<'model>(
             let z = elevation.z;
             let sample = elevation.sample;
             let height = elevation.height;
-            let top_axis = region::HatchAxis::for_policy(
-                recipe.top_skin_axis,
-                hatch_key(schedule, index as usize),
-            );
+            let top_axis =
+                region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(index as usize));
             let (current, below, above, landing) = skin_horizons(index);
             if sections[current].material.0.is_empty() {
                 layers.push(PrintLayer {
@@ -1626,10 +1624,8 @@ fn admit_schedule<'model>(
                 }
             }
             wall_layouts[index as usize] = wall_layout.as_ref().map(Arc::clone);
-            let axis = region::HatchAxis::for_policy(
-                recipe.rectilinear_axis,
-                hatch_key(schedule, index as usize),
-            );
+            let axis =
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, hatch_key(index as usize));
             let axis_slot = usize::from(axis == region::HatchAxis::Y);
             for template in &mut templates {
                 if template
@@ -2656,31 +2652,12 @@ fn deposition_probe(
     }))
 }
 
-/// Alternating-axis key of `schedule[index]`. A layer outside refinement
-/// uses its course. Within a maximal run of layers whose courses were split,
-/// the key counts down from the run's top layer, which keeps its course axis:
-/// every layer inside the run crosses its neighbors, the course above still
-/// crosses the run's top, and a split changes no layer above its run. Plan
-/// validation and replay derive the same key independently from the
-/// published courses.
-fn hatch_key(schedule: &[LayerElevation], index: usize) -> u32 {
-    let refined = |layer: usize| {
-        let course = schedule[layer].course;
-        layer
-            .checked_sub(1)
-            .is_some_and(|below| schedule[below].course == course)
-            || schedule
-                .get(layer + 1)
-                .is_some_and(|above| above.course == course)
-    };
-    if !refined(index) {
-        return schedule[index].course;
-    }
-    let mut top = index;
-    while top + 1 < schedule.len() && refined(top + 1) {
-        top += 1;
-    }
-    schedule[top].course + (top - index) as u32
+/// Alternating-axis key of layer `index`: every printed layer crosses the
+/// layers directly below and above it, including inside runs where a course
+/// was split into thinner layers. Plan validation and replay derive the same
+/// key from the published layer order.
+fn hatch_key(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 fn refine_deposition_pair(

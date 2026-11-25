@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicBool;
 /// per-run linear scan. Selection only; both routes give identical results.
 const MIN_ANCHOR_INVENTORY_EDGES: usize = 64;
 
+#[derive(Debug)]
 pub(crate) enum GapKind {
     Supported,
     Bridge,
@@ -29,13 +30,10 @@ pub(crate) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> Ga
     let right = gap.right;
     // A fully unanchored tiny sampled edge is not a supported overhang. Anchors
     // must be actual positive intervals or certified endpoint-footprint overlap.
-    if left || right {
-        if span <= 2.0 * OFFSET_TOLERANCE_MM {
-            return GapKind::Supported;
-        }
-        if !(left && right) && span <= width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM {
-            return GapKind::Supported;
-        }
+    // An anchored end holds up to half a bead of overhang; anchoring both
+    // ends holds at least as much.
+    if (left || right) && span <= width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM {
+        return GapKind::Supported;
     }
     if left && right && span <= limit {
         if gap.direct_ends {

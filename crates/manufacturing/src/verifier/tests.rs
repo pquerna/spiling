@@ -341,7 +341,9 @@ fn road_connection_preserves_orthogonal_sparse_bridge_anchors_and_role() {
         let (mut intent, mut plan) = fixture();
         intent.recipe.infill_fraction = 0.15;
         intent.recipe.rectilinear_axis = policy;
-        let transpose = (policy == RectilinearAxisPolicy::AlternatingYX) != refined;
+        // Axes follow printed layer order, so splitting a course into
+        // thinner layers leaves layer 0's axis unchanged.
+        let transpose = policy == RectilinearAxisPolicy::AlternatingYX;
         for layer in &mut plan.layers {
             if refined {
                 layer.hatch_course = 0;

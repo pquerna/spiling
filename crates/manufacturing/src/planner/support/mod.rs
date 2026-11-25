@@ -1133,10 +1133,8 @@ pub(super) fn realize(
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
             anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-            let authored_axis = region::HatchAxis::for_policy(
-                recipe.rectilinear_axis,
-                super::hatch_key(schedule, index),
-            );
+            let authored_axis =
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, super::hatch_key(index));
             let previous = prior[index - 1].paths.iter();
             anchors.set_budget(workspace_budget(
                 retained,
@@ -1183,7 +1181,7 @@ pub(super) fn realize(
                         + vec_bytes(&admission.unanchored);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
-                    let course = super::hatch_key(schedule, index);
+                    let course = super::hatch_key(index);
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,
@@ -1911,7 +1909,7 @@ pub(super) fn realize(
                 .map(|(i, layer)| {
                     let axis = region::HatchAxis::for_policy(
                         RectilinearAxisPolicy::AlternatingXY,
-                        super::hatch_key(schedule, i),
+                        super::hatch_key(i),
                     );
                     (layer.z_mm, layer.lower_z_mm, axis)
                 })
@@ -2279,10 +2277,8 @@ pub(super) fn realize(
                 + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
             owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
             anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
-            let authored_axis = region::HatchAxis::for_policy(
-                recipe.rectilinear_axis,
-                super::hatch_key(schedule, index),
-            );
+            let authored_axis =
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, super::hatch_key(index));
             let previous = prior[index - 1].paths.iter();
             let t = split.start();
             if joined_layers[index] {
@@ -2295,7 +2291,7 @@ pub(super) fn realize(
                     + support_metadata_bytes
                     + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
                 let staged_anchor_bytes = anchors.retained_bytes();
-                let course = super::hatch_key(schedule, index);
+                let course = super::hatch_key(index);
                 let mut check_component =
                     |candidate: &mut RasterCandidate,
                      axis,
@@ -2443,7 +2439,7 @@ pub(super) fn realize(
                         + vec_bytes(&admission.bridges);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
-                    let course = super::hatch_key(schedule, index);
+                    let course = super::hatch_key(index);
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,

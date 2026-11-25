@@ -239,9 +239,10 @@ pub(super) fn verify(
                         )
                 });
             if !demanded_terminal {
-                return Err(failed(
-                    "mixed bridge has no actual demanded regional terminal",
-                ));
+                return Err(failed(format!(
+                    "mixed bridge has no actual demanded regional terminal: layer {}, {:?} -> {:?} -> {:?}",
+                    layer.index, a, transition, b
+                )));
             }
             // The captured nominal lower strokes are already bijected to actual
             // commands above. Recheck minimal nominal endpoint construction;

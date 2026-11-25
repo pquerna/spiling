@@ -3453,36 +3453,13 @@ pub struct PrintLayer {
     #[serde(deserialize_with = "diaphragm::skin_command_fits")]
     pub skin_command_fits: Vec<SkinCommandFitDomain>,
 }
-/// Alternation key of every layer, in one pass from the top. A layer outside refinement uses its
-/// hatch course. Within a maximal run of layers whose courses were split into
-/// several layers, the key counts down from the run's top layer, which keeps
-/// its course axis: every layer inside the run crosses its neighbors, the
-/// course above still crosses the run's top, and a refinement split never
-/// changes any layer above its run.
+/// Alternation key of every layer: its position in the printed order, so
+/// every layer crosses the layers directly below and above it, including
+/// inside runs where a hatch course was split into thinner layers.
 pub fn hatch_alternation_keys(layers: &[PrintLayer]) -> Vec<u32> {
-    let refined = |layer: usize| {
-        let course = layers[layer].hatch_course;
-        layer
-            .checked_sub(1)
-            .is_some_and(|below| layers[below].hatch_course == course)
-            || layers
-                .get(layer + 1)
-                .is_some_and(|above| above.hatch_course == course)
-    };
-    let mut keys = vec![0; layers.len()];
-    let mut top: Option<usize> = None;
-    for index in (0..layers.len()).rev() {
-        if !refined(index) {
-            top = None;
-            keys[index] = layers[index].hatch_course;
-            continue;
-        }
-        let run_top = *top.get_or_insert(index);
-        keys[index] = layers[run_top]
-            .hatch_course
-            .saturating_add((run_top - index) as u32);
-    }
-    keys
+    (0..layers.len())
+        .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+        .collect()
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

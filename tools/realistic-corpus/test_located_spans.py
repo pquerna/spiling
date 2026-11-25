@@ -46,9 +46,9 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(summary["unsupported_spans"], 0)
         self.assertEqual(summary["tagged_bounded_bridges"], 1)
         self.assertEqual(evidence[0]["physical_z_mm"], (0.2, 0.4))
-        self.assertAlmostEqual(evidence[0]["length_mm"], 7.6)
-        self.assertEqual(evidence[0]["bounds_xy_mm"], [[1.2, 0], [8.8, 0]])
-        self.assertEqual(spans.observe(roads, 0.2, 7.0, lambda _: None)["unsupported_spans"], 1)
+        self.assertAlmostEqual(evidence[0]["length_mm"], 6.8)
+        self.assertEqual(evidence[0]["bounds_xy_mm"], [[1.6, 0], [8.4, 0]])
+        self.assertEqual(spans.observe(roads, 0.2, 6.0, lambda _: None)["unsupported_spans"], 1)
 
     def test_adjacent_model_and_separated_support_differ_and_tangency_is_not_coverage(self):
         candidate = road(2, (0.4, 0.6), (0, 0), (10, 0))
@@ -59,24 +59,18 @@ class LocatedSpanTests(unittest.TestCase):
         later = road(1, (0.2, 0.4), (0, 0.2), (10, 0.2))
         self.assertEqual(spans.observe([later, candidate], 0.2, 10, list().append)["max_span_mm"], 10)
 
-    def test_two_flanking_beads_anchor_a_road_they_hold_by_half_its_width(self):
+    def test_a_lower_bead_holds_a_ledge_one_road_width_beyond_it(self):
         candidate = road(1, (0.2, 0.4), (0, 0), (10, 0))
-        below = road(0, (0.0, 0.2), (0, 0.28), (10, 0.28))
-        above = road(0, (0.0, 0.2), (0, -0.28), (10, -0.28))
         observe = lambda roads: spans.observe(roads, 0.2, 1, list().append)["max_span_mm"]
-        # Either flank alone leaves the centerline outside its bead.
-        self.assertEqual(observe([below, candidate]), 10)
-        # Together they hold 0.32 of the 0.4 mm cross-section.
-        self.assertEqual(observe([below, above, candidate]), 0)
-        # Two beads on the same side do not add up.
-        same = road(0, (0.0, 0.2), (0, 0.5), (10, 0.5))
-        self.assertEqual(observe([below, same, candidate]), 10)
-        # Too far apart to hold half of it.
-        wide = road(0, (0.0, 0.2), (0, -0.35), (10, -0.35))
-        self.assertEqual(observe([below, wide, candidate]), 10)
-        # Only where both flank the road.
-        short = road(0, (0.0, 0.2), (0, -0.28), (4, -0.28))
-        self.assertAlmostEqual(observe([below, short, candidate]), 6)
+        # Centerlines 0.55 apart: within the lower radius plus one road width.
+        beside = road(0, (0.0, 0.2), (0, 0.55), (10, 0.55))
+        self.assertEqual(observe([beside, candidate]), 0)
+        # 0.65 apart: beyond 0.2 + 0.4, so the road hangs.
+        far = road(0, (0.0, 0.2), (0, 0.65), (10, 0.65))
+        self.assertEqual(observe([far, candidate]), 10)
+        # Only where the lower bead runs.
+        short = road(0, (0.0, 0.2), (0, 0.55), (4, 0.55))
+        self.assertAlmostEqual(observe([short, candidate]), 6 - math.sqrt(0.6 ** 2 - 0.55 ** 2))
 
     def test_unsupported_reference_modes_are_not_reported_as_zero(self):
         for program in (PRUSA.replace("G1 X5 E3", "G2 X5 E3 I1"),
@@ -93,21 +87,16 @@ class LocatedSpanTests(unittest.TestCase):
         self.assertEqual(summary["tagged_bounded_bridges"], 0)
         self.assertEqual(summary["max_span_mm"], 10)
 
-    def test_endpoint_disks_anchor_each_run_without_filling_its_centerline(self):
+    def test_a_run_leaving_its_ledge_is_one_ended(self):
         for role in ("bridge", "Bridge infill"):
             with self.subTest(role=role):
                 candidate = spans.Road(1, 0, role, False, (0.2, 0.4),
                                        [(0, 0), (4, 0), (4, 5)], [0.4, 0.4])
                 donors = [road(0, (0.0, 0.2), (0, -0.3), (4, -0.3))]
-                bounded, one_ended = [gap for gap, _ in spans.road_gaps(candidate, spans.LowerEdges(donors), 4)]
-                self.assertEqual(bounded["length_mm"], 4)
-                self.assertTrue(bounded["bridge_within_limit"])
-                self.assertEqual(one_ended["length_mm"], 5)
-                self.assertFalse(one_ended["two_ended"])
-                self.assertFalse(one_ended["bridge_within_limit"])
-                donors[0].points = [(0, -0.4), (4, -0.4)]
-                tangent, _ = next(spans.road_gaps(candidate, spans.LowerEdges(donors), 4))
-                self.assertFalse(tangent["two_ended"])
+                hanging, = [gap for gap, _ in spans.road_gaps(candidate, spans.LowerEdges(donors), 4)]
+                self.assertAlmostEqual(hanging["length_mm"], 4.7)
+                self.assertFalse(hanging["two_ended"])
+                self.assertFalse(hanging["bridge_within_limit"])
 
     def test_wall_reports_do_not_exempt_other_runs_or_ambiguous_matches(self):
         wall = self.gap((0, 0), (4, 0), role="bridge")
@@ -268,7 +257,7 @@ class LocatedSpanTests(unittest.TestCase):
                             recorded, = map(json.loads, evidence.read_text().splitlines())
                             self.assertEqual(comparison["worst_longer_spans"], [recorded])
                             self.assertAlmostEqual(recorded["excess_mm"],
-                                                   length - 0.4 if case == "native_one_ended" else length)
+                                                   length - 0.8 if case == "native_one_ended" else length)
                             self.assertEqual(recorded["prusa_span_mm"], 0)
                             self.assertFalse(recorded["bridge_within_limit"])
                     if match == "no_geometry":

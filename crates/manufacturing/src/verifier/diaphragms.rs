@@ -157,10 +157,17 @@ fn lower(
             ) {
                 GapKind::Supported => {}
                 GapKind::Bridge if path.kind == DepositionKind::Bridge => genuine = true,
-                _ => {
-                    return Err(failed(
-                        "actual permanent diaphragm or upper landing lacks direct lower anchors or bounded genuine Bridge motion",
-                    ));
+                kind => {
+                    return Err(failed(format!(
+                        "actual permanent diaphragm or upper landing lacks direct lower anchors or bounded genuine Bridge motion: Z {:.3}, {:?} {:?} -> {:?}, gap {:.3}..{:.3} of {:.3} mm is {kind:?}",
+                        path.physical_z_mm[1],
+                        path.kind,
+                        endpoints[0],
+                        endpoints[1],
+                        gap.start,
+                        gap.end,
+                        length
+                    )));
                 }
             }
         }
