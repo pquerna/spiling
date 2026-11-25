@@ -47,8 +47,17 @@ pub struct ProtectedVoidPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProtectedVoidHeightScope {
-    Bounded { lower_mm: f64, upper_mm: f64 },
-    OpenBelow { upper_mm: f64 },
+    Bounded {
+        lower_mm: f64,
+        upper_mm: f64,
+    },
+    /// A hole whose lower rim is open: its walls rise from `rim_mm` (the
+    /// lowest rim height, or negative infinity when unknown) to `upper_mm`.
+    /// Below the rim it bounds nothing, so it protects no corridor there.
+    OpenBelow {
+        rim_mm: f64,
+        upper_mm: f64,
+    },
 }
 
 #[derive(Debug)]
@@ -1658,6 +1667,11 @@ fn native_height_scopes(
         if valid {
             let candidate = if opening == Some(true) {
                 ProtectedVoidHeightScope::OpenBelow {
+                    rim_mm: if lower_world.is_finite() {
+                        lower_world
+                    } else {
+                        f64::NEG_INFINITY
+                    },
                     upper_mm: capture.world_interval[1],
                 }
             } else if opening == Some(false) && lower_world.is_finite() {
@@ -2596,7 +2610,7 @@ mod tests {
             let envelope = &result.envelopes()[0];
             assert!(matches!(
                 envelope.height_scope(),
-                ProtectedVoidHeightScope::OpenBelow { upper_mm: 18.1 }
+                ProtectedVoidHeightScope::OpenBelow { upper_mm: 18.1, .. }
             ));
             let outer = envelope.world_xy_outer();
             assert!(!outer.is_hole && outer.points_mm.len() > 8);
@@ -2982,12 +2996,11 @@ mod tests {
             assert_eq!(interior.holes.len(), 1);
             let protected = query(&definition, &interior, &mut work);
             assert_eq!(protected.envelopes().len(), 1);
-            assert_eq!(
+            assert!(matches!(
                 protected.envelopes()[0].height_scope(),
-                ProtectedVoidHeightScope::OpenBelow {
-                    upper_mm: interior_interval[1],
-                }
-            );
+                ProtectedVoidHeightScope::OpenBelow { upper_mm, .. }
+                    if upper_mm == interior_interval[1]
+            ));
         }
     }
 
@@ -3090,7 +3103,7 @@ mod tests {
         let result = query(&definition, &capture, &mut work);
         assert!(matches!(
             result.envelopes()[0].height_scope(),
-            ProtectedVoidHeightScope::OpenBelow { upper_mm: 6.1 }
+            ProtectedVoidHeightScope::OpenBelow { upper_mm: 6.1, .. }
         ));
     }
 }

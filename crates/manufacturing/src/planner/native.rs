@@ -788,7 +788,9 @@ fn height_meets(scope: spiling_geometry::ProtectedVoidHeightScope, band: [f64; 2
         spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
             lower_mm <= band[1] && upper_mm >= band[0]
         }
-        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => upper_mm >= band[0],
+        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { rim_mm, upper_mm } => {
+            rim_mm <= band[1] && upper_mm >= band[0]
+        }
     }
 }
 
@@ -1666,7 +1668,9 @@ fn scoped_support_layer_range(
         spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
             (Some(lower_mm), upper_mm)
         }
-        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => (None, upper_mm),
+        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { rim_mm, upper_mm } => {
+            (rim_mm.is_finite().then_some(rim_mm), upper_mm)
+        }
     };
     let first = if let Some(lower) = lower {
         partition_schedule(

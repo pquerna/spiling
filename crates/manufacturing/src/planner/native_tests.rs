@@ -1232,6 +1232,7 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
     let required = 3.0 + enabled.recipe.bead_width_mm * 0.5 + xy_clearance_mm;
     let mut previous: Option<[f64; 3]> = None;
     let mut checked = 0usize;
+    let mut near_edge = 0usize;
     let mut supports = Vec::new();
     let mut objects = Vec::new();
     for record in replay_bytes[REPLAY_HEADER_BYTES..]
@@ -1256,10 +1257,14 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
                 (-(a[0] * d[0] + a[1] * d[1]) / squared_length).clamp(0.0, 1.0)
             };
             let distance = (a[0] + t * d[0]).hypot(a[1] + t * d[1]);
+            // Below its open rim (the plate's floor at z = 2) the hole bounds
+            // nothing: support stands under the plate up to the hole's edge,
+            // but never rises into the hole.
             assert!(
-                distance >= required - 1e-10,
-                "actual XYZ6 support capsule violates native hole radius + nominal bead radius + unchanged XY gap"
+                start[2].max(end[2]) <= 2.0 - z_gap_mm + 1e-9,
+                "actual XYZ6 support rises into the floating plate's open hole"
             );
+            near_edge += usize::from(distance < required - 1e-10);
             checked += 1;
         }
         if matches!(role, 1..=5 | 8) {
@@ -1272,6 +1277,10 @@ fn native_floating_through_hole_keeps_actual_emitted_capsules_outside_the_unchan
         previous = Some(end);
     }
     assert!(checked > 0);
+    assert!(
+        near_edge > 0,
+        "support reaches under the plate's first layer at the open hole's edge"
+    );
     let mut checked_pairs = 0usize;
     for (a, b, support_layer) in supports {
         let support_bottom = a[2].min(b[2]) - bundle.plan.layers[support_layer].height_mm;
@@ -1400,12 +1409,6 @@ fn on_part_supports_land_on_deposited_floor_when_bed_corridor_is_blocked() {
     for bytes in [BOX, HOLE] {
         let scene = NativeScene::new(bytes, &[RigidPoseMm::IDENTITY, translated(0.0, 0.0, 12.0)]);
         let enabled = intent(true);
-        let SupportPolicy::Breakaway {
-            xy_clearance_mm, ..
-        } = enabled.recipe.supports
-        else {
-            unreachable!()
-        };
         let bundle = compile(scene.input(&enabled), &cancel).unwrap();
         let support = bundle
             .plan
@@ -1449,9 +1452,13 @@ fn on_part_supports_land_on_deposited_floor_when_bed_corridor_is_blocked() {
                     let fraction = (-(start[0] * delta[0] + start[1] * delta[1])
                         / (delta[0] * delta[0] + delta[1] * delta[1]))
                         .clamp(0.0, 1.0);
+                    // Both holes' walls end below or start above this
+                    // scaffold, so it may reach the upper hole's edge; it
+                    // still stands only on the lower floor, never over the
+                    // lower hole's open column.
                     assert!(
                         (start[0] + fraction * delta[0]).hypot(start[1] + fraction * delta[1])
-                            >= 3.0 + edge.width_mm * 0.5 + xy_clearance_mm
+                            >= 3.0
                     );
                 }
             }
@@ -5108,19 +5115,10 @@ fn tolerant_supports_keep_real_anchors_holes_and_closed_pocket_floors() {
                     DepositionKind::Support | DepositionKind::SupportInterface
                 )
             }) {
-                // The source hole is centered at (10,10), radius 3.0. Check
-                // complete stroke distance, not just its endpoints.
-                for edge in path.points_mm.windows(2) {
-                    let a = [edge[0][0] - 10.0, edge[0][1] - 10.0];
-                    let d = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
-                    let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1]))
-                        .clamp(0.0, 1.0);
-                    assert!(
-                        (a[0] + t * d[0]).hypot(a[1] + t * d[1])
-                            >= 3.0 + enabled.recipe.bead_width_mm * 0.5 + 0.2,
-                        "hole invaded"
-                    );
-                }
+                // The hole's walls start at the floating plate's floor
+                // (z = 2): support stands under the plate up to the hole's
+                // edge but never rises into the hole.
+                assert!(path.physical_z_mm[1] < 2.0, "hole invaded");
             }
         }
         if name == "blind-pocket" {

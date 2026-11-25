@@ -815,6 +815,7 @@ fn project_model(
             }
         } else {
             spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                rim_mm: void.height_mm[0],
                 upper_mm: void.height_mm[1],
             }
         };

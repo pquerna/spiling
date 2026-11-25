@@ -3946,8 +3946,8 @@ fn void_reaches_corridor(
         spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
             *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
         }
-        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
-            *upper_mm >= corridor_lower
+        spiling_geometry::ProtectedVoidHeightScope::OpenBelow { rim_mm, upper_mm } => {
+            *rim_mm <= corridor_upper && *upper_mm >= corridor_lower
         }
     }
 }
@@ -4082,7 +4082,10 @@ mod tests {
         ]))
         .into_shared();
         let mut scope = VoidScope::new(
-            spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 5.0 },
+            spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                rim_mm: f64::NEG_INFINITY,
+                upper_mm: 5.0,
+            },
             Some(Arc::new(spiling_geometry::tolerant::TolerantVoidRoof {
                 height_mm: [4.0, 5.0],
                 facets: Vec::new(),

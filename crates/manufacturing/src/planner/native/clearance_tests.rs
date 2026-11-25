@@ -156,7 +156,10 @@ const VOID_TEST_SCHEDULE: [LayerElevation; 1] = [LayerElevation {
 }];
 
 const VOID_TEST_HEIGHT: spiling_geometry::ProtectedVoidHeightScope =
-    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 1.0 };
+    spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+        rim_mm: f64::NEG_INFINITY,
+        upper_mm: 1.0,
+    };
 
 #[test]
 fn escaped_void_proofs_keep_the_first_width_and_mask_refusals() {
@@ -353,7 +356,10 @@ fn indexed_native_clearance_matches_exhaustive_first_error_and_narrow_tests() {
             }
             5 => {
                 paths[0] = path(0.0);
-                height = spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: -0.1 };
+                height = spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                    rim_mm: f64::NEG_INFINITY,
+                    upper_mm: -0.1,
+                };
             }
             6 => {
                 paths[64] = path(0.0);
@@ -783,7 +789,10 @@ fn pocket_relief_requires_the_full_actual_bead_to_clear_lower_geometry() {
         };
         let mut work = spiling_geometry::GeometryWorkBudget::compile();
         let mut scope = crate::planner::support::VoidScope::new(
-            spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: 1.0 },
+            spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                rim_mm: f64::NEG_INFINITY,
+                upper_mm: 1.0,
+            },
             Some(Arc::new(spiling_geometry::tolerant::TolerantVoidRoof {
                 height_mm: [0.9, 1.0],
                 facets: Vec::new(),
@@ -935,7 +944,10 @@ fn physical_scope_ranges_preserve_irregular_height_endpoints_and_open_below() {
         for height in [boundary.next_down(), boundary, boundary.next_up()] {
             for lower in [None, Some(height - 0.01), Some(height)] {
                 let scope = lower.map_or(
-                    spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm: height },
+                    spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                        rim_mm: f64::NEG_INFINITY,
+                        upper_mm: height,
+                    },
                     |lower_mm| spiling_geometry::ProtectedVoidHeightScope::Bounded {
                         lower_mm,
                         upper_mm: height,
