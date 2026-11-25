@@ -698,6 +698,30 @@ impl Rows {
         })
     }
 
+    /// Appends one road's `[row, left, right]` incidences, as `insert` would.
+    pub(super) fn extend(
+        &mut self,
+        road: usize,
+        rows: &[[i64; 3]],
+        admission: &mut Admission,
+    ) -> Result<(), ManufacturingError> {
+        let required = self
+            .entries
+            .len()
+            .checked_add(rows.len())
+            .ok_or_else(overflow)?;
+        admission.reserve(&mut self.entries, required)?;
+        self.entries
+            .extend(rows.iter().map(|&[row, left, right]| Incidence {
+                row,
+                left,
+                right,
+                prefix_right: right,
+                road,
+            }));
+        Ok(())
+    }
+
     pub(super) fn finish_ancestry(
         &mut self,
         admission: &mut Admission,
@@ -761,19 +785,10 @@ impl Rows {
                 target.next += 1;
             }
         }
-        let mut start = 0;
-        for bucket in &*buckets {
-            debit(work, 1, cancel)?;
-            let entries = &mut self.entries[start..bucket.end];
-            sort_by_key(entries, |entry| (entry.left, entry.road), work, cancel)?;
-            let mut prefix = i64::MIN;
-            for entry in entries {
-                debit(work, 1, cancel)?;
-                prefix = prefix.max(entry.right);
-                entry.prefix_right = prefix;
-            }
-            start = bucket.end;
-        }
+        // Rows are disjoint ranges, so each sorts on its own; keys are
+        // unique per row, so the order is the same on any thread.
+        let sorted = sort_rows(&mut self.entries, buckets, 0, cancel)?;
+        debit(work, sorted, cancel)?;
         let mut start = 0;
         for (entry, bucket) in self.entries.iter_mut().zip(&*buckets) {
             debit(work, 1, cancel)?;
@@ -873,6 +888,42 @@ impl Rows {
         let end = entries[start..].partition_point(|entry| entry.left <= last);
         &entries[start..start + end]
     }
+}
+
+/// Sorts each bucket's entries by `(left, road)` and sets their running
+/// `prefix_right`; `offset` is the index of `entries[0]` in the whole array.
+/// Returns the work done.
+fn sort_rows(
+    entries: &mut [Incidence],
+    buckets: &[RowBucket],
+    offset: usize,
+    cancel: &AtomicBool,
+) -> Result<usize, ManufacturingError> {
+    const SERIAL_ENTRIES: usize = 4096;
+    if buckets.len() > 1 && entries.len() > SERIAL_ENTRIES {
+        let middle = buckets.len() / 2;
+        let split = buckets[middle - 1].end - offset;
+        let (low, high) = entries.split_at_mut(split);
+        let (low, high) = rayon::join(
+            || sort_rows(low, &buckets[..middle], offset, cancel),
+            || sort_rows(high, &buckets[middle..], offset + split, cancel),
+        );
+        return low?.checked_add(high?).ok_or_else(overflow);
+    }
+    let mut work = 0;
+    let mut start = 0;
+    for bucket in buckets {
+        let row = &mut entries[start..bucket.end - offset];
+        start = bucket.end - offset;
+        debit(&mut work, 1 + row.len(), cancel)?;
+        sort_by_key(row, |entry| (entry.left, entry.road), &mut work, cancel)?;
+        let mut prefix = i64::MIN;
+        for entry in row {
+            prefix = prefix.max(entry.right);
+            entry.prefix_right = prefix;
+        }
+    }
+    Ok(work)
 }
 
 fn sort_by_key<T, K: Ord>(

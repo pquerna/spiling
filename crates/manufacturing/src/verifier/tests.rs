@@ -5206,3 +5206,44 @@ fn split_skin_bridge_pieces_need_their_own_anchors_and_supported_neighbours() {
     intent.recipe.process.max_bridge_span_mm = 0.5;
     assert!(replay_skin_fit(&intent, plan).is_err());
 }
+
+#[test]
+fn decimal_fast_path_matches_the_standard_parser() {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut texts = vec![
+        "0".to_owned(),
+        "-0".to_owned(),
+        "-0.000".to_owned(),
+        "+1.5".to_owned(),
+        "000123.400".to_owned(),
+        "999999999999999".to_owned(),
+        "99999999999.9999".to_owned(),
+        "0.000001".to_owned(),
+    ];
+    for _ in 0..300_000 {
+        let bits = next();
+        let digits = 1 + (bits % 15) as usize;
+        let fraction = (bits >> 8) as usize % (digits.min(6) + 1);
+        let units = (bits >> 16) % 10u64.pow(digits as u32);
+        let text = format!("{units:0digits$}");
+        let (whole, part) = text.split_at(digits - fraction);
+        let whole = if whole.is_empty() { "0" } else { whole };
+        let sign = ["", "-", "+"][(bits >> 60) as usize % 3];
+        texts.push(if fraction == 0 {
+            format!("{sign}{whole}")
+        } else {
+            format!("{sign}{whole}.{part}")
+        });
+    }
+    for text in texts {
+        let expected = text.parse::<f64>().unwrap();
+        let actual = decimal(&text, 6).unwrap();
+        assert_eq!(actual.to_bits(), expected.to_bits(), "{text}");
+    }
+}

@@ -5199,3 +5199,25 @@ fn capped_role_speeds_keep_their_order_under_a_slow_print_feed() {
     // Speeds already within the feed are unchanged.
     assert_eq!(generic.capped(600.0), generic);
 }
+
+#[test]
+fn bundle_provenance_reads_the_canonical_head_and_falls_back_on_any_other_layout() {
+    let bundle = bundle();
+    let canonical = serde_json::to_vec(&bundle).unwrap();
+    let pretty = serde_json::to_vec_pretty(&bundle).unwrap();
+    for bytes in [&canonical, &pretty] {
+        let provenance =
+            decode_bundle_provenance_from(bytes.len() as u64, || bytes.as_slice()).unwrap();
+        assert_eq!(provenance, bundle.provenance);
+    }
+    assert_eq!(
+        bundle_head_provenance(canonical.as_slice()),
+        Some(bundle.provenance.clone())
+    );
+    assert_eq!(bundle_head_provenance(pretty.as_slice()), None);
+    let mut stale = bundle.clone();
+    stale.schema_version += 1;
+    let stale = serde_json::to_vec(&stale).unwrap();
+    assert_eq!(bundle_head_provenance(stale.as_slice()), None);
+    assert!(decode_bundle_provenance_from(stale.len() as u64, || stale.as_slice()).is_err());
+}

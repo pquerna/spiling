@@ -5,12 +5,14 @@
 //! Immutable byte content held as independently compressed fixed-size frames.
 //!
 //! Large derived outputs such as emitted programs are written once, read
-//! sequentially and then retained. [`ChunkWriter`] compresses each full
-//! 256 KiB frame as it is produced and hashes the raw stream; the sealed
+//! sequentially and then retained. [`ChunkWriter`] hashes the raw stream as
+//! it is produced and compresses full 256 KiB frames in small parallel
+//! batches, sealing them in stream order; the sealed
 //! [`ChunkSource`] is cheap to clone and decodes one frame at a time. The frame
 //! size and zstd level match PTAC's stored chunk profile. PTAC may borrow
 //! the sealed frames directly; ordinary readers and transfers see raw bytes.
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
@@ -22,6 +24,8 @@ pub const FRAME_BYTES: usize = 256 * 1024;
 const LEVEL: i32 = 3;
 /// Keep a frame raw unless compression saves at least this much.
 const MIN_SAVING: usize = 64;
+/// Full frames held raw until they compress together, in parallel.
+const SEAL_BATCH: usize = 16;
 
 /// Append-only anonymous backing shared by independently sealed byte sources.
 /// Appends cannot modify previously published frame ranges.
@@ -169,6 +173,8 @@ impl Eq for ChunkSource {}
 pub struct ChunkWriter {
     frames: Vec<Frame>,
     pending: Vec<u8>,
+    /// Full raw frames awaiting compression, in stream order.
+    sealing: Vec<Vec<u8>>,
     hasher: Sha256,
     len: u64,
     limit: u64,
@@ -182,6 +188,7 @@ impl ChunkWriter {
         Self {
             frames: Vec::new(),
             pending: Vec::new(),
+            sealing: Vec::new(),
             hasher: Sha256::new(),
             len: 0,
             limit,
@@ -211,42 +218,66 @@ impl ChunkWriter {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let raw_len = u32::try_from(self.pending.len()).map_err(|_| too_large())?;
-        let compressed = zstd::bulk::compress(&self.pending, LEVEL)?;
-        let (compressed, data) = if compressed.len() + MIN_SAVING <= self.pending.len() {
-            (true, compressed.into_boxed_slice())
-        } else {
-            (false, self.pending.as_slice().into())
-        };
-        let stored_len = data.len();
-        let mut offset = 0;
-        let data = if let Some(spool) = &self.spool {
-            let mut file = spool
-                .0
-                .lock()
-                .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
-            offset = file.seek(SeekFrom::End(0))?;
-            file.write_all(&data)?;
-            Box::default()
-        } else {
-            self.stored += stored_len;
-            data
-        };
-        self.frames.try_reserve(1).map_err(io::Error::other)?;
-        self.frames.push(Frame {
-            digest: Sha256::digest(&self.pending).into(),
-            raw_len,
-            compressed,
-            data,
-            offset,
-            stored_len,
-        });
-        self.pending.clear();
+        u32::try_from(self.pending.len()).map_err(|_| too_large())?;
+        self.sealing.try_reserve(1).map_err(io::Error::other)?;
+        self.sealing.push(std::mem::take(&mut self.pending));
+        if self.sealing.len() >= SEAL_BATCH {
+            self.seal_batch()?;
+        }
+        Ok(())
+    }
+    /// Compresses and digests the held frames in parallel, then stores them
+    /// in stream order: the same frames a frame-at-a-time writer produces.
+    fn seal_batch(&mut self) -> io::Result<()> {
+        let sealed = self
+            .sealing
+            .par_iter()
+            .map(|raw| {
+                let compressed = zstd::bulk::compress(raw, LEVEL)?;
+                let saves = compressed.len() + MIN_SAVING <= raw.len();
+                let digest: [u8; 32] = Sha256::digest(raw).into();
+                Ok((saves.then_some(compressed), digest))
+            })
+            .collect::<Vec<io::Result<_>>>();
+        self.frames
+            .try_reserve(sealed.len())
+            .map_err(io::Error::other)?;
+        for (raw, sealed) in self.sealing.drain(..).zip(sealed) {
+            let (compressed, digest) = sealed?;
+            let raw_len = u32::try_from(raw.len()).map_err(|_| too_large())?;
+            let (compressed, data) = match compressed {
+                Some(compressed) => (true, compressed.into_boxed_slice()),
+                None => (false, raw.into_boxed_slice()),
+            };
+            let stored_len = data.len();
+            let mut offset = 0;
+            let data = if let Some(spool) = &self.spool {
+                let mut file = spool
+                    .0
+                    .lock()
+                    .map_err(|_| io::Error::other("chunk spool lock poisoned"))?;
+                offset = file.seek(SeekFrom::End(0))?;
+                file.write_all(&data)?;
+                Box::default()
+            } else {
+                self.stored += stored_len;
+                data
+            };
+            self.frames.push(Frame {
+                digest,
+                raw_len,
+                compressed,
+                data,
+                offset,
+                stored_len,
+            });
+        }
         Ok(())
     }
     /// Seal the content. The remaining partial frame becomes the last frame.
     pub fn finish(mut self) -> io::Result<ChunkSource> {
         self.seal_frame()?;
+        self.seal_batch()?;
         let digest = self.hasher.finalize().into();
         Ok(ChunkSource(Arc::new(Content {
             frames: self.frames.into_boxed_slice(),

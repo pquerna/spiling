@@ -1,11 +1,12 @@
 use super::clearance::{Admission, Road, Rows, debit};
 use super::{Chord, MAX_XYZ6_TICKS, Parameter, delta, failed, overflow};
 use crate::planner::{OFFSET_TOLERANCE_MM, support::StrokeRuns};
+use rayon::prelude::*;
 use spiling_contracts::manufacturing::{
     DepositionKind, ManufacturingError, PlanarPrintRecipe, PrintLayer,
     program_coordinates::{enclosed_vertical_gap_mm, project_xyz6_bead_height_mm},
 };
-use std::{cell::Cell, sync::atomic::AtomicBool};
+use std::sync::atomic::AtomicBool;
 
 const TICKS_PER_MM: f64 = 1_000_000.0;
 const FRACTION_TICKS: u64 = 1 << 53;
@@ -59,7 +60,6 @@ fn support(role: DepositionKind) -> bool {
 struct Donor {
     road: Road,
     span: Span,
-    last_query: Cell<usize>,
 }
 
 struct Inventory {
@@ -353,15 +353,106 @@ struct Replay<'a> {
     covered: Vec<Span>,
     run: Vec<Span>,
     unsupported: Vec<Span>,
+    /// Donors already measured by the current query, by inventory and ordinal.
+    seen: Vec<(usize, usize)>,
 }
 
-impl Replay<'_> {
+/// Deposited roads rasterize in chunks of this many, one buffer per chunk.
+const RASTER_CHUNK: usize = 256;
+
+/// One chunk's row incidences: road `k` of the chunk owns
+/// `rows[ends[k - 1]..ends[k]]`; `refusal` is the first road that failed.
+#[derive(Default)]
+struct Rasterized {
+    rows: Vec<[i64; 3]>,
+    ends: Vec<usize>,
+    refusal: Option<ManufacturingError>,
+}
+
+impl Rasterized {
+    fn new(
+        roads: impl Iterator<Item = Road>,
+        mut admission: Admission,
+        cancel: &AtomicBool,
+    ) -> Self {
+        let mut chunk = Self::default();
+        for road in roads {
+            let rows = &mut chunk.rows;
+            let result = outside_ticks(road.inner_radius_mm)
+                .and_then(|radius| {
+                    road.chord
+                        .outer_rows(radius, &mut 0, cancel, |row, left, right| {
+                            admission.push(rows, [row, left, right])
+                        })
+                })
+                .and_then(|()| admission.push(&mut chunk.ends, chunk.rows.len()));
+            if let Err(error) = result {
+                chunk.refusal = Some(error);
+                break;
+            }
+        }
+        chunk
+    }
+
+    fn take(&mut self, local: usize) -> Result<&[[i64; 3]], ManufacturingError> {
+        match self.ends.get(local) {
+            Some(&end) => {
+                let start = local.checked_sub(1).map_or(0, |prior| self.ends[prior]);
+                Ok(&self.rows[start..end])
+            }
+            None => Err(self.refusal.take().expect("rasterized road or its refusal")),
+        }
+    }
+}
+
+/// A worker thread's reusable query buffers and their admitted bytes.
+#[derive(Default)]
+struct Scratch {
+    admission: usize,
+    covered: Vec<Span>,
+    run: Vec<Span>,
+    unsupported: Vec<Span>,
+    seen: Vec<(usize, usize)>,
+}
+
+/// One support or landing stroke run: `count` edges of the path whose roads
+/// start at `start` in the layer, beginning at edge `first`.
+#[derive(Clone, Copy)]
+struct Measure {
+    start: usize,
+    len: usize,
+    first: usize,
+    count: usize,
+    width: f64,
+}
+
+impl Measure {
+    fn roads(self, current: &[Road]) -> impl Iterator<Item = Road> + Clone + '_ {
+        let roads = &current[self.start..self.start + self.len];
+        (0..self.count).map(move |edge| roads[(self.first + edge) % roads.len()])
+    }
+}
+
+impl<'a> Replay<'a> {
+    fn new(admission: Admission, work: &'a mut usize, cancel: &'a AtomicBool) -> Self {
+        Self {
+            admission,
+            work,
+            cancel,
+            covered: Vec::new(),
+            run: Vec::new(),
+            unsupported: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
     fn query(
         &mut self,
         window: &Window<'_>,
         receiver: Road,
     ) -> Result<[Bond; 2], ManufacturingError> {
         self.covered.clear();
+        self.seen.clear();
         let mut ends = [Bond::None; 2];
         if !window.for_each(receiver, |inventory, _| Ok(!inventory.donors.is_empty()))? {
             debit(self.work, 1, self.cancel)?;
@@ -405,7 +496,6 @@ impl Replay<'_> {
         }
 
         debit(self.work, 1, self.cancel)?;
-        let query_id = *self.work;
         let radius = radius_ticks(receiver.inner_radius_mm, 0.0).max(0.0);
         receiver.chord.row_candidates(
             outside_ticks(receiver.inner_radius_mm)?,
@@ -416,13 +506,14 @@ impl Replay<'_> {
                     for entry in inventory.rows.intersect(row, left, right) {
                         debit(self.work, 1, self.cancel)?;
                         let donor = &inventory.donors[entry.road];
-                        if entry.right < left
-                            || donor.last_query.get() == query_id
-                            || !window.admits(receiver, donor.road, bond)?
-                        {
+                        if entry.right < left || !window.admits(receiver, donor.road, bond)? {
                             continue;
                         }
-                        donor.last_query.set(query_id);
+                        let key = (std::ptr::from_ref(inventory).addr(), entry.road);
+                        if self.seen.contains(&key) {
+                            continue;
+                        }
+                        self.admission.push(&mut self.seen, key)?;
                         if let Some(capsule) = LocalCapsule::for_pair(receiver, donor) {
                             if let Some(span) = capsule.interval() {
                                 self.admission.push(&mut self.covered, span)?;
@@ -452,14 +543,8 @@ impl Replay<'_> {
         debit(self.work, 1, self.cancel)?;
         let ordinal = inventory.donors.len();
         let (indexed, rounding) = span.indexed_chord(road.chord)?;
-        self.admission.push(
-            &mut inventory.donors,
-            Donor {
-                road,
-                span,
-                last_query: Cell::new(0),
-            },
-        )?;
+        self.admission
+            .push(&mut inventory.donors, Donor { road, span })?;
         inventory.rows.insert(
             ordinal,
             indexed,
@@ -470,6 +555,26 @@ impl Replay<'_> {
             self.work,
             self.cancel,
         )
+    }
+
+    /// `insert` of a full road whose incidences `rasterize` built.
+    fn insert_rows(
+        &mut self,
+        inventory: &mut Inventory,
+        road: Road,
+        rows: Result<&[[i64; 3]], ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        debit(self.work, 1, self.cancel)?;
+        let ordinal = inventory.donors.len();
+        self.admission.push(
+            &mut inventory.donors,
+            Donor {
+                road,
+                span: Span::FULL,
+            },
+        )?;
+        // The task that built `rows` admitted them; this inventory admits its copy.
+        inventory.rows.extend(ordinal, rows?, &mut self.admission)
     }
 
     fn measure_stroke(
@@ -552,6 +657,7 @@ impl Replay<'_> {
         &mut self,
         inventory: &mut Inventory,
         roads: impl Iterator<Item = Road>,
+        unsupported: &[Span],
     ) -> Result<(), ManufacturingError> {
         let mut offset = 0.0;
         let mut gap = 0;
@@ -560,7 +666,7 @@ impl Replay<'_> {
             let length = road.length_upper_mm;
             let end = offset + length;
             let mut start = 0.0;
-            while let Some(&excluded) = self.unsupported.get(gap).filter(|span| span.start < end) {
+            while let Some(&excluded) = unsupported.get(gap).filter(|span| span.start < end) {
                 debit(self.work, 1, self.cancel)?;
                 let stop = ((excluded.start - offset) / length).next_down();
                 if start < stop {
@@ -688,14 +794,13 @@ pub(super) fn verify(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let mut replay = Replay {
-        admission,
-        work,
-        cancel,
-        covered: Vec::new(),
-        run: Vec::new(),
-        unsupported: Vec::new(),
-    };
+    let mut replay = Replay::new(admission, work, cancel);
+    let working_set = crate::working_set::current();
+    let limit = recipe.process.max_bridge_span_mm;
+    let mut measures = Vec::<Measure>::new();
+    let mut measured = Vec::<Result<Vec<Span>, ManufacturingError>>::new();
+    let mut deposits = Vec::<usize>::new();
+    let mut rasterized = Vec::<Rasterized>::new();
     let mut last_support = None;
     for road in roads.iter().rev() {
         debit(replay.work, 1, cancel)?;
@@ -755,61 +860,177 @@ pub(super) fn verify(
         let mut landing = Inventory::empty();
         let previous = bands.last();
         let previous_nominal_top = index.checked_sub(1).map(|prior| layers[prior].z_mm);
+        let window = |role: DepositionKind| Window {
+            previous,
+            previous_nominal_top,
+            z_gap,
+            separated: match role {
+                DepositionKind::SupportInterface => &bands[support_start..end],
+                DepositionKind::Support => &[],
+                _ => &bands[contact_index..end],
+            },
+        };
+        let can_land = |role: DepositionKind| {
+            role.is_model() && role != DepositionKind::Bridge && use_window.reads_landing
+        };
+        // A stroke reads only earlier layers' bands, so a layer's strokes
+        // measure in parallel. Path validation, landing and deposited inserts
+        // stay serial in path order, and the first error in that order is the
+        // one reported.
+        measures.clear();
+        let mut refusal = None;
+        let mut start = 0;
         for path_roads in current.chunk_by(|left, right| left.path == right.path) {
             debit(replay.work, 1, cancel)?;
+            let path_start = start;
+            start += path_roads.len();
+            let first_road = path_roads[0];
+            let is_support = support(first_road.role);
+            let ordinary_model =
+                first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
+            if index == 0 || index == last_support && !is_support || !(is_support || ordinary_model)
+            {
+                continue;
+            }
+            let land = can_land(first_road.role);
+            let path = &layer.paths[first_road.path];
+            let runs = if path_roads.len() + 1 != path.points_mm.len() {
+                Err(failed(
+                    "decoded support stroke differs from its associated edge count",
+                ))
+            } else if !is_support && !land {
+                path.checked_edges().map(|_| None)
+            } else {
+                StrokeRuns::for_path(path).map(Some)
+            };
+            let runs = match runs {
+                Ok(runs) => runs,
+                Err(error) => {
+                    refusal = Some((path_start, error));
+                    break;
+                }
+            };
+            for (first, last, width) in runs.into_iter().flatten() {
+                let count = if last > first {
+                    last - first
+                } else {
+                    path_roads.len() - first + last
+                };
+                replay.admission.push(
+                    &mut measures,
+                    Measure {
+                        start: path_start,
+                        len: path_roads.len(),
+                        first,
+                        count,
+                        width,
+                    },
+                )?;
+            }
+        }
+        deposits.clear();
+        if deposited.is_some() && index != last_support {
+            for (position, road) in current.iter().enumerate() {
+                if use_window.deposited_read.reads(road.role) {
+                    replay.admission.push(&mut deposits, position)?;
+                }
+            }
+        }
+        replay.admission.reserve(&mut measured, measures.len())?;
+        replay
+            .admission
+            .reserve(&mut rasterized, deposits.len().div_ceil(RASTER_CHUNK))?;
+        let base = Admission(replay.admission.0);
+        let rasterize = || {
+            deposits
+                .par_chunks(RASTER_CHUNK)
+                .map(|chunk| {
+                    crate::working_set::scope(working_set, || {
+                        let roads = chunk.iter().map(|&position| current[position]);
+                        Rasterized::new(roads, Admission(base.0), cancel)
+                    })
+                })
+                .collect_into_vec(&mut rasterized)
+        };
+        let measure = || {
+            measures
+                .par_iter()
+                .map_init(
+                    || Scratch {
+                        admission: base.0,
+                        ..Scratch::default()
+                    },
+                    |scratch, &measure| {
+                        crate::working_set::scope(working_set, || {
+                            let mut work = 0;
+                            let mut task = Replay {
+                                admission: Admission(scratch.admission),
+                                work: &mut work,
+                                cancel,
+                                covered: std::mem::take(&mut scratch.covered),
+                                run: std::mem::take(&mut scratch.run),
+                                unsupported: std::mem::take(&mut scratch.unsupported),
+                                seen: std::mem::take(&mut scratch.seen),
+                            };
+                            let road = current[measure.start];
+                            let result = task
+                                .measure_stroke(
+                                    &window(road.role),
+                                    measure.roads(current),
+                                    measure.width,
+                                    limit,
+                                )
+                                .and_then(|()| {
+                                    let mut unsupported = Vec::new();
+                                    if can_land(road.role) {
+                                        task.admission
+                                            .reserve(&mut unsupported, task.unsupported.len())?;
+                                        unsupported.extend_from_slice(&task.unsupported);
+                                    } else if !task.unsupported.is_empty() {
+                                        // A support stroke refuses on any gap.
+                                        task.admission
+                                            .push(&mut unsupported, task.unsupported[0])?;
+                                    }
+                                    Ok(unsupported)
+                                });
+                            scratch.admission = task.admission.0;
+                            scratch.covered = task.covered;
+                            scratch.run = task.run;
+                            scratch.unsupported = task.unsupported;
+                            scratch.seen = task.seen;
+                            result
+                        })
+                    },
+                )
+                .collect_into_vec(&mut measured)
+        };
+        rayon::join(measure, rasterize);
+        let mut next = 0;
+        let mut next_deposit = 0;
+        let mut start = 0;
+        for path_roads in current.chunk_by(|left, right| left.path == right.path) {
+            let path_start = start;
+            start += path_roads.len();
+            if refusal.as_ref().is_some_and(|(at, _)| *at == path_start) {
+                return Err(refusal.take().expect("checked refusal").1);
+            }
             let first_road = path_roads[0];
             let is_support = support(first_road.role);
             if index == last_support && !is_support {
                 continue;
             }
-            let window = Window {
-                previous,
-                previous_nominal_top,
-                z_gap,
-                separated: match first_road.role {
-                    DepositionKind::SupportInterface => &bands[support_start..end],
-                    DepositionKind::Support => &[],
-                    _ => &bands[contact_index..end],
-                },
-            };
-            let ordinary_model =
-                first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
-            let can_land = ordinary_model && use_window.reads_landing;
-            if index != 0 && (is_support || ordinary_model) {
-                let path = &layer.paths[first_road.path];
-                if path_roads.len() + 1 != path.points_mm.len() {
-                    return Err(failed(
-                        "decoded support stroke differs from its associated edge count",
-                    ));
+            let land = can_land(first_road.role);
+            while let Some(&measure) = measures.get(next).filter(|m| m.start == path_start) {
+                let unsupported = std::mem::replace(&mut measured[next], Ok(Vec::new()))?;
+                next += 1;
+                if is_support && !unsupported.is_empty() {
+                    return Err(failed(format!(
+                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact",
+                        first_road.line
+                    )));
                 }
-                if !is_support && !can_land {
-                    path.checked_edges()?;
-                }
-                let runs = (is_support || can_land)
-                    .then(|| StrokeRuns::for_path(path))
-                    .transpose()?;
-                for (first, last, width) in runs.into_iter().flatten() {
-                    let count = if last > first {
-                        last - first
-                    } else {
-                        path_roads.len() - first + last
-                    };
-                    let run = (0..count).map(|edge| path_roads[(first + edge) % path_roads.len()]);
-                    replay.measure_stroke(
-                        &window,
-                        run.clone(),
-                        width,
-                        recipe.process.max_bridge_span_mm,
-                    )?;
-                    if is_support && !replay.unsupported.is_empty() {
-                        return Err(failed(format!(
-                            "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact",
-                            first_road.line
-                        )));
-                    }
-                    if can_land {
-                        replay.publish_landing(&mut landing, run)?;
-                    }
+                if land {
+                    replay.publish_landing(&mut landing, measure.roads(current), &unsupported)?;
                 }
             }
             if index != last_support {
@@ -817,14 +1038,19 @@ pub(super) fn verify(
                     if use_window.deposited_read.reads(road.role)
                         && let Some(inventory) = &mut deposited
                     {
-                        replay.insert(inventory, road, Span::FULL)?;
+                        let rows = rasterized[next_deposit / RASTER_CHUNK]
+                            .take(next_deposit % RASTER_CHUNK);
+                        next_deposit += 1;
+                        replay.insert_rows(inventory, road, rows)?;
                     }
-                    if index == 0 && can_land {
+                    if index == 0 && land {
                         replay.insert(&mut landing, road, Span::FULL)?;
                     }
                 }
             }
         }
+        measured.clear();
+        rasterized.clear();
         if let Some(inventory) = &mut deposited {
             inventory
                 .rows
@@ -1142,7 +1368,6 @@ mod tests {
                 start: 0.0,
                 end: 0.25,
             },
-            last_query: Cell::new(0),
         };
         let crossing = road(
             1,

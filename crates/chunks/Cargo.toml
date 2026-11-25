@@ -11,6 +11,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rayon.workspace = true
 sha2.workspace = true
 zstd.workspace = true
 tempfile.workspace = true

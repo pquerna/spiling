@@ -93,6 +93,7 @@ fn emit_body(
     }
     let mut program = BoundedProgram {
         writer: ChunkWriter::new(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)),
+        pending: String::new(),
         max_line: dialect.max_line_bytes(),
         line: 0,
         long_line: false,
@@ -296,8 +297,9 @@ fn emit_body(
                     let e = if routed.is_some() { rounded } else { e };
                     writeln!(
                         program,
-                        "G1 E{} F{feed:.1}",
-                        e_word(e, rounded, emitted_extrusion, relative)
+                        "G1 E{} F{}",
+                        e_word(e, rounded, emitted_extrusion, relative),
+                        Fixed::<1>(feed)
                     )
                     .map_err(limit)?;
                     emitted_extrusion = rounded;
@@ -352,14 +354,15 @@ fn emit_body(
                     }
                     writeln!(
                         program,
-                        "{} X{:.3} Y{:.3} Z{:.3} I{:.3} J{:.3} E{} F{feed:.1}",
+                        "{} X{} Y{} Z{} I{} J{} E{} F{}",
                         if clockwise { "G2" } else { "G3" },
-                        to[0],
-                        to[1],
-                        to[2],
-                        center[0] - from[0],
-                        center[1] - from[1],
+                        Fixed::<3>(to[0]),
+                        Fixed::<3>(to[1]),
+                        Fixed::<3>(to[2]),
+                        Fixed::<3>(center[0] - from[0]),
+                        Fixed::<3>(center[1] - from[1]),
                         e_word(e, rounded, emitted_extrusion, relative),
+                        Fixed::<1>(feed),
                     )
                     .map_err(limit)?;
                     emitted_extrusion = rounded;
@@ -449,19 +452,23 @@ fn emit_body(
                         let e = if routed.is_some() { rounded } else { e };
                         writeln!(
                             program,
-                            "G1 X{:.3} Y{:.3} Z{:.3} E{} F{feed:.1}",
-                            to[0],
-                            to[1],
-                            to[2],
-                            e_word(e, rounded, emitted_extrusion, relative)
+                            "G1 X{} Y{} Z{} E{} F{}",
+                            Fixed::<3>(to[0]),
+                            Fixed::<3>(to[1]),
+                            Fixed::<3>(to[2]),
+                            e_word(e, rounded, emitted_extrusion, relative),
+                            Fixed::<1>(feed)
                         )
                         .map_err(limit)?;
                         emitted_extrusion = rounded;
                     } else {
                         writeln!(
                             program,
-                            "G0 X{:.3} Y{:.3} Z{:.3} F{feed:.1}",
-                            to[0], to[1], to[2]
+                            "G0 X{} Y{} Z{} F{}",
+                            Fixed::<3>(to[0]),
+                            Fixed::<3>(to[1]),
+                            Fixed::<3>(to[2]),
+                            Fixed::<1>(feed)
                         )
                         .map_err(limit)?;
                     }
@@ -582,6 +589,7 @@ fn emit_body(
             "a command line exceeds the firmware's command buffer (Marlin/Prusa MAX_CMD_SIZE, 95 bytes)",
         ));
     }
+    program.flush().map_err(limit)?;
     program.writer.finish().map_err(|_| {
         error(
             ManufacturingErrorCode::ResourceLimit,
@@ -610,7 +618,7 @@ enum ExtrusionWord {
 impl fmt::Display for ExtrusionWord {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::Absolute(target) => write!(out, "{target:.6}"),
+            Self::Absolute(target) => Fixed::<6>(target).fmt(out),
             Self::Relative(units) => {
                 let sign = if units < 0 { "-" } else { "" };
                 let magnitude = units.unsigned_abs();
@@ -657,6 +665,9 @@ fn writable_position(
 /// dialect's firmware command buffer.
 struct BoundedProgram {
     writer: ChunkWriter,
+    /// Lines not yet handed to `writer`, which takes whole buffers rather
+    /// than each formatted fragment.
+    pending: String,
     max_line: Option<usize>,
     line: usize,
     long_line: bool,
@@ -673,7 +684,62 @@ impl Write for BoundedProgram {
                 }
             }
         }
-        std::io::Write::write_all(&mut self.writer, s.as_bytes()).map_err(|_| fmt::Error)
+        if self.pending.capacity() == 0 {
+            self.pending
+                .try_reserve_exact(PENDING_PROGRAM_BYTES)
+                .map_err(|_| fmt::Error)?;
+        }
+        self.pending.push_str(s);
+        if self.pending.len() >= PENDING_PROGRAM_BYTES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+const PENDING_PROGRAM_BYTES: usize = 64 * 1024;
+impl BoundedProgram {
+    fn flush(&mut self) -> fmt::Result {
+        let result = std::io::Write::write_all(&mut self.writer, self.pending.as_bytes());
+        self.pending.clear();
+        result.map_err(|_| fmt::Error)
+    }
+}
+
+/// A finite value written with exactly `DIGITS` fractional digits, the same
+/// text as `{:.DIGITS}`. Program words are already on their decimal lattice,
+/// so when the scaled value is within a quarter step of an integer (and small
+/// enough that the scaling itself cannot move it past half a step) the
+/// digits are that integer's; anything else takes the exact formatter.
+struct Fixed<const DIGITS: u32>(f64);
+impl<const DIGITS: u32> fmt::Display for Fixed<DIGITS> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scale = 10u64.pow(DIGITS);
+        let scaled = self.0 * scale as f64;
+        let units = scaled.round();
+        if !((scaled - units).abs() < 0.25 && units.abs() < (1u64 << 50) as f64) {
+            return write!(out, "{:.*}", DIGITS as usize, self.0);
+        }
+        let magnitude = units.abs() as u64;
+        let mut text = [0u8; 24];
+        let mut at = text.len();
+        let mut rest = magnitude;
+        for digit in 0..DIGITS.max(1) + 19 {
+            if digit == DIGITS && digit > 0 {
+                at -= 1;
+                text[at] = b'.';
+            }
+            at -= 1;
+            text[at] = b'0' + (rest % 10) as u8;
+            rest /= 10;
+            if rest == 0 && digit >= DIGITS {
+                break;
+            }
+        }
+        if self.0.is_sign_negative() {
+            at -= 1;
+            text[at] = b'-';
+        }
+        out.write_str(std::str::from_utf8(&text[at..]).map_err(|_| fmt::Error)?)
     }
 }
 fn limit(_: fmt::Error) -> ManufacturingError {
@@ -693,4 +759,60 @@ fn count_event(counter: &mut u32) -> Result<(), ManufacturingError> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod fixed_tests {
+    use super::Fixed;
+
+    fn check<const DIGITS: u32>(value: f64) {
+        assert_eq!(
+            Fixed::<DIGITS>(value).to_string(),
+            format!("{:.*}", DIGITS as usize, value),
+            "{value:e} at {DIGITS} digits"
+        );
+    }
+
+    #[test]
+    fn fixed_matches_the_exact_formatter() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut values = vec![
+            0.0,
+            -0.0,
+            0.0004,
+            -0.0004,
+            0.0005,
+            -0.0005,
+            0.00049999999,
+            1e15,
+            -1e15,
+            1.0e300,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        for _ in 0..200_000 {
+            let bits = next();
+            let units = (bits >> 11) as i64 % 400_000_000 - 200_000_000;
+            values.push(units as f64 / 1000.0);
+            values.push(units as f64 / 1_000_000.0);
+            values.push(units as f64 / 10.0);
+            values.push((units as f64 + 0.5) / 1000.0);
+            values.push(f64::from_bits(bits));
+            values.push(f64::from_bits(bits >> 2 | 0x3f00_0000_0000_0000));
+        }
+        for value in values {
+            check::<0>(value);
+            check::<1>(value);
+            check::<3>(value);
+            check::<6>(value);
+        }
+    }
 }

@@ -606,6 +606,27 @@ fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
     {
         return Err("malformed number or unsupported numeric precision");
     }
+    // At most 15 digits form an integer below 2^53, and 10^k is exact for
+    // k <= 22, so one IEEE division is the correctly rounded decimal: the
+    // same value `parse` returns.
+    const POWERS: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    if integer.len() + fractional.len() <= 15
+        && let Some(&power) = POWERS.get(fractional.len())
+    {
+        let units = integer
+            .bytes()
+            .chain(fractional.bytes())
+            .fold(0u64, |units, digit| units * 10 + u64::from(digit - b'0'));
+        let magnitude = units as f64 / power;
+        return Ok(if text.starts_with('-') {
+            -magnitude
+        } else {
+            magnitude
+        });
+    }
     let value = text.parse::<f64>().map_err(|_| "malformed number")?;
     if !value.is_finite() {
         return Err("nonfinite number");

@@ -4,6 +4,7 @@
 use super::{LayerElevation, preflight};
 use crate::{check_cancel, error};
 use geo::MultiPolygon;
+use rayon::prelude::*;
 use spiling_contracts::geometry::OccurrenceId;
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_bead_height_mm, project_xyz6_coordinate_mm, project_xyz6_segment_bead_height_mm,
@@ -820,48 +821,86 @@ fn collect_escapes(
     trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<Vec<Escaped>, ManufacturingError> {
-    let mut escapes: Vec<Escaped> = Vec::new();
-    for (ordinal, layer) in layers.iter().enumerate() {
-        charge_support_clearance(work, cancel)?;
-        for (index, path) in layer.paths.iter().enumerate() {
-            charge_support_clearance(work, cancel)?;
-            if path.kind.is_model() {
-                continue;
-            }
-            for (edge, local) in path.checked_edges()?.enumerate() {
-                charge_support_clearance(work, cancel)?;
-                let emitted = emitted_edge(path, local)?;
-                trace.add(&trace.support_edges, 1);
-                let radius = (emitted.width * 0.5 + emitted.endpoint_error).next_up();
-                let (escape, words) =
-                    kept.escaped(ordinal, emitted.segment, radius, emitted.band)?;
-                charge_support_clearance_range(work, words, cancel)?;
-                trace.add(&trace.raster_words, words);
-                let Some(escape) = escape else {
-                    continue;
-                };
-                trace.add(&trace.escaped_edges, 1);
-                trace.add(&trace.escaped_cells, escape.cells);
-                if escapes.len() == escapes.capacity() {
-                    let limit = allowance / std::mem::size_of::<Escaped>();
-                    let capacity = escapes.len().max(16).saturating_mul(2).min(limit);
-                    if capacity <= escapes.len()
-                        || escapes.try_reserve_exact(capacity - escapes.len()).is_err()
-                        || escapes.capacity() > limit
-                    {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "support clearance escapes exceed the remaining admitted geometry bytes",
-                        ));
+    /// One layer's escapes, counts, and the first error it met, if any.
+    #[derive(Default)]
+    struct LayerEscapes {
+        escapes: Vec<Escaped>,
+        refusal: Option<ManufacturingError>,
+        work: usize,
+        support_edges: usize,
+        raster_words: usize,
+        escaped_cells: usize,
+    }
+    let limit = allowance / std::mem::size_of::<Escaped>();
+    let exceeded = || {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "support clearance escapes exceed the remaining admitted geometry bytes",
+        )
+    };
+    // Layers rasterize independently; their escapes join in layer order and
+    // the first error in that order is the one reported, as a serial pass.
+    let found = layers
+        .par_iter()
+        .enumerate()
+        .map(|(ordinal, layer)| {
+            let mut found = LayerEscapes::default();
+            let mut scan = || {
+                charge_support_clearance(&mut found.work, cancel)?;
+                for (index, path) in layer.paths.iter().enumerate() {
+                    charge_support_clearance(&mut found.work, cancel)?;
+                    if path.kind.is_model() {
+                        continue;
+                    }
+                    for (edge, local) in path.checked_edges()?.enumerate() {
+                        charge_support_clearance(&mut found.work, cancel)?;
+                        let emitted = emitted_edge(path, local)?;
+                        found.support_edges += 1;
+                        let radius = (emitted.width * 0.5 + emitted.endpoint_error).next_up();
+                        let (escape, words) =
+                            kept.escaped(ordinal, emitted.segment, radius, emitted.band)?;
+                        charge_support_clearance_range(&mut found.work, words, cancel)?;
+                        found.raster_words = found.raster_words.saturating_add(words);
+                        let Some(escape) = escape else {
+                            continue;
+                        };
+                        found.escaped_cells = found.escaped_cells.saturating_add(escape.cells);
+                        if found.escapes.len() >= limit {
+                            return Err(exceeded());
+                        }
+                        found.escapes.try_reserve(1).map_err(|_| exceeded())?;
+                        found.escapes.push(Escaped {
+                            layer: ordinal,
+                            path: index,
+                            edge,
+                            bounds: escape.bounds,
+                        });
                     }
                 }
-                escapes.push(Escaped {
-                    layer: ordinal,
-                    path: index,
-                    edge,
-                    bounds: escape.bounds,
-                });
-            }
+                Ok(())
+            };
+            found.refusal = scan().err();
+            found
+        })
+        .collect::<Vec<_>>();
+    let mut escapes: Vec<Escaped> = Vec::new();
+    for found in found {
+        charge_support_clearance_range(work, found.work, cancel)?;
+        trace.add(&trace.support_edges, found.support_edges);
+        trace.add(&trace.raster_words, found.raster_words);
+        trace.add(&trace.escaped_edges, found.escapes.len());
+        trace.add(&trace.escaped_cells, found.escaped_cells);
+        let total = escapes
+            .len()
+            .checked_add(found.escapes.len())
+            .filter(|total| *total <= limit)
+            .ok_or_else(exceeded)?;
+        escapes
+            .try_reserve_exact(total - escapes.len())
+            .map_err(|_| exceeded())?;
+        escapes.extend(found.escapes);
+        if let Some(refusal) = found.refusal {
+            return Err(refusal);
         }
     }
     Ok(escapes)

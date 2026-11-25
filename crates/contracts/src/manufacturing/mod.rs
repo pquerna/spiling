@@ -5770,10 +5770,16 @@ pub fn decode_bundle_from<R: std::io::Read>(
 /// plan and report rather than building them.
 pub fn decode_bundle_provenance_from<R: std::io::Read>(
     len: u64,
-    open: impl FnOnce() -> R,
+    open: impl Fn() -> R,
 ) -> Result<ManufacturingProvenance, ManufacturingError> {
     if len == 0 || len > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
         return Err(resource("bundle byte limit exceeded"));
+    }
+    // The bundle writer's compact field order puts the schema version and the
+    // provenance first, so a canonical bundle needs only that prefix read.
+    // Anything else takes the whole-document parse below.
+    if let Some(provenance) = bundle_head_provenance(std::io::BufReader::new(open())) {
+        return Ok(provenance);
     }
     #[derive(Deserialize)]
     struct BundleHead {
@@ -5788,6 +5794,24 @@ pub fn decode_bundle_provenance_from<R: std::io::Read>(
         return Err(invalid("unsupported manufacturing bundle schema"));
     }
     Ok(head.provenance)
+}
+
+/// The provenance of a bundle that starts with the writer's exact
+/// `{"schema_version":N,"provenance":` prefix at the current schema.
+fn bundle_head_provenance(mut reader: impl std::io::Read) -> Option<ManufacturingProvenance> {
+    let mut expect = |text: &[u8]| {
+        let mut read = vec![0; text.len()];
+        reader.read_exact(&mut read).ok()?;
+        (read == text).then_some(())
+    };
+    let version = MANUFACTURING_SCHEMA_VERSION.to_string();
+    expect(b"{\"schema_version\":")?;
+    expect(version.as_bytes())?;
+    expect(b",\"provenance\":")?;
+    serde_json::Deserializer::from_reader(reader)
+        .into_iter::<ManufacturingProvenance>()
+        .next()?
+        .ok()
 }
 
 /// Canonical compact JSON of explicit semantic input fields sorted by identity.
