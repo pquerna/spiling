@@ -1024,3 +1024,16 @@ fn unbounded_interface_faces_recover_rounding_without_leaving_kept_cells() {
         }
     }
 }
+
+#[test]
+fn straight_rows_with_collinear_vertices_trim_as_one_segment() {
+    let z = 1.0;
+    let split = [[3.0, 2.0, z], [3.0, 5.5, z], [3.0, 6.0, z]];
+    assert_eq!(straight_ends(&split), Some([split[0], split[2]]));
+    let back = [[3.0, 2.0, z], [3.0, 6.5, z], [3.0, 6.0, z]];
+    assert_eq!(straight_ends(&back), None);
+    let bent = [[3.0, 2.0, z], [3.1, 5.5, z], [3.0, 6.0, z]];
+    assert_eq!(straight_ends(&bent), None);
+    let two = [[0.0, 0.0, z], [4.0, 3.0, z]];
+    assert_eq!(straight_ends(&two), Some(two));
+}

@@ -913,8 +913,9 @@ pub(super) fn retain_anchored<'a>(
     Ok(receipt)
 }
 
-/// A straight hatch row whose only unanchored stretches are its end
-/// stubs, cut back to where the lower strokes hold it, and proved again.
+/// A straight hatch row (collinear vertices allowed) whose only unanchored
+/// stretches are its end stubs, cut back to where the lower strokes hold it,
+/// and proved again.
 /// A row with an unanchored stretch inside it, or one left shorter than a
 /// bead, is `None`: dropped, as before. Dropping a whole row for an end stub
 /// past the lower layer's last stroke would undermine every row above it.
@@ -931,13 +932,18 @@ fn trim_row_ends<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Option<DepositionPath>, ManufacturingError> {
-    if !super::support_role(path.kind)
-        || path.points_mm.len() != 2
-        || !matches!(path.width, WidthProfile::Constant { .. })
-    {
+    if !super::support_role(path.kind) || !matches!(path.width, WidthProfile::Constant { .. }) {
+        return Ok(None);
+    }
+    let Some(ends) = straight_ends(&path.points_mm) else {
+        return Ok(None);
+    };
+    // Collapsing vertices would orphan anything indexed by them.
+    if path.points_mm.len() > 2 && (!path.arcs.is_empty() || !path.connectors.is_empty()) {
         return Ok(None);
     }
     let mut row = path.clone();
+    row.points_mm = ends.to_vec();
     // Each pass cuts one end; a third failure is an inside gap or a
     // remainder that still does not hold.
     for _ in 0..3 {
@@ -969,6 +975,32 @@ fn trim_row_ends<'a>(
     }
     Ok(None)
 }
+
+/// The two ends of a polyline whose points advance along one straight line
+/// (a hatch row split by collinear vertices), or `None` for any bend.
+fn straight_ends(points: &[[f64; 3]]) -> Option<[[f64; 3]; 2]> {
+    let (&first, &last) = (points.first()?, points.last()?);
+    let along = [last[0] - first[0], last[1] - first[1]];
+    let length = along[0].hypot(along[1]);
+    if points.len() < 2 || length <= 0.0 {
+        return None;
+    }
+    let mut previous = 0.0;
+    for point in &points[1..points.len() - 1] {
+        let offset = [point[0] - first[0], point[1] - first[1]];
+        let t = (offset[0] * along[0] + offset[1] * along[1]) / length;
+        let off_line = (offset[0] * along[1] - offset[1] * along[0]).abs() / length;
+        if off_line > STRAIGHT_ROW_MM || t < previous || t > length {
+            return None;
+        }
+        previous = t;
+    }
+    Some([first, last])
+}
+
+/// Off-line distance below which a vertex leaves a hatch row straight: the
+/// emitted coordinates' own resolution.
+const STRAIGHT_ROW_MM: f64 = 1e-6;
 
 /// Least support candidates per anchoring group.
 const ANCHOR_GROUP_PATHS: usize = 16;
