@@ -418,111 +418,155 @@ impl KeptSupport {
     /// of a section whose final height band leaves the band its scope was
     /// applied for. Object roads regenerated after the sweep are therefore
     /// never trusted to the sweep's copy of them.
-    pub(in crate::planner) fn visit_unseen_object_edges(
+    /// Sections are independent, so they are visited in parallel, each with
+    /// its own `init()` state; the states return in section order and the
+    /// first error in that order is the one reported.
+    #[expect(clippy::too_many_arguments)]
+    pub(in crate::planner) fn visit_unseen_object_edges<S: Send>(
         &self,
         layers: &[PrintLayer],
         sections: &[super::super::SectionSpan],
         z_gap: f64,
         work: &mut usize,
         cancel: &AtomicBool,
-        mut visit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
-    ) -> Result<(), ManufacturingError> {
+        init: impl Fn() -> S + Sync,
+        visit: impl Fn(&mut S, usize, usize, usize) -> Result<(), ManufacturingError> + Sync,
+    ) -> Result<Vec<S>, ManufacturingError> {
+        use rayon::prelude::*;
         if self.layers.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        for (index, section) in sections.iter().enumerate() {
-            check_cancel(cancel)?;
-            let objects = layers
-                .get(section.start as usize..(section.end as usize).min(layers.len()))
-                .unwrap_or(&[]);
-            let mut band: Option<[f64; 2]> = None;
-            for path in objects.iter().flat_map(|layer| &layer.paths) {
-                super::super::native::charge_support_clearance(work, cancel)?;
-                if support_role(path.kind) {
-                    continue;
-                }
-                let mut take = |[lower, upper]: [f64; 2]| {
-                    band = Some(band.map_or([lower, upper], |[l, u]| [l.min(lower), u.max(upper)]));
-                };
-                take([
-                    program_coordinates::project_xyz6_bead_height_mm(
-                        path.physical_z_mm[1],
-                        path.physical_z_mm[1] - path.physical_z_mm[0],
-                    )?[0],
-                    program_coordinates::project_xyz6_bead_height_mm(
-                        path.physical_z_mm[1],
-                        path.height_mm(),
-                    )?[1],
-                ]);
-                for point in &path.points_mm {
-                    super::super::native::charge_support_clearance(work, cancel)?;
-                    take(program_coordinates::project_xyz6_bead_height_mm(
-                        point[2],
-                        path.height_mm(),
-                    )?);
-                }
-            }
-            let Some([floor, ceiling]) = band else {
+        let working_set = crate::working_set::current();
+        let visited = sections
+            .par_iter()
+            .enumerate()
+            .map(|(index, section)| {
+                crate::working_set::scope(working_set, || {
+                    let mut state = init();
+                    let mut section_work = 0usize;
+                    let result = self.visit_unseen_section(
+                        layers,
+                        (index, section),
+                        z_gap,
+                        &mut section_work,
+                        cancel,
+                        &mut |layer, path, edge| visit(&mut state, layer, path, edge),
+                    );
+                    (result, section_work, state)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut states = Vec::new();
+        reserve_owned(&mut states, visited.len(), 0)?;
+        for (result, section_work, state) in visited {
+            super::super::native::charge_support_clearance_range(work, section_work, cancel)?;
+            result?;
+            states.push(state);
+        }
+        Ok(states)
+    }
+
+    fn visit_unseen_section(
+        &self,
+        layers: &[PrintLayer],
+        (index, section): (usize, &super::super::SectionSpan),
+        z_gap: f64,
+        work: &mut usize,
+        cancel: &AtomicBool,
+        visit: &mut dyn FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        let objects = layers
+            .get(section.start as usize..(section.end as usize).min(layers.len()))
+            .unwrap_or(&[]);
+        let mut band: Option<[f64; 2]> = None;
+        for path in objects.iter().flat_map(|layer| &layer.paths) {
+            super::super::native::charge_support_clearance(work, cancel)?;
+            if support_role(path.kind) {
                 continue;
+            }
+            let mut take = |[lower, upper]: [f64; 2]| {
+                band = Some(band.map_or([lower, upper], |[l, u]| [l.min(lower), u.max(upper)]));
             };
-            // Kept bands rise with the layer: the first whose top comes within
-            // the gap of the floor is the lowest that can meet the section.
-            let mut failure = None;
-            let first = self.layers.partition_point(|kept| {
-                match program_coordinates::enclosed_vertical_gap_mm(floor, kept.band[1]) {
+            take([
+                program_coordinates::project_xyz6_bead_height_mm(
+                    path.physical_z_mm[1],
+                    path.physical_z_mm[1] - path.physical_z_mm[0],
+                )?[0],
+                program_coordinates::project_xyz6_bead_height_mm(
+                    path.physical_z_mm[1],
+                    path.height_mm(),
+                )?[1],
+            ]);
+            for point in &path.points_mm {
+                super::super::native::charge_support_clearance(work, cancel)?;
+                take(program_coordinates::project_xyz6_bead_height_mm(
+                    point[2],
+                    path.height_mm(),
+                )?);
+            }
+        }
+        let Some([floor, ceiling]) = band else {
+            return Ok(());
+        };
+        // Kept bands rise with the layer: the first whose top comes within
+        // the gap of the floor is the lowest that can meet the section.
+        let mut failure = None;
+        let first =
+            self.layers.partition_point(
+                |kept| match program_coordinates::enclosed_vertical_gap_mm(floor, kept.band[1]) {
                     Ok(gap) => gap >= z_gap,
                     Err(error) => {
                         failure.get_or_insert(error);
                         false
                     }
+                },
+            );
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        let Some(kept) = self.layers.get(first) else {
+            return Ok(());
+        };
+        if program_coordinates::enclosed_vertical_gap_mm(kept.band[0], ceiling)? >= z_gap {
+            return Ok(());
+        }
+        let record = self
+            .scopes
+            .binary_search_by_key(&index, |scope| scope.section)
+            .ok()
+            .map(|at| &self.scopes[at])
+            .filter(|scope| scope.floor <= floor && ceiling <= scope.ceiling);
+        let start = section.start as usize;
+        let tagged = objects.iter().enumerate().flat_map(|(offset, layer)| {
+            layer
+                .paths
+                .iter()
+                .enumerate()
+                .map(move |(path, value)| ((start + offset, path), value))
+        });
+        if let Some(record) = record {
+            beads::visit_outside_material(
+                &section.material,
+                tagged,
+                BEAD_OUTSIDE_ALLOWANCE_MM,
+                work,
+                cancel,
+                |(layer, path), edge, bead| {
+                    if record.edges.binary_search(&edge_key(&bead)).is_ok() {
+                        return Ok(());
+                    }
+                    visit(layer, path, edge)
+                },
+            )?;
+        } else {
+            for ((layer, path), value) in tagged {
+                super::super::native::charge_support_clearance(work, cancel)?;
+                if support_role(value.kind) {
+                    continue;
                 }
-            });
-            if let Some(failure) = failure {
-                return Err(failure);
-            }
-            let Some(kept) = self.layers.get(first) else {
-                continue;
-            };
-            if program_coordinates::enclosed_vertical_gap_mm(kept.band[0], ceiling)? >= z_gap {
-                continue;
-            }
-            let record = self
-                .scopes
-                .binary_search_by_key(&index, |scope| scope.section)
-                .ok()
-                .map(|at| &self.scopes[at])
-                .filter(|scope| scope.floor <= floor && ceiling <= scope.ceiling);
-            let start = section.start as usize;
-            let tagged = objects.iter().enumerate().flat_map(|(offset, layer)| {
-                layer
-                    .paths
-                    .iter()
-                    .enumerate()
-                    .map(move |(path, value)| ((start + offset, path), value))
-            });
-            if let Some(record) = record {
-                beads::visit_outside_material(
-                    &section.material,
-                    tagged,
-                    BEAD_OUTSIDE_ALLOWANCE_MM,
-                    work,
-                    cancel,
-                    |(layer, path), edge, bead| {
-                        if record.edges.binary_search(&edge_key(&bead)).is_ok() {
-                            return Ok(());
-                        }
-                        visit(layer, path, edge)
-                    },
-                )?;
-            } else {
-                for ((layer, path), value) in tagged {
-                    super::super::native::charge_support_clearance(work, cancel)?;
-                    if support_role(value.kind) {
-                        continue;
-                    }
-                    for edge in 0..value.points_mm.len().saturating_sub(1) {
-                        visit(layer, path, edge)?;
-                    }
+                for edge in 0..value.points_mm.len().saturating_sub(1) {
+                    visit(layer, path, edge)?;
                 }
             }
         }

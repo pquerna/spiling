@@ -1125,6 +1125,9 @@ fn read_object(
     Ok(output)
 }
 
+/// Chunks one object read decodes together.
+const STREAM_BATCH_CHUNKS: usize = 16;
+
 fn stream_object(
     connection: &Connection,
     id: ObjectId,
@@ -1141,36 +1144,60 @@ fn stream_object(
     let mut total = 0usize;
     let mut ordinal = 0i64;
     let mut digest = Sha256::new();
-    while let Some(row) = rows.next()? {
-        cancelled(cancel)?;
-        let actual: i64 = row.get(0)?;
-        let raw_length =
-            usize::try_from(row.get::<_, i64>(2)?).map_err(|_| invalid("negative chunk length"))?;
-        if actual != ordinal
-            || ordinal >= MAX_OBJECT_CHUNKS as i64
-            || total >= length
-            || raw_length != (length - total).min(CHUNK_BYTES)
-            || raw_length == 0
-        {
-            return Err(invalid("chunk coverage/length"));
+    // Rows are validated in order; each batch's chunks decode and check their
+    // own digests in parallel, then feed the object digest in order.
+    let mut batch: Vec<(i64, usize, [u8; 32], Vec<u8>)> = Vec::new();
+    let mut claimed = 0usize;
+    let mut finished = false;
+    while !finished {
+        batch.clear();
+        while batch.len() < STREAM_BATCH_CHUNKS {
+            let Some(row) = rows.next()? else {
+                finished = true;
+                break;
+            };
+            cancelled(cancel)?;
+            let actual: i64 = row.get(0)?;
+            let raw_length = usize::try_from(row.get::<_, i64>(2)?)
+                .map_err(|_| invalid("negative chunk length"))?;
+            let position = ordinal + batch.len() as i64;
+            if actual != position
+                || position >= MAX_OBJECT_CHUNKS as i64
+                || claimed >= length
+                || raw_length != (length - claimed).min(CHUNK_BYTES)
+                || raw_length == 0
+            {
+                return Err(invalid("chunk coverage/length"));
+            }
+            let expected = digest_bytes(
+                row.get_ref(1)?
+                    .as_blob()
+                    .map_err(|_| invalid("chunk ID type"))?,
+            )?;
+            let data = row
+                .get_ref(4)?
+                .as_blob()
+                .map_err(|_| invalid("chunk data type"))?
+                .to_vec();
+            claimed += raw_length;
+            batch.push((row.get(3)?, raw_length, expected, data));
         }
-        let expected = digest_bytes(
-            row.get_ref(1)?
-                .as_blob()
-                .map_err(|_| invalid("chunk ID type"))?,
-        )?;
-        let raw = chunks::decode(
-            row.get(3)?,
-            raw_length,
-            row.get_ref(4)?
-                .as_blob()
-                .map_err(|_| invalid("chunk data type"))?,
-            &expected,
-        )?;
-        digest.update(&raw);
-        consume(&raw)?;
-        total += raw.len();
-        ordinal += 1;
+        let decoded = {
+            use rayon::prelude::*;
+            batch
+                .par_iter()
+                .map(|(codec, raw_length, expected, data)| {
+                    chunks::decode(*codec, *raw_length, data, expected)
+                })
+                .collect::<Vec<_>>()
+        };
+        for raw in decoded {
+            let raw = raw?;
+            digest.update(&raw);
+            consume(&raw)?;
+            total += raw.len();
+            ordinal += 1;
+        }
     }
     let declared: i64 = connection.query_row(
         "SELECT chunk_count FROM objects WHERE object_id=?1",

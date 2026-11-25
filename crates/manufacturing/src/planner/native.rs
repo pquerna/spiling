@@ -44,34 +44,50 @@ struct PolygonDeposition<'a> {
     index: Option<&'a clearance_index::ClearanceIndex>,
 }
 
+/// A diagnostic counter shared by clearance proofs running in parallel.
+#[derive(Default)]
+struct TraceCount(std::sync::atomic::AtomicUsize);
+
+impl TraceCount {
+    fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set(&self, value: usize) {
+        self.0.store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Default)]
 struct ClearanceTrace {
     enabled: bool,
-    support_edges: std::cell::Cell<usize>,
-    raster_words: std::cell::Cell<usize>,
-    escaped_edges: std::cell::Cell<usize>,
-    escaped_cells: std::cell::Cell<usize>,
-    occupancy_tests: std::cell::Cell<usize>,
-    void_tests: std::cell::Cell<usize>,
-    pair_tests: std::cell::Cell<usize>,
-    unseen_object_edges: std::cell::Cell<usize>,
-    polygons: std::cell::Cell<usize>,
-    layers: std::cell::Cell<usize>,
-    paths: std::cell::Cell<usize>,
-    support_paths: std::cell::Cell<usize>,
-    bounds_points: std::cell::Cell<usize>,
-    path_rejects: std::cell::Cell<usize>,
-    edges: std::cell::Cell<usize>,
-    height_rejects: std::cell::Cell<usize>,
-    polygon_tests: std::cell::Cell<usize>,
-    index_bytes: std::cell::Cell<usize>,
-    skipped_paths: std::cell::Cell<usize>,
+    support_edges: TraceCount,
+    raster_words: TraceCount,
+    escaped_edges: TraceCount,
+    escaped_cells: TraceCount,
+    occupancy_tests: TraceCount,
+    void_tests: TraceCount,
+    pair_tests: TraceCount,
+    unseen_object_edges: TraceCount,
+    polygons: TraceCount,
+    layers: TraceCount,
+    paths: TraceCount,
+    support_paths: TraceCount,
+    bounds_points: TraceCount,
+    path_rejects: TraceCount,
+    edges: TraceCount,
+    height_rejects: TraceCount,
+    polygon_tests: TraceCount,
+    index_bytes: TraceCount,
+    skipped_paths: TraceCount,
 }
 
 impl ClearanceTrace {
-    fn add(&self, counter: &std::cell::Cell<usize>, amount: usize) {
+    fn add(&self, counter: &TraceCount, amount: usize) {
         if self.enabled {
-            counter.set(counter.get().saturating_add(amount));
+            counter
+                .0
+                .fetch_add(amount, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1148,7 +1164,7 @@ fn certify_polygon_escapes(
     clearance: f64,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     work: &mut usize,
-    tests: &std::cell::Cell<usize>,
+    tests: &TraceCount,
     trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -1349,14 +1365,16 @@ fn certify_unseen_objects(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let [xy_gap, z_gap] = gaps;
-    let mut pairs = 0usize;
-    kept.visit_unseen_object_edges(
+    // Each section proves with its own pair counter and geometry budget,
+    // charged to the job's in section order.
+    let states = kept.visit_unseen_object_edges(
         layers,
         sections,
         z_gap,
         work,
         cancel,
-        |object_ordinal, path, edge| {
+        || (0usize, spiling_geometry::GeometryWorkBudget::monitored()),
+        |(pairs, native_work), object_ordinal, path, edge| {
             trace.add(&trace.unseen_object_edges, 1);
             let object_layer = &layers[object_ordinal];
             let object = &object_layer.paths[path];
@@ -1368,12 +1386,12 @@ fn certify_unseen_objects(
             let reserve = |width: f64| {
                 ((width + local.width_mm) * 0.5 + 2.0 * XYZ6_SCREEN_SLACK_MM).next_up()
             };
-            for support_ordinal in gap_layer_range(band, object_edge.band, z_gap, &mut pairs, cancel)?
+            for support_ordinal in gap_layer_range(band, object_edge.band, z_gap, pairs, cancel)?
             {
                 let support_layer = &layers[support_ordinal];
-                charge_support_clearance(&mut pairs, cancel)?;
+                charge_support_clearance(pairs, cancel)?;
                 for support in &support_layer.paths {
-                    charge_support_clearance(&mut pairs, cancel)?;
+                    charge_support_clearance(pairs, cancel)?;
                     if support.kind.is_model() {
                         continue;
                     }
@@ -1389,7 +1407,7 @@ fn certify_unseen_objects(
                         continue;
                     }
                     for support_local in support_edges {
-                        charge_support_clearance(&mut pairs, cancel)?;
+                        charge_support_clearance(pairs, cancel)?;
                         if spiling_geometry::planar_bounds_clear(
                             edge_xy_bounds(support_local.points_mm),
                             object_bounds,
@@ -1418,7 +1436,13 @@ fn certify_unseen_objects(
             Ok(())
         },
     )?;
-    charge_support_clearance_range(work, pairs, cancel)
+    for (pairs, spent) in states {
+        charge_support_clearance_range(work, pairs, cancel)?;
+        native_work
+            .charge(spent.consumed(), cancel)
+            .map_err(|failure| super::native_error(failure, "support unseen-object proof"))?;
+    }
+    Ok(())
 }
 
 /// The full capsule proof of every non-model path on the deposition's
@@ -1585,7 +1609,7 @@ pub(super) fn charge_support_clearance(
     charge_support_clearance_range(work, 1, cancel)
 }
 
-fn charge_support_clearance_range(
+pub(super) fn charge_support_clearance_range(
     work: &mut usize,
     amount: usize,
     cancel: &AtomicBool,
