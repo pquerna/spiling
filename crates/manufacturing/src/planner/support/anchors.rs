@@ -794,7 +794,13 @@ impl SegmentCapsule {
         point: [f64; 2],
         candidate_radius: f64,
     ) -> Result<bool, ManufacturingError> {
-        Ok(self.endpoint_distance(point)? < self.radius + candidate_radius)
+        // Judged outward on the emitted decimals, as replay judges them: a
+        // tangency hidden by their binary representation is no overlap.
+        let (distance, enclosure) = endpoint_distance_enclosed(
+            [point[0], point[1], 0.0],
+            [[self.c[0], self.c[1], 0.0], [self.d[0], self.d[1], 0.0]],
+        )?;
+        Ok((distance + enclosure).next_up() < self.radius + candidate_radius)
     }
 
     fn endpoint_distance(&self, point: [f64; 2]) -> Result<f64, ManufacturingError> {

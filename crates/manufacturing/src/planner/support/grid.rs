@@ -690,6 +690,64 @@ impl Raster<'_> {
         Ok(eligible)
     }
 
+    /// `bits` closed by one cell along rows and along columns: a gap of at
+    /// most two cells between set cells on one row or column is filled.
+    /// Adjacent landing ledges tile the part top, but each rasterizes inward
+    /// on its own, so the cells on their shared seam belong to neither.
+    pub(super) fn close_seams(&self, bits: &Bits) -> Result<Bits, ManufacturingError> {
+        if bits.is_empty() {
+            return Ok(Bits::default());
+        }
+        let row0 = bits.row0.saturating_sub(1);
+        let word0 = bits.word0.saturating_sub(1);
+        let rows = bits.row0 + bits.rows() + 1 - row0;
+        let width = bits.word0 + bits.width + 1 - word0;
+        let mut data = self.zeroed(rows * width)?;
+        self.charge(data.len().saturating_mul(6));
+        let at = |row: Option<usize>, word: Option<usize>| -> u64 {
+            row.zip(word).map_or(0, |(row, word)| bits.word(row, word))
+        };
+        // One cell either side along the row, carrying across words.
+        let dilated = |row: Option<usize>, word: usize| -> u64 {
+            let middle = at(row, Some(word));
+            middle
+                | middle << 1
+                | middle >> 1
+                | at(row, word.checked_sub(1)) >> 63
+                | at(row, Some(word + 1)) << 63
+        };
+        for local_row in 0..rows {
+            check_cancel(self.cancel)?;
+            let row = row0 + local_row;
+            for local_word in 0..width {
+                let word = word0 + local_word;
+                let middle = bits.word(row, word);
+                let centre = dilated(Some(row), word);
+                let left = word
+                    .checked_sub(1)
+                    .map_or(0, |left| dilated(Some(row), left));
+                let right = dilated(Some(row), word + 1);
+                let along_row = centre & (centre << 1 | left >> 63) & (centre >> 1 | right << 63);
+                let column = |row: Option<usize>| {
+                    let up = row.and_then(|row| row.checked_sub(1));
+                    let down = row.map(|row| row + 1);
+                    at(row, Some(word)) | at(up, Some(word)) | at(down, Some(word))
+                };
+                let along_column =
+                    column(Some(row)) & column(row.checked_sub(1)) & column(Some(row + 1));
+                data[local_row * width + local_word] = middle | along_row | along_column;
+            }
+        }
+        let mut closed = Bits {
+            row0,
+            word0,
+            width,
+            data,
+        };
+        closed.shrink();
+        Ok(closed)
+    }
+
     fn polygon_cells<'p>(
         &self,
         polygons: impl IntoIterator<Item = &'p Polygon<f64>>,

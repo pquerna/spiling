@@ -510,3 +510,57 @@ fn escaped_cells_are_exactly_the_outward_capsule_outside_the_kept_set() {
             .is_err()
     );
 }
+
+#[test]
+fn closing_seams_fills_two_cell_gaps_only() {
+    let cancel = AtomicBool::new(false);
+    let raster = raster(frame(), &cancel);
+    // Rectangles a hair outside cell boundaries keep their edge cells inward.
+    let rect = |x: [f64; 2], y: [f64; 2]| {
+        Rect::new(
+            coord! { x: x[0] - 0.01, y: y[0] - 0.01 },
+            coord! { x: x[1] + 0.01, y: y[1] + 0.01 },
+        )
+        .to_polygon()
+    };
+    // Rows: a two-cell gap (1.0..1.5), then a three-cell gap (2.5..3.25).
+    // Columns: a two-cell gap (6.0..6.5) beside a three-cell one (8.0..8.75).
+    let pieces = [
+        rect([0.0, 4.0], [0.0, 1.0]),
+        rect([0.0, 4.0], [1.5, 2.5]),
+        rect([0.0, 4.0], [3.25, 4.25]),
+        rect([5.0, 6.0], [6.0, 7.0]),
+        rect([6.5, 8.0], [6.0, 7.0]),
+        rect([8.75, 9.5], [6.0, 7.0]),
+    ];
+    let bits = raster.inward(&pieces).unwrap();
+    let closed = raster.close_seams(&bits).unwrap();
+    let set = |x: f64, y: f64| raster.holds_all(&closed, [x, y]);
+    for y in [1.125, 1.375] {
+        assert!(set(2.125, y), "two-row seam at y {y} stays open");
+    }
+    for y in [2.625, 2.875, 3.125] {
+        assert!(!set(2.125, y), "three-row gap at y {y} was filled");
+    }
+    for x in [6.125, 6.375] {
+        assert!(set(x, 6.625), "two-column seam at x {x} stays open");
+    }
+    for x in [8.125, 8.375, 8.625] {
+        assert!(!set(x, 6.625), "three-column gap at x {x} was filled");
+    }
+    // Closing never grows a set beyond its own extent.
+    for p in [
+        [2.125, -0.125],
+        [4.125, 0.625],
+        [-0.125, 0.625],
+        [9.625, 6.625],
+    ] {
+        assert!(!set(p[0], p[1]), "closing grew outward at {p:?}");
+    }
+    assert!(pieces.iter().all(|piece| {
+        raster
+            .difference(&raster.inward([piece]).unwrap(), &closed)
+            .unwrap()
+            .is_empty()
+    }));
+}

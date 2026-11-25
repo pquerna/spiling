@@ -4412,7 +4412,6 @@ mod tests {
                         .0,
                     )
                     .unwrap(),
-                first: grid::Bits::default(),
                 roots: vec![0],
             };
             let mut segments = layers.iter().map(|layer| path_segments(&layer.paths)).sum();

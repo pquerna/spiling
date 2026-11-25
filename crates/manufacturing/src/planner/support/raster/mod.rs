@@ -818,6 +818,13 @@ pub(super) fn retain_anchored<'a>(
             continue;
         }
         if path_index >= wall_paths {
+            if let Some(row) = trim_row_ends(&path, lower, cells, recipe, anchors, work, cancel)? {
+                let live_bytes = original_bytes
+                    .saturating_add(super::super::bonds::path_bytes(paths))
+                    .saturating_add(anchors.retained_bytes());
+                super::reserve_owned(paths, 1, live_bytes)?;
+                paths.push(row);
+            }
             continue;
         }
         for (first, last, width_mm) in StrokeRuns::for_path(&path)? {
@@ -906,6 +913,63 @@ pub(super) fn retain_anchored<'a>(
     Ok(receipt)
 }
 
+/// A straight hatch row whose only unanchored stretches are its end
+/// stubs, cut back to where the lower strokes hold it, and proved again.
+/// A row with an unanchored stretch inside it, or one left shorter than a
+/// bead, is `None`: dropped, as before. Dropping a whole row for an end stub
+/// past the lower layer's last stroke would undermine every row above it.
+fn trim_row_ends<'a>(
+    path: &DepositionPath,
+    lower: &mut strokes::LowerStrokes<
+        'a,
+        impl Iterator<Item = &'a DepositionPath> + Clone,
+        impl Iterator<Item = &'a DepositionPath> + Clone,
+    >,
+    cells: Option<&super::established::CellContacts<'_, '_>>,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<DepositionPath>, ManufacturingError> {
+    if !super::support_role(path.kind)
+        || path.points_mm.len() != 2
+        || !matches!(path.width, WidthProfile::Constant { .. })
+    {
+        return Ok(None);
+    }
+    let mut row = path.clone();
+    // Each pass cuts one end; a third failure is an inside gap or a
+    // remainder that still does not hold.
+    for _ in 0..3 {
+        let [a, b] = [row.points_mm[0], row.points_mm[1]];
+        if (b[0] - a[0]).hypot(b[1] - a[1]) < recipe.bead_width_mm {
+            return Ok(None);
+        }
+        let Some(failure) = scan_with_lower(
+            std::slice::from_ref(&row),
+            lower,
+            cells,
+            recipe,
+            anchors,
+            work,
+            cancel,
+            true,
+        )?
+        else {
+            return Ok(Some(row));
+        };
+        let at = |t: f64| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2]];
+        if failure.start <= 0.0 && failure.end < 1.0 {
+            row.points_mm[0] = at(failure.end);
+        } else if failure.end >= 1.0 && failure.start > 0.0 {
+            row.points_mm[1] = at(failure.start);
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
 /// Least support candidates per anchoring group.
 const ANCHOR_GROUP_PATHS: usize = 16;
 
@@ -916,6 +980,8 @@ enum Verdict {
     /// Replaced by the anchored stroke runs `(first, last, width)`, possibly
     /// none, with the edge lengths of the omitted runs in order.
     Runs(Vec<(usize, usize, f64)>, Vec<f64>),
+    /// A hatch row kept without its unanchored end stubs.
+    Trimmed(DepositionPath),
 }
 
 /// One group's verdicts, by staged path index, and its anchor work.
@@ -1077,6 +1143,21 @@ where
                             }
                         }
                     }
+                    if index >= wall_paths {
+                        anchors.set_budget(share);
+                        if let Some(row) = trim_row_ends(
+                            path,
+                            &mut lower,
+                            cells,
+                            recipe,
+                            &mut anchors,
+                            &mut out.work,
+                            cancel,
+                        )? {
+                            out.verdicts.push((index, Verdict::Trimmed(row)));
+                            continue;
+                        }
+                    }
                     out.verdicts.push((index, Verdict::Runs(runs, omitted)));
                 }
                 Ok(Some(out))
@@ -1123,6 +1204,10 @@ where
                 receipt.paths += usize::from(path_index < wall_paths);
                 super::reserve_owned(paths, 1, bytes)?;
                 paths.push(path);
+            }
+            Some(Verdict::Trimmed(row)) => {
+                super::reserve_owned(paths, 1, bytes)?;
+                paths.push(row);
             }
             Some(Verdict::Runs(runs, omitted)) => {
                 for (first, last, width_mm) in runs {

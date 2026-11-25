@@ -12,10 +12,11 @@
 //! - up: `G[l] = A[l] ∩ (G[l − 1] ∪ ground[l]) − nominal[l]`,
 //!
 //! where ground is the bed at the first layer and each part landing's
-//! anchored cells at its first support layer. Both passes run on the
-//! conservative cell grid of [`grid`](super::grid): seeds, occupancy, voids
-//! and clearance round outward, landings and road footprints inward, so every
-//! cell kept is support space under the exact rules. Polygons are produced
+//! anchored cells on every layer of its separation band. Both passes run on
+//! the conservative cell grid of [`grid`](super::grid): seeds, occupancy,
+//! voids and clearance round outward, landings and road footprints inward
+//! (a layer's landings then close the seams between adjacent ledges), so
+//! every cell kept is support space under the exact rules. Polygons are produced
 //! only at the output, inside the kept cells. Each layer's occupancy, void
 //! and nominal clearance is built once and shared by every demand.
 
@@ -73,17 +74,12 @@ pub(super) struct SweepOutput {
 
 pub(super) struct PartContact {
     pub cells: Bits,
-    /// The cells of roots whose first support layer this is.
-    pub first: Bits,
     pub roots: Vec<usize>,
 }
 
 impl PartContact {
     pub(super) fn bytes(&self) -> usize {
-        self.cells
-            .bytes()
-            .saturating_add(self.first.bytes())
-            .saturating_add(vec_bytes(&self.roots))
+        self.cells.bytes().saturating_add(vec_bytes(&self.roots))
     }
 }
 
@@ -1009,27 +1005,18 @@ impl Sweep<'_> {
                     continue;
                 };
                 release(&active);
+                // Every layer of a root's separation band lands on its cells.
                 let mut ground = Bits::default();
-                let mut later = Bits::default();
                 if channel.relieved.is_none()
                     && let Some(landing) = &landing
                 {
-                    ground = raster.intersection(&active, &landing.first)?;
-                    later = raster
-                        .difference(&raster.intersection(&active, &landing.cells)?, &ground)?;
+                    ground = raster.intersection(&active, &landing.cells)?;
                 }
                 let mut kept = active;
                 for &at in &reaching {
                     if let Some(bits) = &clearance[at] {
                         kept.subtract(bits);
                     }
-                }
-                // A root's first layer lands as it always has; a later layer
-                // of its band grounds only bead-wide columns.
-                if l > 0 && !later.is_empty() {
-                    let base = raster.union(&grounded[c], &ground)?;
-                    let later = self.bead_wide_ground(&raster, &kept, &base, later)?;
-                    ground = raster.union(&ground, &later)?;
                 }
                 if !ground.is_empty() {
                     part_bands[c].push((layers[l].lower_z_mm, ground.clone()));
@@ -1198,28 +1185,6 @@ impl Sweep<'_> {
     /// and the object layers' roads, never the up pass, so layers are
     /// proposed in parallel; each is the same proposal the up pass would
     /// make at that layer.
-    /// Part landing cells that belong to a column at least one bead wide,
-    /// together with the support already grounded beside them. A narrower
-    /// island prints as a dot that overlaps lower support by a sliver, which
-    /// replay rightly refuses as an anchor; a thin strip beside an existing
-    /// column still grounds, so support climbs a slope layer by layer.
-    fn bead_wide_ground(
-        &self,
-        raster: &Raster<'_>,
-        kept: &Bits,
-        grounded: &Bits,
-        ground: Bits,
-    ) -> Result<Bits, ManufacturingError> {
-        let radius = self.recipe.bead_width_mm * 0.5;
-        let held = raster.intersection(kept, &raster.union(grounded, &ground)?)?;
-        let core = raster.erode(&held, radius)?;
-        if core.is_empty() {
-            return Ok(Bits::default());
-        }
-        let reach = raster.outward(&raster.contour(&core)?.0, radius + raster.frame.cell())?;
-        raster.intersection(&ground, &reach)
-    }
-
     fn propose_landings(
         &self,
         max_top: usize,
@@ -1306,7 +1271,6 @@ impl Sweep<'_> {
         };
         let mut meeting = Vec::new();
         let mut joined = Bits::default();
-        let mut first = Bits::default();
         for (index, root) in roots.iter().enumerate().rev() {
             let Root::Part {
                 first_support_layer,
@@ -1328,13 +1292,11 @@ impl Sweep<'_> {
             reserve_owned(&mut meeting, 1, owned_bytes)?;
             meeting.push(index);
             joined = raster.union(&joined, root_cells)?;
-            if first_support_layer == l {
-                first = raster.union(&first, root_cells)?;
-            }
         }
+        // The band's ledges tile the part top it stands on; their seams too.
+        let joined = raster.close_seams(&joined)?;
         Ok((!joined.is_empty()).then_some(PartContact {
             cells: joined,
-            first,
             roots: meeting,
         }))
     }

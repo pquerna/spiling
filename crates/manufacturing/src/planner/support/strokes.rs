@@ -955,6 +955,54 @@ mod tests {
             assert!(refused.bridges.is_empty());
         }
     }
+
+    #[test]
+    fn decimal_endpoint_tangency_is_no_anchor_whatever_its_binary_difference() {
+        use spiling_contracts::manufacturing::DepositionKind;
+        // 154.85 - 154.4 is 0.44999999999998863 in binary, but the emitted
+        // decimals are exactly a bead apart: tangent, as replay decodes them.
+        let previous = [DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::Support,
+            width: WidthProfile::Constant { width_mm: 0.45 },
+            physical_z_mm: [0.0, 0.4],
+            owner: None,
+            points_mm: vec![[170.3, 154.3, 0.4], [170.3, 154.4, 0.4]],
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        }];
+        let cancel = AtomicBool::new(false);
+        let mut query = AnchorWorkspace::default();
+        let gaps = query
+            .gaps(
+                AnchorCandidate {
+                    endpoints_mm: [[170.3, 154.85, 0.8], [170.2, 154.85, 0.8]],
+                    bead_width_mm: 0.45,
+                },
+                previous.iter(),
+                std::iter::empty(),
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(gaps.len(), 1);
+        assert!(!gaps[0].left && !gaps[0].right);
+        // A hundredth closer overlaps positively.
+        let gaps = query
+            .gaps(
+                AnchorCandidate {
+                    endpoints_mm: [[170.3, 154.84, 0.8], [170.2, 154.84, 0.8]],
+                    bead_width_mm: 0.45,
+                },
+                previous.iter(),
+                std::iter::empty(),
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+        assert!(gaps[0].left && !gaps[0].right);
+    }
 }
 
 #[cfg(test)]

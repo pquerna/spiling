@@ -1033,12 +1033,19 @@ pub(super) fn verify(
                 let unsupported = std::mem::replace(&mut measured[next], Ok(Vec::new()))?;
                 next += 1;
                 if is_support && !unsupported.is_empty() {
+                    let mm = |point: [i64; 2]| point.map(|tick| tick as f64 * 1e-6);
+                    let mut stroke = measure.roads(current);
+                    let from = stroke.next().map(|road| mm(road.chord.start));
+                    let to = measure.roads(current).last().map(|road| mm(road.chord.end));
+                    let gap = unsupported[0];
                     return Err(failed(format!(
-                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact: {:?} at Z {:.3}, {} unsupported intervals, separated bands {}..{}",
+                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact: {:?} at Z {:.3} from {from:?} to {to:?}, {} unsupported intervals (first {:.3}..{:.3} mm along), separated bands {}..{}",
                         first_road.line,
                         first_road.role,
                         layer.z_mm,
                         unsupported.len(),
+                        gap.start,
+                        gap.end,
                         support_start,
                         end
                     )));

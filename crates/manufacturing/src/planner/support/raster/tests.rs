@@ -133,7 +133,14 @@ fn unrooted_islands_cannot_erase_an_independent_deposited_dependency_chain() {
             &cancel,
         )
         .unwrap();
-        assert_eq!(candidate, [rooted]);
+        // The over-extended row keeps the stretch its lower rows hold: it is
+        // cut back to the last row's capsule (y 6 + 0.3), not dropped.
+        assert_eq!(candidate.len(), 2);
+        assert_eq!(candidate[0], rooted);
+        let trimmed = &candidate[1].points_mm;
+        assert_eq!(trimmed[0], [7.0 + shift, shift, 0.4]);
+        assert!((trimmed[1][0] - (7.0 + shift)).abs() < 1e-9);
+        assert!((trimmed[1][1] - (6.3 + shift)).abs() < 1e-6, "{trimmed:?}");
         assert!((omitted.omitted_mm - 4.0).abs() <= crate::planner::OFFSET_TOLERANCE_MM);
         let upper = [row([5.0, 1.0], [5.0, 5.0], 0.4, 0.6)];
         assert!(
