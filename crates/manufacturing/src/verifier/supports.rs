@@ -407,6 +407,7 @@ fn verify_roots(
     else {
         return Err(failed("actual support requires breakaway policy"));
     };
+    let z_gap_mm = program_coordinates::honoured_z_gap_mm(z_gap_mm);
     let mut established: Vec<Vec<bool>> = Vec::new();
     reserve(&mut established, last_support + 1, anchors.retained_bytes())?;
     let mut live = established.capacity() * std::mem::size_of::<Vec<bool>>();
@@ -1216,11 +1217,13 @@ mod tests {
     fn ordered_object_screen_preserves_both_closed_vertical_gaps() {
         let (intent, mut plan) = fixture();
         let support = plan.layers[2].paths[0].clone();
+        // The gap is honoured within the profile tolerance.
+        let tolerance = PROFILE_TOLERANCE_MM;
         for (interval, clears) in [
-            ([3.5, 4.5], true),
-            ([3.5f64.next_down(), 4.5], false),
-            ([0.5, 1.5], true),
-            ([0.5, 1.5 + XYZ6_QUANTUM_MM], false),
+            ([3.5 - tolerance + XYZ6_QUANTUM_MM, 4.5], true),
+            ([3.5 - tolerance - XYZ6_QUANTUM_MM, 4.5], false),
+            ([0.5, 1.5 + tolerance - XYZ6_QUANTUM_MM], true),
+            ([0.5, 1.5 + tolerance + XYZ6_QUANTUM_MM], false),
         ] {
             let object = &mut plan.layers[4].paths[0];
             object.physical_z_mm = interval;

@@ -609,6 +609,7 @@ fn certify_support_clearance_traced(
     else {
         return Ok(None);
     };
+    let z_gap_mm = program_coordinates::honoured_z_gap_mm(z_gap_mm);
     let Some(vertical) = deposition_vertical_extensions(layers, schedule, support_work, cancel)?
     else {
         // Exhausted the actual paths: there are no emitted support segments,

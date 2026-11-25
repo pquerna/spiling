@@ -1496,6 +1496,7 @@ pub(super) fn realize(
         else {
             unreachable!("disabled support demand refused above")
         };
+        let z_gap_mm = program_coordinates::honoured_z_gap_mm(z_gap_mm);
         // The gap is measured against the sliced object layers, which ADR012
         // places within the recorded tolerance of the BREP; widening it by the
         // whole enclosure margin would drop a full layer below every contact.

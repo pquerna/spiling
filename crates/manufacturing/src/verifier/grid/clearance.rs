@@ -200,7 +200,9 @@ impl Clearance {
         Ok(Self {
             roads: Vec::new(),
             admission: Admission::default(),
-            z_gap: z_gap_mm,
+            z_gap: spiling_contracts::manufacturing::program_coordinates::honoured_z_gap_mm(
+                z_gap_mm,
+            ),
             xy_gap: xy_clearance_mm,
         })
     }
@@ -966,6 +968,9 @@ fn count_union(
 mod tests {
     use super::*;
 
+    /// The profile tolerance the Z gap is honoured within, in XYZ6 ticks.
+    const HONOURED_TICKS: i64 = 10_000;
+
     fn clearance() -> Clearance {
         Clearance::new(
             50_000,
@@ -998,17 +1003,24 @@ mod tests {
     #[test]
     fn virtual_arc_chord_uses_the_decoded_z_for_clearance() {
         let cancel = AtomicBool::new(false);
-        for shortfall in [0, 1] {
+        // One tick either side of the honoured gap.
+        for shortfall in [-1, 1] {
             let mut grid = clearance();
             let mut arc = road(0, DepositionKind::Perimeter, 0, 250_000);
             arc.to = super::super::virtual_arc_xyz6([1.000_123, 0.0, 0.250_486], 250_000);
             assert_eq!(arc.to, [1_000_123, 0, 250_000]);
             arc.arc_deviation_mm = 0.011;
             grid.record(arc).unwrap();
-            grid.record(road(3, DepositionKind::Support, 0, 1_000_000 - shortfall))
-                .unwrap();
+            // The gap is honoured within the profile tolerance (10 000 ticks).
+            grid.record(road(
+                3,
+                DepositionKind::Support,
+                0,
+                1_000_000 - HONOURED_TICKS - shortfall,
+            ))
+            .unwrap();
             let result = grid.verify(&mut 0, &cancel);
-            if shortfall == 0 {
+            if shortfall < 0 {
                 assert_eq!(result.unwrap().checked_pairs, 0);
             } else {
                 assert!(
@@ -1122,9 +1134,9 @@ mod tests {
             for overlap in [false, true] {
                 let mut grid = clearance();
                 let model_top = if above {
-                    2_250_000 - i64::from(overlap)
+                    2_250_000 - HONOURED_TICKS - if overlap { 1 } else { -1 }
                 } else {
-                    750_000 + i64::from(overlap)
+                    750_000 + HONOURED_TICKS + if overlap { 1 } else { -1 }
                 };
                 let model = road(
                     if above { 4 } else { 0 },

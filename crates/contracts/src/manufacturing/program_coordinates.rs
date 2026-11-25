@@ -163,6 +163,15 @@ pub fn project_xyz6_segment_bead_height_mm(
     let end = project_xyz6_bead_height_mm(end_z_mm, height_mm)?;
     Ok([start[0].min(end[0]), start[1].max(end[1])])
 }
+/// The support Z gap an actual contact must meet: the recorded gap honoured
+/// within the profile tolerance (never more than half the gap). Schedules
+/// still place support stops at the full recorded gap; this only accepts
+/// contacts whose layers sum to the gap less their rounding, as thinned slope
+/// layers do.
+pub fn honoured_z_gap_mm(z_gap_mm: f64) -> f64 {
+    z_gap_mm - super::PROFILE_TOLERANCE_MM.min(z_gap_mm * 0.5)
+}
+
 /// Lower bound on the gap between an already enclosed lower/upper program
 /// height pair. Error-free TwoDiff keeps exactly representable contact gaps
 /// admissible; only a negative residual requires outward rounding.
