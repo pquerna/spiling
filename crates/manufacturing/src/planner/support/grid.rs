@@ -454,6 +454,23 @@ struct Span {
     to: u32,
 }
 
+impl Span {
+    /// A slot no cell fills.
+    const EMPTY: Self = Self {
+        row: u32::MAX,
+        from: 0,
+        to: 0,
+    };
+}
+
+/// One capsule of a raster batch: segment `a`–`b` grown by `radius`.
+#[derive(Clone, Copy)]
+pub(super) struct CapsuleInput {
+    pub(super) a: [f64; 2],
+    pub(super) b: [f64; 2],
+    pub(super) radius: f64,
+}
+
 /// Rasterizer and set algebra in one frame, with shared byte admission,
 /// work counting and cancellation.
 pub(super) struct Raster<'a> {
@@ -647,15 +664,22 @@ impl Raster<'_> {
     ) -> Result<Bits, ManufacturingError> {
         let mut spans = Vec::new();
         let mut crossings = Vec::new();
-        let mut charged = 0;
+        let mut batch = Vec::new();
         for (polygon, distance) in polygons {
             check_cancel(self.cancel)?;
             self.interior(polygon, &mut crossings, &mut spans)?;
+            self.reserve(&mut batch, polygon.exterior().0.len())?;
             for [a, b] in edges(polygon) {
-                self.capsule(a, b, distance, &mut spans, &mut charged)?;
+                self.reserve(&mut batch, 1)?;
+                batch.push(CapsuleInput {
+                    a,
+                    b,
+                    radius: distance,
+                });
             }
         }
-        self.charge(charged);
+        self.capsule_spans(&batch, &mut spans)?;
+        drop(batch);
         self.bits_of(&spans)
     }
 
@@ -664,13 +688,15 @@ impl Raster<'_> {
         &self,
         segments: impl IntoIterator<Item = ([f64; 2], [f64; 2], f64)>,
     ) -> Result<Bits, ManufacturingError> {
-        let mut spans = Vec::new();
-        let mut charged = 0;
+        let mut batch = Vec::new();
         for (a, b, radius) in segments {
             check_cancel(self.cancel)?;
-            self.capsule(a, b, radius, &mut spans, &mut charged)?;
+            self.reserve(&mut batch, 1)?;
+            batch.push(CapsuleInput { a, b, radius });
         }
-        self.charge(charged);
+        let mut spans = Vec::new();
+        self.capsule_spans(&batch, &mut spans)?;
+        drop(batch);
         self.bits_of(&spans)
     }
 
@@ -791,15 +817,17 @@ impl Raster<'_> {
         let mut inside = Vec::new();
         let mut boundary = Vec::new();
         let mut crossings = Vec::new();
-        let mut charged = 0;
+        let mut batch = Vec::new();
         for polygon in polygons {
             check_cancel(self.cancel)?;
             self.interior(polygon, &mut crossings, &mut inside)?;
             for [a, b] in edges(polygon) {
-                self.capsule(a, b, 0.0, &mut boundary, &mut charged)?;
+                self.reserve(&mut batch, 1)?;
+                batch.push(CapsuleInput { a, b, radius: 0.0 });
             }
         }
-        self.charge(charged);
+        self.capsule_spans(&batch, &mut boundary)?;
+        drop(batch);
         let bits = self.bits_of(&inside)?;
         drop(inside);
         Ok((bits, self.bits_of(&boundary)?))
@@ -868,46 +896,94 @@ impl Raster<'_> {
     }
 
     /// Every cell meeting the closed capsule of segment `ab` and `radius`.
-    fn capsule(
+    /// Every cell within each capsule's radius of its segment, as row spans
+    /// appended to `spans`. The batch is one flat array: a row pass gives
+    /// each capsule its touched rows and an output offset, then every
+    /// (capsule, row) slot is filled independently, in parallel when the
+    /// batch is large, and empty slots are dropped. The cells equal the
+    /// per-capsule raster.
+    fn capsule_spans(
         &self,
-        a: [f64; 2],
-        b: [f64; 2],
-        radius: f64,
+        capsules: &[CapsuleInput],
         spans: &mut Vec<Span>,
-        charged: &mut usize,
     ) -> Result<(), ManufacturingError> {
         let frame = &self.frame;
-        if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0) {
-            return Err(error(
-                ManufacturingErrorCode::NativeConditioningFailure,
-                "support grid capsule has non-finite coordinates",
-            ));
+        let mut ranges = Vec::new();
+        self.reserve(&mut ranges, capsules.len())?;
+        let mut total = 0usize;
+        for capsule in capsules {
+            let CapsuleInput { a, b, radius } = *capsule;
+            if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0) {
+                return Err(error(
+                    ManufacturingErrorCode::NativeConditioningFailure,
+                    "support grid capsule has non-finite coordinates",
+                ));
+            }
+            let range = frame.touching(1, a[1].min(b[1]) - radius, a[1].max(b[1]) + radius);
+            total += range.map_or(0, |(r0, r1)| r1 - r0 + 1);
+            ranges.push((total, range));
         }
-        let Some((r0, r1)) = frame.touching(1, a[1].min(b[1]) - radius, a[1].max(b[1]) + radius)
-        else {
-            return Ok(());
+        // Counted once per batch: a shared counter bumped for every capsule
+        // serializes parallel rasters on one cache line.
+        self.charge(total);
+        self.reserve(spans, total)?;
+        let start = spans.len();
+        spans.resize(start + total, Span::EMPTY);
+        let fill = |capsule: &CapsuleInput, (r0, _): (usize, usize), out: &mut [Span]| {
+            let shape = Capsule::new(capsule.a, capsule.b, capsule.radius);
+            for (offset, slot) in out.iter_mut().enumerate() {
+                let row = r0 + offset;
+                let band = [
+                    frame.y(row as f64) - GUARD_MM,
+                    frame.y(row as f64 + 1.0) + GUARD_MM,
+                ];
+                *slot = shape
+                    .band(band)
+                    .and_then(|(lo, hi)| frame.touching(0, lo, hi))
+                    .map_or(Span::EMPTY, |(c0, c1)| Span {
+                        row: row as u32,
+                        from: c0 as u32,
+                        to: c1 as u32 + 1,
+                    });
+            }
         };
-        self.reserve(spans, r1 - r0 + 1)?;
-        // Counted by the caller once per batch: a shared counter bumped for
-        // every capsule serializes parallel rasters on one cache line.
-        *charged += r1 - r0 + 1;
-        let capsule = Capsule::new(a, b, radius);
-        for row in r0..=r1 {
-            let band = [
-                frame.y(row as f64) - GUARD_MM,
-                frame.y(row as f64 + 1.0) + GUARD_MM,
-            ];
-            let Some((lo, hi)) = capsule.band(band) else {
-                continue;
-            };
-            if let Some((c0, c1)) = frame.touching(0, lo, hi) {
-                spans.push(Span {
-                    row: row as u32,
-                    from: c0 as u32,
-                    to: c1 as u32 + 1,
-                });
+        {
+            let mut rest = &mut spans[start..];
+            let mut jobs = Vec::new();
+            self.reserve(&mut jobs, capsules.len())?;
+            let mut previous = 0usize;
+            for (capsule, &(end, range)) in capsules.iter().zip(&ranges) {
+                let (head, tail) = rest.split_at_mut(end - previous);
+                rest = tail;
+                previous = end;
+                if let Some(range) = range {
+                    jobs.push((capsule, range, head));
+                }
+            }
+            const PARALLEL_ROWS: usize = 1 << 14;
+            if total >= PARALLEL_ROWS {
+                use rayon::prelude::*;
+                let working_set = crate::working_set::current();
+                jobs.par_iter_mut()
+                    .with_min_len(64)
+                    .for_each(|(capsule, range, out)| {
+                        crate::working_set::scope(working_set, || fill(capsule, *range, out));
+                    });
+            } else {
+                for (capsule, range, out) in &mut jobs {
+                    fill(capsule, *range, out);
+                }
             }
         }
+        check_cancel(self.cancel)?;
+        let mut kept = start;
+        for index in start..spans.len() {
+            if spans[index].row != u32::MAX {
+                spans[kept] = spans[index];
+                kept += 1;
+            }
+        }
+        spans.truncate(kept);
         Ok(())
     }
 
