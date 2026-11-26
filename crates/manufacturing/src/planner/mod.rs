@@ -50,7 +50,7 @@ use std::{
 // Bump when sections, walls, skins/fill, or another upstream producer changes
 // the support stage's captured input. Support-only changes leave this alone,
 // even when they change the final plan and bump PLANNER_VERSION.
-const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-1";
+const SUPPORT_INPUT_PRODUCER: &str = "support-upstream-2";
 // All construction through arc attachment, including support, produces the
 // realization input. Routing, connection and arc lowering do not.
 pub(crate) const REALIZATION_INPUT_PRODUCER: &str = "realization-upstream-1";

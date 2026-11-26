@@ -487,6 +487,7 @@ pub(super) struct ProtectedVoidSet {
 pub(super) struct VoidScope {
     pub height: spiling_geometry::ProtectedVoidHeightScope,
     roof: Option<Arc<spiling_geometry::tolerant::TolerantVoidRoof>>,
+    shoulders: Arc<Vec<spiling_geometry::tolerant::TolerantVoidRoof>>,
     access: Vec<RoofAccess>,
 }
 
@@ -503,8 +504,63 @@ impl VoidScope {
         Self {
             height,
             roof,
+            shoulders: Arc::default(),
             access: Vec::new(),
         }
+    }
+
+    pub(super) fn with_shoulders(
+        mut self,
+        shoulders: Arc<Vec<spiling_geometry::tolerant::TolerantVoidRoof>>,
+    ) -> Self {
+        self.shoulders = shoulders;
+        self
+    }
+
+    fn shoulders_at(
+        &self,
+        target: &PrintLayer,
+        top: &PrintLayer,
+    ) -> impl Iterator<Item = &spiling_geometry::tolerant::TolerantVoidRoof> {
+        let [target_floor, target_top, contact_top] = [target.lower_z_mm, target.z_mm, top.z_mm];
+        self.shoulders.iter().filter(move |shoulder| {
+            let [lower, upper] = shoulder.height_mm;
+            contact_top <= lower && target_floor <= upper && target_top >= lower
+        })
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn allows_shoulder_access(
+        &self,
+        bed_z: f64,
+        target: &PrintLayer,
+        top: &PrintLayer,
+        path: &DepositionPath,
+        failure: &strokes::Failure,
+        support_width: f64,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        // The new corridor starts in the foot of the opening on the bed.
+        // Elevated mouths retain ordinary landing and roof policies.
+        if self.shoulders.is_empty()
+            || !matches!(
+                self.height,
+                spiling_geometry::ProtectedVoidHeightScope::OpenBelow { rim_mm, .. }
+                    if rim_mm <= bed_z
+            )
+        {
+            return Ok(false);
+        }
+        Self::roof_facets_reach_gap(
+            self.shoulders_at(target, top)
+                .flat_map(|shoulder| &shoulder.facets),
+            path,
+            failure,
+            support_width,
+            work,
+            cancel,
+        )
     }
 
     /// Height band of the roof that bed-rooted support may hold inside this
@@ -548,6 +604,24 @@ impl VoidScope {
         {
             return Ok(false);
         }
+        // Without stitched cap facets, the void is this layer's to hold when
+        // the layer's own material closes over the void's interior.
+        let Some(roof) = &self.roof else {
+            super::native::charge_support_clearance(work, cancel)?;
+            return Ok(geo::InteriorPoint::interior_point(mask)
+                .is_some_and(|inside| ceiling.iter().any(|piece| piece.contains(&inside))));
+        };
+        Self::roof_facets_reach_gap(&roof.facets, path, failure, support_width, work, cancel)
+    }
+
+    fn roof_facets_reach_gap<'a>(
+        facets: impl IntoIterator<Item = &'a [[f64; 2]; 3]>,
+        path: &DepositionPath,
+        failure: &strokes::Failure,
+        support_width: f64,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
         let start = path.points_mm[failure.first];
         let end = path.points_mm[failure.last];
         let [from, to] = [failure.start, failure.end].map(|at| geo::Coord {
@@ -559,14 +633,7 @@ impl VoidScope {
         };
         let reach = (edge.width_mm + support_width) * 0.5;
         let segment = geo::Line::new(from, to);
-        // Without stitched cap facets, the void is this layer's to hold when
-        // the layer's own material closes over the void's interior.
-        let Some(roof) = &self.roof else {
-            super::native::charge_support_clearance(work, cancel)?;
-            return Ok(geo::InteriorPoint::interior_point(mask)
-                .is_some_and(|inside| ceiling.iter().any(|piece| piece.contains(&inside))));
-        };
-        for &facet in &roof.facets {
+        for &facet in facets {
             super::native::charge_support_clearance(work, cancel)?;
             let contour = geo::Triangle::new(facet[0].into(), facet[1].into(), facet[2].into());
             if contour.contains(&geo::Point::from(from))

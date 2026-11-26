@@ -33,6 +33,8 @@ pub struct TolerantVoidProjection {
     /// hole band, when all its free edges above the lower mouth close. This
     /// is not a clearance or withdrawal certificate.
     pub roof: Option<TolerantVoidRoof>,
+    /// Local downward-facing shoulders incident to this hole's lower walls.
+    pub shoulders: Vec<TolerantVoidRoof>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -59,7 +61,7 @@ struct RoofEdge {
 fn roof_resource_limit() -> GeometryError {
     GeometryError::new(
         GeometryErrorCode::ResourceLimit,
-        "terminal roof discovery exceeds the remaining allocated-byte budget",
+        "support underside discovery exceeds the remaining allocated-byte budget",
     )
 }
 
@@ -696,6 +698,152 @@ impl TolerantModel {
         }))
     }
 
+    /// Find near-horizontal underside patches joined by a manifold edge to
+    /// a hole wall rising into the underside. The patch describes only where
+    /// material closes the vertical corridor, even when the hole continues
+    /// beside it. Ordinary clearance and straight withdrawal are separate.
+    fn void_shoulders(
+        &self,
+        groups: &mut [(usize, TolerantVoidProjection)],
+        owners: &[usize],
+        sides: &[bool],
+        remaining_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        if groups.iter().all(|(_, group)| group.roof.is_some()) {
+            return Ok(());
+        }
+        let margin = self.support_margin();
+        let height = |facet: [u32; 3]| {
+            let z = facet.map(|vertex| self.positions[vertex as usize][2]);
+            [
+                z.into_iter().fold(f64::INFINITY, f64::min),
+                z.into_iter().fold(f64::NEG_INFINITY, f64::max),
+            ]
+        };
+        let downward = |facet: [u32; 3]| {
+            let [lo, hi] = height(facet);
+            let [a, b, c] =
+                facet.map(|vertex| self.positions[vertex as usize].map(Interval::point));
+            hi - lo <= margin
+                && b[0]
+                    .sub(a[0])
+                    .mul(c[1].sub(a[1]))
+                    .sub(b[1].sub(a[1]).mul(c[0].sub(a[0])))
+                    .hi
+                    < 0.0
+        };
+        let mut sides_and_caps = 0usize;
+        let mut caps = 0usize;
+        for (index, &facet) in self.triangles.iter().enumerate() {
+            cancelled(cancel)?;
+            let cap = downward(facet);
+            caps += usize::from(cap);
+            sides_and_caps += usize::from(sides[index] || cap);
+        }
+        if caps == 0 {
+            return Ok(());
+        }
+        let edge_count = sides_and_caps.saturating_mul(3);
+        let scratch = edge_count
+            .saturating_mul(size_of::<(MeshEdge, usize, bool)>())
+            .saturating_add(self.triangles.len().saturating_mul(size_of::<usize>()))
+            .saturating_add(
+                caps.saturating_mul(4 * size_of::<(usize, usize)>() + size_of::<usize>()),
+            );
+        let mut available = remaining_bytes
+            .checked_sub(scratch)
+            .ok_or_else(roof_resource_limit)?;
+        let mut edges = roof_buffer(edge_count)?;
+        let mut parents = roof_buffer(self.triangles.len())?;
+        parents.extend(0..self.triangles.len());
+        let mut candidates = roof_buffer(caps)?;
+        for (index, &facet) in self.triangles.iter().enumerate() {
+            cancelled(cancel)?;
+            let cap = downward(facet);
+            if cap {
+                candidates.push(index);
+            }
+            if cap || sides[index] {
+                edges.extend(facet_edges(facet).map(|edge| (edge, index, cap)));
+            }
+        }
+        edges.sort_unstable();
+        let mut incidences = roof_buffer(edge_count.min(caps.saturating_mul(3)))?;
+        for pair in edges.chunk_by(|a, b| a.0 == b.0) {
+            cancelled(cancel)?;
+            let [(_, a, a_cap), (_, b, b_cap)] = *pair else {
+                continue;
+            };
+            if a_cap && b_cap {
+                join(&mut parents, a, b);
+            } else if a_cap || b_cap {
+                let (cap, wall) = if a_cap { (a, b) } else { (b, a) };
+                if height(self.triangles[wall])[0] < height(self.triangles[cap])[0] - margin {
+                    incidences.push((cap, owners[wall]));
+                }
+            }
+        }
+        for (cap, _) in &mut incidences {
+            *cap = root(&mut parents, *cap);
+        }
+        incidences.sort_unstable();
+        incidences.dedup();
+        let mut patches = roof_buffer(caps)?;
+        for facet in candidates {
+            patches.push((root(&mut parents, facet), facet));
+        }
+        patches.sort_unstable();
+        for patch in patches.chunk_by(|a, b| a.0 == b.0) {
+            cancelled(cancel)?;
+            let owner_start = incidences.partition_point(|(root, _)| *root < patch[0].0);
+            let owner_end = incidences.partition_point(|(root, _)| *root <= patch[0].0);
+            // A common shoulder between distinct voids has no unique corridor
+            // owner. Keep both exclusions in place in that case.
+            let [(_, owner)] = incidences[owner_start..owner_end] else {
+                continue;
+            };
+            let at = groups
+                .binary_search_by_key(&owner, |(index, _)| *index)
+                .expect("side belongs to a projected void");
+            let group = &mut groups[at].1;
+            if group.roof.is_some() {
+                continue;
+            }
+            let [lo, hi] = patch.iter().fold(
+                [f64::INFINITY, f64::NEG_INFINITY],
+                |[lo, hi], &(_, facet)| {
+                    let [a, b] = height(self.triangles[facet]);
+                    [lo.min(a), hi.max(b)]
+                },
+            );
+            if lo <= group.height_mm[0] + margin || hi - lo > margin {
+                continue;
+            }
+            let cost = size_of::<TolerantVoidRoof>()
+                .saturating_add(patch.len().saturating_mul(size_of::<[[f64; 2]; 3]>()));
+            available = available
+                .checked_sub(cost)
+                .ok_or_else(roof_resource_limit)?;
+            let mut facets = roof_buffer(patch.len())?;
+            facets.extend(patch.iter().map(|&(_, facet)| {
+                self.triangles[facet].map(|vertex| {
+                    let [x, y, _] = self.positions[vertex as usize];
+                    [x, y]
+                })
+            }));
+            group
+                .shoulders
+                .try_reserve_exact(1)
+                .map_err(|_| roof_resource_limit())?;
+            group.shoulders.push(TolerantVoidRoof {
+                height_mm: [(lo - margin).next_down(), (hi + margin).next_up()],
+                facets,
+            });
+        }
+        Ok(())
+    }
+
     /// Exhaust every mesh topology interval. Raw traces retain triangle IDs,
     /// so complete swept hole boundaries are grouped independently of print
     /// layer sampling, analytic face labels or the presence of a sample hole.
@@ -973,6 +1121,7 @@ impl TolerantModel {
                     bottom: Vec::new(),
                     floor: Vec::new(),
                     roof: None,
+                    shoulders: Vec::new(),
                 });
             if record.height[0] < group.height_mm[0] {
                 group.height_mm[0] = record.height[0];
@@ -1058,6 +1207,9 @@ impl TolerantModel {
                     )
                     .ok_or_else(roof_resource_limit)?;
             }
+        }
+        self.void_shoulders(&mut result, &parents, &selected, roof_bytes, cancel)?;
+        for (_, group) in &mut result {
             group.height_mm = [
                 (group.height_mm[0] - margin).next_down(),
                 (group.height_mm[1] + margin).next_up(),
@@ -1162,6 +1314,7 @@ mod tests {
                         bottom: Vec::new(),
                         floor: Vec::new(),
                         roof: None,
+                        shoulders: Vec::new(),
                     });
                 if record.height[0] < group.height_mm[0] {
                     group.height_mm[0] = record.height[0];
@@ -1475,6 +1628,36 @@ mod tests {
                 !branches && !side_exit,
                 "branches={branches}, side_exit={side_exit}"
             );
+        }
+    }
+
+    #[test]
+    fn stepped_through_opening_exposes_only_its_underside_shoulders() {
+        let cancel = AtomicBool::new(false);
+        for stepped in [false, true] {
+            let model = block_with_void(|[x, y, z]| {
+                (1..4).contains(&y)
+                    && if stepped && z >= 2 {
+                        (2..5).contains(&x)
+                    } else {
+                        (1..6).contains(&x)
+                    }
+            });
+            let voids = model.support_voids(&cancel).unwrap();
+            assert_eq!(voids.len(), 1);
+            let opening = &voids[0];
+            assert!(opening.roof.is_none());
+            assert_eq!(opening.shoulders.len(), if stepped { 2 } else { 0 });
+            for shoulder in &opening.shoulders {
+                let [lo, hi] = shoulder.height_mm;
+                assert!(lo < 2.0 && hi > 2.0);
+                for facet in &shoulder.facets {
+                    assert!(
+                        facet.iter().all(|p| (1.0..=2.0).contains(&p[0]))
+                            || facet.iter().all(|p| (5.0..=6.0).contains(&p[0]))
+                    );
+                }
+            }
         }
     }
 

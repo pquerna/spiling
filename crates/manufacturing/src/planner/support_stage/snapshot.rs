@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const FORMAT: &str = "support-input-1";
+const FORMAT: &str = "support-input-2";
 type Models = BTreeMap<OccurrenceId, Arc<TolerantModel>>;
 type Classification = (usize, classification::ClassifiedRegions, usize, usize);
 

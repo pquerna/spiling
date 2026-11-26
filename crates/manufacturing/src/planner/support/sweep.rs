@@ -529,8 +529,8 @@ struct Piece {
 struct Entry {
     top: usize,
     target: usize,
-    /// Open-below voids whose roof this demand holds.
-    relieved: Vec<usize>,
+    /// The open-below void and whether its relief is limited to a shoulder.
+    relieved: Vec<(usize, bool)>,
 }
 
 fn expand(bounds: [[f64; 2]; 2], by: f64) -> [[f64; 2]; 2] {
@@ -594,7 +594,7 @@ impl Sweep<'_> {
                 {
                     continue;
                 }
-                if scope.allows_roof_access(
+                let roof = scope.allows_roof_access(
                     mask,
                     &material.0,
                     Root::Bed,
@@ -605,9 +605,21 @@ impl Sweep<'_> {
                     width,
                     work,
                     cancel,
-                )? {
+                )?;
+                let shoulder = !roof
+                    && scope.allows_shoulder_access(
+                        corridor_floor,
+                        &layers[demand.target],
+                        &layers[top],
+                        path,
+                        &demand.failure,
+                        width,
+                        work,
+                        cancel,
+                    )?;
+                if roof || shoulder {
                     reserve_owned(&mut relieved, 1, self.owned_bytes)?;
-                    relieved.push(ordinal);
+                    relieved.push((ordinal, shoulder));
                 }
             }
             reserve_owned(&mut entries, 1, self.owned_bytes)?;
@@ -696,7 +708,7 @@ impl Sweep<'_> {
             // The ordinary channel owns every demand's part roots; each void
             // whose roof the demand holds also gets its own bed-only channel.
             channels[0].add_seed(&raster, entry.top, entry.target, bits)?;
-            for &ordinal in &entry.relieved {
+            for &(ordinal, shoulder) in &entry.relieved {
                 let at = if let Some(at) = channels.iter().position(|c| c.relieved == Some(ordinal))
                 {
                     at
@@ -705,7 +717,23 @@ impl Sweep<'_> {
                     channels.push(Channel::new(Some(ordinal), layers.len()));
                     channels.len() - 1
                 };
-                channels[at].add_seed(&raster, entry.top, entry.target, bits)?;
+                if shoulder {
+                    // The through-passage beside the underside keeps its mask.
+                    let mut shadow = Bits::default();
+                    for facet in scopes[ordinal]
+                        .shoulders_at(&layers[entry.target], &layers[entry.top])
+                        .flat_map(|shoulder| &shoulder.facets)
+                    {
+                        let triangle = super::super::tolerant::polygon(facet.to_vec());
+                        let piece = raster.outward([&triangle], 0.0)?;
+                        shadow = raster.union(&shadow, &piece)?;
+                    }
+                    let clipped = Rc::new(raster.intersection(bits, &shadow)?);
+                    hold(&clipped)?;
+                    channels[at].add_seed(&raster, entry.top, entry.target, &clipped)?;
+                } else {
+                    channels[at].add_seed(&raster, entry.top, entry.target, bits)?;
+                }
             }
             charge(work)?;
         }
@@ -2415,6 +2443,60 @@ mod tests {
             None,
         );
         assert!(!access(&bounded, &closed, &top));
+    }
+
+    #[test]
+    fn shoulder_access_requires_a_bed_mouth_below_the_demand() {
+        use spiling_geometry::{ProtectedVoidHeightScope, tolerant::TolerantVoidRoof};
+
+        let cancel = AtomicBool::new(false);
+        let shoulder = Arc::new(vec![TolerantVoidRoof {
+            height_mm: [0.99, 1.01],
+            facets: vec![[[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]],
+        }]);
+        let mut target = object_layer(vec![bead(
+            DepositionKind::Perimeter,
+            [0.5, 0.5],
+            [1.5, 0.5],
+            0.45,
+        )]);
+        target.lower_z_mm = 1.0;
+        target.z_mm = 1.2;
+        let mut contact = object_layer(Vec::new());
+        contact.z_mm = 0.8;
+        let failure = strokes::Failure {
+            path: 0,
+            first: 0,
+            last: 1,
+            start: 0.0,
+            end: 1.0,
+            span: 1.0,
+        };
+        for (rim_mm, expected) in [(0.0, true), (0.1, false)] {
+            let scope = VoidScope::new(
+                ProtectedVoidHeightScope::OpenBelow {
+                    rim_mm,
+                    upper_mm: 2.0,
+                },
+                None,
+            )
+            .with_shoulders(Arc::clone(&shoulder));
+            assert_eq!(
+                scope
+                    .allows_shoulder_access(
+                        0.0,
+                        &target,
+                        &contact,
+                        &target.paths[0],
+                        &failure,
+                        0.45,
+                        &mut 0,
+                        &cancel,
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
     }
 
     /// A scope excludes its deposited bead capsules at the decoded

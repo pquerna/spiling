@@ -12,7 +12,7 @@ use crate::{check_cancel, error};
 use geo::{BooleanOps, LineString, MultiPolygon, Polygon};
 use spiling_contracts::geometry::{OccurrenceId, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
-use spiling_geometry::tolerant::{TolerantModel, TolerantSection};
+use spiling_geometry::tolerant::{TolerantModel, TolerantSection, TolerantVoidRoof};
 use std::collections::BTreeMap;
 use std::mem::size_of;
 use std::sync::{Arc, atomic::AtomicBool};
@@ -760,7 +760,8 @@ struct ProjectedVoid {
     outer: Polygon<f64>,
     bounds: geo::Rect<f64>,
     height: spiling_geometry::ProtectedVoidHeightScope,
-    roof: Option<Arc<spiling_geometry::tolerant::TolerantVoidRoof>>,
+    roof: Option<Arc<TolerantVoidRoof>>,
+    shoulders: Arc<Vec<TolerantVoidRoof>>,
 }
 
 /// Each occurrence's all-height void projections, independent of demand.
@@ -804,10 +805,15 @@ fn project_model(
             .collect();
         let floor = geo::unary_union(&floor_parts);
         let closed = bottom.unsigned_area() == 0.0 || bottom.difference(&floor).0.is_empty();
-        let roof = void
-            .roof
-            .filter(|_| !closed && (floor.0.is_empty() || bottom.intersection(&floor).0.is_empty()))
-            .map(Arc::new);
+        let accessible_mouth = !closed
+            && (void.roof.is_some() || !void.shoulders.is_empty())
+            && (floor.0.is_empty() || bottom.intersection(&floor).0.is_empty());
+        let roof = void.roof.filter(|_| accessible_mouth).map(Arc::new);
+        let shoulders = Arc::new(if accessible_mouth {
+            void.shoulders
+        } else {
+            Vec::new()
+        });
         let scope = if closed {
             spiling_geometry::ProtectedVoidHeightScope::Bounded {
                 lower_mm: void.height_mm[0],
@@ -824,6 +830,7 @@ fn project_model(
             bounds,
             height: scope,
             roof,
+            shoulders,
         });
     }
     Ok(projected)
@@ -876,9 +883,24 @@ pub(super) fn project_protected_voids(
                     .iter()
                     .filter_map(|void| void.roof.as_ref())
                     .map(|roof| {
-                        std::mem::size_of::<spiling_geometry::tolerant::TolerantVoidRoof>()
+                        std::mem::size_of::<TolerantVoidRoof>()
                             + 2 * std::mem::size_of::<usize>()
                             + roof.facets.capacity() * std::mem::size_of::<[[f64; 2]; 3]>()
+                    })
+                    .sum::<usize>()
+                + projected
+                    .iter()
+                    .map(|void| {
+                        std::mem::size_of::<Vec<TolerantVoidRoof>>()
+                            + 2 * std::mem::size_of::<usize>()
+                            + void.shoulders.capacity() * std::mem::size_of::<TolerantVoidRoof>()
+                            + void
+                                .shoulders
+                                .iter()
+                                .map(|roof| {
+                                    roof.facets.capacity() * std::mem::size_of::<[[f64; 2]; 3]>()
+                                })
+                                .sum::<usize>()
                     })
                     .sum::<usize>();
             let memo_points = memo.points.saturating_add(added_points);
@@ -922,10 +944,10 @@ pub(super) fn project_protected_voids(
                     ),
             )?;
             regions.push(void.outer.clone());
-            scopes.push(super::support::VoidScope::new(
-                void.height,
-                void.roof.clone(),
-            ));
+            scopes.push(
+                super::support::VoidScope::new(void.height, void.roof.clone())
+                    .with_shoulders(Arc::clone(&void.shoulders)),
+            );
         }
     }
     Ok(super::support::ProtectedVoidSet {
