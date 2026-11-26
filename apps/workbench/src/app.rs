@@ -8,7 +8,7 @@ use crate::{
     host::{Command, Config, Host, Phase, Picker, Snapshot},
     ui::{self, Theme},
 };
-use egui::{Key, KeyboardShortcut, Modifiers, RichText};
+use egui::{Key, KeyboardShortcut, Modifiers};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use spiling_contracts::geometry::*;
@@ -46,7 +46,7 @@ impl Default for Preferences {
         Self {
             compute: Default::default(),
             navigation: Default::default(),
-            theme: Theme::Graphite,
+            theme: Theme::System,
             accepted_osl3: false,
             library_location: None,
             analysis_pins: Vec::new(),
@@ -70,6 +70,7 @@ pub struct Workbench {
     awaiting_serial: Option<u64>,
     local_problem: Option<String>,
     show_license: bool,
+    show_about: bool,
     show_gallery: bool,
     show_commands: bool,
     show_feedback: bool,
@@ -159,6 +160,7 @@ impl Workbench {
             awaiting_serial: None,
             local_problem: None,
             show_license: false,
+            show_about: false,
             show_gallery: false,
             show_commands: false,
             show_feedback: false,
@@ -240,7 +242,7 @@ impl Workbench {
             return Some("Select a part or face in the current source display first");
         }
         if action == Action::Compile && (self.project_drafts() || self.subject_drafts()) {
-            return Some("Apply or discard unapplied changes before slicing");
+            return Some("Apply or discard changes before slicing");
         }
         if action == Action::Compare && !self.manufacturing_current() {
             return Some("Freshly verify the current plate before comparing settings");
@@ -466,7 +468,7 @@ impl Workbench {
         if self.plate_sheet_open() {
             return;
         }
-        if self.navigation.is_some() {
+        if self.navigation.is_some() || self.show_about {
             return;
         }
         // Route Escape once, from the topmost surface. Popups and modal decisions
@@ -563,7 +565,7 @@ impl Workbench {
         }
     }
     fn project(&self, ui: &mut egui::Ui) {
-        let tokens = self.prefs.theme.tokens();
+        let tokens = ui::Tokens::for_ui(ui);
         ui::pane_header(ui, "Project", "");
         if self.state.phase != Phase::Running {
             ui.colored_label(tokens.warning, "Last observed state · engine disconnected");
@@ -572,12 +574,6 @@ impl Workbench {
             ui.label("Waiting for checked project information");
             return;
         };
-        ui::property(
-            ui,
-            "Location",
-            p.path_label.as_deref().unwrap_or("Unsaved project"),
-            tokens,
-        );
         let status = if p.read_only {
             "Read-only"
         } else if p.save_uncertain {
@@ -591,6 +587,9 @@ impl Workbench {
         };
         ui::property(ui, "State", status, tokens);
         ui.collapsing("Saved revisions", |ui| {
+            if let Some(path) = &p.path_label {
+                ui::property(ui, "Location", path, tokens);
+            }
             ui::property(ui, "Project revision", p.revision.0.to_string(), tokens);
             ui::property(
                 ui,
@@ -603,9 +602,6 @@ impl Workbench {
         });
         if p.recovered_previous {
             ui.colored_label(tokens.warning, "Recovered previous checkpoint");
-        }
-        if p.save_uncertain {
-            ui.colored_label(tokens.warning,"A save may have reached disk. Inspect the saved project before relying on the outcome.");
         }
         ui.collapsing("Scene details", |ui| {
             if let Some(scene) = &self.state.scene {
@@ -665,7 +661,7 @@ impl Workbench {
                     columns[0].allocate_exact_size(egui::vec2(80.0, 40.0), egui::Sense::hover());
                 columns[0].painter().add(egui::Shape::convex_polygon(
                     vec![rect.left_bottom(), rect.right_bottom(), rect.center_top()],
-                    self.prefs.theme.tokens().accent,
+                    ui::Tokens::for_ui(&columns[0]).accent,
                     egui::Stroke::NONE,
                 ));
                 columns[0].weak("Checked SPLT · unitless diagnostic, separate from project BREP");
@@ -903,19 +899,21 @@ impl eframe::App for Workbench {
             self.viewport.suspend_navigation();
         }
         if !self.prefs.accepted_osl3 {
-            ui.heading("Welcome to Spiling");
-            ui.label("Native BREP manufacturing workbench · development build");
-            ui.label("Review the Open Software License 3.0 before using this application.");
-            egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - 70.0)
-                .show(ui, |ui| {
-                    ui.label(LICENSE);
-                });
-            if ui::primary(ui, "Accept and continue", None) {
-                self.prefs.accepted_osl3 = true;
-                self.start_requested = true;
-                ctx.request_repaint();
-            }
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.set_max_width(ui.available_width().min(820.0));
+                ui.heading("Spiling");
+                ui.label("Open Software License 3.0");
+                egui::ScrollArea::vertical()
+                    .max_height((ui.available_height() - 48.0).max(0.0))
+                    .show(ui, |ui| {
+                        ui.label(LICENSE);
+                    });
+                if ui::primary(ui, "Accept and continue", None) {
+                    self.prefs.accepted_osl3 = true;
+                    self.start_requested = true;
+                    ctx.request_repaint();
+                }
+            });
             return;
         }
         self.library_sync();
@@ -929,7 +927,7 @@ impl eframe::App for Workbench {
                         ui.label("Starting engine…");
                     }
                     Phase::Interrupted => {
-                        ui.colored_label(self.prefs.theme.tokens().warning, "Engine interrupted");
+                        ui.colored_label(ui::Tokens::for_ui(ui).warning, "Engine interrupted");
                     }
                     Phase::Closed => {
                         ui.label("Engine closed");
@@ -941,7 +939,7 @@ impl eframe::App for Workbench {
                     .as_ref()
                     .is_some_and(|p| p.save_uncertain)
                 {
-                    ui.colored_label(self.prefs.theme.tokens().warning, "Save outcome uncertain");
+                    ui.colored_label(ui::Tokens::for_ui(ui).warning, "Save outcome uncertain");
                 }
                 let problems =
                     self.state.problems.len() + usize::from(self.local_problem.is_some());
@@ -1043,25 +1041,20 @@ impl eframe::App for Workbench {
                     .show(ui, |ui| self.tree_ui(ui));
             }
             egui::CentralPanel::default_margins()
-                .frame(
-                    egui::Frame::central_panel(ui.style()).fill(self.prefs.theme.tokens().canvas),
-                )
+                .frame(egui::Frame::central_panel(ui.style()).fill(ui::Tokens::for_ui(ui).canvas))
                 .show(ui, |ui| {
                     if self.plates.overview {
                         self.plate_overview_ui(ui);
                         return;
                     }
                     if self.state.display_loading {
-                        ui.label("Updating source display · previous revision retained");
+                        ui.label("Updating source display…");
                         if ui.button("Pause transfer").clicked() {
                             self.queued_host = Some(Command::PauseDisplay);
                         }
                     }
                     if self.state.display_paused {
-                        ui.colored_label(
-                            self.prefs.theme.tokens().warning,
-                            "Source display paused · previous revision retained",
-                        );
+                        ui.colored_label(ui::Tokens::for_ui(ui).warning, "Source display paused");
                         if ui.button("Resume transfer").clicked() {
                             self.queued_host = Some(Command::ResumeDisplay);
                         }
@@ -1072,8 +1065,8 @@ impl eframe::App for Workbench {
                     let current = self.display_current();
                     if !current && self.state.display.is_some() {
                         ui.colored_label(
-                            self.prefs.theme.tokens().warning,
-                            "Displayed source is stale · picking and edits disabled",
+                            ui::Tokens::for_ui(ui).warning,
+                            "Earlier source revision · inspection only",
                         );
                     }
                     if self
@@ -1087,15 +1080,16 @@ impl eframe::App for Workbench {
                             if self.state.project.is_some() {
                                 "This plate is empty"
                             } else {
-                                "No source geometry"
+                                "Open or import a part"
                             },
-                            if self.state.project.is_some() {
-                                "Import a part, or move or copy parts from another plate"
-                            } else {
-                                "Import a STEP part or open a saved project"
-                            },
+                            "",
                         );
-                        self.primary_button(ui, Action::Import);
+                        ui.horizontal_wrapped(|ui| {
+                            self.primary_button(ui, Action::Import);
+                            if self.state.project.is_none() {
+                                self.button(ui, Action::Open);
+                            }
+                        });
                     }
                     let layout_preview = self.layout_preview();
                     let review = if self.layout.open
@@ -1332,6 +1326,22 @@ impl eframe::App for Workbench {
                 ctx.memory_mut(|m| m.request_focus(id));
             }
         }
+        if self.show_about {
+            let modal = egui::Modal::new(egui::Id::unique("about-spiling")).show(&ctx, |ui| {
+                ui.heading("Spiling");
+                ui.label("Native desktop slicer for mechanical parts");
+                ui.weak(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.separator();
+                ui.label("A QHODL project");
+                ui.hyperlink_to(
+                    "Documentation",
+                    "https://github.com/pquerna/spiling#technical-documentation",
+                );
+                ui.add_space(8.0);
+                ui::close(ui, "Close")
+            });
+            self.show_about = !(modal.inner || modal.should_close());
+        }
         self.import_failure_dialog(&ctx, frame);
         self.navigation_dialog(&ctx);
         self.compute_dialog(&ctx);
@@ -1339,16 +1349,29 @@ impl eframe::App for Workbench {
         if let Some(confirmation) = &self.state.confirmation {
             let id = confirmation.id;
             self.opening_frames.confirmation(&ctx, id);
-            let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx,|ui| {
+            let modal = egui::Modal::new(egui::Id::unique("discard-project")).show(&ctx, |ui| {
                 ui.set_max_width(420.0);
                 ui.heading("Discard unsaved changes?");
-                ui.label(format!("{} discards the current in-memory changes. Save first to preserve them.",confirmation.action));
-                if self.state.project.as_ref().is_some_and(|p| p.save_uncertain) { ui.colored_label(self.prefs.theme.tokens().warning,"The last save may already have reached disk. Inspect it before relying on its outcome."); }
+                ui.label(format!("Action: {}", confirmation.action));
+                if self
+                    .state
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| p.save_uncertain)
+                {
+                    ui.colored_label(ui::Tokens::for_ui(ui).warning, "Last save unconfirmed");
+                }
                 ui.horizontal(|ui| {
-                    if ui::primary(ui, "Keep editing", None) { self.confirmation = Some((id,false)); }
-                    if ui.button(RichText::new("Discard changes").color(self.prefs.theme.tokens().warning)).on_hover_text("Alt+D").clicked()
+                    if ui::primary(ui, "Keep editing", None) {
+                        self.confirmation = Some((id, false));
+                    }
+                    if ui::destructive(ui, "Discard changes", None)
+                        .on_hover_text("Alt+D")
+                        .clicked()
                         || ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::D))
-                    { self.confirmation = Some((id,true)); }
+                    {
+                        self.confirmation = Some((id, true));
+                    }
                 });
             });
             if modal.should_close() {

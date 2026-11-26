@@ -202,7 +202,7 @@ impl Workbench {
             None => "Choose…".into(),
         };
         let mut problem = None;
-        let tokens = self.prefs.theme.tokens();
+        let tokens = ui::Tokens::for_ui(ui);
         egui::Grid::new("print-settings")
             .num_columns(2)
             .spacing([12.0, 8.0])
@@ -477,7 +477,7 @@ impl Workbench {
         plan: &NormalizedPrintPlan,
         artifact: &spiling_contracts::geometry::SourceHash,
     ) {
-        let tokens = self.prefs.theme.tokens();
+        let tokens = ui::Tokens::for_ui(ui);
         // One scan per artifact; a large plate is not rescanned every frame.
         let size = match &self.print_settings.printed_size {
             Some((k, size)) if k == artifact => *size,
@@ -489,8 +489,9 @@ impl Workbench {
         };
         let time = report
             .estimated_seconds
-            .map_or_else(|| "Time not estimated".into(), duration);
-        ui.label(egui::RichText::new(time).size(26.0).strong());
+            .map_or_else(|| "Unavailable".into(), duration);
+        ui.weak("Estimated time");
+        ui.label(egui::RichText::new(time).size(24.0).strong());
         let filament = report.filament_length_mm
             + report.support_filament_length_mm
             + report.priming_filament_length_mm
@@ -538,7 +539,7 @@ impl Workbench {
     /// the reported slowdowns and limitations.
     pub(super) fn job_summary(&self, ui: &mut egui::Ui, report: &VerificationReport) {
         ui::group(ui, "Print job");
-        let tokens = self.prefs.theme.tokens();
+        let tokens = ui::Tokens::for_ui(ui);
         if let Some(seconds) = report.estimated_seconds {
             ui::property(ui, "Estimated time", duration(seconds), tokens);
         } else if report.job_time.is_none() {

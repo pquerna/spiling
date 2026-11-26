@@ -19,7 +19,7 @@ mod stock;
 mod surfaces;
 pub use color::{ColorDensity, ColorInspector, ColorMeaning, ColorPresentation};
 pub use stock::{stock_results, stock_target};
-pub use surfaces::{close, group, help, pane_header, primary, problem};
+pub use surfaces::{close, destructive, group, help, pane_header, primary, problem, verified};
 
 mod routing;
 pub use routing::{routed_material_fields, tool_reference};
@@ -30,8 +30,7 @@ pub use modifiers::{ModifierAction, modifier_delta, modifier_row, resolved_value
 mod navigation;
 pub use navigation::{workspace_commands, workspace_tabs};
 
-use egui::{Color32, RichText, Ui};
-use serde::{Deserialize, Serialize};
+use egui::{RichText, Ui};
 use spiling_contracts::manufacturing::{LayerHeightPolicy, LayerHeightReason, ManufacturingIntent};
 
 pub fn replay_control_area(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
@@ -41,85 +40,19 @@ pub fn replay_control_area(ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
         .show(ui, contents);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Theme {
-    Graphite,
-    Paper,
-}
-#[derive(Clone, Copy)]
-pub struct Tokens {
-    pub panel: Color32,
-    pub canvas: Color32,
-    pub text: Color32,
-    pub muted: Color32,
-    pub accent: Color32,
-    pub warning: Color32,
-    pub error: Color32,
-}
-impl Theme {
-    pub fn tokens(self) -> Tokens {
-        match self {
-            Self::Graphite => Tokens {
-                panel: Color32::from_rgb(27, 33, 42),
-                canvas: Color32::from_rgb(18, 22, 28),
-                text: Color32::from_rgb(232, 238, 246),
-                muted: Color32::from_rgb(168, 183, 202),
-                accent: Color32::from_rgb(121, 184, 255),
-                warning: Color32::from_rgb(244, 196, 107),
-                error: Color32::from_rgb(255, 138, 128),
-            },
-            Self::Paper => Tokens {
-                panel: Color32::from_rgb(246, 248, 251),
-                canvas: Color32::from_rgb(232, 237, 243),
-                text: Color32::from_rgb(23, 33, 46),
-                muted: Color32::from_rgb(75, 93, 115),
-                accent: Color32::from_rgb(23, 95, 181),
-                warning: Color32::from_rgb(128, 80, 0),
-                error: Color32::from_rgb(179, 38, 30),
-            },
-        }
-    }
-    pub fn apply(self, ctx: &egui::Context) {
-        let tokens = self.tokens();
-        let mut visuals = match self {
-            Self::Graphite => egui::Visuals::dark(),
-            Self::Paper => egui::Visuals::light(),
-        };
-        visuals.panel_fill = tokens.panel;
-        visuals.window_fill = tokens.panel;
-        visuals.extreme_bg_color = tokens.canvas;
-        visuals.override_text_color = Some(tokens.text);
-        visuals.weak_text_color = Some(tokens.muted);
-        visuals.selection.stroke.color = tokens.accent;
-        visuals.hyperlink_color = tokens.accent;
-        visuals.warn_fg_color = tokens.warning;
-        visuals.error_fg_color = tokens.error;
-        ctx.set_visuals(visuals);
-        ctx.global_style_mut(|style| {
-            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-            style.spacing.button_padding = egui::vec2(10.0, 6.0);
-            style.spacing.interact_size.y = 28.0;
-            style
-                .text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Heading, egui::FontId::proportional(17.0));
-            style
-                .text_styles
-                .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-        });
-    }
-}
+mod theme;
+pub(crate) use theme::rgb;
+pub use theme::{Theme, Tokens};
 
 /// Every command surface shares disabled reasons and target sizing.
 pub fn action(ui: &mut Ui, label: &str, disabled: Option<&str>) -> bool {
-    ui.add_enabled(disabled.is_none(), egui::Button::new(label))
-        .on_disabled_hover_text(disabled.unwrap_or_default())
-        .clicked()
+    if ui.stack().contained_in(egui::UiKind::Menu) {
+        ui.add_enabled(disabled.is_none(), egui::Button::new(label).frame(false))
+            .on_disabled_hover_text(disabled.unwrap_or_default())
+            .clicked()
+    } else {
+        surfaces::secondary(ui, label, disabled).clicked()
+    }
 }
 pub fn property(ui: &mut Ui, label: &str, value: impl AsRef<str>, tokens: Tokens) {
     ui.vertical(|ui| {
@@ -133,7 +66,8 @@ pub fn notice(ui: &mut Ui, heading: &str, detail: &str, tokens: Tokens) {
     ui.add(egui::Label::new(RichText::new(detail).color(tokens.muted)).wrap());
 }
 pub fn theme_choice(ui: &mut Ui, theme: &mut Theme) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(theme, Theme::System, "System");
         ui.selectable_value(theme, Theme::Graphite, "Graphite");
         ui.selectable_value(theme, Theme::Paper, "Paper");
     });
@@ -278,37 +212,86 @@ pub fn number<N: egui::emath::Numeric>(
 mod tests {
     use super::*;
 
+    fn luminance(color: egui::Color32) -> f64 {
+        let [r, g, b, _] = color.to_array();
+        let linear = [r, g, b].map(|v| {
+            let c = f64::from(v) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    }
+
     #[test]
-    fn both_themes_keep_secondary_text_readable_on_panel_and_canvas() {
-        fn luminance(color: Color32) -> f64 {
-            let [r, g, b, _] = color.to_array();
-            let linear = [r, g, b].map(|v| {
-                let c = f64::from(v) / 255.0;
-                if c <= 0.04045 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            });
-            0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
-        }
+    fn theme_pairs_keep_primary_labels_roles_and_focus_readable() {
+        let ratio = |a, b| {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
         for theme in [Theme::Graphite, Theme::Paper] {
-            let tokens = theme.tokens();
+            let t = theme.tokens();
             let ctx = egui::Context::default();
             theme.apply(&ctx);
-            assert_eq!(
-                ctx.global_style().visuals.weak_text_color,
-                Some(tokens.muted)
-            );
-            for foreground in [tokens.text, tokens.muted, tokens.warning, tokens.error] {
-                for background in [tokens.panel, tokens.canvas] {
-                    let a = luminance(foreground);
-                    let b = luminance(background);
-                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                    assert!(ratio >= 4.5, "{theme:?} text contrast {ratio}");
+            assert_eq!(ctx.global_style().visuals.weak_text_color, Some(t.muted));
+            for background in [t.panel, t.canvas, t.control, t.hover, t.pressed, t.selected] {
+                for foreground in [t.text, t.muted, t.warning, t.error, t.success, t.accent] {
+                    assert!(ratio(foreground, background) >= 4.5, "{theme:?} text");
+                }
+                for edge in [t.boundary, t.focus, t.accent] {
+                    assert!(ratio(edge, background) >= 3.0, "{theme:?} edge");
+                }
+            }
+            assert!(ratio(t.focus, t.focus_gap) >= 3.0);
+            assert!(ratio(t.boundary, t.bed) >= 3.0);
+            for fill in theme::ACTION {
+                assert!(ratio(egui::Color32::WHITE, fill) >= 7.0);
+            }
+            for role in crate::replay::ROLES {
+                for background in [t.panel, t.canvas, t.bed] {
+                    assert!(
+                        ratio(role.color(theme == Theme::Graphite), background) >= 3.0,
+                        "{theme:?} {}",
+                        role.label
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn system_uses_both_installed_palettes_and_preserves_explicit_paper() {
+        let ctx = egui::Context::default();
+        Theme::System.apply(&ctx);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        let set_system = |theme| {
+            ctx.run_ui(
+                egui::RawInput {
+                    system_theme: Some(theme),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .drop_without_applying_deltas();
+        };
+        set_system(egui::Theme::Light);
+        assert_eq!(
+            ctx.global_style().visuals.panel_fill,
+            Theme::Paper.tokens().panel
+        );
+        Theme::Paper.apply(&ctx);
+        set_system(egui::Theme::Dark);
+        assert_eq!(
+            ctx.global_style().visuals.panel_fill,
+            Theme::Paper.tokens().panel
+        );
+        Theme::System.apply(&ctx);
+        assert_eq!(
+            ctx.global_style().visuals.panel_fill,
+            Theme::Graphite.tokens().panel
+        );
     }
 
     #[test]

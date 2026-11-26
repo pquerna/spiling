@@ -8,5 +8,14 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) color:vec3<f
 @vertex fn vs(@location(0) position:vec3<f32>, @location(1) color:vec3<f32>)->Output {
     var out:Output; out.position=camera.view_projection*vec4(position,1.0); out.color=color; return out;
 }
+// Separate the coplanar grid and outline from the rendered sheet in
+// clip depth. This is a display offset, not a change to the build frame.
+@vertex fn vs_line(@location(0) position:vec3<f32>, @location(1) color:vec3<f32>)->Output {
+    var out:Output;
+    out.position=camera.view_projection*vec4(position,1.0);
+    out.position.z-=0.000001*out.position.w;
+    out.color=color;
+    return out;
+}
 // Hardware is contextual display, never source geometry or a section cap.
 @fragment fn fs(input:Output)->@location(0) vec4<f32>{ return vec4(input.color,1.0); }

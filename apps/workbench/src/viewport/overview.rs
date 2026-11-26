@@ -218,6 +218,9 @@ pub fn paint(
                 cut: [0.0; 4],
                 context: tint,
                 emphasis: [0.0; 4],
+                roles: [[0.0; 4]; 16],
+                source_color: super::color_rgba(tokens.source),
+                selection_color: super::color_rgba(tokens.accent),
             },
             dark: ui.visuals().dark_mode,
         },
@@ -279,13 +282,17 @@ impl egui_wgpu::CallbackTrait for Frame {
             r.overview.cards[self.index] = Some(card);
         }
         if let Some(Ok(card)) = &r.overview.cards[self.index] {
-            queue.write_buffer(&card.uniform, 0, bytemuck::bytes_of(&self.uniform));
+            let uniform = Uniform {
+                context: super::render_color(self.uniform.context, r.srgb_target),
+                ..self.uniform
+            };
+            queue.write_buffer(&card.uniform, 0, bytemuck::bytes_of(&uniform));
             queue.write_buffer(
                 &card.line_uniform,
                 0,
                 bytemuck::bytes_of(&Uniform {
                     context: [0.0; 4],
-                    ..self.uniform
+                    ..uniform
                 }),
             );
         }

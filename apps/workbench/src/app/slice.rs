@@ -47,7 +47,7 @@ impl Workbench {
             ui::primary(ui, "Slicing…", Some(""));
             return;
         }
-        if ui::primary(ui, "Slice", self.disabled(Action::Preflight)) {
+        if ui::primary(ui, "Slice plate", self.disabled(Action::Preflight)) {
             self.start_slice();
         }
     }

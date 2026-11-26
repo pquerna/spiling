@@ -42,7 +42,7 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         return;
     }
     if category == 6 {
-        crate::app::alternative_gallery(ui, theme.tokens());
+        crate::app::alternative_gallery(ui, Tokens::for_ui(ui));
         return;
     }
     egui::ScrollArea::vertical()
@@ -50,8 +50,15 @@ pub fn gallery(ui: &mut Ui, theme: &mut Theme) {
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width().min(650.0));
             match category {
-                0 => panel(ui),
-                1 => fields(ui, theme.tokens()),
+                0 => {
+                    ui.collapsing("Action states", |ui| {
+                        primary(ui, "Slice plate", None);
+                        primary(ui, "Export plate", Some("Slice the plate first"));
+                        destructive(ui, "Discard changes", None);
+                    });
+                    panel(ui);
+                }
+                1 => fields(ui, Tokens::for_ui(ui)),
                 4 => matching(ui),
                 5 => wall_starts(ui),
                 7 => build_area(ui),
@@ -333,7 +340,7 @@ mod tests {
     fn review_and_build_area_controls_reflow_in_both_themes_and_scaled_panes() {
         for theme in [Theme::Graphite, Theme::Paper] {
             for width in [240.0, 320.0, 400.0] {
-                for scale in [1.0, 1.5, 2.0] {
+                for scale in [1.0, 1.25, 1.5, 2.0] {
                     let ctx = egui::Context::default();
                     theme.apply(&ctx);
                     ctx.set_zoom_factor(scale);

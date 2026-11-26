@@ -316,14 +316,10 @@ impl Action {
             {
                 Some("Choose a complete single-tool Marlin setup or apply an intent first")
             }
-            Self::Preflight if m.intent.is_none() => {
-                Some("Apply a complete manufacturing intent first")
-            }
+            Self::Preflight if m.intent.is_none() => Some("Apply print settings first"),
             // The engine's Compile runs its own admission and refuses what it
             // cannot make; the client adds no preflight gate (same as the CLI).
-            Self::Compile if m.intent.is_none() => {
-                Some("Apply a complete manufacturing intent first")
-            }
+            Self::Compile if m.intent.is_none() => Some("Apply print settings first"),
             Self::Verify if m.artifact.is_none() => Some("Compile a manufacturing artifact first"),
             Self::Export
                 if m.export_busy
@@ -332,7 +328,7 @@ impl Action {
                             .is_some_and(|r| r.report.verified)
                     }) =>
             {
-                Some("Fresh passing verification is required for the current output")
+                Some("Verify the current plate first")
             }
             Self::Undo if !project.can_undo => Some("No project transaction to undo"),
             Self::Redo if !project.can_redo => Some("No project transaction to redo"),

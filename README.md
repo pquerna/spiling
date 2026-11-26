@@ -6,7 +6,11 @@ Licensed under the Open Software License version 3.0
 
 # Spiling
 
-Spiling is an experimental desktop app for preparing FDM jobs from mechanical CAD models. You choose how the parts are filled and finished, inspect the printer instructions it generates, and save the job. The desktop app and CLI use the same native Rust engine.
+**Prepare the part. See how it will be made.**
+
+Spiling is an experimental native desktop slicer for mechanical parts. Set up a
+plate, inspect the generated toolpaths, and save the project for the next
+revision. The workbench and CLI use the same Rust engine.
 
 It is for engineers and workshop users who start from STEP files. Spiling is early software: it is not production-ready, machine-ready, or physically qualified. Do not use it to run a printer.
 
@@ -20,6 +24,14 @@ It is for engineers and workshop users who start from STEP files. Spiling is ear
 - Undo changes, save the job, and reopen it without the original CAD or image file.
 
 A saved job keeps its own copy of the imported CAD model and any relief image, so you can move the job folder as a unit. Reopening uses those stored bytes; it does not automatically follow later edits to your CAD file. If a stored file is missing or changed, the app reports an error rather than silently substituting it.
+
+## Prepare and review a housing
+
+| Prepare | Review |
+| --- | --- |
+| ![Paper theme with the housing on the plate and Slice plate available](docs/quality/images/housing-prepare.png) | ![Paper theme with emitted housing toolpaths, job metrics and Export plate after software verification](docs/quality/images/housing-review.png) |
+
+The native Linux workbench shows the same [rounded housing fixture](fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step) before slicing and after fresh review. The estimate and overhang finding come from the checked job. Review keeps the finding beside the control that shows its layer. [Build and run the native workbench](docs/quality/development.md#native-egui-workbench)
 
 ## Current limits
 

@@ -240,7 +240,7 @@ impl Workbench {
             let conflict = s.revision != Some(project.revision);
             if conflict {
                 ui.colored_label(
-                    self.prefs.theme.tokens().warning,
+                    ui::Tokens::for_ui(ui).warning,
                     "Project changed while editing. Reload this finish draft before applying.",
                 );
             }
@@ -265,7 +265,7 @@ impl Workbench {
                 let old_scope=s.scope;egui::ComboBox::from_id_salt("finish scope").selected_text(format!("Scope: {:?}",s.scope)).show_ui(ui,|ui|{ui.selectable_value(&mut s.scope,SurfaceScopeKind::Occurrence,"Occurrence override");ui.selectable_value(&mut s.scope,SurfaceScopeKind::Definition,"Shared source definition");});s.dirty|=old_scope!=s.scope;
                 let old=s.kind;egui::ComboBox::from_id_salt("finish kind").selected_text(["Smooth override","Planar vertical ribs","Cylindrical ribs","Image relief"][s.kind as usize]).show_ui(ui,|ui|{for (index,label) in ["Smooth override","Planar vertical ribs","Cylindrical ribs","Image relief"].iter().enumerate(){ui.selectable_value(&mut s.kind,index as u8,*label);}});s.dirty|=old!=s.kind;
                 let supported=match s.kind{0=>true,1=>plane,2=>cylinder,_=>plane||cylinder};
-                if !supported{ui.colored_label(self.prefs.theme.tokens().warning,"This finish needs an exact native plane/cylinder. Other carriers are not supported.");}
+                if !supported{ui.colored_label(ui::Tokens::for_ui(ui).warning,"This finish needs an exact native plane/cylinder. Other carriers are not supported.");}
                 let mut changed=false;
                 if matches!(s.kind,1|2){
                     changed|=numeric(ui,"Depth (mm)",&mut s.ribs[0],0.01);
@@ -277,7 +277,7 @@ impl Workbench {
                     let before=s.stored.clone();egui::ComboBox::from_id_salt("canonical image").selected_text(s.stored.as_ref().and_then(|hash|project.surface_overlays.images.iter().find(|i|&i.image_hash==hash)).map_or("Import a new PNG / PGM",|i|i.source_name.as_str())).show_ui(ui,|ui|{ui.selectable_value(&mut s.stored,None,"Import a new PNG / PGM");for image in &project.surface_overlays.images{ui.selectable_value(&mut s.stored,Some(image.image_hash.clone()),&image.source_name);}});s.dirty|=before!=s.stored;
                     for(label,value)in[("Maximum additive depth (mm)",&mut s.image.depth_mm),("U phase (cycle fraction)",&mut s.image.u_phase_fraction),("Source-Z period (mm)",&mut s.image.z_period_mm),("Source-Z phase (mm)",&mut s.image.z_phase_mm),("Protected edge margin (mm; cylinder 0)",&mut s.image.edge_margin_mm),("Vertical displacement error (mm)",&mut s.image.vertical_error_mm)]{changed|=numeric(ui,label,value,0.01);}
                     changed|=ui.add(egui::DragValue::new(&mut s.image.u_repeats).range(1..=256).prefix("U repeats ")).changed();
-                    if let Err(error)=s.image.validate(){ui.colored_label(self.prefs.theme.tokens().warning,error.to_string());}
+                    if let Err(error)=s.image.validate(){ui.colored_label(ui::Tokens::for_ui(ui).warning,error.to_string());}
                 }
                 s.dirty|=changed;
             });

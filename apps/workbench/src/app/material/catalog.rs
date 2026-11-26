@@ -88,7 +88,7 @@ impl Workbench {
             }
             if !valid {
                 ui.colored_label(
-                    self.prefs.theme.tokens().warning,
+                    ui::Tokens::for_ui(ui).warning,
                     "Search accepts up to 128 UTF-8 bytes and no control characters.",
                 );
             }
@@ -148,7 +148,7 @@ impl Workbench {
                             }
                         } else {
                             for issue in &candidate.issues {
-                                ui.colored_label(self.prefs.theme.tokens().warning, &issue.message);
+                                ui.colored_label(ui::Tokens::for_ui(ui).warning, &issue.message);
                             }
                             ui.weak("This declaration cannot be applied unchanged.");
                             if ui::primary(ui, "Back to results", None) { self.material.catalog.preview = None; }

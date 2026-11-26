@@ -129,7 +129,7 @@ pub fn seam_review(
         count,
         start.layer + 1,
         start.tool,
-        crate::replay::ROLES[start.role as usize]
+        crate::replay::ROLES[start.role as usize].label
     ));
     ui.collapsing("Start coordinates and commands", |ui| {
         ui.add(

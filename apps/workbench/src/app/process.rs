@@ -595,7 +595,7 @@ impl Workbench {
             let conflict = p.revision != Some(project.revision);
             if conflict {
                 ui.colored_label(
-                    self.prefs.theme.tokens().warning,
+                    ui::Tokens::for_ui(ui).warning,
                     "Project changed · draft retained",
                 );
             }

@@ -113,7 +113,7 @@ impl Workbench {
             if self.manufacturing.trial.is_some() { ui.weak("Keep an alternative explicitly before leaving if you want to retain it."); }
             if let Some(Navigation::Action(action)) = &self.navigation { ui.label(format!("Next: {}", action.label())); }
             keep = ui::primary(ui, "Keep editing", None);
-            discard = ui.button(egui::RichText::new("Discard drafts and continue").color(self.prefs.theme.tokens().warning)).clicked();
+            discard = ui::destructive(ui, "Discard drafts and continue", None).clicked();
         });
         if keep || modal.should_close() {
             self.navigation = None;

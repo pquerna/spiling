@@ -8,7 +8,7 @@ impl eframe::App for Gallery {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let before = self.theme;
         egui::Frame::central_panel(ui.style())
-            .fill(self.theme.tokens().canvas)
+            .fill(spiling_workbench::ui::Tokens::for_ui(ui).canvas)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 spiling_workbench::ui::gallery(ui, &mut self.theme);

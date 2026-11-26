@@ -206,7 +206,7 @@ impl Workbench {
             .display
             .clone()
             .filter(|s| s.context.same_geometry(&overview));
-        let tokens = self.prefs.theme.tokens();
+        let tokens = ui::Tokens::for_ui(ui);
         egui::ScrollArea::vertical().show(ui, |ui| {
             if let Some(event) = ui::plate_overview(
                 ui,
@@ -338,7 +338,7 @@ impl Workbench {
             if ui
                 .add_enabled(
                     reason.is_none() && p.layouts.len() < 16,
-                    egui::Button::new("Add plate"),
+                    egui::Button::new("Add"),
                 )
                 .on_disabled_hover_text(reason.unwrap_or("A project supports up to 16 plates"))
                 .clicked()
@@ -346,7 +346,7 @@ impl Workbench {
                 self.plate_sheet(ui, Mode::Add);
             }
             ui.add_enabled_ui(reason.is_none(), |ui| {
-                ui.menu_button("Plate actions", |ui| {
+                ui.menu_button("Actions", |ui| {
                     for mode in [
                         Mode::Rename,
                         Mode::Duplicate,

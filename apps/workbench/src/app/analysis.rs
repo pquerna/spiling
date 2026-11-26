@@ -211,7 +211,7 @@ impl Workbench {
         });
         if (self.analysis.view.local_frame || self.analysis.view.selected_only) && pose.is_none() {
             ui.colored_label(
-                self.prefs.theme.tokens().warning,
+                ui::Tokens::for_ui(ui).warning,
                 "Select a current part to restore this plane or source scope. The cut is disabled until then.",
             );
         }
@@ -298,7 +298,7 @@ impl Workbench {
         if self.analysis.view.representation != Representation::Source {
             if !self.manufacturing_current() {
                 ui.colored_label(
-                    self.prefs.theme.tokens().warning,
+                    ui::Tokens::for_ui(ui).warning,
                     "Verify the current program to compare deposition.",
                 );
             }

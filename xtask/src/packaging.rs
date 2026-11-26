@@ -251,10 +251,19 @@ pub fn provenance(context: &Context) -> Result<PathBuf> {
     let source = directory.join("third-party/source");
     let mut components = catalogs(&context.root, &source)?;
     components.extend([
+        json!({"name":"ibm-plex-sans","source":"https://github.com/IBM/plex","revision":"383c681f015ed2626e919ec4e3cca16ccc204e9d","license":"OFL-1.1-RFN","path":"apps/workbench/fonts/IBMPlexSans-SemiBold.ttf","modifications":"None; original SemiBold face embedded in primary action labels."}),
         json!({"name":"xkcd-color-survey","source":"https://xkcd.com/color/rgb.txt","revision":"sha256:450cca88fa6fa9a1e79c969969e05e6900b41a94f0a3a5f134e3d0b79077f890","license":"CC0-1.0","path":"crates/appearance/data/xkcd-rgb.txt","modifications":"None; 949 original survey samples, names and source license declaration retained."}),
         json!({"name":"prusa-fdm-mixer","source":"https://github.com/prusa3d/prusa-fdm-mixer","revision":"007bb922994cdf985c324cb734f6504e805f6790","license":"MIT","path":"crates/appearance/src/prusa_v7.rs","modifications":"Allocation-free Rust port of the pinned TypeScript v7 reference functions; no measurement dataset imported."})
     ]);
     for (from, to) in [
+        (
+            "apps/workbench/fonts/LICENSE-IBM-Plex.txt",
+            "ibm-plex-sans-383c681f/LICENSE-IBM-Plex.txt",
+        ),
+        (
+            "apps/workbench/fonts/IBMPlexSans-SemiBold.ttf.license",
+            "ibm-plex-sans-383c681f/PROVENANCE.txt",
+        ),
         (
             "crates/appearance/LICENSE-prusa-fdm-mixer.txt",
             "prusa-fdm-mixer-007bb922/LICENSE-prusa-fdm-mixer.txt",

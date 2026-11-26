@@ -328,16 +328,14 @@ pub(super) fn unsupported_layers(
         return;
     };
     let count = unsupported().count();
-    ui.horizontal_wrapped(|ui| {
-        ui.colored_label(
-            ui.visuals().warn_fg_color,
-            format!(
-                "Unsupported overhang · {count} {}",
-                if count == 1 { "layer" } else { "layers" }
-            ),
-        );
-        unsupported_layer_row(ui, featured, display, view);
-    });
+    ui.colored_label(
+        ui.visuals().warn_fg_color,
+        format!(
+            "Unsupported overhang · {count} {}",
+            if count == 1 { "layer" } else { "layers" }
+        ),
+    );
+    unsupported_layer_row(ui, featured, display, view);
     if display.is_none() {
         ui.weak("Actual-program layer preview unavailable.");
     }

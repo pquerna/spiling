@@ -31,6 +31,28 @@ struct Uniform {
     /// Neutral RGB/alpha for contextual lines; zero alpha keeps normal colors.
     context: [f32; 4],
     emphasis: [f32; 4],
+    roles: [[f32; 4]; 16],
+    source_color: [f32; 4],
+    selection_color: [f32; 4],
+}
+
+/// egui normally prefers an unorm target for sRGB display values. An sRGB
+/// target encodes in hardware and instead needs linear shader output.
+fn render_color(mut rgba: [f32; 4], srgb_target: bool) -> [f32; 4] {
+    if srgb_target {
+        for c in &mut rgba[..3] {
+            *c = if *c <= 0.04045 {
+                *c / 12.92
+            } else {
+                ((*c + 0.055) / 1.055).powf(2.4)
+            };
+        }
+    }
+    rgba
+}
+
+fn color_rgba(color: egui::Color32) -> [f32; 4] {
+    color.to_array().map(|channel| f32::from(channel) / 255.0)
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -62,6 +84,7 @@ struct PendingUpload {
     result: std::sync::Mutex<UploadResult>,
 }
 struct Resources {
+    srgb_target: bool,
     mechanics: mechanics::Renderer,
     meshes: HashMap<SourceHash, Arc<wgpu::Buffer>>,
     overview: overview::Renderer,
@@ -524,6 +547,7 @@ impl Viewport {
         let mechanics =
             mechanics::Renderer::new(device, &line_pipeline_layout, state.target_format);
         state.renderer.write().callback_resources.insert(Resources {
+            srgb_target: state.target_format.is_srgb(),
             mechanics,
             meshes: HashMap::new(),
             overview,
@@ -1326,6 +1350,7 @@ impl Viewport {
                     .and_then(|scene| reveal::participant_mask(scene, &[scope?]))
             })
             .unwrap_or_default();
+        let tokens = crate::ui::Tokens::for_ui(ui);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Callback {
@@ -1346,6 +1371,10 @@ impl Viewport {
                     [0.21, 0.29, 0.39, 0.14]
                 },
                 uniform: Uniform {
+                    roles: crate::replay::ROLES
+                        .map(|role| color_rgba(role.color(ui.visuals().dark_mode))),
+                    source_color: color_rgba(tokens.source),
+                    selection_color: color_rgba(tokens.accent),
                     matrix: matrix.as_mat4().to_cols_array_2d(),
                     selected: [
                         selection[0],
@@ -1495,7 +1524,7 @@ impl Viewport {
                 egui::Align2::LEFT_TOP,
                 error,
                 egui::FontId::proportional(14.0),
-                egui::Color32::LIGHT_RED,
+                ui.visuals().error_fg_color,
             );
         }
         hit
@@ -1755,7 +1784,16 @@ impl egui_wgpu::CallbackTrait for Callback {
             crate::performance::mark("replay_gpu_ready");
             self.context.request_repaint();
         }
-        queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&self.uniform));
+        let convert = |color| render_color(color, r.srgb_target);
+        let uniform = Uniform {
+            roles: self.uniform.roles.map(convert),
+            source_color: convert(self.uniform.source_color),
+            selection_color: convert(self.uniform.selection_color),
+            context: convert(self.uniform.context),
+            emphasis: convert(self.uniform.emphasis),
+            ..self.uniform
+        };
+        queue.write_buffer(&r.uniform, 0, bytemuck::bytes_of(&uniform));
         let words = self.participants.words();
         if words.len() * 4 > r.participants.size() as usize {
             (r.participants, r.participants_group) =
@@ -1768,8 +1806,8 @@ impl egui_wgpu::CallbackTrait for Callback {
             &r.context_uniform,
             0,
             bytemuck::bytes_of(&Uniform {
-                context: self.context_color,
-                ..self.uniform
+                context: convert(self.context_color),
+                ..uniform
             }),
         );
         let colors = self
@@ -1781,8 +1819,8 @@ impl egui_wgpu::CallbackTrait for Callback {
             });
         for (i, buffer) in r.tool_uniforms.iter().enumerate() {
             let uniform = Uniform {
-                tool_color: colors.map_or([0.0; 4], |c| c[i]),
-                ..self.uniform
+                tool_color: colors.map_or([0.0; 4], |c| convert(c[i])),
+                ..uniform
             };
             queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
         }

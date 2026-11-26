@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>, context:vec4<f32>,emphasis:vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, selected: vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>, context:vec4<f32>,emphasis:vec4<f32>,roles:array<vec4<f32>,16>,source_color:vec4<f32>,selection_color:vec4<f32> };
 struct Instance { rotation: vec4<f32>, translation: vec3<f32>, occurrence: u32 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage,read> mesh: array<u32>;
@@ -30,8 +30,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) normal:vec3<
     if camera.cut.x>0.0 && dot(camera.plane,vec4(input.world,1.0))>0.000001 { discard; }
     if camera.cut.z>0.0 && input.occurrence!=u32(camera.cut.z-1.0) { discard; }
     let normal=normalize(input.normal)*select(-1.0,1.0,front);
-    let light=0.28+0.72*max(dot(normal,normalize(vec3<f32>(0.4,-0.5,0.8))),0.0);
-    let base=select(vec3<f32>(0.52,0.64,0.77),vec3<f32>(1.0,0.67,0.22),input.selected!=0u);
+    let light=0.84+0.16*max(dot(normal,normalize(vec3<f32>(0.4,-0.5,0.8))),0.0);
+    let base=select(camera.source_color.rgb,camera.selection_color.rgb,input.selected!=0u);
     var color=select(base,camera.context.rgb,camera.context.a>0.0);
     if camera.emphasis.w>0.0 && input.selected==0u {
         let word=select(0u,participants[input.occurrence/32u],input.occurrence/32u<arrayLength(&participants));

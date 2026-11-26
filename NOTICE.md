@@ -43,3 +43,5 @@ The vendored tracel-llvm-bundler build helper is derived from Tracel Technologie
 Inc.'s MIT OR Apache-2.0 source. Its licenses, exact source revision and local
 Darwin cross-build adaptation are recorded in vendor/tracel-llvm-bundler/.
 Original Spiling code in src/cross.rs is OSL-3.0; upstream sources retain their original licenses.
+
+The primary action labels embed the original IBM Plex Sans SemiBold face from IBM Plex v6.4.0 under SIL OFL 1.1 with the reserved name “Plex”. Release provenance includes its license and source receipt. [Font provenance](apps/workbench/fonts/IBMPlexSans-SemiBold.ttf.license)

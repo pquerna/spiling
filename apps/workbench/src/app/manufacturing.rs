@@ -226,12 +226,18 @@ impl Workbench {
             && matches!(self.manufacturing.prepare_section, 1 | 2)
             && self.manufacturing.trial.is_some()
         {
-            ui.label("Current drafts are retained. Return to the alternative or explicitly end it before editing Current.");
+            ui.label("Current drafts retained · alternative open");
             return;
         }
         if self.work_area.panel == Panel::Review {
             if self.manufacturing_current() {
                 self.primary_button(ui, Action::Export);
+                if m.capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.report.verified)
+                {
+                    ui::verified(ui);
+                }
             } else if m.intent.is_some() {
                 self.slice_button(ui);
             } else if ui::primary(ui, "Prepare plate", self.disabled(Action::PrepareWorkspace)) {
@@ -253,7 +259,7 @@ impl Workbench {
                 .has_changes(&project.project_id, m.intent.as_deref())
             || self.process.has_changes();
         if draft && self.manufacturing.prepare_section != 4 {
-            ui.label("Unapplied changes · compile uses committed settings");
+            ui.label("Unapplied changes");
         }
         match self.manufacturing.prepare_section {
             1 if self.material.tool_id.is_some()
@@ -441,8 +447,8 @@ impl Workbench {
                     let conflict = d.revision != project.revision;
                     if conflict {
                         ui.colored_label(
-                            self.prefs.theme.tokens().warning,
-                            "Project changed while editing. Reload current values before applying.",
+                            ui::Tokens::for_ui(ui).warning,
+                            "Project changed · reload settings",
                         );
                     }
                     if let Some(loaded) = m
@@ -461,21 +467,17 @@ impl Workbench {
                         d.value.recipe.id, d.value.recipe.revision
                     ));
                     ui.add_enabled_ui(writable && !conflict, |ui| {
-                        settings_fields(ui, &mut d.value, self.prefs.theme.tokens());
+                        settings_fields(ui, &mut d.value, ui::Tokens::for_ui(ui));
                     });
                     ui.collapsing("Complete declaration", |ui| {
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
                 } else {
-                    ui.weak("Choose a printer setup and apply a material to create standard settings. Existing recipe declarations can also be loaded.");
+                    ui.weak("Choose a printer and material.");
                 }
             }
             if section == 4 {
                 self.process_ui(ui, writable && self.display_current());
-            }
-            if section == 3 {
-                ui::group(ui, "Placement");
-                ui.weak("Rests the selected part, or every part when none is selected, on the bed. Parts keep their position when the printer can reach it there; otherwise they are centred.");
             }
             if let Some(preflight) = &m.preflight
                 && preflight.disposition != PreflightDisposition::Admitted
@@ -513,7 +515,7 @@ impl Workbench {
         } else if self.work_area.panel == Panel::Review {
             if m.loading {
                 ui.spinner();
-                ui.label("Retrieving checked actual output…");
+                ui.label("Loading Review…");
                 if ui.button("Cancel review transfer").clicked() {
                     self.queued_host = Some(Command::CancelReview);
                 }
@@ -527,8 +529,8 @@ impl Workbench {
                         .has_intent_draft(&project.project_id, m.intent.as_deref())
                 {
                     ui.colored_label(
-                        self.prefs.theme.tokens().warning,
-                        "Unapplied construction changes. This review describes committed settings.",
+                        ui::Tokens::for_ui(ui).warning,
+                        "Unapplied changes · showing committed output",
                     );
                 }
                 let report = &review.capture.report;
@@ -609,7 +611,7 @@ impl Workbench {
                         ));
                         if goal.reason != LayerHeightReason::Requested {
                             ui.colored_label(
-                        self.prefs.theme.tokens().warning,
+                        ui::Tokens::for_ui(ui).warning,
                         match goal.reason {
                             LayerHeightReason::ProcessMinimum => {
                                 "Goal adjusted · captured process minimum requires thicker layers."
@@ -748,12 +750,17 @@ impl Workbench {
                 egui::ComboBox::from_id_salt("replay-role")
                     .selected_text(
                         view.role
-                            .map_or("All roles", |role| crate::replay::ROLES[role as usize]),
+                            .map_or("All roles", |role| crate::replay::ROLES[role as usize].label),
                     )
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut view.role, None, "All roles");
-                        for (role, name) in crate::replay::ROLES.iter().enumerate() {
-                            ui.selectable_value(&mut view.role, Some(role as u8), *name);
+                        let dark = ui.visuals().dark_mode;
+                        for (role, entry) in crate::replay::ROLES.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 8.0), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, 1, entry.color(dark));
+                                ui.selectable_value(&mut view.role, Some(role as u8), entry.label);
+                            });
                         }
                     });
                 if descriptor.info.tool_epoch_count > 0 {
@@ -997,9 +1004,6 @@ fn event_controls(
     {
         view.events = window.start + progress;
     }
-    if view.context && view.layer.is_some() {
-        ui.weak("Dim layers show complete deposition, independent of playback.");
-    }
     if view.events > window.start
         && view.events <= window.end
         && let Some(index) = view.events.checked_sub(1)
@@ -1032,7 +1036,7 @@ fn event_controls(
         ui.add(
             egui::Label::new(format!(
                 "{} · tool {} · XYZ {:.6}, {:.6}, {:.6} mm · E {:.8} mm · F {:.1} mm/min",
-                crate::replay::ROLES[r[46] as usize],
+                crate::replay::ROLES[r[46] as usize].label,
                 tool,
                 number(0),
                 number(8),

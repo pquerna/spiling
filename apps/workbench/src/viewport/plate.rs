@@ -87,7 +87,7 @@ impl Plate {
             dimension(b.max[1] - b.min[1])
         );
         match self {
-            Self::Hardware(h) => format!("Build area · {size} · {}", h.plate.label),
+            Self::Hardware(_) => format!("Build area · {size}"),
             Self::Envelope(_) => format!("Declared print envelope · {size}"),
         }
     }
@@ -111,26 +111,15 @@ impl Geometry {
         if !(0..2).all(|a| b.min[a] < b.max[a]) {
             return Err("Build area has no usable intersection with the machine envelope");
         }
-        let surface = if dark {
-            [0.15, 0.19, 0.24]
-        } else {
-            [0.76, 0.80, 0.85]
+        let t = crate::ui::Tokens::for_dark(dark);
+        let rgb = |color| {
+            let [r, g, b, _] = super::color_rgba(color);
+            [r, g, b]
         };
-        let grid = if dark {
-            [0.23, 0.29, 0.35]
-        } else {
-            [0.59, 0.65, 0.72]
-        };
-        let edge = if dark {
-            [0.47, 0.57, 0.68]
-        } else {
-            [0.30, 0.40, 0.51]
-        };
-        let warning = if dark {
-            [0.65, 0.46, 0.24]
-        } else {
-            [0.58, 0.39, 0.16]
-        };
+        let surface = rgb(t.bed);
+        let grid = rgb(t.divider);
+        let edge = rgb(t.boundary);
+        let warning = rgb(t.warning);
         let fixture = if dark {
             [0.27, 0.25, 0.21]
         } else {
@@ -160,11 +149,15 @@ impl Geometry {
                 if v <= b.min[axis] {
                     continue;
                 }
-                let mut a = b.min;
-                let mut z = b.max;
-                a[axis] = v;
-                z[axis] = v;
-                Self::line(&mut g.lines, a, z, grid, origin)?;
+                // A thin display ribbon stays well behaved when a long grid
+                // line crosses the near clip plane at close inspection zoom.
+                let mut ribbon = b;
+                let half_width = step * 0.002;
+                ribbon.min[axis] = v - half_width;
+                ribbon.max[axis] = v + half_width;
+                ribbon.min[2] += step * 0.0002;
+                ribbon.max[2] = ribbon.min[2];
+                g.flat_surface(ribbon, grid, origin)?;
             }
         }
         if let Plate::Hardware(h) = plate {
@@ -271,6 +264,19 @@ impl Geometry {
         }
         Ok(())
     }
+    fn flat_surface(
+        &mut self,
+        b: AabbMm,
+        color: [f32; 3],
+        origin: DVec3,
+    ) -> Result<(), &'static str> {
+        let corners = Self::corners(b);
+        for index in [0, 1, 3, 0, 3, 2] {
+            self.surface
+                .push(Self::vertex(corners[index], color, origin)?);
+        }
+        Ok(())
+    }
     fn box_surface(
         &mut self,
         b: AabbMm,
@@ -300,6 +306,7 @@ pub(super) struct Renderer {
     source: Option<Plate>,
     origin: DVec3,
     dark: bool,
+    srgb_target: bool,
     buffers: Vec<(wgpu::Buffer, u32)>,
     pub error: Option<&'static str>,
 }
@@ -319,7 +326,7 @@ impl Renderer {
                 layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("vs"),
+                    entry_point: Some(if write { "vs" } else { "vs_line" }),
                     compilation_options: Default::default(),
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<LineVertex>() as u64,
@@ -359,6 +366,7 @@ impl Renderer {
             source: None,
             origin: DVec3::ZERO,
             dark: false,
+            srgb_target: format.is_srgb(),
             buffers: vec![],
             error: None,
         }
@@ -390,7 +398,14 @@ impl Renderer {
         };
         match Geometry::new(plate, origin, dark) {
             Ok(g) => {
-                for vertices in [g.surface, g.lines, g.height] {
+                for mut vertices in [g.surface, g.lines, g.height] {
+                    if self.srgb_target {
+                        for vertex in &mut vertices {
+                            let [r, g, b] = vertex.color;
+                            let [r, g, b, _] = super::render_color([r, g, b, 1.0], true);
+                            vertex.color = [r, g, b];
+                        }
+                    }
                     self.buffers.push((
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Bounded build area display"),

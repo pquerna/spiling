@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
-struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>,context:vec4<f32>,emphasis:vec4<f32> };
+struct Camera { matrix:mat4x4<f32>, selected:vec4<u32>, tool_color:vec4<f32>, plane:vec4<f32>, cut:vec4<f32>,context:vec4<f32>,emphasis:vec4<f32>,roles:array<vec4<f32>,16>,source_color:vec4<f32>,selection_color:vec4<f32> };
 @group(0) @binding(0) var<uniform> camera:Camera;
 // One bit per scene occurrence index; only the source cap binds it.
 @group(1) @binding(0) var<storage,read> participants: array<u32>;
@@ -24,11 +24,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         if pattern[pixel]>=select(3u,12u,participant) { discard; }
         if !participant { return vec4(camera.emphasis.rgb,1.0); }
     }
-    let hatch=select(0.0,0.13,fract((input.uv.x+input.uv.y)*0.7)<0.14);
-    return vec4(vec3(0.28,0.47,0.64)+hatch,1.0);
+    let hatch=select(0.0,0.65,fract((input.uv.x+input.uv.y)*0.7)<0.14);
+    return vec4(mix(camera.source_color.rgb,camera.selection_color.rgb,hatch),1.0);
 }
 @fragment fn actual_fs(input:Output)->@location(0) vec4<f32> {
-    return vec4(select(vec3(1.0,0.64,0.27),camera.tool_color.xyz,camera.tool_color.w>0.0),1.0);
+    return vec4(select(camera.roles[1u].rgb,camera.tool_color.xyz,camera.tool_color.w>0.0),1.0);
 }
 
 @vertex fn clear_vs(@builtin(vertex_index) index:u32)->@builtin(position) vec4<f32> {

@@ -205,7 +205,7 @@ impl Workbench {
         }
         let action = ui
             .push_id(("source_report", occurrence.occurrence_id), |ui| {
-                report(ui, source, selected, self.prefs.theme.tokens().warning)
+                report(ui, source, selected, ui::Tokens::for_ui(ui).warning)
             })
             .inner;
         match action {

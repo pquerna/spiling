@@ -2,27 +2,96 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use egui::{Color32, RichText, Ui};
+use super::{
+    Tokens,
+    theme::{ACTION, action_font},
+};
+use egui::{Color32, Response, RichText, Stroke, StrokeKind, Ui};
 
-/// Presentation only: callers retain command enablement and receipt ownership.
-/// A disabled action keeps its short reason beside it, in muted text.
+enum ButtonKind {
+    Primary,
+    Secondary,
+    Destructive,
+}
+
+fn button(ui: &mut Ui, label: &str, disabled: Option<&str>, kind: ButtonKind) -> Response {
+    let t = Tokens::for_ui(ui);
+    let primary = matches!(kind, ButtonKind::Primary);
+    let (fills, ink, edge) = match kind {
+        ButtonKind::Primary => (ACTION, Color32::WHITE, t.accent),
+        ButtonKind::Secondary => ([t.control, t.hover, t.pressed], t.text, t.boundary),
+        ButtonKind::Destructive => ([t.control, t.hover, t.pressed], t.error, t.error),
+    };
+    let enabled = ui.is_enabled() && disabled.is_none();
+    ui.scope(|ui| {
+        let v = ui.visuals_mut();
+        v.disabled_alpha = 1.0;
+        for (widget, fill) in [
+            (&mut v.widgets.inactive, fills[0]),
+            (&mut v.widgets.hovered, fills[1]),
+            (&mut v.widgets.active, fills[2]),
+            (&mut v.widgets.open, fills[1]),
+            (&mut v.widgets.noninteractive, t.control),
+        ] {
+            widget.weak_bg_fill = if enabled { fill } else { t.control };
+            widget.bg_stroke = Stroke::new(1.0, if enabled { edge } else { t.boundary });
+            widget.corner_radius = 4.into();
+            widget.expansion = 0.0;
+        }
+        let label = RichText::new(label).color(if enabled { ink } else { t.muted });
+        let label = if primary {
+            label.font(action_font(ui.ctx()))
+        } else {
+            label
+        };
+        let response = ui.add_enabled(
+            enabled,
+            egui::Button::new(label)
+                .frame(true)
+                .wrap()
+                .min_size(egui::vec2(0.0, if primary { 32.0 } else { 28.0 })),
+        );
+        if response.has_focus() && enabled {
+            ui.painter().rect_stroke(
+                response.rect,
+                4,
+                Stroke::new(2.0, t.focus_gap),
+                StrokeKind::Outside,
+            );
+            ui.painter().rect_stroke(
+                response.rect.expand(2.0),
+                6,
+                Stroke::new(2.0, t.focus),
+                StrokeKind::Outside,
+            );
+        }
+        response.on_disabled_hover_text(disabled.unwrap_or_default())
+    })
+    .inner
+}
+
+/// Callers retain enablement and dispatch. A reason stays visible beside the action.
 pub fn primary(ui: &mut Ui, label: &str, disabled: Option<&str>) -> bool {
     ui.horizontal_wrapped(|ui| {
-        let clicked = ui
-            .add_enabled(
-                disabled.is_none(),
-                egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
-                    .fill(Color32::from_rgb(23, 95, 181))
-                    .min_size(egui::vec2(96.0, 30.0)),
-            )
-            .on_disabled_hover_text(disabled.unwrap_or_default())
-            .clicked();
+        let clicked = button(ui, label, disabled, ButtonKind::Primary).clicked();
         if let Some(reason) = disabled.filter(|r| !r.is_empty()) {
-            ui.label(RichText::new(reason).small().weak());
+            ui.weak(reason);
         }
         clicked
     })
     .inner
+}
+
+pub(super) fn secondary(ui: &mut Ui, label: &str, disabled: Option<&str>) -> Response {
+    button(ui, label, disabled, ButtonKind::Secondary)
+}
+
+pub fn destructive(ui: &mut Ui, label: &str, disabled: Option<&str>) -> Response {
+    button(ui, label, disabled, ButtonKind::Destructive)
+}
+
+pub fn verified(ui: &mut Ui) {
+    ui.colored_label(Tokens::for_ui(ui).success, "Software verification passed");
 }
 
 pub fn pane_header(ui: &mut Ui, title: &str, scope: &str) {
@@ -87,12 +156,65 @@ pub fn problem(ui: &mut Ui, summary: &str, detail: &str) {
 }
 
 pub fn close(ui: &mut Ui, label: &str) -> bool {
-    ui.button(label).clicked()
+    secondary(ui, label, None).clicked()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn primary_renders_enabled_and_disabled_states_with_keyboard_focus() {
+        for theme in [super::super::Theme::Graphite, super::super::Theme::Paper] {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let tokens = theme.tokens();
+            let show = |disabled, events| {
+                let mut response = None;
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.add_space(8.0);
+                        response = Some(button(ui, "Slice plate", disabled, ButtonKind::Primary));
+                    },
+                );
+                let rects: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect) => Some((rect.fill, rect.stroke.color)),
+                        _ => None,
+                    })
+                    .collect();
+                output.drop_without_applying_deltas();
+                (response.unwrap(), rects)
+            };
+            let (enabled, colors) = show(None, vec![]);
+            assert!(enabled.rect.height() >= 32.0);
+            assert!(colors.contains(&(ACTION[0], tokens.accent)), "{colors:?}");
+            enabled.request_focus();
+            let (_, colors) = show(None, vec![]);
+            assert!(colors.iter().any(|&(_, edge)| edge == tokens.focus));
+            assert!(colors.iter().any(|&(_, edge)| edge == tokens.focus_gap));
+            let enter = egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            assert!(show(None, vec![enter.clone()]).0.clicked());
+            let (disabled, colors) = show(Some("Apply settings first"), vec![enter]);
+            assert!(!disabled.enabled() && !disabled.clicked());
+            assert!(
+                colors.contains(&(tokens.control, tokens.boundary)),
+                "{colors:?}"
+            );
+        }
+    }
+
     #[test]
     fn keyboard_help_owns_escape_and_restores_its_invoker() {
         let ctx = egui::Context::default();

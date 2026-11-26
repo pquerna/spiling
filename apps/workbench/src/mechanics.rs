@@ -307,16 +307,17 @@ pub fn color(value: f64, range: [f64; 2]) -> [f32; 3] {
     } else {
         0.5
     };
-    let stops = [
-        [0.13, 0.35, 0.73],
-        [0.10, 0.69, 0.76],
-        [0.96, 0.83, 0.30],
-        [0.89, 0.21, 0.12],
-    ];
-    let segment = (fraction * 3.0).floor().min(2.0) as usize;
-    let blend = fraction * 3.0 - segment as f32;
+    let stops = [0xF0F5FA, 0xAACBDD, 0x5C9EBB, 0x326D92, 0x193D62];
+    let at = fraction * (stops.len() - 1) as f32;
+    let segment = (at.floor() as usize).min(stops.len() - 2);
+    let blend = at - segment as f32;
+    // Interpolate linear light so relative luminance decreases throughout each
+    // interval, including between two adjacent stops.
+    let linear = |stop| egui::Rgba::from(crate::ui::rgb(stop));
+    let a = linear(stops[segment]).to_array();
+    let b = linear(stops[segment + 1]).to_array();
     std::array::from_fn(|axis| {
-        stops[segment][axis] * (1.0 - blend) + stops[segment + 1][axis] * blend
+        egui::ecolor::gamma_from_linear(a[axis] * (1.0 - blend) + b[axis] * blend)
     })
 }
 

@@ -289,6 +289,10 @@ impl Workbench {
                     ui::theme_choice(ui, &mut self.prefs.theme);
                 });
                 ui.menu_button("Help", |ui| {
+                    if ui.button("About Spiling").clicked() {
+                        self.show_about = true;
+                        ui.close();
+                    }
                     self.button(ui, Action::License);
                     self.button(ui, Action::Gallery);
                     ui.menu_button("Diagnostics", |ui| {
@@ -370,7 +374,7 @@ impl Workbench {
                 .is_some_and(|s| s.occurrence_count > 0)
         {
             if self.project_drafts() || self.subject_drafts() {
-                ui.weak("Unapplied changes are retained in their editor");
+                ui.weak("Unapplied changes");
             } else if self.state.manufacturing.intent.is_some() {
                 // The same one-step Slice as Review: check, slice, verify, then
                 // open Review. A sliced, verified plate offers Review instead.

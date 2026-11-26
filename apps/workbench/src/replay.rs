@@ -94,23 +94,44 @@ impl Default for View {
         }
     }
 }
-pub const ROLES: [&str; 16] = [
-    "Travel",
-    "Perimeter",
-    "Solid",
-    "Bottom skin",
-    "Top skin",
-    "Sparse",
-    "Lifecycle travel",
-    "Prime",
-    "Bridge",
-    "Support",
-    "Support interface",
-    "Retract",
-    "Unretract",
-    "Separator wall",
-    "Tool epoch",
-    "Skirt, brim, waste",
+#[derive(Clone, Copy)]
+pub struct RolePresentation {
+    pub label: &'static str,
+    graphite: u32,
+    paper: u32,
+}
+impl RolePresentation {
+    pub fn color(self, dark: bool) -> egui::Color32 {
+        crate::ui::rgb(if dark { self.graphite } else { self.paper })
+    }
+}
+
+const fn role(label: &'static str, graphite: u32, paper: u32) -> RolePresentation {
+    RolePresentation {
+        label,
+        graphite,
+        paper,
+    }
+}
+
+/// Indexed by the checked packed replay role, shared by the legend and renderer.
+pub const ROLES: [RolePresentation; 16] = [
+    role("Travel", 0x8C9BA9, 0x596A7A),
+    role("Perimeter", 0xFFBD7A, 0x934704),
+    role("Solid", 0xA9C1D0, 0x425F76),
+    role("Bottom skin", 0xAD9EDC, 0x584581),
+    role("Top skin", 0xC8DBEA, 0x354E66),
+    role("Sparse", 0x62CCBA, 0x17685D),
+    role("Lifecycle travel", 0xBDC8D2, 0x465664),
+    role("Prime", 0xE6CB8C, 0x72561B),
+    role("Bridge", 0xFFE07A, 0x755600),
+    role("Support", 0x8AAEFF, 0x294F9A),
+    role("Support interface", 0xBD9BF2, 0x623C91),
+    role("Retract", 0xE4A8C0, 0x803557),
+    role("Unretract", 0xF4CEDD, 0x943D66),
+    role("Separator wall", 0xEAE0CB, 0x665B42),
+    role("Tool epoch", 0xE7BFEC, 0x773C85),
+    role("Skirt, brim, waste", 0xD2BE94, 0x6B552B),
 ];
 fn event_range(
     events: &[(u32, u32)],

@@ -25,9 +25,17 @@ never expand a narrow parent. Preserve field identities across reflow and state
 changes.
 
 Use shared `pane_header`, `group`, `text`, `number`, `percent`, `primary`, `help` and `problem`
-components with their real consumers. Primary actions use the common blue/white
-treatment; unavailable primary actions show their reason without requiring hover.
-Do not infer readiness or duplicate engine validation to choose a visual action.
+components with their real consumers. Primary actions use the shared blue fill and
+white 14-point semibold label. Hover and pressed have their own fills. The keyboard
+ring remains visible beside the action edge. Unavailable actions use readable
+neutral colors and give a short reason next to the button. Keep destructive
+confirmation separate from the safe primary action. Engine state owns enablement.
+
+View offers System, Graphite and Paper. Explicit choices persist as window
+preferences. The replay role legend, centerlines and beads share the same
+theme-specific palette. Role names and filters remain available in both themes.
+Material swatches retain their declared samples. The Analyze legend and element
+colors use one ordered scale and retain the checked quantities and units.
 
 Labels use sentence case and concise operator terms. Aim for one to four words;
 meaning, units and localization take priority over word counts. Optional short

@@ -128,7 +128,7 @@ impl Workbench {
                     }
                     let title = egui::RichText::new(title);
                     let title = if not_applied > 0 {
-                        title.color(self.prefs.theme.tokens().warning)
+                        title.color(ui::Tokens::for_ui(ui).warning)
                     } else {
                         title
                     };
@@ -152,7 +152,7 @@ impl Workbench {
                                 &definition.record.display
                             {
                                 ui.colored_label(
-                                    self.prefs.theme.tokens().warning,
+                                    ui::Tokens::for_ui(ui).warning,
                                     "Preview unavailable",
                                 ).on_hover_text(format!("Source remains loaded; slicing is checked separately. {}", error.message));
                             } else if matches!(definition.record.display, DefinitionDisplay::NotRequested) {
@@ -168,7 +168,7 @@ impl Workbench {
                                 })
                             {
                                 ui.colored_label(
-                                    self.prefs.theme.tokens().warning,
+                                    ui::Tokens::for_ui(ui).warning,
                                     format!(
                                         "Coarser display (±{} mm) to fit the scene display capacity; geometry and slicing are unchanged",
                                         profile.surface_tolerance_mm()
@@ -322,7 +322,7 @@ impl Workbench {
         if let Some(inspection) = &self.state.inspection
             && self.selected.as_ref() == Some(&inspection.reference)
         {
-            let tokens = self.prefs.theme.tokens();
+            let tokens = ui::Tokens::for_ui(ui);
             ui::property(
                 ui,
                 "Native surface",

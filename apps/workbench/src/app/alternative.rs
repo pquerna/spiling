@@ -506,7 +506,7 @@ impl Workbench {
         }
             if trial.editing {
                 ui.push_id("alternative-settings", |ui| {
-                    ui.add_enabled_ui(ready, |ui| super::manufacturing::settings_fields(ui, &mut trial.value, self.prefs.theme.tokens()));
+                    ui.add_enabled_ui(ready, |ui| super::manufacturing::settings_fields(ui, &mut trial.value, ui::Tokens::for_ui(ui)));
                 });
             } else {
                 ui::group(ui, "Shared canvas");

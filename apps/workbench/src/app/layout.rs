@@ -189,7 +189,7 @@ impl Workbench {
                 ui.label("Plate filled: no further copy fits the build area");
             } else if p.total_placed() < p.requested_count {
                 ui.colored_label(
-                    self.prefs.theme.tokens().warning,
+                    ui::Tokens::for_ui(ui).warning,
                     format!(
                         "{} requested copies were not placed",
                         p.requested_count - p.total_placed()

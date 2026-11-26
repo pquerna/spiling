@@ -157,7 +157,7 @@ impl Workbench {
         let conflict = d.revision != project.revision;
         let validity = d.value.validate();
         if let Err(error) = &validity {
-            ui.colored_label(self.prefs.theme.tokens().warning, error.to_string());
+            ui.colored_label(ui::Tokens::for_ui(ui).warning, error.to_string());
         }
         let validation_problem = validity.as_ref().err().map(ToString::to_string);
         let changed = captured != Some(&d.value);
@@ -378,7 +378,7 @@ impl Workbench {
         });
         let conflict = d.revision != project.revision;
         if conflict {
-            ui.colored_label(self.prefs.theme.tokens().warning, "Project changed while editing this material draft. Reload the captured profile before applying.");
+            ui.colored_label(ui::Tokens::for_ui(ui).warning, "Project changed while editing this material draft. Reload the captured profile before applying.");
         }
         ui.add_enabled_ui(writable && !conflict, |ui| {
             ui::help(ui, "profile-overrides", "Profile overrides", "An enabled override replaces the captured profile value. Clear the override to inherit again. Apply commits the complete profile draft.");
