@@ -11,7 +11,10 @@ use std::{
 };
 mod anchors;
 mod beads;
+mod donor_cache;
+use donor_cache::{DonorCache, DonorInput};
 mod grid;
+mod layer_dag;
 #[cfg(test)]
 pub(crate) use anchors::ProjectedAnchorPaths;
 pub(crate) use anchors::strict_capsule_point;
@@ -20,6 +23,7 @@ pub(crate) use anchors::{
     projected_edges,
 };
 pub(super) use anchors::{condition_skin_bond_endpoint, inward_bond_endpoint};
+use layer_dag::{LayerDagTrace, LayerStep};
 pub(in crate::planner) mod strokes;
 pub(crate) use established::part_root_max_separation;
 pub(crate) use strokes::StrokeRuns;
@@ -206,14 +210,17 @@ pub(super) fn component_admission<'a>(
 ) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError> {
     // One borrowed lower set for every endpoint, row and stroke query below.
     let mut lower = strokes::LowerStrokes::new(previous, contacts);
-    component_admission_with(
+    let mut proof = component_admission_with(
         (candidate, axis, budget, contact_bridge),
         &mut lower,
         recipe,
         anchors,
         work,
         cancel,
-    )
+    )?;
+    proof.workspace_points = anchors.retained_records();
+    proof.workspace_bytes = anchors.retained_bytes();
+    Ok(proof)
 }
 
 /// [`component_admission`] against a caller's lower set, so repeated
@@ -398,8 +405,11 @@ where
             proof.bridges.push(index);
         }
     }
-    proof.workspace_points = anchors.retained_records();
-    proof.workspace_bytes = anchors.retained_bytes();
+    let inventory_bytes = lower.retained_bytes();
+    proof.workspace_points = anchors
+        .retained_records()
+        .saturating_add(inventory_bytes.div_ceil(std::mem::size_of::<geo::Coord<f64>>()));
+    proof.workspace_bytes = anchors.retained_bytes().saturating_add(inventory_bytes);
     Ok(proof)
 }
 
@@ -413,197 +423,6 @@ pub(super) fn component_budget(
         retained.saturating_add(scratch),
         owned_bytes.saturating_add(scratch_owned_bytes),
     )
-}
-
-/// Layers whose stroke analysis is speculated at once.
-const SPECULATION_LAYERS: usize = 32;
-
-/// A stroke analysis made ahead of the serial regeneration pass, with the
-/// exact inputs it read.
-struct SpeculatedAnalysis {
-    begin: usize,
-    object: Vec<DepositionPath>,
-    previous: Vec<DepositionPath>,
-    contact: Vec<DepositionPath>,
-    admission: strokes::Admission,
-}
-
-/// Analyzes each layer in `range` against its current lower layer and
-/// contact, in parallel, with the authored bridge roles restored as the
-/// serial pass restores them. A layer whose analysis fails or cannot be
-/// admitted is left to the serial pass.
-#[expect(clippy::too_many_arguments)]
-fn speculate_analyses(
-    layers: &[PrintLayer],
-    range: std::ops::Range<usize>,
-    object_start: &[usize],
-    contact_tops: &[Option<usize>],
-    roles: &[(usize, usize, DepositionKind)],
-    recipe: &PlanarPrintRecipe,
-    budget: usize,
-    cancel: &AtomicBool,
-) -> Result<Vec<Option<SpeculatedAnalysis>>, ManufacturingError> {
-    use rayon::prelude::*;
-    let working_set = crate::working_set::current();
-    let analyses = range
-        .into_par_iter()
-        .map(|index| {
-            crate::working_set::scope(working_set, || {
-                let begin = object_start[index];
-                let mut object = layers[index].paths.get(begin..)?.to_vec();
-                let from = roles.partition_point(|&(layer, _, _)| layer < index);
-                let to = roles.partition_point(|&(layer, _, _)| layer <= index);
-                for &(_, path, kind) in &roles[from..to] {
-                    object.get_mut(path)?.kind = kind;
-                }
-                let previous = layers[index - 1].paths.clone();
-                let contact: Vec<DepositionPath> = contact_tops[index]
-                    .map(|top| {
-                        layers[top]
-                            .paths
-                            .iter()
-                            .filter(|path| support_role(path.kind))
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut anchors = AnchorWorkspace::default();
-                anchors.set_budget(budget.saturating_sub(stroke_proof_reservation(object.len())));
-                let mut work = 0;
-                let admission = strokes::analyze(
-                    &object,
-                    previous.iter(),
-                    contact.iter(),
-                    recipe,
-                    &mut anchors,
-                    &mut work,
-                    cancel,
-                )
-                .ok()?;
-                Some(SpeculatedAnalysis {
-                    begin,
-                    object,
-                    previous,
-                    contact,
-                    admission,
-                })
-            })
-        })
-        .collect();
-    check_cancel(cancel)?;
-    Ok(analyses)
-}
-
-// Limit the footprint of the optional lookahead. A proof whose indices do
-// not fit is recomputed in order; this imposes no limit on a printable layer.
-const DEMAND_INDEX_WORDS: usize = 16;
-struct DemandStrokeProof {
-    bridges: [u64; DEMAND_INDEX_WORDS],
-    unanchored: [u64; DEMAND_INDEX_WORDS],
-    failure: Option<strokes::Failure>,
-    worst_unanchored_mm: f64,
-}
-
-impl DemandStrokeProof {
-    fn pack(proof: strokes::Admission) -> Option<Self> {
-        fn encode(indices: &[usize]) -> Option<[u64; DEMAND_INDEX_WORDS]> {
-            let mut bits = [0; DEMAND_INDEX_WORDS];
-            for &index in indices {
-                *bits.get_mut(index / u64::BITS as usize)? |= 1 << (index % u64::BITS as usize);
-            }
-            Some(bits)
-        }
-        Some(Self {
-            bridges: encode(&proof.bridges)?,
-            unanchored: encode(&proof.unanchored)?,
-            failure: proof.failure,
-            worst_unanchored_mm: proof.worst_unanchored_mm,
-        })
-    }
-
-    fn unpack(self) -> strokes::Admission {
-        fn decode(bits: [u64; DEMAND_INDEX_WORDS]) -> Vec<usize> {
-            let count = bits.iter().map(|word| word.count_ones() as usize).sum();
-            let mut indices = Vec::with_capacity(count);
-            for (index, mut word) in bits.into_iter().enumerate() {
-                while word != 0 {
-                    indices.push(index * u64::BITS as usize + word.trailing_zeros() as usize);
-                    word &= word - 1;
-                }
-            }
-            indices
-        }
-        strokes::Admission {
-            bridges: decode(self.bridges),
-            unanchored: decode(self.unanchored),
-            failure: self.failure,
-            worst_unanchored_mm: self.worst_unanchored_mm,
-        }
-    }
-}
-
-/// Speculate over borrowed paths. The retained proofs have only inline
-/// indices, so ordinary demand recovery has no extra live heap ownership.
-fn speculate_demand_analyses(
-    layers: &[PrintLayer],
-    from: usize,
-    proofs: &mut [Option<DemandStrokeProof>; SPECULATION_LAYERS],
-    recipe: &PlanarPrintRecipe,
-    budget: usize,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    use rayon::prelude::*;
-
-    *proofs = [const { None }; SPECULATION_LAYERS];
-    let count = (layers.len() - from).min(proofs.len());
-    let workers = rayon::current_num_threads().min(count);
-    if workers <= 1 || budget == 0 {
-        return Ok(());
-    }
-    let working_set = crate::working_set::current();
-    let per_worker = budget / workers;
-    let mut charges = [0; SPECULATION_LAYERS];
-    proofs[..count]
-        .par_iter_mut()
-        .zip(&mut charges[..count])
-        .enumerate()
-        .for_each(|(offset, (proof, charge))| {
-            let index = from + offset;
-            let layer = &layers[index];
-            if !layer.region_coverage.process_interfaces.is_empty()
-                || (offset != 0
-                    && !layers[index - 1]
-                        .region_coverage
-                        .process_interfaces
-                        .is_empty())
-            {
-                return;
-            }
-            let reserve = stroke_proof_reservation(layer.paths.len());
-            let Some(scratch) = per_worker.checked_sub(reserve).filter(|&n| n != 0) else {
-                return;
-            };
-            *proof = crate::working_set::scope(working_set, || {
-                let mut anchors = AnchorWorkspace::default();
-                anchors.set_budget(scratch);
-                strokes::analyze(
-                    &layer.paths,
-                    layers[index - 1].paths.iter(),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    charge,
-                    cancel,
-                )
-                .ok()
-                .and_then(DemandStrokeProof::pack)
-            });
-        });
-    for charge in charges[..count].iter().copied() {
-        anchors::charge_pairs(work, charge)?;
-    }
-    check_cancel(cancel)
 }
 
 fn stroke_proof_reservation(paths: usize) -> usize {
@@ -1097,12 +916,12 @@ pub(super) fn realize(
             return Err(super::bonds::unresolved(first));
         }
         let mut split = crate::timing::Split::new("support.demand");
+        let mut dag = LayerDagTrace::new();
         // Layer payload accounting is read many times per layer; only the
         // current layer changes, so keep a per-layer ledger.
         let mut payload = PayloadLedger::new(layers)?;
-        let mut speculated = [const { None }; SPECULATION_LAYERS];
-        let mut previous_unchanged = true;
         for index in 1..layers.len() {
+            let demand_started = dag.start();
             check_cancel(cancel)?;
             payload.refresh(index - 1, &layers[index - 1]);
             owned_bytes = native_owned_bytes
@@ -1111,34 +930,11 @@ pub(super) fn realize(
                 + vec_bytes(&demands)
                 + vec_bytes(&original_bridge_roles);
             anchors.set_budget(workspace_budget(retained, owned_bytes)?);
-            let offset = (index - 1) % speculated.len();
-            if offset == 0 {
-                let t = split.start();
-                speculate_demand_analyses(
-                    layers,
-                    index,
-                    &mut speculated,
-                    recipe,
-                    workspace_budget(
-                        retained,
-                        owned_bytes.saturating_add(anchors.retained_bytes()),
-                    )
-                    .unwrap_or(0),
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                split.stop("speculate_analyze", t);
-                // This lower layer was already committed at the batch read.
-                previous_unchanged = true;
-            }
             let (prior, remaining) = layers.split_at_mut(index);
             let layer = remaining.first_mut().expect("current support layer");
             check_cancel(cancel)?;
             layer.region_coverage.unsupported_overhang_mm = 0.0;
             let t = split.start();
-            // Until its interface callback or recovery replaces paths, this
-            // is the exact current layer read by the worker.
-            let mut paths_unchanged = layer.region_coverage.process_interfaces.is_empty();
             let mut interface_bound = finalize_layer_interface(
                 index,
                 layer,
@@ -1162,26 +958,16 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
             )?);
             let t = split.start();
-            let mut admission = if let Some(proof) = speculated[offset]
-                .take()
-                .filter(|_| previous_unchanged && paths_unchanged)
-            {
-                let admission = proof.unpack();
-                split.stop("reuse_analyze", t);
-                admission
-            } else {
-                let admission = strokes::analyze(
-                    &layer.paths,
-                    previous.clone(),
-                    std::iter::empty(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?;
-                split.stop("analyze", t);
-                admission
-            };
+            let mut admission = strokes::analyze(
+                &layer.paths,
+                previous.clone(),
+                std::iter::empty(),
+                recipe,
+                &mut anchors,
+                &mut anchor_work,
+                cancel,
+            )?;
+            split.stop("analyze", t);
             let t = split.start();
             if admission.failure.is_some() || !interface_bound {
                 // Preserve ordinary authored hatch; only a finite demanded role
@@ -1372,7 +1158,6 @@ pub(super) fn realize(
                     // when another stroke still needs support; do not demand a
                     // corridor for fragments that we can already anchor.
                     if complete || joined || component_bridges {
-                        paths_unchanged = false;
                         *segments = without_old + path_segments(&candidate.paths);
                         layer.paths = candidate.paths;
                         layer.region_coverage.process_interfaces = candidate.process_interfaces;
@@ -1491,14 +1276,11 @@ pub(super) fn realize(
                 + vec_bytes(&admission.bridges)
                 + vec_bytes(&admission.unanchored);
             reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
-            // Only the candidate's role is read by stroke analysis. Lower
-            // roads enter through checked_edges and their explicit top Z;
-            // relabelling a lower road does not change either operand.
-            previous_unchanged = paths_unchanged;
             for path in admission.bridges {
                 original_bridge_roles.push((index, path, layer.paths[path].kind));
                 layer.paths[path].kind = DepositionKind::Bridge;
             }
+            dag.finish(LayerStep::Demand, index, demand_started);
         }
         drop(split);
         drop(payload);
@@ -1613,6 +1395,7 @@ pub(super) fn realize(
         let layer_metadata_bytes = layers.len().saturating_mul(
             2 * std::mem::size_of::<Rc<OwnedMaterial>>()
                 + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<bool>()
                 + std::mem::size_of::<Option<usize>>(),
         );
         super::remaining_geometry_units(
@@ -1630,6 +1413,7 @@ pub(super) fn realize(
         let interfaces = vec![empty; layers.len()];
         let mut object_start = vec![0; layers.len()];
         let mut support_wall_paths = vec![0; layers.len()];
+        let mut used_contact_proposals = vec![false; layers.len()];
         trace.report("analysis_complete");
         mark(
             "demand_and_void_analysis",
@@ -1733,6 +1517,7 @@ pub(super) fn realize(
             + vec_bytes(&interfaces)
             + vec_bytes(&object_start)
             + vec_bytes(&support_wall_paths)
+            + vec_bytes(&used_contact_proposals)
             + vec_bytes(&contact_tops)
             + vec_bytes(&roots)
             + vec_bytes(&root_landings)
@@ -2011,6 +1796,7 @@ pub(super) fn realize(
                                 return Ok(None);
                             };
                             crate::working_set::scope(working_set, || {
+                                let started = dag.start();
                                 let mut local = 0usize;
                                 let hatch = region::HatchLayer {
                                     roof: None,
@@ -2043,7 +1829,9 @@ pub(super) fn realize(
                                     0,
                                     cancel,
                                 )
-                                .map(|(paths, receipt)| Some((paths, receipt, local)));
+                                .map(|(paths, receipt)| {
+                                    Some((paths, receipt, local, started.map(|t| t.elapsed())))
+                                });
                                 drop(loaded);
                                 if let Some(cache) = &spans {
                                     cache.release(l);
@@ -2062,8 +1850,9 @@ pub(super) fn realize(
             let mut prebuilt = Vec::new();
             reserve_owned(&mut prebuilt, layers.len(), base_owned)?;
             let (mut units, mut bytes) = (0usize, 0usize);
-            for result in built {
-                let staged = result?.map(|(paths, receipt, local)| {
+            for (layer, result) in built.into_iter().enumerate() {
+                let staged = result?.map(|(paths, receipt, local, elapsed)| {
+                    dag.record(LayerStep::RasterPreparation, layer, elapsed);
                     units = paths.iter().fold(units, |total, path| {
                         total.saturating_add(path.points_mm.capacity())
                     });
@@ -2087,175 +1876,132 @@ pub(super) fn realize(
             )?;
             prebuilt
         };
-        let mut staged_bytes = prebuilt
-            .iter()
-            .flatten()
-            .map(|(paths, _)| super::bonds::path_bytes(paths))
-            .fold(vec_bytes(&prebuilt), usize::saturating_add);
+        mark(
+            "raster_preparation",
+            work,
+            anchor_work,
+            native_work.consumed(),
+        );
+        let (mut staged_units, mut staged_bytes) = prebuilt.iter().flatten().fold(
+            (0usize, vec_bytes(&prebuilt)),
+            |(units, bytes), (paths, receipt)| {
+                (
+                    units.saturating_add(raster_path_units(paths)),
+                    bytes
+                        .saturating_add(super::bonds::path_bytes(paths))
+                        .saturating_add(vec_bytes(&receipt.certified)),
+                )
+            },
+        );
         let mut payload = PayloadLedger::new(layers)?;
-        for i in 0..layers.len() {
-            if i > 0 {
-                payload.refresh(i - 1, &layers[i - 1]);
-            }
-            owned_bytes =
-                native_owned_bytes + payload.refresh(i, &layers[i]) + support_metadata_bytes;
-            anchors.set_budget(0);
-            let (mut paths, mut wall_receipt) = prebuilt[i].take().unwrap_or_default();
-            staged_bytes = staged_bytes.saturating_sub(super::bonds::path_bytes(&paths));
-            let (prior, remaining) = layers.split_at_mut(i);
-            let layer = remaining.first_mut().expect("current support layer");
-            let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
-            let retained_domains = retained + geometry.0;
-            let live_bytes = owned_bytes
-                .saturating_add(geometry.1)
-                .saturating_add(staged_bytes);
-            // The bed roots the first layer. Above it, every stroke needs
-            // actual anchors on the support below or, for interface, on an
-            // established part contact. The preferred axis is the only one
-            // tried: what it cannot anchor is omitted and reported.
-            if i > 0 && !paths.is_empty() {
-                let paths_bytes = super::bonds::path_bytes(&paths);
-                let admit = |extra: usize| {
-                    super::remaining_geometry_units(
-                        retained_domains,
-                        live_bytes.saturating_add(paths_bytes).saturating_add(extra),
-                    )
-                    .map(|_| ())
-                };
-                let proposal = part_contacts.get(i).and_then(Option::as_ref);
-                let contact_raster =
-                    grid_frame
-                        .filter(|_| proposal.is_some())
-                        .map(|frame| grid::Raster {
-                            frame,
-                            cancel,
-                            admit: &admit,
-                            work: std::sync::atomic::AtomicUsize::new(0),
-                        });
-                let contacts = contact_raster
-                    .as_ref()
-                    .zip(proposal)
-                    .map(|(raster, proposal)| established::CellContacts {
-                        raster,
-                        cells: &proposal.cells,
-                        donors: &[],
-                    });
-                // One lower inventory serves every anchor query on this layer.
-                let mut lower = strokes::LowerStrokes::new(
-                    prior[i - 1]
-                        .paths
-                        .iter()
-                        .filter(|path| support_role(path.kind)),
-                    std::iter::empty(),
-                );
-                let kept = raster::retain_anchored(
-                    &mut paths,
-                    wall_receipt.paths,
-                    &mut lower,
-                    contacts.as_ref(),
-                    recipe,
-                    retained_domains,
-                    live_bytes,
+        let (support_units, support_bytes) =
+            geometry_receipt(&support_regions, &interfaces, &[&protected]);
+        let donor_outside = native_owned_bytes
+            + payload.bytes()
+            + support_metadata_bytes
+            + support_bytes
+            + staged_bytes;
+        let mut donors = DonorCache::new(
+            layers.len(),
+            &roots,
+            part_contacts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, proposal)| {
+                    proposal.as_ref().map(|proposal| (index, proposal))
+                }),
+            donor_outside,
+            cancel,
+            &mut anchor_work,
+        )?;
+        let mut outstanding_roles = original_bridge_roles.as_slice();
+        let mut outstanding_demands = demands.as_slice();
+        let mut unchanged_lower = true;
+        let mut lower_support_unchanged = true; // Layer zero is bed-rooted.
+        let mut split = crate::timing::Split::new("support.regeneration");
+        // R[L+1] is R[L]'s last reader. Admit it before S[L] and O[L]
+        // replace the layer in place. Both consumers of R[L] see the same
+        // ordered raster result, including its proposal-based trims.
+        for next_raster in 0..=layers.len() {
+            check_cancel(cancel)?;
+            if next_raster < layers.len() {
+                let t = dag.start();
+                let i = next_raster;
+                anchors.set_budget(0);
+                let (paths, wall_receipt) = prebuilt[i].take().unwrap_or_default();
+                staged_units -= raster_path_units(&paths);
+                staged_bytes -=
+                    super::bonds::path_bytes(&paths) + vec_bytes(&wall_receipt.certified);
+                let live_bytes = native_owned_bytes
+                    + payload.refresh(i, &layers[i])
+                    + support_metadata_bytes
+                    + support_bytes
+                    + staged_bytes
+                    + donors.bytes();
+                let (prior, remaining) = layers.split_at_mut(i);
+                let layer = remaining.first_mut().expect("current support layer");
+                let (receipt, contact_work) = admit_raster_layer(
+                    RasterLayerInput {
+                        layer,
+                        previous: prior.last(),
+                        paths,
+                        wall_receipt,
+                        part_contact: part_contacts.get(i).and_then(Option::as_ref),
+                        frame: grid_frame,
+                        recipe,
+                        retained: retained + support_units + staged_units,
+                        owned_bytes: live_bytes,
+                    },
+                    segments,
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
                 )?;
-                if let Some(raster) = &contact_raster {
-                    charge_owned_work(&mut work, foreign_work, raster.take_work(), cancel)?;
+                charge_owned_work(&mut work, foreign_work, contact_work, cancel)?;
+                support_metadata_bytes += kept.certify(i, receipt.certified);
+                object_start[i] = receipt.first_object;
+                support_wall_paths[i] = receipt.walls;
+                used_contact_proposals[i] = receipt.used_part_proposal;
+                payload.refresh(i, layer);
+                if i == 0 {
+                    unchanged_lower = receipt.first_object == 0;
                 }
-                wall_receipt.paths = kept.paths;
-                wall_receipt.omitted_mm += kept.omitted_mm;
+                dag.finish(LayerStep::RasterAdmission, i, t);
             }
-            // Final clearance takes the edges the raster proved clear exactly.
-            support_metadata_bytes += kept.certify(i, std::mem::take(&mut wall_receipt.certified));
-            layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
-            support_wall_paths[i] = wall_receipt.paths;
-            *segments = segments
-                .checked_add(path_segments(&paths))
-                .filter(|count| *count <= crate::working_set::units())
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "retained deposition segment limit exceeded",
-                    )
-                })?;
-            anchors.set_budget(0);
-            layer.region_coverage.support_nominal_deposition_volume_mm3 =
-                raster::nominal_volume(&paths, layer.index, recipe)?;
-            layer.region_coverage.support_area_mm2 =
-                layer.region_coverage.support_nominal_deposition_volume_mm3
-                    / (layer.z_mm - layer.lower_z_mm);
-            object_start[i] = paths.len();
-            let paths_live = live_bytes.saturating_add(super::bonds::path_bytes(&paths));
-            reserve_owned(&mut paths, layer.paths.len(), paths_live)?;
-            paths.append(&mut layer.paths);
-            layer.paths = paths;
-            let geometry = geometry_receipt(&support_regions, &interfaces, &[&protected]);
-            owned_bytes = native_owned_bytes
-                + support_metadata_bytes
-                + geometry.1
-                + payload.refresh(i, layer);
-        }
-        drop(prebuilt);
-        drop(payload);
-        mark("support_raster", work, anchor_work, native_work.consumed());
-        let mut outstanding_roles = original_bridge_roles.as_slice();
-        let mut outstanding_demands = demands.as_slice();
-        let mut unchanged_lower = object_start[0] == 0;
-        let mut retained_regions =
-            retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
-        // Raster staging must include these live support/protected domains without
-        // counting the caller's object/cache reservation twice.
-        let retained_support_points = retained_regions.checked_sub(retained).ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "support retained point accounting underflow",
-            )
-        })?;
-        let mut split = crate::timing::Split::new("support.regeneration");
-        let mut payload = PayloadLedger::new(layers)?;
-        let mut lower_support_unchanged = true; // Layer zero is bed-rooted.
-        // Stroke analysis of the coming layers runs speculatively in
-        // parallel; a result is used only if its exact inputs are unchanged
-        // when the serial pass reaches its layer.
-        let mut speculated: Vec<Option<SpeculatedAnalysis>> = Vec::new();
-        let mut speculated_from = 1;
-        for index in 1..layers.len() {
-            check_cancel(cancel)?;
-            if index >= speculated_from + speculated.len() {
-                speculated_from = index;
-                speculated = speculate_analyses(
-                    layers,
-                    index..(index + SPECULATION_LAYERS).min(layers.len()),
-                    &object_start,
-                    &contact_tops,
-                    outstanding_roles,
-                    recipe,
-                    workspace_budget(retained_regions, owned_bytes)?,
-                    cancel,
-                )?;
+            // Layer zero has no lower deposition and is already final.
+            if next_raster < 2 {
+                continue;
             }
+            let index = next_raster - 1;
+            let pending_metadata_bytes = support_metadata_bytes.saturating_add(staged_bytes);
+            let retained_support_points = support_units.saturating_add(staged_units);
+            let mut retained_regions = retained.saturating_add(retained_support_points);
+            let root_started = dag.start();
+            let donor_before = dag.elapsed(LayerStep::DonorPreparation);
             let part_contact = part_contacts.get(index).and_then(Option::as_ref);
             if object_start[index] == 0 {
                 lower_support_unchanged = true;
-            } else if !lower_support_unchanged || part_contact.is_some() {
+            } else if !lower_support_unchanged || used_contact_proposals[index] {
                 let t = split.start();
+                let outside =
+                    native_owned_bytes + pending_metadata_bytes + support_bytes + donors.bytes();
                 lower_support_unchanged = reconcile_layer_roots(
                     layers,
                     &mut payload,
                     FinalSupportInput {
                         index,
                         roots: &roots,
+                        donors: &mut donors,
+                        trace: &mut dag,
                         part_contact,
+                        lower_support_unchanged,
                         contact_tops: &contact_tops,
                         z_gap: z_gap_mm,
                         frame: grid_frame,
                         wall_paths: &mut support_wall_paths,
                         recipe,
                         retained_units: retained_regions,
-                        owned_bytes: native_owned_bytes
-                            + support_metadata_bytes
-                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1,
+                        owned_bytes: outside,
                     },
                     segments,
                     &mut anchors,
@@ -2263,6 +2009,7 @@ pub(super) fn realize(
                     cancel,
                 )?;
                 if !lower_support_unchanged {
+                    payload.refresh(index, &layers[index]);
                     object_start[index] = layers[index]
                         .paths
                         .iter()
@@ -2271,6 +2018,19 @@ pub(super) fn realize(
                 }
                 split.stop("reconcile_roots", t);
             }
+            if let Some(proposal) = part_contact {
+                donors.release(index, &roots, proposal, cancel, &mut anchor_work)?;
+            }
+            dag.record(
+                LayerStep::Support,
+                index,
+                root_started.map(|t| {
+                    let donor_time = dag.elapsed(LayerStep::DonorPreparation) - donor_before;
+                    t.elapsed().saturating_sub(donor_time)
+                }),
+            );
+            let support_metadata_bytes = pending_metadata_bytes.saturating_add(donors.bytes());
+            let object_started = dag.start();
             // Otherwise the same ordered support-only lower prefix already
             // admitted these roads in the raster pass, with no PART operands.
             // Finalizing lower object geometry doesn't change that proof.
@@ -2298,14 +2058,14 @@ pub(super) fn realize(
                     layer.region_coverage.unsupported_overhang_mm = demand.worst_unanchored_mm;
                 }
                 unchanged_lower = begin == 0;
+                dag.finish(LayerStep::Object, index, object_started);
                 continue;
             }
             for &(_, path, kind) in original_roles {
                 layer.paths[begin + path].kind = kind;
             }
-            let extra_owned_bytes = payload.refresh(index, layer)
-                + support_metadata_bytes
-                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+            let extra_owned_bytes =
+                payload.refresh(index, layer) + support_metadata_bytes + support_bytes;
             owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
             anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             let authored_axis =
@@ -2318,11 +2078,11 @@ pub(super) fn realize(
                 let without_old = *segments - path_segments(&layer.paths[begin..]);
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let extra_owned_bytes = payload.refresh(index, layer)
-                    + support_metadata_bytes
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+                let extra_owned_bytes =
+                    payload.refresh(index, layer) + support_metadata_bytes + support_bytes;
                 let staged_anchor_bytes = anchors.retained_bytes();
                 let course = super::hatch_key(index);
+                let mut lower = strokes::LowerStrokes::new(previous.clone(), contact.clone());
                 let mut check_component =
                     |candidate: &mut RasterCandidate,
                      axis,
@@ -2336,10 +2096,9 @@ pub(super) fn realize(
                             scratch.saturating_add(candidate_units(candidate)),
                             scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
                         )?;
-                        component_admission(
+                        component_admission_with(
                             (candidate, axis, budget, contact_bridge),
-                            previous.clone(),
-                            contact.clone(),
+                            &mut lower,
                             recipe,
                             &mut anchors,
                             &mut anchor_work,
@@ -2357,6 +2116,7 @@ pub(super) fn realize(
                     &mut work,
                     Some(&mut check_component),
                 );
+                drop(lower);
                 exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                 let mut candidate = candidate?;
                 coalesce_bridge_rows(
@@ -2394,7 +2154,7 @@ pub(super) fn realize(
                 let live_bytes = native_owned_bytes
                     + support_metadata_bytes
                     + payload.refresh(index, layer)
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                    + support_bytes
                     + super::bonds::path_bytes(&candidate.paths)
                     + candidate_aux_bytes(&candidate)
                     + anchors.retained_bytes();
@@ -2415,12 +2175,11 @@ pub(super) fn realize(
                         &mut constructed_points,
                     )?;
                 };
-                retained_regions =
-                    retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+                retained_regions = retained + retained_support_points;
                 owned_bytes = native_owned_bytes
                     + support_metadata_bytes
                     + payload.refresh(index, layer)
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+                    + support_bytes;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
             split.stop("joined_rebuild", t);
@@ -2429,27 +2188,15 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
             )?);
             let t = split.start();
-            let reuse = speculated
-                .get_mut(index - speculated_from)
-                .and_then(Option::take)
-                .filter(|spec| {
-                    spec.begin == begin
-                        && spec.object == layer.paths[begin..]
-                        && spec.previous == prior[index - 1].paths
-                        && spec.contact.iter().eq(contact.clone())
-                });
-            let mut admission = match reuse {
-                Some(spec) => spec.admission,
-                None => strokes::analyze(
-                    &layer.paths[begin..],
-                    previous.clone(),
-                    contact.clone(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )?,
-            };
+            let mut admission = strokes::analyze(
+                &layer.paths[begin..],
+                previous.clone(),
+                contact.clone(),
+                recipe,
+                &mut anchors,
+                &mut anchor_work,
+                cancel,
+            )?;
             split.stop("analyze", t);
             let t = split.start();
             if admission.failure.is_some() {
@@ -2466,11 +2213,12 @@ pub(super) fn realize(
                     anchors.set_budget(0);
                     let extra_owned_bytes = payload.refresh(index, layer)
                         + support_metadata_bytes
-                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                        + support_bytes
                         + vec_bytes(&admission.bridges);
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
                     let course = super::hatch_key(index);
+                    let mut lower = strokes::LowerStrokes::new(previous.clone(), contact.clone());
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,
@@ -2485,10 +2233,9 @@ pub(super) fn realize(
                                 scratch_owned_bytes
                                     .saturating_add(candidate_owned_bytes(candidate)),
                             )?;
-                            component_admission(
+                            component_admission_with(
                                 (candidate, axis, budget, contact_bridge),
-                                previous.clone(),
-                                contact.clone(),
+                                &mut lower,
                                 recipe,
                                 &mut anchors,
                                 &mut anchor_work,
@@ -2513,6 +2260,7 @@ pub(super) fn realize(
                         &mut work,
                         recovery,
                     );
+                    drop(lower);
                     exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                     let mut candidate = candidate?;
                     split.stop(
@@ -2556,6 +2304,17 @@ pub(super) fn realize(
                     )? {
                         continue;
                     }
+                    if admission.failure.as_ref().is_some_and(|failure| {
+                        candidate
+                            .paths
+                            .get(failure.path)
+                            .is_some_and(|path| layer.paths.get(begin + failure.path) == Some(path))
+                    }) {
+                        // This same stroke still fails against these lower roads,
+                        // so the staged replacement cannot pass admission.
+                        check_cancel(cancel)?;
+                        continue;
+                    }
                     anchors.set_budget(candidate_budget(
                         &candidate.paths,
                         retained_regions,
@@ -2595,7 +2354,7 @@ pub(super) fn realize(
                         let live_bytes = native_owned_bytes
                             + support_metadata_bytes
                             + payload.refresh(index, layer)
-                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                            + support_bytes
                             + super::bonds::path_bytes(&candidate.paths)
                             + candidate_aux_bytes(&candidate)
                             + anchors.retained_bytes();
@@ -2616,8 +2375,7 @@ pub(super) fn realize(
                                 &mut constructed_points,
                             )?;
                         };
-                        retained_regions = retained
-                            + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+                        retained_regions = retained + retained_support_points;
                         admission = other;
                         break;
                     }
@@ -2625,7 +2383,7 @@ pub(super) fn realize(
                 owned_bytes = native_owned_bytes
                     + support_metadata_bytes
                     + payload.refresh(index, layer)
-                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+                    + support_bytes;
                 anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
             }
             split.stop("recovery", t);
@@ -2640,9 +2398,15 @@ pub(super) fn realize(
             for path in admission.bridges {
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
             }
+            dag.finish(LayerStep::Object, index, object_started);
         }
+        drop(dag);
+        drop(donors);
+        drop(prebuilt);
         drop(split);
         drop(payload);
+        support_metadata_bytes -= vec_bytes(&used_contact_proposals);
+        drop(used_contact_proposals);
         support_metadata_bytes -= vec_bytes(&original_bridge_roles);
         drop(original_bridge_roles);
         support_metadata_bytes = support_metadata_bytes.saturating_sub(
@@ -2760,10 +2524,146 @@ pub(super) fn realize(
     outcome
 }
 
+struct RasterLayerInput<'a> {
+    layer: &'a mut PrintLayer,
+    previous: Option<&'a PrintLayer>,
+    paths: Vec<DepositionPath>,
+    wall_receipt: raster::WallReceipt,
+    part_contact: Option<&'a sweep::PartContact>,
+    frame: Option<grid::CellFrame>,
+    recipe: &'a PlanarPrintRecipe,
+    retained: usize,
+    owned_bytes: usize,
+}
+
+struct RasterLayerReceipt {
+    first_object: usize,
+    walls: usize,
+    used_part_proposal: bool,
+    certified: Vec<sweep::CertifiedEdge>,
+}
+
+fn raster_path_units(paths: &[DepositionPath]) -> usize {
+    paths
+        .iter()
+        .map(|path| path.points_mm.capacity())
+        .fold(0, usize::saturating_add)
+}
+
+fn admit_raster_layer(
+    input: RasterLayerInput<'_>,
+    segments: &mut usize,
+    anchors: &mut AnchorWorkspace,
+    anchor_work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(RasterLayerReceipt, usize), ManufacturingError> {
+    let RasterLayerInput {
+        layer,
+        previous,
+        mut paths,
+        mut wall_receipt,
+        part_contact,
+        frame,
+        recipe,
+        retained,
+        owned_bytes,
+    } = input;
+    let owned_bytes = owned_bytes.saturating_add(vec_bytes(&wall_receipt.certified));
+    let mut contact_work = 0;
+    let mut used_part_proposal = false;
+    // The bed roots the first layer. Above it, the only operands are the
+    // previous layer's admitted raster prefix and this layer's proposal cells.
+    if let Some(previous) = previous
+        && !paths.is_empty()
+    {
+        let paths_bytes = super::bonds::path_bytes(&paths);
+        let admit = |extra: usize| {
+            super::remaining_geometry_units(
+                retained,
+                owned_bytes
+                    .saturating_add(paths_bytes)
+                    .saturating_add(extra),
+            )
+            .map(|_| ())
+        };
+        let contact_raster = frame
+            .filter(|_| part_contact.is_some())
+            .map(|frame| grid::Raster {
+                frame,
+                cancel,
+                admit: &admit,
+                work: std::sync::atomic::AtomicUsize::new(0),
+            });
+        let queried = AtomicBool::new(false);
+        let contacts = contact_raster
+            .as_ref()
+            .zip(part_contact)
+            .map(|(raster, proposal)| established::CellContacts {
+                raster,
+                cells: &proposal.cells,
+                donors: &[],
+                queried: Some(&queried),
+            });
+        let mut lower = strokes::LowerStrokes::new(
+            previous.paths.iter().filter(|path| support_role(path.kind)),
+            std::iter::empty(),
+        );
+        let kept = raster::retain_anchored(
+            &mut paths,
+            wall_receipt.paths,
+            &mut lower,
+            contacts.as_ref(),
+            recipe,
+            retained,
+            owned_bytes,
+            anchors,
+            anchor_work,
+            cancel,
+        )?;
+        contact_work = contact_raster.as_ref().map_or(0, grid::Raster::take_work);
+        used_part_proposal = queried.into_inner();
+        wall_receipt.paths = kept.paths;
+        wall_receipt.omitted_mm += kept.omitted_mm;
+    }
+    layer.region_coverage.support_omitted_wall_mm = wall_receipt.omitted_mm;
+    *segments = segments
+        .checked_add(path_segments(&paths))
+        .filter(|count| *count <= crate::working_set::units())
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "retained deposition segment limit exceeded",
+            )
+        })?;
+    anchors.set_budget(0);
+    layer.region_coverage.support_nominal_deposition_volume_mm3 =
+        raster::nominal_volume(&paths, layer.index, recipe)?;
+    layer.region_coverage.support_area_mm2 =
+        layer.region_coverage.support_nominal_deposition_volume_mm3
+            / (layer.z_mm - layer.lower_z_mm);
+    let first_object = paths.len();
+    let paths_live = owned_bytes.saturating_add(super::bonds::path_bytes(&paths));
+    reserve_owned(&mut paths, layer.paths.len(), paths_live)?;
+    paths.append(&mut layer.paths);
+    layer.paths = paths;
+    Ok((
+        RasterLayerReceipt {
+            first_object,
+            walls: wall_receipt.paths,
+            used_part_proposal,
+            certified: wall_receipt.certified,
+        },
+        contact_work,
+    ))
+}
+
 struct FinalSupportInput<'a> {
     index: usize,
     roots: &'a [Root],
+    donors: &'a mut DonorCache,
+    trace: &'a mut LayerDagTrace,
     part_contact: Option<&'a sweep::PartContact>,
+    lower_support_unchanged: bool,
     contact_tops: &'a [Option<usize>],
     z_gap: f64,
     /// The support grid frame; `None` when the sweep had no demand.
@@ -2786,7 +2686,10 @@ fn reconcile_layer_roots(
     let FinalSupportInput {
         index,
         roots,
+        donors: donor_cache,
+        trace,
         part_contact,
+        lower_support_unchanged,
         contact_tops,
         z_gap,
         frame,
@@ -2814,7 +2717,16 @@ fn reconcile_layer_roots(
                     .filter(|path| support_role(path.kind)),
                 std::iter::empty(),
             );
-            for path in layer.paths.iter().filter(|path| support_role(path.kind)) {
+            // Bulk support never reads part contacts. Its raster admission
+            // still applies when the ordered lower support roads survived.
+            for path in layer
+                .paths
+                .iter()
+                .take_while(|path| support_role(path.kind))
+            {
+                if lower_support_unchanged && path.kind == DepositionKind::Support {
+                    continue;
+                }
                 if raster::scan_with_lower(
                     std::slice::from_ref(path),
                     &mut lower,
@@ -2835,14 +2747,22 @@ fn reconcile_layer_roots(
         if continuing {
             return Ok(true);
         }
-        {
+        let unchanged = {
             let layer_bytes = super::bonds::path_bytes(&layer.paths);
             let outside = owned_bytes
                 .saturating_add(payload.others(index))
                 .saturating_add(layer_bytes);
+            let cached_before = donor_cache.bytes();
+            let extra_cache = std::sync::atomic::AtomicUsize::new(0);
+            use std::sync::atomic::Ordering::Relaxed;
             let admit = |extra: usize| {
-                super::remaining_geometry_units(retained_units, outside.saturating_add(extra))
-                    .map(|_| ())
+                super::remaining_geometry_units(
+                    retained_units,
+                    outside
+                        .saturating_add(extra_cache.load(Relaxed))
+                        .saturating_add(extra),
+                )
+                .map(|_| ())
             };
             let contact_raster =
                 frame
@@ -2878,15 +2798,27 @@ fn reconcile_layer_roots(
                         {
                             continue;
                         }
-                        established::local_donors(
-                            prior,
-                            object_layer,
-                            contact_tops[object_layer],
-                            recipe,
-                            raster,
-                            outside,
-                            &mut donors,
+                        let (prepared, cached_bytes) = donor_cache.get(
+                            DonorInput {
+                                layers: prior,
+                                target: object_layer,
+                                contact_top: contact_tops[object_layer],
+                                recipe,
+                                raster,
+                                owned_bytes: outside
+                                    .saturating_add(extra_cache.load(Relaxed))
+                                    .saturating_add(vec_bytes(&donors)),
+                            },
+                            trace,
                         )?;
+                        extra_cache.store(cached_bytes - cached_before, Relaxed);
+                        // Keep the exact contact predicate's original root order.
+                        reserve_owned(
+                            &mut donors,
+                            prepared.len(),
+                            outside.saturating_add(extra_cache.load(Relaxed)),
+                        )?;
+                        donors.extend_from_slice(prepared);
                     }
                     let cells = established::inward_donors(raster, &donors)?;
                     *work = work.saturating_add(raster.take_work());
@@ -2902,6 +2834,7 @@ fn reconcile_layer_roots(
                         raster,
                         cells,
                         donors: &donors,
+                        queried: None,
                     });
             let old_segments = path_segments(&layer.paths);
             let kept = raster::retain_anchored(
@@ -2919,6 +2852,7 @@ fn reconcile_layer_roots(
                 retained_units,
                 outside
                     .saturating_sub(layer_bytes)
+                    .saturating_add(extra_cache.load(Relaxed))
                     .saturating_add(vec_bytes(&donors))
                     .saturating_add(contact_cells.as_ref().map_or(0, grid::Bits::bytes)),
                 anchors,
@@ -2939,6 +2873,10 @@ fn reconcile_layer_roots(
                         "final support segment accounting overflow",
                     )
                 })?;
+            kept.unchanged
+        };
+        if unchanged {
+            return Ok(true);
         }
         let support_count = layer
             .paths
@@ -3839,6 +3777,10 @@ impl PayloadLedger {
         let bytes = layer_payload_bytes(std::iter::once(layer));
         self.total = self.total - self.per_layer[index] + bytes;
         self.per_layer[index] = bytes;
+        self.bytes()
+    }
+
+    fn bytes(&self) -> usize {
         self.total.saturating_add(vec_bytes(&self.per_layer))
     }
 
@@ -4397,14 +4339,28 @@ mod tests {
             .unwrap();
             assert!(before.failure.is_none() && !before.bridges.is_empty());
             let mut payload = PayloadLedger::new(&layers).unwrap();
+            let mut donors = DonorCache::new(
+                layers.len(),
+                &roots,
+                [(2, &part_contact)],
+                0,
+                &cancel,
+                &mut 0,
+            )
+            .unwrap();
+            let mut trace = LayerDagTrace::new();
+            let mut lower_support_unchanged = false;
             for index in 1..layers.len() {
-                reconcile_layer_roots(
+                lower_support_unchanged = reconcile_layer_roots(
                     &mut layers,
                     &mut payload,
                     FinalSupportInput {
                         index,
                         roots: &roots,
+                        donors: &mut donors,
+                        trace: &mut trace,
                         part_contact: (index == 2).then_some(&part_contact),
+                        lower_support_unchanged,
                         contact_tops: &contacts,
                         z_gap: 0.125,
                         frame,
@@ -4475,7 +4431,10 @@ mod tests {
                     FinalSupportInput {
                         index: 1,
                         roots: &roots,
+                        donors: &mut donors,
+                        trace: &mut trace,
                         part_contact: None,
+                        lower_support_unchanged: false,
                         contact_tops: &contacts,
                         z_gap: 0.125,
                         frame,

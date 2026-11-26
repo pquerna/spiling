@@ -493,6 +493,8 @@ pub(super) struct CellContacts<'r, 'a> {
     pub raster: &'r Raster<'a>,
     pub cells: &'r Bits,
     pub donors: &'r [Donor],
+    /// Records whether any anchoring query consulted these proposal cells.
+    pub queried: Option<&'r AtomicBool>,
 }
 
 impl CellContacts<'_, '_> {
@@ -503,6 +505,9 @@ impl CellContacts<'_, '_> {
         pieces: &mut Vec<(f64, bool)>,
         intervals: &mut Vec<(f64, f64)>,
     ) -> Result<[bool; 2], ManufacturingError> {
+        if let Some(queried) = self.queried {
+            queried.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let [start, end] = [
             program_coordinates::project_xyz6_point_mm(endpoints[0])?,
             program_coordinates::project_xyz6_point_mm(endpoints[1])?,

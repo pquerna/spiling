@@ -118,6 +118,12 @@ where
         Self::new(self.previous.clone(), self.contacts.clone())
     }
 
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.inventory
+            .as_ref()
+            .map_or(0, NominalAnchorPaths::retained_bytes)
+    }
+
     fn admit_inventory(
         &mut self,
         anchors: &AnchorWorkspace,

@@ -44,6 +44,24 @@ pub(super) struct EdgeGrid {
 }
 
 impl EdgeGrid {
+    pub(super) fn retained_bytes(&self) -> usize {
+        use super::super::super::vec_bytes;
+
+        vec_bytes(&self.offsets)
+            + vec_bytes(&self.entries)
+            + vec_bytes(&self.edges)
+            + vec_bytes(&self.first_edge)
+            + vec_bytes(&self.whole)
+            + vec_bytes(&self.stamp)
+            + vec_bytes(&self.hits)
+            + vec_bytes(&self.prefixes)
+            + self
+                .prefixes
+                .iter()
+                .map(|(_, prefix)| vec_bytes(prefix))
+                .sum::<usize>()
+    }
+
     pub(super) fn new<'a>(
         paths: impl ExactSizeIterator<Item = &'a DepositionPath>,
         cancel: &AtomicBool,

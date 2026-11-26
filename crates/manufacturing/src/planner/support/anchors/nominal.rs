@@ -151,6 +151,11 @@ impl<'a> NominalAnchorPaths<'a> {
         Ok(inventory.admitted(workspace).then_some(inventory))
     }
 
+    pub(in crate::planner::support) fn retained_bytes(&self) -> usize {
+        self.reserved_records * size_of::<[f64; 2]>()
+            + self.grid.as_ref().map_or(0, grid::EdgeGrid::retained_bytes)
+    }
+
     /// Admission with the actual allocated metadata, as a fresh build would see it.
     pub(in crate::planner::support) fn admitted(&self, workspace: &AnchorWorkspace) -> bool {
         self.stats.admits(workspace)

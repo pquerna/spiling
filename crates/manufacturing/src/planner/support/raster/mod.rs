@@ -27,6 +27,14 @@ pub(super) struct WallReceipt {
     pub(super) certified: Vec<super::sweep::CertifiedEdge>,
 }
 
+#[derive(Debug)]
+pub(super) struct RetainedSupport {
+    pub(super) paths: usize,
+    pub(super) omitted_mm: f64,
+    /// Every original support path passed unchanged in its original order.
+    pub(super) unchanged: bool,
+}
+
 /// One layer's staged support walls and hatch rows from its kept support
 /// cells `support` and the interface cells `interface` among them.
 ///
@@ -686,15 +694,7 @@ pub(super) fn scan_with_lower<'a>(
         for (first_point, last, width_mm) in StrokeRuns::for_path(path)? {
             let a = path.points_mm[first_point];
             let b = path.points_mm[last];
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-            let ends = if let Some(contacts) = cells {
-                contacts.stroke([a, b], width_mm * 0.5, &mut pieces, &mut intervals)?
-            } else {
-                pieces.clear();
-                pieces.push((1.0, false));
-                [false; 2]
-            };
-            for gap in lower.gaps_supplied_contacts(
+            let gaps = lower.gaps_supplied_contacts(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
                     bead_width_mm: width_mm,
@@ -704,9 +704,22 @@ pub(super) fn scan_with_lower<'a>(
                 anchors,
                 work,
                 cancel,
-            )? {
+            )?;
+            // A fully anchored run needs no part-contact raster. When it has
+            // gaps, borrow a single outside piece if no contact is eligible.
+            if gaps.is_empty() {
+                continue;
+            }
+            let (pieces, ends) = if let Some(contacts) = cells {
+                let ends = contacts.stroke([a, b], width_mm * 0.5, &mut pieces, &mut intervals)?;
+                (pieces.as_slice(), ends)
+            } else {
+                (&[(1.0, false)][..], [false; 2])
+            };
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            for gap in gaps {
                 super::established::CellContacts::refine(
-                    &pieces,
+                    pieces,
                     gap,
                     ends,
                     |start, end, left, right, direct_ends| {
@@ -770,9 +783,13 @@ pub(super) fn retain_anchored<'a>(
     anchors: &mut AnchorWorkspace,
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<WallReceipt, ManufacturingError> {
+) -> Result<RetainedSupport, ManufacturingError> {
     check_cancel(cancel)?;
-    let mut receipt = WallReceipt::default();
+    let mut receipt = RetainedSupport {
+        paths: 0,
+        omitted_mm: 0.0,
+        unchanged: true,
+    };
     let original_units = paths.iter().fold(retained, |total, path| {
         total.saturating_add(path.points_mm.capacity())
     });
@@ -817,6 +834,7 @@ pub(super) fn retain_anchored<'a>(
             paths.push(path);
             continue;
         }
+        receipt.unchanged = false;
         if path_index >= wall_paths {
             if let Some(row) = trim_row_ends(&path, lower, cells, recipe, anchors, work, cancel)? {
                 let live_bytes = original_bytes
@@ -1067,7 +1085,7 @@ fn retain_in_groups<'a, P, C>(
     [original_units, original_bytes]: [usize; 2],
     work: &mut usize,
     cancel: &AtomicBool,
-) -> Result<Option<WallReceipt>, ManufacturingError>
+) -> Result<Option<RetainedSupport>, ManufacturingError>
 where
     P: Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
     C: Iterator<Item = &'a DepositionPath> + Clone + Send + Sync,
@@ -1228,7 +1246,11 @@ where
             }
         }
     }
-    let mut receipt = WallReceipt::default();
+    let mut receipt = RetainedSupport {
+        paths: 0,
+        omitted_mm: 0.0,
+        unchanged: true,
+    };
     let original = std::mem::take(paths);
     for ((path_index, path), verdict) in original.into_iter().enumerate().zip(by_path) {
         match verdict {
@@ -1238,10 +1260,12 @@ where
                 paths.push(path);
             }
             Some(Verdict::Trimmed(row)) => {
+                receipt.unchanged = false;
                 super::reserve_owned(paths, 1, bytes)?;
                 paths.push(row);
             }
             Some(Verdict::Runs(runs, omitted)) => {
+                receipt.unchanged = false;
                 for (first, last, width_mm) in runs {
                     super::reserve_owned(paths, 1, bytes)?;
                     paths.push(run_fragment(&path, first, last, width_mm));
