@@ -104,8 +104,16 @@ pub(crate) fn configure(connection: &Connection, read_only: bool) -> Result<()> 
 }
 
 pub(crate) fn create(connection: &Connection, profile: crate::DocumentProfile) -> Result<()> {
-    connection.execute_batch("PRAGMA page_size=4096; PRAGMA journal_mode=DELETE; PRAGMA auto_vacuum=NONE; PRAGMA application_id=1347699011; PRAGMA user_version=1;")?;
-    connection.execute_batch(&ddl(profile))?;
+    connection.execute_batch(
+        "PRAGMA page_size=4096; PRAGMA journal_mode=DELETE; PRAGMA auto_vacuum=NONE;",
+    )?;
+    // One durable commit for the whole schema: each statement would otherwise
+    // commit (and, at synchronous=EXTRA, sync journal, file and directory) on
+    // its own.
+    connection.execute_batch(&format!(
+        "BEGIN IMMEDIATE; PRAGMA application_id=1347699011; PRAGMA user_version=1; {} COMMIT;",
+        ddl(profile)
+    ))?;
     Ok(())
 }
 
