@@ -1720,95 +1720,76 @@ fn structuring(radius: f64) -> Vec<usize> {
     reach
 }
 
-/// One closed capsule `ab ⊕ disk(radius)` with its per-segment invariants
-/// (direction and length) computed once, so each row evaluates only the
-/// per-line terms. A flat (capsule, row) batch of [`Capsule::band`] calls
-/// is independent per item: the shape a CubeCL kernel would take.
-#[derive(Debug, Clone, Copy)]
+/// The left and right tangents of a closed capsule and its two end disks.
 struct Capsule {
-    a: [f64; 2],
-    b: [f64; 2],
+    ends: [[f64; 2]; 2],
     radius: f64,
-    /// Unit direction and length; `None` for a degenerate segment.
-    axis: Option<(f64, f64, f64)>,
+    radius_squared: f64,
+    tangents: Option<[[[f64; 2]; 2]; 2]>,
 }
 
 impl Capsule {
+    #[inline]
     fn new(a: [f64; 2], b: [f64; 2], radius: f64) -> Self {
+        let ends = if a[0] <= b[0] { [a, b] } else { [b, a] };
+        let [a, b] = ends;
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let length = dx.hypot(dy);
-        let axis = (length > 0.0).then(|| (dx / length, dy / length, length));
-        Self { a, b, radius, axis }
+        let tangents = (length > 0.0).then(|| {
+            let nx = (dy.abs() / length) * radius;
+            let ny = (dx / length).copysign(dy) * radius;
+            [
+                [[a[0] - nx, a[1] + ny], [b[0] - nx, b[1] + ny]],
+                [[a[0] + nx, a[1] - ny], [b[0] + nx, b[1] - ny]],
+            ]
+        });
+        Self {
+            ends,
+            radius,
+            radius_squared: radius * radius,
+            tangents,
+        }
     }
 
-    /// X extent within the horizontal band `[y0, y1]`. A convex set's
-    /// extreme in a slab lies on a slab line or is the set's own extreme.
-    fn band(&self, band: [f64; 2]) -> Option<(f64, f64)> {
-        let (a, b, radius) = (self.a, self.b, self.radius);
+    /// X extent within the horizontal band `[y0, y1]`. Each disk reaches
+    /// farthest at the ordinate closest to its center. Between the disks
+    /// only the left tangent can extend the left bound (and vice versa).
+    #[inline]
+    fn band(&self, [bottom, top]: [f64; 2]) -> Option<(f64, f64)> {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
-        let mut take = |range: Option<(f64, f64)>| {
-            if let Some((l, h)) = range {
-                lo = lo.min(l);
-                hi = hi.max(h);
-            }
-        };
-        take(self.line(band[0]));
-        take(self.line(band[1]));
-        let inside = |y: f64| y >= band[0] && y <= band[1];
-        let (left, right) = if a[0] <= b[0] { (a, b) } else { (b, a) };
-        if a[0] == b[0] {
-            if a[1].max(b[1]) >= band[0] && a[1].min(b[1]) <= band[1] {
-                take(Some((a[0] - radius, a[0] + radius)));
-            }
-        } else {
-            if inside(left[1]) {
-                take(Some((left[0] - radius, left[0] - radius)));
-            }
-            if inside(right[1]) {
-                take(Some((right[0] + radius, right[0] + radius)));
+        for [x, y] in self.ends {
+            let distance = (bottom - y).max(y - top).max(0.0);
+            if distance <= self.radius {
+                let half = (self.radius_squared - distance * distance).max(0.0).sqrt();
+                lo = lo.min(x - half);
+                hi = hi.max(x + half);
             }
         }
-        (lo <= hi).then_some((lo, hi))
-    }
-
-    /// X interval of the closed capsule on the line `y`.
-    fn line(&self, y: f64) -> Option<(f64, f64)> {
-        let (a, radius) = (self.a, self.radius);
-        let mut lo = f64::INFINITY;
-        let mut hi = f64::NEG_INFINITY;
-        for p in [a, self.b] {
-            let dy = y - p[1];
-            if dy.abs() <= radius {
-                let half = (radius * radius - dy * dy).max(0.0).sqrt();
-                lo = lo.min(p[0] - half);
-                hi = hi.max(p[0] + half);
+        if let Some([left, right]) = &self.tangents {
+            if let Some(x) = tangent_extent(left[0], left[1], bottom, top) {
+                lo = lo.min(x);
             }
-        }
-        if let Some((ux, uy, length)) = self.axis {
-            // Along the segment s(x) = ux·(x − ax) + uy·(y − ay) ∈ [0, L];
-            // across it q(x) = −uy·(x − ax) + ux·(y − ay) ∈ [−r, r].
-            let along = solve(ux, uy * (y - a[1]) - ux * a[0], 0.0, length);
-            let across = solve(-uy, ux * (y - a[1]) + uy * a[0], -radius, radius);
-            if let (Some(s), Some(q)) = (along, across) {
-                let (l, h) = (s.0.max(q.0), s.1.min(q.1));
-                if l <= h {
-                    lo = lo.min(l);
-                    hi = hi.max(h);
-                }
+            if let Some(x) = tangent_extent(right[1], right[0], bottom, top) {
+                hi = hi.max(x);
             }
         }
         (lo <= hi).then_some((lo, hi))
     }
 }
 
-/// The x interval with `k·x + m ∈ [lo, hi]`.
-fn solve(k: f64, m: f64, lo: f64, hi: f64) -> Option<(f64, f64)> {
-    if k.abs() < 1.0e-12 {
-        return (m >= lo && m <= hi).then_some((f64::NEG_INFINITY, f64::INFINITY));
-    }
-    let (p, q) = ((lo - m) / k, (hi - m) / k);
-    Some((p.min(q), p.max(q)))
+/// X coordinate at the first point of the oriented tangent inside the band.
+#[inline]
+fn tangent_extent(from: [f64; 2], to: [f64; 2], bottom: f64, top: f64) -> Option<f64> {
+    let boundary = if from[1] < bottom && to[1] >= bottom {
+        bottom
+    } else if from[1] > top && to[1] <= top {
+        top
+    } else {
+        return (from[1] >= bottom && from[1] <= top).then_some(from[0]);
+    };
+    let fraction = (boundary - from[1]) / (to[1] - from[1]);
+    Some(from[0] + (to[0] - from[0]) * fraction)
 }
 
 /// Douglas–Peucker on a closed ring of integer corners, splitting at the

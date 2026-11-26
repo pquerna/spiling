@@ -468,6 +468,19 @@ fn frame_refuses_unrepresentable_bounds_and_cancels() {
 }
 
 #[test]
+fn diagonal_capsule_spans_a_band_between_its_end_disks() {
+    let a = [0.0, 0.0];
+    let b = [3.0, 4.0];
+    for (start, end) in [(a, b), (b, a)] {
+        let capsule = Capsule::new(start, end, 1.0);
+        let (left, right) = capsule.band([1.9, 2.1]).unwrap();
+        assert!((left - 0.175).abs() < 1e-12);
+        assert!((right - 2.825).abs() < 1e-12);
+        assert!(capsule.band([5.1, 5.2]).is_none());
+    }
+}
+
+#[test]
 fn escaped_cells_are_exactly_the_outward_capsule_outside_the_kept_set() {
     let cancel = AtomicBool::new(false);
     let frame = frame();
