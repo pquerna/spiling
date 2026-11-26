@@ -427,6 +427,19 @@ struct CompletedSchedule {
     hatch_keys: Vec<u32>,
 }
 
+/// A precomputed centered template: (run, axis slot, top-skin axis).
+type TemplateKey = (usize, usize, region::HatchAxis);
+/// A centered template built ahead of the ordered pass, with its work.
+type PreTemplate = Result<(OrdinaryTemplate, usize), ManufacturingError>;
+
+/// A layer's classification built ahead of the ordered object pass, with
+/// the wall layout it was built on.
+struct PreClassified {
+    layer: usize,
+    layout: Option<Arc<walls::WallPlan>>,
+    result: Result<(classification::ClassifiedRegions, usize, usize), ManufacturingError>,
+}
+
 struct OrdinaryTemplate {
     phase: region::OrdinaryHatchPhase,
     top_axis: region::HatchAxis,
@@ -1193,28 +1206,15 @@ fn admit_schedule<'model>(
             }
         }
         timing.mark("skin_prefetch");
-        for index in 0..count {
-            check_cancel(cancel)?;
+        let mut object_split = crate::timing::Split::new("planner.object_layers");
+        // A layer's classification key and wall layout key, from its schedule
+        // entry and source spans alone; `None` for a layer without material.
+        let layer_keys = |index: u32| -> Result<_, ManufacturingError> {
             let elevation = &schedule[index as usize];
             let z = elevation.z;
-            let sample = elevation.sample;
-            let height = elevation.height;
-            let top_axis =
-                region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(index as usize));
             let (current, below, above, landing) = skin_horizons(index);
             if sections[current].material.0.is_empty() {
-                layers.push(PrintLayer {
-                    skin_command_fits: Vec::new(),
-                    index,
-                    hatch_course: elevation.course,
-                    z_mm: z,
-                    lower_z_mm: elevation.lower_z,
-                    height_mm: height,
-                    section_z_mm: sample,
-                    paths: Vec::new(),
-                    region_coverage: empty_coverage(recipe.infill_fraction),
-                });
-                continue;
+                return Ok(None);
             }
             let native_index = native_surfaces.partition_point(|span| span.end <= index);
             let native_span = native_surfaces
@@ -1244,7 +1244,362 @@ fn admit_schedule<'model>(
                     })
                 }),
             );
-            if key != Some(next_key) {
+            let actual_height = z - elevation.lower_z;
+            let limits = input.intent.effective_deposition_limits();
+            let envelope = walls::width_envelope(&limits, actual_height)?;
+            // Retain the exact unguarded stadium floor as well: adding the
+            // guard must not merge adjacent height-dominated f64 floors.
+            let envelope_key = [
+                envelope[0].to_bits(),
+                envelope[1].to_bits(),
+                limits.min_bead_width_mm.max(actual_height).to_bits(),
+            ];
+            // Identical material plans identical walls: key by the first span
+            // with bit-equal material so repeated prismatic layers share one plan.
+            let wall_span = if required_owner.is_none() && construction.domains.is_empty() {
+                material_twin[current]
+            } else {
+                current
+            };
+            let layout_key = (wall_span, required_owner, envelope_key, construction_phase);
+            Ok(Some((
+                next_key,
+                layout_key,
+                envelope_key,
+                native_span,
+                required_owner,
+                construction_phase,
+            )))
+        };
+        // Classification and the centered ordinary template read only source
+        // material, walls and survivals, never an earlier layer's paths, so
+        // each chunk of layers builds them in parallel ahead of the ordered
+        // pass. Only the hatch phase reads the layer below; it is centered on
+        // nearly every layer, so the ordered pass adopts the centered template
+        // and builds another phase's template itself.
+        const OBJECT_CHUNK: usize = 64;
+        let mut chunk_start = 0usize;
+        let mut pre_classified: Vec<Option<PreClassified>> = Vec::new();
+        let mut pre_run: Vec<Option<usize>> = Vec::new();
+        let mut pre_templates: Vec<(TemplateKey, PreTemplate)> = Vec::new();
+        for index in 0..count {
+            check_cancel(cancel)?;
+            if (index as usize).is_multiple_of(OBJECT_CHUNK) {
+                let pre_started = object_split.start();
+                chunk_start = index as usize;
+                let chunk_end = (chunk_start + OBJECT_CHUNK).min(count as usize);
+                pre_classified.clear();
+                pre_run.clear();
+                pre_templates.clear();
+                let wall_static_bytes = geometry_bytes(&[
+                    wall_static_base_bytes,
+                    classification_bytes,
+                    phase_anchors.retained_bytes(),
+                ])?;
+                let snapshot_bytes = skin_external_owned_bytes(
+                    wall_static_bytes,
+                    retained_plan_bytes,
+                    retained_wall_bytes,
+                    wall_cache.len(),
+                    wall_index_entry_bytes,
+                    resolution_allocated_bytes,
+                    &templates,
+                )?;
+                // Serial: each new key's cached wall layout and survivals.
+                struct Job<'m> {
+                    layer: usize,
+                    layout: Arc<walls::WallPlan>,
+                    lower: neighborhood::Material<'m>,
+                    upper: neighborhood::Material<'m>,
+                    landed: Option<neighborhood::Material<'m>>,
+                }
+                let mut jobs: Vec<(usize, Result<Job<'_>, ManufacturingError>)> = Vec::new();
+                let mut previous = key;
+                // Run of the layer: a job, `usize::MAX` for the classification
+                // carried in from the previous chunk, or `None`.
+                let mut run = classified.as_ref().map(|_| usize::MAX);
+                for layer in chunk_start..chunk_end {
+                    let Some((
+                        next_key,
+                        layout_key,
+                        envelope_key,
+                        _,
+                        required_owner,
+                        construction_phase,
+                    )) = layer_keys(layer as u32)?
+                    else {
+                        pre_run.push(None);
+                        continue;
+                    };
+                    if previous != Some(next_key) {
+                        previous = Some(next_key);
+                        run = None;
+                        // The same layout the ordered pass will take: cached by
+                        // key, else remembered for identical material.
+                        let layout = wall_cache.get(&layout_key).map(Arc::clone).or_else(|| {
+                            (required_owner.is_none()
+                                && construction_phase.is_none()
+                                && construction.domains.is_empty())
+                            .then_some(envelope_key)
+                            .and_then(|key| {
+                                wall_memo
+                                    .find(&sections[skin_horizons(layer as u32).0].material, key)
+                            })
+                        });
+                        if let Some(layout) = &layout {
+                            let (current, below, above, landing) = skin_horizons(layer as u32);
+                            let job = (|| {
+                                let lower = neighborhoods.survival(
+                                    current,
+                                    below,
+                                    retained_points,
+                                    snapshot_bytes,
+                                    cancel,
+                                )?;
+                                let upper = neighborhoods.survival(
+                                    current,
+                                    above,
+                                    skin_query_retained_points(retained_points, &[&lower])?,
+                                    skin_query_retained_bytes(snapshot_bytes, &[&lower])?,
+                                    cancel,
+                                )?;
+                                let landed = match landing {
+                                    Some((span, horizon)) => Some(neighborhoods.survival(
+                                        span,
+                                        horizon,
+                                        skin_query_retained_points(
+                                            retained_points,
+                                            &[&lower, &upper],
+                                        )?,
+                                        skin_query_retained_bytes(
+                                            snapshot_bytes,
+                                            &[&lower, &upper],
+                                        )?,
+                                        cancel,
+                                    )?),
+                                    None => None,
+                                };
+                                Ok(Job {
+                                    layer,
+                                    layout: Arc::clone(layout),
+                                    lower,
+                                    upper,
+                                    landed,
+                                })
+                            })();
+                            jobs.push((layer, job));
+                            run = Some(jobs.len() - 1);
+                        }
+                    }
+                    pre_run.push(run);
+                }
+                // Parallel: classify each new key.
+                let (neighbor_points, neighbor_bytes) = (
+                    neighborhoods.retained_points(),
+                    neighborhoods.retained_bytes(),
+                );
+                let working_set = crate::working_set::current();
+                let classify = |job: &Job<'_>| -> Result<
+                    (classification::ClassifiedRegions, usize, usize),
+                    ManufacturingError,
+                > {
+                    let elevation = &schedule[job.layer];
+                    let (current, ..) = skin_horizons(job.layer as u32);
+                    let queries = [&job.lower, &job.upper];
+                    let class_points = skin_query_retained_points(retained_points, &queries)?
+                        .saturating_add(neighbor_points);
+                    let class_bytes = skin_query_retained_bytes(snapshot_bytes, &queries)?
+                        .saturating_add(neighbor_bytes);
+                    let budget = || classification::fixed_owned_budget(class_points, class_bytes);
+                    let mut work = 0usize;
+                    let fresh = classification::ClassifiedRegions::new(
+                        Arc::clone(&job.layout),
+                        &job.lower,
+                        &job.upper,
+                        budget(),
+                        recipe,
+                        cancel,
+                    )?;
+                    let landed = job.landed.as_ref().filter(|_| !fresh.top.0.is_empty());
+                    let snapped = fresh.snap_roof_to_cells(
+                        web_roof.as_ref().map(|field| field.roof()),
+                        landed.map(|material| &**material),
+                        recipe,
+                        budget(),
+                        cancel,
+                    )?;
+                    let mut regions = snapped.with_process(
+                        &sections[current].process_domains,
+                        input.intent,
+                        budget(),
+                        &mut work,
+                        cancel,
+                    )?;
+                    construction.classify(
+                        &mut regions,
+                        [elevation.lower_z, elevation.z],
+                        budget(),
+                        &mut work,
+                        cancel,
+                    )?;
+                    regions.with_tool_widths(input.intent, budget(), &mut work, cancel)?;
+                    let owned = regions.retained_bytes();
+                    Ok((regions, work, owned))
+                };
+                let classified_jobs: Vec<
+                    Result<(classification::ClassifiedRegions, usize, usize), ManufacturingError>,
+                > = {
+                    use rayon::prelude::*;
+                    jobs.par_iter()
+                        .map(|(_, job)| {
+                            crate::working_set::scope(working_set, || match job {
+                                Ok(job) => classify(job),
+                                Err(error) => Err(error.clone()),
+                            })
+                        })
+                        .collect()
+                };
+                // Parallel: each run's centered template per axis pair.
+                let mut wanted: Vec<(usize, usize, region::HatchAxis)> = Vec::new();
+                for layer in chunk_start..chunk_end {
+                    let Some(run) = pre_run[layer - chunk_start] else {
+                        continue;
+                    };
+                    let axis =
+                        region::HatchAxis::for_policy(recipe.rectilinear_axis, hatch_key(layer));
+                    let top_axis =
+                        region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(layer));
+                    let want = (run, usize::from(axis == region::HatchAxis::Y), top_axis);
+                    if !wanted.contains(&want) {
+                        wanted.push(want);
+                    }
+                }
+                let firsts: Vec<usize> = wanted
+                    .iter()
+                    .map(|want| {
+                        (chunk_start..chunk_end)
+                            .find(|&layer| {
+                                pre_run[layer - chunk_start] == Some(want.0)
+                                    && usize::from(
+                                        region::HatchAxis::for_policy(
+                                            recipe.rectilinear_axis,
+                                            hatch_key(layer),
+                                        ) == region::HatchAxis::Y,
+                                    ) == want.1
+                                    && region::HatchAxis::for_policy(
+                                        recipe.top_skin_axis,
+                                        hatch_key(layer),
+                                    ) == want.2
+                            })
+                            .expect("wanted template has a layer")
+                    })
+                    .collect();
+                let template_points = retained_points.saturating_add(neighbor_points);
+                let template_bytes = snapshot_bytes.saturating_add(neighbor_bytes);
+                let built: Vec<Result<(OrdinaryTemplate, usize), ManufacturingError>> = {
+                    use rayon::prelude::*;
+                    let carried = classified
+                        .as_ref()
+                        .map(|regions| (regions, classified_owned_bytes));
+                    wanted
+                        .par_iter()
+                        .zip(firsts.par_iter())
+                        .map(|(want, &layer)| {
+                            crate::working_set::scope(working_set, || {
+                                let (regions, owned) = if want.0 == usize::MAX {
+                                    carried.expect("carried classification")
+                                } else {
+                                    match &classified_jobs[want.0] {
+                                        Ok((regions, _, owned)) => (regions, *owned),
+                                        Err(error) => return Err(error.clone()),
+                                    }
+                                };
+                                let elevation = &schedule[layer];
+                                let (current, ..) = skin_horizons(layer as u32);
+                                let axis = region::HatchAxis::for_policy(
+                                    recipe.rectilinear_axis,
+                                    hatch_key(layer),
+                                );
+                                let mut work = 0usize;
+                                let mut template_segments = segments;
+                                let mut budget = classification::fixed_owned_budget(
+                                    template_points,
+                                    template_bytes,
+                                );
+                                let (paths, proposed, fits) = regions.paths(
+                                    elevation.z,
+                                    elevation.lower_z,
+                                    axis,
+                                    want.2,
+                                    recipe,
+                                    web_roof.as_ref().map(|field| field.roof()),
+                                    region::OrdinaryHatchPhase::Centered,
+                                    owned,
+                                    &sections[current].process_domains,
+                                    &mut template_segments,
+                                    |scratch, scratch_bytes, scratch_work| {
+                                        work = work.saturating_add(scratch_work);
+                                        budget(scratch, scratch_bytes)
+                                    },
+                                    cancel,
+                                )?;
+                                Ok((
+                                    OrdinaryTemplate {
+                                        phase: region::OrdinaryHatchPhase::Centered,
+                                        top_axis: want.2,
+                                        paths,
+                                        coverage: proposed.clone(),
+                                        fits,
+                                    },
+                                    work,
+                                ))
+                            })
+                        })
+                        .collect()
+                };
+                pre_templates.extend(wanted.into_iter().zip(built));
+                for ((layer, job), result) in jobs.into_iter().zip(classified_jobs) {
+                    pre_classified.push(Some(PreClassified {
+                        layer,
+                        layout: job.ok().map(|job| job.layout),
+                        result,
+                    }));
+                }
+                object_split.stop("precompute", pre_started);
+            }
+            let elevation = &schedule[index as usize];
+            let z = elevation.z;
+            let sample = elevation.sample;
+            let height = elevation.height;
+            let top_axis =
+                region::HatchAxis::for_policy(recipe.top_skin_axis, hatch_key(index as usize));
+            let (current, below, above, landing) = skin_horizons(index);
+            if sections[current].material.0.is_empty() {
+                layers.push(PrintLayer {
+                    skin_command_fits: Vec::new(),
+                    index,
+                    hatch_course: elevation.course,
+                    z_mm: z,
+                    lower_z_mm: elevation.lower_z,
+                    height_mm: height,
+                    section_z_mm: sample,
+                    paths: Vec::new(),
+                    region_coverage: empty_coverage(recipe.infill_fraction),
+                });
+                continue;
+            }
+            let (
+                next_key,
+                layout_key,
+                envelope_key,
+                native_span,
+                required_owner,
+                construction_phase,
+            ) = layer_keys(index)?.expect("a layer with material has keys");
+            let key_started = object_split.start();
+            let rekeyed = key != Some(next_key);
+            let mut classify_started = None;
+            if rekeyed {
                 if let Some(regions) = classified.take() {
                     let points = classification::ClassifiedRegions::retained_points(&regions);
                     classifications.push((
@@ -1265,24 +1620,7 @@ fn admit_schedule<'model>(
                     classification_bytes,
                     phase_anchors.retained_bytes(),
                 ])?;
-                let actual_height = z - elevation.lower_z;
                 let limits = input.intent.effective_deposition_limits();
-                let envelope = walls::width_envelope(&limits, actual_height)?;
-                // Retain the exact unguarded stadium floor as well: adding the
-                // guard must not merge adjacent height-dominated f64 floors.
-                let envelope_key = [
-                    envelope[0].to_bits(),
-                    envelope[1].to_bits(),
-                    limits.min_bead_width_mm.max(actual_height).to_bits(),
-                ];
-                // Identical material plans identical walls: key by the first span
-                // with bit-equal material so repeated prismatic layers share one plan.
-                let wall_span = if required_owner.is_none() && construction.domains.is_empty() {
-                    material_twin[current]
-                } else {
-                    current
-                };
-                let layout_key = (wall_span, required_owner, envelope_key, construction_phase);
                 if index == 0 {
                     first_wall_key = Some(layout_key);
                 }
@@ -1403,93 +1741,115 @@ fn admit_schedule<'model>(
                     resolution_allocated_bytes,
                     &templates,
                 )?;
-                let lower = neighborhoods.survival(
-                    current,
-                    below,
-                    retained_points,
-                    skin_owned_bytes,
-                    cancel,
-                )?;
-                let upper = neighborhoods.survival(
-                    current,
-                    above,
-                    skin_query_retained_points(retained_points, &[&lower])?,
-                    skin_query_retained_bytes(skin_owned_bytes, &[&lower])?,
-                    cancel,
-                )?;
-                let mut fresh = classification::ClassifiedRegions::new(
-                    Arc::clone(
-                        wall_layout
-                            .as_ref()
-                            .expect("current wall layout initialized"),
-                    ),
-                    &lower,
-                    &upper,
-                    |scratch, scratch_bytes| {
-                        admit_skin_scratch(
-                            retained_points,
-                            skin_owned_bytes,
-                            &mut neighborhoods,
-                            &[&lower, &upper],
-                            scratch,
-                            scratch_bytes,
-                            cancel,
-                        )
-                    },
-                    recipe,
-                    cancel,
-                )?;
-                // The lower layer matters only under top skin.
-                let landed = match landing.filter(|_| !fresh.top.0.is_empty()) {
-                    Some((span, horizon)) => Some(neighborhoods.survival(
-                        span,
-                        horizon,
-                        skin_query_retained_points(
-                            retained_points + fresh.retained_points(),
-                            &[&lower, &upper],
-                        )?,
-                        skin_query_retained_bytes(
-                            geometry_bytes(&[skin_owned_bytes, fresh.retained_bytes()])?,
-                            &[&lower, &upper],
-                        )?,
+                object_split.stop("walls", key_started);
+                classify_started = object_split.start();
+                let adopted = pre_classified
+                    .iter_mut()
+                    .find(|pre| pre.as_ref().is_some_and(|pre| pre.layer == index as usize))
+                    .and_then(Option::take)
+                    .filter(|pre| {
+                        pre.layout.as_ref().is_none_or(|layout| {
+                            wall_layout
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(layout, current))
+                        })
+                    });
+                if let Some(pre) = adopted {
+                    let (regions, work, _) = pre.result?;
+                    boolean::charge(neighborhoods.work_mut(), work)?;
+                    classified = Some(regions);
+                } else {
+                    let lower = neighborhoods.survival(
+                        current,
+                        below,
+                        retained_points,
+                        skin_owned_bytes,
                         cancel,
-                    )?),
-                    None => None,
-                };
-                let class_points = skin_query_retained_points(retained_points, &[&lower, &upper])?;
-                let class_bytes = skin_query_retained_bytes(skin_owned_bytes, &[&lower, &upper])?;
-                let (admit, _) = neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
-                let snapped = fresh.snap_roof_to_cells(
-                    web_roof.as_ref().map(|field| field.roof()),
-                    landed.as_deref(),
-                    recipe,
-                    admit,
-                    cancel,
-                )?;
-                let (admit, work) =
-                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
-                classified = Some(snapped.with_process(
-                    &sections[current].process_domains,
-                    input.intent,
-                    admit,
-                    work,
-                    cancel,
-                )?);
-                let (admit, work) =
-                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
-                construction.classify(
-                    classified.as_mut().expect("classified material regions"),
-                    [elevation.lower_z, z],
-                    admit,
-                    work,
-                    cancel,
-                )?;
-                let (admit, work) =
-                    neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
-                classified
-                    .as_mut()
-                    .expect("classified material")
-                    .with_tool_widths(input.intent, admit, work, cancel)?;
+                    )?;
+                    let upper = neighborhoods.survival(
+                        current,
+                        above,
+                        skin_query_retained_points(retained_points, &[&lower])?,
+                        skin_query_retained_bytes(skin_owned_bytes, &[&lower])?,
+                        cancel,
+                    )?;
+                    let mut fresh = classification::ClassifiedRegions::new(
+                        Arc::clone(
+                            wall_layout
+                                .as_ref()
+                                .expect("current wall layout initialized"),
+                        ),
+                        &lower,
+                        &upper,
+                        |scratch, scratch_bytes| {
+                            admit_skin_scratch(
+                                retained_points,
+                                skin_owned_bytes,
+                                &mut neighborhoods,
+                                &[&lower, &upper],
+                                scratch,
+                                scratch_bytes,
+                                cancel,
+                            )
+                        },
+                        recipe,
+                        cancel,
+                    )?;
+                    // The lower layer matters only under top skin.
+                    let landed = match landing.filter(|_| !fresh.top.0.is_empty()) {
+                        Some((span, horizon)) => Some(neighborhoods.survival(
+                            span,
+                            horizon,
+                            skin_query_retained_points(
+                                retained_points + fresh.retained_points(),
+                                &[&lower, &upper],
+                            )?,
+                            skin_query_retained_bytes(
+                                geometry_bytes(&[skin_owned_bytes, fresh.retained_bytes()])?,
+                                &[&lower, &upper],
+                            )?,
+                            cancel,
+                        )?),
+                        None => None,
+                    };
+                    let class_points =
+                        skin_query_retained_points(retained_points, &[&lower, &upper])?;
+                    let class_bytes =
+                        skin_query_retained_bytes(skin_owned_bytes, &[&lower, &upper])?;
+                    let (admit, _) =
+                        neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                    let snapped = fresh.snap_roof_to_cells(
+                        web_roof.as_ref().map(|field| field.roof()),
+                        landed.as_deref(),
+                        recipe,
+                        admit,
+                        cancel,
+                    )?;
+                    let (admit, work) =
+                        neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                    classified = Some(snapped.with_process(
+                        &sections[current].process_domains,
+                        input.intent,
+                        admit,
+                        work,
+                        cancel,
+                    )?);
+                    let (admit, work) =
+                        neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                    construction.classify(
+                        classified.as_mut().expect("classified material regions"),
+                        [elevation.lower_z, z],
+                        admit,
+                        work,
+                        cancel,
+                    )?;
+                    let (admit, work) =
+                        neighborhoods.fixed_budget_and_work(class_points, class_bytes)?;
+                    classified
+                        .as_mut()
+                        .expect("classified material")
+                        .with_tool_widths(input.intent, admit, work, cancel)?;
+                }
                 classified_owned_bytes = classified
                     .as_mut()
                     .expect("classified process regions")
@@ -1535,6 +1895,9 @@ fn admit_schedule<'model>(
                         capture.applied = true;
                     }
                 }
+            }
+            if rekeyed {
+                object_split.stop("classify", classify_started);
             }
             // Only XY wall geometry is shared. Source-finish evidence is evaluated
             // at this actual sample, independently of the wall cache/envelope key.
@@ -1654,6 +2017,7 @@ fn admit_schedule<'model>(
                 top_axis,
                 recipe,
             };
+            let phase_started = object_split.start();
             let phase = loop {
                 let revocable = neighborhoods.has_prefetch();
                 let proposed = classified
@@ -1695,6 +2059,8 @@ fn admit_schedule<'model>(
                 }
             };
             phase_by_layer[index as usize] = phase;
+            object_split.stop("phase", phase_started);
+            let template_started = object_split.start();
             if templates[axis_slot]
                 .as_ref()
                 .is_some_and(|template| template.phase != phase || template.top_axis != top_axis)
@@ -1715,6 +2081,42 @@ fn admit_schedule<'model>(
                 resolution_allocated_bytes,
                 &templates,
             )?;
+            if templates[axis_slot].is_none() && phase == region::OrdinaryHatchPhase::Centered {
+                let run = pre_run.get(index as usize - chunk_start).copied().flatten();
+                if let Some(at) = run.and_then(|run| {
+                    pre_templates
+                        .iter()
+                        .position(|(want, _)| *want == (run, axis_slot, top_axis))
+                }) {
+                    let (_, result) = pre_templates.swap_remove(at);
+                    let (template, work) = result?;
+                    boolean::charge(neighborhoods.work_mut(), work)?;
+                    let base = retained_points
+                        + classified
+                            .as_ref()
+                            .expect("region classification initialized")
+                            .retained_points()
+                        + template
+                            .paths
+                            .iter()
+                            .map(|p| p.points_mm.capacity())
+                            .sum::<usize>()
+                        + bonds::skin_command_fit_points(&template.fits);
+                    let live_bytes = geometry_bytes(&[
+                        outside_skin_bytes,
+                        classified_owned_bytes,
+                        bonds::path_bytes(&template.paths),
+                        bonds::skin_command_fit_bytes(&template.fits),
+                    ])?;
+                    let (mut admit, _) = neighborhoods.fixed_budget_and_work(base, live_bytes)?;
+                    admit(
+                        bonds::coverage_owned_bytes(&template.coverage)
+                            .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                        bonds::coverage_owned_bytes(&template.coverage),
+                    )?;
+                    templates[axis_slot] = Some(template);
+                }
+            }
             if templates[axis_slot].is_none() {
                 let mut template_segments = segments;
                 let classified = classified
@@ -1770,6 +2172,8 @@ fn admit_schedule<'model>(
                     fits,
                 });
             }
+            object_split.stop("template", template_started);
+            let assemble_started = object_split.start();
             let OrdinaryTemplate {
                 paths: template,
                 coverage,
@@ -1897,6 +2301,7 @@ fn admit_schedule<'model>(
             if let Some(field) = &web_roof {
                 field.stamp(&mut coverage.web_roof_domains);
             }
+            object_split.stop("assemble", assemble_started);
             layers.push(PrintLayer {
                 skin_command_fits,
                 index,
@@ -1910,6 +2315,19 @@ fn admit_schedule<'model>(
             });
         }
 
+        if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
+            let mut counts = [0usize; 4];
+            for phase in &phase_by_layer {
+                counts[region::OrdinaryHatchPhase::CANDIDATES
+                    .iter()
+                    .position(|candidate| candidate == phase)
+                    .unwrap_or(0)] += 1;
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({"event": "ordinary_phase_counts", "centered": counts[0], "quarter": counts[1], "half": counts[2], "three_quarters": counts[3]})
+            );
+        }
         timing.mark("object_layers");
         neighborhoods.clear_prefetch();
         if let Some(regions) = classified.take() {
