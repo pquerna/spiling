@@ -227,18 +227,26 @@ impl EdgeGrid {
         let [ymin, ymax] = [p[1].min(q[1]), p[1].max(q[1])];
         let first = self.index(p[0] - e, 0);
         let last = self.index(q[0] + e, 0);
+        if dx == 0.0 || ymin == ymax {
+            let row_first = self.index(ymin - e, 1);
+            let row_last = self.index(ymax + e, 1);
+            for row in row_first..=row_last {
+                let row_offset = row * self.dims[0];
+                for cell in row_offset + first..=row_offset + last {
+                    visit(cell);
+                }
+            }
+            return;
+        }
+        let slope = (q[1] - p[1]) / dx;
         for column in first..=last {
-            let (y0, y1) = if dx > 0.0 {
-                let slab_lo = self.origin[0] + column as f64 * self.cell - e;
-                let slab_hi = self.origin[0] + (column + 1) as f64 * self.cell + e;
-                let lo = slab_lo.clamp(p[0], q[0]);
-                let hi = slab_hi.clamp(p[0], q[0]);
-                let at = |x: f64| (p[1] + (x - p[0]) * ((q[1] - p[1]) / dx)).clamp(ymin, ymax);
-                let (a, b) = (at(lo), at(hi));
-                (a.min(b), a.max(b))
-            } else {
-                (ymin, ymax)
-            };
+            let slab_lo = self.origin[0] + column as f64 * self.cell - e;
+            let slab_hi = self.origin[0] + (column + 1) as f64 * self.cell + e;
+            let lo = slab_lo.clamp(p[0], q[0]);
+            let hi = slab_hi.clamp(p[0], q[0]);
+            let at = |x: f64| (p[1] + (x - p[0]) * slope).clamp(ymin, ymax);
+            let (a, b) = (at(lo), at(hi));
+            let (y0, y1) = (a.min(b), a.max(b));
             let row_first = self.index(y0 - e, 1);
             let row_last = self.index(y1 + e, 1);
             for row in row_first..=row_last {
@@ -300,9 +308,12 @@ impl EdgeGrid {
         // Unit direction and the candidate's own extent in that frame:
         // (start along, across, end along).
         let delta = [b2[0] - a2[0], b2[1] - a2[1]];
-        let length = delta[0].hypot(delta[1]);
-        let unit = [delta[0] / length, delta[1] / length];
-        let frame = ([dot(unit, a2), cross(unit, a2), dot(unit, b2)], unit);
+        // An axial stroke already has the tighter world-axis box below.
+        let frame = (delta[0] != 0.0 && delta[1] != 0.0).then(|| {
+            let length = delta[0].hypot(delta[1]);
+            let unit = [delta[0] / length, delta[1] / length];
+            ([dot(unit, a2), cross(unit, a2), dot(unit, b2)], unit)
+        });
         let mut hits = std::mem::take(&mut self.hits);
         let query = self.query;
         let mut stamp = std::mem::take(&mut self.stamp);
@@ -329,15 +340,17 @@ impl EdgeGrid {
                 }
                 // Conservative oriented slab: an edge wholly beyond the
                 // candidate's reach on one side cannot meet either footprint.
-                let reach = endpoint_reach + COVER_SLACK_MM;
-                let across = [cross(frame.1, c), cross(frame.1, d)];
-                let along = [dot(frame.1, c), dot(frame.1, d)];
-                if across[0].min(across[1]) > frame.0[1] + reach
-                    || across[0].max(across[1]) < frame.0[1] - reach
-                    || along[0].min(along[1]) > frame.0[2] + reach
-                    || along[0].max(along[1]) < frame.0[0] - reach
-                {
-                    continue;
+                if let Some((extent, unit)) = frame {
+                    let reach = endpoint_reach + COVER_SLACK_MM;
+                    let across = [cross(unit, c), cross(unit, d)];
+                    let along = [dot(unit, c), dot(unit, d)];
+                    if across[0].min(across[1]) > extent[1] + reach
+                        || across[0].max(across[1]) < extent[1] - reach
+                        || along[0].min(along[1]) > extent[2] + reach
+                        || along[0].max(along[1]) < extent[0] - reach
+                    {
+                        continue;
+                    }
                 }
                 hits.push(index);
             }

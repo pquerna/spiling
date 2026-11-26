@@ -4,6 +4,7 @@
 use crate::{check_cancel, error};
 use spiling_contracts::manufacturing::{
     DepositionPath, ManufacturingError, ManufacturingErrorCode,
+    program_coordinates::{MAX_XYZ6_COORDINATE_MM, XYZ6_PROJECTION_SCREEN_MM},
 };
 use std::sync::atomic::AtomicBool;
 
@@ -31,6 +32,7 @@ pub(crate) struct AnchorGap {
 struct EndpointAnchor {
     present: bool,
     direct: bool,
+    projected: Option<ProjectedAnchorPoint>,
 }
 
 struct SegmentCapsule {
@@ -492,10 +494,31 @@ impl AnchorWorkspace {
                 continue;
             }
             let capsule = SegmentCapsule::new(c, d, previous_radius)?;
+            let mut projected_segment = None;
             for (endpoint, point) in endpoints.iter_mut().zip([[a[0], a[1]], [b[0], b[1]]]) {
-                if (!endpoint.present || (direct && !endpoint.direct))
-                    && capsule.overlaps_endpoint(point, radius)?
-                {
+                if endpoint.present && (!direct || endpoint.direct) {
+                    continue;
+                }
+                if capsule.excludes_projected_endpoint(point, endpoint_reach) {
+                    continue;
+                }
+                let projected_point = match endpoint.projected {
+                    Some(projected) => projected,
+                    None => {
+                        let projected = ProjectedAnchorPoint::new([point[0], point[1], 0.0])?;
+                        endpoint.projected = Some(projected);
+                        projected
+                    }
+                };
+                let segment = match &projected_segment {
+                    Some(segment) => segment,
+                    None => projected_segment.insert(ProjectedAnchorSegment::new([
+                        [c[0], c[1], 0.0],
+                        [d[0], d[1], 0.0],
+                    ])?),
+                };
+                let (distance, enclosure) = segment.distance_enclosed(projected_point)?;
+                if (distance + enclosure).next_up() < previous_radius + radius {
                     endpoint.present = true;
                     endpoint.direct |= direct;
                 }
@@ -585,24 +608,65 @@ fn endpoint_distance_enclosed(
     point: [f64; 3],
     segment: [[f64; 3]; 2],
 ) -> Result<(f64, f64), ManufacturingError> {
-    use spiling_contracts::manufacturing::program_coordinates::{
-        project_xyz6_point_mm, xyz6_coordinate_error_mm,
-    };
-    let p = project_xyz6_point_mm(point)?;
-    let a = project_xyz6_point_mm(segment[0])?;
-    let b = project_xyz6_point_mm(segment[1])?;
-    let error_at = |p: [f64; 3]| -> Result<f64, ManufacturingError> {
-        Ok(xyz6_coordinate_error_mm(p[0])?.hypot(xyz6_coordinate_error_mm(p[1])?))
-    };
-    let scale = p
-        .into_iter()
-        .chain(a)
-        .chain(b)
-        .fold(1_f64, |s, x| s.max(x.abs()));
-    let enclosure = error_at(p)? + error_at(a)?.max(error_at(b)?) + scale * 64. * f64::EPSILON;
-    let distance =
-        SegmentCapsule::new([a[0], a[1]], [b[0], b[1]], 0.)?.endpoint_distance([p[0], p[1]])?;
-    Ok((distance, enclosure))
+    let point = ProjectedAnchorPoint::new(point)?;
+    ProjectedAnchorSegment::new(segment)?.distance_enclosed(point)
+}
+
+#[derive(Clone, Copy)]
+struct ProjectedAnchorPoint {
+    point: [f64; 3],
+    error_mm: f64,
+}
+
+impl ProjectedAnchorPoint {
+    fn new(point: [f64; 3]) -> Result<Self, ManufacturingError> {
+        use spiling_contracts::manufacturing::program_coordinates::{
+            project_xyz6_point_mm, xyz6_coordinate_error_mm,
+        };
+        let point = project_xyz6_point_mm(point)?;
+        let error_mm =
+            xyz6_coordinate_error_mm(point[0])?.hypot(xyz6_coordinate_error_mm(point[1])?);
+        Ok(Self { point, error_mm })
+    }
+}
+
+struct ProjectedAnchorSegment {
+    capsule: SegmentCapsule,
+    scale: f64,
+    error_mm: f64,
+}
+
+impl ProjectedAnchorSegment {
+    fn new([a, b]: [[f64; 3]; 2]) -> Result<Self, ManufacturingError> {
+        let a = ProjectedAnchorPoint::new(a)?;
+        let b = ProjectedAnchorPoint::new(b)?;
+        let scale = a
+            .point
+            .into_iter()
+            .chain(b.point)
+            .fold(1_f64, |scale, coordinate| scale.max(coordinate.abs()));
+        let capsule = SegmentCapsule::new([a.point[0], a.point[1]], [b.point[0], b.point[1]], 0.0)?;
+        Ok(Self {
+            capsule,
+            scale,
+            error_mm: a.error_mm.max(b.error_mm),
+        })
+    }
+
+    fn distance_enclosed(
+        &self,
+        point: ProjectedAnchorPoint,
+    ) -> Result<(f64, f64), ManufacturingError> {
+        let scale = point
+            .point
+            .into_iter()
+            .fold(self.scale, |scale, coordinate| scale.max(coordinate.abs()));
+        let enclosure = point.error_mm + self.error_mm + scale * 64. * f64::EPSILON;
+        let distance = self
+            .capsule
+            .endpoint_distance([point.point[0], point.point[1]])?;
+        Ok((distance, enclosure))
+    }
 }
 
 pub(crate) fn strict_capsule_point(
@@ -789,18 +853,23 @@ impl SegmentCapsule {
         })
     }
 
-    fn overlaps_endpoint(
-        &self,
-        point: [f64; 2],
-        candidate_radius: f64,
-    ) -> Result<bool, ManufacturingError> {
-        // Judged outward on the emitted decimals, as replay judges them: a
-        // tangency hidden by their binary representation is no overlap.
-        let (distance, enclosure) = endpoint_distance_enclosed(
-            [point[0], point[1], 0.0],
-            [[self.c[0], self.c[1], 0.0], [self.d[0], self.d[1], 0.0]],
-        )?;
-        Ok((distance + enclosure).next_up() < self.radius + candidate_radius)
+    fn excludes_projected_endpoint(&self, point: [f64; 2], reach: f64) -> bool {
+        let reach = (reach + XYZ6_PROJECTION_SCREEN_MM).next_up();
+        let outside = (0..2).any(|axis| {
+            point[axis] < (self.c[axis].min(self.d[axis]) - reach).next_down()
+                || point[axis] > (self.c[axis].max(self.d[axis]) + reach).next_up()
+        });
+        // The expanded box covers coordinate projection on both operands.
+        // Keep the ordered projection proof whenever projection could refuse
+        // a coordinate or collapse the lower edge to a point.
+        outside
+            && self
+                .c
+                .iter()
+                .chain(&self.d)
+                .chain(&point)
+                .all(|coordinate| coordinate.abs() <= MAX_XYZ6_COORDINATE_MM)
+            && (0..2).any(|axis| (self.d[axis] - self.c[axis]).abs() > XYZ6_PROJECTION_SCREEN_MM)
     }
 
     fn endpoint_distance(&self, point: [f64; 2]) -> Result<f64, ManufacturingError> {
@@ -925,6 +994,26 @@ mod dimension_tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn endpoint_screen_preserves_refusal_when_lower_edge_collapses_on_projection() {
+        let candidate = AnchorCandidate {
+            endpoints_mm: [[0.0, 0.0, 0.4], [2.0, 0.0, 0.4]],
+            bead_width_mm: 0.4,
+        };
+        let edge = [[1.0, 0.0, 0.2], [1.0000001, 0.0, 0.2]];
+        let mut work = 0;
+        let failure = AnchorWorkspace::default()
+            .gaps_edges(
+                candidate,
+                std::iter::once((Ok(edge), true, 0.4)),
+                &mut work,
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+        assert_eq!(work, 1);
     }
 
     #[test]
