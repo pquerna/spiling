@@ -1831,10 +1831,14 @@ pub(crate) fn verify_actual(
         || {
             crate::working_set::scope(working_set, || {
                 let mut work = 0usize;
+                let mut clock = crate::timing::Clock::new("verifier.grid");
                 let receipt = match support_grid {
                     Some(grid) => {
                         grid.verify_ancestry(plan, recipe, &mut work, cancel)?;
-                        Some(grid.verify(&mut work, cancel)?)
+                        clock.mark("ancestry");
+                        let receipt = grid.verify(&mut work, cancel)?;
+                        clock.mark("clearance");
+                        Some(receipt)
                     }
                     None => None,
                 };
@@ -1842,58 +1846,114 @@ pub(crate) fn verify_actual(
             })
         },
         || {
-            crate::working_set::scope(working_set, || {
-                let mut geometry_work = 0usize;
-                let mut anchors = crate::planner::support::AnchorWorkspace::default();
-                let mut plate_contacts = Vec::new();
-                interfaces::verify_two_axis_sparse(
-                    plan,
-                    recipe,
-                    &mut geometry_work,
-                    &mut anchors,
-                    cancel,
-                )?;
-                gyroid::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-                cathedral::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-                connectors::verify(plan, &mut geometry_work, cancel)?;
-                interfaces::verify_projected_byte_geometry(
-                    plan,
-                    recipe,
-                    &mut geometry_work,
-                    &mut anchors,
-                    cancel,
-                )?;
-                diaphragms::verify(
-                    plan,
-                    recipe,
-                    &mut geometry_work,
-                    &mut anchors,
-                    &mut plate_contacts,
-                    cancel,
-                )?;
-                drop(plate_contacts);
-                skin_bridges::verify(
-                    plan,
-                    recipe,
-                    &alternation,
-                    &mut geometry_work,
-                    &mut anchors,
-                    cancel,
-                )?;
-                skin_commands::verify(
-                    plan,
-                    recipe,
-                    &alternation,
-                    &mut geometry_work,
-                    &mut anchors,
-                    cancel,
-                )?;
-                construction::verify(plan, &mut geometry_work, cancel)?;
-                joins::verify(plan, intent, &alternation, &mut geometry_work, cancel)?;
+            // Each remaining check reads only the decoded plan, so they run
+            // concurrently with their own workspaces; errors still report in
+            // this fixed order.
+            type Check<'c> = (
+                &'static str,
+                Box<
+                    dyn Fn(
+                            &mut usize,
+                            &mut crate::planner::support::AnchorWorkspace,
+                        ) -> Result<(), ManufacturingError>
+                        + Sync
+                        + 'c,
+                >,
+            );
+            let checks: Vec<Check<'_>> = vec![
+                (
+                    "two_axis_sparse",
+                    Box::new(|work, anchors| {
+                        interfaces::verify_two_axis_sparse(plan, recipe, work, anchors, cancel)
+                    }),
+                ),
+                (
+                    "gyroid",
+                    Box::new(|work, anchors| gyroid::verify(plan, recipe, work, anchors, cancel)),
+                ),
+                (
+                    "cathedral",
+                    Box::new(|work, anchors| {
+                        cathedral::verify(plan, recipe, work, anchors, cancel)
+                    }),
+                ),
+                (
+                    "connectors",
+                    Box::new(|work, _| connectors::verify(plan, work, cancel)),
+                ),
+                (
+                    "projected_byte_geometry",
+                    Box::new(|work, anchors| {
+                        interfaces::verify_projected_byte_geometry(
+                            plan, recipe, work, anchors, cancel,
+                        )
+                    }),
+                ),
+                (
+                    "diaphragms",
+                    Box::new(|work, anchors| {
+                        let mut plate_contacts = Vec::new();
+                        diaphragms::verify(plan, recipe, work, anchors, &mut plate_contacts, cancel)
+                    }),
+                ),
+                (
+                    "skin_bridges",
+                    Box::new(|work, anchors| {
+                        skin_bridges::verify(plan, recipe, &alternation, work, anchors, cancel)
+                    }),
+                ),
+                (
+                    "skin_commands",
+                    Box::new(|work, anchors| {
+                        skin_commands::verify(plan, recipe, &alternation, work, anchors, cancel)
+                    }),
+                ),
+                (
+                    "construction",
+                    Box::new(|work, _| construction::verify(plan, work, cancel)),
+                ),
+                (
+                    "joins",
+                    Box::new(|work, _| joins::verify(plan, intent, &alternation, work, cancel)),
+                ),
                 // After row construction, so a missing or shifted row reports as such.
-                bridge_split::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-                Ok::<_, ManufacturingError>(geometry_work)
-            })
+                (
+                    "bridge_split",
+                    Box::new(|work, anchors| {
+                        bridge_split::verify(plan, recipe, work, anchors, cancel)
+                    }),
+                ),
+            ];
+            let traced = std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some();
+            let results: Vec<Result<usize, ManufacturingError>> = {
+                use rayon::prelude::*;
+                checks
+                    .par_iter()
+                    .map(|(name, check)| {
+                        crate::working_set::scope(working_set, || {
+                            let started = std::time::Instant::now();
+                            let mut work = 0usize;
+                            let mut anchors = crate::planner::support::AnchorWorkspace::default();
+                            let result = check(&mut work, &mut anchors).map(|()| work);
+                            if traced {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "event": "slice_phase", "scope": "verifier.check",
+                                        "phase": name, "seconds": started.elapsed().as_secs_f64(),
+                                    })
+                                );
+                            }
+                            result
+                        })
+                    })
+                    .collect()
+            };
+            let mut geometry_work = 0usize;
+            for result in results {
+                geometry_work = geometry_work.saturating_add(result?);
+            }
+            Ok::<_, ManufacturingError>(geometry_work)
         },
     );
     let (clearance_receipt, _) = grid_checked?;

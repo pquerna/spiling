@@ -359,64 +359,6 @@ struct Replay<'a> {
     seen: Vec<(usize, usize)>,
 }
 
-/// Deposited roads rasterize in chunks of this many, one buffer per chunk.
-const RASTER_CHUNK: usize = 256;
-
-/// One chunk's row incidences: road `k` of the chunk owns
-/// `rows[ends[k - 1]..ends[k]]`; `refusal` is the first road that failed.
-#[derive(Default)]
-struct Rasterized {
-    rows: Vec<[i64; 3]>,
-    ends: Vec<usize>,
-    refusal: Option<ManufacturingError>,
-}
-
-impl Rasterized {
-    fn new(
-        roads: impl Iterator<Item = Road>,
-        mut admission: Admission,
-        cancel: &AtomicBool,
-    ) -> Self {
-        let mut chunk = Self::default();
-        for road in roads {
-            let rows = &mut chunk.rows;
-            let result = outside_ticks(road.inner_radius_mm)
-                .and_then(|radius| {
-                    road.chord
-                        .outer_rows(radius, &mut 0, cancel, |row, left, right| {
-                            admission.push(rows, [row, left, right])
-                        })
-                })
-                .and_then(|()| admission.push(&mut chunk.ends, chunk.rows.len()));
-            if let Err(error) = result {
-                chunk.refusal = Some(error);
-                break;
-            }
-        }
-        chunk
-    }
-
-    fn take(&mut self, local: usize) -> Result<&[[i64; 3]], ManufacturingError> {
-        match self.ends.get(local) {
-            Some(&end) => {
-                let start = local.checked_sub(1).map_or(0, |prior| self.ends[prior]);
-                Ok(&self.rows[start..end])
-            }
-            None => Err(self.refusal.take().expect("rasterized road or its refusal")),
-        }
-    }
-}
-
-/// A worker thread's reusable query buffers and their admitted bytes.
-#[derive(Default)]
-struct Scratch {
-    admission: usize,
-    covered: Vec<Span>,
-    run: Vec<Span>,
-    unsupported: Vec<Span>,
-    seen: Vec<(usize, usize)>,
-}
-
 /// One support or landing stroke run: `count` edges of the path whose roads
 /// start at `start` in the layer, beginning at edge `first`.
 #[derive(Clone, Copy)]
@@ -793,6 +735,70 @@ fn layer_windows(
     Ok(windows)
 }
 
+impl<'a> Window<'a> {
+    /// Layer `index`'s donor bands for a receiver of `role`.
+    fn at(
+        bands: &'a [Band],
+        windows: &[LayerWindow],
+        support_starts: &[usize],
+        layers: &[PrintLayer],
+        z_gap: f64,
+        index: usize,
+        role: DepositionKind,
+    ) -> Self {
+        let end = windows[index].separated_end;
+        Self {
+            previous: index.checked_sub(1).map(|prior| &bands[prior]),
+            previous_nominal_top: index.checked_sub(1).map(|prior| layers[prior].z_mm),
+            z_gap,
+            separated: match role {
+                DepositionKind::SupportInterface => &bands[support_starts[index]..end],
+                DepositionKind::Support => &[],
+                _ => &bands[end.saturating_sub(1)..end],
+            },
+        }
+    }
+}
+
+/// Layers replayed together. Every layer of a wave measures only against
+/// bands of earlier layers, so each phase runs across the wave in parallel.
+const WAVE_LAYERS: usize = 32;
+
+/// Where a refusal falls in the serial replay order: layer, then the path's
+/// first road, then the step within that path.
+type Order = (usize, usize, u8);
+const STEP_SCHEDULE: u8 = 0;
+const STEP_RUNS: u8 = 1;
+const STEP_MEASURE: u8 = 2;
+const STEP_DEPOSIT: u8 = 3;
+const STEP_FINISH: u8 = 4;
+
+/// A layer's stroke runs and the first path whose runs could not be read.
+#[derive(Default)]
+struct LayerPlan {
+    measures: Vec<Measure>,
+    refusal: Option<(usize, ManufacturingError)>,
+}
+
+/// One layer task's result: what it built, its admitted bytes and work, and
+/// its first refusal in replay order.
+struct Built<T> {
+    value: T,
+    bytes: usize,
+    work: usize,
+    refusal: Option<(Order, ManufacturingError)>,
+}
+
+fn keep(first: &mut Option<(Order, ManufacturingError)>, order: Order, error: ManufacturingError) {
+    if first.as_ref().is_none_or(|(at, _)| order < *at) {
+        *first = Some((order, error));
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the replay's three per-layer phases share one set of windows"
+)]
 pub(super) fn verify(
     roads: &[Road],
     layers: &[PrintLayer],
@@ -805,10 +811,6 @@ pub(super) fn verify(
     let mut replay = Replay::new(admission, work, cancel);
     let working_set = crate::working_set::current();
     let limit = recipe.process.max_bridge_span_mm;
-    let mut measures = Vec::<Measure>::new();
-    let mut measured = Vec::<Result<Vec<Span>, ManufacturingError>>::new();
-    let mut deposits = Vec::<usize>::new();
-    let mut rasterized = Vec::<Rasterized>::new();
     let mut last_support = None;
     for road in roads.iter().rev() {
         debit(replay.work, 1, cancel)?;
@@ -832,29 +834,59 @@ pub(super) fn verify(
         replay.work,
         cancel,
     )?;
-    let mut bands = Vec::<Band>::new();
-    replay
-        .admission
-        .reserve(&mut bands, selected_layers.len())?;
-    let mut road_start = 0;
-    let mut expired = 0;
-    let mut last_separated_end = 0;
-    for (index, (layer, use_window)) in selected_layers.iter().zip(&windows).enumerate() {
-        debit(replay.work, 1, cancel)?;
-        let current = &roads[road_start..use_window.road_end];
-        road_start = use_window.road_end;
-        let end = use_window.separated_end;
-        let support_start = last_separated_end.min(use_window.landing_start);
-        let contact_index = end.saturating_sub(1);
-        let oldest = support_start
-            .min(contact_index)
-            .min(index.saturating_sub(1));
-        if oldest < expired {
-            return Err(failed(
-                "support ancestry schedule reverses its contact window",
-            ));
+    let count = selected_layers.len();
+    // Each layer's roads, support band start and oldest band read, from the
+    // windows alone.
+    let mut ranges = Vec::<(usize, usize)>::new();
+    let mut support_starts = Vec::<usize>::new();
+    let mut oldest = Vec::<usize>::new();
+    replay.admission.reserve(&mut ranges, count)?;
+    replay.admission.reserve(&mut support_starts, count)?;
+    replay.admission.reserve(&mut oldest, count)?;
+    let mut first: Option<(Order, ManufacturingError)> = None;
+    {
+        let mut road_start = 0;
+        let mut last_separated_end = 0;
+        let mut expired = 0;
+        for (index, window) in windows.iter().enumerate() {
+            debit(replay.work, 1, cancel)?;
+            ranges.push((road_start, window.road_end));
+            road_start = window.road_end;
+            let end = window.separated_end;
+            let support_start = last_separated_end.min(window.landing_start);
+            let at = support_start
+                .min(end.saturating_sub(1))
+                .min(index.saturating_sub(1));
+            if at < expired && first.is_none() {
+                first = Some((
+                    (index, 0, STEP_SCHEDULE),
+                    failed("support ancestry schedule reverses its contact window"),
+                ));
+            }
+            expired = expired.max(at);
+            support_starts.push(support_start);
+            oldest.push(at);
+            last_separated_end = end;
         }
-        for band in &mut bands[expired..oldest] {
+    }
+    let can_land = |index: usize, role: DepositionKind| {
+        role.is_model() && role != DepositionKind::Bridge && windows[index].reads_landing
+    };
+    let mut bands = Vec::<Band>::new();
+    replay.admission.reserve(&mut bands, count)?;
+    let mut expired = 0;
+    let mut wave_start = 0;
+    while wave_start < count {
+        if let Some((at, _)) = &first
+            && at.0 < wave_start
+        {
+            break;
+        }
+        let wave = wave_start..(wave_start + WAVE_LAYERS).min(count);
+        wave_start = wave.end;
+        // Bands no layer of this wave or later reads are released.
+        let reach = oldest[wave.start];
+        for band in &mut bands[expired..reach.max(expired)] {
             debit(replay.work, 1, cancel)?;
             if let Some(inventory) = band.deposited.take() {
                 inventory.release(&mut replay.admission);
@@ -863,232 +895,324 @@ pub(super) fn verify(
                 inventory.release(&mut replay.admission);
             }
         }
-        expired = oldest;
-        let mut deposited =
-            (use_window.deposited_read != DepositedRead::Unused).then(Inventory::empty);
-        let mut landing = Inventory::empty();
-        let previous = bands.last();
-        let previous_nominal_top = index.checked_sub(1).map(|prior| layers[prior].z_mm);
-        let window = |role: DepositionKind| Window {
-            previous,
-            previous_nominal_top,
-            z_gap,
-            separated: match role {
-                DepositionKind::SupportInterface => &bands[support_start..end],
-                DepositionKind::Support => &[],
-                _ => &bands[contact_index..end],
-            },
-        };
-        let can_land = |role: DepositionKind| {
-            role.is_model() && role != DepositionKind::Bridge && use_window.reads_landing
-        };
-        // A stroke reads only earlier layers' bands, so a layer's strokes
-        // measure in parallel. Path validation, landing and deposited inserts
-        // stay serial in path order, and the first error in that order is the
-        // one reported.
-        measures.clear();
-        let mut refusal = None;
-        let mut start = 0;
-        for path_roads in current.chunk_by(|left, right| left.path == right.path) {
-            debit(replay.work, 1, cancel)?;
-            let path_start = start;
-            start += path_roads.len();
-            let first_road = path_roads[0];
-            let is_support = support(first_road.role);
-            let ordinary_model =
-                first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
-            if index == 0 || index == last_support && !is_support || !(is_support || ordinary_model)
-            {
-                continue;
-            }
-            let land = can_land(first_road.role);
-            let path = &layer.paths[first_road.path];
-            let runs = if path_roads.len() + 1 != path.points_mm.len() {
-                Err(failed(
-                    "decoded support stroke differs from its associated edge count",
-                ))
-            } else if !is_support && !land {
-                path.checked_edges().map(|_| None)
-            } else {
-                StrokeRuns::for_path(path).map(Some)
-            };
-            let runs = match runs {
-                Ok(runs) => runs,
-                Err(error) => {
-                    refusal = Some((path_start, error));
-                    break;
-                }
-            };
-            for (first, last, width) in runs.into_iter().flatten() {
-                let count = if last > first {
-                    last - first
-                } else {
-                    path_roads.len() - first + last
-                };
-                replay.admission.push(
-                    &mut measures,
-                    Measure {
-                        start: path_start,
-                        len: path_roads.len(),
-                        first,
-                        count,
-                        width,
-                    },
-                )?;
-            }
-        }
-        deposits.clear();
-        if deposited.is_some() && index != last_support {
-            for (position, road) in current.iter().enumerate() {
-                if use_window.deposited_read.reads(road.role) {
-                    replay.admission.push(&mut deposits, position)?;
-                }
-            }
-        }
-        replay.admission.reserve(&mut measured, measures.len())?;
-        replay
-            .admission
-            .reserve(&mut rasterized, deposits.len().div_ceil(RASTER_CHUNK))?;
-        let base = Admission(replay.admission.0);
-        let rasterize = || {
-            deposits
-                .par_chunks(RASTER_CHUNK)
-                .map(|chunk| {
-                    crate::working_set::scope(working_set, || {
-                        let roads = chunk.iter().map(|&position| current[position]);
-                        Rasterized::new(roads, Admission(base.0), cancel)
-                    })
-                })
-                .collect_into_vec(&mut rasterized)
-        };
-        let measure = || {
-            measures
-                .par_iter()
-                .map_init(
-                    || Scratch {
-                        admission: base.0,
-                        ..Scratch::default()
-                    },
-                    |scratch, &measure| {
-                        crate::working_set::scope(working_set, || {
-                            let mut work = 0;
-                            let mut task = Replay {
-                                admission: Admission(scratch.admission),
-                                work: &mut work,
-                                cancel,
-                                covered: std::mem::take(&mut scratch.covered),
-                                run: std::mem::take(&mut scratch.run),
-                                unsupported: std::mem::take(&mut scratch.unsupported),
-                                seen: std::mem::take(&mut scratch.seen),
+        expired = expired.max(reach);
+        let base = replay.admission.0;
+
+        // Phase 1: each layer's stroke runs and its own deposited band (and
+        // the bed layer's landing), from its roads alone.
+        let planned: Vec<Built<(LayerPlan, Band)>> = wave
+            .clone()
+            .into_par_iter()
+            .map(|index| {
+                crate::working_set::scope(working_set, || {
+                    let mut work = 0usize;
+                    let mut replay = Replay::new(Admission(base), &mut work, cancel);
+                    let mut refusal = None;
+                    let (road_start, road_end) = ranges[index];
+                    let current = &roads[road_start..road_end];
+                    let layer = &selected_layers[index];
+                    let window = &windows[index];
+                    let mut plan = LayerPlan::default();
+                    let mut start = 0;
+                    for path_roads in current.chunk_by(|left, right| left.path == right.path) {
+                        let path_start = start;
+                        start += path_roads.len();
+                        let first_road = path_roads[0];
+                        let is_support = support(first_road.role);
+                        let ordinary_model =
+                            first_road.role.is_model() && first_road.role != DepositionKind::Bridge;
+                        if index == 0
+                            || index == last_support && !is_support
+                            || !(is_support || ordinary_model)
+                        {
+                            continue;
+                        }
+                        let land = can_land(index, first_road.role);
+                        let path = &layer.paths[first_road.path];
+                        let runs = if path_roads.len() + 1 != path.points_mm.len() {
+                            Err(failed(
+                                "decoded support stroke differs from its associated edge count",
+                            ))
+                        } else if !is_support && !land {
+                            path.checked_edges().map(|_| None)
+                        } else {
+                            StrokeRuns::for_path(path).map(Some)
+                        };
+                        let runs = match runs {
+                            Ok(runs) => runs,
+                            Err(error) => {
+                                plan.refusal = Some((path_start, error));
+                                break;
+                            }
+                        };
+                        for (first, last, width) in runs.into_iter().flatten() {
+                            let count = if last > first {
+                                last - first
+                            } else {
+                                path_roads.len() - first + last
                             };
-                            let road = current[measure.start];
-                            let result = task
+                            if let Err(error) = replay.admission.push(
+                                &mut plan.measures,
+                                Measure {
+                                    start: path_start,
+                                    len: path_roads.len(),
+                                    first,
+                                    count,
+                                    width,
+                                },
+                            ) {
+                                keep(&mut refusal, (index, path_start, STEP_RUNS), error);
+                            }
+                        }
+                    }
+                    let mut deposited = (window.deposited_read != DepositedRead::Unused
+                        && index != last_support)
+                        .then(Inventory::empty);
+                    let mut landing = (index == 0 && index != last_support && window.reads_landing)
+                        .then(Inventory::empty);
+                    let mut start = 0;
+                    'paths: for path_roads in
+                        current.chunk_by(|left, right| left.path == right.path)
+                    {
+                        let path_start = start;
+                        start += path_roads.len();
+                        for &road in path_roads {
+                            let result = (|| {
+                                if let Some(inventory) = &mut deposited
+                                    && window.deposited_read.reads(road.role)
+                                {
+                                    let mut rows = Vec::new();
+                                    let radius = outside_ticks(road.inner_radius_mm)?;
+                                    let mut scratch = Admission(replay.admission.0);
+                                    road.chord.outer_rows(
+                                        radius,
+                                        &mut 0,
+                                        cancel,
+                                        |row, left, right| {
+                                            scratch.push(&mut rows, [row, left, right])
+                                        },
+                                    )?;
+                                    replay.insert_rows(inventory, road, Ok(&rows))?;
+                                }
+                                if let Some(inventory) = &mut landing
+                                    && can_land(index, road.role)
+                                {
+                                    replay.insert(inventory, road, Span::FULL)?;
+                                }
+                                Ok::<_, ManufacturingError>(())
+                            })();
+                            if let Err(error) = result {
+                                keep(&mut refusal, (index, path_start, STEP_DEPOSIT), error);
+                                break 'paths;
+                            }
+                        }
+                    }
+                    for inventory in [&mut deposited, &mut landing].into_iter().flatten() {
+                        if let Err(error) = inventory.rows.finish_ancestry(
+                            &mut replay.admission,
+                            replay.work,
+                            cancel,
+                        ) {
+                            keep(&mut refusal, (index, usize::MAX, STEP_FINISH), error);
+                        }
+                    }
+                    if let Some((path_start, error)) = plan.refusal.take() {
+                        keep(&mut refusal, (index, path_start, STEP_RUNS), error);
+                    }
+                    let bytes = replay.admission.0.saturating_sub(base);
+                    Built {
+                        value: (plan, Band { deposited, landing }),
+                        bytes,
+                        work,
+                        refusal,
+                    }
+                })
+            })
+            .collect();
+        let mut plans = Vec::<LayerPlan>::new();
+        replay.admission.reserve(&mut plans, planned.len())?;
+        for built in planned {
+            debit(replay.work, built.work, cancel)?;
+            replay.admission.absorb(built.bytes)?;
+            if let Some((order, error)) = built.refusal {
+                keep(&mut first, order, error);
+            }
+            let (plan, band) = built.value;
+            plans.push(plan);
+            bands.push(band);
+        }
+
+        // Phase 2: model strokes land support on earlier deposited bands
+        // only, so every layer's landing band builds at once.
+        let base = replay.admission.0;
+        let landed: Vec<Built<Option<Inventory>>> = wave
+            .clone()
+            .into_par_iter()
+            .map(|index| {
+                crate::working_set::scope(working_set, || {
+                    let mut work = 0usize;
+                    let mut replay = Replay::new(Admission(base), &mut work, cancel);
+                    let mut refusal = None;
+                    let (road_start, road_end) = ranges[index];
+                    let current = &roads[road_start..road_end];
+                    let mut landing =
+                        (index > 0 && windows[index].reads_landing).then(Inventory::empty);
+                    if let Some(inventory) = &mut landing {
+                        for &measure in &plans[index - wave.start].measures {
+                            let role = current[measure.start].role;
+                            if !can_land(index, role) {
+                                continue;
+                            }
+                            let result = replay
                                 .measure_stroke(
-                                    &window(road.role),
+                                    &Window::at(
+                                        &bands,
+                                        &windows,
+                                        &support_starts,
+                                        layers,
+                                        z_gap,
+                                        index,
+                                        role,
+                                    ),
                                     measure.roads(current),
                                     measure.width,
                                     limit,
                                 )
                                 .and_then(|()| {
-                                    let mut unsupported = Vec::new();
-                                    if can_land(road.role) {
-                                        task.admission
-                                            .reserve(&mut unsupported, task.unsupported.len())?;
-                                        unsupported.extend_from_slice(&task.unsupported);
-                                    } else if !task.unsupported.is_empty() {
-                                        // A support stroke refuses on any gap.
-                                        task.admission
-                                            .push(&mut unsupported, task.unsupported[0])?;
-                                    }
-                                    Ok(unsupported)
+                                    let unsupported = std::mem::take(&mut replay.unsupported);
+                                    let published = replay.publish_landing(
+                                        inventory,
+                                        measure.roads(current),
+                                        &unsupported,
+                                    );
+                                    replay.unsupported = unsupported;
+                                    published
                                 });
-                            scratch.admission = task.admission.0;
-                            scratch.covered = task.covered;
-                            scratch.run = task.run;
-                            scratch.unsupported = task.unsupported;
-                            scratch.seen = task.seen;
-                            result
-                        })
-                    },
-                )
-                .collect_into_vec(&mut measured)
-        };
-        rayon::join(measure, rasterize);
-        let mut next = 0;
-        let mut next_deposit = 0;
-        let mut start = 0;
-        for path_roads in current.chunk_by(|left, right| left.path == right.path) {
-            let path_start = start;
-            start += path_roads.len();
-            if refusal.as_ref().is_some_and(|(at, _)| *at == path_start) {
-                return Err(refusal.take().expect("checked refusal").1);
-            }
-            let first_road = path_roads[0];
-            let is_support = support(first_road.role);
-            if index == last_support && !is_support {
-                continue;
-            }
-            let land = can_land(first_road.role);
-            while let Some(&measure) = measures.get(next).filter(|m| m.start == path_start) {
-                let unsupported = std::mem::replace(&mut measured[next], Ok(Vec::new()))?;
-                next += 1;
-                if is_support && !unsupported.is_empty() {
-                    let mm = |point: [i64; 2]| point.map(|tick| tick as f64 * 1e-6);
-                    let mut stroke = measure.roads(current);
-                    let from = stroke.next().map(|road| mm(road.chord.start));
-                    let to = measure.roads(current).last().map(|road| mm(road.chord.end));
-                    let gap = unsupported[0];
-                    return Err(failed(format!(
-                        "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact: {:?} at Z {:.3} from {from:?} to {to:?}, {} unsupported intervals (first {:.3}..{:.3} mm along), separated bands {}..{}",
-                        first_road.line,
-                        first_road.role,
-                        layer.z_mm,
-                        unsupported.len(),
-                        gap.start,
-                        gap.end,
-                        support_start,
-                        end
-                    )));
-                }
-                if land {
-                    replay.publish_landing(&mut landing, measure.roads(current), &unsupported)?;
-                }
-            }
-            if index != last_support {
-                for &road in path_roads {
-                    if use_window.deposited_read.reads(road.role)
-                        && let Some(inventory) = &mut deposited
-                    {
-                        let rows = rasterized[next_deposit / RASTER_CHUNK]
-                            .take(next_deposit % RASTER_CHUNK);
-                        next_deposit += 1;
-                        replay.insert_rows(inventory, road, rows)?;
+                            if let Err(error) = result {
+                                keep(&mut refusal, (index, measure.start, STEP_MEASURE), error);
+                                break;
+                            }
+                        }
+                        if let Err(error) = inventory.rows.finish_ancestry(
+                            &mut replay.admission,
+                            replay.work,
+                            cancel,
+                        ) {
+                            keep(&mut refusal, (index, usize::MAX, STEP_FINISH), error);
+                        }
                     }
-                    if index == 0 && land {
-                        replay.insert(&mut landing, road, Span::FULL)?;
+                    // Query scratch is released here; only the band stays live.
+                    let scratch = (replay.covered.capacity() * size_of::<Span>())
+                        + (replay.run.capacity() * size_of::<Span>())
+                        + (replay.unsupported.capacity() * size_of::<Span>())
+                        + (replay.seen.capacity() * size_of::<(usize, usize)>());
+                    let bytes = replay
+                        .admission
+                        .0
+                        .saturating_sub(base)
+                        .saturating_sub(scratch);
+                    Built {
+                        value: landing,
+                        bytes,
+                        work,
+                        refusal,
                     }
-                }
+                })
+            })
+            .collect();
+        for (index, built) in wave.clone().zip(landed) {
+            debit(replay.work, built.work, cancel)?;
+            replay.admission.absorb(built.bytes)?;
+            if let Some((order, error)) = built.refusal {
+                keep(&mut first, order, error);
+            }
+            if built.value.is_some() {
+                bands[index].landing = built.value;
             }
         }
-        measured.clear();
-        rasterized.clear();
-        if let Some(inventory) = &mut deposited {
-            inventory
-                .rows
-                .finish_ancestry(&mut replay.admission, replay.work, cancel)?;
+
+        // Phase 3: support strokes read deposited and landing bands of
+        // earlier layers only.
+        let base = replay.admission.0;
+        let checked: Vec<Built<()>> = wave
+            .clone()
+            .into_par_iter()
+            .map(|index| {
+                crate::working_set::scope(working_set, || {
+                    let mut work = 0usize;
+                    let mut replay = Replay::new(Admission(base), &mut work, cancel);
+                    let mut refusal = None;
+                    let (road_start, road_end) = ranges[index];
+                    let current = &roads[road_start..road_end];
+                    let layer = &selected_layers[index];
+                    for &measure in &plans[index - wave.start].measures {
+                        let first_road = current[measure.start];
+                        if !support(first_road.role) {
+                            continue;
+                        }
+                        let result = replay.measure_stroke(
+                            &Window::at(&bands, &windows, &support_starts, layers, z_gap, index, first_road.role),
+                            measure.roads(current),
+                            measure.width,
+                            limit,
+                        );
+                        let error = match result {
+                            Err(error) => error,
+                            Ok(()) => {
+                                let Some(&gap) = replay.unsupported.first() else {
+                                    continue;
+                                };
+                                let mm = |point: [i64; 2]| point.map(|tick| tick as f64 * 1e-6);
+                                let from = measure.roads(current).next().map(|road| mm(road.chord.start));
+                                let to = measure.roads(current).last().map(|road| mm(road.chord.end));
+                                // A support stroke refuses on any gap.
+                                failed(format!(
+                                    "actual support layer {index} (line {}) has no established bed, continuing support or earlier-part contact: {:?} at Z {:.3} from {from:?} to {to:?}, {} unsupported intervals (first {:.3}..{:.3} mm along), separated bands {}..{}",
+                                    first_road.line,
+                                    first_road.role,
+                                    layer.z_mm,
+                                    replay.unsupported.len(),
+                                    gap.start,
+                                    gap.end,
+                                    support_starts[index],
+                                    windows[index].separated_end
+                                ))
+                            }
+                        };
+                        keep(&mut refusal, (index, measure.start, STEP_MEASURE), error);
+                        break;
+                    }
+                    Built {
+                        value: (),
+                        bytes: 0,
+                        work,
+                        refusal,
+                    }
+                })
+            })
+            .collect();
+        for built in checked {
+            debit(replay.work, built.work, cancel)?;
+            if let Some((order, error)) = built.refusal {
+                keep(&mut first, order, error);
+            }
         }
-        if use_window.reads_landing {
-            landing
-                .rows
-                .finish_ancestry(&mut replay.admission, replay.work, cancel)?;
+        for plan in plans {
+            replay.admission.release(plan.measures);
         }
-        bands.push(Band {
-            deposited,
-            landing: use_window.reads_landing.then_some(landing),
-        });
-        last_separated_end = end;
     }
-    Ok(())
+    for band in bands {
+        if let Some(inventory) = band.deposited {
+            inventory.release(&mut replay.admission);
+        }
+        if let Some(inventory) = band.landing {
+            inventory.release(&mut replay.admission);
+        }
+    }
+    match first {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

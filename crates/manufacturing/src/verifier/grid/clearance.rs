@@ -153,6 +153,17 @@ impl Admission {
         self.0 -= values.capacity() * size_of::<T>();
         drop(values);
     }
+
+    /// Charge bytes another task admitted from this same base, so the
+    /// combined live total stays within the working set.
+    pub(super) fn absorb(&mut self, bytes: usize) -> Result<(), ManufacturingError> {
+        self.0 = self
+            .0
+            .checked_add(bytes)
+            .filter(|live| *live <= crate::working_set::bytes())
+            .ok_or_else(exhausted)?;
+        Ok(())
+    }
 }
 
 pub(super) fn debit(
