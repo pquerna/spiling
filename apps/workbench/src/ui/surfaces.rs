@@ -70,12 +70,12 @@ fn button(ui: &mut Ui, label: &str, disabled: Option<&str>, kind: ButtonKind) ->
     .inner
 }
 
-/// Callers retain enablement and dispatch. A reason stays visible beside the action.
+/// Callers retain enablement and dispatch. A reason stays visible below the action.
 pub fn primary(ui: &mut Ui, label: &str, disabled: Option<&str>) -> bool {
-    ui.horizontal_wrapped(|ui| {
+    ui.vertical(|ui| {
         let clicked = button(ui, label, disabled, ButtonKind::Primary).clicked();
         if let Some(reason) = disabled.filter(|r| !r.is_empty()) {
-            ui.weak(reason);
+            ui.add(egui::Label::new(RichText::new(reason).weak()).wrap());
         }
         clicked
     })

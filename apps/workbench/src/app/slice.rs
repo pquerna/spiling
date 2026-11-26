@@ -33,8 +33,8 @@ impl SliceRun {
 }
 
 impl Workbench {
-    pub(super) fn start_slice(&mut self) {
-        self.slice = Some(SliceRun::default());
+    pub(super) fn slice_draft_reason(&self) -> Option<&'static str> {
+        (self.project_drafts() || self.subject_drafts()).then_some("Apply or discard changes first")
     }
 
     pub(super) fn slicing(&self) -> bool {
@@ -47,8 +47,15 @@ impl Workbench {
             ui::primary(ui, "Slicing…", Some(""));
             return;
         }
-        if ui::primary(ui, "Slice plate", self.disabled(Action::Preflight)) {
-            self.start_slice();
+        if self.slice_draft_reason().is_none() && self.manufacturing_verified() {
+            ui.weak("Output ready · Review tab");
+            return;
+        }
+        let reason = self
+            .slice_draft_reason()
+            .or_else(|| self.disabled(Action::Preflight));
+        if ui::primary(ui, "Slice plate", reason) {
+            self.slice = Some(SliceRun::default());
         }
     }
 
@@ -64,6 +71,10 @@ impl Workbench {
             && self.queued.is_none()
             && self.library.queued.is_none();
         if !idle {
+            return;
+        }
+        if self.slice_draft_reason().is_some() {
+            self.slice = None;
             return;
         }
         let last = run.last;

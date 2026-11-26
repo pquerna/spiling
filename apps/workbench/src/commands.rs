@@ -53,6 +53,7 @@ pub enum Action {
     Surface,
     Study,
     ReviewLayers,
+    AnalysisCase,
     Compare,
     Analysis,
     FocusSelection,
@@ -147,6 +148,7 @@ impl Action {
         Self::Surface,
         Self::Study,
         Self::ReviewLayers,
+        Self::AnalysisCase,
         Self::Compare,
         Self::Analysis,
         Self::FocusSelection,
@@ -192,6 +194,7 @@ impl Action {
             Self::Surface => "Surface finish",
             Self::Study => "Color study",
             Self::ReviewLayers => "Layers",
+            Self::AnalysisCase => "Analysis case",
             Self::Compare => "Compare settings",
             Self::Analysis => "Section analysis",
             Self::FocusSelection => "Focus on selection",
@@ -210,7 +213,7 @@ impl Action {
             Self::LoadMaterialCatalog => "Browse material catalog…",
             Self::LoadAnalysisModel => "Choose analysis model…",
             Self::Preflight => "Check setup",
-            Self::Compile => "Slice plate",
+            Self::Compile => "Compile program",
             Self::Verify => "Verify program",
             Self::Export => "Export plate…",
             Self::Undo => "Undo",
@@ -239,6 +242,7 @@ impl Action {
                 | Self::Surface
                 | Self::Study
                 | Self::ReviewLayers
+                | Self::AnalysisCase
         )
     }
     pub fn disabled(self, state: &Snapshot) -> Option<&'static str> {
@@ -289,9 +293,6 @@ impl Action {
         }
         let m = &state.manufacturing;
         match self {
-            Self::Compare if m.artifact.is_none() => {
-                Some("Slice and freshly verify the current plate first")
-            }
             Self::Arrange if state.scene.as_ref().is_none_or(|s| s.occurrence_count == 0) => {
                 Some("Import a part first")
             }

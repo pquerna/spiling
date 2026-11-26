@@ -155,6 +155,16 @@ impl Workbench {
                         .is_some()
                 })
     }
+    pub(super) fn manufacturing_verified(&self) -> bool {
+        self.manufacturing_current()
+            && self
+                .state
+                .manufacturing
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.report.verified)
+    }
+
     pub(super) fn manufacturing_pane(&mut self, ui: &mut egui::Ui) {
         if self.work_area.panel == Panel::Alternative {
             self.alternative_pane(ui);
@@ -199,14 +209,7 @@ impl Workbench {
                     },
                 ),
         );
-        if ui::close(ui, "Back to preparation") {
-            self.show_panel(Panel::Parts);
-        }
-        // Keep the primary action above optional comparison controls and outside scrolling.
         self.manufacturing_actions(ui);
-        if !prepare || self.manufacturing.prepare_section == 2 {
-            ui.collapsing("Compare settings", |ui| self.try_alternative_entry(ui));
-        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_salt((
@@ -230,18 +233,17 @@ impl Workbench {
             return;
         }
         if self.work_area.panel == Panel::Review {
-            if self.manufacturing_current() {
+            if self.slicing() {
+                ui.weak("Slicing…");
+            } else if self.manufacturing_verified() {
                 self.primary_button(ui, Action::Export);
-                if m.capture
-                    .as_ref()
-                    .is_some_and(|capture| capture.report.verified)
-                {
-                    ui::verified(ui);
-                }
-            } else if m.intent.is_some() {
-                self.slice_button(ui);
-            } else if ui::primary(ui, "Prepare plate", self.disabled(Action::PrepareWorkspace)) {
-                self.queued = Some(Action::PrepareWorkspace);
+                ui::verified(ui);
+            } else if m.loading {
+                ui.weak("Loading output…");
+            } else if m.artifact.is_some() {
+                self.primary_button(ui, Action::Verify);
+            } else {
+                ui.label("Slice the plate in Prepare.");
             }
             return;
         }
@@ -250,17 +252,6 @@ impl Workbench {
             && !self.state.picker_open
             && self.state.confirmation.is_none()
             && self.awaiting_serial.is_none();
-        let draft = self
-            .manufacturing
-            .has_intent_draft(&project.project_id, m.intent.as_deref())
-            || self.manufacturing.pending_loaded(m.loaded.as_deref())
-            || self
-                .material
-                .has_changes(&project.project_id, m.intent.as_deref())
-            || self.process.has_changes();
-        if draft && self.manufacturing.prepare_section != 4 {
-            ui.label("Unapplied changes");
-        }
         match self.manufacturing.prepare_section {
             1 if self.material.tool_id.is_some()
                 || self
@@ -316,10 +307,8 @@ impl Workbench {
         }
         // On Printer, a changed choice is sliced by the form's own action.
         let form_owns = self.manufacturing.prepare_section == 0 && self.print_settings.changed;
-        if !draft && m.intent.is_some() && !form_owns {
+        if !form_owns && (m.intent.is_some() || self.slice_draft_reason().is_some()) {
             self.slice_button(ui);
-        } else if draft {
-            ui.label("Apply or discard in the changed section");
         }
     }
     fn placement_actions(&mut self, ui: &mut egui::Ui) {
@@ -421,17 +410,6 @@ impl Workbench {
                 });
             }
             if section == 2 {
-                self.functional_material_ui(ui, writable);
-                ui::group(ui, "Part modifiers");
-                if ui
-                    .add_enabled(
-                        self.occurrence.is_some(),
-                        egui::Button::new("View infill modifiers"),
-                    )
-                    .clicked()
-                {
-                    self.show_prepare(4);
-                }
                 ui::group(ui, "Plate defaults");
                 if let Some(source) = self
                     .manufacturing
@@ -458,23 +436,24 @@ impl Workbench {
                     {
                         ui.weak(format!("Selected: {}", loaded.label));
                     }
-                    ui.label(format!(
-                        "{} · {}",
-                        d.value.printer.name, d.value.recipe.material_id
-                    ));
-                    ui.weak(format!(
-                        "Recipe {} / {}",
-                        d.value.recipe.id, d.value.recipe.revision
-                    ));
                     ui.add_enabled_ui(writable && !conflict, |ui| {
                         settings_fields(ui, &mut d.value, ui::Tokens::for_ui(ui));
                     });
                     ui.collapsing("Complete declaration", |ui| {
+                        ui.label(&d.value.printer.name);
+                        ui.label(&d.value.recipe.material_id);
+                        ui.weak(format!(
+                            "Recipe {} / {}",
+                            d.value.recipe.id, d.value.recipe.revision
+                        ));
                         ui.label(serde_json::to_string_pretty(&source).unwrap_or_default());
                     });
                 } else {
                     ui.weak("Choose a printer and material.");
                 }
+                ui.collapsing("Material regions", |ui| {
+                    self.functional_material_ui(ui, writable)
+                });
             }
             if section == 4 {
                 self.process_ui(ui, writable && self.display_current());
@@ -515,8 +494,7 @@ impl Workbench {
         } else if self.work_area.panel == Panel::Review {
             if m.loading {
                 ui.spinner();
-                ui.label("Loading Review…");
-                if ui.button("Cancel review transfer").clicked() {
+                if ui.button("Cancel layer loading").clicked() {
                     self.queued_host = Some(Command::CancelReview);
                 }
             }
@@ -576,9 +554,6 @@ impl Workbench {
                 egui::CollapsingHeader::new("Details")
                     .id_salt("review-details")
                     .show(ui, |ui| {
-                        if ui.button("Verify again").clicked() {
-                            self.queued = Some(Action::Verify);
-                        }
                         ui.label(format!(
                             "Software verification: {}",
                             if report.verified { "Passed" } else { "Failed" }
@@ -714,12 +689,6 @@ impl Workbench {
                         });
                         self.construction_interfaces_ui(ui, &review);
                     });
-            } else {
-                ui.weak(if self.slicing() {
-                    "Slicing…"
-                } else {
-                    "Not sliced yet"
-                });
             }
         }
     }
@@ -923,18 +892,6 @@ pub(super) fn settings_fields(
     tokens: ui::Tokens,
 ) {
     super::policies::seam_fields(ui, intent);
-    ui::group(ui, "Geometry");
-    ui.label(format!(
-        "Shape approximation limit: {:.3} mm (recorded tolerance policy)",
-        intent.recipe.native_shape_error_mm()
-    ));
-    ui::help(
-        ui,
-        "shape-approximation",
-        "Geometry approximation",
-        "The geometry approximation bound protects source material and holes.",
-    );
-    ui.separator();
     ui::group(ui, "Construction goals");
     ui::layer_height_goal(ui, intent, tokens);
     for (label, value) in [
@@ -982,6 +939,12 @@ pub(super) fn settings_fields(
         ui.add(egui::DragValue::new(&mut intent.recipe.perimeter_count).range(1..=8));
     });
     super::policies::fields(ui, intent);
+    ui.collapsing("Geometry tolerance", |ui| {
+        ui.label(format!(
+            "Shape approximation limit · {:.3} mm",
+            intent.recipe.native_shape_error_mm()
+        ));
+    });
 }
 
 fn event_controls(

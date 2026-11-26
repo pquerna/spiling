@@ -241,11 +241,18 @@ impl Workbench {
         {
             return Some("Select a part or face in the current source display first");
         }
-        if action == Action::Compile && (self.project_drafts() || self.subject_drafts()) {
-            return Some("Apply or discard changes before slicing");
+        if action == Action::Compile
+            && let Some(reason) = self.slice_draft_reason()
+        {
+            return Some(reason);
         }
-        if action == Action::Compare && !self.manufacturing_current() {
-            return Some("Freshly verify the current plate before comparing settings");
+        if action == Action::Compare
+            && self.manufacturing.trial.is_none()
+            && (!self.manufacturing_verified()
+                || self.state.manufacturing.review.is_none()
+                || self.state.manufacturing.context_hash.is_none())
+        {
+            return Some("Verify the plate and load its layers first");
         }
         if let Some(project) = &self.state.project {
             if action == Action::LoadMaterial

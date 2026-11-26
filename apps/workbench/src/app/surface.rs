@@ -88,9 +88,6 @@ impl Workbench {
             "Surface finish",
             "Selected source face · additive construction",
         );
-        if ui::close(ui, "Back to preparation") {
-            self.show_panel(Panel::Parts);
-        }
         self.finish_actions(ui);
         ui.separator();
         egui::ScrollArea::vertical()

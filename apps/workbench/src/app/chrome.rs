@@ -133,7 +133,8 @@ impl Workbench {
             | Action::Infill
             | Action::Surface
             | Action::Study
-            | Action::ReviewLayers => {
+            | Action::ReviewLayers
+            | Action::AnalysisCase => {
                 self.show_gallery = false;
                 self.show_license = false;
                 if self.work_area.panel == Panel::Study && action != Action::Study {
@@ -159,13 +160,18 @@ impl Workbench {
                         self.show_panel(Panel::Study);
                     }
                     Action::ReviewLayers => self.show_panel(Panel::Review),
+                    Action::AnalysisCase => self.show_panel(Panel::Mechanics),
                     _ => unreachable!(),
                 }
             }
             Action::Compare => {
                 self.select_workspace(Workspace::Review, ctx);
                 self.close_analysis(ctx);
-                self.begin_alternative(None);
+                if self.manufacturing.trial.is_some() {
+                    self.show_panel(Panel::Alternative);
+                } else {
+                    self.begin_alternative(None);
+                }
             }
             _ => return false,
         }
@@ -190,7 +196,7 @@ impl Workbench {
             Panel::Surface => Action::Surface,
             Panel::Study => Action::Study,
             Panel::Review => Action::ReviewLayers,
-            Panel::Mechanics => Action::AnalyzeWorkspace,
+            Panel::Mechanics => Action::AnalysisCase,
             Panel::Alternative | Panel::Option => Action::Compare,
         })
     }
@@ -359,13 +365,6 @@ impl Workbench {
         });
     }
     pub(super) fn properties_pane(&mut self, ui: &mut egui::Ui) {
-        if self.work_area.workspace == Workspace::Analyze && ui::close(ui, "Back to analysis case")
-        {
-            self.show_panel(Panel::Mechanics);
-        }
-        if self.work_area.workspace == Workspace::Review && ui::close(ui, "Back to layers") {
-            self.show_panel(Panel::Review);
-        }
         if self.work_area.workspace == Workspace::Prepare
             && self
                 .state
@@ -373,18 +372,8 @@ impl Workbench {
                 .as_ref()
                 .is_some_and(|s| s.occurrence_count > 0)
         {
-            if self.project_drafts() || self.subject_drafts() {
-                ui.weak("Unapplied changes");
-            } else if self.state.manufacturing.intent.is_some() {
-                // The same one-step Slice as Review: check, slice, verify, then
-                // open Review. A sliced, verified plate offers Review instead.
-                if self.manufacturing_current() && !self.slicing() {
-                    if ui::primary(ui, "Review", None) {
-                        self.show_panel(Panel::Review);
-                    }
-                } else {
-                    self.slice_button(ui);
-                }
+            if self.slice_draft_reason().is_some() || self.state.manufacturing.intent.is_some() {
+                self.slice_button(ui);
             } else if ui::primary(ui, "Choose printer", self.disabled(Action::Printer)) {
                 self.queued = Some(Action::Printer);
             }

@@ -96,47 +96,6 @@ impl super::manufacturing::ManufacturingUi {
 }
 
 impl Workbench {
-    pub(super) fn try_alternative_entry(&mut self, ui: &mut egui::Ui) {
-        if self.manufacturing.trial.is_some() {
-            if ui.button("Return to alternative").clicked() {
-                self.show_panel(Panel::Alternative);
-            }
-            return;
-        }
-        let reason = if self.state.manufacturing.intent.is_none() {
-            Some("Apply Current settings before trying an alternative")
-        } else if self.state.manufacturing.context_hash.is_none() {
-            Some("Wait for checked Current context")
-        } else if !self.manufacturing_current() || self.state.manufacturing.review.is_none() {
-            Some(
-                "Compile and freshly verify Current before starting a fixed actual-output comparison",
-            )
-        } else if self.state.busy || self.state.phase != Phase::Running {
-            Some("Wait for the current operation")
-        } else {
-            None
-        };
-        if ui
-            .add_enabled(reason.is_none(), egui::Button::new("Try an alternative"))
-            .clicked()
-        {
-            self.begin_alternative(None);
-        }
-        if let Some(reason) = reason {
-            ui.weak(reason);
-            if self.state.manufacturing.intent.is_some()
-                && !self.manufacturing_current()
-                && ui.button("Prepare Current for comparison").clicked()
-            {
-                if self.state.manufacturing.artifact.is_some() {
-                    self.show_panel(Panel::Review);
-                } else {
-                    self.show_prepare(2);
-                }
-            }
-        }
-    }
-
     pub(super) fn begin_alternative(
         &mut self,
         option: Option<&crate::manufacture::InspectedOption>,

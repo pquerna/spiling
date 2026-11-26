@@ -189,7 +189,6 @@ pub(super) fn fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
 }
 
 pub(super) fn seam_fields(ui: &mut egui::Ui, intent: &mut ManufacturingIntent) {
-    ui.weak("Entire print job · closed constructed walls");
     egui::CollapsingHeader::new(format!(
         "Wall starts · {}",
         ui::seam_summary(&intent.recipe.seam_policy)

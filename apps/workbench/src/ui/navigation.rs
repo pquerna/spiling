@@ -47,7 +47,7 @@ fn groups(workspace: Workspace) -> &'static [(&'static str, &'static [Action])] 
             ("Inspect", &[Action::Properties, Action::Analysis]),
         ],
         Workspace::Analyze => &[
-            ("Case", &[Action::AnalyzeWorkspace]),
+            ("Analysis", &[Action::AnalysisCase]),
             ("Inspect", &[Action::Properties, Action::Analysis]),
         ],
     }

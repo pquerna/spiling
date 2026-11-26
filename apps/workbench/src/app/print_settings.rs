@@ -379,11 +379,10 @@ impl Workbench {
             }),
             None => None,
         };
-        let drafts = self.project_drafts();
         let reason = if !writable {
             Some("Read-only or busy".to_string())
-        } else if drafts {
-            Some("Apply or discard the open settings draft first".into())
+        } else if let Some(reason) = self.slice_draft_reason() {
+            Some(reason.into())
         } else if setup.is_none() {
             Some("Choose a printer".into())
         } else if material.is_none() {
@@ -412,7 +411,7 @@ impl Workbench {
             let slicing = self.slicing();
             if ui::primary(
                 ui,
-                if slicing { "Slicing…" } else { "Slice" },
+                if slicing { "Slicing…" } else { "Slice plate" },
                 if slicing { Some("") } else { reason.as_deref() },
             ) && let (Some(printer), Some(material)) = (printer, material)
             {

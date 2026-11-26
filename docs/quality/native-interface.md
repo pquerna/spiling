@@ -54,7 +54,7 @@ When several read-only rows share one evidence source, disclose that source once
 Prepare, Review and Analyze are the persistent workspaces. The application bar contains
 Project/Edit/View/Help, project save state and command search. Grouped commands
 below the workspace tabs change with the task: Parts/Setup/Construction in Prepare,
-Output/Inspect in Review and Case/Inspect in Analyze. Narrow surfaces collapse whole groups into menus in the
+Output/Inspect in Review and Analysis/Inspect in Analyze. Narrow surfaces collapse whole groups into menus in the
 same order; workflow tabs do not wrap together with arbitrary commands.
 
 Properties and Section analysis remain available in all workspaces. Selecting a
@@ -133,7 +133,7 @@ the buried boundary using the reversible cut. Stale, missing or oversized output
 does not produce an invented contact. This is not general adjacency discovery or
 physical bond qualification.
 
-Workspace switching hides and retains drafts. One **Slice** runs the existing
+Workspace switching hides and retains drafts. In Prepare, **Slice plate** runs the existing
 operations in order (create print settings when the choice changed, preflight,
 compile, fresh inspection) and opens Review. The setup check is shown for its
 findings (with fixes such as Arrange on bed) but is not a client gate: the engine's
@@ -141,8 +141,10 @@ Compile decides, exactly as for the CLI, and Slice stops only at an engine refus
 Print settings offer the setups that support one-step settings and default
 Supports to Auto only where the printer generates supports, the same shared rules
 the CLI uses. Slice refuses unapplied
-changes. Prepare and Review offer the same Slice; a reopened project whose saved
-output is still current needs only the fresh inspection. Creating print settings
+changes. Switch to **Prepare** to revise the plate and slice again. Empty Review
+points to Prepare. For saved output that needs fresh inspection, **Verify program**
+is the primary action in Review. A passing verification makes **Export plate…**
+primary. Creating print settings
 then calls the engine's `PlaceOnBed`, the same rule as the CLI's `--place-all-on-bed`:
 the plate's parts rest on the bed as one group (one undo step), kept where the
 printer admits them and otherwise centred on the selected plate's usable region. Prepare's Placement
@@ -207,7 +209,7 @@ rendering does not establish a hardware frame-rate claim.
 ## Defaults and scoped modifiers
 
 Plate settings are the baseline; explicit part/definition process instructions are
-modifiers. Prepare → Settings links to the selected part's Infill modifiers.
+modifiers. Prepare → Construction → Infill opens the selected part's modifiers.
 Resolved base shows the engine's whole-volume density and owning source; Defaults
 and inheritance separates the captured recipe and definition baseline. Regional
 boxes are separate instructions, not a uniform-density claim.
@@ -310,8 +312,9 @@ complete surrounding deposition, including later layers. It is display context,
 not evidence that those commands have executed.
 
 Inspectors keep task navigation and their action strip outside the body scroll.
-Back to preparation hides an ordinary draft; replacing its source face/part or infill
-scope asks whether to keep editing or discard. Project replacement still uses the
+Use the workspace tabs to switch phases and contextual commands to switch tasks
+within a workspace. Reserve Back for returning from a temporary task. Replacing
+an edited source face, part or infill scope asks whether to keep editing or discard. Project replacement still uses the
 engine's independent dirty-state confirmation after resolving local drafts.
 
 Library, Color study and long reference content (gallery/license) use focused pages with a stable Back to workbench action.
@@ -409,8 +412,8 @@ receipt, stale-output invalidation, save/reopen/fresh verification/export and aw
 child cleanup as relevant. A snapshot or enabled accessibility feature is not
 keyboard, screen-reader, packaged-platform or universal GPU qualification.
 
-For Try and Compare, freshly verify Current in Program review, then choose
-Try an alternative in Review or Prepare's Settings. Change the complete trial
+For Try and Compare, freshly verify Current and load its layers in Review, then
+choose **Compare settings** in Review's Output group. Change the complete trial
 settings, Evaluate alternative and switch between the fixed reference and checked
 candidate. Exercise Keep option separately from Use these settings, Undo/Redo,
 Current-only export while inspecting the candidate, and explicit trial discard.
