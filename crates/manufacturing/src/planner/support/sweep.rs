@@ -529,7 +529,8 @@ struct Piece {
 struct Entry {
     top: usize,
     target: usize,
-    relieved: Option<usize>,
+    /// Open-below voids whose roof this demand holds.
+    relieved: Vec<usize>,
 }
 
 fn expand(bounds: [[f64; 2]; 2], by: f64) -> [[f64; 2]; 2] {
@@ -580,10 +581,10 @@ impl Sweep<'_> {
                 continue;
             };
             bounds = Some(bounds.map_or(seed_bounds, |b| union_frame(Some(b), seed_bounds)));
-            // A bed-rooted demand may enter one open-below void whose roof it
-            // supports; that relief is per demand, so it gets its own channel.
+            // A bed-rooted demand may enter every open-below void whose roof
+            // it supports; each such void gets its own relieved channel.
             let corridor_floor = layers[0].lower_z_mm;
-            let mut relieved = None;
+            let mut relieved = Vec::new();
             for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
                 if !void_reaches_corridor(&scope.height, corridor_floor, layers[top].z_mm) {
                     continue;
@@ -594,6 +595,8 @@ impl Sweep<'_> {
                     continue;
                 }
                 if scope.allows_roof_access(
+                    mask,
+                    &material.0,
                     Root::Bed,
                     &layers[demand.target],
                     &layers[top],
@@ -603,8 +606,8 @@ impl Sweep<'_> {
                     work,
                     cancel,
                 )? {
-                    relieved = Some(ordinal);
-                    break;
+                    reserve_owned(&mut relieved, 1, self.owned_bytes)?;
+                    relieved.push(ordinal);
                 }
             }
             reserve_owned(&mut entries, 1, self.owned_bytes)?;
@@ -690,19 +693,19 @@ impl Sweep<'_> {
                 seed = Some((entry.target, Rc::new(bits)));
             }
             let bits = &seed.as_ref().expect("rasterized seed").1;
-            let at = if entry.relieved.is_none() {
-                0
-            } else if let Some(at) = channels.iter().position(|c| c.relieved == entry.relieved) {
-                at
-            } else {
-                reserve_owned(&mut channels, 1, self.owned_bytes)?;
-                channels.push(Channel::new(entry.relieved, layers.len()));
-                channels.len() - 1
-            };
-            channels[at].add_seed(&raster, entry.top, entry.target, bits)?;
-            if at != 0 {
-                // The ordinary channel still owns this demand's part roots.
-                channels[0].add_seed(&raster, entry.top, entry.target, bits)?;
+            // The ordinary channel owns every demand's part roots; each void
+            // whose roof the demand holds also gets its own bed-only channel.
+            channels[0].add_seed(&raster, entry.top, entry.target, bits)?;
+            for &ordinal in &entry.relieved {
+                let at = if let Some(at) = channels.iter().position(|c| c.relieved == Some(ordinal))
+                {
+                    at
+                } else {
+                    reserve_owned(&mut channels, 1, self.owned_bytes)?;
+                    channels.push(Channel::new(Some(ordinal), layers.len()));
+                    channels.len() - 1
+                };
+                channels[at].add_seed(&raster, entry.top, entry.target, bits)?;
             }
             charge(work)?;
         }
@@ -2328,6 +2331,90 @@ mod tests {
             exposed: false,
             connectors: Vec::new(),
         }
+    }
+
+    /// An open-below pocket without a stitched roof cap is still the roof of
+    /// the layer whose own material closes over it: bed-rooted support may
+    /// enter it. A void the layer leaves open, a bounded void, or a contact
+    /// top above the pocket's top grants nothing.
+    #[test]
+    fn roofless_open_below_pocket_is_held_by_the_layer_closing_over_it() {
+        use geo::{LineString, polygon};
+        let cancel = AtomicBool::new(false);
+        let pocket = polygon![(x: 10., y: 0.), (x: 20., y: 0.), (x: 20., y: 4.), (x: 10., y: 4.)];
+        let open = VoidScope::new(
+            spiling_geometry::ProtectedVoidHeightScope::OpenBelow {
+                rim_mm: 1.0,
+                upper_mm: 5.0,
+            },
+            None,
+        );
+        let layer = |lower: f64, z: f64| {
+            let mut layer = object_layer(vec![bead(
+                DepositionKind::BottomSkin,
+                [12.0, 2.0],
+                [18.0, 2.0],
+                0.45,
+            )]);
+            layer.lower_z_mm = lower;
+            layer.z_mm = z;
+            layer
+        };
+        let target = layer(4.95, 5.1);
+        let top = layer(4.6, 4.75);
+        let failure = super::super::strokes::Failure {
+            path: 0,
+            first: 0,
+            last: 1,
+            start: 0.0,
+            end: 1.0,
+            span: 6.0,
+        };
+        let closed =
+            vec![polygon![(x: 0., y: -5.), (x: 30., y: -5.), (x: 30., y: 9.), (x: 0., y: 9.)]];
+        let around = vec![Polygon::new(
+            closed[0].exterior().clone(),
+            vec![LineString::from(vec![
+                (10., 0.),
+                (20., 0.),
+                (20., 4.),
+                (10., 4.),
+                (10., 0.),
+            ])],
+        )];
+        let access = |scope: &VoidScope, ceiling: &[Polygon<f64>], top: &PrintLayer| {
+            scope
+                .allows_roof_access(
+                    &pocket,
+                    ceiling,
+                    super::super::Root::Bed,
+                    &target,
+                    top,
+                    &target.paths[0],
+                    &failure,
+                    0.45,
+                    &mut 0,
+                    &cancel,
+                )
+                .unwrap()
+        };
+        assert!(access(&open, &closed, &top));
+        assert!(
+            !access(&open, &around, &top),
+            "the layer leaves the pocket open"
+        );
+        assert!(
+            !access(&open, &closed, &target),
+            "contact top above the pocket"
+        );
+        let bounded = VoidScope::new(
+            spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                lower_mm: 1.0,
+                upper_mm: 5.0,
+            },
+            None,
+        );
+        assert!(!access(&bounded, &closed, &top));
     }
 
     /// A scope excludes its deposited bead capsules at the decoded

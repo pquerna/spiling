@@ -688,9 +688,24 @@ impl VoidScope {
         }
     }
 
+    /// Height band of the roof that bed-rooted support may hold inside this
+    /// void. Without a stitched roof cap, an open-below void still ends
+    /// against the material at its top: that top is its roof.
+    fn roof_band(&self) -> Option<[f64; 2]> {
+        match (&self.roof, self.height) {
+            (Some(roof), _) => Some(roof.height_mm),
+            (None, spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm, .. }) => {
+                Some([upper_mm, upper_mm])
+            }
+            _ => None,
+        }
+    }
+
     #[expect(clippy::too_many_arguments)]
     fn allows_roof_access(
         &self,
+        mask: &geo::Polygon<f64>,
+        ceiling: &[geo::Polygon<f64>],
         root: Root,
         target: &PrintLayer,
         top: &PrintLayer,
@@ -700,10 +715,9 @@ impl VoidScope {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<bool, ManufacturingError> {
-        let Some(roof) = &self.roof else {
+        let Some([lower, upper]) = self.roof_band() else {
             return Ok(false);
         };
-        let [lower, upper] = roof.height_mm;
         if !matches!(root, Root::Bed)
             || !matches!(
                 self.height,
@@ -726,6 +740,13 @@ impl VoidScope {
         };
         let reach = (edge.width_mm + support_width) * 0.5;
         let segment = geo::Line::new(from, to);
+        // Without stitched cap facets, the void is this layer's to hold when
+        // the layer's own material closes over the void's interior.
+        let Some(roof) = &self.roof else {
+            super::native::charge_support_clearance(work, cancel)?;
+            return Ok(geo::InteriorPoint::interior_point(mask)
+                .is_some_and(|inside| ceiling.iter().any(|piece| piece.contains(&inside))));
+        };
         for &facet in &roof.facets {
             super::native::charge_support_clearance(work, cancel)?;
             let contour = geo::Triangle::new(facet[0].into(), facet[1].into(), facet[2].into());
@@ -775,11 +796,7 @@ impl VoidScope {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<bool, ManufacturingError> {
-        if self
-            .roof
-            .as_ref()
-            .is_none_or(|roof| upper > roof.height_mm[1])
-        {
+        if self.roof_band().is_none_or(|band| upper > band[1]) {
             return Ok(false);
         }
         let line = geo::Line::new(segment[0], segment[1]);
