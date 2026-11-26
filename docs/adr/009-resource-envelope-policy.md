@@ -139,9 +139,10 @@ constants, and Core's held compressed-artifact allowance and the native
 durable-storage reservation remain separate capacity debt.
 
 Resident memory, not only counted live data, consumes that headroom. On glibc
-the engine bounds allocator arenas to four before any thread starts (an operator
-`MALLOC_ARENA_MAX` wins), so parallel per-layer planning does not keep a
-per-thread arena high-water resident beside its live working set.
+the engine bounds allocator arenas to one per available core (at least four)
+before any thread starts (an operator `MALLOC_ARENA_MAX` wins). Unbounded
+arenas keep a per-thread high-water resident beside the live working set; fewer
+arenas than workers serialize planning on arena locks.
 
 Core owns semantic source identity and persistence, measures distinct actual
 source Vec capacities across Current/history/prepared snapshots and accepts a

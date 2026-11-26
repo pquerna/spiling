@@ -33,24 +33,30 @@ fn memory_limit(name: &str, value: Option<std::ffi::OsString>) -> Result<Option<
 
 /// Operator override for the allocator arena count, read by glibc itself.
 const MALLOC_ARENA_ENV: &str = "MALLOC_ARENA_MAX";
-/// glibc arenas shared by the engine's worker threads.
-const ENGINE_MALLOC_ARENAS: i32 = 4;
+/// Fewest glibc arenas the engine runs with, even on a small machine.
+const ENGINE_MIN_MALLOC_ARENAS: usize = 4;
 
 /// Bound glibc's per-thread allocator arenas before worker threads start.
 ///
 /// glibc gives each concurrently allocating thread its own arena (up to eight
-/// per core) and rarely returns their freed pages. Parallel per-layer planning
-/// on a wide machine then keeps several times its live working set resident,
-/// which also shrinks the headroom later admissions observe. Four shared
-/// arenas keep that parallel planning's throughput while its resident peak
-/// tracks live data. This tunes allocation reuse; it refuses no work.
+/// per core) and rarely returns their freed pages, so unbounded arenas keep a
+/// high-water resident beside the live working set. Too few arenas instead
+/// serialize every worker on arena locks: four arenas under 32 planning
+/// threads spent about a fifth of all CPU waiting in malloc. One arena per
+/// available core keeps each worker on its own arena while the resident peak
+/// stays near the live working set. This tunes allocation reuse; it refuses
+/// no work.
 pub fn configure_allocator() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     if std::env::var_os(MALLOC_ARENA_ENV).is_none() {
+        let arenas = std::thread::available_parallelism()
+            .map_or(ENGINE_MIN_MALLOC_ARENAS, usize::from)
+            .max(ENGINE_MIN_MALLOC_ARENAS);
+        let arenas = i32::try_from(arenas).unwrap_or(i32::MAX);
         // SAFETY: mallopt only adjusts glibc allocator tuning; it is called at
         // startup and has no Rust-visible memory effects.
         unsafe {
-            libc::mallopt(libc::M_ARENA_MAX, ENGINE_MALLOC_ARENAS);
+            libc::mallopt(libc::M_ARENA_MAX, arenas);
         }
     }
 }
