@@ -152,7 +152,8 @@
       "file": "23-LCD_Front_holes.STEP",
       "path": "printer_mods/mjoaris/Mini12864_LCD_Mount_for_V2.4/CAD/Alternative_base_(No_Heatset_Inserts)/LCD_Front_holes.STEP",
       "sha256": "dae5781428785d53e76aa33ecbd67f9efda4e57ddf8c93a5c7ac33e0805cc907",
-      "bytes": 975597
+      "bytes": 975597,
+      "prusa_rotation_degrees": {"x": 90, "y": 90}
     },
     {
       "file": "24-dti-mount.step",

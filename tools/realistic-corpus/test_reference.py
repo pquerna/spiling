@@ -7,6 +7,11 @@ import reference
 
 
 class ReferenceObservationTests(unittest.TestCase):
+    def test_manifest_rotations_use_prusa_axis_flags(self):
+        self.assertEqual(reference.rotation_args({}), [])
+        self.assertEqual(reference.rotation_args({"y": 90, "x": 90, "z": -90}),
+                         ["--rotate-x", "90", "--rotate-y", "90", "--rotate", "-90"])
+
     def test_absent_mesh_evidence_is_unknown_not_closed(self):
         self.assertIsNone(reference.mesh_info("")["open_edges"])
         self.assertIsNone(reference.mesh_info("")["manifold"])

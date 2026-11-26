@@ -6,7 +6,7 @@
 Spiling: create + import + printer/material/quality (or an explicit intent)
 + center the whole source on the bed + compile + save, then source-absent
 read-only reopen + verify + export. PrusaSlicer: slice the same STEP with
-matched settings as the printability reference.
+matched settings and any manifest reference rotations.
 Usage: run.py CORPUS_DIR BIN_DIR [RESULTS] [PART_PREFIX...] --profile PROFILE [--intent INTENT_JSON]
 CORPUS_DIR holds step/ from fetch.py; results and work/ are written there.
 Writes one JSON record per part to results.ndjson. Standard library only.
@@ -316,7 +316,7 @@ def prusa_pattern(recipe):
     return {"gyroid": "gyroid", "grid": "grid"}.get(recipe["sparse_infill"]["kind"], "rectilinear")
 
 
-def prusa(step, cwd, brimmed=False):
+def prusa(step, cwd, rotations, brimmed=False):
     started = time.monotonic()
     gcode = os.path.join(cwd, "prusa.gcode")
     recipe = INTENT["recipe"]
@@ -337,8 +337,9 @@ def prusa(step, cwd, brimmed=False):
     args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
     info = {"fill_pattern": prusa_pattern(recipe), "threads": 1}
-    for stage, command in (("import", ["prusa-slicer", "--threads", "1", "--info", step]),
-                           ("slice", ["prusa-slicer", "--threads", "1", "--export-gcode", *args,
+    cli = ["prusa-slicer", "--threads", "1", *reference.rotation_args(rotations)]
+    for stage, command in (("import", [*cli, "--info", step]),
+                           ("slice", [*cli, "--export-gcode", *args,
                                       "--center", center, "-o", gcode, step])):
         info[stage] = {"command": command}
         try:
@@ -406,7 +407,8 @@ def part(case, intent, results):
                     INTENT, json.load(open(os.path.join(cwd, "create.stdout.json"))))
     # PrusaSlicer slices the original source after Spiling, so its brim can
     # follow the brim Spiling planned.
-    record["prusa"] = (prusa(src, cwd, brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
+    record["prusa"] = (prusa(src, cwd, case.get("prusa_rotation_degrees", {}),
+                             brimmed=bool(plan and plan["adhesion"]["brim_paths"]))
                        if ARGS.reference == "prusa" else {"status": "not_requested"})
     if plan is not None:
         stdout = open(os.path.join(returned, "open.stdout.json")).read()

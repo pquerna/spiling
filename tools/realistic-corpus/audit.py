@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import features
+import reference
 
 
 def digest(path):
@@ -25,6 +26,10 @@ def select_cases(manifest, prefixes=(), cohort="full"):
         name = case["file"]
         if Path(name).name != name or name in (".", ".."):
             raise ValueError(f"case is not a source basename: {name}")
+        try:
+            reference.rotation_args(case.get("prusa_rotation_degrees", {}))
+        except ValueError as error:
+            raise ValueError(f"invalid Prusa rotations: {name}: {error}") from error
         expectation = case.get("expectation", {"kind": "complete"})
         if not isinstance(expectation, dict) or expectation.get("kind") not in (
                 "complete", "refusal"):

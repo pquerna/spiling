@@ -866,9 +866,12 @@ choose printer + material + quality (`--printer spiling.reference.marlin.04
 center on the bed, compile, save; then remove the source, reopen read-only,
 freshly verify and export. No intent file is involved by default; PrusaSlicer's
 matched settings follow the engine-created intent read from a part-free probe
-project. PrusaSlicer slices the
-same STEP with matched settings as the printability reference. Results record
-the refusing stage and code, wall time and sampled engine peak RSS per part.
+project. PrusaSlicer slices the same STEP with matched settings. A manifest
+case can declare `prusa_rotation_degrees` by axis to align Prusa's imported
+orientation to Spiling's. The LCD front (part 23) uses this to undo the
+auxiliary STEP frame applied by Prusa and compare both slicers with the broad
+face on the bed. The recorded reference commands include the rotations. Each
+result records wall time, sampled engine peak RSS and any refusal stage and code.
 
 The runner admits only manifest-owned sources with their frozen hashes. Each run
 needs a new directory containing `step/` (a symlink to shared fetched sources is

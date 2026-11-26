@@ -9,6 +9,16 @@ MODEL_TYPES = {"External perimeter", "Perimeter", "Overhang perimeter", "Interna
                "Solid infill", "Top solid infill", "Bridge infill", "Gap fill", "Ironing"}
 
 
+def rotation_args(rotations):
+    """Set the per-axis rotation options in Prusa's imported frame."""
+    flags = {"x": "--rotate-x", "y": "--rotate-y", "z": "--rotate"}
+    if not isinstance(rotations, dict) or any(
+            axis not in flags or type(degrees) is not int for axis, degrees in rotations.items()):
+        raise ValueError("Prusa rotations require x, y or z axes with integer degrees")
+    return [argument for axis, flag in flags.items() if axis in rotations
+            for argument in (flag, str(rotations[axis]))]
+
+
 def mesh_info(text):
     fields = dict(re.findall(r"(?m)^([a-z_]+)\s*=\s*(.+)$", text))
     result = {"manifold": {"yes": True, "no": False}.get(fields.get("manifold")),

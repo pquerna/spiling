@@ -92,6 +92,12 @@ class CorpusAuditTests(unittest.TestCase):
             (root / "program.gcode").unlink()
             self.assertFalse(all(audit.export_checks(root).values()))
 
+    def test_invalid_prusa_rotation_is_rejected_before_native_work(self):
+        for rotations in (None, ["x", 90], {"w": 90}, {"x": True}, {"x": "90"}):
+            with (self.subTest(rotations=rotations),
+                  self.assertRaisesRegex(ValueError, "invalid Prusa rotations")):
+                audit.select_cases({"parts": [dict(self.case, prusa_rotation_degrees=rotations)]})
+
     def test_invalid_expectations_are_rejected_before_native_work(self):
         for expectation in (None, False, "complete", [], {}, {"kind": "unknown"},
                             {"kind": "refusal"}, {"kind": "refusal", "code": "timeout", "domain": None}):
