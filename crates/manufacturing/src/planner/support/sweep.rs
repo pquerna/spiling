@@ -456,6 +456,10 @@ impl KeptSupport {
 /// bed-only demands a single open-below void relieves.
 struct Channel {
     relieved: Option<usize>,
+    /// Branching support: its candidate is the tree slice of each layer,
+    /// not a carried prism, and it stands on the lower layer grown by the
+    /// branch lean.
+    tree: bool,
     seeds: Vec<Option<Bits>>,
     /// Per demand target, in first-seen order: its contact tops in demand
     /// order and its seed. Every demand on one target shares that target's
@@ -475,6 +479,7 @@ impl Channel {
     fn new(relieved: Option<usize>, layers: usize) -> Self {
         Self {
             relieved,
+            tree: false,
             seeds: vec![None; layers],
             interface_seeds: Vec::new(),
             tops: Vec::new(),
@@ -620,6 +625,20 @@ impl Sweep<'_> {
                 tops: Vec::new(),
             });
         };
+        let params = super::tree::Params::new(width);
+        // Branches walk around the part to the bed, so the frame covers the
+        // part below every contact top, not only the seeds.
+        let bounds = {
+            let mut reach = bounds;
+            for span in self.sections {
+                if span.start as usize <= max_top
+                    && let Some(b) = material_bounds(&span.material)
+                {
+                    reach = union_frame(Some(reach), b);
+                }
+            }
+            expand(reach, params.base + 2.0 * params.max_radius)
+        };
         let cells = CellFrame::new(bounds, SUPPORT_CELL_MM)?;
         let cell_bounds = cells.bounds();
         // Live grid bytes held across steps; every new allocation is admitted
@@ -688,6 +707,23 @@ impl Sweep<'_> {
             charge(work)?;
         }
         drop(seed);
+        let tree_at = {
+            let interface_seeds = channels[0]
+                .interface_seeds
+                .iter()
+                .map(|entry| InterfaceSeed {
+                    target: entry.target,
+                    tops: entry.tops.clone(),
+                    seed: Rc::clone(&entry.seed),
+                })
+                .collect();
+            let mut channel = Channel::new(None, layers.len());
+            channel.tree = true;
+            channel.interface_seeds = interface_seeds;
+            channel.tops = channels[0].tops.clone();
+            channels.push(channel);
+            channels.len() - 1
+        };
         timing.mark("seeds");
 
         // Down pass: carry every channel's candidate through occupancy and
@@ -697,6 +733,54 @@ impl Sweep<'_> {
         // Subtracting a piece again at every layer it occupies changes no
         // cell: the carry already lacks it, and each entering seed needs it.
         let distance = self.frame.distance;
+        let guide = {
+            {
+                let mut moves = Vec::new();
+                reserve_owned(&mut moves, max_top + 1, self.owned_bytes)?;
+                for layer in &layers[..=max_top] {
+                    moves.push(params.lean(layer.z_mm - layer.lower_z_mm));
+                }
+                let sections = self.sections;
+                let protected = &self.protected.0;
+                let obstacles = |l: usize| {
+                    let slab = bead_slab(&layers[l])?;
+                    // The layer's own section only: the next section up is the
+                    // overhang a tree supports, not an obstacle under it.
+                    let span = span_at(sections, l as u32);
+                    let mut key = span as u64;
+                    let mut polygons = Vec::new();
+                    polygons.extend(sections[span].material.0.iter());
+                    for (ordinal, (mask, scope)) in protected.iter().zip(scopes).enumerate() {
+                        if void_reaches_corridor(&scope.height, slab[0], slab[1]) {
+                            key = key.rotate_left(7)
+                                ^ (ordinal as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                            polygons.push(mask);
+                        }
+                    }
+                    Ok((key, polygons))
+                };
+                let guide = super::tree::Guide::build(
+                    cell_bounds,
+                    &moves,
+                    obstacles,
+                    distance,
+                    &admit,
+                    cancel,
+                    work,
+                )?;
+                admit(guide.bytes())?;
+                live.fetch_add(guide.bytes(), Ordering::Relaxed);
+                guide
+            }
+        };
+        timing.mark("tree_guide");
+        let mut roofs: Vec<(usize, Bits)> = Vec::new();
+        let mut forest = super::tree::Forest::default();
+        let mut bridge = Vec::new();
+        reserve_owned(&mut bridge, max_top + 1, self.owned_bytes)?;
+        bridge.resize(max_top + 1, false);
+        let mut tree_near: Option<(Vec<(usize, usize)>, Bits)> = None;
+        let mut tree_time = [std::time::Duration::ZERO; 4];
         // The carry at layer `l` lies inside the seeds at or above `l`, so a
         // piece outside their running envelope cannot change any cell.
         let mut envelope: Vec<Option<[[f64; 2]; 2]>> = Vec::new();
@@ -788,11 +872,17 @@ impl Sweep<'_> {
                     .iter_mut()
                     .map(|channel| channel.seeds[l].take())
                     .collect();
-                let skip = carried.iter().all(Bits::is_empty) && seeds.iter().all(Option::is_none);
+                let skip = carried.iter().all(Bits::is_empty)
+                    && seeds.iter().all(Option::is_none)
+                    && roofs.is_empty()
+                    && forest.is_empty();
                 if let Some(bits) = &fresh {
                     // Carries already exclude every earlier piece.
                     for carry in &mut carried {
                         carry.subtract(bits);
+                    }
+                    for (_, roof) in &mut roofs {
+                        roof.subtract(bits);
                     }
                     release(bits);
                 }
@@ -843,6 +933,34 @@ impl Sweep<'_> {
                         }
                     }
                 }
+                // A tree overhang leaves the ordinary channel at its contact
+                // top: it carries as a roof through the interface band, then
+                // as branches.
+                if layers[l].z_mm > TREE_MIN_HEIGHT_MM
+                    && let Some(seed) = seeds[0].as_mut()
+                {
+                    let mut moved = false;
+                    for component in raster.components(seed)? {
+                        if prefers_tree(&raster, &guide, &params, &component, l)? {
+                            // Only cells whose branches reach the bed leave the
+                            // column: the rest still lands on the part.
+                            let component = raster.select(&component, |c, r| {
+                                guide.reach(l, cells.centre(c, r)) >= params.tip
+                            })?;
+                            if component.is_empty() {
+                                continue;
+                            }
+                            seed.subtract(&component);
+                            hold(&component)?;
+                            reserve_owned(&mut roofs, 1, self.owned_bytes)?;
+                            roofs.push((self.band_bottom(l), component));
+                            moved = true;
+                        }
+                    }
+                    if moved && seed.is_empty() {
+                        seeds[0] = None;
+                    }
+                }
                 for (carry, seed) in carried.iter_mut().zip(seeds) {
                     if let Some(seed) = seed {
                         *carry = raster.union(carry, &seed)?;
@@ -879,6 +997,133 @@ impl Sweep<'_> {
                         }
                     }
                 }
+                if !(roofs.is_empty() && forest.is_empty()) {
+                    let mut cuts = Vec::new();
+                    for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate()
+                    {
+                        if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
+                            continue;
+                        }
+                        if voids[ordinal].is_none() {
+                            let clearance = projection::void_placement_distance(
+                                mask,
+                                cell_bounds,
+                                self.requested,
+                            )?
+                            .map(|distance| raster.outward([mask], distance))
+                            .transpose()?;
+                            if let Some(bits) = &clearance {
+                                hold(bits)?;
+                            }
+                            voids[ordinal] = Some(clearance);
+                        }
+                        if let Some(Some(clearance)) = &voids[ordinal] {
+                            cuts.push(ordinal);
+                            let _ = clearance;
+                        }
+                    }
+                    let void_bits = |ordinal: usize| match &voids[ordinal] {
+                        Some(Some(bits)) => Some(bits),
+                        _ => None,
+                    };
+                    let layer = &layers[l];
+                    let tt = std::time::Instant::now();
+                    forest.descend(
+                        &guide,
+                        l,
+                        layer.z_mm - layer.lower_z_mm,
+                        layer.lower_z_mm,
+                        &params,
+                        cancel,
+                        work,
+                    )?;
+                    let mut at = 0;
+                    while at < roofs.len() {
+                        if roofs[at].0 > l {
+                            let (bottom, roof) = roofs.remove(at);
+                            forest.plant(&raster, &roof, &params, self.roof_rows(bottom))?;
+                            release(&roof);
+                        } else {
+                            at += 1;
+                        }
+                    }
+                    let mut roof_cells = Bits::default();
+                    for (bottom, roof) in &mut roofs {
+                        for &ordinal in &cuts {
+                            if let Some(bits) = void_bits(ordinal) {
+                                roof.subtract(bits);
+                            }
+                        }
+                        roof_cells = raster.union(&roof_cells, roof)?;
+                        if *bottom == l {
+                            bridge[l] = true;
+                        }
+                    }
+                    tree_time[0] += tt.elapsed();
+                    let tt = std::time::Instant::now();
+                    let mut slice = if forest.is_empty() {
+                        Bits::default()
+                    } else {
+                        raster.capsules(forest.discs().map(|(p, r)| (p, p, r)))?
+                    };
+                    tree_time[1] += tt.elapsed();
+                    let tt = std::time::Instant::now();
+                    if !slice.is_empty() {
+                        let span = span_at(self.sections, l as u32);
+                        if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
+                            if let Some((_, old)) = material_cells.take() {
+                                release(&old);
+                            }
+                            let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                            hold(&bits)?;
+                            material_cells = Some((span, bits));
+                        }
+                        slice.subtract(&material_cells.as_ref().expect("section material cells").1);
+                        let spans = slab_spans(self.sections, l);
+                        let mut key = Vec::new();
+                        let mut near = Vec::new();
+                        for (span, pieces) in window.iter().filter(|(span, _)| spans.contains(span))
+                        {
+                            for (k, piece) in pieces.iter().enumerate() {
+                                // Only pieces whose clearance reaches the slice
+                                // can remove a cell of it.
+                                if piece.scope[0] <= slab[1]
+                                    && piece.scope[1] >= slab[0]
+                                    && slice.meets_rect(&cells, piece.reach)
+                                {
+                                    reserve_owned(&mut key, 1, self.owned_bytes)?;
+                                    key.push((*span, k));
+                                    raster.reserve(&mut near, 1)?;
+                                    near.push(&piece.polygon);
+                                }
+                            }
+                        }
+                        if tree_near.as_ref().is_none_or(|(k, _)| *k != key) {
+                            if let Some((_, old)) = tree_near.take() {
+                                release(&old);
+                            }
+                            let bits = if near.is_empty() {
+                                Bits::default()
+                            } else {
+                                raster.outward_parallel(&near, distance)?
+                            };
+                            hold(&bits)?;
+                            tree_near = Some((key, bits));
+                        }
+                        slice.subtract(&tree_near.as_ref().expect("tree occupancy").1);
+                        for &ordinal in &cuts {
+                            if let Some(bits) = void_bits(ordinal) {
+                                slice.subtract(bits);
+                            }
+                        }
+                    }
+                    tree_time[2] += tt.elapsed();
+                    let active = raster.union(&roof_cells, &slice)?;
+                    if !active.is_empty() {
+                        hold(&active)?;
+                        channels[tree_at].active[l] = Some(active);
+                    }
+                }
                 down_rest += t0.elapsed();
                 for (channel, carry) in channels.iter_mut().zip(&carried) {
                     if !carry.is_empty() {
@@ -891,6 +1136,17 @@ impl Sweep<'_> {
         }
         drop(carried);
         drop(window);
+        for (_, roof) in roofs.drain(..) {
+            release(&roof);
+        }
+        if let Some((_, bits)) = tree_near.take() {
+            release(&bits);
+        }
+        live.fetch_sub(
+            guide.bytes().min(live.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+        drop(guide);
         if let Some((_, bits)) = material_cells.take() {
             release(&bits);
         }
@@ -901,7 +1157,7 @@ impl Sweep<'_> {
         if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
             eprintln!(
                 "{}",
-                serde_json::json!({"event": "support_down_detail", "load": down_load.as_secs_f64(), "fresh": down_fresh.as_secs_f64(), "seed": down_seed.as_secs_f64(), "rest": down_rest.as_secs_f64()})
+                serde_json::json!({"event": "support_down_detail", "tree_descend": tree_time[0].as_secs_f64(), "tree_slice": tree_time[1].as_secs_f64(), "tree_clip": tree_time[2].as_secs_f64(), "load": down_load.as_secs_f64(), "fresh": down_fresh.as_secs_f64(), "seed": down_seed.as_secs_f64(), "rest": down_rest.as_secs_f64()})
             );
         }
 
@@ -918,7 +1174,20 @@ impl Sweep<'_> {
         reserve_owned(&mut part_contacts, max_top + 1, self.owned_bytes)?;
         part_contacts.resize_with(max_top + 1, || None);
         let te = std::time::Instant::now();
-        let mut proposed = self.propose_landings(max_top, &raster, &channels[0].active)?;
+        // Branches may land on the part as ordinary columns do.
+        let mut joined = Vec::new();
+        reserve_owned(&mut joined, max_top + 1, self.owned_bytes)?;
+        for l in 0..=max_top {
+            joined.push(
+                match (&channels[0].active[l], &channels[tree_at].active[l]) {
+                    (Some(a), Some(b)) => Some(raster.union(a, b)?),
+                    (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+                    (None, None) => None,
+                },
+            );
+        }
+        let mut proposed = self.propose_landings(max_top, &raster, &joined)?;
+        drop(joined);
         for landing in proposed.iter().flatten() {
             admit(landing.bytes())?;
             live.fetch_add(landing.bytes(), Ordering::Relaxed);
@@ -988,6 +1257,13 @@ impl Sweep<'_> {
             let landing = proposed[l].take();
             let mut layer_support = Bits::default();
             let mut layer_interface = Bits::default();
+            // Columns and branches print together: either stands on what the
+            // other kept below. Relieved roof-access channels stay apart.
+            let shared = if grounded[tree_at].is_empty() {
+                None
+            } else {
+                Some(raster.union(&grounded[0], &grounded[tree_at])?)
+            };
             for (c, channel) in channels.iter_mut().enumerate() {
                 let Some(active) = channel.active[l].take() else {
                     grounded[c] = Bits::default();
@@ -1015,7 +1291,28 @@ impl Sweep<'_> {
                 let mut column = if l == 0 {
                     kept
                 } else {
-                    let base = raster.union(&grounded[c], &ground)?;
+                    let below = match &shared {
+                        Some(shared) if channel.relieved.is_none() => shared,
+                        None if channel.tree => &grounded[0],
+                        _ => &grounded[c],
+                    };
+                    let dilated;
+                    let lower = if channel.tree {
+                        // A branch leans by its layer's move; the lowest roof
+                        // layer bridges between the tips under it.
+                        let layer = &layers[l];
+                        let reach = if bridge[l] {
+                            params.spacing
+                        } else {
+                            params.lean(layer.z_mm - layer.lower_z_mm) + 2.0 * SUPPORT_CELL_MM
+                        };
+                        let near = raster.near_window(below, &kept, reach)?;
+                        dilated = raster.dilate(&near, reach)?;
+                        &dilated
+                    } else {
+                        below
+                    };
+                    let base = raster.union(lower, &ground)?;
                     raster.intersection(&kept, &base)?
                 };
                 // Higher support stands on this layer before the touching
@@ -1175,6 +1472,35 @@ impl Sweep<'_> {
     /// and the object layers' roads, never the up pass, so layers are
     /// proposed in parallel; each is the same proposal the up pass would
     /// make at that layer.
+    /// Row lattice of interface layer `l`, as raster draws it: full-density
+    /// pitch on the layer's alternating axis.
+    fn roof_rows(&self, l: usize) -> super::tree::Rows {
+        let width = self.recipe.bead_width_mm;
+        let h = self.recipe.layer_height_mm;
+        let pitch = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
+        let axis = super::super::region::HatchAxis::for_policy(
+            RectilinearAxisPolicy::AlternatingXY,
+            super::super::hatch_key(l),
+        );
+        super::tree::Rows {
+            fixed: usize::from(axis == super::super::region::HatchAxis::X),
+            pitch,
+        }
+    }
+
+    /// Lowest layer of a tree roof under contact top `top`: its interface
+    /// band. A deeper roof carried as a column is eaten by the part's own
+    /// occupancy before its tips are planted.
+    fn band_bottom(&self, top: usize) -> usize {
+        let layers = self.layers;
+        let depth = self.interface_thickness;
+        let mut bottom = top;
+        while bottom > 0 && layers[bottom - 1].z_mm > layers[top].z_mm - depth {
+            bottom -= 1;
+        }
+        bottom
+    }
+
     fn propose_landings(
         &self,
         max_top: usize,
@@ -1908,6 +2234,41 @@ fn nominal_band(layers: &[PrintLayer], l: usize) -> Result<[f64; 2], Manufacturi
         layers[l].z_mm - layers[l].lower_z_mm,
     )?[1];
     Ok([lower, upper])
+}
+
+/// Contact tops at or below this height keep columns: near the bed a
+/// branch saves little and a column is sturdier (Bambu's vertical zone).
+const TREE_MIN_HEIGHT_MM: f64 = 5.0;
+
+/// Whether an overhang component goes to branches: it is wide enough that
+/// its tips merge into fewer, thinner trunks than its column (a lip or ledge
+/// narrower than the tip spacing is a cheap thin column but a row of full
+/// branches), and a branch from most of it can walk around the part to the
+/// bed. The strip beside the part's wall, inside the clearance and a tip
+/// radius, never reaches, so the bar is 70%.
+fn prefers_tree(
+    raster: &Raster<'_>,
+    guide: &super::tree::Guide,
+    params: &super::tree::Params,
+    component: &Bits,
+    l: usize,
+) -> Result<bool, ManufacturingError> {
+    let cells = &raster.frame;
+    let (mut over, mut reaching, mut total) = (0usize, 0usize, 0usize);
+    component.for_each_cell(|c, r| {
+        let p = cells.centre(c, r);
+        total += 1;
+        over += usize::from(guide.shadowed(l, p));
+        reaching += usize::from(guide.reach(l, p) >= params.tip);
+    });
+    if total == 0 || 10 * reaching < 7 * total {
+        return Ok(false);
+    }
+    let inner = raster.erode(component, cells.cell())?.count();
+    let boundary = total.saturating_sub(inner).max(1);
+    // Mean width 2A/P, with the boundary cells measuring the perimeter.
+    let width = 2.0 * total as f64 * cells.cell() / boundary as f64;
+    Ok(width >= params.spacing)
 }
 
 #[cfg(test)]

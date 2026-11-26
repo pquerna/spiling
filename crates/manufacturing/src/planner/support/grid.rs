@@ -109,6 +109,29 @@ impl CellFrame {
             .saturating_mul(8)
     }
 
+    /// Columns and rows of the frame.
+    pub(super) fn size(&self) -> [usize; 2] {
+        [self.cols, self.rows]
+    }
+
+    /// Centre of cell `(col, row)` in millimetres.
+    pub(super) fn centre(&self, col: usize, row: usize) -> [f64; 2] {
+        [self.x(col as f64 + 0.5), self.y(row as f64 + 0.5)]
+    }
+
+    /// The cell holding `p` by floor, if inside the frame.
+    pub(super) fn cell_of(&self, p: [f64; 2]) -> Option<[usize; 2]> {
+        let u = (p[0] - self.origin[0]) / self.cell;
+        let v = (p[1] - self.origin[1]) / self.cell;
+        (u.is_finite()
+            && v.is_finite()
+            && u >= 0.0
+            && v >= 0.0
+            && u < self.cols as f64
+            && v < self.rows as f64)
+            .then_some([u as usize, v as usize])
+    }
+
     fn x(&self, col: f64) -> f64 {
         self.origin[0] + col * self.cell
     }
@@ -190,7 +213,6 @@ impl Bits {
     }
 
     /// Number of set cells.
-    #[cfg(test)]
     pub(super) fn count(&self) -> usize {
         self.data.iter().map(|w| w.count_ones() as usize).sum()
     }
@@ -258,6 +280,20 @@ impl Bits {
             }
         }
         false
+    }
+
+    /// Visit every set cell as `(col, row)`, row-major.
+    pub(super) fn for_each_cell(&self, mut visit: impl FnMut(usize, usize)) {
+        for r in 0..self.rows() {
+            for (w, &word) in self.data[r * self.width..(r + 1) * self.width]
+                .iter()
+                .enumerate()
+            {
+                for_bits(word, |bit| {
+                    visit((self.word0 + w) * 64 + bit, self.row0 + r)
+                });
+            }
+        }
     }
 
     /// Restore the tight window after cells were removed.
@@ -1162,6 +1198,251 @@ impl Raster<'_> {
         };
         result.shrink();
         Ok(result)
+    }
+
+    /// Cells within `radius` of a set cell (the dual of [`Self::erode`] on
+    /// the same structuring disc), kept inside the frame.
+    pub(super) fn dilate(&self, bits: &Bits, radius: f64) -> Result<Bits, ManufacturingError> {
+        if bits.is_empty() || radius <= 0.0 {
+            return Ok(bits.clone());
+        }
+        let reach = structuring(radius / self.frame.cell);
+        let extent = reach.iter().copied().max().unwrap_or(0);
+        let frame_words = self.frame.cols.div_ceil(64);
+        let pad_rows = reach.len().saturating_sub(1);
+        let pad_words = extent.div_ceil(64);
+        let row0 = bits.row0.saturating_sub(pad_rows);
+        let row1 = (bits.row0 + bits.rows() + pad_rows).min(self.frame.rows);
+        let word0 = bits.word0.saturating_sub(pad_words);
+        let word1 = (bits.word0 + bits.width + pad_words).min(frame_words);
+        let (rows, width) = (row1 - row0, word1 - word0);
+        let mut source = self.zeroed(rows * width)?;
+        for r in 0..bits.rows() {
+            let to = (bits.row0 + r - row0) * width + bits.word0 - word0;
+            source[to..to + bits.width]
+                .copy_from_slice(&bits.data[r * bits.width..(r + 1) * bits.width]);
+        }
+        let mut extents: Vec<usize> = reach.clone();
+        extents.sort_unstable();
+        extents.dedup();
+        let mut horizontal: Vec<Vec<u64>> = Vec::new();
+        for &e in &extents {
+            check_cancel(self.cancel)?;
+            let mut grown = self.zeroed(source.len())?;
+            for r in 0..rows {
+                let row = &source[r * width..(r + 1) * width];
+                for (w, slot) in grown[r * width..(r + 1) * width].iter_mut().enumerate() {
+                    let mut word = 0u64;
+                    for shift in -(e as i64)..=e as i64 {
+                        word |= shifted(row, w, shift);
+                    }
+                    *slot = word;
+                }
+            }
+            self.charge(source.len() * (2 * e + 1));
+            horizontal.push(grown);
+        }
+        drop(source);
+        let mut data = self.zeroed(rows * width)?;
+        let tail = self.frame.cols % 64;
+        for r in 0..rows {
+            check_cancel(self.cancel)?;
+            let out = &mut data[r * width..(r + 1) * width];
+            for (k, e) in reach.iter().enumerate() {
+                let grown = &horizontal[extents.binary_search(e).unwrap_or(0)];
+                for n in [r.checked_sub(k), (k > 0).then_some(r + k)]
+                    .into_iter()
+                    .flatten()
+                    .filter(|&n| n < rows)
+                {
+                    for (o, s) in out.iter_mut().zip(&grown[n * width..(n + 1) * width]) {
+                        *o |= s;
+                    }
+                }
+            }
+            if tail != 0 && word1 == frame_words {
+                out[width - 1] &= (1u64 << tail) - 1;
+            }
+            self.charge(width * (2 * reach.len()));
+        }
+        drop(horizontal);
+        let mut result = Bits {
+            row0,
+            word0,
+            width,
+            data,
+        };
+        result.shrink();
+        Ok(result)
+    }
+
+    /// The cells of `bits` inside `other`'s window grown by `pad` (whole
+    /// words across): what a dilation by at most `pad` can bring into it.
+    pub(super) fn near_window(
+        &self,
+        bits: &Bits,
+        other: &Bits,
+        pad: f64,
+    ) -> Result<Bits, ManufacturingError> {
+        if bits.is_empty() || other.is_empty() {
+            return Ok(Bits::default());
+        }
+        let cells = (pad / self.frame.cell).ceil() as usize + 1;
+        let rows = other.row0.saturating_sub(cells)..other.row0 + other.rows() + cells;
+        let words = other.word0.saturating_sub(cells.div_ceil(64))
+            ..other.word0 + other.width + cells.div_ceil(64);
+        let row0 = rows.start.max(bits.row0);
+        let row1 = rows.end.min(bits.row0 + bits.rows());
+        let word0 = words.start.max(bits.word0);
+        let word1 = words.end.min(bits.word0 + bits.width);
+        if row0 >= row1 || word0 >= word1 {
+            return Ok(Bits::default());
+        }
+        let width = word1 - word0;
+        let mut data = self.zeroed((row1 - row0) * width)?;
+        for row in row0..row1 {
+            for word in word0..word1 {
+                data[(row - row0) * width + word - word0] = bits.word(row, word);
+            }
+        }
+        let mut out = Bits {
+            row0,
+            word0,
+            width,
+            data,
+        };
+        out.shrink();
+        Ok(out)
+    }
+
+    /// The cells of `bits` that satisfy `keep`, by frame column and row.
+    pub(super) fn select(
+        &self,
+        bits: &Bits,
+        mut keep: impl FnMut(usize, usize) -> bool,
+    ) -> Result<Bits, ManufacturingError> {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut open: Option<Span> = None;
+        let mut failed = None;
+        bits.for_each_cell(|c, r| {
+            if failed.is_some() {
+                return;
+            }
+            let (c32, r32) = (c as u32, r as u32);
+            if !keep(c, r) {
+                return;
+            }
+            match &mut open {
+                Some(span) if span.row == r32 && span.to == c32 => span.to = c32 + 1,
+                _ => {
+                    if let Some(done) = open.take() {
+                        if let Err(e) = self.reserve(&mut spans, 1) {
+                            failed = Some(e);
+                            return;
+                        }
+                        spans.push(done);
+                    }
+                    open = Some(Span {
+                        row: r32,
+                        from: c32,
+                        to: c32 + 1,
+                    });
+                }
+            }
+        });
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if let Some(done) = open {
+            self.reserve(&mut spans, 1)?;
+            spans.push(done);
+        }
+        self.bits_of(&spans)
+    }
+
+    /// The 8-connected components of `bits`, in order of their first cell.
+    pub(super) fn components(&self, bits: &Bits) -> Result<Vec<Bits>, ManufacturingError> {
+        let mut spans: Vec<Span> = Vec::new();
+        for r in 0..bits.rows() {
+            check_cancel(self.cancel)?;
+            let row = &bits.data[r * bits.width..(r + 1) * bits.width];
+            let mut col = 0usize;
+            let total = bits.width * 64;
+            while col < total {
+                let set = |c: usize| row[c / 64] >> (c % 64) & 1 == 1;
+                if !set(col) {
+                    col += 1;
+                    continue;
+                }
+                let from = col;
+                while col < total && set(col) {
+                    col += 1;
+                }
+                self.reserve(&mut spans, 1)?;
+                spans.push(Span {
+                    row: (bits.row0 + r) as u32,
+                    from: (bits.word0 * 64 + from) as u32,
+                    to: (bits.word0 * 64 + col) as u32,
+                });
+            }
+        }
+        self.charge(spans.len());
+        // Union-find over runs; runs on adjacent rows join when their
+        // closed column ranges touch (8-connectivity).
+        let mut parent: Vec<usize> = Vec::new();
+        self.reserve(&mut parent, spans.len())?;
+        parent.extend(0..spans.len());
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let mut previous = 0..0;
+        let mut start = 0;
+        while start < spans.len() {
+            let row = spans[start].row;
+            let mut end = start;
+            while end < spans.len() && spans[end].row == row {
+                end += 1;
+            }
+            if previous.end > previous.start && spans[previous.start].row + 1 == row {
+                let mut j = previous.start;
+                for i in start..end {
+                    while j < previous.end && spans[j].to < spans[i].from {
+                        j += 1;
+                    }
+                    let mut k = j;
+                    while k < previous.end && spans[k].from <= spans[i].to {
+                        let (a, b) = (find(&mut parent, i), find(&mut parent, k));
+                        if a != b {
+                            parent[a.max(b)] = a.min(b);
+                        }
+                        k += 1;
+                    }
+                }
+            }
+            previous = start..end;
+            start = end;
+        }
+        let mut label: Vec<usize> = Vec::new();
+        self.reserve(&mut label, spans.len())?;
+        let mut groups: Vec<Vec<Span>> = Vec::new();
+        for (i, span) in spans.iter().enumerate() {
+            let root = find(&mut parent, i);
+            let at = if root == i {
+                self.reserve(&mut groups, 1)?;
+                groups.push(Vec::new());
+                groups.len() - 1
+            } else {
+                label[root]
+            };
+            label.push(at);
+            self.reserve(&mut groups[at], 1)?;
+            groups[at].push(*span);
+        }
+        groups.iter().map(|group| self.bits_of(group)).collect()
     }
 
     /// Polygons inside the cell set with few vertices: erode by one cell,

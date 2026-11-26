@@ -9,7 +9,7 @@ use crate::planner::OFFSET_TOLERANCE_MM;
 use spiling_contracts::manufacturing::WidthProfile;
 use spiling_contracts::manufacturing::{
     DepositionEdges, DepositionKind, DepositionPath, MAX_SPARSE_UNSUPPORTED_RUN_WIDTHS,
-    ManufacturingError, PlanarPrintRecipe,
+    ManufacturingError, PlanarPrintRecipe, program_coordinates::XYZ6_PROJECTION_SCREEN_MM,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -31,7 +31,10 @@ pub(crate) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> Ga
     // A fully unanchored tiny sampled edge is not a supported overhang. Anchors
     // must be actual positive intervals or certified endpoint-footprint overlap.
     // An anchored end holds up to half a bead of overhang; anchoring both
-    // ends holds at least as much.
+    // ends holds at least as much. Replay measures the emitted XYZ6 road with
+    // an outward length enclosure, so a span that only ties an allowance in
+    // raw arithmetic (lattice-aligned support often does) is not accepted.
+    let span = span + XYZ6_PROJECTION_SCREEN_MM;
     if (left || right) && span <= width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM {
         return GapKind::Supported;
     }
@@ -759,6 +762,35 @@ mod tests {
             1,
             "support demand must retain an actual chord, not flatten the curved road"
         );
+    }
+
+    #[test]
+    fn a_stub_that_only_ties_its_allowance_is_not_supported() {
+        // Lattice-aligned support often lands an end stub exactly on the
+        // half-bead allowance; replay's outward length enclosure rejects the
+        // tie, so the planner must too.
+        let gap = AnchorGap {
+            start: 0.5,
+            end: 1.0,
+            left: true,
+            right: false,
+            direct_ends: true,
+        };
+        let width = 0.45;
+        let allowance = width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM;
+        assert!(matches!(
+            gap_kind(&gap, allowance, width, 5.0),
+            GapKind::Demand
+        ));
+        assert!(matches!(
+            gap_kind(
+                &gap,
+                allowance - 2.0 * XYZ6_PROJECTION_SCREEN_MM,
+                width,
+                5.0
+            ),
+            GapKind::Supported
+        ));
     }
 
     #[test]

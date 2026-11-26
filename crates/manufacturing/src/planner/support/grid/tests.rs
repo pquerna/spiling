@@ -564,3 +564,53 @@ fn closing_seams_fills_two_cell_gaps_only() {
             .is_empty()
     }));
 }
+
+#[test]
+fn dilation_components_selection_and_windows_keep_their_cells() {
+    let cancel = AtomicBool::new(false);
+    let frame = frame();
+    let raster = raster(frame, &cancel);
+    let square = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        Rect::new(coord! { x: x0, y: y0 }, coord! { x: x1, y: y1 }).to_polygon()
+    };
+    let a = raster.inward([&square(1.0, 1.0, 2.0, 2.0)]).unwrap();
+    let b = raster.inward([&square(6.0, 6.0, 7.0, 7.0)]).unwrap();
+    let both = raster.union(&a, &b).unwrap();
+
+    // Dilation is the dual of erosion and reaches exactly its radius.
+    let grown = raster.dilate(&a, 0.5).unwrap();
+    assert!(raster.holds_all(&grown, [2.4, 1.5]));
+    assert!(!raster.holds_any(&grown, [2.7, 1.5]));
+    assert_eq!(raster.erode(&grown, 0.5).unwrap(), a);
+
+    // Two separate squares are two components, in first-cell order.
+    let parts = raster.components(&both).unwrap();
+    assert_eq!(parts, vec![a.clone(), b.clone()]);
+    // Two blocks meeting only at a corner are one component
+    // (8-connectivity).
+    let big = raster.inward([&square(0.0, 0.0, 10.0, 10.0)]).unwrap();
+    let mid = frame.cell_of([5.0, 5.0]).unwrap();
+    let diagonal = raster
+        .select(&big, |c, r| (c < mid[0]) == (r < mid[1]))
+        .unwrap();
+    assert_eq!(raster.components(&diagonal).unwrap().len(), 1);
+    let apart = raster
+        .select(&big, |c, r| {
+            (c + 1 < mid[0] && r + 1 < mid[1]) || (c > mid[0] && r > mid[1])
+        })
+        .unwrap();
+    assert_eq!(raster.components(&apart).unwrap().len(), 2);
+
+    // Selection keeps exactly the cells the predicate keeps.
+    let left = raster
+        .select(&both, |c, r| frame.centre(c, r)[0] < 4.0)
+        .unwrap();
+    assert_eq!(left, a);
+
+    // The window around `a` grown by a radius holds everything a dilation
+    // of that radius can bring into it, and nothing far away.
+    let near = raster.near_window(&both, &a, 0.5).unwrap();
+    assert_eq!(near, a);
+    let far = raster.near_window(&both, &a, 6.0).unwrap();
+    assert_eq!(far, both);
+}

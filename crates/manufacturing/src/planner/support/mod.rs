@@ -31,6 +31,7 @@ mod field;
 pub(in crate::planner) mod projection;
 mod raster;
 mod sweep;
+mod tree;
 pub(in crate::planner) use sweep::KeptSupport;
 
 struct ProjectionTrace {
