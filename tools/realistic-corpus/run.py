@@ -336,8 +336,10 @@ def prusa(step, cwd, rotations, brimmed=False):
                 "--bed-shape", f"0x0,{x:g}x0,{x:g}x{y:g},0x{y:g}", "--max-print-height", f"{z:g}"]
     args += ["--support-material"] if SUPPORTS != "disabled" else []
     args += adhesion_args(brimmed)
-    info = {"fill_pattern": prusa_pattern(recipe), "threads": 1}
-    cli = ["prusa-slicer", "--threads", "1", *reference.rotation_args(rotations)]
+    # Product defaults on both sides: PrusaSlicer uses every core unless told
+    # otherwise, as the engine does.
+    info = {"fill_pattern": prusa_pattern(recipe), "threads": "default"}
+    cli = ["prusa-slicer", *reference.rotation_args(rotations)]
     for stage, command in (("import", [*cli, "--info", step]),
                            ("slice", [*cli, "--export-gcode", *args,
                                       "--center", center, "-o", gcode, step])):
