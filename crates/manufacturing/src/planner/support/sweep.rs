@@ -134,11 +134,8 @@ struct NominalRecord {
     section: usize,
     floor: f64,
     ceiling: f64,
-    edges: Vec<[u64; 5]>,
-}
-
-fn edge_key(edge: &beads::BeadEdge) -> [u64; 5] {
-    [edge.a[0], edge.a[1], edge.b[0], edge.b[1], edge.half].map(f64::to_bits)
+    /// Digest of every object bead edge the scope's clearance excluded.
+    beads: beads::BeadDigest,
 }
 
 /// An emitted bead's cells that the kept grid does not certify.
@@ -156,12 +153,6 @@ impl KeptSupport {
                 self.layers
                     .iter()
                     .map(|layer| layer.bits.bytes())
-                    .fold(0, usize::saturating_add),
-            )
-            .saturating_add(
-                self.scopes
-                    .iter()
-                    .map(|scope| vec_bytes(&scope.edges))
                     .fold(0, usize::saturating_add),
             )
             .saturating_add(
@@ -380,29 +371,29 @@ impl KeptSupport {
                 .enumerate()
                 .map(move |(path, value)| ((start + offset, path), value))
         });
+        // The scope excluded every bead it saw; the same beads are seen.
         if let Some(record) = record {
-            beads::visit_outside_material(
-                &section.material,
-                tagged,
-                BEAD_OUTSIDE_ALLOWANCE_MM,
+            let mut digest = beads::BeadDigest::default();
+            beads::visit_object_beads(
+                objects.iter().flat_map(|layer| &layer.paths),
                 work,
                 cancel,
-                |(layer, path), edge, bead| {
-                    if record.edges.binary_search(&edge_key(&bead)).is_ok() {
-                        return Ok(());
-                    }
-                    visit(layer, path, edge)
+                |bead| {
+                    digest.add(&bead);
+                    Ok(())
                 },
             )?;
-        } else {
-            for ((layer, path), value) in tagged {
-                super::super::native::charge_support_clearance(work, cancel)?;
-                if support_role(value.kind) {
-                    continue;
-                }
-                for edge in 0..value.points_mm.len().saturating_sub(1) {
-                    visit(layer, path, edge)?;
-                }
+            if digest == record.beads {
+                return Ok(());
+            }
+        }
+        for ((layer, path), value) in tagged {
+            super::super::native::charge_support_clearance(work, cancel)?;
+            if support_role(value.kind) {
+                continue;
+            }
+            for edge in 0..value.points_mm.len().saturating_sub(1) {
+                visit(layer, path, edge)?;
             }
         }
         Ok(())
@@ -446,16 +437,15 @@ impl KeptSupport {
         [floor, ceiling]: [f64; 2],
         edges: &[([f64; 2], [f64; 2], f64)],
     ) -> Self {
-        let mut keys: Vec<[u64; 5]> = edges
-            .iter()
-            .map(|&(a, b, half)| edge_key(&beads::BeadEdge { a, b, half }))
-            .collect();
-        keys.sort_unstable();
+        let mut digest = beads::BeadDigest::default();
+        for &(a, b, half) in edges {
+            digest.add(&beads::BeadEdge { a, b, half });
+        }
         self.scopes.push(NominalRecord {
             section,
             floor,
             ceiling,
-            edges: keys,
+            beads: digest,
         });
         self.scopes.sort_unstable_by_key(|scope| scope.section);
         self
@@ -1609,13 +1599,18 @@ impl Exclusions<'_> {
             {
                 continue;
             }
-            for polygon in &self.sections[record.section].material.0 {
-                builder.polygon(polygon, distance)?;
-            }
-            for key in &record.edges {
-                let [ax, ay, bx, by, half] = key.map(f64::from_bits);
-                builder.segment([ax, ay], [bx, by], (half + distance).next_up())?;
-            }
+            let section = &self.sections[record.section];
+            let objects = self
+                .layers
+                .get(section.start as usize..(section.end as usize).min(self.layers.len()))
+                .unwrap_or(&[]);
+            let mut work = 0;
+            beads::visit_object_beads(
+                objects.iter().flat_map(|layer| &layer.paths),
+                &mut work,
+                cancel,
+                |bead| builder.segment(bead.a, bead.b, (bead.half + distance).next_up()),
+            )?;
         }
         Ok(true)
     }
@@ -1789,48 +1784,43 @@ impl NominalBuilder<'_, '_> {
         let cancel = raster.cancel;
         let scope = &self.nominal[at];
         let section = &self.sections[scope.index];
-        if section
-            .material
-            .0
-            .iter()
-            .any(|polygon| polygon.exterior().0.is_empty())
-        {
-            return Err(error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                "native outer operand has no finite bounds",
-            ));
-        }
-        let mut bits = raster.outward(&section.material.0, self.distance)?;
-        let mut keys = Vec::new();
+        // The clearance is what the scope deposits: its actual bead
+        // capsules, not its section material, which can hold unprintable
+        // slivers the walls omit. Capsules are unioned in bounded chunks.
+        const CHUNK: usize = 4096;
+        let mut bits = Bits::default();
+        let mut digest = beads::BeadDigest::default();
         let mut work = 0;
-        if scope.beads.is_some() {
-            let objects = self
-                .layers
-                .get(section.start as usize..(section.end as usize).min(self.layers.len()))
-                .unwrap_or(&[]);
-            let edges = beads::outside_material(
-                &section.material,
-                objects.iter().flat_map(|layer| &layer.paths),
-                BEAD_OUTSIDE_ALLOWANCE_MM,
-                &mut work,
-                cancel,
-            )?;
-            let beads = raster.capsules(
-                edges
-                    .iter()
-                    .map(|edge| (edge.a, edge.b, (edge.half + self.distance).next_up())),
-            )?;
+        let objects = self
+            .layers
+            .get(section.start as usize..(section.end as usize).min(self.layers.len()))
+            .unwrap_or(&[]);
+        let mut chunk = Vec::new();
+        reserve_owned(&mut chunk, CHUNK, self.owned_bytes)?;
+        let mut flush = |chunk: &mut Vec<([f64; 2], [f64; 2], f64)>| {
+            let beads = raster.capsules(chunk.drain(..))?;
             bits = raster.union(&bits, &beads)?;
-            reserve_owned(&mut keys, edges.len(), self.owned_bytes)?;
-            keys.extend(edges.iter().map(edge_key));
-            keys.sort_unstable();
-            keys.dedup();
-        }
+            Ok::<(), ManufacturingError>(())
+        };
+        beads::visit_object_beads(
+            objects.iter().flat_map(|layer| &layer.paths),
+            &mut work,
+            cancel,
+            |bead| {
+                digest.add(&bead);
+                chunk.push((bead.a, bead.b, (bead.half + self.distance).next_up()));
+                if chunk.len() == CHUNK {
+                    flush(&mut chunk)?;
+                }
+                Ok(())
+            },
+        )?;
+        flush(&mut chunk)?;
         let record = NominalRecord {
             section: scope.index,
             floor: scope.floor,
             ceiling: scope.ceiling,
-            edges: keys,
+            beads: digest,
         };
         Ok((bits, record, work))
     }
@@ -1925,8 +1915,65 @@ mod tests {
     use super::*;
     use geo::{Rect, coord};
 
+    fn object_layer(paths: Vec<DepositionPath>) -> PrintLayer {
+        use spiling_contracts::manufacturing::PlanarRegionCoverage;
+        PrintLayer {
+            index: 0,
+            hatch_course: 0,
+            z_mm: 0.2,
+            lower_z_mm: 0.0,
+            height_mm: 0.2,
+            section_z_mm: 0.1,
+            paths,
+            skin_command_fits: Vec::new(),
+            region_coverage: PlanarRegionCoverage {
+                section_area_mm2: 0.0,
+                source_section_area_mm2: 0.0,
+                surface_added_area_mm2: 0.0,
+                wall_area_mm2: 0.0,
+                bottom_skin_area_mm2: 0.0,
+                top_skin_area_mm2: 0.0,
+                solid_interior_area_mm2: 0.0,
+                sparse_interior_area_mm2: 0.0,
+                intentional_void_area_mm2: 0.0,
+                protected_hole_area_mm2: 0.0,
+                nominal_deposition_volume_mm3: 0.0,
+                support_area_mm2: 0.0,
+                support_nominal_deposition_volume_mm3: 0.0,
+                unsupported_overhang_mm: 0.0,
+                support_omitted_wall_mm: 0.0,
+                thin_widened_mm: 0.0,
+                thin_omitted_area_mm2: 0.0,
+                process_regions: Vec::new(),
+                process_interfaces: Vec::new(),
+                separator_area_mm2: 0.0,
+                process_diaphragms: Vec::new(),
+                diaphragm_area_mm2: 0.0,
+                skin_bridge_domains: Vec::new(),
+                web_roof_domains: Vec::new(),
+            },
+        }
+    }
+
+    fn bead(kind: DepositionKind, from: [f64; 2], to: [f64; 2], width_mm: f64) -> DepositionPath {
+        DepositionPath {
+            material_domain: None,
+            kind,
+            owner: None,
+            width: spiling_contracts::manufacturing::WidthProfile::Constant { width_mm },
+            physical_z_mm: [0.0, 0.2],
+            points_mm: vec![[from[0], from[1], 0.2], [to[0], to[1], 0.2]],
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        }
+    }
+
+    /// A scope excludes its deposited bead capsules at the decoded
+    /// enclosure, and nothing of its section material that deposits no bead
+    /// (an unprintable sliver the walls omit).
     #[test]
-    fn nominal_material_excludes_the_decoded_bead_enclosure() {
+    fn nominal_scope_excludes_deposited_beads_not_omitted_material() {
         let cancel = AtomicBool::new(false);
         let bounds = [[0.0, 0.0], [2.0, 2.0]];
         let raster = Raster {
@@ -1935,29 +1982,36 @@ mod tests {
             admit: &|_| Ok(()),
             work: AtomicUsize::new(0),
         };
-        let polygon = Rect::new(coord! { x: 0.2, y: 0.2 }, coord! { x: 1.8, y: 0.68 }).to_polygon();
-        let material = MultiPolygon::new(vec![polygon]);
+        // The bead covers y 0.2..0.68; the sliver at y 1.6 deposits nothing.
+        let footprint =
+            Rect::new(coord! { x: 0.2, y: 0.2 }, coord! { x: 1.8, y: 0.68 }).to_polygon();
+        let sliver = Rect::new(coord! { x: 0.2, y: 1.6 }, coord! { x: 1.8, y: 1.65 }).to_polygon();
         let nominal_distance = clearance_distance_in_frame(bounds, bounds, 0.3).unwrap();
         let probe = [0.975, 1.025];
-        let nominal_only = raster.outward(&material.0, nominal_distance).unwrap();
+        let nominal_only = raster
+            .outward(std::slice::from_ref(&footprint), nominal_distance)
+            .unwrap();
         assert!(!raster.holds_all(&nominal_only, probe));
 
         let sections = [super::super::super::SectionSpan {
             start: 0,
             end: 1,
-            material: std::sync::Arc::new(material),
+            material: std::sync::Arc::new(MultiPolygon::new(vec![footprint, sliver])),
             process_domains: Vec::new(),
             occupied: None,
             source_area_mm2: 0.0,
         }];
+        let layers = [object_layer(vec![
+            bead(DepositionKind::Perimeter, [0.2, 0.44], [1.8, 0.44], 0.48),
+            bead(DepositionKind::Support, [0.2, 1.9], [1.8, 1.9], 0.4),
+        ])];
         let builder = NominalBuilder {
-            layers: &[],
+            layers: &layers,
             sections: &sections,
             nominal: &[NominalScope {
                 index: 0,
                 floor: 0.0,
                 ceiling: 0.2,
-                beads: None,
             }],
             distance: (nominal_distance + raster::exact::VERIFIER_ENCLOSURE_MM).next_up(),
             owned_bytes: 0,
@@ -1966,6 +2020,7 @@ mod tests {
         let (excluded, _, _) = builder.build(0).unwrap();
         assert!(raster.holds_all(&excluded, probe));
         assert!(!raster.holds_all(&excluded, [probe[0], 1.075]));
+        assert!(!raster.holds_all(&excluded, [probe[0], 1.625]));
     }
 
     #[test]

@@ -1770,7 +1770,6 @@ pub(super) fn realize(
             }
             let mut floor: Option<f64> = None;
             let mut ceiling = f64::NEG_INFINITY;
-            let mut beads: Option<[[f64; 2]; 2]> = None;
             let objects = layers
                 .get(section.start as usize..(section.end as usize).min(layers.len()))
                 .unwrap_or(&[]);
@@ -1791,12 +1790,6 @@ pub(super) fn realize(
                             path.height_mm(),
                         )?[1],
                     );
-                    // Outward XY bounds of the actual nominal bead footprint,
-                    // which can extend outside D; screens only.
-                    let Some(bounds) = bead_bounds(path, &mut work, cancel)? else {
-                        continue;
-                    };
-                    beads = Some(union_frame(beads, bounds));
                 }
             }
             if let Some(floor) = floor {
@@ -1804,7 +1797,6 @@ pub(super) fn realize(
                     index,
                     floor,
                     ceiling,
-                    beads,
                 });
             }
         }
@@ -3907,54 +3899,12 @@ fn union_frame(frame: Option<[[f64; 2]; 2]>, other: [[f64; 2]; 2]) -> [[f64; 2];
     }
 }
 
-/// Object beads reaching at most this far outside D stay covered by the D
-/// exclusion, whose clearance distance already adds the offset tolerance.
-const BEAD_OUTSIDE_ALLOWANCE_MM: f64 = super::OFFSET_TOLERANCE_MM * 0.4;
-
-/// One section's admitted object floor and the outward XY bounds of its
-/// actual nominal bead footprints.
+/// One section's admitted object floor and ceiling.
 #[derive(Clone, Copy)]
 struct NominalScope {
     index: usize,
     floor: f64,
     ceiling: f64,
-    beads: Option<[[f64; 2]; 2]>,
-}
-
-/// Outward XY bounds of a path's nominal bead capsules; `None` for paths that
-/// deposit no edge. Malformed paths are left to ordinary validation.
-fn bead_bounds(
-    path: &DepositionPath,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<Option<[[f64; 2]; 2]>, ManufacturingError> {
-    if path.points_mm.len() < 2 || support_role(path.kind) {
-        return Ok(None);
-    }
-    let width = match &path.width {
-        spiling_contracts::manufacturing::WidthProfile::Constant { width_mm } => *width_mm,
-        spiling_contracts::manufacturing::WidthProfile::PerEdge { widths_mm } => {
-            widths_mm.iter().copied().fold(0.0, f64::max)
-        }
-    };
-    let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
-    for point in &path.points_mm {
-        super::native::charge_support_clearance(work, cancel)?;
-        bounds = [
-            [bounds[0][0].min(point[0]), bounds[0][1].min(point[1])],
-            [bounds[1][0].max(point[0]), bounds[1][1].max(point[1])],
-        ];
-    }
-    let half = (width * 0.5).next_up();
-    let bounds = [
-        bounds[0].map(|v| (v - half).next_down()),
-        bounds[1].map(|v| (v + half).next_up()),
-    ];
-    Ok(bounds
-        .iter()
-        .flatten()
-        .all(|v| v.is_finite())
-        .then_some(bounds))
 }
 
 /// How far beyond the kept support a loaded occupied piece's
