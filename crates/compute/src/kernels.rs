@@ -3,7 +3,7 @@
 
 use cubecl::prelude::*;
 
-use crate::{ComputeError, TILE_WORDS, zeroed_words};
+use crate::{ComputeError, zeroed_words};
 
 #[cube]
 fn ordered_le(left_hi: u32, left_lo: u32, right_hi: u32, right_lo: u32) -> bool {
@@ -15,24 +15,37 @@ fn ordered_lt(left_hi: u32, left_lo: u32, right_hi: u32, right_lo: u32) -> bool 
     left_hi < right_hi || (left_hi == right_hi && left_lo < right_lo)
 }
 
+/// Mask words of many independent groups in one launch. `table` holds the
+/// `entry_count + 1` word starts, then four words per entry: entry `e` owns
+/// output words `table[e]..table[e + 1]`, row-major with `words_per_row`
+/// words per row; its padded four-lane input fields start at vector
+/// `value_base` and its encoded query rows at `query_base`. A word reads only
+/// its own entry, so every group's mask is the same however groups are batched.
 #[cube(launch)]
 fn masks<N: Size>(
     values: &[Vector<u32, N>],
     queries: &[u32],
+    table: &[u32],
     output: &mut [u32],
-    columns: u32,
-    word_offset: u32,
+    entry_count: u32,
     #[comptime] kind: u32,
 ) {
-    let words_per_row = (columns as usize).div_ceil(32);
-    let field_stride = words_per_row * 8;
+    let query_fields = if kind == 1 { 8usize } else { 2usize };
+    let fields = entry_count as usize + 1;
     for position in range_stepped(ABSOLUTE_POS, output.len(), CUBE_DIM as usize * CUBE_COUNT) {
-        let global_word = position + word_offset as usize;
-        let row = global_word / words_per_row;
-        let row_word = global_word % words_per_row;
+        let entry = capsule_of(table, entry_count, position as u32) as usize;
+        let value_base = table[fields + entry * 4] as usize;
+        let query_base = table[fields + entry * 4 + 1] as usize;
+        let columns = table[fields + entry * 4 + 2] as usize;
+        let words_per_row = table[fields + entry * 4 + 3] as usize;
+        let local = position - table[entry] as usize;
+        let row = local / words_per_row;
+        let row_word = local % words_per_row;
+        let field_stride = words_per_row * 8;
+        let query = query_base + row * query_fields;
         let mut mask = 0u32;
         for group in 0..8usize {
-            let base = row_word * 8 + group;
+            let base = value_base + row_word * 8 + group;
             let first_hi = values[base];
             let first_lo = values[field_stride + base];
             let second_hi = values[field_stride * 2 + base];
@@ -48,25 +61,25 @@ fn masks<N: Size>(
                     let hit = ordered_le(
                         first_hi.extract(lane),
                         first_lo.extract(lane),
-                        queries[row * 8 + 4],
-                        queries[row * 8 + 5],
+                        queries[query + 4],
+                        queries[query + 5],
                     ) && ordered_le(
-                        queries[row * 8],
-                        queries[row * 8 + 1],
+                        queries[query],
+                        queries[query + 1],
                         third_hi.extract(lane),
                         third_lo.extract(lane),
                     ) && ordered_le(
                         second_hi.extract(lane),
                         second_lo.extract(lane),
-                        queries[row * 8 + 6],
-                        queries[row * 8 + 7],
+                        queries[query + 6],
+                        queries[query + 7],
                     ) && ordered_le(
-                        queries[row * 8 + 2],
-                        queries[row * 8 + 3],
+                        queries[query + 2],
+                        queries[query + 3],
                         fourth_hi.extract(lane),
                         fourth_lo.extract(lane),
                     );
-                    if column < columns as usize && hit {
+                    if column < columns && hit {
                         mask |= 1u32 << (group * 4 + lane) as u32;
                     }
                 }
@@ -77,42 +90,42 @@ fn masks<N: Size>(
                     let forward_start = ordered_le(
                         first_hi.extract(lane),
                         first_lo.extract(lane),
-                        queries[row * 2],
-                        queries[row * 2 + 1],
+                        queries[query],
+                        queries[query + 1],
                     );
                     let reverse_start = ordered_le(
                         second_hi.extract(lane),
                         second_lo.extract(lane),
-                        queries[row * 2],
-                        queries[row * 2 + 1],
+                        queries[query],
+                        queries[query + 1],
                     );
                     let mut forward_end = ordered_lt(
-                        queries[row * 2],
-                        queries[row * 2 + 1],
+                        queries[query],
+                        queries[query + 1],
                         second_hi.extract(lane),
                         second_lo.extract(lane),
                     );
                     let mut reverse_end = ordered_lt(
-                        queries[row * 2],
-                        queries[row * 2 + 1],
+                        queries[query],
+                        queries[query + 1],
                         first_hi.extract(lane),
                         first_lo.extract(lane),
                     );
                     if kind == 2 {
                         forward_end = ordered_le(
-                            queries[row * 2],
-                            queries[row * 2 + 1],
+                            queries[query],
+                            queries[query + 1],
                             second_hi.extract(lane),
                             second_lo.extract(lane),
                         );
                         reverse_end = ordered_le(
-                            queries[row * 2],
-                            queries[row * 2 + 1],
+                            queries[query],
+                            queries[query + 1],
                             first_hi.extract(lane),
                             first_lo.extract(lane),
                         );
                     }
-                    if column < columns as usize
+                    if column < columns
                         && ((forward_start && forward_end) || (reverse_start && reverse_end))
                     {
                         mask |= 1u32 << (group * 4 + lane) as u32;
@@ -124,125 +137,94 @@ fn masks<N: Size>(
     }
 }
 
-/// The sole unsafe adapter. All handles are allocated from these exact u32 slices;
-/// lengths are scalar element counts, four-lane inputs are padded, and checked launches
-/// retain bounds checks. CPU launches have one unit and one cube, with no barriers;
-/// Vulkan tiles use up to 64 cubes of 64 units. Readback drains every bounded tile.
-pub(crate) struct UploadedBatch {
-    client: Client,
-    cpu: bool,
-    input: cubecl::server::Handle,
-    queries: cubecl::server::Handle,
-    input_length: usize,
-    query_length: usize,
-    columns: u32,
-    total_words: usize,
-    kind: u32,
+/// Units per cube for a CPU launch: the CPU runtime runs one worker per unit
+/// of a cube, so one cube of one unit per core uses every core.
+pub(crate) fn cpu_units(client: &Client) -> u32 {
+    std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(client.properties().hardware.max_units_per_cube as usize)
+        .max(1) as u32
 }
 
-impl UploadedBatch {
-    pub(crate) fn new(
-        client: &Client,
-        cpu: bool,
-        values: &[u32],
-        queries: &[u32],
-        columns: usize,
-        kind: u32,
-    ) -> Result<Self, ComputeError> {
-        if columns == 0 || columns > crate::MAX_BATCH_ITEMS || kind > 2 {
-            return Err(ComputeError::Execution(
-                "invalid internal dispatch shape".into(),
-            ));
-        }
-        let fields = if kind == 1 { 8 } else { 4 };
-        let query_fields = if kind == 1 { 8 } else { 2 };
-        let words_per_row = columns.div_ceil(32);
-        let rows = queries.len() / query_fields;
-        if rows == 0 || rows > crate::MAX_BATCH_ITEMS {
-            return Err(ComputeError::Execution(
-                "invalid internal query count".into(),
-            ));
-        }
-        let total_words = rows
-            .checked_mul(words_per_row)
-            .ok_or_else(|| ComputeError::Execution("internal mask shape overflow".into()))?;
-        if values.len() != words_per_row * 32 * fields
-            || !queries.len().is_multiple_of(query_fields)
-            || total_words > crate::MAX_MASK_WORDS
-        {
-            return Err(ComputeError::Execution(
-                "invalid internal buffer lengths".into(),
-            ));
-        }
-        Ok(Self {
-            client: client.clone(),
-            cpu,
-            input: client.create_from_slice(u32::as_bytes(values)),
-            queries: client.create_from_slice(u32::as_bytes(queries)),
-            input_length: values.len(),
-            query_length: queries.len(),
-            columns: u32::try_from(columns)
-                .map_err(|_| ComputeError::Execution("column index overflow".into()))?,
-            total_words,
-            kind,
-        })
+/// Cubes and units for `work` grid-stride items: one cube of every core on
+/// the CPU, 64-unit cubes on a GPU.
+fn launch_shape(client: &Client, cpu: bool, work: usize) -> (CubeCount, CubeDim) {
+    if cpu {
+        (
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(cpu_units(client)),
+        )
+    } else {
+        let cubes = work.div_ceil(64).clamp(1, 65_535) as u32;
+        (CubeCount::Static(cubes, 1, 1), CubeDim::new_1d(64))
     }
+}
 
-    pub(crate) fn dispatch(
-        &self,
-        word_offset: usize,
-        word_count: usize,
-    ) -> Result<Vec<u32>, ComputeError> {
-        if word_count == 0
-            || word_count > TILE_WORDS
-            || word_offset
-                .checked_add(word_count)
-                .is_none_or(|end| end > self.total_words)
-        {
-            return Err(ComputeError::Execution(
-                "invalid internal tile range".into(),
-            ));
-        }
-        let word_offset = u32::try_from(word_offset)
-            .map_err(|_| ComputeError::Execution("word offset overflow".into()))?;
-        let output_handle = self.client.empty(word_count * size_of::<u32>());
-        unsafe {
-            masks::launch(
-                &self.client,
-                CubeCount::Static(
-                    if self.cpu {
-                        1
-                    } else {
-                        word_count.div_ceil(64) as u32
-                    },
-                    1,
-                    1,
-                ),
-                CubeDim::new_1d(if self.cpu { 1 } else { 64 }),
-                4,
-                BufferArg::from_raw_parts(self.input.clone(), self.input_length),
-                BufferArg::from_raw_parts(self.queries.clone(), self.query_length),
-                BufferArg::from_raw_parts(output_handle.clone(), word_count),
-                self.columns,
-                word_offset,
-                self.kind,
-            );
-        }
-        let bytes = self
-            .client
-            .read_one(output_handle)
-            .map_err(|error| ComputeError::Execution(crate::runtime::bounded_message(error)))?;
-        if bytes.len() != word_count * size_of::<u32>() {
-            return Err(ComputeError::Execution(
-                "readback length differs from the dispatch".into(),
-            ));
-        }
-        let mut words = zeroed_words(word_count)?;
-        for (destination, source) in words.iter_mut().zip(bytes.as_chunks::<4>().0) {
-            *destination = u32::from_ne_bytes(*source);
-        }
-        Ok(words)
+/// One packed mask segment: the sole unsafe adapter for `masks`. Handles are
+/// allocated from these exact u32 slices; lengths are scalar element counts,
+/// four-lane inputs are padded, and checked launches retain bounds checks.
+/// One grid-stride launch with no barriers, read back once.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn masks_dispatch(
+    client: &Client,
+    cpu: bool,
+    kind: u32,
+    values: &[u32],
+    queries: &[u32],
+    entries: &[u32],
+    starts: &[u32],
+) -> Result<Vec<u32>, ComputeError> {
+    let entry_count = entries.len() / 4;
+    let words = starts.last().map_or(0, |&words| words as usize);
+    if kind > 2
+        || entry_count == 0
+        || !entries.len().is_multiple_of(4)
+        || starts.len() != entry_count + 1
+        || words == 0
+        || !values.len().is_multiple_of(4)
+    {
+        return Err(ComputeError::Execution(
+            "invalid internal mask segment".into(),
+        ));
     }
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(starts.len() + entries.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    table.extend_from_slice(starts);
+    table.extend_from_slice(entries);
+    let value_handle = client.create_from_slice(u32::as_bytes(values));
+    let query_handle = client.create_from_slice(u32::as_bytes(queries));
+    let table_handle = client.create_from_slice(u32::as_bytes(&table));
+    let output_handle = client.empty(words * size_of::<u32>());
+    let (cubes, units) = launch_shape(client, cpu, words);
+    unsafe {
+        masks::launch(
+            client,
+            cubes,
+            units,
+            4,
+            BufferArg::from_raw_parts(value_handle, values.len()),
+            BufferArg::from_raw_parts(query_handle, queries.len()),
+            BufferArg::from_raw_parts(table_handle, table.len()),
+            BufferArg::from_raw_parts(output_handle.clone(), words),
+            entry_count as u32,
+            kind,
+        );
+    }
+    let bytes = client
+        .read_one(output_handle)
+        .map_err(|error| ComputeError::Execution(crate::runtime::bounded_message(error)))?;
+    if bytes.len() != words * size_of::<u32>() {
+        return Err(ComputeError::Execution(
+            "readback length differs from the dispatch".into(),
+        ));
+    }
+    let mut output = zeroed_words(words)?;
+    for (destination, source) in output.iter_mut().zip(bytes.as_chunks::<4>().0) {
+        *destination = u32::from_ne_bytes(*source);
+    }
+    Ok(output)
 }
 
 /// Distance from `value` to the closed interval `[low, high]`.
@@ -642,10 +624,7 @@ pub(crate) fn capsule_masks_dispatch(
             "invalid internal capsule batch".into(),
         ));
     }
-    let cpu_units = std::thread::available_parallelism()
-        .map_or(1, |cores| cores.get())
-        .min(client.properties().hardware.max_units_per_cube as usize)
-        .max(1) as u32;
+    let cpu_units = cpu_units(client);
     let capsule_handle = client.create_from_slice(i64::as_bytes(capsules));
     let start_handle = client.create_from_slice(u32::as_bytes(starts));
     let row_handle = client.create_from_slice(u32::as_bytes(first_rows));

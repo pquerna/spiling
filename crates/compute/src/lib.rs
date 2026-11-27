@@ -16,11 +16,12 @@ pub use spiling_contracts::compute::{
     ComputeBackend, ComputeDevice, ComputeSettings, ComputeStatus,
 };
 
-/// Admission limits, not a speedup promise. Smaller/larger work stays on the caller's baseline.
-pub const MIN_BATCH_PAIRS: usize = 4_096;
-pub const MAX_BATCH_ITEMS: usize = 65_536;
-pub const MAX_MASK_WORDS: usize = 262_144;
-const TILE_WORDS: usize = 4_096;
+/// Output words one mask segment uploads and reads back at most, unless a
+/// single row is wider. Larger masks run as several segments.
+const MASK_SEGMENT_WORDS: usize = 1 << 20;
+/// Encoded input words one mask segment uploads at most, unless a single
+/// group is larger.
+const MASK_SEGMENT_INPUT: usize = 1 << 22;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputeError {
@@ -114,33 +115,71 @@ struct Shape {
 }
 
 impl Shape {
-    fn admit(rows: usize, columns: usize) -> Option<Self> {
-        if rows > MAX_BATCH_ITEMS || columns > MAX_BATCH_ITEMS {
-            return None;
-        }
-        let pairs = rows.checked_mul(columns)?;
+    fn new(rows: usize, columns: usize) -> Result<Self, ComputeError> {
         let words_per_row = columns.div_ceil(32);
-        let words = rows.checked_mul(words_per_row)?;
-        if pairs < MIN_BATCH_PAIRS || words > MAX_MASK_WORDS {
-            return None;
+        let words = rows
+            .checked_mul(words_per_row)
+            .ok_or(ComputeError::InvalidInput("mask shape overflows"))?;
+        if u32::try_from(columns).is_err() {
+            return Err(ComputeError::InvalidInput("mask columns exceed u32"));
         }
-        Some(Self {
+        Ok(Self {
             rows,
             columns,
             words_per_row,
             words,
         })
     }
+
+    fn empty(self) -> Result<MaskRows, ComputeError> {
+        Ok(MaskRows {
+            rows: self.rows,
+            columns: self.columns,
+            words_per_row: self.words_per_row,
+            words: zeroed_words(self.words)?,
+        })
+    }
 }
 
 /// Exact half-open crossing, including reversed endpoints: `(a <= q && q < b) || (b <= q && q < a)`.
-/// `None` means only that the bounded acceleration budget declined the batch.
+/// Rows are coordinates and columns are ranges; any size runs.
 pub fn row_crossings(
     edge_ranges: &[[f64; 2]],
     coordinates: &[f64],
     cancel: &AtomicBool,
-) -> Result<Option<MaskRows>, ComputeError> {
+) -> Result<MaskRows, ComputeError> {
     intervals(edge_ranges, coordinates, cancel, 0)
+}
+
+/// `row_crossings` for many independent `(edge_ranges, coordinates)` groups
+/// in one request: one stage's worth of work shares one launch.
+pub fn row_crossings_groups(
+    groups: &[(&[[f64; 2]], &[f64])],
+    cancel: &AtomicBool,
+) -> Result<Vec<MaskRows>, ComputeError> {
+    check_cancel(cancel)?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(groups.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    for (ranges, coordinates) in groups {
+        validate_finite(ranges.iter().flatten().chain(coordinates.iter()), cancel)?;
+        let shape = Shape::new(coordinates.len(), ranges.len())?;
+        encoded.push(runtime::interval_group(
+            shape,
+            ranges,
+            coordinates,
+            cancel,
+            0,
+        )?);
+    }
+    let masks = runtime::execute_masks(encoded, cancel)?;
+    if masks.len() != groups.len() {
+        return Err(ComputeError::Execution(
+            "mask round returned the wrong group count".into(),
+        ));
+    }
+    Ok(masks)
 }
 
 /// Exact closed interval membership. Endpoints may be reversed; zero-width intervals include their point.
@@ -148,7 +187,7 @@ pub fn interval_membership(
     ranges: &[[f64; 2]],
     coordinates: &[f64],
     cancel: &AtomicBool,
-) -> Result<Option<MaskRows>, ComputeError> {
+) -> Result<MaskRows, ComputeError> {
     intervals(ranges, coordinates, cancel, 2)
 }
 
@@ -157,28 +196,34 @@ fn intervals(
     coordinates: &[f64],
     cancel: &AtomicBool,
     kind: u32,
-) -> Result<Option<MaskRows>, ComputeError> {
+) -> Result<MaskRows, ComputeError> {
     check_cancel(cancel)?;
-    if ranges.len() > MAX_BATCH_ITEMS || coordinates.len() > MAX_BATCH_ITEMS {
-        return Ok(None);
-    }
     validate_finite(ranges.iter().flatten().chain(coordinates), cancel)?;
-    let Some(shape) = Shape::admit(coordinates.len(), ranges.len()) else {
-        return Ok(None);
-    };
-    runtime::execute(shape, ranges, coordinates, cancel, kind)
+    let shape = Shape::new(coordinates.len(), ranges.len())?;
+    if shape.words == 0 {
+        return shape.empty();
+    }
+    let group = runtime::interval_group(shape, ranges, coordinates, cancel, kind)?;
+    single(runtime::execute_masks(vec![group], cancel)?)
+}
+
+fn single(mut masks: Vec<MaskRows>) -> Result<MaskRows, ComputeError> {
+    match (masks.pop(), masks.is_empty()) {
+        (Some(mask), true) => Ok(mask),
+        _ => Err(ComputeError::Execution(
+            "mask round returned the wrong group count".into(),
+        )),
+    }
 }
 
 /// Exact closed overlap of `[min_x, min_y, max_x, max_y]` boxes. Inverted boxes are invalid.
+/// Rows are queries and columns are boxes; any size runs.
 pub fn box_overlaps(
     boxes: &[[f64; 4]],
     queries: &[[f64; 4]],
     cancel: &AtomicBool,
-) -> Result<Option<MaskRows>, ComputeError> {
+) -> Result<MaskRows, ComputeError> {
     check_cancel(cancel)?;
-    if boxes.len() > MAX_BATCH_ITEMS || queries.len() > MAX_BATCH_ITEMS {
-        return Ok(None);
-    }
     validate_finite(
         boxes.iter().flatten().chain(queries.iter().flatten()),
         cancel,
@@ -190,10 +235,12 @@ pub fn box_overlaps(
     {
         return Err(ComputeError::InvalidInput("box minima exceed maxima"));
     }
-    let Some(shape) = Shape::admit(queries.len(), boxes.len()) else {
-        return Ok(None);
-    };
-    runtime::execute_boxes(shape, boxes, queries, cancel)
+    let shape = Shape::new(queries.len(), boxes.len())?;
+    if shape.words == 0 {
+        return shape.empty();
+    }
+    let group = runtime::box_group(shape, boxes, queries, cancel)?;
+    single(runtime::execute_masks(vec![group], cancel)?)
 }
 
 /// Largest capsule coordinate or radius, in ticks: keeps every product the

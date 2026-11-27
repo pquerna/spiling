@@ -12,6 +12,32 @@ complete cold/warm calls and resident-data reuse across workload sizes; batch
 size is one policy input, not a blanket GPU admission gate. Keep kernels
 portable for future Wasm/WebGPU consumers; each target still needs conformance.
 
+## Batch architecture
+
+A launch has a fixed cost (about 100–250 µs per round trip today, CPU or
+GPU) that no kernel tuning removes, so launches must scale with device time,
+not with how often code asks. Every kernel follows three layers:
+
+1. **Grouped, pure kernels.** A kernel takes many independent groups as flat
+   buffers plus offset tables and runs them in one launch. A group's result
+   depends only on that group, so it is identical however groups are batched;
+   determinism never depends on scheduling.
+2. **Device coalescer (group commit).** Callers make an ordinary synchronous
+   call. Requests from every thread queue on the device; whoever finds no round
+   running leads one: it takes everything queued, runs one grouped launch per
+   segment and kernel kind, publishes each result and wakes the waiters, while
+   the next round gathers. Under concurrency, many calls share one launch with
+   no caller changes. Exclusive work (a whole-stage batch borrowing the
+   caller's data) leads a round the same way, after the queued requests.
+3. **Stage batches.** Where the planner's (stage, layer) graph is wide but a
+   chain is serial, the stage gathers its groups and submits them in one call
+   (`capsule_masks` takes a whole support stage; a layer's skins and
+   interiors, its bridge rows and its gyroid curves each make one request).
+
+There are no admission gates or scalar fallbacks: any size runs, and an
+empty axis returns without a launch. A new kernel adds a grouped kernel, an
+encoded request on the caller's thread and a packing step in the round.
+
 `configure(ComputeSettings)` initializes an immutable process session before native
 workers, off the async executor. `status()` lazily initializes default settings for
 direct callers. Failed initialization is retained; changing settings requires a
@@ -27,7 +53,7 @@ initialization-probe and execution failures refuse rather than silently downgrad
 The three numeric APIs return exact row-major query × input masks:
 `row_crossings` uses half-open intervals with either endpoint order;
 `interval_membership` uses closed intervals with either order; `box_overlaps`
-uses closed axis-aligned bounds and rejects inverted boxes. Nonfinite admitted
+uses closed axis-aligned bounds and rejects inverted boxes. Nonfinite
 inputs refuse. IEEE-754 ordered high/low u32 keys normalize signed zero and
 preserve subnormal/extreme comparisons without shader f64. Kernels use four-lane
 loads and packed 32-bit masks. `get` bounds-checks; `selected_columns` scans set
@@ -35,33 +61,27 @@ bits without walking every column.
 
 The generated CubeCL buffer-argument call is the isolated unsafe boundary.
 Before it, the adapter checks padded source-field lengths, query-field lengths,
-row/column and total-word bounds, and every tile range. Inputs and results are
+row/column and total-word bounds, and every segment's length. Inputs and results are
 u32 arrays, not serialized Rust structs; readback must have the exact expected
 word-byte length before decoding. No kernel object crosses the service boundary.
 
-Admission is 4,096 or more pairs, at most 65,536 items per axis and 262,144
-mask words including row padding (1 MiB; at most 8,388,608 comparisons). Outside
-this optional budget, `Ok(None)` leaves the original scalar algorithm authoritative.
-Cancellation, invalid inputs and runtime failures never mean `None`.
-Each tile holds at most 4,096 words (16 KiB/131,072 comparisons). Host encoded
-inputs and queries each cap at 2 MiB; the result caps at 1 MiB. Device inputs and
-queries are uploaded once per batch, not per tile; there are only two immutable
-input handles and one output tile live. Dedicated device allocations bypass
-adaptive pool growth. Runtime/compiler/driver overhead is additional to these
-buffer limits, not a claimed total memory ceiling.
+Callers encode their own requests. A round packs queued mask groups of one
+kind into segments of whole rows: at most 1,048,576 output words and
+4,194,304 input words (or one group's rows, if larger), each one launch read
+back once. A word finds its group by bisection over the segment's word
+starts. CPU launches are one cube with one unit per core, since the CPU
+runtime runs one worker per unit; GPU launches are grid-stride 64-unit
+cubes. Dedicated device allocations bypass adaptive pool growth.
+Runtime/compiler/driver overhead is additional to these buffers, not a
+claimed total memory ceiling.
 
-One cancellable gate admits a batch before scratch allocation; no application
-work queue is created. One fixed stream per selected device prevents per-caller
-stream accumulation. Every tile synchronously drains, and completion/cancellation
-drains resource release before the next batch. CPU launches have one cube/unit,
-no barriers and no pool-growth requirement. CubeCL's independent LLVM runner
-still creates its initial worker pool from OS-active cores, not Rayon settings;
-these kernels queue at most one unit at a time. Vulkan launches use one 64-unit
-cube per 64 output words, up to 64 cubes in the same bounded tile. Cancellation
-is checked during validation/encoding, while waiting for
-admission, between tiles and before result publication, not inside a running tile.
-Only three predicate specializations are compiled; initialization exercises the
-crossing specialization.
+One fixed stream per selected device prevents per-caller stream
+accumulation. Every round synchronously drains before the next begins. The
+first execution failure is retained and refuses every later round. A waiter
+that is cancelled leaves the queue, or abandons its result if its round has
+started; a running segment is not interrupted. Kernels have no barriers.
+Only three predicate specializations are compiled; initialization exercises
+the crossing specialization.
 
 `capsule_masks` rasterizes groups of closed capsules (integer ticks) into
 each group's dense window of 64-cell words. Decisions are exact i64 tests, so

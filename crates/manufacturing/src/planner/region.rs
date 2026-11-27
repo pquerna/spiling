@@ -476,6 +476,7 @@ pub(super) struct Roof {
     pub rooms: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct HatchLayer<'a> {
     /// Cathedral lattice frame.
     pub roof: Option<Roof>,
@@ -518,6 +519,7 @@ impl OrdinaryHatchPhase {
 
 // Fill endpoints belong to the eroded interior boundary, half a bead from
 // the final wall center. No wall-extension strokes or duplicate outlines.
+#[cfg(test)]
 pub(super) fn hatch(
     fill: &MultiPolygon<f64>,
     kind: DepositionKind,
@@ -555,51 +557,242 @@ pub(super) fn hatch_with_phase(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    if kind == DepositionKind::SparseFill
-        && matches!(
-            layer.recipe.sparse_infill,
-            SparseInfillPolicy::WebRoof { .. }
+    let mut batch = HatchBatch::default();
+    batch.push(
+        fill,
+        kind,
+        fraction,
+        layer,
+        common_phase,
+        phase,
+        None,
+        cancel,
+    )?;
+    batch.run(paths, segments, cancel)
+}
+
+/// Every hatch of one pass (a layer's skins and interiors), planned first,
+/// masked as one kernel request and emitted in push order: the stage batch
+/// that keeps a serial chain from paying one launch per polygon.
+#[derive(Default)]
+pub(super) struct HatchBatch<'a> {
+    jobs: Vec<HatchJob<'a>>,
+}
+
+struct HatchJob<'a> {
+    work: HatchWork<'a>,
+    owner: Option<DepositionOwner>,
+}
+
+enum HatchWork<'a> {
+    Rows {
+        kind: DepositionKind,
+        rows: HatchRows,
+        layer: HatchLayer<'a>,
+        prepared: hatch::PreparedHatch,
+    },
+    Rooms {
+        fill: &'a MultiPolygon<f64>,
+        fraction: f64,
+        layer: HatchLayer<'a>,
+    },
+    Gyroid {
+        fill: &'a MultiPolygon<f64>,
+        fraction: f64,
+        layer: HatchLayer<'a>,
+    },
+}
+
+impl<'a> HatchBatch<'a> {
+    /// Plan the hatch of `fill` under one policy; `owner` marks its paths.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Authored common phase and ordinary recovery phase are distinct hatch policies"
+    )]
+    pub(super) fn push(
+        &mut self,
+        fill: &'a MultiPolygon<f64>,
+        kind: DepositionKind,
+        fraction: f64,
+        layer: &HatchLayer<'a>,
+        common_phase: Option<[f64; 2]>,
+        phase: OrdinaryHatchPhase,
+        owner: Option<DepositionOwner>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        let layer = *layer;
+        if kind == DepositionKind::SparseFill
+            && matches!(
+                layer.recipe.sparse_infill,
+                SparseInfillPolicy::WebRoof { .. }
+            )
+        {
+            if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
+                return Err(unsupported("Cathedral requires its fixed room lattice"));
+            }
+            return self.job(
+                HatchWork::Rooms {
+                    fill,
+                    fraction,
+                    layer,
+                },
+                owner,
+            );
+        }
+        if kind == DepositionKind::SparseFill
+            && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Gyroid)
+        {
+            return self.job(
+                HatchWork::Gyroid {
+                    fill,
+                    fraction,
+                    layer,
+                },
+                owner,
+            );
+        }
+        if kind == DepositionKind::SparseFill
+            && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)
+        {
+            if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
+                return Err(unsupported(
+                    "grid infill requires its centered two-family lattice",
+                ));
+            }
+            for axis in [HatchAxis::X, HatchAxis::Y] {
+                let grid_layer = HatchLayer { axis, ..layer };
+                for polygon in &fill.0 {
+                    check_cancel(cancel)?;
+                    let rows = HatchRows::new(polygon, fraction * 0.5, &grid_layer)?;
+                    self.rows(polygon, kind, rows, grid_layer, owner, cancel)?;
+                }
+            }
+            return Ok(());
+        }
+        for polygon in &fill.0 {
+            let rows = if let Some(origin) = common_phase {
+                HatchRows::common(polygon, fraction, &layer, origin)?
+            } else {
+                HatchRows::centered_phase(polygon, fraction, &layer, phase)?.ok_or_else(|| {
+                    unsupported(
+                        "selected ordinary hatch phase no longer preserves polygon row count",
+                    )
+                })?
+            };
+            self.rows(polygon, kind, rows, layer, owner, cancel)?;
+        }
+        Ok(())
+    }
+
+    fn rows(
+        &mut self,
+        polygon: &'a Polygon<f64>,
+        kind: DepositionKind,
+        rows: HatchRows,
+        layer: HatchLayer<'a>,
+        owner: Option<DepositionOwner>,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        if rows.count == 0 {
+            return Ok(());
+        }
+        let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
+        self.job(
+            HatchWork::Rows {
+                kind,
+                rows,
+                layer,
+                prepared,
+            },
+            owner,
         )
-    {
-        if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
-            return Err(unsupported("Cathedral requires its fixed room lattice"));
-        }
-        return super::cathedral::rooms(fill, fraction, layer, paths, segments, cancel);
     }
-    if kind == DepositionKind::SparseFill
-        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Gyroid)
-    {
-        return gyroid::hatch(fill, fraction, layer, paths, segments, cancel);
+
+    fn job(
+        &mut self,
+        work: HatchWork<'a>,
+        owner: Option<DepositionOwner>,
+    ) -> Result<(), ManufacturingError> {
+        self.jobs
+            .try_reserve(1)
+            .map_err(|_| resource("hatch batch allocation refused"))?;
+        self.jobs.push(HatchJob { work, owner });
+        Ok(())
     }
-    if kind == DepositionKind::SparseFill
-        && matches!(layer.recipe.sparse_infill, SparseInfillPolicy::Grid)
-    {
-        if common_phase.is_some() || phase != OrdinaryHatchPhase::Centered {
-            return Err(unsupported(
-                "grid infill requires its centered two-family lattice",
-            ));
-        }
-        for axis in [HatchAxis::X, HatchAxis::Y] {
-            let grid_layer = HatchLayer { axis, ..*layer };
-            for polygon in &fill.0 {
+
+    /// Mask every planned row in one request, then emit each job in order.
+    pub(super) fn run(
+        self,
+        paths: &mut Vec<DepositionPath>,
+        segments: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let mut coordinates = Vec::new();
+        for job in &self.jobs {
+            if let HatchWork::Rows { rows, .. } = &job.work {
                 check_cancel(cancel)?;
-                let rows = HatchRows::new(polygon, fraction * 0.5, &grid_layer)?;
-                hatch_polygon(polygon, kind, &rows, &grid_layer, paths, segments, cancel)?;
+                let mut row_coordinates = Vec::new();
+                row_coordinates
+                    .try_reserve_exact(rows.count)
+                    .map_err(|_| resource("hatch batch row allocation refused"))?;
+                row_coordinates
+                    .extend((0..rows.count).map(|row| rows.start + row as f64 * rows.spacing));
+                coordinates.push(row_coordinates);
             }
         }
-        return Ok(());
-    }
-    for polygon in &fill.0 {
-        let rows = if let Some(origin) = common_phase {
-            HatchRows::common(polygon, fraction, layer, origin)?
+        let queries: Vec<(&[[f64; 2]], &[f64])> = self
+            .jobs
+            .iter()
+            .filter_map(|job| match &job.work {
+                HatchWork::Rows { prepared, .. } => Some(prepared.ranges()),
+                _ => None,
+            })
+            .zip(&coordinates)
+            .map(|(ranges, rows)| (ranges, rows.as_slice()))
+            .collect();
+        let mut masks = if queries.is_empty() {
+            Vec::new()
         } else {
-            HatchRows::centered_phase(polygon, fraction, layer, phase)?.ok_or_else(|| {
-                unsupported("selected ordinary hatch phase no longer preserves polygon row count")
-            })?
-        };
-        hatch_polygon(polygon, kind, &rows, layer, paths, segments, cancel)?;
+            spiling_compute::row_crossings_groups(&queries, cancel).map_err(crate::compute_error)?
+        }
+        .into_iter();
+        drop(queries);
+        for job in self.jobs {
+            let begin = paths.len();
+            match job.work {
+                HatchWork::Rows {
+                    kind,
+                    rows,
+                    layer,
+                    prepared,
+                } => {
+                    let mask = masks
+                        .next()
+                        .ok_or_else(|| unsupported("hatch batch mask missing"))?;
+                    emit_rows(
+                        &prepared, &mask, kind, &rows, &layer, paths, segments, cancel,
+                    )?;
+                }
+                HatchWork::Rooms {
+                    fill,
+                    fraction,
+                    layer,
+                } => super::cathedral::rooms(fill, fraction, &layer, paths, segments, cancel)?,
+                HatchWork::Gyroid {
+                    fill,
+                    fraction,
+                    layer,
+                } => gyroid::hatch(fill, fraction, &layer, paths, segments, cancel)?,
+            }
+            if let Some(owner) = job.owner {
+                for path in &mut paths[begin..] {
+                    path.owner = Some(owner);
+                }
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Prepared lattice shared by retention admission and actual component hatch.
@@ -760,43 +953,50 @@ pub(super) fn hatch_polygon(
     if rows.count == 0 {
         return Ok(false);
     }
+    let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
+    let mask = prepared.mask(0, rows.count, rows, cancel)?;
+    emit_rows(&prepared, &mask, kind, rows, layer, paths, segments, cancel)
+}
+
+/// Emit every row of one polygon's hatch from its crossing mask; whether any
+/// row met the polygon.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Prepared edges, their mask and the hatch policy are explicit inputs"
+)]
+fn emit_rows(
+    prepared: &hatch::PreparedHatch,
+    mask: &spiling_compute::MaskRows,
+    kind: DepositionKind,
+    rows: &HatchRows,
+    layer: &HatchLayer<'_>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    check_cancel(cancel)?;
     if rows.count > crate::working_set::units().saturating_sub(*segments) {
         return Err(resource("rectilinear hatch row limit exceeded"));
     }
     let mut hits = Vec::new();
     hits.try_reserve_exact(rows.edges)
         .map_err(|_| resource("component hatch intersection allocation refused"))?;
-    let prepared = hatch::PreparedHatch::new(polygon, rows, layer.axis, cancel)?;
-    let tile_rows = prepared.as_ref().map_or(1, |batch| batch.tile_rows());
     let mut had_clips = false;
-    for first in (0..rows.count).step_by(tile_rows) {
-        let count = tile_rows.min(rows.count - first);
-        let mask = prepared
-            .as_ref()
-            .map(|batch| batch.mask(first, count, rows, cancel))
-            .transpose()?
-            .flatten();
-        for offset in 0..count {
-            check_cancel(cancel)?;
-            let row = first + offset;
-            hits.clear();
-            let coordinate = rows.start + row as f64 * rows.spacing;
-            if let (Some(batch), Some(mask)) = (&prepared, &mask) {
-                batch.intersections(mask, offset, coordinate, &mut hits, cancel)?;
-            } else {
-                row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
-            }
-            had_clips |= !hits.is_empty();
-            append_hatch_row(
-                &hits,
-                coordinate,
-                kind,
-                layer,
-                row % 2 == 1,
-                paths,
-                segments,
-            )?;
-        }
+    for row in 0..rows.count {
+        check_cancel(cancel)?;
+        hits.clear();
+        let coordinate = rows.start + row as f64 * rows.spacing;
+        prepared.intersections(mask, row, coordinate, &mut hits, cancel)?;
+        had_clips |= !hits.is_empty();
+        append_hatch_row(
+            &hits,
+            coordinate,
+            kind,
+            layer,
+            row % 2 == 1,
+            paths,
+            segments,
+        )?;
     }
     Ok(had_clips)
 }
@@ -847,7 +1047,6 @@ pub(super) fn bridge_rows<'a>(
     check_cancel(cancel)?;
     let mut rows = Vec::new();
     let mut hits = Vec::new();
-    let mut local = Vec::new();
     let exclusion_edges = exclusions.iter().map(point_count).sum::<usize>();
     if exclusion_edges > crate::working_set::units().saturating_sub(*segments + intervals.len()) {
         return Err(resource("bridge exclusion row scratch limit exceeded"));
@@ -856,6 +1055,10 @@ pub(super) fn bridge_rows<'a>(
     excluded
         .try_reserve_exact(exclusion_edges)
         .map_err(|_| resource("bridge exclusion row allocation refused"))?;
+    // Stage batch: plan every polygon's owned rows first, mask them all in
+    // one kernel request, then build rows polygon by polygon.
+    let mut planned = Vec::new();
+    let mut stored = 0usize;
     for polygon in &fill.0 {
         check_cancel(cancel)?;
         let rect = polygon
@@ -868,16 +1071,19 @@ pub(super) fn bridge_rows<'a>(
         };
         let begin = intervals.partition_point(|piece| piece.0 < grid(low));
         let end = intervals.partition_point(|piece| piece.0 <= grid(high));
-        local.clear();
+        let mut local = Vec::new();
         charge_bridge_rows(&mut work, end - begin + 1)?;
         for &piece in &intervals[begin..end] {
             check_cancel(cancel)?;
             if piece.1 <= grid(high) && piece.3 >= min && piece.3 < max {
-                if intervals.len() + local.len()
+                if intervals.len() + stored + local.len()
                     >= crate::working_set::units().saturating_sub(*segments)
                 {
                     return Err(resource("bridge row ownership scratch limit exceeded"));
                 }
+                local
+                    .try_reserve(1)
+                    .map_err(|_| resource("bridge row ownership allocation refused"))?;
                 local.push(piece);
             }
         }
@@ -886,33 +1092,48 @@ pub(super) fn bridge_rows<'a>(
             local.len() * (usize::BITS - local.len().leading_zeros()) as usize,
         )?;
         local.sort_unstable_by(|a, b| a.2.total_cmp(&b.2).then(a.0.total_cmp(&b.0)));
-        let prepared = hatch::PreparedHatch::for_queries(polygon, local.len(), layer.axis, cancel)?;
-        let mut mask = None;
-        let mut tile_stop = 0;
-        let mut mask_row = 0;
-        let mut coordinates = Vec::new();
-        if let Some(prepared) = &prepared {
-            coordinates
-                .try_reserve_exact(prepared.tile_rows())
-                .map_err(|_| resource("bridge compute query allocation refused"))?;
+        if local.is_empty() {
+            continue;
         }
+        stored += local.len();
+        let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
+        // One query row per distinct row key, in key order.
+        let mut coordinates = Vec::new();
+        let mut at = 0;
+        while at < local.len() {
+            check_cancel(cancel)?;
+            coordinates
+                .try_reserve(1)
+                .map_err(|_| resource("bridge compute query allocation refused"))?;
+            coordinates.push(local[at].3);
+            let key = local[at].2;
+            at += local[at..].partition_point(|piece| piece.2 <= key);
+        }
+        planned
+            .try_reserve(1)
+            .map_err(|_| resource("bridge row plan allocation refused"))?;
+        planned.push((polygon, local, prepared, coordinates));
+    }
+    let queries: Vec<(&[[f64; 2]], &[f64])> = planned
+        .iter()
+        .map(|(_, _, prepared, coordinates)| (prepared.ranges(), coordinates.as_slice()))
+        .collect();
+    let masks = if queries.is_empty() {
+        Vec::new()
+    } else {
+        spiling_compute::row_crossings_groups(&queries, cancel).map_err(crate::compute_error)?
+    };
+    drop(queries);
+    if masks.len() != planned.len() {
+        return Err(unsupported("bridge row masks differ from the plan"));
+    }
+    for ((polygon, local, prepared, _), mask) in planned.iter().zip(&masks) {
+        let polygon = *polygon;
+        let local = local.as_slice();
+        let mut mask_row = 0;
         let mut first = 0;
         while first < local.len() {
             check_cancel(cancel)?;
-            if let Some(prepared) = &prepared
-                && first >= tile_stop
-            {
-                coordinates.clear();
-                tile_stop = first;
-                while tile_stop < local.len() && coordinates.len() < prepared.tile_rows() {
-                    check_cancel(cancel)?;
-                    coordinates.push(local[tile_stop].3);
-                    let key = local[tile_stop].2;
-                    tile_stop += local[tile_stop..].partition_point(|piece| piece.2 <= key);
-                }
-                mask = prepared.mask_coordinates(&coordinates, cancel)?;
-                mask_row = 0;
-            }
             let key = local[first].2;
             let stop = first + local[first..].partition_point(|piece| piece.2 <= key);
             let owners = &local[first..stop];
@@ -925,11 +1146,7 @@ pub(super) fn bridge_rows<'a>(
                     .map(|ring| ring.0.len())
                     .sum::<usize>();
             charge_bridge_rows(&mut work, edges + owners.len())?;
-            if let (Some(prepared), Some(mask)) = (&prepared, &mask) {
-                prepared.intersections(mask, mask_row, coordinate, &mut hits, cancel)?;
-            } else {
-                row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
-            }
+            prepared.intersections(mask, mask_row, coordinate, &mut hits, cancel)?;
             mask_row += 1;
             excluded.clear();
             charge_bridge_rows(&mut work, exclusion_edges)?;

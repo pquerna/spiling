@@ -118,6 +118,10 @@ impl Wave {
     }
 }
 
+/// Mask words one boundary request holds, unless one curve needs more:
+/// bounds the working set, not the layer.
+const MASK_BATCH_WORDS: usize = 1 << 22;
+
 pub(super) fn hatch(
     fill: &MultiPolygon<f64>,
     fraction: f64,
@@ -185,6 +189,7 @@ pub(super) fn hatch(
     if !rows.is_finite() || rows >= usize::MAX as f64 {
         return Err(resource("Gyroid row count exceeds addressable coordinates"));
     }
+    let mut curves = Vec::new();
     for row in 0..rows as usize {
         let offset = (first_row + row as f64) * TAU;
         for profile in &profiles {
@@ -216,8 +221,36 @@ pub(super) fn hatch(
                     });
                 }
             }
-            boundaries.clip(&curve, fill, layer, paths, segments, cancel)?;
+            reserve_points(&mut curves, 1)?;
+            curves.push(curve);
         }
+    }
+    // Stage batch: the layer's curve segments against the boundary boxes, in
+    // as few kernel requests as the mask working set allows.
+    let words_per_query = boundaries.boxes.len().div_ceil(32).max(1);
+    let batch_queries = (MASK_BATCH_WORDS / words_per_query).max(1);
+    let mut queries = Vec::new();
+    let mut firsts = Vec::new();
+    let mut begin = 0;
+    while begin < curves.len() {
+        check_cancel(cancel)?;
+        queries.clear();
+        firsts.clear();
+        let mut end = begin;
+        while end < curves.len()
+            && (end == begin || queries.len() + curves[end].len() <= batch_queries)
+        {
+            reserve_points(&mut firsts, 1)?;
+            firsts.push(queries.len());
+            Boundary::queries(&curves[end], &mut queries)?;
+            end += 1;
+        }
+        let mask = spiling_compute::box_overlaps(&boundaries.boxes, &queries, cancel)
+            .map_err(crate::compute_error)?;
+        for (curve, &first) in curves[begin..end].iter().zip(&firsts) {
+            boundaries.clip(curve, &mask, first, fill, layer, paths, segments, cancel)?;
+        }
+        begin = end;
     }
     Ok(())
 }
@@ -245,10 +278,6 @@ fn bounds(a: [f64; 2], b: [f64; 2]) -> [f64; 4] {
     ]
 }
 
-fn overlaps(a: [f64; 4], b: [f64; 4]) -> bool {
-    a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
-}
-
 impl Boundary {
     fn new(fill: &MultiPolygon<f64>) -> Result<Self, ManufacturingError> {
         let mut result = Self {
@@ -270,9 +299,24 @@ impl Boundary {
         Ok(result)
     }
 
+    /// Segment boxes of `curve`, the queries its clip's mask rows answer.
+    fn queries(curve: &[[f64; 2]], queries: &mut Vec<[f64; 4]>) -> Result<(), ManufacturingError> {
+        reserve_points(queries, curve.len().saturating_sub(1))?;
+        queries.extend(curve.windows(2).map(|edge| bounds(edge[0], edge[1])));
+        Ok(())
+    }
+
+    /// Clip `curve` to `fill`; mask rows `mask_first..` are its segments'
+    /// boundary-box candidates.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The curve, its batched mask rows and the hatch policy are explicit inputs"
+    )]
     fn clip(
         &self,
         curve: &[[f64; 2]],
+        mask: &spiling_compute::MaskRows,
+        mask_first: usize,
         fill: &MultiPolygon<f64>,
         layer: &HatchLayer<'_>,
         paths: &mut Vec<DepositionPath>,
@@ -284,22 +328,12 @@ impl Boundary {
         };
         let mut inside = fill.intersects(&Point::new(first[0], first[1]));
         let mut road = Vec::new();
-        let tile = (spiling_compute::MAX_MASK_WORDS / self.edges.len().div_ceil(32).max(1))
-            .clamp(1, spiling_compute::MAX_BATCH_ITEMS);
-        let mut cursor = 0;
         let mut splits = Vec::new();
-        while cursor + 1 < curve.len() {
+        {
             check_cancel(cancel)?;
-            let count = tile.min(curve.len() - 1 - cursor);
-            let queries: Vec<_> = curve[cursor..=cursor + count]
-                .windows(2)
-                .map(|edge| bounds(edge[0], edge[1]))
-                .collect();
-            let mask = spiling_compute::box_overlaps(&self.boxes, &queries, cancel)
-                .map_err(crate::compute_error)?;
-            for index in 0..count {
-                let a = curve[cursor + index];
-                let b = curve[cursor + index + 1];
+            for index in 0..curve.len().saturating_sub(1) {
+                let a = curve[index];
+                let b = curve[index + 1];
                 let line = Line::new(Coord { x: a[0], y: a[1] }, Coord { x: b[0], y: b[1] });
                 let delta = [b[0] - a[0], b[1] - a[1]];
                 let axis = usize::from(delta[1].abs() > delta[0].abs());
@@ -327,19 +361,11 @@ impl Boundary {
                     }
                     Ok(())
                 };
-                if let Some(mask) = &mask {
-                    for edge in mask
-                        .selected_columns(index)
-                        .ok_or_else(|| unsupported("Gyroid boundary mask row missing"))?
-                    {
-                        intersect(edge)?;
-                    }
-                } else {
-                    for (edge, bbox) in self.boxes.iter().enumerate() {
-                        if overlaps(*bbox, queries[index]) {
-                            intersect(edge)?;
-                        }
-                    }
+                for edge in mask
+                    .selected_columns(mask_first + index)
+                    .ok_or_else(|| unsupported("Gyroid boundary mask row missing"))?
+                {
+                    intersect(edge)?;
                 }
                 splits.sort_unstable_by(f64::total_cmp);
                 splits.dedup();
@@ -373,7 +399,6 @@ impl Boundary {
                     }
                 }
             }
-            cursor += count;
         }
         finish(&mut road, self, fill, layer, paths, segments, cancel)
     }

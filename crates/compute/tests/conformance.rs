@@ -39,7 +39,9 @@ fn assert_masks() {
     let cancel = AtomicBool::new(false);
     let values = coordinates();
     for (columns, rows) in [
-        (1usize, 4_099usize),
+        (1usize, 1usize),
+        (3, 2),
+        (1, 4_099),
         (7, 593),
         (31, 137),
         (32, 131),
@@ -61,12 +63,8 @@ fn assert_masks() {
         let queries: Vec<_> = (0..rows)
             .map(|index| values[index % values.len()])
             .collect();
-        let crossings = row_crossings(&ranges, &queries, &cancel)
-            .unwrap()
-            .expect("admitted crossings");
-        let closed = interval_membership(&ranges, &queries, &cancel)
-            .unwrap()
-            .expect("admitted closed intervals");
+        let crossings = row_crossings(&ranges, &queries, &cancel).unwrap();
+        let closed = interval_membership(&ranges, &queries, &cancel).unwrap();
         assert_eq!((crossings.rows(), crossings.columns()), (rows, columns));
         for (row, coordinate) in queries.iter().enumerate() {
             let mut selected = Vec::new();
@@ -116,9 +114,7 @@ fn assert_masks() {
                 [first.min(second), third, first.max(second), third]
             })
             .collect();
-        let overlaps = box_overlaps(&boxes, &queries, &cancel)
-            .unwrap()
-            .expect("admitted boxes");
+        let overlaps = box_overlaps(&boxes, &queries, &cancel).unwrap();
         for (row, query) in queries.iter().enumerate() {
             for (column, bounds) in boxes.iter().enumerate() {
                 let expected = bounds[0] <= query[2]
@@ -152,11 +148,8 @@ fn cpu_matches_scalar_oracles_and_tiled_tails() {
         Err(ComputeError::Cancelled)
     );
     cancel.store(false, Ordering::Relaxed);
-    assert!(
-        row_crossings(&vec![[0.0, 1.0]; MAX_BATCH_ITEMS], &[0.0; 129], &cancel)
-            .unwrap()
-            .is_none()
-    );
+    let wide = row_crossings(&vec![[0.0, 1.0]; 70_000], &[0.0; 129], &cancel).unwrap();
+    assert_eq!(wide.selected_columns(128).unwrap().count(), 70_000);
 }
 
 fn run_session(case: &str) {

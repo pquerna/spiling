@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::*;
-use spiling_compute::{MAX_BATCH_ITEMS, MAX_MASK_WORDS, MIN_BATCH_PAIRS, MaskRows};
+use spiling_compute::MaskRows;
 
 pub(crate) struct AnchorBatch {
     mask: MaskRows,
@@ -14,17 +14,15 @@ impl PreparedAnchorPaths<'_> {
         &self,
         candidates: &[AnchorCandidate],
         cancel: &AtomicBool,
-    ) -> Result<Option<AnchorBatch>, ManufacturingError> {
+    ) -> Result<AnchorBatch, ManufacturingError> {
         check_cancel(cancel)?;
         let count = self.paths.len();
-        if count == 0
-            || count > MAX_BATCH_ITEMS
-            || candidates.len() > MAX_BATCH_ITEMS
-            || count.saturating_mul(candidates.len()) < MIN_BATCH_PAIRS
-            || candidates.len().saturating_mul(count.div_ceil(32)) > MAX_MASK_WORDS
-        {
-            return Ok(None);
-        }
+        let nonfinite = || {
+            error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "nonfinite or zero nominal anchor query",
+            )
+        };
         let mut radius = 0.0_f64;
         for candidate in candidates {
             check_cancel(cancel)?;
@@ -36,7 +34,7 @@ impl PreparedAnchorPaths<'_> {
                     .flatten()
                     .any(|value| !value.is_finite())
             {
-                return Ok(None);
+                return Err(nonfinite());
             }
             radius = radius.max(candidate.bead_width_mm * 0.5);
         }
@@ -67,7 +65,7 @@ impl PreparedAnchorPaths<'_> {
                 path.bounds[1][1] + reach,
             ];
             if bounds.iter().any(|value| !value.is_finite()) {
-                return Ok(None);
+                return Err(nonfinite());
             }
             boxes.push(bounds);
             edge_prefix.push(
@@ -89,12 +87,9 @@ impl PreparedAnchorPaths<'_> {
                 start[1].max(end[1]),
             ]);
         }
-        let Some(mask) = spiling_compute::box_overlaps(&boxes, &queries, cancel)
-            .map_err(crate::compute_error)?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(AnchorBatch { mask, edge_prefix }))
+        let mask = spiling_compute::box_overlaps(&boxes, &queries, cancel)
+            .map_err(crate::compute_error)?;
+        Ok(AnchorBatch { mask, edge_prefix })
     }
 }
 
@@ -176,7 +171,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let prepared = PreparedAnchorPaths::new(paths.iter(), &cancel).unwrap();
-        let batch = prepared.screen(&candidates, &cancel).unwrap().unwrap();
+        let batch = prepared.screen(&candidates, &cancel).unwrap();
         let capture = |gaps: &[AnchorGap]| {
             gaps.iter()
                 .map(|gap| (gap.start, gap.end, gap.left, gap.right, gap.direct_ends))
@@ -207,7 +202,7 @@ mod tests {
                 assert_eq!(screened_work, scalar_work);
             }
         }
-        assert!(prepared.screen(&[], &cancel).unwrap().is_none());
+        assert_eq!(prepared.screen(&[], &cancel).unwrap().mask.rows(), 0);
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             prepared.screen(&[], &cancel).err().unwrap().code,

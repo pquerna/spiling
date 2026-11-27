@@ -1386,16 +1386,21 @@ impl ClassifiedRegions {
             top_axis,
             recipe,
         };
-        region::hatch(
+        // One stage batch: every skin and interior hatch of this layer shares
+        // one kernel request.
+        let mut batch = region::HatchBatch::default();
+        let centered = region::OrdinaryHatchPhase::Centered;
+        batch.push(
             &self.bottom,
             DepositionKind::BottomSkin,
             1.0,
             &layer,
-            &mut paths,
-            segments,
+            None,
+            centered,
+            None,
             cancel,
         )?;
-        region::hatch(
+        batch.push(
             &self.top,
             DepositionKind::TopSkin,
             1.0,
@@ -1403,8 +1408,9 @@ impl ClassifiedRegions {
                 axis: top_axis,
                 ..layer
             },
-            &mut paths,
-            segments,
+            None,
+            centered,
+            None,
             cancel,
         )?;
         for (region_index, interior) in self.interiors.iter().enumerate() {
@@ -1413,8 +1419,7 @@ impl ClassifiedRegions {
                 ..layer
             };
             let fraction = interior.coverage.fraction;
-            let begin = paths.len();
-            region::hatch_with_phase(
+            batch.push(
                 &interior.domain,
                 if fraction == 1.0 {
                     DepositionKind::SolidFill
@@ -1425,16 +1430,13 @@ impl ClassifiedRegions {
                 &interior_layer,
                 interior.frame_origin_mm,
                 phase,
-                &mut paths,
-                segments,
+                Some(DepositionOwner::Regional {
+                    region_index: region_index as u16,
+                }),
                 cancel,
             )?;
-            for path in &mut paths[begin..] {
-                path.owner = Some(DepositionOwner::Regional {
-                    region_index: region_index as u16,
-                });
-            }
         }
+        batch.run(&mut paths, segments, cancel)?;
         // A section thinner than the minimum feature everywhere deposits
         // nothing; its walls proved no printable material was left and
         // reported the omitted area.

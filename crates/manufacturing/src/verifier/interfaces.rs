@@ -790,11 +790,7 @@ pub(super) fn verify_earlier_fine_paths(
             for (row, candidate) in candidates.into_iter().enumerate() {
                 let [start, end] = candidate.endpoints_mm;
                 let length = (end[0] - start[0]).hypot(end[1] - start[1]);
-                let gaps = if let Some(batch) = &batch {
-                    anchors.gaps_screened(candidate, prepared, batch, row, work, cancel)?
-                } else {
-                    anchors.gaps_prepared(candidate, prepared, work, cancel)?
-                };
+                let gaps = anchors.gaps_screened(candidate, prepared, &batch, row, work, cancel)?;
                 for gap in gaps {
                     if !matches!(
                         gap_kind(

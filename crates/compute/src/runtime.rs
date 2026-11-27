@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError, atomic::AtomicBool};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, atomic::AtomicBool};
 use std::time::Duration;
 
 use cubecl::prelude::Client;
@@ -10,8 +10,9 @@ use cubecl::wgpu::{RuntimeOptions, Vulkan, WgpuBackend, WgpuDevice, WgpuDeviceKi
 use cubecl_environment::stream::Stream;
 
 use crate::{
-    ComputeBackend, ComputeDevice, ComputeError, ComputeSettings, ComputeStatus, MaskRows, Shape,
-    TILE_WORDS, check_cancel, kernels, ordered_key, zeroed_words,
+    ComputeBackend, ComputeDevice, ComputeError, ComputeSettings, ComputeStatus,
+    MASK_SEGMENT_INPUT, MASK_SEGMENT_WORDS, MaskRows, Shape, check_cancel, kernels, ordered_key,
+    zeroed_words,
 };
 
 static SESSION: OnceLock<Session> = OnceLock::new();
@@ -26,7 +27,31 @@ pub(crate) struct Context {
     status: ComputeStatus,
     default: ResolvedDevice,
     _fea: ResolvedDevice,
-    dispatch: Mutex<Option<ComputeError>>,
+    /// The first execution failure; every later round refuses with it.
+    failure: Mutex<Option<ComputeError>>,
+    pending: Mutex<Pending>,
+    wake: Condvar,
+}
+
+/// Queued mask requests and the device's leader. Requests from every thread
+/// wait here; whoever finds no leader takes everything queued and runs it as
+/// one round (group commit), so launches scale with device time, not calls.
+#[derive(Default)]
+struct Pending {
+    leader: bool,
+    next: u64,
+    queue: Vec<(u64, Vec<MaskGroup>)>,
+    done: Vec<(u64, Result<Vec<MaskRows>, ComputeError>)>,
+    abandoned: Vec<u64>,
+}
+
+/// One encoded mask request: `shape.rows` query rows against
+/// `shape.columns` padded four-lane input fields.
+pub(crate) struct MaskGroup {
+    kind: u32,
+    shape: Shape,
+    values: Vec<u32>,
+    queries: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -98,7 +123,9 @@ fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
             status,
             default,
             _fea: fea,
-            dispatch: Mutex::new(None),
+            failure: Mutex::new(None),
+            pending: Mutex::new(Pending::default()),
+            wake: Condvar::new(),
         })
     })
     .map_err(|error| match error {
@@ -218,15 +245,15 @@ fn probe(device: &ResolvedDevice) -> Result<(), ComputeError> {
         device.stream.enter(|| {
             device.client.memory_dedicated_allocation((), |_| {
                 guarded(|| {
-                    let batch = kernels::UploadedBatch::new(
+                    kernels::masks_dispatch(
                         &device.client,
                         device.description.backend == ComputeBackend::Cpu,
+                        0,
                         &values,
                         &queries,
-                        2,
-                        0,
-                    )?;
-                    batch.dispatch(0, 1)
+                        &[0, 0, 2, 1],
+                        &[0, 1],
+                    )
                 })
             })
         })
@@ -266,109 +293,290 @@ fn drain(device: &ResolvedDevice) -> Result<(), ComputeError> {
     })
 }
 
-fn lock_dispatch<'context>(
-    context: &'context Context,
-    cancel: &AtomicBool,
-) -> Result<MutexGuard<'context, Option<ComputeError>>, ComputeError> {
-    loop {
-        check_cancel(cancel)?;
-        match context.dispatch.try_lock() {
-            Ok(guard) => return Ok(guard),
-            Err(TryLockError::Poisoned(_)) => return Err(ComputeError::Poisoned),
-            Err(TryLockError::WouldBlock) => std::thread::park_timeout(Duration::from_millis(1)),
-        }
-    }
-}
-
-pub(crate) fn execute(
+/// Encode `queries.len()` closed or half-open interval rows on the caller's thread.
+pub(crate) fn interval_group(
     shape: Shape,
     values: &[[f64; 2]],
     queries: &[f64],
     cancel: &AtomicBool,
     kind: u32,
-) -> Result<Option<MaskRows>, ComputeError> {
-    execute_with(shape, cancel, kind, || {
-        let values = encode_values(values, shape.words_per_row * 32, cancel)?;
-        let mut encoded_queries = zeroed_words(queries.len() * 2)?;
-        for (index, query) in queries.iter().enumerate() {
-            if index % 1_024 == 0 {
-                check_cancel(cancel)?;
-            }
-            encoded_queries[index * 2..index * 2 + 2].copy_from_slice(&ordered_key(*query));
+) -> Result<MaskGroup, ComputeError> {
+    let values = encode_values(values, shape.words_per_row * 32, cancel)?;
+    let mut encoded = zeroed_words(queries.len() * 2)?;
+    for (index, query) in queries.iter().enumerate() {
+        if index % 1_024 == 0 {
+            check_cancel(cancel)?;
         }
-        Ok((values, encoded_queries))
+        encoded[index * 2..index * 2 + 2].copy_from_slice(&ordered_key(*query));
+    }
+    Ok(MaskGroup {
+        kind,
+        shape,
+        values,
+        queries: encoded,
     })
 }
 
-pub(crate) fn execute_boxes(
+/// Encode box queries on the caller's thread.
+pub(crate) fn box_group(
     shape: Shape,
     values: &[[f64; 4]],
     queries: &[[f64; 4]],
     cancel: &AtomicBool,
-) -> Result<Option<MaskRows>, ComputeError> {
-    execute_with(shape, cancel, 1, || {
-        Ok((
-            encode_values(values, shape.words_per_row * 32, cancel)?,
-            encode_queries(queries, cancel)?,
-        ))
+) -> Result<MaskGroup, ComputeError> {
+    Ok(MaskGroup {
+        kind: 1,
+        shape,
+        values: encode_values(values, shape.words_per_row * 32, cancel)?,
+        queries: encode_queries(queries, cancel)?,
     })
 }
 
-fn execute_with(
-    shape: Shape,
+fn lock_pending(context: &Context) -> Result<MutexGuard<'_, Pending>, ComputeError> {
+    context.pending.lock().map_err(|_| ComputeError::Poisoned)
+}
+
+/// Run `groups` in the next round that starts, alongside every other queued
+/// request. Results are per group and exact, so batching never changes them.
+pub(crate) fn execute_masks(
+    groups: Vec<MaskGroup>,
     cancel: &AtomicBool,
-    kind: u32,
-    encode: impl FnOnce() -> Result<(Vec<u32>, Vec<u32>), ComputeError> + Send,
-) -> Result<Option<MaskRows>, ComputeError> {
-    let context = context()?;
-    let mut failure = lock_dispatch(context, cancel)?;
-    if let Some(error) = failure.as_ref() {
-        return Err(error.clone());
+) -> Result<Vec<MaskRows>, ComputeError> {
+    check_cancel(cancel)?;
+    if groups.iter().all(|group| group.shape.words == 0) {
+        return groups
+            .into_iter()
+            .map(|group| group.shape.empty())
+            .collect();
     }
-    let result = guarded(|| {
-        context.default.stream.enter(|| {
-            context.default.client.memory_dedicated_allocation((), |_| {
+    let context = context()?;
+    let mut pending = lock_pending(context)?;
+    let id = pending.next;
+    pending.next += 1;
+    pending.queue.push((id, groups));
+    loop {
+        if let Some(index) = pending.done.iter().position(|(done, _)| *done == id) {
+            return pending.done.swap_remove(index).1;
+        }
+        if check_cancel(cancel).is_err() {
+            if let Some(index) = pending.queue.iter().position(|(queued, _)| *queued == id) {
+                pending.queue.remove(index);
+            } else {
+                pending.abandoned.push(id);
+            }
+            return Err(ComputeError::Cancelled);
+        }
+        if !pending.leader {
+            pending = lead(context, pending, |_, _| Ok(()))?.0;
+            continue;
+        }
+        pending = context
+            .wake
+            .wait_timeout(pending, Duration::from_millis(1))
+            .map_err(|_| ComputeError::Poisoned)?
+            .0;
+    }
+}
+
+/// Run `work` on the device as soon as no round is running, after every
+/// queued request; `work` may borrow the caller's data.
+pub(crate) fn execute_exclusive<T: Send>(
+    cancel: &AtomicBool,
+    work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
+) -> Result<T, ComputeError> {
+    let context = context()?;
+    let mut pending = lock_pending(context)?;
+    loop {
+        check_cancel(cancel)?;
+        if !pending.leader {
+            let (_pending, result) = lead(context, pending, work)?;
+            return result;
+        }
+        pending = context
+            .wake
+            .wait_timeout(pending, Duration::from_millis(1))
+            .map_err(|_| ComputeError::Poisoned)?
+            .0;
+    }
+}
+
+/// Lead one round: take every queued request, run them and then `work`,
+/// publish every result and wake the waiters.
+fn lead<'context, T: Send>(
+    context: &'context Context,
+    mut pending: MutexGuard<'context, Pending>,
+    work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
+) -> Result<(MutexGuard<'context, Pending>, Result<T, ComputeError>), ComputeError> {
+    pending.leader = true;
+    let queued = std::mem::take(&mut pending.queue);
+    drop(pending);
+    let ids: Vec<u64> = queued.iter().map(|(id, _)| *id).collect();
+    let (masks, own) = round(context, queued, work);
+    let mut pending = lock_pending(context)?;
+    pending.leader = false;
+    let masks: Vec<Result<Vec<MaskRows>, ComputeError>> = match masks {
+        Ok(masks) => masks.into_iter().map(Ok).collect(),
+        Err(error) => ids.iter().map(|_| Err(error.clone())).collect(),
+    };
+    for (id, result) in ids.into_iter().zip(masks) {
+        if let Some(index) = pending.abandoned.iter().position(|gone| *gone == id) {
+            pending.abandoned.swap_remove(index);
+        } else {
+            pending.done.push((id, result));
+        }
+    }
+    context.wake.notify_all();
+    Ok((pending, own))
+}
+
+type RoundResult<T> = (
+    Result<Vec<Vec<MaskRows>>, ComputeError>,
+    Result<T, ComputeError>,
+);
+
+fn round<T: Send>(
+    context: &Context,
+    queued: Vec<(u64, Vec<MaskGroup>)>,
+    work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
+) -> RoundResult<T> {
+    let mut failure = match context.failure.lock() {
+        Ok(failure) => failure,
+        Err(_) => return (Err(ComputeError::Poisoned), Err(ComputeError::Poisoned)),
+    };
+    if let Some(error) = failure.as_ref() {
+        return (Err(error.clone()), Err(error.clone()));
+    }
+    let device = &context.default;
+    let cpu = device.description.backend == ComputeBackend::Cpu;
+    let mut own = Err(ComputeError::Execution("round did not run".into()));
+    let masks = guarded(|| {
+        device.stream.enter(|| {
+            device.client.memory_dedicated_allocation((), |_| {
                 guarded(|| {
-                    check_cancel(cancel)?;
-                    let (values, queries) = encode()?;
-                    check_cancel(cancel)?;
-                    let batch = kernels::UploadedBatch::new(
-                        &context.default.client,
-                        context.default.description.backend == ComputeBackend::Cpu,
-                        &values,
-                        &queries,
-                        shape.columns,
-                        kind,
-                    )?;
-                    let mut words = zeroed_words(shape.words)?;
-                    for (tile_index, tile) in words.chunks_mut(TILE_WORDS).enumerate() {
-                        check_cancel(cancel)?;
-                        let result = batch.dispatch(tile_index * TILE_WORDS, tile.len())?;
-                        tile.copy_from_slice(&result);
-                    }
-                    check_cancel(cancel)?;
-                    Ok(Some(MaskRows {
-                        rows: shape.rows,
-                        columns: shape.columns,
-                        words_per_row: shape.words_per_row,
-                        words,
-                    }))
+                    let masks = run_masks(&device.client, cpu, queued);
+                    own = guarded(|| work(&device.client, cpu));
+                    masks
                 })
             })
         })
     });
-    let drained = drain(&context.default);
-    let result = match (result, drained) {
-        (_, Err(error)) => Err(error),
-        (result, Ok(())) => result.and_then(|value| {
-            check_cancel(cancel)?;
-            Ok(value)
-        }),
+    let drained = drain(device);
+    let (masks, own) = match drained {
+        Err(error) => (Err(error.clone()), Err(error)),
+        Ok(()) => (masks, own),
     };
-    if let Err(error @ ComputeError::Execution(_)) = &result {
-        *failure = Some(error.clone());
+    for result in [masks.as_ref().err(), own.as_ref().err()] {
+        if let Some(error @ ComputeError::Execution(_)) = result {
+            *failure = Some(error.clone());
+        }
     }
-    result
+    (masks, own)
+}
+
+/// Pack every queued group into segments of whole rows, one launch per
+/// segment and kind, and split the words back per group.
+fn run_masks(
+    client: &Client,
+    cpu: bool,
+    queued: Vec<(u64, Vec<MaskGroup>)>,
+) -> Result<Vec<Vec<MaskRows>>, ComputeError> {
+    let groups: Vec<&MaskGroup> = queued.iter().flat_map(|(_, groups)| groups).collect();
+    let mut words: Vec<Vec<u32>> = Vec::new();
+    words
+        .try_reserve_exact(groups.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    for group in &groups {
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(group.shape.words)
+            .map_err(|_| ComputeError::Allocation)?;
+        words.push(buffer);
+    }
+    let index = |value: usize| {
+        u32::try_from(value).map_err(|_| ComputeError::InvalidInput("mask input exceeds u32"))
+    };
+    for kind in 0..3 {
+        // (group, first row, end row), each at most one segment of words.
+        let mut entries = Vec::new();
+        for (at, group) in groups.iter().enumerate() {
+            if group.kind != kind || group.shape.words == 0 {
+                continue;
+            }
+            let step = (MASK_SEGMENT_WORDS / group.shape.words_per_row).max(1);
+            let mut row = 0;
+            while row < group.shape.rows {
+                let end = (row + step).min(group.shape.rows);
+                entries.push((at, row, end));
+                row = end;
+            }
+        }
+        let mut next = 0;
+        while next < entries.len() {
+            let (mut values, mut queries, mut table) = (Vec::new(), Vec::new(), Vec::new());
+            let mut starts = vec![0u32];
+            let mut total = 0usize;
+            let mut last = None;
+            let first = next;
+            while next < entries.len() {
+                let (at, row, end) = entries[next];
+                let group = groups[at];
+                let length = (end - row) * group.shape.words_per_row;
+                let fresh = last != Some(at);
+                let added = if fresh { group.values.len() } else { 0 };
+                if next > first
+                    && (total + length > MASK_SEGMENT_WORDS
+                        || values.len() + added > MASK_SEGMENT_INPUT)
+                {
+                    break;
+                }
+                if fresh {
+                    values.extend_from_slice(&group.values);
+                    last = Some(at);
+                }
+                let fields = group.queries.len() / group.shape.rows;
+                let value_base = index((values.len() - group.values.len()) / 4)?;
+                let query_base = index(queries.len())?;
+                queries.extend_from_slice(&group.queries[row * fields..end * fields]);
+                table.extend_from_slice(&[
+                    value_base,
+                    query_base,
+                    index(group.shape.columns)?,
+                    index(group.shape.words_per_row)?,
+                ]);
+                total += length;
+                starts.push(index(total)?);
+                next += 1;
+            }
+            index(values.len())?;
+            let output =
+                kernels::masks_dispatch(client, cpu, kind, &values, &queries, &table, &starts)?;
+            for (offset, &(at, _, _)) in entries[first..next].iter().enumerate() {
+                let range = starts[offset] as usize..starts[offset + 1] as usize;
+                words[at].extend_from_slice(&output[range]);
+            }
+        }
+    }
+    let mut words = words.into_iter();
+    let mut results = Vec::new();
+    for (_, groups) in &queued {
+        let mut masks = Vec::new();
+        for group in groups {
+            let words = words.next().unwrap_or_default();
+            if words.len() != group.shape.words {
+                return Err(ComputeError::Execution(
+                    "mask segments differ from the shape".into(),
+                ));
+            }
+            masks.push(MaskRows {
+                rows: group.shape.rows,
+                columns: group.shape.columns,
+                words_per_row: group.shape.words_per_row,
+                words,
+            });
+        }
+        results.push(masks);
+    }
+    Ok(results)
 }
 
 /// Jobs and output words one uploaded capsule segment holds at most, unless
@@ -398,134 +606,106 @@ pub(crate) fn execute_capsule_masks(
             .sum()
     };
     let group_words = |group: usize| windows[group][1] as usize * windows[group][3] as usize * 2;
-    let context = context()?;
-    let mut failure = lock_dispatch(context, cancel)?;
-    if let Some(error) = failure.as_ref() {
-        return Err(error.clone());
-    }
-    let result = guarded(|| {
-        context.default.stream.enter(|| {
-            context.default.client.memory_dedicated_allocation((), |_| {
-                guarded(|| {
-                    let cpu = context.default.description.backend == ComputeBackend::Cpu;
-                    let mut group = 0usize;
-                    while group < group_ends.len() {
-                        check_cancel(cancel)?;
-                        // Whole groups, up to the segment's bounds.
-                        let first_group = group;
-                        let (mut jobs, mut words) = (0usize, 0usize);
-                        while group < group_ends.len()
-                            && (group == first_group
-                                || (jobs + group_jobs(group) <= CAPSULE_SEGMENT_JOBS
-                                    && words + group_words(group) <= CAPSULE_SEGMENT_WORDS))
-                        {
-                            jobs += group_jobs(group);
-                            words += group_words(group);
-                            group += 1;
-                        }
-                        let capsule_first = if first_group == 0 {
-                            0
-                        } else {
-                            group_ends[first_group - 1]
-                        };
-                        let capsule_end = group_ends[group - 1];
-                        let mut segment_windows = Vec::new();
-                        let mut capsule_windows = Vec::new();
-                        let mut starts = vec![0u32];
-                        let mut first_rows = Vec::new();
-                        let (mut base, mut total) = (0u32, 0u32);
-                        let mut previous = capsule_first;
-                        for (local, at) in (first_group..group).enumerate() {
-                            let [row0, rows_in, word0, width] = windows[at];
-                            segment_windows.extend_from_slice(&[
-                                base,
-                                row0,
-                                rows_in,
-                                word0 * 2,
-                                width * 2,
-                            ]);
-                            base = rows_in
-                                .checked_mul(width)
-                                .and_then(|cells| cells.checked_mul(2))
-                                .and_then(|cells| cells.checked_add(base))
-                                .ok_or(ComputeError::Allocation)?;
-                            for &[row, count] in &rows[previous..group_ends[at]] {
-                                if count == 0 {
-                                    continue;
-                                }
-                                total = total.checked_add(count).ok_or(ComputeError::Allocation)?;
-                                starts.push(total);
-                                first_rows.push(row);
-                                capsule_windows.push(local as u32);
-                            }
-                            previous = group_ends[at];
-                        }
-                        let output = if first_rows.is_empty() {
-                            Vec::new()
-                        } else {
-                            let kept: Vec<i64> = capsules[capsule_first..capsule_end]
-                                .iter()
-                                .zip(&rows[capsule_first..capsule_end])
-                                .filter(|(_, row)| row[1] > 0)
-                                .flat_map(|(capsule, _)| *capsule)
-                                .collect();
-                            kernels::capsule_masks_dispatch(
-                                &context.default.client,
-                                cpu,
-                                &kept,
-                                &starts,
-                                &first_rows,
-                                &capsule_windows,
-                                &segment_windows,
-                                words,
-                                cell,
-                                columns,
-                                cancel,
-                            )?
-                        };
-                        for (local, at) in (first_group..group).enumerate() {
-                            let [row0, rows_in, word0, width] = windows[at];
-                            let base = segment_windows[local * 5] as usize;
-                            let length = rows_in as usize * width as usize;
-                            let mut words = Vec::new();
-                            words
-                                .try_reserve_exact(length)
-                                .map_err(|_| ComputeError::Allocation)?;
-                            let window = output.get(base..base + length * 2).ok_or_else(|| {
-                                ComputeError::Execution(
-                                    "capsule readback is shorter than its windows".into(),
-                                )
-                            })?;
-                            words.extend(
-                                window
-                                    .as_chunks::<2>()
-                                    .0
-                                    .iter()
-                                    .map(|&[low, high]| u64::from(low) | u64::from(high) << 32),
-                            );
-                            masks.push(crate::CellMask {
-                                row0,
-                                rows: rows_in,
-                                word0,
-                                width,
-                                words,
-                            });
-                        }
+    execute_exclusive(cancel, |client, cpu| {
+        let mut group = 0usize;
+        while group < group_ends.len() {
+            check_cancel(cancel)?;
+            // Whole groups, up to the segment's bounds.
+            let first_group = group;
+            let (mut jobs, mut words) = (0usize, 0usize);
+            while group < group_ends.len()
+                && (group == first_group
+                    || (jobs + group_jobs(group) <= CAPSULE_SEGMENT_JOBS
+                        && words + group_words(group) <= CAPSULE_SEGMENT_WORDS))
+            {
+                jobs += group_jobs(group);
+                words += group_words(group);
+                group += 1;
+            }
+            let capsule_first = if first_group == 0 {
+                0
+            } else {
+                group_ends[first_group - 1]
+            };
+            let capsule_end = group_ends[group - 1];
+            let mut segment_windows = Vec::new();
+            let mut capsule_windows = Vec::new();
+            let mut starts = vec![0u32];
+            let mut first_rows = Vec::new();
+            let (mut base, mut total) = (0u32, 0u32);
+            let mut previous = capsule_first;
+            for (local, at) in (first_group..group).enumerate() {
+                let [row0, rows_in, word0, width] = windows[at];
+                segment_windows.extend_from_slice(&[base, row0, rows_in, word0 * 2, width * 2]);
+                base = rows_in
+                    .checked_mul(width)
+                    .and_then(|cells| cells.checked_mul(2))
+                    .and_then(|cells| cells.checked_add(base))
+                    .ok_or(ComputeError::Allocation)?;
+                for &[row, count] in &rows[previous..group_ends[at]] {
+                    if count == 0 {
+                        continue;
                     }
-                    Ok(())
-                })
-            })
-        })
-    });
-    let drained = drain(&context.default);
-    let result = match (result, drained) {
-        (_, Err(error)) => Err(error),
-        (result, Ok(())) => result.and_then(|()| check_cancel(cancel)),
-    };
-    if let Err(error @ ComputeError::Execution(_)) = &result {
-        *failure = Some(error.clone());
-    }
-    result.map(|()| masks)
+                    total = total.checked_add(count).ok_or(ComputeError::Allocation)?;
+                    starts.push(total);
+                    first_rows.push(row);
+                    capsule_windows.push(local as u32);
+                }
+                previous = group_ends[at];
+            }
+            let output = if first_rows.is_empty() {
+                Vec::new()
+            } else {
+                let kept: Vec<i64> = capsules[capsule_first..capsule_end]
+                    .iter()
+                    .zip(&rows[capsule_first..capsule_end])
+                    .filter(|(_, row)| row[1] > 0)
+                    .flat_map(|(capsule, _)| *capsule)
+                    .collect();
+                kernels::capsule_masks_dispatch(
+                    client,
+                    cpu,
+                    &kept,
+                    &starts,
+                    &first_rows,
+                    &capsule_windows,
+                    &segment_windows,
+                    words,
+                    cell,
+                    columns,
+                    cancel,
+                )?
+            };
+            for (local, at) in (first_group..group).enumerate() {
+                let [row0, rows_in, word0, width] = windows[at];
+                let base = segment_windows[local * 5] as usize;
+                let length = rows_in as usize * width as usize;
+                let mut words = Vec::new();
+                words
+                    .try_reserve_exact(length)
+                    .map_err(|_| ComputeError::Allocation)?;
+                let window = output.get(base..base + length * 2).ok_or_else(|| {
+                    ComputeError::Execution("capsule readback is shorter than its windows".into())
+                })?;
+                words.extend(
+                    window
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&[low, high]| u64::from(low) | u64::from(high) << 32),
+                );
+                masks.push(crate::CellMask {
+                    row0,
+                    rows: rows_in,
+                    word0,
+                    width,
+                    words,
+                });
+            }
+        }
+        check_cancel(cancel)?;
+        Ok(masks)
+    })
 }
 
 fn encode_values<const FIELDS: usize>(
@@ -571,25 +751,37 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn cancelled_waiter_does_not_need_the_dispatch_gate() {
+    fn cancelled_waiter_leaves_the_queue_while_another_round_leads() {
         configure(ComputeSettings {
             default_backend: ComputeBackend::Cpu,
             fea_backend: None,
         })
         .unwrap();
         let context = context().unwrap();
-        let gate = context.dispatch.lock().unwrap();
+        // Take the leader role the way a round does, so no real round resets it.
+        loop {
+            let mut pending = lock_pending(context).unwrap();
+            if !pending.leader {
+                pending.leader = true;
+                break;
+            }
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let (started, receive) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             started.send(()).unwrap();
-            lock_dispatch(context, &worker_cancel).err().unwrap()
+            crate::row_crossings(&[[0.0, 1.0]], &[0.5], &worker_cancel)
+                .err()
+                .unwrap()
         });
         receive.recv().unwrap();
         cancel.store(true, Ordering::Relaxed);
         assert_eq!(worker.join().unwrap(), ComputeError::Cancelled);
-        drop(gate);
+        let mut pending = lock_pending(context).unwrap();
+        assert!(pending.abandoned.is_empty());
+        pending.leader = false;
+        context.wake.notify_all();
     }
 
     #[test]
@@ -608,7 +800,6 @@ mod tests {
                         &[0.5; 65],
                         &AtomicBool::new(false),
                     )
-                    .unwrap()
                     .unwrap();
                     for row in 0..65 {
                         assert_eq!(result.selected_columns(row).unwrap().count(), 65);
@@ -622,18 +813,68 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_after_encoding_refuses_before_upload() {
+    fn concurrent_groups_of_every_kind_match_their_single_runs() {
         configure(ComputeSettings {
             default_backend: ComputeBackend::Cpu,
             fea_backend: None,
         })
         .unwrap();
         let cancel = AtomicBool::new(false);
-        let shape = Shape::admit(65, 65).unwrap();
-        let result = execute_with(shape, &cancel, 0, || {
-            cancel.store(true, Ordering::Relaxed);
-            Ok((Vec::new(), Vec::new()))
-        });
-        assert_eq!(result, Err(ComputeError::Cancelled));
+        let ranges: Vec<[f64; 2]> = (0..70)
+            .map(|i| [f64::from(i), f64::from(i) + 2.5])
+            .collect();
+        let boxes: Vec<[f64; 4]> = (0..40)
+            .map(|i| [f64::from(i), 0.0, f64::from(i) + 1.0, 1.0])
+            .collect();
+        let expected_crossings: Vec<_> = (0..12)
+            .map(|rows| {
+                let coordinates: Vec<f64> = (0..rows).map(|row| f64::from(row) * 3.5).collect();
+                let group = interval_group(
+                    Shape::new(coordinates.len(), ranges.len()).unwrap(),
+                    &ranges,
+                    &coordinates,
+                    &cancel,
+                    0,
+                )
+                .unwrap();
+                (coordinates, group)
+            })
+            .collect();
+        let queries: Vec<[f64; 4]> = (0..9)
+            .map(|i| [f64::from(i) * 4.0, 0.5, f64::from(i) * 4.0 + 0.5, 0.5])
+            .collect();
+        let mut groups = Vec::new();
+        for (coordinates, _) in &expected_crossings {
+            for kind in [0, 2] {
+                groups.push(
+                    interval_group(
+                        Shape::new(coordinates.len(), ranges.len()).unwrap(),
+                        &ranges,
+                        coordinates,
+                        &cancel,
+                        kind,
+                    )
+                    .unwrap(),
+                );
+            }
+            groups.push(
+                box_group(
+                    Shape::new(queries.len(), boxes.len()).unwrap(),
+                    &boxes,
+                    &queries,
+                    &cancel,
+                )
+                .unwrap(),
+            );
+        }
+        let batched = execute_masks(groups, &cancel).unwrap();
+        for (index, (coordinates, _)) in expected_crossings.iter().enumerate() {
+            let single = crate::row_crossings(&ranges, coordinates, &cancel).unwrap();
+            let closed = crate::interval_membership(&ranges, coordinates, &cancel).unwrap();
+            let boxed = crate::box_overlaps(&boxes, &queries, &cancel).unwrap();
+            assert_eq!(batched[index * 3], single);
+            assert_eq!(batched[index * 3 + 1], closed);
+            assert_eq!(batched[index * 3 + 2], boxed);
+        }
     }
 }

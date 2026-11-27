@@ -60,22 +60,28 @@ fn masks_bound_access_and_scan_only_selected_columns() {
 }
 
 #[test]
-fn admission_bounds_padding_and_overflow() {
-    assert!(Shape::admit(0, 0).is_none());
-    assert!(Shape::admit(1, MIN_BATCH_PAIRS - 1).is_none());
-    assert!(Shape::admit(1, MIN_BATCH_PAIRS).is_some());
-    assert!(Shape::admit(128, MAX_BATCH_ITEMS).is_some());
-    assert!(Shape::admit(129, MAX_BATCH_ITEMS).is_none());
-    assert!(Shape::admit(MAX_BATCH_ITEMS, 128).is_some());
-    assert!(Shape::admit(MAX_BATCH_ITEMS, 129).is_none());
-    assert!(Shape::admit(usize::MAX, usize::MAX).is_none());
+fn shapes_pad_rows_and_refuse_overflow() {
+    let shape = Shape::new(3, 33).unwrap();
+    assert_eq!((shape.words_per_row, shape.words), (2, 6));
+    assert_eq!(Shape::new(5, 0).unwrap().words, 0);
+    assert!(Shape::new(usize::MAX, usize::MAX).is_err());
 }
 
 #[test]
-fn declines_cancellation_and_invalid_inputs_are_distinct() {
+fn every_size_runs_and_cancellation_and_invalid_inputs_are_distinct() {
+    crate::configure(crate::ComputeSettings {
+        default_backend: crate::ComputeBackend::Cpu,
+        fea_backend: None,
+    })
+    .unwrap();
     let cancel = AtomicBool::new(false);
-    assert_eq!(row_crossings(&[[0.0, 1.0]], &[0.5], &cancel).unwrap(), None);
-    assert_eq!(box_overlaps(&[], &[], &cancel).unwrap(), None);
+    let single = row_crossings(&[[0.0, 1.0]], &[0.5], &cancel).unwrap();
+    assert_eq!(single.get(0, 0), Some(true));
+    let empty = box_overlaps(&[], &[[0.0, 0.0, 1.0, 1.0]], &cancel).unwrap();
+    assert_eq!((empty.rows(), empty.columns()), (1, 0));
+    assert_eq!(empty.selected_columns(0).unwrap().count(), 0);
+    let none = interval_membership(&[[0.0, 1.0]], &[], &cancel).unwrap();
+    assert_eq!((none.rows(), none.columns()), (0, 1));
     assert!(matches!(
         row_crossings(&[[f64::NAN, 0.0]], &[0.0], &cancel),
         Err(ComputeError::InvalidInput(_))
@@ -101,6 +107,28 @@ fn declines_cancellation_and_invalid_inputs_are_distinct() {
         interval_membership(&[], &[], &cancel),
         Err(ComputeError::Cancelled)
     );
+}
+
+#[test]
+fn masks_span_several_segments() {
+    crate::configure(crate::ComputeSettings {
+        default_backend: crate::ComputeBackend::Cpu,
+        fea_backend: None,
+    })
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let columns = 1 << 16;
+    let rows = MASK_SEGMENT_WORDS / (columns / 32) * 2 + 5;
+    let ranges = vec![[0.0, 1.0]; columns];
+    let coordinates: Vec<f64> = (0..rows)
+        .map(|row| if row % 3 == 0 { 0.5 } else { 2.0 })
+        .collect();
+    let mask = row_crossings(&ranges, &coordinates, &cancel).unwrap();
+    assert_eq!(mask.words.len(), rows * columns / 32);
+    for (row, words) in mask.words.chunks(columns / 32).enumerate() {
+        let expected = if row % 3 == 0 { u32::MAX } else { 0 };
+        assert!(words.iter().all(|&word| word == expected), "row {row}");
+    }
 }
 
 #[test]

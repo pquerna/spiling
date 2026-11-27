@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::*;
-use spiling_compute::{MAX_BATCH_ITEMS, MAX_MASK_WORDS, MIN_BATCH_PAIRS, MaskRows};
+use spiling_compute::MaskRows;
 
 pub(super) struct PreparedHatch {
     edges: Vec<[[f64; 2]; 2]>,
@@ -10,32 +10,16 @@ pub(super) struct PreparedHatch {
 }
 
 impl PreparedHatch {
-    pub(super) fn new(
+    pub(super) fn for_polygon(
         polygon: &Polygon<f64>,
-        rows: &HatchRows,
         axis: HatchAxis,
         cancel: &AtomicBool,
-    ) -> Result<Option<Self>, ManufacturingError> {
-        Self::for_queries(polygon, rows.count, axis, cancel)
-    }
-
-    pub(super) fn for_queries(
-        polygon: &Polygon<f64>,
-        queries: usize,
-        axis: HatchAxis,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Self>, ManufacturingError> {
+    ) -> Result<Self, ManufacturingError> {
         check_cancel(cancel)?;
         let edge_count = std::iter::once(polygon.exterior())
             .chain(polygon.interiors())
             .map(|ring| ring.0.len().saturating_sub(1))
             .sum::<usize>();
-        if edge_count == 0
-            || edge_count > MAX_BATCH_ITEMS
-            || queries.min(256).saturating_mul(edge_count) < MIN_BATCH_PAIRS
-        {
-            return Ok(None);
-        }
         let mut edges = Vec::new();
         let mut ranges = Vec::new();
         edges
@@ -65,11 +49,11 @@ impl PreparedHatch {
         if edges.len() != edge_count {
             return Err(unsupported("compute hatch edge inventory mismatch"));
         }
-        Ok(Some(Self { edges, ranges }))
+        Ok(Self { edges, ranges })
     }
 
-    pub(super) fn tile_rows(&self) -> usize {
-        (MAX_MASK_WORDS / self.edges.len().div_ceil(32)).clamp(1, 256)
+    pub(super) fn ranges(&self) -> &[[f64; 2]] {
+        &self.ranges
     }
 
     pub(super) fn mask(
@@ -78,7 +62,7 @@ impl PreparedHatch {
         count: usize,
         rows: &HatchRows,
         cancel: &AtomicBool,
-    ) -> Result<Option<MaskRows>, ManufacturingError> {
+    ) -> Result<MaskRows, ManufacturingError> {
         let mut coordinates = Vec::new();
         coordinates
             .try_reserve_exact(count)
@@ -94,7 +78,7 @@ impl PreparedHatch {
         &self,
         coordinates: &[f64],
         cancel: &AtomicBool,
-    ) -> Result<Option<MaskRows>, ManufacturingError> {
+    ) -> Result<MaskRows, ManufacturingError> {
         spiling_compute::row_crossings(&self.ranges, coordinates, cancel)
             .map_err(crate::compute_error)
     }
@@ -163,13 +147,8 @@ mod tests {
             edges: 512,
         };
         for axis in [HatchAxis::X, HatchAxis::Y] {
-            let prepared = PreparedHatch::new(&polygon, &rows, axis, &cancel)
-                .unwrap()
-                .unwrap();
-            let mask = prepared
-                .mask(0, rows.count, &rows, &cancel)
-                .unwrap()
-                .unwrap();
+            let prepared = PreparedHatch::for_polygon(&polygon, axis, &cancel).unwrap();
+            let mask = prepared.mask(0, rows.count, &rows, &cancel).unwrap();
             for row in 0..rows.count {
                 let coordinate = rows.start + row as f64 * rows.spacing;
                 let mut scalar = Vec::new();
@@ -235,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn small_hatch_keeps_allocation_free_preparation_and_cancellation_refuses() {
+    fn small_hatch_runs_on_the_kernel_and_cancellation_refuses() {
         let polygon = Polygon::new(
             LineString::from(vec![
                 (0.0, 0.0),
@@ -252,16 +231,19 @@ mod tests {
             spacing: 1.0,
             edges: 4,
         };
-        assert!(
-            PreparedHatch::new(&polygon, &rows, HatchAxis::X, &AtomicBool::new(false))
-                .unwrap()
-                .is_none()
-        );
-        let rows = HatchRows {
-            count: 2048,
-            ..rows
-        };
-        let failure = PreparedHatch::new(&polygon, &rows, HatchAxis::X, &AtomicBool::new(true))
+        let cancel = AtomicBool::new(false);
+        let prepared = PreparedHatch::for_polygon(&polygon, HatchAxis::X, &cancel).unwrap();
+        let mask = prepared.mask(0, rows.count, &rows, &cancel).unwrap();
+        for row in 0..rows.count {
+            let coordinate = rows.start + row as f64 * rows.spacing;
+            let (mut scalar, mut actual) = (Vec::new(), Vec::new());
+            row_intersections(&polygon, coordinate, HatchAxis::X, &mut scalar, &cancel).unwrap();
+            prepared
+                .intersections(&mask, row, coordinate, &mut actual, &cancel)
+                .unwrap();
+            assert_eq!(scalar, actual);
+        }
+        let failure = PreparedHatch::for_polygon(&polygon, HatchAxis::X, &AtomicBool::new(true))
             .err()
             .unwrap();
         assert_eq!(failure.code, ManufacturingErrorCode::Cancelled);
@@ -353,11 +335,6 @@ mod tests {
                 )
                 .unwrap();
             }
-            assert!(
-                PreparedHatch::for_queries(&fill.0[0], required.len(), axis, &cancel)
-                    .unwrap()
-                    .is_some()
-            );
             let mut actual_segments = 0;
             let actual = bridge_rows(
                 &fill,
