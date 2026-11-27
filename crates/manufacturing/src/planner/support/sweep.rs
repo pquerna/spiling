@@ -20,7 +20,7 @@
 //! only at the output, inside the kept cells. Each layer's occupancy, void
 //! and nominal clearance is built once and shared by every demand.
 
-use super::grid::{Bits, CellFrame, Escape, Raster, SUPPORT_CELL_MM};
+use super::grid::{Bits, CapsuleInput, CellFrame, Escape, Raster, SUPPORT_CELL_MM};
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -844,7 +844,6 @@ impl Sweep<'_> {
         for layer in &layers[..=max_top] {
             slabs.push(bead_slab(layer)?);
         }
-        let working_set = crate::working_set::current();
         const CHUNK: usize = 32;
         let mut next = Some(max_top);
         while let Some(hi) = next {
@@ -864,10 +863,10 @@ impl Sweep<'_> {
             )?;
             down_load += t0.elapsed();
             // Each piece is rasterized once, in the batch of the layer where
-            // the carry first meets it; batches build in parallel.
+            // the carry first meets it; the chunk's batches are one raster
+            // stage.
             let t0 = std::time::Instant::now();
             let mut fresh: Vec<Option<Bits>> = {
-                use rayon::prelude::*;
                 let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); hi - lo + 1];
                 for piece in window.iter().flat_map(|(_, pieces)| pieces) {
                     if let Some(first) = piece.first
@@ -878,19 +877,7 @@ impl Sweep<'_> {
                         batches[first - lo].push(&piece.polygon);
                     }
                 }
-                let raster = &raster;
-                let built: Vec<Result<Option<Bits>, ManufacturingError>> = batches
-                    .par_iter()
-                    .map(|batch| {
-                        crate::working_set::scope(working_set, || {
-                            if batch.is_empty() {
-                                return Ok(None);
-                            }
-                            raster.outward_parallel(batch, distance).map(Some)
-                        })
-                    })
-                    .collect();
-                built.into_iter().collect::<Result<_, _>>()?
+                raster.outward_groups(&batches, distance)?
             };
             for bits in fresh.iter().flatten() {
                 hold(bits)?;
@@ -1259,24 +1246,16 @@ impl Sweep<'_> {
                         }
                     }
                 }
-                let built = {
-                    use rayon::prelude::*;
-                    let builder = NominalBuilder {
-                        layers: self.layers,
-                        sections: self.sections,
-                        nominal: self.nominal,
-                        distance,
-                        owned_bytes: self.owned_bytes,
-                        raster: &raster,
-                    };
-                    let working_set = crate::working_set::current();
-                    wanted
-                        .par_iter()
-                        .map(|&at| crate::working_set::scope(working_set, || builder.build(at)))
-                        .collect::<Vec<_>>()
-                };
-                for (&at, result) in wanted.iter().zip(built) {
-                    let (bits, record, spent) = result?;
+                let built = NominalBuilder {
+                    layers: self.layers,
+                    sections: self.sections,
+                    nominal: self.nominal,
+                    distance,
+                    owned_bytes: self.owned_bytes,
+                    raster: &raster,
+                }
+                .build_all(&wanted)?;
+                for (&at, (bits, record, spent)) in wanted.iter().zip(built) {
                     charge_owned_work(work, self.foreign_work, spent, cancel)?;
                     hold(&bits)?;
                     prebuilt[at] = Some((bits, record));
@@ -1547,25 +1526,32 @@ impl Sweep<'_> {
         ledges.extend(self.landings.iter().map(|landing| &landing.material));
         // A root proposes on every layer of its separation band, so its
         // landing cells are built once: its inward ledge over its object
-        // layer's ordinary road footprint.
-        let built: Vec<Result<Option<Bits>, ManufacturingError>> = self
+        // layer's ordinary road footprint. Every root's ledge is one raster
+        // stage, its roads build in parallel, and every landing is another.
+        let empty: &[Polygon<f64>] = &[];
+        let ledge_groups: Vec<Vec<&Polygon<f64>>> = self
+            .roots
+            .iter()
+            .map(|root| match *root {
+                Root::Part { landing, .. } => ledges[landing].0.iter().collect(),
+                _ => empty.iter().collect(),
+            })
+            .collect();
+        let root_ledges = raster.inward_groups(&ledge_groups)?;
+        drop(ledge_groups);
+        let roads: Vec<Result<Option<MultiPolygon<f64>>, ManufacturingError>> = self
             .roots
             .par_iter()
-            .map(|root| {
+            .zip(&root_ledges)
+            .map(|(root, ledge)| {
                 crate::working_set::scope(working_set, || {
-                    let Root::Part {
-                        object_layer,
-                        landing,
-                        ..
-                    } = *root
-                    else {
+                    let Root::Part { object_layer, .. } = *root else {
                         return Ok(None);
                     };
-                    let ledge = raster.inward(&ledges[landing].0)?;
                     if ledge.is_empty() {
                         return Ok(None);
                     }
-                    let roads = established::proposal_geometry(
+                    established::proposal_geometry(
                         raster,
                         layers[object_layer]
                             .paths
@@ -1573,17 +1559,27 @@ impl Sweep<'_> {
                             .filter(|path| established::ordinary(path)),
                         radius,
                         ledge.bytes(),
-                    )?;
-                    let cells = raster.landing(&ledge, &roads.0)?;
-                    Ok((!cells.is_empty()).then_some(cells))
+                    )
+                    .map(Some)
                 })
             })
             .collect();
+        let roads = roads.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let (landing_ledges, landing_roads): (Vec<&Bits>, Vec<Vec<&Polygon<f64>>>) = root_ledges
+            .iter()
+            .zip(&roads)
+            .filter_map(|(ledge, roads)| Some((ledge, roads.as_ref()?.0.iter().collect())))
+            .unzip();
+        let mut landed = raster
+            .landing_groups(&landing_ledges, &landing_roads)?
+            .into_iter();
+        drop(landing_roads);
+        drop(root_ledges);
         let mut cells = Vec::new();
-        reserve_owned(&mut cells, built.len(), self.owned_bytes)?;
+        reserve_owned(&mut cells, roads.len(), self.owned_bytes)?;
         let mut cell_bytes = 0usize;
-        for root_cells in built {
-            let root_cells = root_cells?;
+        for roads in roads {
+            let root_cells = roads.and_then(|_| landed.next().filter(|cells| !cells.is_empty()));
             cell_bytes = cell_bytes.saturating_add(root_cells.as_ref().map_or(0, Bits::bytes));
             (raster.admit)(cell_bytes)?;
             cells.push(root_cells);
@@ -2136,50 +2132,83 @@ struct NominalBuilder<'r, 'a> {
 }
 
 impl NominalBuilder<'_, '_> {
+    #[cfg(test)]
     fn build(&self, at: usize) -> Result<(Bits, NominalRecord, usize), ManufacturingError> {
-        let raster = self.raster;
-        let cancel = raster.cancel;
+        let mut built = self.build_all(&[at])?;
+        built.pop().ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "support nominal scope build lost its scope",
+            )
+        })
+    }
+
+    /// Every wanted scope's clearance grid, record and work: bead capsules
+    /// gather in parallel per scope and rasterize as one stage.
+    fn build_all(
+        &self,
+        wanted: &[usize],
+    ) -> Result<Vec<(Bits, NominalRecord, usize)>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let gathered: Vec<Result<_, ManufacturingError>> = wanted
+            .par_iter()
+            .map(|&at| crate::working_set::scope(working_set, || self.beads(at)))
+            .collect();
+        let gathered = gathered.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let batches: Vec<&[CapsuleInput]> = gathered
+            .iter()
+            .map(|(capsules, _, _)| capsules.as_slice())
+            .collect();
+        let grids = self.raster.capsule_groups(&batches)?;
+        drop(batches);
+        Ok(gathered
+            .into_iter()
+            .zip(grids)
+            .map(|((_, record, work), bits)| (bits, record, work))
+            .collect())
+    }
+
+    /// One scope's bead capsules, its record and the work spent. The
+    /// clearance is what the scope deposits: its actual bead capsules, not
+    /// its section material, which can hold unprintable slivers the walls
+    /// omit.
+    fn beads(
+        &self,
+        at: usize,
+    ) -> Result<(Vec<CapsuleInput>, NominalRecord, usize), ManufacturingError> {
+        let cancel = self.raster.cancel;
         let scope = &self.nominal[at];
         let section = &self.sections[scope.index];
-        // The clearance is what the scope deposits: its actual bead
-        // capsules, not its section material, which can hold unprintable
-        // slivers the walls omit. Capsules are unioned in bounded chunks.
-        const CHUNK: usize = 4096;
-        let mut bits = Bits::default();
         let mut digest = beads::BeadDigest::default();
         let mut work = 0;
         let objects = self
             .layers
             .get(section.start as usize..(section.end as usize).min(self.layers.len()))
             .unwrap_or(&[]);
-        let mut chunk = Vec::new();
-        reserve_owned(&mut chunk, CHUNK, self.owned_bytes)?;
-        let mut flush = |chunk: &mut Vec<([f64; 2], [f64; 2], f64)>| {
-            let beads = raster.capsules(chunk.drain(..))?;
-            bits = raster.union(&bits, &beads)?;
-            Ok::<(), ManufacturingError>(())
-        };
+        let mut capsules = Vec::new();
         beads::visit_object_beads(
             objects.iter().flat_map(|layer| &layer.paths),
             &mut work,
             cancel,
             |bead| {
                 digest.add(&bead);
-                chunk.push((bead.a, bead.b, (bead.half + self.distance).next_up()));
-                if chunk.len() == CHUNK {
-                    flush(&mut chunk)?;
-                }
+                reserve_owned(&mut capsules, 1, self.owned_bytes)?;
+                capsules.push(CapsuleInput {
+                    a: bead.a,
+                    b: bead.b,
+                    radius: (bead.half + self.distance).next_up(),
+                });
                 Ok(())
             },
         )?;
-        flush(&mut chunk)?;
         let record = NominalRecord {
             section: scope.index,
             floor: scope.floor,
             ceiling: scope.ceiling,
             beads: digest,
         };
-        Ok((bits, record, work))
+        Ok((capsules, record, work))
     }
 }
 

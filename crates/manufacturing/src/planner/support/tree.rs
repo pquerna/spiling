@@ -130,8 +130,8 @@ impl Guide {
                 _ => runs.push((key, polygons, l + 1)),
             }
         }
-        let build_field = |polygons: &[&'p Polygon<f64>]| -> Result<Field, ManufacturingError> {
-            let occupied = raster.outward(polygons.iter().copied(), 0.0)?;
+        let build_field = |occupied: Option<Bits>| -> Result<Field, ManufacturingError> {
+            let occupied = occupied.unwrap_or_default();
             let mut bits = vec![0u64; words];
             occupied.for_each_cell(|c, r| {
                 let i = r * cols + c;
@@ -160,10 +160,16 @@ impl Guide {
                     let upto = (next_run + CHUNK).min(runs.len());
                     admit(held.saturating_add((upto - next_run) * (cells + words * 8)))?;
                     let working_set = crate::working_set::current();
-                    let built: Vec<Result<Field, ManufacturingError>> = runs[next_run..upto]
-                        .par_iter()
-                        .map(|(_, polygons, _)| {
-                            crate::working_set::scope(working_set, || build_field(polygons))
+                    // The chunk's occupancy rasters are one kernel batch.
+                    let groups: Vec<&[&'p Polygon<f64>]> = runs[next_run..upto]
+                        .iter()
+                        .map(|(_, polygons, _)| polygons.as_slice())
+                        .collect();
+                    let occupied = raster.outward_groups(&groups, 0.0)?;
+                    let built: Vec<Result<Field, ManufacturingError>> = occupied
+                        .into_par_iter()
+                        .map(|occupied| {
+                            crate::working_set::scope(working_set, || build_field(occupied))
                         })
                         .collect();
                     for field in built {

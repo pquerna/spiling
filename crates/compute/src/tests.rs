@@ -102,3 +102,28 @@ fn declines_cancellation_and_invalid_inputs_are_distinct() {
         Err(ComputeError::Cancelled)
     );
 }
+
+#[test]
+fn capsule_masks_match_the_exact_reference_on_the_cpu() {
+    crate::configure(crate::ComputeSettings {
+        default_backend: crate::ComputeBackend::Cpu,
+        fea_backend: None,
+    })
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let (capsules, rows) = crate::capsule_cases::capsule_cases(7, 300);
+    let columns = 300;
+    // Uneven groups, an empty one among them.
+    let group_ends = [0, 50, 50, 121, 300];
+    let masks = crate::capsule_masks(&capsules, &rows, &group_ends, 128, columns, &cancel).unwrap();
+    let set = crate::capsule_cases::assert_masks_match_reference(
+        &capsules,
+        &rows,
+        &group_ends,
+        &masks,
+        128,
+        columns,
+    );
+    assert!(set > 1_000);
+    assert_eq!(masks[0], crate::CellMask::default());
+}

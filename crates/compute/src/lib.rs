@@ -3,6 +3,8 @@
 
 //! Bounded session-owned data-parallel kernels whose results are identical on every backend.
 
+#[doc(hidden)]
+pub mod capsule_cases;
 mod kernels;
 mod runtime;
 
@@ -192,6 +194,152 @@ pub fn box_overlaps(
         return Ok(None);
     };
     runtime::execute_boxes(shape, boxes, queries, cancel)
+}
+
+/// Largest capsule coordinate or radius, in ticks: keeps every product the
+/// exact capsule test forms inside `i64`.
+pub const MAX_CAPSULE_TICKS: i64 = 1 << 30;
+/// Longest capsule segment, in ticks, the exact test admits.
+pub const MAX_CAPSULE_SEGMENT_TICKS: i64 = 1 << 12;
+/// Largest capsule radius, in ticks, the exact test admits.
+pub const MAX_CAPSULE_RADIUS_TICKS: i64 = 1 << 17;
+
+/// One group's cells as a dense row-major window of 64-cell words: rows
+/// `row0..row0 + rows`, word columns `word0..word0 + width`; bit `b` of word
+/// `w` is column `64 w + b`. An empty group has an empty window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CellMask {
+    pub row0: u32,
+    pub rows: u32,
+    pub word0: u32,
+    pub width: u32,
+    pub words: Vec<u64>,
+}
+
+/// Every cell whose closed square meets a closed capsule `[ax, ay, bx, by,
+/// radius]` (integer ticks, `cell` ticks per grid cell, columns
+/// `0..columns`), per group. Capsule `i` reaches `rows[i][1]` rows from
+/// `rows[i][0]`; group `g` holds capsules `group_ends[g - 1]..group_ends[g]`.
+/// Exact integer decisions: identical on every backend. Any batch size runs;
+/// large batches are split into bounded segments of whole groups.
+pub fn capsule_masks(
+    capsules: &[[i64; 5]],
+    rows: &[[u32; 2]],
+    group_ends: &[usize],
+    cell: i64,
+    columns: i64,
+    cancel: &AtomicBool,
+) -> Result<Vec<CellMask>, ComputeError> {
+    check_cancel(cancel)?;
+    if !(1..=1 << 16).contains(&cell) || !(1..=i64::from(i32::MAX)).contains(&columns) {
+        return Err(ComputeError::InvalidInput("capsule grid shape"));
+    }
+    if rows.len() != capsules.len()
+        || group_ends.windows(2).any(|pair| pair[0] > pair[1])
+        || group_ends.last().is_some_and(|&end| end != capsules.len())
+        || (group_ends.is_empty() && !capsules.is_empty())
+    {
+        return Err(ComputeError::InvalidInput("capsule groups"));
+    }
+    // Each group's window holds every column and row its capsules can
+    // reach, by the kernel's own bounds.
+    let mut windows = Vec::new();
+    windows
+        .try_reserve_exact(group_ends.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    let mut first = 0usize;
+    for &end in group_ends {
+        let mut bounds: Option<[i64; 4]> = None;
+        for (index, (&[ax, ay, bx, by, radius], &[row, count])) in capsules[first..end]
+            .iter()
+            .zip(&rows[first..end])
+            .enumerate()
+        {
+            if index % 1_024 == 0 {
+                check_cancel(cancel)?;
+            }
+            if [ax, ay, bx, by].iter().any(|v| v.abs() > MAX_CAPSULE_TICKS)
+                || !(0..=MAX_CAPSULE_RADIUS_TICKS).contains(&radius)
+                || (bx - ax).abs().max((by - ay).abs()) > MAX_CAPSULE_SEGMENT_TICKS
+            {
+                return Err(ComputeError::InvalidInput(
+                    "capsule outside the exact range",
+                ));
+            }
+            if row.checked_add(count).is_none() {
+                return Err(ComputeError::InvalidInput("capsule row range"));
+            }
+            if count == 0 {
+                continue;
+            }
+            let first_column = ((ax.min(bx) - radius - 1).max(0) / cell).min(columns - 1);
+            let last_column = ((ax.max(bx) + radius).max(0) / cell).min(columns - 1);
+            let (row0, row1) = (i64::from(row), i64::from(row) + i64::from(count) - 1);
+            bounds = Some(match bounds {
+                None => [row0, row1, first_column, last_column],
+                Some([r0, r1, c0, c1]) => [
+                    r0.min(row0),
+                    r1.max(row1),
+                    c0.min(first_column),
+                    c1.max(last_column),
+                ],
+            });
+        }
+        windows.push(bounds.map_or([0; 4], |[r0, r1, c0, c1]| {
+            [
+                r0 as u32,
+                (r1 - r0 + 1) as u32,
+                (c0 / 64) as u32,
+                (c1 / 64 - c0 / 64 + 1) as u32,
+            ]
+        }));
+        first = end;
+    }
+    runtime::execute_capsule_masks(capsules, rows, group_ends, &windows, cell, columns, cancel)
+}
+
+/// The exact capsule-row answer computed on the host, for reference checks.
+pub fn capsule_rows_reference(capsule: [i64; 5], row: u32, cell: i64, columns: i64) -> [i32; 2] {
+    let [ax, ay, bx, by, radius] = capsule;
+    let r2 = radius * radius;
+    let gap = |value: i64, low: i64, high: i64| (low - value).max(value - high).max(0);
+    let within = |px: i64, py: i64| {
+        let (dx, dy, wx, wy) = (bx - ax, by - ay, px - ax, py - ay);
+        let along = wx * dx + wy * dy;
+        let length2 = dx * dx + dy * dy;
+        if along <= 0 {
+            wx * wx + wy * wy <= r2
+        } else if along >= length2 {
+            (px - bx).pow(2) + (py - by).pow(2) <= r2
+        } else {
+            let cross = dx * wy - dy * wx;
+            cross * cross <= r2 * length2
+        }
+    };
+    let y0 = i64::from(row) * cell;
+    let y1 = y0 + cell;
+    let meets = |column: i64| {
+        let (x0, x1) = (column * cell, column * cell + cell);
+        if gap(ax, x0, x1).pow(2) + gap(ay, y0, y1).pow(2) <= r2
+            || gap(bx, x0, x1).pow(2) + gap(by, y0, y1).pow(2) <= r2
+        {
+            return true;
+        }
+        if ax.max(bx) >= x0 && ax.min(bx) <= x1 && ay.max(by) >= y0 && ay.min(by) <= y1 {
+            let (dx, dy) = (bx - ax, by - ay);
+            let sides = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+                .map(|(x, y)| dx * (y - ay) - dy * (x - ax));
+            if !(sides.iter().all(|s| *s > 0) || sides.iter().all(|s| *s < 0)) {
+                return true;
+            }
+        }
+        within(x0, y0) || within(x1, y0) || within(x0, y1) || within(x1, y1)
+    };
+    let hits: Vec<i64> = (0..columns).filter(|&column| meets(column)).collect();
+    match (hits.first(), hits.last()) {
+        (Some(&first), Some(&last)) => [first as i32, last as i32],
+        _ => [-1, -2],
+    }
 }
 
 fn validate_finite<'value>(

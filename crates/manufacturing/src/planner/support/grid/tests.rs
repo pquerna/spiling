@@ -7,6 +7,9 @@ use geo::{Area, Contains, Distance, Euclidean, Intersects, Line, Rect, coord};
 const CELL: f64 = 0.25;
 /// Cells this close to the decision boundary are not judged.
 const SLACK: f64 = 1.0e-6;
+/// The exact capsule raster's conservative margin: under a tick of radius
+/// rounding, a tick of growth and 0.71 tick of axis snap, per `CAPSULE_TICKS`.
+const CAPSULE_SLACK: f64 = 3.0 * CELL / super::CAPSULE_TICKS as f64;
 
 struct Lcg(u64);
 
@@ -162,14 +165,19 @@ fn outward_and_dilation_match_exact_closed_distance() {
             for row in 0..frame.rows {
                 for col in 0..frame.cols {
                     let exact = distance(&cell_rect(&frame, col, row), &polygon);
-                    if (exact - d).abs() < SLACK {
-                        continue;
+                    // Every cell within the distance is kept; the raster may
+                    // add only cells within its conservative margin of it.
+                    if exact < d - SLACK || exact == 0.0 {
+                        assert!(
+                            bits.contains(col, row),
+                            "cell ({col}, {row}) at {exact} for d {d} dropped"
+                        );
+                    } else if exact > d + CAPSULE_SLACK {
+                        assert!(
+                            !bits.contains(col, row),
+                            "cell ({col}, {row}) at {exact} for d {d} added"
+                        );
                     }
-                    assert_eq!(
-                        bits.contains(col, row),
-                        exact < d || exact == 0.0,
-                        "cell ({col}, {row}) at distance {exact} for d {d}"
-                    );
                 }
             }
         }
@@ -188,7 +196,7 @@ fn inward_keeps_exactly_the_cells_inside() {
                 let cell = cell_rect(&frame, col, row);
                 if bits.contains(col, row) {
                     assert!(polygon.contains(&cell), "cell ({col}, {row}) not inside");
-                } else if boundary_distance(&cell, &polygon) > SLACK {
+                } else if boundary_distance(&cell, &polygon) > CAPSULE_SLACK {
                     assert!(
                         !polygon.contains(&cell),
                         "cell ({col}, {row}) inside but dropped"
@@ -496,8 +504,12 @@ fn escaped_cells_are_exactly_the_outward_capsule_outside_the_kept_set() {
         outside.subtract(&kept);
         let (escape, work) = frame.escaped(&kept, a, b, radius).unwrap();
         assert!(work > 0);
-        assert_eq!(escape.map_or(0, |e| e.cells), outside.count());
-        if let Some(escape) = escape {
+        // The batch raster is the exact capsule grown by at most its margin.
+        let (grown, _) = frame.escaped(&kept, a, b, radius + CAPSULE_SLACK).unwrap();
+        let count = outside.count();
+        assert!(escape.as_ref().map_or(0, |e| e.cells) <= count);
+        assert!(count <= grown.as_ref().map_or(0, |e| e.cells));
+        if let Some(escape) = grown {
             for (index, inside) in brute(&frame, &outside).into_iter().enumerate() {
                 if inside {
                     let (col, row) = (index % frame.cols, index / frame.cols);

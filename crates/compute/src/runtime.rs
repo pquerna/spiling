@@ -371,6 +371,163 @@ fn execute_with(
     result
 }
 
+/// Jobs and output words one uploaded capsule segment holds at most, unless
+/// a single group is larger; larger batches run as several segments.
+const CAPSULE_SEGMENT_JOBS: usize = 1 << 24;
+const CAPSULE_SEGMENT_WORDS: usize = 1 << 24;
+
+/// Group windows are `[row0, rows, word0, width]` in 64-cell words.
+pub(crate) fn execute_capsule_masks(
+    capsules: &[[i64; 5]],
+    rows: &[[u32; 2]],
+    group_ends: &[usize],
+    windows: &[[u32; 4]],
+    cell: i64,
+    columns: i64,
+    cancel: &AtomicBool,
+) -> Result<Vec<crate::CellMask>, ComputeError> {
+    let mut masks = Vec::new();
+    masks
+        .try_reserve_exact(group_ends.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    let group_jobs = |group: usize| -> usize {
+        let first = if group == 0 { 0 } else { group_ends[group - 1] };
+        rows[first..group_ends[group]]
+            .iter()
+            .map(|&[_, count]| count as usize)
+            .sum()
+    };
+    let group_words = |group: usize| windows[group][1] as usize * windows[group][3] as usize * 2;
+    let context = context()?;
+    let mut failure = lock_dispatch(context, cancel)?;
+    if let Some(error) = failure.as_ref() {
+        return Err(error.clone());
+    }
+    let result = guarded(|| {
+        context.default.stream.enter(|| {
+            context.default.client.memory_dedicated_allocation((), |_| {
+                guarded(|| {
+                    let cpu = context.default.description.backend == ComputeBackend::Cpu;
+                    let mut group = 0usize;
+                    while group < group_ends.len() {
+                        check_cancel(cancel)?;
+                        // Whole groups, up to the segment's bounds.
+                        let first_group = group;
+                        let (mut jobs, mut words) = (0usize, 0usize);
+                        while group < group_ends.len()
+                            && (group == first_group
+                                || (jobs + group_jobs(group) <= CAPSULE_SEGMENT_JOBS
+                                    && words + group_words(group) <= CAPSULE_SEGMENT_WORDS))
+                        {
+                            jobs += group_jobs(group);
+                            words += group_words(group);
+                            group += 1;
+                        }
+                        let capsule_first = if first_group == 0 {
+                            0
+                        } else {
+                            group_ends[first_group - 1]
+                        };
+                        let capsule_end = group_ends[group - 1];
+                        let mut segment_windows = Vec::new();
+                        let mut capsule_windows = Vec::new();
+                        let mut starts = vec![0u32];
+                        let mut first_rows = Vec::new();
+                        let (mut base, mut total) = (0u32, 0u32);
+                        let mut previous = capsule_first;
+                        for (local, at) in (first_group..group).enumerate() {
+                            let [row0, rows_in, word0, width] = windows[at];
+                            segment_windows.extend_from_slice(&[
+                                base,
+                                row0,
+                                rows_in,
+                                word0 * 2,
+                                width * 2,
+                            ]);
+                            base = rows_in
+                                .checked_mul(width)
+                                .and_then(|cells| cells.checked_mul(2))
+                                .and_then(|cells| cells.checked_add(base))
+                                .ok_or(ComputeError::Allocation)?;
+                            for &[row, count] in &rows[previous..group_ends[at]] {
+                                if count == 0 {
+                                    continue;
+                                }
+                                total = total.checked_add(count).ok_or(ComputeError::Allocation)?;
+                                starts.push(total);
+                                first_rows.push(row);
+                                capsule_windows.push(local as u32);
+                            }
+                            previous = group_ends[at];
+                        }
+                        let output = if first_rows.is_empty() {
+                            Vec::new()
+                        } else {
+                            let kept: Vec<i64> = capsules[capsule_first..capsule_end]
+                                .iter()
+                                .zip(&rows[capsule_first..capsule_end])
+                                .filter(|(_, row)| row[1] > 0)
+                                .flat_map(|(capsule, _)| *capsule)
+                                .collect();
+                            kernels::capsule_masks_dispatch(
+                                &context.default.client,
+                                cpu,
+                                &kept,
+                                &starts,
+                                &first_rows,
+                                &capsule_windows,
+                                &segment_windows,
+                                words,
+                                cell,
+                                columns,
+                                cancel,
+                            )?
+                        };
+                        for (local, at) in (first_group..group).enumerate() {
+                            let [row0, rows_in, word0, width] = windows[at];
+                            let base = segment_windows[local * 5] as usize;
+                            let length = rows_in as usize * width as usize;
+                            let mut words = Vec::new();
+                            words
+                                .try_reserve_exact(length)
+                                .map_err(|_| ComputeError::Allocation)?;
+                            let window = output.get(base..base + length * 2).ok_or_else(|| {
+                                ComputeError::Execution(
+                                    "capsule readback is shorter than its windows".into(),
+                                )
+                            })?;
+                            words.extend(
+                                window
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
+                                    .map(|&[low, high]| u64::from(low) | u64::from(high) << 32),
+                            );
+                            masks.push(crate::CellMask {
+                                row0,
+                                rows: rows_in,
+                                word0,
+                                width,
+                                words,
+                            });
+                        }
+                    }
+                    Ok(())
+                })
+            })
+        })
+    });
+    let drained = drain(&context.default);
+    let result = match (result, drained) {
+        (_, Err(error)) => Err(error),
+        (result, Ok(())) => result.and_then(|()| check_cancel(cancel)),
+    };
+    if let Err(error @ ComputeError::Execution(_)) = &result {
+        *failure = Some(error.clone());
+    }
+    result.map(|()| masks)
+}
+
 fn encode_values<const FIELDS: usize>(
     values: &[[f64; FIELDS]],
     padded_columns: usize,

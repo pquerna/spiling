@@ -30,6 +30,8 @@ pub(super) const SUPPORT_CELL_MM: f64 = spiling_contracts::manufacturing::SUPPOR
 /// Absolute guard against floating rounding in raster arithmetic. Outward
 /// rasters widen by it and inward rasters lose it; it is far below a cell.
 const GUARD_MM: f64 = 1.0e-7;
+/// Integer ticks per support cell in the exact capsule raster.
+const CAPSULE_TICKS: i64 = 128;
 
 /// Cells of margin kept around the requested bounds.
 const MARGIN_CELLS: f64 = 2.0;
@@ -454,14 +456,11 @@ struct Span {
     to: u32,
 }
 
-impl Span {
-    /// A slot no cell fills.
-    const EMPTY: Self = Self {
-        row: u32::MAX,
-        from: 0,
-        to: 0,
-    };
-}
+/// One group's interior spans and edge capsules, before its kernel batch.
+type GroupInput = (Vec<Span>, Vec<CapsuleInput>);
+/// One group's capsules in kernel ticks and the rows `[first, count]` each
+/// can reach.
+type KernelPieces = (Vec<[i64; 5]>, Vec<[u32; 2]>);
 
 /// One capsule of a raster batch: segment `a`–`b` grown by `radius`.
 #[derive(Clone, Copy)]
@@ -628,33 +627,112 @@ impl Raster<'_> {
         self.dilated(polygons.into_iter().map(|polygon| (polygon, distance)))
     }
 
-    /// [`Self::outward`] over many polygons, rasterized in parallel chunks
-    /// and unioned in order. Set union is order-free, so the cells equal the
-    /// sequential raster.
+    /// [`Self::outward`] over many polygons in one kernel batch.
     pub(super) fn outward_parallel(
         &self,
         polygons: &[&Polygon<f64>],
         distance: f64,
     ) -> Result<Bits, ManufacturingError> {
+        let mut groups = self.outward_groups(std::slice::from_ref(&polygons), distance)?;
+        Ok(groups.pop().flatten().unwrap_or_default())
+    }
+
+    /// [`Self::outward`] of each group of polygons, `None` for an empty
+    /// group, in one raster stage.
+    pub(super) fn outward_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[G],
+        distance: f64,
+    ) -> Result<Vec<Option<Bits>>, ManufacturingError> {
         use rayon::prelude::*;
-        const CHUNK: usize = 64;
-        if polygons.len() <= CHUNK {
-            return self.outward(polygons.iter().copied(), distance);
-        }
         let working_set = crate::working_set::current();
-        let parts: Vec<Result<Bits, ManufacturingError>> = polygons
-            .par_chunks(CHUNK)
-            .map(|chunk| {
+        let built: Vec<Result<Option<Bits>, ManufacturingError>> = self
+            .raster_groups(groups, distance)?
+            .into_par_iter()
+            .zip(groups)
+            .map(|((inside, boundary), group)| {
                 crate::working_set::scope(working_set, || {
-                    self.outward(chunk.iter().copied(), distance)
+                    if group.as_ref().is_empty() {
+                        return Ok(None);
+                    }
+                    self.with_spans(boundary, &inside).map(Some)
                 })
             })
             .collect();
-        let mut union = Bits::default();
-        for part in parts {
-            union = self.union(&union, &part?)?;
+        built.into_iter().collect()
+    }
+
+    /// Each group's interior spans (cells whose centre is inside one of its
+    /// polygons) and the cells of its edge capsules of `radius`, as one
+    /// raster stage: interiors build in parallel per group and every
+    /// group's capsules run as one kernel batch, so the stage costs one
+    /// dispatch however many groups it has.
+    fn raster_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[G],
+        radius: f64,
+    ) -> Result<Vec<(Vec<Span>, Bits)>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let prepared: Vec<Result<GroupInput, ManufacturingError>> = groups
+            .par_iter()
+            .map(|group| {
+                crate::working_set::scope(working_set, || {
+                    let mut spans = Vec::new();
+                    let mut crossings = Vec::new();
+                    let mut batch = Vec::new();
+                    for polygon in group.as_ref() {
+                        check_cancel(self.cancel)?;
+                        self.interior(polygon, &mut crossings, &mut spans)?;
+                        self.reserve(&mut batch, polygon.exterior().0.len())?;
+                        for [a, b] in edges(polygon) {
+                            self.reserve(&mut batch, 1)?;
+                            batch.push(CapsuleInput { a, b, radius });
+                        }
+                    }
+                    Ok((spans, batch))
+                })
+            })
+            .collect();
+        let prepared = prepared.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let batches: Vec<&[CapsuleInput]> =
+            prepared.iter().map(|(_, batch)| batch.as_slice()).collect();
+        let boundaries = self.capsule_groups(&batches)?;
+        drop(batches);
+        Ok(prepared
+            .into_iter()
+            .map(|(inside, _)| inside)
+            .zip(boundaries)
+            .collect())
+    }
+
+    /// `bits` with every span's cells added: in place when they fit its
+    /// window, else as a union.
+    fn with_spans(&self, mut bits: Bits, spans: &[Span]) -> Result<Bits, ManufacturingError> {
+        let fits = |span: &Span| {
+            let row = span.row as usize;
+            span.from >= span.to
+                || (row >= bits.row0
+                    && row < bits.row0 + bits.rows()
+                    && span.from as usize >= bits.word0 * 64
+                    && (span.to as usize) <= (bits.word0 + bits.width) * 64)
+        };
+        if bits.is_empty() || !spans.iter().all(fits) {
+            let added = self.bits_of(spans)?;
+            return self.union(&bits, &added);
         }
-        Ok(union)
+        let origin = bits.word0 * 64;
+        for span in spans {
+            let row = span.row as usize - bits.row0;
+            let width = bits.width;
+            set_range(
+                &mut bits.data[row * width..(row + 1) * width],
+                span.from as usize - origin,
+                span.to as usize - origin,
+            );
+        }
+        self.charge(spans.len());
+        Ok(bits)
     }
 
     /// [`Self::outward`] with a distance of its own for each polygon.
@@ -678,9 +756,9 @@ impl Raster<'_> {
                 });
             }
         }
-        self.capsule_spans(&batch, &mut spans)?;
+        let boundary = self.capsule_group(&batch)?;
         drop(batch);
-        self.bits_of(&spans)
+        self.with_spans(boundary, &spans)
     }
 
     /// Every cell within `radius` of a segment: union of closed capsules.
@@ -694,10 +772,12 @@ impl Raster<'_> {
             self.reserve(&mut batch, 1)?;
             batch.push(CapsuleInput { a, b, radius });
         }
-        let mut spans = Vec::new();
-        self.capsule_spans(&batch, &mut spans)?;
-        drop(batch);
-        self.bits_of(&spans)
+        self.capsule_group(&batch)
+    }
+
+    /// [`Self::capsule_groups`] of one group.
+    fn capsule_group(&self, capsules: &[CapsuleInput]) -> Result<Bits, ManufacturingError> {
+        Ok(self.capsule_groups(&[capsules])?.pop().unwrap_or_default())
     }
 
     /// Cells entirely inside the polygons' union is not attempted: each kept
@@ -706,21 +786,77 @@ impl Raster<'_> {
         &self,
         polygons: impl IntoIterator<Item = &'p Polygon<f64>>,
     ) -> Result<Bits, ManufacturingError> {
-        let (mut inside, boundary) = self.polygon_cells(polygons)?;
-        inside.subtract(&boundary);
-        Ok(inside)
+        let polygons: Vec<&Polygon<f64>> = polygons.into_iter().collect();
+        Ok(self.inward_groups(&[polygons])?.pop().unwrap_or_default())
+    }
+
+    /// [`Self::inward`] of each group, in one raster stage.
+    pub(super) fn inward_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[G],
+    ) -> Result<Vec<Bits>, ManufacturingError> {
+        Ok(self
+            .polygon_cell_groups(groups)?
+            .into_iter()
+            .map(|(mut inside, boundary)| {
+                inside.subtract(&boundary);
+                inside
+            })
+            .collect())
     }
 
     /// Landing proposals keep inward road cells and may recover a one-cell
     /// donor seam between opposing inward neighbours. The recovered cell
     /// must be wholly in the ledge and its centre must be inside the road
     /// footprint. Neither proposal grants contact to the emitted stroke.
+    #[cfg(test)]
     pub(super) fn landing<'p>(
         &self,
         ledge: &Bits,
         roads: impl IntoIterator<Item = &'p Polygon<f64>>,
     ) -> Result<Bits, ManufacturingError> {
-        let (inside, boundary) = self.polygon_cells(roads)?;
+        let roads: Vec<&Polygon<f64>> = roads.into_iter().collect();
+        let [(inside, boundary)] =
+            <[(Bits, Bits); 1]>::try_from(self.polygon_cell_groups(&[roads])?).map_err(|_| {
+                error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "support landing raster lost its group",
+                )
+            })?;
+        self.landing_cells(ledge, inside, boundary)
+    }
+
+    /// Landing proposals of each ledge over its roads, in one raster stage:
+    /// inward road cells, plus a one-cell donor seam between opposing inward
+    /// neighbours when the cell is wholly in the ledge and its centre is
+    /// inside the road footprint. Neither grants contact to the emitted
+    /// stroke.
+    pub(super) fn landing_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        ledges: &[&Bits],
+        roads: &[G],
+    ) -> Result<Vec<Bits>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let built: Vec<Result<Bits, ManufacturingError>> = self
+            .polygon_cell_groups(roads)?
+            .into_par_iter()
+            .zip(ledges)
+            .map(|((inside, boundary), ledge)| {
+                crate::working_set::scope(working_set, || {
+                    self.landing_cells(ledge, inside, boundary)
+                })
+            })
+            .collect();
+        built.into_iter().collect()
+    }
+
+    fn landing_cells(
+        &self,
+        ledge: &Bits,
+        inside: Bits,
+        boundary: Bits,
+    ) -> Result<Bits, ManufacturingError> {
         (self.admit)(
             ledge
                 .bytes()
@@ -810,27 +946,22 @@ impl Raster<'_> {
         Ok(closed)
     }
 
-    fn polygon_cells<'p>(
+    /// Each group's cells whose centre is inside one of its polygons, and
+    /// the cells meeting its edges, in one raster stage.
+    fn polygon_cell_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
         &self,
-        polygons: impl IntoIterator<Item = &'p Polygon<f64>>,
-    ) -> Result<(Bits, Bits), ManufacturingError> {
-        let mut inside = Vec::new();
-        let mut boundary = Vec::new();
-        let mut crossings = Vec::new();
-        let mut batch = Vec::new();
-        for polygon in polygons {
-            check_cancel(self.cancel)?;
-            self.interior(polygon, &mut crossings, &mut inside)?;
-            for [a, b] in edges(polygon) {
-                self.reserve(&mut batch, 1)?;
-                batch.push(CapsuleInput { a, b, radius: 0.0 });
-            }
-        }
-        self.capsule_spans(&batch, &mut boundary)?;
-        drop(batch);
-        let bits = self.bits_of(&inside)?;
-        drop(inside);
-        Ok((bits, self.bits_of(&boundary)?))
+        groups: &[G],
+    ) -> Result<Vec<(Bits, Bits)>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let built: Vec<Result<(Bits, Bits), ManufacturingError>> = self
+            .raster_groups(groups, 0.0)?
+            .into_par_iter()
+            .map(|(inside, boundary)| {
+                crate::working_set::scope(working_set, || Ok((self.bits_of(&inside)?, boundary)))
+            })
+            .collect();
+        built.into_iter().collect()
     }
 
     /// Cells whose centre lies inside one polygon (even-odd over its own
@@ -895,23 +1026,106 @@ impl Raster<'_> {
         Ok(())
     }
 
-    /// Every cell meeting the closed capsule of segment `ab` and `radius`.
-    /// Every cell within each capsule's radius of its segment, as row spans
-    /// appended to `spans`. The batch is one flat array: a row pass gives
-    /// each capsule its touched rows and an output offset, then every
-    /// (capsule, row) slot is filled independently, in parallel when the
-    /// batch is large, and empty slots are dropped. The cells equal the
-    /// per-capsule raster.
-    fn capsule_spans(
+    /// Every cell within each capsule's radius of its segment, per group,
+    /// decided by one exact integer kernel batch for all groups (identical
+    /// on every compute backend) that writes each group's cells directly.
+    /// Endpoints snap to [`CAPSULE_TICKS`] per cell; snapping moves the
+    /// capsule's axis (its ends and the split points of long segments) by at
+    /// most 0.71 tick, so the radius grows by one tick and cells can only be
+    /// added, never lost.
+    pub(super) fn capsule_groups(
+        &self,
+        groups: &[&[CapsuleInput]],
+    ) -> Result<Vec<Bits>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let prepared: Vec<Result<KernelPieces, ManufacturingError>> = groups
+            .par_iter()
+            .map(|capsules| {
+                crate::working_set::scope(working_set, || self.capsule_pieces(capsules))
+            })
+            .collect();
+        let prepared = prepared.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let count: usize = prepared.iter().map(|(pieces, _)| pieces.len()).sum();
+        let mut pieces = Vec::new();
+        let mut rows = Vec::new();
+        let mut ends = Vec::new();
+        self.reserve(&mut pieces, count)?;
+        self.reserve(&mut rows, count)?;
+        self.reserve(&mut ends, groups.len())?;
+        for (group_pieces, group_rows) in prepared {
+            pieces.extend_from_slice(&group_pieces);
+            rows.extend_from_slice(&group_rows);
+            ends.push(pieces.len());
+        }
+        check_cancel(self.cancel)?;
+        // Counted once per batch: a shared counter bumped for every capsule
+        // serializes parallel rasters on one cache line.
+        self.charge(rows.iter().map(|&[_, count]| count as usize).sum());
+        let masks = spiling_compute::capsule_masks(
+            &pieces,
+            &rows,
+            &ends,
+            CAPSULE_TICKS,
+            self.frame.cols as i64,
+            self.cancel,
+        )
+        .map_err(|failure| match failure {
+            spiling_compute::ComputeError::Cancelled => error(
+                ManufacturingErrorCode::Cancelled,
+                "support capsule raster cancelled",
+            ),
+            other => error(
+                ManufacturingErrorCode::NativeConditioningFailure,
+                format!("support capsule raster: {other}"),
+            ),
+        })?;
+        drop((pieces, rows));
+        let built: Vec<Result<Bits, ManufacturingError>> = masks
+            .into_par_iter()
+            .map(|mask| {
+                crate::working_set::scope(working_set, || {
+                    if mask.words.is_empty() {
+                        return Ok(Bits::default());
+                    }
+                    (self.admit)(mask.words.len().saturating_mul(8))?;
+                    let mut bits = Bits {
+                        row0: mask.row0 as usize,
+                        word0: mask.word0 as usize,
+                        width: mask.width as usize,
+                        data: mask.words,
+                    };
+                    bits.shrink();
+                    Ok(bits)
+                })
+            })
+            .collect();
+        built.into_iter().collect()
+    }
+
+    /// One group's capsules in kernel ticks, long segments split, each with
+    /// the frame rows `[first, count]` it can reach.
+    fn capsule_pieces(
         &self,
         capsules: &[CapsuleInput],
-        spans: &mut Vec<Span>,
-    ) -> Result<(), ManufacturingError> {
+    ) -> Result<KernelPieces, ManufacturingError> {
         let frame = &self.frame;
-        let mut ranges = Vec::new();
-        self.reserve(&mut ranges, capsules.len())?;
-        let mut total = 0usize;
-        for capsule in capsules {
+        let scale = CAPSULE_TICKS as f64 / frame.cell;
+        let ticks = |p: [f64; 2]| {
+            [
+                ((p[0] - frame.origin[0]) * scale).round() as i64,
+                ((p[1] - frame.origin[1]) * scale).round() as i64,
+            ]
+        };
+        let last_row = frame.rows as i64 - 1;
+        let mut pieces: Vec<[i64; 5]> = Vec::new();
+        let mut rows: Vec<[u32; 2]> = Vec::new();
+        self.reserve(&mut pieces, capsules.len())?;
+        self.reserve(&mut rows, capsules.len())?;
+        for (index, capsule) in capsules.iter().enumerate() {
+            if index % 1_024 == 0 {
+                check_cancel(self.cancel)?;
+            }
             let CapsuleInput { a, b, radius } = *capsule;
             if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius >= 0.0) {
                 return Err(error(
@@ -919,72 +1133,35 @@ impl Raster<'_> {
                     "support grid capsule has non-finite coordinates",
                 ));
             }
-            let range = frame.touching(1, a[1].min(b[1]) - radius, a[1].max(b[1]) + radius);
-            total += range.map_or(0, |(r0, r1)| r1 - r0 + 1);
-            ranges.push((total, range));
-        }
-        // Counted once per batch: a shared counter bumped for every capsule
-        // serializes parallel rasters on one cache line.
-        self.charge(total);
-        self.reserve(spans, total)?;
-        let start = spans.len();
-        spans.resize(start + total, Span::EMPTY);
-        let fill = |capsule: &CapsuleInput, (r0, _): (usize, usize), out: &mut [Span]| {
-            let shape = Capsule::new(capsule.a, capsule.b, capsule.radius);
-            for (offset, slot) in out.iter_mut().enumerate() {
-                let row = r0 + offset;
-                let band = [
-                    frame.y(row as f64) - GUARD_MM,
-                    frame.y(row as f64 + 1.0) + GUARD_MM,
-                ];
-                *slot = shape
-                    .band(band)
-                    .and_then(|(lo, hi)| frame.touching(0, lo, hi))
-                    .map_or(Span::EMPTY, |(c0, c1)| Span {
-                        row: row as u32,
-                        from: c0 as u32,
-                        to: c1 as u32 + 1,
-                    });
-            }
-        };
-        {
-            let mut rest = &mut spans[start..];
-            let mut jobs = Vec::new();
-            self.reserve(&mut jobs, capsules.len())?;
-            let mut previous = 0usize;
-            for (capsule, &(end, range)) in capsules.iter().zip(&ranges) {
-                let (head, tail) = rest.split_at_mut(end - previous);
-                rest = tail;
-                previous = end;
-                if let Some(range) = range {
-                    jobs.push((capsule, range, head));
+            let radius = (radius * scale).ceil() as i64 + 1;
+            let [ax, ay] = ticks(a);
+            let [bx, by] = ticks(b);
+            let span = (bx - ax).abs().max((by - ay).abs());
+            let parts = (span / spiling_compute::MAX_CAPSULE_SEGMENT_TICKS + 1).max(1);
+            let mut from = [ax, ay];
+            for part in 1..=parts {
+                let to = if part == parts {
+                    [bx, by]
+                } else {
+                    let t = part as f64 / parts as f64;
+                    ticks([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+                };
+                let low = (from[1].min(to[1]) - radius - 1)
+                    .div_euclid(CAPSULE_TICKS)
+                    .max(0);
+                let high = (from[1].max(to[1]) + radius)
+                    .div_euclid(CAPSULE_TICKS)
+                    .min(last_row);
+                if low <= high {
+                    self.reserve(&mut pieces, 1)?;
+                    self.reserve(&mut rows, 1)?;
+                    pieces.push([from[0], from[1], to[0], to[1], radius]);
+                    rows.push([low as u32, (high - low + 1) as u32]);
                 }
-            }
-            const PARALLEL_ROWS: usize = 1 << 14;
-            if total >= PARALLEL_ROWS {
-                use rayon::prelude::*;
-                let working_set = crate::working_set::current();
-                jobs.par_iter_mut()
-                    .with_min_len(64)
-                    .for_each(|(capsule, range, out)| {
-                        crate::working_set::scope(working_set, || fill(capsule, *range, out));
-                    });
-            } else {
-                for (capsule, range, out) in &mut jobs {
-                    fill(capsule, *range, out);
-                }
+                from = to;
             }
         }
-        check_cancel(self.cancel)?;
-        let mut kept = start;
-        for index in start..spans.len() {
-            if spans[index].row != u32::MAX {
-                spans[kept] = spans[index];
-                kept += 1;
-            }
-        }
-        spans.truncate(kept);
-        Ok(())
+        Ok((pieces, rows))
     }
 
     /// The cell lines (rows when `fixed` is 1, columns when 0) holding the
