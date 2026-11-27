@@ -180,9 +180,29 @@ pub struct ChunkWriter {
     limit: u64,
     stored: usize,
     spool: Option<Spool>,
+    /// Receives each sealed raw frame in order, for a concurrent reader.
+    tap: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
 }
 
 impl ChunkWriter {
+    /// A writer that also streams its raw content, frame by frame, to the
+    /// returned reader while it is written. At most `frames` frames wait
+    /// unread; the reader ends when the writer finishes or is dropped, and
+    /// a dropped reader leaves the writer unaffected.
+    pub fn tapped(limit: u64, frames: usize) -> (Self, FrameStream) {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(frames.max(1));
+        let mut writer = Self::new(limit);
+        writer.tap = Some(sender);
+        (
+            writer,
+            FrameStream {
+                frames: receiver,
+                frame: Vec::new(),
+                pos: 0,
+            },
+        )
+    }
+
     /// A writer refusing content longer than `limit` raw bytes.
     pub fn new(limit: u64) -> Self {
         Self {
@@ -194,6 +214,7 @@ impl ChunkWriter {
             limit,
             stored: 0,
             spool: None,
+            tap: None,
         }
     }
     /// Keep frame payloads in an anonymous, owner-lifetime temporary file.
@@ -219,6 +240,16 @@ impl ChunkWriter {
             return Ok(());
         }
         u32::try_from(self.pending.len()).map_err(|_| too_large())?;
+        // The stream digest covers whole frames in order: the same bytes in
+        // the same order as hashing each write, without a hasher call per
+        // small write.
+        self.hasher.update(&self.pending);
+        if let Some(tap) = &self.tap
+            && tap.send(self.pending.clone()).is_err()
+        {
+            // The reader stopped; the content itself is unaffected.
+            self.tap = None;
+        }
         self.sealing.try_reserve(1).map_err(io::Error::other)?;
         self.sealing.push(std::mem::take(&mut self.pending));
         if self.sealing.len() >= SEAL_BATCH {
@@ -297,7 +328,6 @@ impl Write for ChunkWriter {
             .checked_add(accepted as u64)
             .filter(|len| *len <= self.limit)
             .ok_or_else(too_large)?;
-        self.hasher.update(bytes);
         while !bytes.is_empty() {
             if self.pending.capacity() == 0 {
                 self.pending
@@ -316,6 +346,43 @@ impl Write for ChunkWriter {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// The raw content of a [`ChunkWriter::tapped`] writer, read while it is
+/// written. It ends when the writer finishes or is dropped.
+pub struct FrameStream {
+    frames: std::sync::mpsc::Receiver<Vec<u8>>,
+    frame: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for FrameStream {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let available = self.fill_buf()?;
+        let take = available.len().min(out.len());
+        out[..take].copy_from_slice(&available[..take]);
+        self.consume(take);
+        Ok(take)
+    }
+}
+
+impl BufRead for FrameStream {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        while self.pos == self.frame.len() {
+            match self.frames.recv() {
+                Ok(frame) => {
+                    self.frame = frame;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(&[]),
+            }
+        }
+        Ok(&self.frame[self.pos..])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.pos = (self.pos + amount).min(self.frame.len());
     }
 }
 
@@ -479,6 +546,49 @@ mod tests {
             reader.read_to_end(&mut restored).unwrap();
             assert_eq!(restored, raw);
         }
+    }
+
+    #[test]
+    fn a_tapped_stream_reads_the_content_while_it_is_written() {
+        let raw = noise(5 * FRAME_BYTES + 77);
+        let (mut writer, mut stream) = ChunkWriter::tapped(u64::MAX, 2);
+        let (source, streamed) = std::thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                for piece in raw.chunks(1_001) {
+                    writer.write_all(piece).unwrap();
+                }
+                writer.finish().unwrap()
+            });
+            let mut streamed = Vec::new();
+            stream.read_to_end(&mut streamed).unwrap();
+            (producer.join().unwrap(), streamed)
+        });
+        assert_eq!(streamed, raw);
+        assert_eq!(source.to_vec().unwrap(), raw);
+        // A reader that stops early leaves the writer's content whole.
+        let (mut writer, stream) = ChunkWriter::tapped(u64::MAX, 1);
+        drop(stream);
+        writer.write_all(&raw).unwrap();
+        assert_eq!(writer.finish().unwrap().to_vec().unwrap(), raw);
+    }
+
+    #[test]
+    fn token_sized_writes_digest_the_whole_stream() {
+        let raw = noise(2 * FRAME_BYTES + 333);
+        let mut writer = ChunkWriter::new(u64::MAX);
+        let mut at = 0;
+        for size in (1..=7).cycle() {
+            if at >= raw.len() {
+                break;
+            }
+            let end = (at + size).min(raw.len());
+            writer.write_all(&raw[at..end]).unwrap();
+            at = end;
+        }
+        let source = writer.finish().unwrap();
+        let digest: [u8; 32] = Sha256::digest(&raw).into();
+        assert_eq!(source.digest(), &digest);
+        assert_eq!(source.to_vec().unwrap(), raw);
     }
 
     #[test]

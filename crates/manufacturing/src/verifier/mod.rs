@@ -796,11 +796,122 @@ pub(crate) fn verify_actual(
 ) -> Result<VerificationReport, ManufacturingError> {
     cancelled(cancel)?;
     if program.len() > u64::from(MAX_MANUFACTURING_PROGRAM_BYTES) {
-        return Err(ManufacturingError::new(
-            ManufacturingErrorCode::ResourceLimit,
-            "emitted program exceeds manufacturing byte limit",
-        ));
+        return Err(program_too_large());
     }
+    let report = verify_reader(program.reader(), plan, intent, cancel, replay)?;
+    validate_selection(plan, program.digest(), &report)?;
+    Ok(report)
+}
+
+fn program_too_large() -> ManufacturingError {
+    ManufacturingError::new(
+        ManufacturingErrorCode::ResourceLimit,
+        "emitted program exceeds manufacturing byte limit",
+    )
+}
+
+/// [`verify_actual`] over program bytes read while they are emitted. The
+/// replay decodes the same bytes in the same order; it enforces its own
+/// byte limit as it reads. The caller checks [`validate_selection`] once
+/// the program's digest exists.
+pub(crate) fn verify_streamed(
+    program: impl BufRead + Send,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    replay: Option<ReplayTarget<'_>>,
+) -> Result<VerificationReport, ManufacturingError> {
+    cancelled(cancel)?;
+    let limit = u64::from(MAX_MANUFACTURING_PROGRAM_BYTES);
+    // One byte past the limit is read, so an oversized program refuses.
+    let mut capped = program.take(limit + 1);
+    let report = verify_reader(&mut capped, plan, intent, cancel, replay);
+    if capped.limit() == 0 {
+        return Err(program_too_large());
+    }
+    report
+}
+
+/// Parsed line batches the reader may run ahead of the replay.
+const PARSE_AHEAD_BATCHES: usize = 8;
+/// Lines per parsed batch.
+const PARSE_BATCH_LINES: usize = 2_048;
+
+/// One read program line: its text range and its pure, context-free decode.
+struct ParsedLine {
+    index: usize,
+    start: usize,
+    end: usize,
+    decoded: Result<Option<Decoded>, &'static str>,
+    ticks: [Option<i64>; 3],
+}
+
+/// Consecutive parsed lines; `failure` is the read error after them, if any.
+#[derive(Default)]
+struct LineBatch {
+    text: String,
+    lines: Vec<ParsedLine>,
+    failure: Option<ManufacturingError>,
+}
+
+/// Read and decode every program line in order, in batches. A decode
+/// depends only on the line and the program's fixed dialect flags.
+fn parse_ahead(
+    program: impl BufRead,
+    routed: bool,
+    with_ticks: bool,
+    sender: std::sync::mpsc::SyncSender<LineBatch>,
+) {
+    let mut lines = ProgramLines::new(program);
+    loop {
+        let mut batch = LineBatch::default();
+        let mut finished = false;
+        while batch.lines.len() < PARSE_BATCH_LINES {
+            match lines.next() {
+                Ok(Some((index, line))) => {
+                    let start = batch.text.len();
+                    batch.text.push_str(line);
+                    let mut ticks = [None; 3];
+                    let decoded = if with_ticks {
+                        decode_with_xyz6(line, routed, |axis, word| {
+                            ticks[axis] = Some(grid::xyz6_ticks(word)?);
+                            Ok(())
+                        })
+                    } else {
+                        decode(line, routed)
+                    };
+                    batch.lines.push(ParsedLine {
+                        index,
+                        start,
+                        end: batch.text.len(),
+                        decoded,
+                        ticks,
+                    });
+                }
+                Ok(None) => {
+                    finished = true;
+                    break;
+                }
+                Err(failure) => {
+                    batch.failure = Some(failure);
+                    finished = true;
+                    break;
+                }
+            }
+        }
+        if sender.send(batch).is_err() || finished {
+            return;
+        }
+    }
+}
+
+fn verify_reader(
+    program: impl BufRead + Send,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    replay: Option<ReplayTarget<'_>>,
+) -> Result<VerificationReport, ManufacturingError> {
     let ReplayPlanFacts {
         prime_exclusion,
         alternation,
@@ -926,876 +1037,911 @@ pub(crate) fn verify_actual(
     let mut previous_wall_edge = None;
 
     let mut vclock = crate::timing::Clock::new("verifier");
-    let mut lines = ProgramLines::new(program.reader());
-    'lines: while let Some((line_index, line)) = lines.next()? {
-        cancelled(cancel)?;
-        if max_line.is_some_and(|max| line.len() > max) {
-            return Err(failed(format!(
-                "program line {} exceeds the firmware command buffer",
-                line_index + 1
-            )));
-        }
-        if let Some(markers) = bambu.as_mut()
-            && markers.accept(line, line_index + 1)?
-        {
-            continue;
-        }
-        // Declared lifecycle text (dialect commands, opaque block lines) is
-        // matched exactly rather than decoded.
-        if let Some(lc) = lifecycle.as_mut()
-            && setup_index == setup_len
-        {
-            let item = if lc.in_start() {
-                lc.next_start()
-            } else if expected.peek().is_none() {
-                lc.next_end()
-            } else {
-                None
-            };
-            if let Some(lifecycle::Item::Text(text)) = item {
-                if text == line {
-                    lc.pop();
-                    lc.accepted_text(&mut state);
-                    continue;
+    // Wide part: a parser thread reads and decodes every line ahead of the
+    // replay (decoding is a pure function of the line); the replay below
+    // consumes them in order and raises a decode error only on a line it
+    // decodes, exactly as before.
+    let routed = route.is_some();
+    let with_ticks = support_grid.is_some();
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<LineBatch>(PARSE_AHEAD_BATCHES);
+    std::thread::scope(|scope| -> Result<(), ManufacturingError> {
+        // Owned by this closure, so an early return drops it and the
+        // parser's next send fails instead of blocking the scope's join.
+        let receiver = receiver;
+        scope.spawn(move || parse_ahead(program, routed, with_ticks, sender));
+        let mut current = LineBatch::default();
+        let mut at = 0usize;
+        'lines: loop {
+            while at == current.lines.len() {
+                if let Some(failure) = current.failure.take() {
+                    return Err(failure);
                 }
-                if line
-                    .split_once(';')
-                    .map_or(line, |(code, _)| code)
-                    .trim()
-                    .is_empty()
-                {
-                    continue;
+                match receiver.recv() {
+                    Ok(next) => {
+                        current = next;
+                        at = 0;
+                    }
+                    Err(_) => break 'lines,
                 }
+            }
+            let parsed = &current.lines[at];
+            at += 1;
+            let line_index = parsed.index;
+            let line = &current.text[parsed.start..parsed.end];
+            cancelled(cancel)?;
+            if max_line.is_some_and(|max| line.len() > max) {
                 return Err(failed(format!(
-                    "program line {}: expected declared lifecycle command {text:?}",
+                    "program line {} exceeds the firmware command buffer",
                     line_index + 1
                 )));
             }
-        }
-        let mut coordinate_ticks = [None; 3];
-        let decoded = if support_grid.is_some() {
-            decode_with_xyz6(line, route.is_some(), |axis, word| {
-                coordinate_ticks[axis] = Some(grid::xyz6_ticks(word)?);
-                Ok(())
-            })
-        } else {
-            decode(line, route.is_some())
-        }
-        .map_err(|reason| {
-            let shown: String = line.chars().take(96).collect();
-            failed(format!(
-                "program line {}: {reason}: {shown:?}",
-                line_index + 1
-            ))
-        })?;
-        let command_ticks = match coordinate_ticks {
-            [Some(x), Some(y), Some(z)] => Some([x, y, z]),
-            _ => None,
-        };
-        let Some(mut decoded) = decoded else { continue };
-        if relative
-            && matches!(
-                decoded.command,
-                Command::Deposit | Command::Recovery | Command::Arc(_)
-            )
-            && let Some(delta) = decoded.fields[3]
-        {
-            decoded.fields[3] = Some(relative_e8(state.extrusion, delta)?);
-        }
-        let top_before = max_z;
-        if matches!(
-            decoded.command,
-            Command::Travel | Command::Deposit | Command::Arc(_)
-        ) && let Some(z) = decoded.fields[2]
-        {
-            max_z = max_z.max(z);
-        }
-        if let Some(estimate) = &mut estimate {
-            estimate.observe(&decoded, &state)?;
-        }
-        if let Some(time) = &mut time {
-            time.observe(
-                &decoded,
-                line,
-                &state,
-                route.as_ref().is_some_and(|r| r.pending()),
-            )?;
-        }
-        if setup_index < setup_len {
-            if decoded.command != setup[setup_index] {
-                return Err(failed(
-                    "program must establish G21, G90, the extrusion mode and G92 E0 in order",
-                ));
-            }
-            setup_index += 1;
-            continue;
-        }
-        if let Some(routed) = &mut route {
-            if !routed.pending() && !routed.done() {
-                if let Some(Ok(expected::Action::BeginTool { layer, tool })) = expected.peek() {
-                    let (layer, tool) = (*layer, *tool);
-                    expected.next();
-                    routed.begin_group(layer, tool, &state, expected_e)?;
-                } else if expected.peek().is_none() {
-                    routed.begin_finish(&state, expected_e)?;
-                }
-            }
-            if routed.pending() {
-                routed.consume(
-                    &decoded,
-                    &mut state,
-                    intent,
-                    (line_index + 1) as u32,
-                    replay.as_deref_mut(),
-                )?;
-                expected_e = routed.expected_e;
-                continue;
-            }
-        }
-        let filament_area = route
-            .as_ref()
-            .map_or(filament_area, routing::RouteState::filament_area);
-        if let (Some(job), Some(lc)) = (job, lifecycle.as_mut()) {
-            let item = if lc.in_start() {
-                lc.next_start()
-            } else if expected.peek().is_none() {
-                Some(
-                    lc.next_end()
-                        .ok_or_else(|| failed("extra command after shutdown"))?,
-                )
-            } else {
-                None
-            };
-            if let Some(item) = item {
-                let kind = match item {
-                    lifecycle::Item::PrimeTravel => 0,
-                    lifecycle::Item::PrimeLine => 1,
-                    lifecycle::Item::Lift => 2,
-                    lifecycle::Item::ParkXy => 3,
-                    lifecycle::Item::Text(_) | lifecycle::Item::Applied(_) => {
-                        return Err(failed(format!(
-                            "program line {}: command differs from the declared lifecycle step",
-                            line_index + 1
-                        )));
-                    }
-                };
-                lc.check_motion(kind, &state)?;
-                lc.pop();
-                let operation = match kind {
-                    0 => Lifecycle::Motion(job.prime_start_mm, recipe.travel_speed_mm_s, None),
-                    1 => Lifecycle::Motion(
-                        job.prime_end_mm,
-                        job.prime_speed_mm_s,
-                        Some(job.prime_filament_length_mm),
-                    ),
-                    2 => {
-                        let last = state
-                            .position
-                            .ok_or_else(|| failed("park from an unknown position"))?;
-                        let height = (top_before.max(last[2]) + job.park_clearance_mm)
-                            .min(printer.build_envelope.max[2]);
-                        let lift = project_xyz6_point_mm([last[0], last[1], height])?;
-                        if lift[2] <= last[2]
-                            || lift[2] <= top_before
-                            || decoded.fields[0] != Some(last[0])
-                            || decoded.fields[1] != Some(last[1])
-                        {
-                            return Err(failed(
-                                "final lift must be vertical and clear the highest emitted Z",
-                            ));
-                        }
-                        lc.lift_z = Some(lift[2]);
-                        Lifecycle::Motion(lift, recipe.travel_speed_mm_s, None)
-                    }
-                    _ => {
-                        let z = lc.lift_z.ok_or_else(|| failed("XY park without a lift"))?;
-                        if decoded.fields[2] != Some(z) {
-                            return Err(failed("final XY park must preserve clearance Z"));
-                        }
-                        Lifecycle::Motion(
-                            [job.park_xy_mm[0], job.park_xy_mm[1], z],
-                            recipe.travel_speed_mm_s,
-                            None,
-                        )
-                    }
-                };
-                let (position_error, extrusion_error) = inspect_lifecycle(
-                    &decoded,
-                    operation,
-                    intent,
-                    &mut state,
-                    (line_index + 1) as u32,
-                    replay.as_deref_mut(),
-                    prime_exclusion,
-                )?;
-                max_position_error_mm = max_position_error_mm.max(position_error);
-                max_extrusion_error_mm = max_extrusion_error_mm.max(extrusion_error);
-                if kind == 1 {
-                    priming_filament_length_mm = state.extrusion;
-                    expected_e = job.prime_filament_length_mm;
-                }
-                if command_ticks.is_some() {
-                    prior_grid_position = command_ticks;
-                }
-                continue;
-            }
-        }
-        // A G2/G3 replays as the planned run's edges: each a virtual G1 at
-        // the planned point, checked on the decoded arc, with arc-length E.
-        let mut arc_replay = match decoded.command {
-            Command::Arc(clockwise) => Some(ArcReplay::new(&decoded, clockwise, &state, intent)?),
-            _ => None,
-        };
-        loop {
-            let Some(action) = expected.next() else {
-                return Err(failed("extra command after final normalized motion"));
-            };
-            let (
-                target,
-                source,
-                source_tool,
-                layer_index,
-                deposition_kind,
-                association,
-                closes_wall,
-                run_start,
-            ) = match action? {
-                expected::Action::BeginTool { .. } => {
-                    return Err(failed("unconsumed routed tool boundary"));
-                }
-                expected::Action::Fan(pwm) => {
-                    if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm))
-                    {
-                        return Err(failed("missing or mutated process cooling state"));
-                    }
-                    fan_state = Some(pwm);
-                    continue 'lines;
-                }
-                expected::Action::NozzleTarget(target) => {
-                    if decoded.command != Command::NozzleOff || decoded.fields[5] != Some(target) {
-                        return Err(failed("missing or mutated later-layer nozzle target"));
-                    }
-                    continue 'lines;
-                }
-                expected::Action::BedTarget(target) => {
-                    if decoded.command != Command::BedOff || decoded.fields[5] != Some(target) {
-                        return Err(failed("missing or mutated later-layer bed target"));
-                    }
-                    continue 'lines;
-                }
-                expected::Action::Recovery {
-                    retract,
-                    layer,
-                    speed_role: role,
-                } => {
-                    let RetractionPolicy::Enabled {
-                        distance_mm,
-                        speed_mm_s,
-                        z_hop_mm,
-                        ..
-                    } = recipe.process.retraction
-                    else {
-                        return Err(failed("stationary extrusion without enabled retraction"));
-                    };
-                    if decoded.command != Command::Recovery
-                        || state.position.is_none()
-                        || retract == retracted_endpoint.is_some()
-                    {
-                        return Err(failed(
-                            "missing, reordered or nonstationary retraction/recovery",
-                        ));
-                    }
-                    let short = match cooling.filter(|(index, _)| *index == layer) {
-                        Some((_, c)) => c.short,
-                        None => {
-                            speeds::layer_cooling(intent, &plan.layers[layer as usize], layer)?
-                                .short
-                        }
-                    };
-                    let pwm = speeds::path_fan_pwm(&recipe.process, role, layer, short);
-                    if fan_state != Some(pwm)
-                        || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
-                    {
-                        return Err(failed(
-                            "recovery without required queued fan or complete travel/hop sequence",
-                        ));
-                    }
-                    let next_e = decoded.fields[3].unwrap();
-                    let feed = decoded.fields[4].unwrap();
-                    let delta = next_e - state.extrusion;
-                    let desired = if retract { -distance_mm } else { distance_mm };
-                    let wanted_e = if retract {
-                        expected_e - distance_mm
-                    } else {
-                        expected_e
-                    };
-                    if (next_e - wanted_e).abs() > E_HALF_STEP + arithmetic_slack(wanted_e)
-                        || (delta - desired).abs()
-                            > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
-                        || (!retract && retracted_endpoint != Some(next_e))
-                        || (retract && delta >= 0.0)
-                        || (!retract && delta <= 0.0)
-                        || (feed - speed_mm_s * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
-                        || feed <= 0.0
-                        || feed / 60.0 > printer.max_travel_feed_mm_s + F_HALF_STEP / 60.0
-                    {
-                        return Err(failed(
-                            "actual retraction distance, recovery or feed differs from policy",
-                        ));
-                    }
-                    max_extrusion_error_mm = max_extrusion_error_mm
-                        .max((next_e - wanted_e).abs())
-                        .max((delta - desired).abs());
-                    if retract {
-                        recovery_moves = 0;
-                        retraction_count = count_event(retraction_count)?;
-                        retracted_filament_mm -= delta;
-                    }
-                    retracted_endpoint = if retract { Some(state.extrusion) } else { None };
-                    state.extrusion = next_e;
-                    if let Some(sink) = replay.as_deref_mut() {
-                        sink.push(
-                            state.position.unwrap(),
-                            next_e,
-                            feed,
-                            (line_index + 1) as u32,
-                            layer,
-                            if retract { 11 } else { 12 },
-                        )?;
-                    }
-                    continue 'lines;
-                }
-                expected::Action::Move {
-                    target,
-                    tool,
-                    source,
-                    layer,
-                    role,
-                    speed_role,
-                    association,
-                    closes_wall,
-                    arc,
-                    connector,
-                } => (
-                    target,
-                    source,
-                    tool,
-                    layer,
-                    (role, speed_role, connector),
-                    association,
-                    closes_wall,
-                    arc,
-                ),
-            };
-            let (deposition_kind, move_speed_role, connector) = deposition_kind;
-            let (decoded, arc_segment) = match arc_replay.as_mut() {
-                Some(replay) => {
-                    let (virtual_move, segment) = replay.step(target, source, run_start)?;
-                    (virtual_move, Some(segment))
-                }
-                None => (decoded, None),
-            };
-            let grid_position = if arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
-                command_ticks.map(|[_, _, z]| grid::virtual_arc_xyz6(target, z))
-            } else {
-                command_ticks
-            };
-            if let Some(markers) = &bambu {
-                markers.before_layer_motion(layer_index)?;
-            }
-            if layer_index != volume_layer {
-                verify_region_volume(
-                    &plan.layers[volume_layer as usize],
-                    layer_nominal_volume,
-                    layer_support_volume,
-                )?;
-                for skipped in volume_layer + 1..layer_index {
-                    verify_region_volume(&plan.layers[skipped as usize], 0.0, 0.0)?;
-                }
-                volume_layer = layer_index;
-                layer_nominal_volume = 0.0;
-                layer_support_volume = 0.0;
-            }
-            let process = intent.process_for_tool(source_tool)?;
-            if cooling.is_none_or(|(index, _)| index != layer_index) {
-                let layer =
-                    speeds::layer_cooling(intent, &plan.layers[layer_index as usize], layer_index)?;
-                if layer.slowed() {
-                    cooling_slowed_layers = count_event(cooling_slowed_layers)?;
-                    minimum_cooling_scale = minimum_cooling_scale.min(layer.scale);
-                }
-                cooling = Some((layer_index, layer));
-            }
-            let layer_cooling = cooling.map_or(speeds::LayerCooling::NONE, |(_, c)| c);
-            let wanted_fan = speeds::path_fan_pwm(
-                process.policy,
-                move_speed_role,
-                layer_index,
-                layer_cooling.short,
-            );
-            if fan_state != Some(wanted_fan) {
-                return Err(failed(
-                    "motion without independently decoded queued process fan state",
-                ));
-            }
-            let required_command = if source.is_some() {
-                Command::Deposit
-            } else {
-                Command::Travel
-            };
-            if decoded.command != required_command {
-                return Err(failed(
-                    "command kind or mode does not match normalized motion",
-                ));
-            }
-            // decode's exact field masks establish these values, not firmware defaults.
-            let position = [
-                decoded.fields[0].ok_or_else(|| failed("missing X"))?,
-                decoded.fields[1].ok_or_else(|| failed("missing Y"))?,
-                decoded.fields[2].ok_or_else(|| failed("missing Z"))?,
-            ];
-            if let Some(routed) = &route {
-                routed.check_motion(
-                    state
-                        .position
-                        .ok_or_else(|| failed("routed motion before native home"))?,
-                    position,
-                    intent,
-                )?;
-            }
-            for axis in 0..3 {
-                // Independent parsing admits at most six decimal places. Compare
-                // that decoded number with this output contract's projection,
-                // not raw-plan ±half-step (which admits the wrong tie neighbor).
-                // Both conversions are correctly rounded f64 values; physical
-                // decimal enclosure remains the shared proof operand, not extra
-                // permission to choose another encoded coordinate.
-                if position[axis] != project_xyz6_coordinate_mm(target[axis])? {
-                    return Err(failed("command position differs from projected XYZ6 path"));
-                }
-                if position[axis] < printer.build_envelope.min[axis]
-                    || position[axis] > printer.build_envelope.max[axis]
-                {
-                    return Err(failed(
-                        "command position lies outside printer build envelope",
-                    ));
-                }
-            }
-            if retracted_endpoint.is_some() && source.is_none() {
-                let previous = state
-                    .position
-                    .ok_or_else(|| failed("hop without known actual position"))?;
-                let RetractionPolicy::Enabled { z_hop_mm, .. } = recipe.process.retraction else {
-                    unreachable!()
-                };
-                if z_hop_mm > 0.0 {
-                    let unsafe_hop = match recovery_moves {
-                        0 => {
-                            position[0..2] != previous[0..2]
-                                || position[2] <= previous[2]
-                                || position[2] <= plan.layers[layer_index as usize].z_mm
-                        }
-                        1 => position[2] != previous[2],
-                        2 => position[0..2] != previous[0..2] || position[2] >= previous[2],
-                        _ => true,
-                    };
-                    if unsafe_hop {
-                        return Err(failed(
-                            "actual travel hop lacks vertical clearance, constant elevated Z or stationary-XY landing",
-                        ));
-                    }
-                }
-                recovery_moves += 1;
-            }
-            max_position_error_mm = max_position_error_mm.max(distance(position, target));
-            let feed = decoded.fields[4].ok_or_else(|| failed("missing feed"))?;
-            let process_flow = speeds::flow_factor(&process, deposition_kind, layer_index);
-            // The declared speed rule: role speed, the volumetric flow
-            // ceiling at this edge's width and the layer's cooling scale.
-            let mut process_speed = 0.0;
-            if let Some(association) = association {
-                let base = speeds::base_speed_mm_s(
-                    recipe,
-                    &process,
-                    move_speed_role,
-                    association.exposed,
-                    layer_index,
-                )
-                .min(printer.max_print_feed_mm_s);
-                let (unslowed, limited) = speeds::flow_limited_speed_mm_s(
-                    base,
-                    association.width,
-                    association.physical_z[1] - association.physical_z[0],
-                    process_flow,
-                    process.max_volumetric_flow_mm3_s,
-                    route.is_some(),
-                );
-                if limited {
-                    flow_limited_segments = count_event(flow_limited_segments)?;
-                }
-                process_speed =
-                    layer_cooling.speed_mm_s(unslowed, recipe.process.minimum_print_speed_mm_s);
-            }
-            let volume_per_mm = association.map_or(0.0, |association| {
-                let height = association.physical_z[1] - association.physical_z[0];
-                ((association.width - height) * height
-                    + std::f64::consts::PI * (height * 0.5).powi(2))
-                    * process_flow
-            });
-            let expected_feed = 60.0
-                * if source.is_some() {
-                    process_speed
-                } else {
-                    recipe.travel_speed_mm_s
-                };
-            let feed_limit = if source.is_some() {
-                printer.max_print_feed_mm_s
-            } else {
-                printer.max_travel_feed_mm_s
-            };
-            if feed <= 0.0
-                || !expected_feed.is_finite()
-                || (feed - expected_feed).abs() > F_HALF_STEP + arithmetic_slack(expected_feed)
-                || feed / 60.0 > feed_limit + F_HALF_STEP / 60.0 + arithmetic_slack(feed_limit)
+            if let Some(markers) = bambu.as_mut()
+                && markers.accept(line, line_index + 1)?
             {
-                return Err(failed(
-                    "command feed violates expected speed or printer limit",
-                ));
+                continue;
             }
-
-            if source.is_some() {
-                let from = state
-                    .position
-                    .ok_or_else(|| failed("deposition before positioning"))?;
-                let half = 0.5 * association.map_or(recipe.bead_width_mm, |a| a.width)
-                    + arc_segment.map_or(0.0, |segment| segment.sagitta);
-                bed_exclusion::check(&printer.bed_exclusions, from, position, half)?;
-            }
-            if let Some(source) = source {
-                let from = state
-                    .position
-                    .ok_or_else(|| failed("deposition before positioning"))?;
-                if matches!(
-                    deposition_kind,
-                    DepositionKind::BottomSkin
-                        | DepositionKind::TopSkin
-                        | DepositionKind::SolidFill
-                        | DepositionKind::SparseFill
-                ) && !(deposition_kind == DepositionKind::SparseFill
-                    && matches!(
-                        recipe.sparse_infill,
-                        SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
-                    ))
-                {
-                    let policy = if deposition_kind == DepositionKind::TopSkin {
-                        recipe.top_skin_axis
-                    } else {
-                        recipe.rectilinear_axis
-                    };
-                    let course = *alternation
-                        .get(layer_index as usize)
-                        .ok_or_else(|| failed("deposition outside a planned layer"))?;
-                    let mut fixed_axis = match policy {
-                        RectilinearAxisPolicy::X => 1,
-                        RectilinearAxisPolicy::Y => 0,
-                        RectilinearAxisPolicy::AlternatingXY => {
-                            if course.is_multiple_of(2) {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        RectilinearAxisPolicy::AlternatingYX => {
-                            if course.is_multiple_of(2) {
-                                0
-                            } else {
-                                1
-                            }
-                        }
-                    };
-                    if deposition_kind == DepositionKind::SparseFill
-                        && matches!(recipe.sparse_infill, SparseInfillPolicy::Grid)
-                    {
-                        fixed_axis = if from[0] == position[0] {
-                            0
-                        } else if from[1] == position[1] || connector {
-                            1
-                        } else {
-                            return Err(failed("actual grid deposition must follow build X or Y"));
-                        };
-                    }
-                    if from[fixed_axis] != position[fixed_axis] && !connector {
-                        return Err(failed(
-                            "actual ordinary deposition violates its authored axis policy",
-                        ));
-                    }
-                }
-                let length = arc_segment.map_or_else(|| distance(from, position), |arc| arc.length);
-                if let Some(hardware) = &intent.hardware {
-                    let radius = association.map_or(recipe.bead_width_mm, |a| a.width) * 0.5
-                        + arc_segment.map_or(0.0, |arc| arc.sagitta);
-                    let actual = spiling_contracts::geometry::AabbMm {
-                        min: [
-                            from[0].min(position[0]) - radius,
-                            from[1].min(position[1]) - radius,
-                            from[2].min(position[2])
-                                - association.map_or(recipe.layer_height_mm, |a| {
-                                    a.physical_z[1] - a.physical_z[0]
-                                }),
-                        ],
-                        max: [
-                            from[0].max(position[0]) + radius,
-                            from[1].max(position[1]) + radius,
-                            from[2].max(position[2]),
-                        ],
-                    };
-                    hardware.admits_bounds(&actual).map_err(|e| failed(&e))?;
-                }
-                let nominal_length = distance(source, target);
-                let support = deposition_kind.is_support();
-                let adhesion = deposition_kind.is_adhesion();
-                if support {
-                    layer_support_volume += nominal_length * volume_per_mm;
-                } else if !adhesion {
-                    layer_nominal_volume += nominal_length * volume_per_mm;
-                }
-                if retracted_endpoint.is_some() {
-                    return Err(failed("deposition before exact stationary recovery"));
-                }
-                let next_e = decoded.fields[3].ok_or_else(|| failed("missing extrusion"))?;
-                let delta_e = next_e - state.extrusion;
-                // Independently decoded XYZ6 chord length owns constant-section
-                // extrusion. Source endpoints separately own positional fidelity.
-                let nominal_e = match (arc_segment, arc_replay.as_mut()) {
-                    (Some(arc), Some(replay)) => {
-                        let start = *replay.expected_start.get_or_insert(expected_e);
-                        let total = start + arc.swept * volume_per_mm / filament_area;
-                        let nominal = total - expected_e;
-                        expected_e = total;
-                        nominal
-                    }
-                    _ => {
-                        let nominal = length * volume_per_mm / filament_area;
-                        expected_e += nominal;
-                        nominal
-                    }
+            // Declared lifecycle text (dialect commands, opaque block lines) is
+            // matched exactly rather than decoded.
+            if let Some(lc) = lifecycle.as_mut()
+                && setup_index == setup_len
+            {
+                let item = if lc.in_start() {
+                    lc.next_start()
+                } else if expected.peek().is_none() {
+                    lc.next_end()
+                } else {
+                    None
                 };
-                if !expected_e.is_finite()
-                    || length <= 0.0
-                    || nominal_length <= 0.0
-                    || !nominal_e.is_finite()
-                    || nominal_e <= 0.0
-                    || delta_e <= 0.0
-                {
-                    return Err(failed("zero-length, nonpositive or nonfinite deposition"));
-                }
-                let cumulative_error = (next_e - expected_e).abs();
-                let segment_error = (delta_e - nominal_e).abs();
-                max_extrusion_error_mm = max_extrusion_error_mm
-                    .max(cumulative_error)
-                    .max(segment_error);
-                if cumulative_error > E_HALF_STEP + arithmetic_slack(expected_e)
-                    || segment_error > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
-                {
-                    return Err(failed(
-                        "absolute or incremental extrusion differs from nominal volume",
-                    ));
-                }
-                let association = association.ok_or_else(|| {
-                    failed("deposition lost its local width/interval association")
-                })?;
-                // The minimum governs commanded moves: a whole arc, not the
-                // planned edges replayed along it.
-                if arc_segment.is_none() && !program_coordinates::meets_minimum_command(length) {
-                    return Err(failed(
-                        "deposition command is below the declared software minimum length",
-                    ));
-                }
-                let length_error = (xyz_endpoint_error(from)?
-                    + xyz_endpoint_error(position)?
-                    + arithmetic_slack(length))
-                .next_up();
-                let extrusion_error = (e8_endpoint_error(next_e)
-                    + e8_endpoint_error(state.extrusion)
-                    + 2.0 * f64::EPSILON * delta_e.abs())
-                .next_up();
-                let bounds = program_coordinates::commanded_stadium_width_enclosure_mm(
-                    length,
-                    length_error,
-                    delta_e,
-                    extrusion_error,
-                    filament_area,
-                    association.physical_z[1] - association.physical_z[0],
-                    process_flow,
-                )?;
-                // Quantized E can give a width-equivalent value below height even
-                // for an admitted circular nominal target. Nominal geometry and the
-                // independent forward E volume check above own that model domain;
-                // keep the FULL actual algebraic interval for all checks below.
-                // The planned width must lie in the decoded interval widened by
-                // the E word's own rounding (half a step at each endpoint); only
-                // the remainder counts against the lateral command budget.
-                let represented = program_coordinates::commanded_stadium_width_enclosure_mm(
-                    length,
-                    length_error,
-                    delta_e,
-                    // An E delta below one step can represent any width
-                    // down to nearly zero; keep the interval positive.
-                    (extrusion_error + 2.0 * E_HALF_STEP)
-                        .next_up()
-                        .min(delta_e.abs() * (1.0 - 1e-9)),
-                    filament_area,
-                    association.physical_z[1] - association.physical_z[0],
-                    process_flow,
-                )?;
-                let width_error = (represented[0] - association.width)
-                    .max(association.width - represented[1])
-                    .max(0.0);
-                // A bead's lateral error is in XY; its Z is enclosed by the
-                // bead height checks.
-                let lateral = |a: [f64; 3], b: [f64; 3]| (a[0] - b[0]).hypot(a[1] - b[1]);
-                // An arc replays through its rounded I/J centre, which moves
-                // the decoded curve up to half a step on each axis on its own.
-                let centre_rounding = std::f64::consts::SQRT_2 * XYZ_HALF_STEP;
-                let center_error = lateral(source, from)
-                    .max(lateral(target, position))
-                    .max(arc_segment.map_or(0.0, |arc| (arc.deviation - centre_rounding).max(0.0)));
-                // The E words must be able to represent a width inside the
-                // printer's limits.
-                if represented[1] < printer.deposition_limits.min_bead_width_mm
-                    || represented[0] > printer.deposition_limits.max_bead_width_mm
-                    || width_error + center_error
-                        > program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
-                {
+                if let Some(lifecycle::Item::Text(text)) = item {
+                    if text == line {
+                        lc.pop();
+                        lc.accepted_text(&mut state);
+                        continue;
+                    }
+                    if line
+                        .split_once(';')
+                        .map_or(line, |(code, _)| code)
+                        .trim()
+                        .is_empty()
+                    {
+                        continue;
+                    }
                     return Err(failed(format!(
-                        "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure: width {} in [{}, {}], width error {}, centre error {}, length {}",
-                        association.width, bounds[0], bounds[1], width_error, center_error, length,
+                        "program line {}: expected declared lifecycle command {text:?}",
+                        line_index + 1
                     )));
                 }
-                if let Some(grid) = &mut support_grid {
-                    grid.record(grid::RoadInput {
-                        layer: layer_index,
-                        line: line_index + 1,
-                        path: association.path,
-                        role: deposition_kind,
-                        from: prior_grid_position.ok_or_else(|| {
-                            failed("no decoded starting XYZ6 coordinates for deposition")
-                        })?,
-                        to: grid_position.ok_or_else(|| {
-                            failed("no decoded ending XYZ6 coordinates for deposition")
-                        })?,
-                        physical_z: association.physical_z,
-                        maximum_width_mm: bounds[1].max(association.width),
-                        minimum_width_mm: bounds[0].min(association.width),
-                        length_upper_mm: (length + length_error).next_up(),
-                        arc_deviation_mm: arc_segment
-                            .map_or(0.0, |segment| segment.grid_deviation_mm),
-                    })?;
-                }
-                if association.owner == Some(DepositionOwner::Wall) {
-                    let edge = CommandedWallEdge {
-                        width: represented,
-                        length_lower: (length - length_error).next_down(),
-                    };
-                    if let Some(previous) = previous_wall_edge {
-                        verify_wall_gradient(previous, edge)?;
-                    }
-                    let first = *first_wall_edge.get_or_insert(edge);
-                    if closes_wall {
-                        verify_wall_gradient(edge, first)?;
-                    }
-                    previous_wall_edge = Some(edge);
-                }
-                let speed = feed / 60.0;
-                let flow = delta_e * filament_area * speed / length;
-                // E deltas have two rounded endpoints; a segment's decoded length
-                // differs from its ideal by at most two XYZ rounding-vector norms.
-                let position_delta_bound =
-                    2.0 * 3.0_f64.sqrt() * XYZ_HALF_STEP + arithmetic_slack(nominal_length);
-                let rounding_flow_slack = (process.max_volumetric_flow_mm3_s
-                    * position_delta_bound
-                    + 2.0 * E_HALF_STEP * filament_area * speed)
-                    / length
-                    + volume_per_mm * F_HALF_STEP / 60.0;
-                if !flow.is_finite()
-                    || !rounding_flow_slack.is_finite()
-                    || flow
-                        > process.max_volumetric_flow_mm3_s
-                            + rounding_flow_slack
-                            + arithmetic_slack(flow)
-                {
-                    return Err(failed("decoded volumetric flow exceeds printer limit"));
-                }
-                if let Some(routed) = &mut route {
-                    routed.record_model(
-                        source_tool
-                            .ok_or_else(|| failed("model deposition lost its source tool"))?,
-                        state.extrusion,
-                        next_e,
-                    )?;
-                }
-                state.extrusion = next_e;
-                if support {
-                    support_deposition_segments = count_event(support_deposition_segments)?;
-                    support_filament += delta_e;
-                } else if adhesion {
-                    adhesion_deposition_segments = count_event(adhesion_deposition_segments)?;
-                    adhesion_filament += delta_e;
-                } else {
-                    deposition_segments = count_event(deposition_segments)?;
-                    object_filament += delta_e;
-                }
-                if deposition_segments
-                    .checked_add(support_deposition_segments)
-                    .and_then(|n| n.checked_add(adhesion_deposition_segments))
-                    .is_none()
-                {
-                    return Err(failed(
-                        "deposition segment count exceeds its u32 representation",
-                    ));
-                }
-            } else {
-                // Every stored path has an explicit entry travel; wall continuity
-                // never crosses a travel, even if endpoints happen to coincide.
-                first_wall_edge = None;
-                previous_wall_edge = None;
-                travel_segments = count_event(travel_segments)?;
             }
-            if let Some(sink) = replay.as_deref_mut() {
-                let kind = if source.is_none() {
-                    0
-                } else {
-                    match deposition_kind {
-                        spiling_contracts::manufacturing::DepositionKind::Perimeter => 1,
-                        spiling_contracts::manufacturing::DepositionKind::SolidFill => 2,
-                        DepositionKind::BottomSkin => 3,
-                        DepositionKind::TopSkin => 4,
-                        DepositionKind::SparseFill => 5,
-                        DepositionKind::Bridge => 8,
-                        DepositionKind::Support => 9,
-                        DepositionKind::SupportInterface => 10,
-                        DepositionKind::SeparatorWall => 13,
-                        // Non-model deposition without a model owner.
-                        DepositionKind::Skirt | DepositionKind::Brim => 15,
-                    }
-                };
-                sink.push_associated(
-                    position,
-                    state.extrusion,
-                    feed,
-                    (line_index + 1) as u32,
-                    layer_index,
-                    kind,
-                    association,
+            let coordinate_ticks = parsed.ticks;
+            let decoded = parsed.decoded.map_err(|reason| {
+                let shown: String = line.chars().take(96).collect();
+                failed(format!(
+                    "program line {}: {reason}: {shown:?}",
+                    line_index + 1
+                ))
+            })?;
+            let command_ticks = match coordinate_ticks {
+                [Some(x), Some(y), Some(z)] => Some([x, y, z]),
+                _ => None,
+            };
+            let Some(mut decoded) = decoded else { continue };
+            if relative
+                && matches!(
+                    decoded.command,
+                    Command::Deposit | Command::Recovery | Command::Arc(_)
+                )
+                && let Some(delta) = decoded.fields[3]
+            {
+                decoded.fields[3] = Some(relative_e8(state.extrusion, delta)?);
+            }
+            let top_before = max_z;
+            if matches!(
+                decoded.command,
+                Command::Travel | Command::Deposit | Command::Arc(_)
+            ) && let Some(z) = decoded.fields[2]
+            {
+                max_z = max_z.max(z);
+            }
+            if let Some(estimate) = &mut estimate {
+                estimate.observe(&decoded, &state)?;
+            }
+            if let Some(time) = &mut time {
+                time.observe(
+                    &decoded,
+                    line,
+                    &state,
+                    route.as_ref().is_some_and(|r| r.pending()),
                 )?;
             }
-            state.position = Some(position);
-            prior_grid_position = grid_position;
-            if arc_replay.as_ref().is_none_or(ArcReplay::done) {
-                break;
+            if setup_index < setup_len {
+                if decoded.command != setup[setup_index] {
+                    return Err(failed(
+                        "program must establish G21, G90, the extrusion mode and G92 E0 in order",
+                    ));
+                }
+                setup_index += 1;
+                continue;
+            }
+            if let Some(routed) = &mut route {
+                if !routed.pending() && !routed.done() {
+                    if let Some(Ok(expected::Action::BeginTool { layer, tool })) = expected.peek() {
+                        let (layer, tool) = (*layer, *tool);
+                        expected.next();
+                        routed.begin_group(layer, tool, &state, expected_e)?;
+                    } else if expected.peek().is_none() {
+                        routed.begin_finish(&state, expected_e)?;
+                    }
+                }
+                if routed.pending() {
+                    routed.consume(
+                        &decoded,
+                        &mut state,
+                        intent,
+                        (line_index + 1) as u32,
+                        replay.as_deref_mut(),
+                    )?;
+                    expected_e = routed.expected_e;
+                    continue;
+                }
+            }
+            let filament_area = route
+                .as_ref()
+                .map_or(filament_area, routing::RouteState::filament_area);
+            if let (Some(job), Some(lc)) = (job, lifecycle.as_mut()) {
+                let item = if lc.in_start() {
+                    lc.next_start()
+                } else if expected.peek().is_none() {
+                    Some(
+                        lc.next_end()
+                            .ok_or_else(|| failed("extra command after shutdown"))?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(item) = item {
+                    let kind = match item {
+                        lifecycle::Item::PrimeTravel => 0,
+                        lifecycle::Item::PrimeLine => 1,
+                        lifecycle::Item::Lift => 2,
+                        lifecycle::Item::ParkXy => 3,
+                        lifecycle::Item::Text(_) | lifecycle::Item::Applied(_) => {
+                            return Err(failed(format!(
+                                "program line {}: command differs from the declared lifecycle step",
+                                line_index + 1
+                            )));
+                        }
+                    };
+                    lc.check_motion(kind, &state)?;
+                    lc.pop();
+                    let operation = match kind {
+                        0 => Lifecycle::Motion(job.prime_start_mm, recipe.travel_speed_mm_s, None),
+                        1 => Lifecycle::Motion(
+                            job.prime_end_mm,
+                            job.prime_speed_mm_s,
+                            Some(job.prime_filament_length_mm),
+                        ),
+                        2 => {
+                            let last = state
+                                .position
+                                .ok_or_else(|| failed("park from an unknown position"))?;
+                            let height = (top_before.max(last[2]) + job.park_clearance_mm)
+                                .min(printer.build_envelope.max[2]);
+                            let lift = project_xyz6_point_mm([last[0], last[1], height])?;
+                            if lift[2] <= last[2]
+                                || lift[2] <= top_before
+                                || decoded.fields[0] != Some(last[0])
+                                || decoded.fields[1] != Some(last[1])
+                            {
+                                return Err(failed(
+                                    "final lift must be vertical and clear the highest emitted Z",
+                                ));
+                            }
+                            lc.lift_z = Some(lift[2]);
+                            Lifecycle::Motion(lift, recipe.travel_speed_mm_s, None)
+                        }
+                        _ => {
+                            let z = lc.lift_z.ok_or_else(|| failed("XY park without a lift"))?;
+                            if decoded.fields[2] != Some(z) {
+                                return Err(failed("final XY park must preserve clearance Z"));
+                            }
+                            Lifecycle::Motion(
+                                [job.park_xy_mm[0], job.park_xy_mm[1], z],
+                                recipe.travel_speed_mm_s,
+                                None,
+                            )
+                        }
+                    };
+                    let (position_error, extrusion_error) = inspect_lifecycle(
+                        &decoded,
+                        operation,
+                        intent,
+                        &mut state,
+                        (line_index + 1) as u32,
+                        replay.as_deref_mut(),
+                        prime_exclusion,
+                    )?;
+                    max_position_error_mm = max_position_error_mm.max(position_error);
+                    max_extrusion_error_mm = max_extrusion_error_mm.max(extrusion_error);
+                    if kind == 1 {
+                        priming_filament_length_mm = state.extrusion;
+                        expected_e = job.prime_filament_length_mm;
+                    }
+                    if command_ticks.is_some() {
+                        prior_grid_position = command_ticks;
+                    }
+                    continue;
+                }
+            }
+            // A G2/G3 replays as the planned run's edges: each a virtual G1 at
+            // the planned point, checked on the decoded arc, with arc-length E.
+            let mut arc_replay = match decoded.command {
+                Command::Arc(clockwise) => {
+                    Some(ArcReplay::new(&decoded, clockwise, &state, intent)?)
+                }
+                _ => None,
+            };
+            loop {
+                let Some(action) = expected.next() else {
+                    return Err(failed("extra command after final normalized motion"));
+                };
+                let (
+                    target,
+                    source,
+                    source_tool,
+                    layer_index,
+                    deposition_kind,
+                    association,
+                    closes_wall,
+                    run_start,
+                ) = match action? {
+                    expected::Action::BeginTool { .. } => {
+                        return Err(failed("unconsumed routed tool boundary"));
+                    }
+                    expected::Action::Fan(pwm) => {
+                        if decoded.command != Command::Fan
+                            || decoded.fields[5] != Some(f64::from(pwm))
+                        {
+                            return Err(failed("missing or mutated process cooling state"));
+                        }
+                        fan_state = Some(pwm);
+                        continue 'lines;
+                    }
+                    expected::Action::NozzleTarget(target) => {
+                        if decoded.command != Command::NozzleOff
+                            || decoded.fields[5] != Some(target)
+                        {
+                            return Err(failed("missing or mutated later-layer nozzle target"));
+                        }
+                        continue 'lines;
+                    }
+                    expected::Action::BedTarget(target) => {
+                        if decoded.command != Command::BedOff || decoded.fields[5] != Some(target) {
+                            return Err(failed("missing or mutated later-layer bed target"));
+                        }
+                        continue 'lines;
+                    }
+                    expected::Action::Recovery {
+                        retract,
+                        layer,
+                        speed_role: role,
+                    } => {
+                        let RetractionPolicy::Enabled {
+                            distance_mm,
+                            speed_mm_s,
+                            z_hop_mm,
+                            ..
+                        } = recipe.process.retraction
+                        else {
+                            return Err(failed("stationary extrusion without enabled retraction"));
+                        };
+                        if decoded.command != Command::Recovery
+                            || state.position.is_none()
+                            || retract == retracted_endpoint.is_some()
+                        {
+                            return Err(failed(
+                                "missing, reordered or nonstationary retraction/recovery",
+                            ));
+                        }
+                        let short = match cooling.filter(|(index, _)| *index == layer) {
+                            Some((_, c)) => c.short,
+                            None => {
+                                speeds::layer_cooling(intent, &plan.layers[layer as usize], layer)?
+                                    .short
+                            }
+                        };
+                        let pwm = speeds::path_fan_pwm(&recipe.process, role, layer, short);
+                        if fan_state != Some(pwm)
+                            || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
+                        {
+                            return Err(failed(
+                                "recovery without required queued fan or complete travel/hop sequence",
+                            ));
+                        }
+                        let next_e = decoded.fields[3].unwrap();
+                        let feed = decoded.fields[4].unwrap();
+                        let delta = next_e - state.extrusion;
+                        let desired = if retract { -distance_mm } else { distance_mm };
+                        let wanted_e = if retract {
+                            expected_e - distance_mm
+                        } else {
+                            expected_e
+                        };
+                        if (next_e - wanted_e).abs() > E_HALF_STEP + arithmetic_slack(wanted_e)
+                            || (delta - desired).abs()
+                                > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
+                            || (!retract && retracted_endpoint != Some(next_e))
+                            || (retract && delta >= 0.0)
+                            || (!retract && delta <= 0.0)
+                            || (feed - speed_mm_s * 60.0).abs()
+                                > F_HALF_STEP + arithmetic_slack(feed)
+                            || feed <= 0.0
+                            || feed / 60.0 > printer.max_travel_feed_mm_s + F_HALF_STEP / 60.0
+                        {
+                            return Err(failed(
+                                "actual retraction distance, recovery or feed differs from policy",
+                            ));
+                        }
+                        max_extrusion_error_mm = max_extrusion_error_mm
+                            .max((next_e - wanted_e).abs())
+                            .max((delta - desired).abs());
+                        if retract {
+                            recovery_moves = 0;
+                            retraction_count = count_event(retraction_count)?;
+                            retracted_filament_mm -= delta;
+                        }
+                        retracted_endpoint = if retract { Some(state.extrusion) } else { None };
+                        state.extrusion = next_e;
+                        if let Some(sink) = replay.as_deref_mut() {
+                            sink.push(
+                                state.position.unwrap(),
+                                next_e,
+                                feed,
+                                (line_index + 1) as u32,
+                                layer,
+                                if retract { 11 } else { 12 },
+                            )?;
+                        }
+                        continue 'lines;
+                    }
+                    expected::Action::Move {
+                        target,
+                        tool,
+                        source,
+                        layer,
+                        role,
+                        speed_role,
+                        association,
+                        closes_wall,
+                        arc,
+                        connector,
+                    } => (
+                        target,
+                        source,
+                        tool,
+                        layer,
+                        (role, speed_role, connector),
+                        association,
+                        closes_wall,
+                        arc,
+                    ),
+                };
+                let (deposition_kind, move_speed_role, connector) = deposition_kind;
+                let (decoded, arc_segment) = match arc_replay.as_mut() {
+                    Some(replay) => {
+                        let (virtual_move, segment) = replay.step(target, source, run_start)?;
+                        (virtual_move, Some(segment))
+                    }
+                    None => (decoded, None),
+                };
+                let grid_position = if arc_replay.as_ref().is_some_and(|arc| !arc.done()) {
+                    command_ticks.map(|[_, _, z]| grid::virtual_arc_xyz6(target, z))
+                } else {
+                    command_ticks
+                };
+                if let Some(markers) = &bambu {
+                    markers.before_layer_motion(layer_index)?;
+                }
+                if layer_index != volume_layer {
+                    verify_region_volume(
+                        &plan.layers[volume_layer as usize],
+                        layer_nominal_volume,
+                        layer_support_volume,
+                    )?;
+                    for skipped in volume_layer + 1..layer_index {
+                        verify_region_volume(&plan.layers[skipped as usize], 0.0, 0.0)?;
+                    }
+                    volume_layer = layer_index;
+                    layer_nominal_volume = 0.0;
+                    layer_support_volume = 0.0;
+                }
+                let process = intent.process_for_tool(source_tool)?;
+                if cooling.is_none_or(|(index, _)| index != layer_index) {
+                    let layer = speeds::layer_cooling(
+                        intent,
+                        &plan.layers[layer_index as usize],
+                        layer_index,
+                    )?;
+                    if layer.slowed() {
+                        cooling_slowed_layers = count_event(cooling_slowed_layers)?;
+                        minimum_cooling_scale = minimum_cooling_scale.min(layer.scale);
+                    }
+                    cooling = Some((layer_index, layer));
+                }
+                let layer_cooling = cooling.map_or(speeds::LayerCooling::NONE, |(_, c)| c);
+                let wanted_fan = speeds::path_fan_pwm(
+                    process.policy,
+                    move_speed_role,
+                    layer_index,
+                    layer_cooling.short,
+                );
+                if fan_state != Some(wanted_fan) {
+                    return Err(failed(
+                        "motion without independently decoded queued process fan state",
+                    ));
+                }
+                let required_command = if source.is_some() {
+                    Command::Deposit
+                } else {
+                    Command::Travel
+                };
+                if decoded.command != required_command {
+                    return Err(failed(
+                        "command kind or mode does not match normalized motion",
+                    ));
+                }
+                // decode's exact field masks establish these values, not firmware defaults.
+                let position = [
+                    decoded.fields[0].ok_or_else(|| failed("missing X"))?,
+                    decoded.fields[1].ok_or_else(|| failed("missing Y"))?,
+                    decoded.fields[2].ok_or_else(|| failed("missing Z"))?,
+                ];
+                if let Some(routed) = &route {
+                    routed.check_motion(
+                        state
+                            .position
+                            .ok_or_else(|| failed("routed motion before native home"))?,
+                        position,
+                        intent,
+                    )?;
+                }
+                for axis in 0..3 {
+                    // Independent parsing admits at most six decimal places. Compare
+                    // that decoded number with this output contract's projection,
+                    // not raw-plan ±half-step (which admits the wrong tie neighbor).
+                    // Both conversions are correctly rounded f64 values; physical
+                    // decimal enclosure remains the shared proof operand, not extra
+                    // permission to choose another encoded coordinate.
+                    if position[axis] != project_xyz6_coordinate_mm(target[axis])? {
+                        return Err(failed("command position differs from projected XYZ6 path"));
+                    }
+                    if position[axis] < printer.build_envelope.min[axis]
+                        || position[axis] > printer.build_envelope.max[axis]
+                    {
+                        return Err(failed(
+                            "command position lies outside printer build envelope",
+                        ));
+                    }
+                }
+                if retracted_endpoint.is_some() && source.is_none() {
+                    let previous = state
+                        .position
+                        .ok_or_else(|| failed("hop without known actual position"))?;
+                    let RetractionPolicy::Enabled { z_hop_mm, .. } = recipe.process.retraction
+                    else {
+                        unreachable!()
+                    };
+                    if z_hop_mm > 0.0 {
+                        let unsafe_hop = match recovery_moves {
+                            0 => {
+                                position[0..2] != previous[0..2]
+                                    || position[2] <= previous[2]
+                                    || position[2] <= plan.layers[layer_index as usize].z_mm
+                            }
+                            1 => position[2] != previous[2],
+                            2 => position[0..2] != previous[0..2] || position[2] >= previous[2],
+                            _ => true,
+                        };
+                        if unsafe_hop {
+                            return Err(failed(
+                                "actual travel hop lacks vertical clearance, constant elevated Z or stationary-XY landing",
+                            ));
+                        }
+                    }
+                    recovery_moves += 1;
+                }
+                max_position_error_mm = max_position_error_mm.max(distance(position, target));
+                let feed = decoded.fields[4].ok_or_else(|| failed("missing feed"))?;
+                let process_flow = speeds::flow_factor(&process, deposition_kind, layer_index);
+                // The declared speed rule: role speed, the volumetric flow
+                // ceiling at this edge's width and the layer's cooling scale.
+                let mut process_speed = 0.0;
+                if let Some(association) = association {
+                    let base = speeds::base_speed_mm_s(
+                        recipe,
+                        &process,
+                        move_speed_role,
+                        association.exposed,
+                        layer_index,
+                    )
+                    .min(printer.max_print_feed_mm_s);
+                    let (unslowed, limited) = speeds::flow_limited_speed_mm_s(
+                        base,
+                        association.width,
+                        association.physical_z[1] - association.physical_z[0],
+                        process_flow,
+                        process.max_volumetric_flow_mm3_s,
+                        route.is_some(),
+                    );
+                    if limited {
+                        flow_limited_segments = count_event(flow_limited_segments)?;
+                    }
+                    process_speed =
+                        layer_cooling.speed_mm_s(unslowed, recipe.process.minimum_print_speed_mm_s);
+                }
+                let volume_per_mm = association.map_or(0.0, |association| {
+                    let height = association.physical_z[1] - association.physical_z[0];
+                    ((association.width - height) * height
+                        + std::f64::consts::PI * (height * 0.5).powi(2))
+                        * process_flow
+                });
+                let expected_feed = 60.0
+                    * if source.is_some() {
+                        process_speed
+                    } else {
+                        recipe.travel_speed_mm_s
+                    };
+                let feed_limit = if source.is_some() {
+                    printer.max_print_feed_mm_s
+                } else {
+                    printer.max_travel_feed_mm_s
+                };
+                if feed <= 0.0
+                    || !expected_feed.is_finite()
+                    || (feed - expected_feed).abs() > F_HALF_STEP + arithmetic_slack(expected_feed)
+                    || feed / 60.0 > feed_limit + F_HALF_STEP / 60.0 + arithmetic_slack(feed_limit)
+                {
+                    return Err(failed(
+                        "command feed violates expected speed or printer limit",
+                    ));
+                }
+
+                if source.is_some() {
+                    let from = state
+                        .position
+                        .ok_or_else(|| failed("deposition before positioning"))?;
+                    let half = 0.5 * association.map_or(recipe.bead_width_mm, |a| a.width)
+                        + arc_segment.map_or(0.0, |segment| segment.sagitta);
+                    bed_exclusion::check(&printer.bed_exclusions, from, position, half)?;
+                }
+                if let Some(source) = source {
+                    let from = state
+                        .position
+                        .ok_or_else(|| failed("deposition before positioning"))?;
+                    if matches!(
+                        deposition_kind,
+                        DepositionKind::BottomSkin
+                            | DepositionKind::TopSkin
+                            | DepositionKind::SolidFill
+                            | DepositionKind::SparseFill
+                    ) && !(deposition_kind == DepositionKind::SparseFill
+                        && matches!(
+                            recipe.sparse_infill,
+                            SparseInfillPolicy::Gyroid | SparseInfillPolicy::WebRoof { .. }
+                        ))
+                    {
+                        let policy = if deposition_kind == DepositionKind::TopSkin {
+                            recipe.top_skin_axis
+                        } else {
+                            recipe.rectilinear_axis
+                        };
+                        let course = *alternation
+                            .get(layer_index as usize)
+                            .ok_or_else(|| failed("deposition outside a planned layer"))?;
+                        let mut fixed_axis =
+                            match policy {
+                                RectilinearAxisPolicy::X => 1,
+                                RectilinearAxisPolicy::Y => 0,
+                                RectilinearAxisPolicy::AlternatingXY => {
+                                    if course.is_multiple_of(2) { 1 } else { 0 }
+                                }
+                                RectilinearAxisPolicy::AlternatingYX => {
+                                    if course.is_multiple_of(2) { 0 } else { 1 }
+                                }
+                            };
+                        if deposition_kind == DepositionKind::SparseFill
+                            && matches!(recipe.sparse_infill, SparseInfillPolicy::Grid)
+                        {
+                            fixed_axis = if from[0] == position[0] {
+                                0
+                            } else if from[1] == position[1] || connector {
+                                1
+                            } else {
+                                return Err(failed(
+                                    "actual grid deposition must follow build X or Y",
+                                ));
+                            };
+                        }
+                        if from[fixed_axis] != position[fixed_axis] && !connector {
+                            return Err(failed(
+                                "actual ordinary deposition violates its authored axis policy",
+                            ));
+                        }
+                    }
+                    let length =
+                        arc_segment.map_or_else(|| distance(from, position), |arc| arc.length);
+                    if let Some(hardware) = &intent.hardware {
+                        let radius = association.map_or(recipe.bead_width_mm, |a| a.width) * 0.5
+                            + arc_segment.map_or(0.0, |arc| arc.sagitta);
+                        let actual = spiling_contracts::geometry::AabbMm {
+                            min: [
+                                from[0].min(position[0]) - radius,
+                                from[1].min(position[1]) - radius,
+                                from[2].min(position[2])
+                                    - association.map_or(recipe.layer_height_mm, |a| {
+                                        a.physical_z[1] - a.physical_z[0]
+                                    }),
+                            ],
+                            max: [
+                                from[0].max(position[0]) + radius,
+                                from[1].max(position[1]) + radius,
+                                from[2].max(position[2]),
+                            ],
+                        };
+                        hardware.admits_bounds(&actual).map_err(|e| failed(&e))?;
+                    }
+                    let nominal_length = distance(source, target);
+                    let support = deposition_kind.is_support();
+                    let adhesion = deposition_kind.is_adhesion();
+                    if support {
+                        layer_support_volume += nominal_length * volume_per_mm;
+                    } else if !adhesion {
+                        layer_nominal_volume += nominal_length * volume_per_mm;
+                    }
+                    if retracted_endpoint.is_some() {
+                        return Err(failed("deposition before exact stationary recovery"));
+                    }
+                    let next_e = decoded.fields[3].ok_or_else(|| failed("missing extrusion"))?;
+                    let delta_e = next_e - state.extrusion;
+                    // Independently decoded XYZ6 chord length owns constant-section
+                    // extrusion. Source endpoints separately own positional fidelity.
+                    let nominal_e = match (arc_segment, arc_replay.as_mut()) {
+                        (Some(arc), Some(replay)) => {
+                            let start = *replay.expected_start.get_or_insert(expected_e);
+                            let total = start + arc.swept * volume_per_mm / filament_area;
+                            let nominal = total - expected_e;
+                            expected_e = total;
+                            nominal
+                        }
+                        _ => {
+                            let nominal = length * volume_per_mm / filament_area;
+                            expected_e += nominal;
+                            nominal
+                        }
+                    };
+                    if !expected_e.is_finite()
+                        || length <= 0.0
+                        || nominal_length <= 0.0
+                        || !nominal_e.is_finite()
+                        || nominal_e <= 0.0
+                        || delta_e <= 0.0
+                    {
+                        return Err(failed("zero-length, nonpositive or nonfinite deposition"));
+                    }
+                    let cumulative_error = (next_e - expected_e).abs();
+                    let segment_error = (delta_e - nominal_e).abs();
+                    max_extrusion_error_mm = max_extrusion_error_mm
+                        .max(cumulative_error)
+                        .max(segment_error);
+                    if cumulative_error > E_HALF_STEP + arithmetic_slack(expected_e)
+                        || segment_error > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
+                    {
+                        return Err(failed(
+                            "absolute or incremental extrusion differs from nominal volume",
+                        ));
+                    }
+                    let association = association.ok_or_else(|| {
+                        failed("deposition lost its local width/interval association")
+                    })?;
+                    // The minimum governs commanded moves: a whole arc, not the
+                    // planned edges replayed along it.
+                    if arc_segment.is_none() && !program_coordinates::meets_minimum_command(length)
+                    {
+                        return Err(failed(
+                            "deposition command is below the declared software minimum length",
+                        ));
+                    }
+                    let length_error = (xyz_endpoint_error(from)?
+                        + xyz_endpoint_error(position)?
+                        + arithmetic_slack(length))
+                    .next_up();
+                    let extrusion_error = (e8_endpoint_error(next_e)
+                        + e8_endpoint_error(state.extrusion)
+                        + 2.0 * f64::EPSILON * delta_e.abs())
+                    .next_up();
+                    let bounds = program_coordinates::commanded_stadium_width_enclosure_mm(
+                        length,
+                        length_error,
+                        delta_e,
+                        extrusion_error,
+                        filament_area,
+                        association.physical_z[1] - association.physical_z[0],
+                        process_flow,
+                    )?;
+                    // Quantized E can give a width-equivalent value below height even
+                    // for an admitted circular nominal target. Nominal geometry and the
+                    // independent forward E volume check above own that model domain;
+                    // keep the FULL actual algebraic interval for all checks below.
+                    // The planned width must lie in the decoded interval widened by
+                    // the E word's own rounding (half a step at each endpoint); only
+                    // the remainder counts against the lateral command budget.
+                    let represented = program_coordinates::commanded_stadium_width_enclosure_mm(
+                        length,
+                        length_error,
+                        delta_e,
+                        // An E delta below one step can represent any width
+                        // down to nearly zero; keep the interval positive.
+                        (extrusion_error + 2.0 * E_HALF_STEP)
+                            .next_up()
+                            .min(delta_e.abs() * (1.0 - 1e-9)),
+                        filament_area,
+                        association.physical_z[1] - association.physical_z[0],
+                        process_flow,
+                    )?;
+                    let width_error = (represented[0] - association.width)
+                        .max(association.width - represented[1])
+                        .max(0.0);
+                    // A bead's lateral error is in XY; its Z is enclosed by the
+                    // bead height checks.
+                    let lateral = |a: [f64; 3], b: [f64; 3]| (a[0] - b[0]).hypot(a[1] - b[1]);
+                    // An arc replays through its rounded I/J centre, which moves
+                    // the decoded curve up to half a step on each axis on its own.
+                    let centre_rounding = std::f64::consts::SQRT_2 * XYZ_HALF_STEP;
+                    let center_error = lateral(source, from).max(lateral(target, position)).max(
+                        arc_segment.map_or(0.0, |arc| (arc.deviation - centre_rounding).max(0.0)),
+                    );
+                    // The E words must be able to represent a width inside the
+                    // printer's limits.
+                    if represented[1] < printer.deposition_limits.min_bead_width_mm
+                        || represented[0] > printer.deposition_limits.max_bead_width_mm
+                        || width_error + center_error
+                            > program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
+                    {
+                        return Err(failed(format!(
+                            "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure: width {} in [{}, {}], width error {}, centre error {}, length {}",
+                            association.width,
+                            bounds[0],
+                            bounds[1],
+                            width_error,
+                            center_error,
+                            length,
+                        )));
+                    }
+                    if let Some(grid) = &mut support_grid {
+                        grid.record(grid::RoadInput {
+                            layer: layer_index,
+                            line: line_index + 1,
+                            path: association.path,
+                            role: deposition_kind,
+                            from: prior_grid_position.ok_or_else(|| {
+                                failed("no decoded starting XYZ6 coordinates for deposition")
+                            })?,
+                            to: grid_position.ok_or_else(|| {
+                                failed("no decoded ending XYZ6 coordinates for deposition")
+                            })?,
+                            physical_z: association.physical_z,
+                            maximum_width_mm: bounds[1].max(association.width),
+                            minimum_width_mm: bounds[0].min(association.width),
+                            length_upper_mm: (length + length_error).next_up(),
+                            arc_deviation_mm: arc_segment
+                                .map_or(0.0, |segment| segment.grid_deviation_mm),
+                        })?;
+                    }
+                    if association.owner == Some(DepositionOwner::Wall) {
+                        let edge = CommandedWallEdge {
+                            width: represented,
+                            length_lower: (length - length_error).next_down(),
+                        };
+                        if let Some(previous) = previous_wall_edge {
+                            verify_wall_gradient(previous, edge)?;
+                        }
+                        let first = *first_wall_edge.get_or_insert(edge);
+                        if closes_wall {
+                            verify_wall_gradient(edge, first)?;
+                        }
+                        previous_wall_edge = Some(edge);
+                    }
+                    let speed = feed / 60.0;
+                    let flow = delta_e * filament_area * speed / length;
+                    // E deltas have two rounded endpoints; a segment's decoded length
+                    // differs from its ideal by at most two XYZ rounding-vector norms.
+                    let position_delta_bound =
+                        2.0 * 3.0_f64.sqrt() * XYZ_HALF_STEP + arithmetic_slack(nominal_length);
+                    let rounding_flow_slack = (process.max_volumetric_flow_mm3_s
+                        * position_delta_bound
+                        + 2.0 * E_HALF_STEP * filament_area * speed)
+                        / length
+                        + volume_per_mm * F_HALF_STEP / 60.0;
+                    if !flow.is_finite()
+                        || !rounding_flow_slack.is_finite()
+                        || flow
+                            > process.max_volumetric_flow_mm3_s
+                                + rounding_flow_slack
+                                + arithmetic_slack(flow)
+                    {
+                        return Err(failed("decoded volumetric flow exceeds printer limit"));
+                    }
+                    if let Some(routed) = &mut route {
+                        routed.record_model(
+                            source_tool
+                                .ok_or_else(|| failed("model deposition lost its source tool"))?,
+                            state.extrusion,
+                            next_e,
+                        )?;
+                    }
+                    state.extrusion = next_e;
+                    if support {
+                        support_deposition_segments = count_event(support_deposition_segments)?;
+                        support_filament += delta_e;
+                    } else if adhesion {
+                        adhesion_deposition_segments = count_event(adhesion_deposition_segments)?;
+                        adhesion_filament += delta_e;
+                    } else {
+                        deposition_segments = count_event(deposition_segments)?;
+                        object_filament += delta_e;
+                    }
+                    if deposition_segments
+                        .checked_add(support_deposition_segments)
+                        .and_then(|n| n.checked_add(adhesion_deposition_segments))
+                        .is_none()
+                    {
+                        return Err(failed(
+                            "deposition segment count exceeds its u32 representation",
+                        ));
+                    }
+                } else {
+                    // Every stored path has an explicit entry travel; wall continuity
+                    // never crosses a travel, even if endpoints happen to coincide.
+                    first_wall_edge = None;
+                    previous_wall_edge = None;
+                    travel_segments = count_event(travel_segments)?;
+                }
+                if let Some(sink) = replay.as_deref_mut() {
+                    let kind = if source.is_none() {
+                        0
+                    } else {
+                        match deposition_kind {
+                            spiling_contracts::manufacturing::DepositionKind::Perimeter => 1,
+                            spiling_contracts::manufacturing::DepositionKind::SolidFill => 2,
+                            DepositionKind::BottomSkin => 3,
+                            DepositionKind::TopSkin => 4,
+                            DepositionKind::SparseFill => 5,
+                            DepositionKind::Bridge => 8,
+                            DepositionKind::Support => 9,
+                            DepositionKind::SupportInterface => 10,
+                            DepositionKind::SeparatorWall => 13,
+                            // Non-model deposition without a model owner.
+                            DepositionKind::Skirt | DepositionKind::Brim => 15,
+                        }
+                    };
+                    sink.push_associated(
+                        position,
+                        state.extrusion,
+                        feed,
+                        (line_index + 1) as u32,
+                        layer_index,
+                        kind,
+                        association,
+                    )?;
+                }
+                state.position = Some(position);
+                prior_grid_position = grid_position;
+                if arc_replay.as_ref().is_none_or(ArcReplay::done) {
+                    break;
+                }
             }
         }
-    }
+        Ok(())
+    })?;
     cancelled(cancel)?;
     vclock.mark("decode");
     let remaining = expected.next().transpose()?;
@@ -2114,10 +2260,19 @@ pub(crate) fn verify_actual(
         }
     }
     report.validate()?;
-    if let Some(selection) = &plan.interior_selection {
-        selection.validate_current(&SourceHash::from_digest(program.digest()), &report)?;
-    }
     Ok(report)
+}
+
+/// The plan's interior selection must name this exact program and report.
+pub(crate) fn validate_selection(
+    plan: &NormalizedPrintPlan,
+    program_digest: &[u8; 32],
+    report: &VerificationReport,
+) -> Result<(), ManufacturingError> {
+    if let Some(selection) = &plan.interior_selection {
+        selection.validate_current(&SourceHash::from_digest(program_digest), report)?;
+    }
+    Ok(())
 }
 
 mod diaphragms;

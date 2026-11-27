@@ -210,11 +210,9 @@ fn compile_exact_with_replay(
         verifier_version: VERIFIER_VERSION.into(),
     };
     timing.mark("provenance");
-    let program = backend::emit_prepared(&prepared, cancel)?;
+    let (program, verification) = emit_and_replay(&prepared, input.intent, cancel, replay)?;
     let plan = prepared.into_plan();
-    timing.mark("emission");
-    let verification = verify_compiled(&program, &plan, input.intent, cancel, replay)?;
-    timing.mark("independent_replay");
+    timing.mark("emission_and_independent_replay");
     let bundle = ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance,
@@ -226,6 +224,48 @@ fn compile_exact_with_replay(
     timing.mark("bundle_validation");
     check_cancel(cancel)?;
     Ok(ManufacturingResult { bundle, program })
+}
+
+/// Emit the program and independently replay it at once: emission writes on
+/// its own thread through a tapped writer while the replay decodes the same
+/// bytes as each frame seals. The replay shares no emitter state; only the
+/// program bytes pass between them.
+fn emit_and_replay(
+    prepared: &planner::PreparedPlan<'_>,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    replay: Option<&mut Option<verifier::ReplaySink>>,
+) -> Result<(ChunkSource, VerificationReport), ManufacturingError> {
+    /// Sealed frames the emitter may run ahead of the replay.
+    const AHEAD_FRAMES: usize = 16;
+    let (writer, stream) =
+        spiling_chunks::ChunkWriter::tapped(backend::program_writer_limit(), AHEAD_FRAMES);
+    let working_set = working_set::current();
+    let (program, report) = std::thread::scope(|scope| {
+        let emitter = scope.spawn(move || {
+            working_set::scope(working_set, || {
+                backend::emit_prepared_into(prepared, writer, cancel)
+            })
+        });
+        let (plan, _, _) = prepared.emission_inputs();
+        let report = verifier::verify_streamed(
+            std::io::BufReader::new(stream),
+            plan,
+            intent,
+            cancel,
+            replay.map(verifier::ReplayTarget::Capture),
+        );
+        let program = emitter
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (program, report)
+    });
+    // An emission failure is the cause of any replay failure it produced.
+    let program = program?;
+    let report = report?;
+    let (plan, _, _) = prepared.emission_inputs();
+    verifier::validate_selection(plan, program.digest(), &report)?;
+    Ok((program, report))
 }
 
 fn verify_compiled(

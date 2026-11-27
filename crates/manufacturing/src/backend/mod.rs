@@ -38,26 +38,41 @@ pub(crate) fn emit(
         }
         _ => None,
     };
-    emit_body(plan, intent, estimate.as_ref(), cancel)
+    emit_body(plan, intent, estimate.as_ref(), program_writer(), cancel)
 }
 
 /// Emit the explicit diagnostic, complete single-extruder or fixed-dual
 /// workflow in the printer's dialect. Takes the validated construction;
 /// independent replay is mandatory.
-pub(crate) fn emit_prepared(
+/// The writer a program is emitted into, at the manufacturing byte limit.
+#[cfg(test)]
+pub(crate) fn program_writer() -> ChunkWriter {
+    ChunkWriter::new(program_writer_limit())
+}
+
+/// The raw byte limit every program writer enforces.
+pub(crate) fn program_writer_limit() -> u64 {
+    u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)
+}
+
+/// Emit a prepared plan into a caller's writer, such as a tapped one that a
+/// concurrent replay reads while the program is written.
+pub(crate) fn emit_prepared_into(
     prepared: &crate::planner::PreparedPlan<'_>,
+    writer: ChunkWriter,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
     check_cancel(cancel)?;
     let (plan, intent, estimate) = prepared.emission_inputs();
     let execution = plan.execution_intent(intent)?;
-    emit_body(plan, execution.as_ref(), estimate, cancel)
+    emit_body(plan, execution.as_ref(), estimate, writer, cancel)
 }
 
 fn emit_body(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
     estimate: Option<&crate::realization::BambuEstimate>,
+    writer: ChunkWriter,
     cancel: &AtomicBool,
 ) -> Result<ChunkSource, ManufacturingError> {
     let routed = match &intent.printer.workflow {
@@ -92,7 +107,7 @@ fn emit_body(
         ));
     }
     let mut program = BoundedProgram {
-        writer: ChunkWriter::new(u64::from(MAX_MANUFACTURING_PROGRAM_BYTES)),
+        writer,
         pending: String::new(),
         max_line: dialect.max_line_bytes(),
         line: 0,

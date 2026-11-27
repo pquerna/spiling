@@ -411,11 +411,34 @@ pub(super) fn connect_roads(
     if routed || !plan.sparse_bands.is_empty() {
         return Ok(0);
     }
+    use rayon::prelude::*;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut work = 0usize;
     let mut payload = crate::planner::layer_payload_bytes(&plan.layers).ok();
+    // Wide part: a layer's connection reads that layer and the unrelabelled
+    // layers above it, exactly what the ordered pass sees, so each chunk's
+    // connections are planned in parallel. Thin part: relabelling reads the
+    // connected layer below, in order; a layer it changes is planned again.
+    const CHUNK: usize = 32;
+    let working_set = crate::working_set::current();
+    let mut planned: Vec<Option<Result<Option<Connection>, ManufacturingError>>> = Vec::new();
     for index in 0..plan.layers.len() {
         check_cancel(cancel)?;
+        if index % CHUNK == 0 {
+            let end = (index + CHUNK).min(plan.layers.len());
+            let shared: &NormalizedPrintPlan = plan;
+            planned = (index..end)
+                .into_par_iter()
+                .map(|at| {
+                    Some(crate::working_set::scope(working_set, || {
+                        plan_connection(shared, at, alternation, intent, cancel)
+                    }))
+                })
+                .collect();
+        }
+        let ready = planned[index % CHUNK]
+            .take()
+            .expect("each layer's connection is planned once");
         let before = layer_bytes(&plan.layers[index]);
         // Leave room for the anchor workspace even when all lower edges hit.
         let cache_bytes = payload.map_or(0, |bytes| {
@@ -440,7 +463,15 @@ pub(super) fn connect_roads(
         };
         // Joining groups by role, so relabelling must precede connector
         // discovery. Relabelling itself reads the connected layer below.
-        let connected = connect_layer(plan, index, alternation, intent, cancel)?;
+        let connection = if relabelled {
+            plan_connection(plan, index, alternation, intent, cancel)?
+        } else {
+            ready?
+        };
+        let connected = connection.is_some();
+        if let Some(connection) = connection {
+            connection.apply(&mut plan.layers[index]);
+        }
         if connected || relabelled {
             let layer = &mut plan.layers[index];
             crate::planner::support::object_volumes(std::slice::from_mut(layer), intent)?;
@@ -455,13 +486,34 @@ fn layer_bytes(layer: &PrintLayer) -> usize {
     crate::planner::layer_payload_bytes(std::slice::from_ref(layer)).unwrap_or(usize::MAX)
 }
 
-fn connect_layer(
-    plan: &mut NormalizedPrintPlan,
+/// One layer's joined roads: which paths the chains absorbed, and the chains.
+struct Connection {
+    taken: Vec<bool>,
+    chains: Vec<DepositionPath>,
+}
+
+impl Connection {
+    fn apply(self, layer: &mut PrintLayer) {
+        let mut kept = Vec::with_capacity(layer.paths.len());
+        for (i, path) in std::mem::take(&mut layer.paths).into_iter().enumerate() {
+            if !self.taken[i] {
+                kept.push(path);
+            }
+        }
+        kept.extend(self.chains);
+        layer.paths = kept;
+    }
+}
+
+/// The connection of layer `index` as the plan stands, or `None` when its
+/// roads stay as they are.
+fn plan_connection(
+    plan: &NormalizedPrintPlan,
     index: usize,
     alternation: &[u32],
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
-) -> Result<bool, ManufacturingError> {
+) -> Result<Option<Connection>, ManufacturingError> {
     let policy = intent.recipe.sparse_infill;
     let layer = &plan.layers[index];
     // Separators, diaphragms, process interfaces, skin-bridge domains and
@@ -475,13 +527,13 @@ fn connect_layer(
         || !layer.region_coverage.skin_bridge_domains.is_empty()
         || !layer.skin_command_fits.is_empty()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let candidates: Vec<usize> = (0..layer.paths.len())
         .filter(|i| eligible(&layer.paths[*i], &policy, layer))
         .collect();
     if candidates.len() < 2 {
-        return Ok(false);
+        return Ok(None);
     }
     // A bridge on the next layer was decided from the roads below it; no
     // connector within two bead widths of its footprint.
@@ -577,7 +629,7 @@ fn connect_layer(
         .filter(|i| !under_support(&layer.paths[*i]))
         .collect();
     if candidates.len() < 2 {
-        return Ok(false);
+        return Ok(None);
     }
     let walls = SegmentGrid::new(
         layer
@@ -830,10 +882,10 @@ fn connect_layer(
         joined.insert((b.path, b.side), (a.path, a.side, connector));
     }
     if joined.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     // Walk each chain from a road end that is not joined.
-    let layer = &mut plan.layers[index];
+    let layer = &plan.layers[index];
     let mut taken = vec![false; layer.paths.len()];
     let mut chains = Vec::new();
     for &start in &candidates {
@@ -872,15 +924,7 @@ fn connect_layer(
         path.connectors = runs;
         chains.push(path);
     }
-    let mut kept = Vec::with_capacity(layer.paths.len());
-    for (i, path) in std::mem::take(&mut layer.paths).into_iter().enumerate() {
-        if !taken[i] {
-            kept.push(path);
-        }
-    }
-    kept.extend(chains);
-    layer.paths = kept;
-    Ok(true)
+    Ok(Some(Connection { taken, chains }))
 }
 
 /// XY length of a connector edge once both ends are on the program lattice.
