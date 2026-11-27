@@ -25,7 +25,10 @@ struct Session {
 
 pub(crate) struct Context {
     status: ComputeStatus,
-    default: ResolvedDevice,
+    /// Devices that lead rounds: the default first, then helpers. Auto
+    /// with a hardware GPU adds the CPU runtime as a helper; every kernel is
+    /// exact, so a request's result is the same on whichever device runs it.
+    devices: Vec<ResolvedDevice>,
     _fea: ResolvedDevice,
     /// The first execution failure; every later round refuses with it.
     failure: Mutex<Option<ComputeError>>,
@@ -38,9 +41,13 @@ pub(crate) struct Context {
 /// one round (group commit), so launches scale with device time, not calls.
 #[derive(Default)]
 struct Pending {
-    leader: bool,
+    /// Whether each device is leading a round.
+    leaders: Vec<bool>,
     next: u64,
     queue: Vec<(u64, Vec<MaskGroup>)>,
+    /// Exclusive callers waiting for the device, served first come first
+    /// served so a long batch's later segments queue behind a short request.
+    turns: std::collections::VecDeque<u64>,
     done: Vec<(u64, Result<Vec<MaskRows>, ComputeError>)>,
     abandoned: Vec<u64>,
 }
@@ -119,12 +126,25 @@ fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
             fea_device: fea.description.clone(),
         };
         status.validate().map_err(ComputeError::Initialization)?;
+        let mut devices = vec![default];
+        if settings.default_backend == ComputeBackend::Auto
+            && devices[0].description.backend == ComputeBackend::Vulkan
+            && devices[0].description.hardware_accelerated
+            && let Ok(cpu) = resolve(ComputeBackend::Cpu, None)
+        {
+            // Extra capacity only: a helper that cannot start changes no result.
+            devices.push(cpu);
+        }
+        let pending = Pending {
+            leaders: vec![false; devices.len()],
+            ..Pending::default()
+        };
         Ok(Context {
             status,
-            default,
+            devices,
             _fea: fea,
             failure: Mutex::new(None),
-            pending: Mutex::new(Pending::default()),
+            pending: Mutex::new(pending),
             wake: Condvar::new(),
         })
     })
@@ -349,7 +369,14 @@ pub(crate) fn execute_masks(
             .map(|group| group.shape.empty())
             .collect();
     }
-    let context = context()?;
+    masks_in(context()?, groups, cancel)
+}
+
+fn masks_in(
+    context: &Context,
+    groups: Vec<MaskGroup>,
+    cancel: &AtomicBool,
+) -> Result<Vec<MaskRows>, ComputeError> {
     let mut pending = lock_pending(context)?;
     let id = pending.next;
     pending.next += 1;
@@ -366,8 +393,8 @@ pub(crate) fn execute_masks(
             }
             return Err(ComputeError::Cancelled);
         }
-        if !pending.leader {
-            pending = lead(context, pending, |_, _| Ok(()))?.0;
+        if let Some(device) = pending.leaders.iter().position(|busy| !busy) {
+            pending = lead(context, pending, device, |_, _| Ok(()))?.0;
             continue;
         }
         pending = context
@@ -378,18 +405,35 @@ pub(crate) fn execute_masks(
     }
 }
 
-/// Run `work` on the device as soon as no round is running, after every
-/// queued request; `work` may borrow the caller's data.
+/// Run `work` on the first free device in turn order, after every queued
+/// request; `work` may borrow the caller's data.
 pub(crate) fn execute_exclusive<T: Send>(
     cancel: &AtomicBool,
     work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
 ) -> Result<T, ComputeError> {
-    let context = context()?;
+    exclusive_in(context()?, cancel, work)
+}
+
+fn exclusive_in<T: Send>(
+    context: &Context,
+    cancel: &AtomicBool,
+    work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
+) -> Result<T, ComputeError> {
     let mut pending = lock_pending(context)?;
+    let id = pending.next;
+    pending.next += 1;
+    pending.turns.push_back(id);
     loop {
-        check_cancel(cancel)?;
-        if !pending.leader {
-            let (_pending, result) = lead(context, pending, work)?;
+        if let Err(error) = check_cancel(cancel) {
+            pending.turns.retain(|turn| *turn != id);
+            context.wake.notify_all();
+            return Err(error);
+        }
+        if pending.turns.front() == Some(&id)
+            && let Some(device) = pending.leaders.iter().position(|busy| !busy)
+        {
+            pending.turns.pop_front();
+            let (_pending, result) = lead(context, pending, device, work)?;
             return result;
         }
         pending = context
@@ -405,15 +449,16 @@ pub(crate) fn execute_exclusive<T: Send>(
 fn lead<'context, T: Send>(
     context: &'context Context,
     mut pending: MutexGuard<'context, Pending>,
+    device: usize,
     work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
 ) -> Result<(MutexGuard<'context, Pending>, Result<T, ComputeError>), ComputeError> {
-    pending.leader = true;
+    pending.leaders[device] = true;
     let queued = std::mem::take(&mut pending.queue);
     drop(pending);
     let ids: Vec<u64> = queued.iter().map(|(id, _)| *id).collect();
-    let (masks, own) = round(context, queued, work);
+    let (masks, own) = round(context, device, queued, work);
     let mut pending = lock_pending(context)?;
-    pending.leader = false;
+    pending.leaders[device] = false;
     let masks: Vec<Result<Vec<MaskRows>, ComputeError>> = match masks {
         Ok(masks) => masks.into_iter().map(Ok).collect(),
         Err(error) => ids.iter().map(|_| Err(error.clone())).collect(),
@@ -436,17 +481,20 @@ type RoundResult<T> = (
 
 fn round<T: Send>(
     context: &Context,
+    device: usize,
     queued: Vec<(u64, Vec<MaskGroup>)>,
     work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
 ) -> RoundResult<T> {
-    let mut failure = match context.failure.lock() {
-        Ok(failure) => failure,
+    // Checked and recorded briefly, so rounds on two devices overlap.
+    match context.failure.lock() {
+        Ok(failure) => {
+            if let Some(error) = failure.as_ref() {
+                return (Err(error.clone()), Err(error.clone()));
+            }
+        }
         Err(_) => return (Err(ComputeError::Poisoned), Err(ComputeError::Poisoned)),
-    };
-    if let Some(error) = failure.as_ref() {
-        return (Err(error.clone()), Err(error.clone()));
     }
-    let device = &context.default;
+    let device = &context.devices[device];
     let cpu = device.description.backend == ComputeBackend::Cpu;
     let mut own = Err(ComputeError::Execution("round did not run".into()));
     let masks = guarded(|| {
@@ -466,8 +514,10 @@ fn round<T: Send>(
         Ok(()) => (masks, own),
     };
     for result in [masks.as_ref().err(), own.as_ref().err()] {
-        if let Some(error @ ComputeError::Execution(_)) = result {
-            *failure = Some(error.clone());
+        if let Some(error @ ComputeError::Execution(_)) = result
+            && let Ok(mut failure) = context.failure.lock()
+        {
+            failure.get_or_insert_with(|| error.clone());
         }
     }
     (masks, own)
@@ -581,7 +631,7 @@ fn run_masks(
 
 /// Jobs and output words one uploaded capsule segment holds at most, unless
 /// a single group is larger; larger batches run as several segments.
-const CAPSULE_SEGMENT_JOBS: usize = 1 << 24;
+const CAPSULE_SEGMENT_JOBS: usize = 1 << 22;
 const CAPSULE_SEGMENT_WORDS: usize = 1 << 24;
 
 /// Group windows are `[row0, rows, word0, width]` in 64-cell words.
@@ -606,7 +656,7 @@ pub(crate) fn execute_capsule_masks(
             .sum()
     };
     let group_words = |group: usize| windows[group][1] as usize * windows[group][3] as usize * 2;
-    execute_exclusive(cancel, |client, cpu| {
+    {
         let mut group = 0usize;
         while group < group_ends.len() {
             check_cancel(cancel)?;
@@ -662,19 +712,24 @@ pub(crate) fn execute_capsule_masks(
                     .filter(|(_, row)| row[1] > 0)
                     .flat_map(|(capsule, _)| *capsule)
                     .collect();
-                kernels::capsule_masks_dispatch(
-                    client,
-                    cpu,
-                    &kept,
-                    &starts,
-                    &first_rows,
-                    &capsule_windows,
-                    &segment_windows,
-                    words,
-                    cell,
-                    columns,
-                    cancel,
-                )?
+                // Each segment is its own device turn: packing and
+                // unpacking stay on this thread, and a short request queued
+                // behind a long batch waits at most one segment.
+                execute_exclusive(cancel, |client, cpu| {
+                    kernels::capsule_masks_dispatch(
+                        client,
+                        cpu,
+                        &kept,
+                        &starts,
+                        &first_rows,
+                        &capsule_windows,
+                        &segment_windows,
+                        words,
+                        cell,
+                        columns,
+                        cancel,
+                    )
+                })?
             };
             for (local, at) in (first_group..group).enumerate() {
                 let [row0, rows_in, word0, width] = windows[at];
@@ -705,7 +760,7 @@ pub(crate) fn execute_capsule_masks(
         }
         check_cancel(cancel)?;
         Ok(masks)
-    })
+    }
 }
 
 fn encode_values<const FIELDS: usize>(
@@ -759,11 +814,15 @@ mod tests {
         .unwrap();
         let context = context().unwrap();
         // Take the leader role the way a round does, so no real round resets it.
-        loop {
+        // Every device, so the waiter cannot lead a round of its own.
+        let mut taken = vec![false; context.devices.len()];
+        while taken.iter().any(|taken| !taken) {
             let mut pending = lock_pending(context).unwrap();
-            if !pending.leader {
-                pending.leader = true;
-                break;
+            for (device, taken) in taken.iter_mut().enumerate() {
+                if !*taken && !pending.leaders[device] {
+                    pending.leaders[device] = true;
+                    *taken = true;
+                }
             }
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -780,7 +839,7 @@ mod tests {
         assert_eq!(worker.join().unwrap(), ComputeError::Cancelled);
         let mut pending = lock_pending(context).unwrap();
         assert!(pending.abandoned.is_empty());
-        pending.leader = false;
+        pending.leaders.iter_mut().for_each(|busy| *busy = false);
         context.wake.notify_all();
     }
 
@@ -876,5 +935,57 @@ mod tests {
             assert_eq!(batched[index * 3 + 1], closed);
             assert_eq!(batched[index * 3 + 2], boxed);
         }
+    }
+
+    #[test]
+    fn a_busy_device_hands_rounds_to_the_next_with_identical_results() {
+        let cpu = || resolve(ComputeBackend::Cpu, None).unwrap();
+        let first = cpu();
+        let status = ComputeStatus {
+            settings: ComputeSettings {
+                default_backend: ComputeBackend::Cpu,
+                fea_backend: None,
+            },
+            default_device: first.description.clone(),
+            fea_device: first.description.clone(),
+        };
+        let context = Context {
+            status,
+            _fea: first.clone(),
+            devices: vec![first, cpu()],
+            failure: Mutex::new(None),
+            pending: Mutex::new(Pending {
+                leaders: vec![false, false],
+                ..Pending::default()
+            }),
+            wake: Condvar::new(),
+        };
+        let cancel = AtomicBool::new(false);
+        let ranges: Vec<[f64; 2]> = (0..90)
+            .map(|i| [f64::from(i), f64::from(i) + 4.5])
+            .collect();
+        let coordinates: Vec<f64> = (0..33).map(|i| f64::from(i) * 2.75).collect();
+        let group = || {
+            interval_group(
+                Shape::new(coordinates.len(), ranges.len()).unwrap(),
+                &ranges,
+                &coordinates,
+                &cancel,
+                0,
+            )
+            .unwrap()
+        };
+        let free = masks_in(&context, vec![group()], &cancel).unwrap();
+        // Device 0 stays busy, so both kinds of work must lead on device 1.
+        lock_pending(&context).unwrap().leaders[0] = true;
+        let handed = masks_in(&context, vec![group()], &cancel).unwrap();
+        assert_eq!(handed, free);
+        let second = &context.devices[1].client as *const Client as usize;
+        let device = exclusive_in(&context, &cancel, |client, _| {
+            Ok(client as *const Client as usize == second)
+        })
+        .unwrap();
+        assert!(device, "exclusive work ran on the free device");
+        lock_pending(&context).unwrap().leaders[0] = false;
     }
 }

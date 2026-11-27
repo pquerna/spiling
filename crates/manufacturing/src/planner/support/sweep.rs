@@ -518,6 +518,36 @@ impl Channel {
 /// A raw occupied piece, its height scope clipped to its span, the bounds
 /// its clearance can reach, and the highest swept layer whose bead slab it
 /// meets: the layer where the descending carry first excludes it.
+/// What part landing cells read: roots, their ledges and object roads.
+#[derive(Clone, Copy)]
+struct LandingSource<'a> {
+    roots: &'a [Root],
+    ledges: &'a [&'a MultiPolygon<f64>],
+    layers: &'a [PrintLayer],
+    radius: f64,
+    owned_bytes: usize,
+}
+
+/// What loading a span reads: source sections and the schedule only.
+struct SpanSource<'a> {
+    sections: &'a [super::super::SectionSpan],
+    schedule: &'a [super::super::LayerElevation],
+    owned_bytes: usize,
+}
+
+/// One descending chunk's wide part, ready for its ordered carry.
+struct Prepared {
+    window: Window,
+    fresh: Vec<Option<Bits>>,
+    charged: usize,
+    load: std::time::Duration,
+    rasterize: std::time::Duration,
+}
+
+/// The loaded spans of the descending pass, shared with the chunk that
+/// consumes them while the next chunk loads.
+type Window = Vec<(usize, Arc<Vec<Piece>>)>;
+
 struct Piece {
     polygon: Polygon<f64>,
     scope: [f64; 2],
@@ -829,199 +859,230 @@ impl Sweep<'_> {
             }
             envelope[l] = running;
         }
-        let mut window: Vec<(usize, Vec<Piece>)> = Vec::new();
-        let mut carried: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
-        let mut voids: Vec<Option<Option<Bits>>> = vec![None; self.protected.0.len()];
-        let mut material_cells: Option<(usize, Bits)> = None;
+        // The landing stage reads no carry: build it alongside the down pass.
+        let ledges: Vec<&MultiPolygon<f64>> = self
+            .landings
+            .iter()
+            .map(|landing| &landing.material)
+            .collect();
+        let landing_source = LandingSource {
+            roots: self.roots,
+            ledges: &ledges,
+            layers: self.layers,
+            radius: self.recipe.bead_width_mm * 0.5,
+            owned_bytes: self.owned_bytes,
+        };
         let (mut down_load, mut down_fresh, mut down_seed, mut down_rest): (
             std::time::Duration,
             std::time::Duration,
             std::time::Duration,
             std::time::Duration,
         ) = Default::default();
-        let mut slabs = Vec::new();
-        reserve_owned(&mut slabs, max_top + 1, self.owned_bytes)?;
-        for layer in &layers[..=max_top] {
-            slabs.push(bead_slab(layer)?);
-        }
-        const CHUNK: usize = 32;
-        let mut next = Some(max_top);
-        while let Some(hi) = next {
-            let lo = hi.saturating_sub(CHUNK - 1);
-            next = lo.checked_sub(1);
-            check_cancel(cancel)?;
-            let t0 = std::time::Instant::now();
-            self.load_spans(
-                lo,
-                hi,
-                &mut window,
-                &slabs,
-                cell_bounds,
-                distance,
-                work,
-                cancel,
-            )?;
-            down_load += t0.elapsed();
-            // Each piece is rasterized once, in the batch of the layer where
-            // the carry first meets it; the chunk's batches are one raster
-            // stage.
-            let t0 = std::time::Instant::now();
-            let mut fresh: Vec<Option<Bits>> = {
-                let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); hi - lo + 1];
-                for piece in window.iter().flat_map(|(_, pieces)| pieces) {
-                    if let Some(first) = piece.first
-                        && (lo..=hi).contains(&first)
-                        && envelope[first].is_some_and(|reach| rects_meet(piece.reach, reach))
-                    {
-                        raster.reserve(&mut batches[first - lo], 1)?;
-                        batches[first - lo].push(&piece.polygon);
-                    }
-                }
-                raster.outward_groups(&batches, distance)?
-            };
-            for bits in fresh.iter().flatten() {
-                hold(bits)?;
+        let mut landing_cells = None;
+        rayon::in_place_scope(|scope| -> Result<(), ManufacturingError> {
+            {
+                let landing_cells = &mut landing_cells;
+                let (landing_source, raster) = (&landing_source, &raster);
+                scope.spawn(move |_| {
+                    let started = std::time::Instant::now();
+                    *landing_cells = Some((
+                        Self::landing_cells(landing_source, raster),
+                        started.elapsed(),
+                    ));
+                });
             }
-            down_fresh += t0.elapsed();
-            for l in (lo..=hi).rev() {
+            let mut window: Window = Vec::new();
+            let mut carried: Vec<Bits> = channels.iter().map(|_| Bits::default()).collect();
+            let mut voids: Vec<Option<Option<Bits>>> = vec![None; self.protected.0.len()];
+            let mut material_cells: Option<(usize, Bits)> = None;
+            let mut slabs = Vec::new();
+            reserve_owned(&mut slabs, max_top + 1, self.owned_bytes)?;
+            for layer in &layers[..=max_top] {
+                slabs.push(bead_slab(layer)?);
+            }
+            const CHUNK: usize = 32;
+            let chunks = std::iter::successors(Some(max_top), |&hi| {
+                hi.saturating_sub(CHUNK - 1).checked_sub(1)
+            })
+            .map(|hi| (hi.saturating_sub(CHUNK - 1), hi));
+            let source = SpanSource {
+                sections: self.sections,
+                schedule: self.schedule,
+                owned_bytes: self.owned_bytes,
+            };
+            // Wide part: a chunk's spans and its fresh occupancy read only the
+            // source pieces and the seed envelope, so the next chunk loads and
+            // rasterizes while this one carries.
+            let prepare = |(lo, hi): (usize, usize)| -> Result<Prepared, ManufacturingError> {
                 check_cancel(cancel)?;
-                let fresh = fresh[l - lo].take();
-                let mut seeds: Vec<Option<Bits>> = channels
-                    .iter_mut()
-                    .map(|channel| channel.seeds[l].take())
-                    .collect();
-                let skip = carried.iter().all(Bits::is_empty)
-                    && seeds.iter().all(Option::is_none)
-                    && roofs.is_empty()
-                    && forest.is_empty();
-                if let Some(bits) = &fresh {
-                    // Carries already exclude every earlier piece.
-                    for carry in &mut carried {
-                        carry.subtract(bits);
-                    }
-                    for (_, roof) in &mut roofs {
-                        roof.subtract(bits);
-                    }
-                    release(bits);
-                }
-                if skip {
-                    continue;
-                }
-                let slab = slabs[l];
                 let t0 = std::time::Instant::now();
-                if seeds.iter().any(Option::is_some) {
-                    // Every layer in the same section shares the material used to
-                    // trim its seed before sizing the occupancy query.
-                    let span = span_at(self.sections, l as u32);
-                    if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
-                        if let Some((_, old)) = material_cells.take() {
-                            release(&old);
-                        }
-                        let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
-                        hold(&bits)?;
-                        material_cells = Some((span, bits));
-                    }
-                    let material = &material_cells.as_ref().expect("section material cells").1;
-                    for seed in seeds.iter_mut().flatten() {
-                        seed.subtract(material);
-                    }
-                    // An entering seed needs every piece of this slab.
-                    let spans = slab_spans(self.sections, l);
-                    let mut near = Vec::new();
-                    for piece in window
-                        .iter()
-                        .filter(|(span, _)| spans.contains(span))
-                        .flat_map(|(_, pieces)| pieces)
-                    {
-                        if piece.scope[0] <= slab[1]
-                            && piece.scope[1] >= slab[0]
-                            && seeds
-                                .iter()
-                                .flatten()
-                                .any(|seed| seed.meets_rect(&cells, piece.reach))
+                let charged = Self::load_spans(
+                    &source,
+                    lo,
+                    hi,
+                    &mut window,
+                    &slabs,
+                    cell_bounds,
+                    distance,
+                    cancel,
+                )?;
+                let load = t0.elapsed();
+                // Each piece is rasterized once, in the batch of the layer where
+                // the carry first meets it; the chunk's batches are one raster
+                // stage.
+                let t0 = std::time::Instant::now();
+                let fresh: Vec<Option<Bits>> = {
+                    let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); hi - lo + 1];
+                    for piece in window.iter().flat_map(|(_, pieces)| pieces.iter()) {
+                        if let Some(first) = piece.first
+                            && (lo..=hi).contains(&first)
+                            && envelope[first].is_some_and(|reach| rects_meet(piece.reach, reach))
                         {
-                            raster.reserve(&mut near, 1)?;
-                            near.push(&piece.polygon);
+                            raster.reserve(&mut batches[first - lo], 1)?;
+                            batches[first - lo].push(&piece.polygon);
                         }
                     }
-                    if !near.is_empty() {
-                        let clearance = raster.outward_parallel(&near, distance)?;
-                        for seed in seeds.iter_mut().flatten() {
-                            seed.subtract(&clearance);
-                        }
-                    }
+                    raster.outward_groups(&batches, distance)?
+                };
+                for bits in fresh.iter().flatten() {
+                    hold(bits)?;
                 }
-                // A tree overhang leaves the ordinary channel at its contact
-                // top: it carries as a roof through the interface band, then
-                // as branches.
-                if layers[l].z_mm > TREE_MIN_HEIGHT_MM
-                    && let Some(seed) = seeds[0].as_mut()
-                {
-                    let mut moved = false;
-                    for component in raster.components(seed)? {
-                        if prefers_tree(&raster, &guide, &params, &component, l)? {
-                            // Only cells whose branches reach the bed leave the
-                            // column: the rest still lands on the part.
-                            let component = raster.select(&component, |c, r| {
-                                guide.reach(l, cells.centre(c, r)) >= params.tip
-                            })?;
-                            if component.is_empty() {
-                                continue;
+                Ok(Prepared {
+                    window: window.clone(),
+                    fresh,
+                    charged,
+                    load,
+                    rasterize: t0.elapsed(),
+                })
+            };
+            // Thin part: the carry, in layer order.
+            let consume = |(lo, hi): (usize, usize),
+                           prepared: Prepared|
+             -> Result<(), ManufacturingError> {
+                let Prepared {
+                    window,
+                    mut fresh,
+                    charged,
+                    load,
+                    rasterize,
+                } = prepared;
+                charge_owned_work(work, self.foreign_work, charged, cancel)?;
+                down_load += load;
+                down_fresh += rasterize;
+                for l in (lo..=hi).rev() {
+                    check_cancel(cancel)?;
+                    let fresh = fresh[l - lo].take();
+                    let mut seeds: Vec<Option<Bits>> = channels
+                        .iter_mut()
+                        .map(|channel| channel.seeds[l].take())
+                        .collect();
+                    let skip = carried.iter().all(Bits::is_empty)
+                        && seeds.iter().all(Option::is_none)
+                        && roofs.is_empty()
+                        && forest.is_empty();
+                    if let Some(bits) = &fresh {
+                        // Carries already exclude every earlier piece.
+                        for carry in &mut carried {
+                            carry.subtract(bits);
+                        }
+                        for (_, roof) in &mut roofs {
+                            roof.subtract(bits);
+                        }
+                        release(bits);
+                    }
+                    if skip {
+                        continue;
+                    }
+                    let slab = slabs[l];
+                    let t0 = std::time::Instant::now();
+                    if seeds.iter().any(Option::is_some) {
+                        // Every layer in the same section shares the material used to
+                        // trim its seed before sizing the occupancy query.
+                        let span = span_at(self.sections, l as u32);
+                        if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
+                            if let Some((_, old)) = material_cells.take() {
+                                release(&old);
                             }
-                            seed.subtract(&component);
-                            hold(&component)?;
-                            reserve_owned(&mut roofs, 1, self.owned_bytes)?;
-                            roofs.push((self.band_bottom(l), component));
-                            moved = true;
+                            let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                            hold(&bits)?;
+                            material_cells = Some((span, bits));
+                        }
+                        let material = &material_cells.as_ref().expect("section material cells").1;
+                        for seed in seeds.iter_mut().flatten() {
+                            seed.subtract(material);
+                        }
+                        // An entering seed needs every piece of this slab.
+                        let spans = slab_spans(self.sections, l);
+                        let mut near = Vec::new();
+                        for piece in window
+                            .iter()
+                            .filter(|(span, _)| spans.contains(span))
+                            .flat_map(|(_, pieces)| pieces.iter())
+                        {
+                            if piece.scope[0] <= slab[1]
+                                && piece.scope[1] >= slab[0]
+                                && seeds
+                                    .iter()
+                                    .flatten()
+                                    .any(|seed| seed.meets_rect(&cells, piece.reach))
+                            {
+                                raster.reserve(&mut near, 1)?;
+                                near.push(&piece.polygon);
+                            }
+                        }
+                        if !near.is_empty() {
+                            let clearance = raster.outward_parallel(&near, distance)?;
+                            for seed in seeds.iter_mut().flatten() {
+                                seed.subtract(&clearance);
+                            }
                         }
                     }
-                    if moved && seed.is_empty() {
-                        seeds[0] = None;
-                    }
-                }
-                for (carry, seed) in carried.iter_mut().zip(seeds) {
-                    if let Some(seed) = seed {
-                        *carry = raster.union(carry, &seed)?;
-                    }
-                }
-                down_seed += t0.elapsed();
-                let t0 = std::time::Instant::now();
-                for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
-                    if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
-                        continue;
-                    }
-                    if channels.iter().zip(&carried).all(|(channel, carry)| {
-                        carry.is_empty() || channel.relieved == Some(ordinal)
-                    }) {
-                        continue;
-                    }
-                    // A void's clearance depends only on the void; build it once.
-                    if voids[ordinal].is_none() {
-                        let clearance =
-                            projection::void_placement_distance(mask, cell_bounds, self.requested)?
-                                .map(|distance| raster.outward([mask], distance))
-                                .transpose()?;
-                        if let Some(bits) = &clearance {
-                            hold(bits)?;
+                    // A tree overhang leaves the ordinary channel at its contact
+                    // top: it carries as a roof through the interface band, then
+                    // as branches.
+                    if layers[l].z_mm > TREE_MIN_HEIGHT_MM
+                        && let Some(seed) = seeds[0].as_mut()
+                    {
+                        let mut moved = false;
+                        for component in raster.components(seed)? {
+                            if prefers_tree(&raster, &guide, &params, &component, l)? {
+                                // Only cells whose branches reach the bed leave the
+                                // column: the rest still lands on the part.
+                                let component = raster.select(&component, |c, r| {
+                                    guide.reach(l, cells.centre(c, r)) >= params.tip
+                                })?;
+                                if component.is_empty() {
+                                    continue;
+                                }
+                                seed.subtract(&component);
+                                hold(&component)?;
+                                reserve_owned(&mut roofs, 1, self.owned_bytes)?;
+                                roofs.push((self.band_bottom(l), component));
+                                moved = true;
+                            }
                         }
-                        voids[ordinal] = Some(clearance);
-                    }
-                    let Some(Some(clearance)) = &voids[ordinal] else {
-                        continue;
-                    };
-                    for (channel, carry) in channels.iter().zip(&mut carried) {
-                        if channel.relieved != Some(ordinal) {
-                            carry.subtract(clearance);
+                        if moved && seed.is_empty() {
+                            seeds[0] = None;
                         }
                     }
-                }
-                if !(roofs.is_empty() && forest.is_empty()) {
-                    let mut cuts = Vec::new();
+                    for (carry, seed) in carried.iter_mut().zip(seeds) {
+                        if let Some(seed) = seed {
+                            *carry = raster.union(carry, &seed)?;
+                        }
+                    }
+                    down_seed += t0.elapsed();
+                    let t0 = std::time::Instant::now();
                     for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate()
                     {
                         if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
                             continue;
                         }
+                        if channels.iter().zip(&carried).all(|(channel, carry)| {
+                            carry.is_empty() || channel.relieved == Some(ordinal)
+                        }) {
+                            continue;
+                        }
+                        // A void's clearance depends only on the void; build it once.
                         if voids[ordinal].is_none() {
                             let clearance = projection::void_placement_distance(
                                 mask,
@@ -1035,142 +1096,181 @@ impl Sweep<'_> {
                             }
                             voids[ordinal] = Some(clearance);
                         }
-                        if let Some(Some(clearance)) = &voids[ordinal] {
-                            cuts.push(ordinal);
-                            let _ = clearance;
-                        }
-                    }
-                    let void_bits = |ordinal: usize| match &voids[ordinal] {
-                        Some(Some(bits)) => Some(bits),
-                        _ => None,
-                    };
-                    let layer = &layers[l];
-                    let tt = std::time::Instant::now();
-                    forest.descend(
-                        &guide,
-                        l,
-                        layer.z_mm - layer.lower_z_mm,
-                        layer.lower_z_mm,
-                        &params,
-                        cancel,
-                        work,
-                    )?;
-                    let mut at = 0;
-                    while at < roofs.len() {
-                        if roofs[at].0 > l {
-                            let (bottom, roof) = roofs.remove(at);
-                            forest.plant(&raster, &roof, &params, self.roof_rows(bottom))?;
-                            release(&roof);
-                        } else {
-                            at += 1;
-                        }
-                    }
-                    let mut roof_cells = Bits::default();
-                    for (bottom, roof) in &mut roofs {
-                        for &ordinal in &cuts {
-                            if let Some(bits) = void_bits(ordinal) {
-                                roof.subtract(bits);
+                        let Some(Some(clearance)) = &voids[ordinal] else {
+                            continue;
+                        };
+                        for (channel, carry) in channels.iter().zip(&mut carried) {
+                            if channel.relieved != Some(ordinal) {
+                                carry.subtract(clearance);
                             }
                         }
-                        roof_cells = raster.union(&roof_cells, roof)?;
-                        if *bottom == l {
-                            bridge[l] = true;
-                        }
                     }
-                    tree_time[0] += tt.elapsed();
-                    let tt = std::time::Instant::now();
-                    let mut slice = if forest.is_empty() {
-                        Bits::default()
-                    } else {
-                        raster.capsules(forest.discs().map(|(p, r)| (p, p, r)))?
-                    };
-                    tree_time[1] += tt.elapsed();
-                    let tt = std::time::Instant::now();
-                    if !slice.is_empty() {
-                        let span = span_at(self.sections, l as u32);
-                        if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
-                            if let Some((_, old)) = material_cells.take() {
-                                release(&old);
-                            }
-                            let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
-                            hold(&bits)?;
-                            material_cells = Some((span, bits));
-                        }
-                        slice.subtract(&material_cells.as_ref().expect("section material cells").1);
-                        let spans = slab_spans(self.sections, l);
-                        let mut key = Vec::new();
-                        let mut near = Vec::new();
-                        for (span, pieces) in window.iter().filter(|(span, _)| spans.contains(span))
+                    if !(roofs.is_empty() && forest.is_empty()) {
+                        let mut cuts = Vec::new();
+                        for (ordinal, (mask, scope)) in
+                            self.protected.0.iter().zip(scopes).enumerate()
                         {
-                            for (k, piece) in pieces.iter().enumerate() {
-                                // Only pieces whose clearance reaches the slice
-                                // can remove a cell of it.
-                                if piece.scope[0] <= slab[1]
-                                    && piece.scope[1] >= slab[0]
-                                    && slice.meets_rect(&cells, piece.reach)
-                                {
-                                    reserve_owned(&mut key, 1, self.owned_bytes)?;
-                                    key.push((*span, k));
-                                    raster.reserve(&mut near, 1)?;
-                                    near.push(&piece.polygon);
+                            if !void_reaches_corridor(&scope.height, slab[0], slab[1]) {
+                                continue;
+                            }
+                            if voids[ordinal].is_none() {
+                                let clearance = projection::void_placement_distance(
+                                    mask,
+                                    cell_bounds,
+                                    self.requested,
+                                )?
+                                .map(|distance| raster.outward([mask], distance))
+                                .transpose()?;
+                                if let Some(bits) = &clearance {
+                                    hold(bits)?;
+                                }
+                                voids[ordinal] = Some(clearance);
+                            }
+                            if let Some(Some(clearance)) = &voids[ordinal] {
+                                cuts.push(ordinal);
+                                let _ = clearance;
+                            }
+                        }
+                        let void_bits = |ordinal: usize| match &voids[ordinal] {
+                            Some(Some(bits)) => Some(bits),
+                            _ => None,
+                        };
+                        let layer = &layers[l];
+                        let tt = std::time::Instant::now();
+                        forest.descend(
+                            &guide,
+                            l,
+                            layer.z_mm - layer.lower_z_mm,
+                            layer.lower_z_mm,
+                            &params,
+                            cancel,
+                            work,
+                        )?;
+                        let mut at = 0;
+                        while at < roofs.len() {
+                            if roofs[at].0 > l {
+                                let (bottom, roof) = roofs.remove(at);
+                                forest.plant(&raster, &roof, &params, self.roof_rows(bottom))?;
+                                release(&roof);
+                            } else {
+                                at += 1;
+                            }
+                        }
+                        let mut roof_cells = Bits::default();
+                        for (bottom, roof) in &mut roofs {
+                            for &ordinal in &cuts {
+                                if let Some(bits) = void_bits(ordinal) {
+                                    roof.subtract(bits);
+                                }
+                            }
+                            roof_cells = raster.union(&roof_cells, roof)?;
+                            if *bottom == l {
+                                bridge[l] = true;
+                            }
+                        }
+                        tree_time[0] += tt.elapsed();
+                        let tt = std::time::Instant::now();
+                        let mut slice = if forest.is_empty() {
+                            Bits::default()
+                        } else {
+                            raster.capsules(forest.discs().map(|(p, r)| (p, p, r)))?
+                        };
+                        tree_time[1] += tt.elapsed();
+                        let tt = std::time::Instant::now();
+                        if !slice.is_empty() {
+                            let span = span_at(self.sections, l as u32);
+                            if material_cells.as_ref().is_none_or(|(at, _)| *at != span) {
+                                if let Some((_, old)) = material_cells.take() {
+                                    release(&old);
+                                }
+                                let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                                hold(&bits)?;
+                                material_cells = Some((span, bits));
+                            }
+                            slice.subtract(
+                                &material_cells.as_ref().expect("section material cells").1,
+                            );
+                            let spans = slab_spans(self.sections, l);
+                            let mut key = Vec::new();
+                            let mut near = Vec::new();
+                            for (span, pieces) in
+                                window.iter().filter(|(span, _)| spans.contains(span))
+                            {
+                                for (k, piece) in pieces.iter().enumerate() {
+                                    // Only pieces whose clearance reaches the slice
+                                    // can remove a cell of it.
+                                    if piece.scope[0] <= slab[1]
+                                        && piece.scope[1] >= slab[0]
+                                        && slice.meets_rect(&cells, piece.reach)
+                                    {
+                                        reserve_owned(&mut key, 1, self.owned_bytes)?;
+                                        key.push((*span, k));
+                                        raster.reserve(&mut near, 1)?;
+                                        near.push(&piece.polygon);
+                                    }
+                                }
+                            }
+                            if tree_near.as_ref().is_none_or(|(k, _)| *k != key) {
+                                if let Some((_, old)) = tree_near.take() {
+                                    release(&old);
+                                }
+                                let bits = if near.is_empty() {
+                                    Bits::default()
+                                } else {
+                                    raster.outward_parallel(&near, distance)?
+                                };
+                                hold(&bits)?;
+                                tree_near = Some((key, bits));
+                            }
+                            slice.subtract(&tree_near.as_ref().expect("tree occupancy").1);
+                            for &ordinal in &cuts {
+                                if let Some(bits) = void_bits(ordinal) {
+                                    slice.subtract(bits);
                                 }
                             }
                         }
-                        if tree_near.as_ref().is_none_or(|(k, _)| *k != key) {
-                            if let Some((_, old)) = tree_near.take() {
-                                release(&old);
-                            }
-                            let bits = if near.is_empty() {
-                                Bits::default()
-                            } else {
-                                raster.outward_parallel(&near, distance)?
-                            };
-                            hold(&bits)?;
-                            tree_near = Some((key, bits));
-                        }
-                        slice.subtract(&tree_near.as_ref().expect("tree occupancy").1);
-                        for &ordinal in &cuts {
-                            if let Some(bits) = void_bits(ordinal) {
-                                slice.subtract(bits);
-                            }
+                        tree_time[2] += tt.elapsed();
+                        let active = raster.union(&roof_cells, &slice)?;
+                        if !active.is_empty() {
+                            hold(&active)?;
+                            channels[tree_at].active[l] = Some(active);
                         }
                     }
-                    tree_time[2] += tt.elapsed();
-                    let active = raster.union(&roof_cells, &slice)?;
-                    if !active.is_empty() {
-                        hold(&active)?;
-                        channels[tree_at].active[l] = Some(active);
+                    down_rest += t0.elapsed();
+                    for (channel, carry) in channels.iter_mut().zip(&carried) {
+                        if !carry.is_empty() {
+                            hold(carry)?;
+                            channel.active[l] = Some(carry.clone());
+                        }
                     }
+                    charge(work)?;
                 }
-                down_rest += t0.elapsed();
-                for (channel, carry) in channels.iter_mut().zip(&carried) {
-                    if !carry.is_empty() {
-                        hold(carry)?;
-                        channel.active[l] = Some(carry.clone());
-                    }
-                }
-                charge(work)?;
+                Ok(())
+            };
+            super::super::pipeline::pipelined(chunks, prepare, consume)?;
+            drop(carried);
+            for (_, roof) in roofs.drain(..) {
+                release(&roof);
             }
-        }
-        drop(carried);
-        drop(window);
-        for (_, roof) in roofs.drain(..) {
-            release(&roof);
-        }
-        if let Some((_, bits)) = tree_near.take() {
-            release(&bits);
-        }
-        live.fetch_sub(
-            guide.bytes().min(live.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-        drop(guide);
-        if let Some((_, bits)) = material_cells.take() {
-            release(&bits);
-        }
-        for bits in voids.into_iter().flatten().flatten() {
-            release(&bits);
-        }
+            if let Some((_, bits)) = tree_near.take() {
+                release(&bits);
+            }
+            live.fetch_sub(
+                guide.bytes().min(live.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
+            drop(guide);
+            if let Some((_, bits)) = material_cells.take() {
+                release(&bits);
+            }
+            for bits in voids.into_iter().flatten().flatten() {
+                release(&bits);
+            }
+            Ok(())
+        })?;
+        let (landing_cells, landing_build) =
+            landing_cells.expect("the landing stage ran inside the down pass scope");
+        let landing_cells = landing_cells?;
         timing.mark("down_pass");
         if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
             eprintln!(
@@ -1204,7 +1304,8 @@ impl Sweep<'_> {
                 },
             );
         }
-        let mut proposed = self.propose_landings(max_top, &raster, &joined)?;
+        let mut proposed = self.propose_landings(max_top, &raster, &joined, &landing_cells)?;
+        drop(landing_cells);
         drop(joined);
         for landing in proposed.iter().flatten() {
             admit(landing.bytes())?;
@@ -1392,7 +1493,7 @@ impl Sweep<'_> {
         if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
             eprintln!(
                 "{}",
-                serde_json::json!({"event": "support_sweep_detail", "landing_seconds": up_e.as_secs_f64(), "nominal_seconds": up_nominal.as_secs_f64()})
+                serde_json::json!({"event": "support_sweep_detail", "landing_seconds": up_e.as_secs_f64(), "landing_cells_seconds": landing_build.as_secs_f64(), "nominal_seconds": up_nominal.as_secs_f64()})
             );
         }
         drop(clearance);
@@ -1511,26 +1612,27 @@ impl Sweep<'_> {
         bottom
     }
 
-    fn propose_landings(
-        &self,
-        max_top: usize,
+    /// Each part root's landing cells: its inward ledge over its object
+    /// layer's ordinary road footprint. This reads only roots, ledges and
+    /// object roads, never the carry, so it builds alongside the down pass.
+    fn landing_cells(
+        source: &LandingSource<'_>,
         raster: &Raster<'_>,
-        active: &[Option<Bits>],
-    ) -> Result<Vec<Option<PartContact>>, ManufacturingError> {
+    ) -> Result<Vec<Option<Bits>>, ManufacturingError> {
         use rayon::prelude::*;
         let working_set = crate::working_set::current();
-        let radius = self.recipe.bead_width_mm * 0.5;
-        let layers = self.layers;
-        let mut ledges = Vec::new();
-        reserve_owned(&mut ledges, self.landings.len(), self.owned_bytes)?;
-        ledges.extend(self.landings.iter().map(|landing| &landing.material));
+        let LandingSource {
+            roots,
+            ledges,
+            layers,
+            radius,
+            owned_bytes,
+        } = *source;
         // A root proposes on every layer of its separation band, so its
-        // landing cells are built once: its inward ledge over its object
-        // layer's ordinary road footprint. Every root's ledge is one raster
+        // landing cells are built once. Every root's ledge is one raster
         // stage, its roads build in parallel, and every landing is another.
         let empty: &[Polygon<f64>] = &[];
-        let ledge_groups: Vec<Vec<&Polygon<f64>>> = self
-            .roots
+        let ledge_groups: Vec<Vec<&Polygon<f64>>> = roots
             .iter()
             .map(|root| match *root {
                 Root::Part { landing, .. } => ledges[landing].0.iter().collect(),
@@ -1539,8 +1641,7 @@ impl Sweep<'_> {
             .collect();
         let root_ledges = raster.inward_groups(&ledge_groups)?;
         drop(ledge_groups);
-        let roads: Vec<Result<Option<MultiPolygon<f64>>, ManufacturingError>> = self
-            .roots
+        let roads: Vec<Result<Option<MultiPolygon<f64>>, ManufacturingError>> = roots
             .par_iter()
             .zip(&root_ledges)
             .map(|(root, ledge)| {
@@ -1576,7 +1677,7 @@ impl Sweep<'_> {
         drop(landing_roads);
         drop(root_ledges);
         let mut cells = Vec::new();
-        reserve_owned(&mut cells, roads.len(), self.owned_bytes)?;
+        reserve_owned(&mut cells, roads.len(), owned_bytes)?;
         let mut cell_bytes = 0usize;
         for roads in roads {
             let root_cells = roads.and_then(|_| landed.next().filter(|cells| !cells.is_empty()));
@@ -1584,9 +1685,21 @@ impl Sweep<'_> {
             (raster.admit)(cell_bytes)?;
             cells.push(root_cells);
         }
+        Ok(cells)
+    }
+
+    /// Each layer's part landing from its root cells and its active carry.
+    fn propose_landings(
+        &self,
+        max_top: usize,
+        raster: &Raster<'_>,
+        active: &[Option<Bits>],
+        cells: &[Option<Bits>],
+    ) -> Result<Vec<Option<PartContact>>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
         let roots = self.roots;
         let owned_bytes = self.owned_bytes;
-        let cells = &cells;
         (0..=max_top)
             .into_par_iter()
             .map(|l| {
@@ -1650,18 +1763,17 @@ impl Sweep<'_> {
     /// grid are never collected.
     #[expect(clippy::too_many_arguments)]
     fn load_spans(
-        &self,
+        source: &SpanSource<'_>,
         lo: usize,
         hi: usize,
-        window: &mut Vec<(usize, Vec<Piece>)>,
+        window: &mut Window,
         slabs: &[[f64; 2]],
         cell_bounds: [[f64; 2]; 2],
         distance: f64,
-        work: &mut usize,
         cancel: &AtomicBool,
-    ) -> Result<(), ManufacturingError> {
+    ) -> Result<usize, ManufacturingError> {
         use rayon::prelude::*;
-        let sections = self.sections;
+        let sections = source.sections;
         let needed = *slab_spans(sections, lo).start()..=*slab_spans(sections, hi).end();
         // The pass descends: spans above the chunk's reach are finished.
         window.retain(|(span, _)| needed.contains(span));
@@ -1669,7 +1781,7 @@ impl Sweep<'_> {
             .filter(|span| !window.iter().any(|(cached, _)| cached == span))
             .collect();
         let working_set = crate::working_set::current();
-        let (schedule, owned_bytes) = (self.schedule, self.owned_bytes);
+        let (schedule, owned_bytes) = (source.schedule, source.owned_bytes);
         let loaded: Vec<Result<Vec<Piece>, ManufacturingError>> = missing
             .par_iter()
             .map(|&span| {
@@ -1702,12 +1814,13 @@ impl Sweep<'_> {
                 })
             })
             .collect();
+        let mut charged = 0usize;
         for (span, pieces) in missing.into_iter().zip(loaded) {
             let pieces = pieces?;
-            charge_owned_work(work, self.foreign_work, pieces.len(), cancel)?;
-            window.push((span, pieces));
+            charged = charged.saturating_add(pieces.len());
+            window.push((span, Arc::new(pieces)));
         }
-        Ok(())
+        Ok(charged)
     }
 
     /// The nominal scopes reaching layer `l`, and those whose ceiling the

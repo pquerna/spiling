@@ -19,6 +19,7 @@ mod combined;
 mod exposure;
 mod native;
 mod partition;
+pub(crate) mod pipeline;
 mod preflight;
 mod region;
 pub(crate) use region::nominal_volume;

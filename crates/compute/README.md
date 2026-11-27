@@ -34,6 +34,17 @@ not with how often code asks. Every kernel follows three layers:
    (`capsule_masks` takes a whole support stage; a layer's skins and
    interiors, its bridge rows and its gyroid curves each make one request).
 
+Rounds lead on any free device. Auto with a hardware GPU adds the CPU
+runtime as a helper device, so a request that would wait behind a GPU round
+runs on the CPU instead; explicit backends use one device. Exclusive work
+(whole-stage batches) takes device turns first come, first served, one
+capsule segment per turn, so a short request on a serial chain waits behind
+at most one segment of someone else's batch.
+
+The planner's side of the same rule is `planner::pipeline::pipelined`: a
+chunked stage prepares chunk k+1 (its batches included) on the pool while
+chunk k is consumed in order, when the preparation reads only final inputs.
+
 There are no admission gates or scalar fallbacks: any size runs, and an
 empty axis returns without a launch. A new kernel adds a grouped kernel, an
 encoded request on the caller's thread and a packing step in the round.
