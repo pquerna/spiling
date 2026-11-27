@@ -860,7 +860,7 @@ fn withdrawal_test_sweep(
 }
 
 #[test]
-fn withdrawal_accepts_an_exact_contact_gap() {
+fn withdrawal_honours_the_contact_gap_within_profile_tolerance() {
     let cancel = AtomicBool::new(false);
     let mut work = spiling_geometry::GeometryWorkBudget::compile();
     let sweep = withdrawal_test_sweep(0.625, &mut work, &cancel);
@@ -871,7 +871,7 @@ fn withdrawal_accepts_an_exact_contact_gap() {
         point[2] = 0.875;
     }
     let layers = [layer(vec![roof])];
-    for (z_gap_mm, clears) in [(0.125, true), (0.126, false)] {
+    for (z_gap_mm, clears) in [(0.125, true), (0.134, true), (0.136, false)] {
         let policy = SupportPolicy::Breakaway {
             density: 0.3,
             xy_clearance_mm: 0.2,

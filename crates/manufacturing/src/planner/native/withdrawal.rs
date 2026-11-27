@@ -286,6 +286,8 @@ impl Sweep {
                 "withdrawal proof lost the breakaway clearance policy",
             ));
         };
+        // Use the same accepted contact gap as support admission and replay.
+        let z_gap = program_coordinates::honoured_z_gap_mm(z_gap);
         let root = self.nodes.len() - 1;
         let enclosing = &self.nodes[root];
         let work = &mut 0;
