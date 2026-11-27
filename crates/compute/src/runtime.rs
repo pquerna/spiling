@@ -739,16 +739,11 @@ pub(crate) fn execute_capsule_masks(
                 words
                     .try_reserve_exact(length)
                     .map_err(|_| ComputeError::Allocation)?;
-                let window = output.get(base..base + length * 2).ok_or_else(|| {
+                // Windows start on whole 64-bit words: `base` counts 32-bit ones.
+                let window = output.get(base / 2..base / 2 + length).ok_or_else(|| {
                     ComputeError::Execution("capsule readback is shorter than its windows".into())
                 })?;
-                words.extend(
-                    window
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|&[low, high]| u64::from(low) | u64::from(high) << 32),
-                );
+                words.extend_from_slice(window);
                 masks.push(crate::CellMask {
                     row0,
                     rows: rows_in,

@@ -595,8 +595,17 @@ fn capsule_masks(
     }
 }
 
-/// One uploaded capsule segment: its jobs launched in tiles over one zeroed
-/// output of `words` words, read back once.
+/// Zero `output` on the device, so no zeroed buffer is uploaded.
+#[cube(launch)]
+fn clear(output: &mut [u32]) {
+    for position in range_stepped(ABSOLUTE_POS, output.len(), CUBE_DIM as usize * CUBE_COUNT) {
+        output[position] = 0u32;
+    }
+}
+
+/// One uploaded capsule segment: its jobs launched in tiles over one output
+/// of `words` 32-bit words zeroed on the device, read back once as 64-bit
+/// words (each the low then the high 32-bit word).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn capsule_masks_dispatch(
     client: &Client,
@@ -610,7 +619,7 @@ pub(crate) fn capsule_masks_dispatch(
     cell: i64,
     columns: i64,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<Vec<u32>, ComputeError> {
+) -> Result<Vec<u64>, ComputeError> {
     let count = first_rows.len();
     let job_count = starts.last().map_or(0, |&jobs| jobs as usize);
     if count == 0
@@ -630,9 +639,23 @@ pub(crate) fn capsule_masks_dispatch(
     let row_handle = client.create_from_slice(u32::as_bytes(first_rows));
     let capsule_window_handle = client.create_from_slice(u32::as_bytes(capsule_windows));
     let window_handle = client.create_from_slice(u32::as_bytes(windows));
-    let zeros = zeroed_words(words)?;
-    let output_handle = client.create_from_slice(u32::as_bytes(&zeros));
-    drop(zeros);
+    if !words.is_multiple_of(2) {
+        return Err(ComputeError::Execution(
+            "capsule output is not whole 64-bit words".into(),
+        ));
+    }
+    let output_handle = client.empty(words * size_of::<u32>());
+    {
+        let (cubes, units) = launch_shape(client, cpu, words);
+        unsafe {
+            clear::launch(
+                client,
+                cubes,
+                units,
+                BufferArg::from_raw_parts(output_handle.clone(), words),
+            );
+        }
+    }
     let overflow_handle = client.create_from_slice(u32::as_bytes(&[0u32]));
     let mut offset = 0usize;
     while offset < job_count {
@@ -666,7 +689,7 @@ pub(crate) fn capsule_masks_dispatch(
         }
         offset += tile;
     }
-    let read = |handle, length: usize| -> Result<Vec<u32>, ComputeError> {
+    let read = |handle, length: usize| -> Result<cubecl::bytes::Bytes, ComputeError> {
         let bytes = client
             .read_one(handle)
             .map_err(|error| ComputeError::Execution(crate::runtime::bounded_message(error)))?;
@@ -675,25 +698,24 @@ pub(crate) fn capsule_masks_dispatch(
                 "readback length differs from the dispatch".into(),
             ));
         }
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(length)
-            .map_err(|_| ComputeError::Allocation)?;
-        values.extend(
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|chunk| u32::from_ne_bytes(*chunk)),
-        );
-        Ok(values)
+        Ok(bytes)
     };
-    if read(overflow_handle, 1)? != [0] {
+    if read(overflow_handle, 1)?[..] != 0u32.to_ne_bytes() {
         return Err(ComputeError::Execution(
             "a capsule hit fell outside its window".into(),
         ));
     }
-    read(output_handle, words)
+    let bytes = read(output_handle, words)?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(words / 2)
+        .map_err(|_| ComputeError::Allocation)?;
+    values.extend(bytes.as_chunks::<8>().0.iter().map(|pair| {
+        let low = u32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]);
+        let high = u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]);
+        u64::from(low) | u64::from(high) << 32
+    }));
+    Ok(values)
 }
 
 /// Jobs per capsule dispatch tile.

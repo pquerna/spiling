@@ -538,6 +538,8 @@ struct SpanSource<'a> {
 /// One descending chunk's wide part, ready for its ordered carry.
 struct Prepared {
     window: Window,
+    /// Clearance of the pieces that can trim each layer's entering seeds.
+    near: Vec<Option<Bits>>,
     fresh: Vec<Option<Bits>>,
     charged: usize,
     load: std::time::Duration,
@@ -848,6 +850,11 @@ impl Sweep<'_> {
         reserve_owned(&mut envelope, max_top + 1, self.owned_bytes)?;
         envelope.resize(max_top + 1, None);
         let mut running: Option<[[f64; 2]; 2]> = None;
+        // Each layer's entering seeds' extent: the pieces whose clearance can
+        // trim them, chosen ahead of the carry.
+        let mut seed_reach: Vec<Option<[[f64; 2]; 2]>> = Vec::new();
+        reserve_owned(&mut seed_reach, max_top + 1, self.owned_bytes)?;
+        seed_reach.resize(max_top + 1, None);
         for l in (0..=max_top).rev() {
             for channel in &channels {
                 if let Some(seed) = &channel.seeds[l]
@@ -855,6 +862,7 @@ impl Sweep<'_> {
                 {
                     let rect = [[x[0], y[0]], [x[1], y[1]]];
                     running = Some(union_frame(running, rect));
+                    seed_reach[l] = Some(union_frame(seed_reach[l], rect));
                 }
             }
             envelope[l] = running;
@@ -905,6 +913,25 @@ impl Sweep<'_> {
                 hi.saturating_sub(CHUNK - 1).checked_sub(1)
             })
             .map(|hi| (hi.saturating_sub(CHUNK - 1), hi));
+            // The carry at layer l lies inside the seed cells at or above l, so a
+            // piece whose clearance misses them cannot change a carried cell: each
+            // chunk keeps the seed union down to its lowest layer.
+            let mut potential: Vec<Bits> = Vec::new();
+            {
+                let mut running = Bits::default();
+                for (lo, hi) in chunks.clone() {
+                    for l in (lo..=hi).rev() {
+                        for channel in &channels {
+                            if let Some(seed) = &channel.seeds[l] {
+                                running = raster.union(&running, seed)?;
+                            }
+                        }
+                    }
+                    hold(&running)?;
+                    reserve_owned(&mut potential, 1, self.owned_bytes)?;
+                    potential.push(running.clone());
+                }
+            }
             let source = SpanSource {
                 sections: self.sections,
                 schedule: self.schedule,
@@ -931,24 +958,53 @@ impl Sweep<'_> {
                 // the carry first meets it; the chunk's batches are one raster
                 // stage.
                 let t0 = std::time::Instant::now();
-                let fresh: Vec<Option<Bits>> = {
-                    let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); hi - lo + 1];
+                let count = hi - lo + 1;
+                let (fresh, near): (Vec<Option<Bits>>, Vec<Option<Bits>>) = {
+                    let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); 2 * count];
                     for piece in window.iter().flat_map(|(_, pieces)| pieces.iter()) {
                         if let Some(first) = piece.first
                             && (lo..=hi).contains(&first)
                             && envelope[first].is_some_and(|reach| rects_meet(piece.reach, reach))
+                            && potential[(max_top - hi) / CHUNK].meets_rect(&cells, piece.reach)
                         {
                             raster.reserve(&mut batches[first - lo], 1)?;
                             batches[first - lo].push(&piece.polygon);
                         }
                     }
-                    raster.outward_groups(&batches, distance)?
+                    // An entering seed needs every piece of its slab whose
+                    // clearance reaches it. Seeds are final before the pass, so
+                    // the same raster stage builds that clearance; a piece
+                    // reaching only the seeds' extent trims no seed cell.
+                    for l in lo..=hi {
+                        let Some(reach) = seed_reach[l] else {
+                            continue;
+                        };
+                        let slab = slabs[l];
+                        let spans = slab_spans(source.sections, l);
+                        for piece in window
+                            .iter()
+                            .filter(|(span, _)| spans.contains(span))
+                            .flat_map(|(_, pieces)| pieces.iter())
+                        {
+                            if piece.scope[0] <= slab[1]
+                                && piece.scope[1] >= slab[0]
+                                && rects_meet(piece.reach, reach)
+                            {
+                                raster.reserve(&mut batches[count + l - lo], 1)?;
+                                batches[count + l - lo].push(&piece.polygon);
+                            }
+                        }
+                    }
+                    let mut built = raster.outward_groups(&batches, distance)?;
+                    let near = built.split_off(count);
+                    (built, near)
                 };
-                for bits in fresh.iter().flatten() {
+                for bits in fresh.iter().chain(&near).flatten() {
                     hold(bits)?;
                 }
                 Ok(Prepared {
                     window: window.clone(),
+                    near,
                     fresh,
                     charged,
                     load,
@@ -961,6 +1017,7 @@ impl Sweep<'_> {
              -> Result<(), ManufacturingError> {
                 let Prepared {
                     window,
+                    mut near,
                     mut fresh,
                     charged,
                     load,
@@ -972,6 +1029,7 @@ impl Sweep<'_> {
                 for l in (lo..=hi).rev() {
                     check_cancel(cancel)?;
                     let fresh = fresh[l - lo].take();
+                    let near = near[l - lo].take();
                     let mut seeds: Vec<Option<Bits>> = channels
                         .iter_mut()
                         .map(|channel| channel.seeds[l].take())
@@ -1011,31 +1069,14 @@ impl Sweep<'_> {
                         for seed in seeds.iter_mut().flatten() {
                             seed.subtract(material);
                         }
-                        // An entering seed needs every piece of this slab.
-                        let spans = slab_spans(self.sections, l);
-                        let mut near = Vec::new();
-                        for piece in window
-                            .iter()
-                            .filter(|(span, _)| spans.contains(span))
-                            .flat_map(|(_, pieces)| pieces.iter())
-                        {
-                            if piece.scope[0] <= slab[1]
-                                && piece.scope[1] >= slab[0]
-                                && seeds
-                                    .iter()
-                                    .flatten()
-                                    .any(|seed| seed.meets_rect(&cells, piece.reach))
-                            {
-                                raster.reserve(&mut near, 1)?;
-                                near.push(&piece.polygon);
-                            }
-                        }
-                        if !near.is_empty() {
-                            let clearance = raster.outward_parallel(&near, distance)?;
+                        if let Some(clearance) = &near {
                             for seed in seeds.iter_mut().flatten() {
-                                seed.subtract(&clearance);
+                                seed.subtract(clearance);
                             }
                         }
+                    }
+                    if let Some(bits) = &near {
+                        release(bits);
                     }
                     // A tree overhang leaves the ordinary channel at its contact
                     // top: it carries as a roof through the interface band, then
@@ -1248,6 +1289,10 @@ impl Sweep<'_> {
                 Ok(())
             };
             super::super::pipeline::pipelined(chunks, prepare, consume)?;
+            for bits in &potential {
+                release(bits);
+            }
+            drop(potential);
             drop(carried);
             for (_, roof) in roofs.drain(..) {
                 release(&roof);
