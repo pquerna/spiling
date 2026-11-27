@@ -66,13 +66,40 @@ impl EdgeGrid {
         paths: impl ExactSizeIterator<Item = &'a DepositionPath>,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, ManufacturingError> {
+        Self::new_bounded(paths, None, cancel)
+    }
+
+    /// Optional preparation owns one share of the wave's live byte allowance.
+    /// All buffers, including the grid build's temporary offsets, fit that share.
+    pub(super) fn new_bounded<'a>(
+        paths: impl ExactSizeIterator<Item = &'a DepositionPath>,
+        budget: Option<(usize, usize)>,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, ManufacturingError> {
         let count = paths.len();
         if count >= u32::MAX as usize {
             return Ok(None);
         }
+        let fixed = if let Some((edges, bytes)) = budget {
+            let fixed = edges
+                .saturating_mul(size_of::<GridEdge>() + 2 * size_of::<u32>())
+                .saturating_add((2 * count + 1).saturating_mul(size_of::<u32>()));
+            if fixed > bytes {
+                return Ok(None);
+            }
+            fixed
+        } else {
+            0
+        };
         let mut edges = Vec::new();
         let mut first_edge = Vec::with_capacity(count + 1);
         let mut whole = Vec::new();
+        if let Some((count_edges, _)) = budget
+            && (edges.try_reserve_exact(count_edges).is_err()
+                || whole.try_reserve_exact(count).is_err())
+        {
+            return Ok(None);
+        }
         let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
         let mut max_radius = 0.0_f64;
         for (index, path) in paths.enumerate() {
@@ -178,11 +205,15 @@ impl EdgeGrid {
             ];
         }
         let cell_count = grid.dims[0] * grid.dims[1];
+        let offset_bytes = (cell_count + 1).saturating_mul(2 * size_of::<u32>());
+        if budget.is_some_and(|(_, bytes)| fixed.saturating_add(offset_bytes) > bytes) {
+            return Ok(None);
+        }
         let mut counts = vec![0u32; cell_count + 1];
         for edge in grid.edges.iter().filter(|edge| !edge.width.is_nan()) {
             check_cancel(cancel)?;
             grid.cover(edge.c, edge.d, edge.width * 0.5, |cell| {
-                counts[cell + 1] += 1
+                counts[cell + 1] = counts[cell + 1].saturating_add(1)
             });
         }
         for cell in 0..cell_count {
@@ -192,6 +223,19 @@ impl EdgeGrid {
                     "anchor edge grid exceeds index range",
                 )
             })?;
+        }
+        if budget.is_some_and(|(_, bytes)| {
+            fixed
+                .saturating_add(offset_bytes)
+                .saturating_add(counts[cell_count] as usize * size_of::<u32>())
+                > bytes
+        }) {
+            return Ok(None);
+        }
+        if let Some((count_edges, _)) = budget
+            && grid.hits.try_reserve_exact(count_edges).is_err()
+        {
+            return Ok(None);
         }
         let mut fill = counts.clone();
         let mut entries = vec![0u32; counts[cell_count] as usize];

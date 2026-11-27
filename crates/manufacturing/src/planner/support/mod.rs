@@ -9,7 +9,9 @@ use std::{
     rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
+mod anchor_window;
 mod anchors;
+use anchor_window::AnchorWindow;
 mod beads;
 mod donor_cache;
 use donor_cache::{DonorCache, DonorInput};
@@ -986,8 +988,31 @@ pub(super) fn realize(
         let mut dag = LayerDagTrace::new();
         // Layer payload accounting is read many times per layer; only the
         // current layer changes, so keep a per-layer ledger.
+        let mut prepared = AnchorWindow::default();
         let mut payload = PayloadLedger::new(layers)?;
         for index in 1..layers.len() {
+            anchors.use_prepared(None);
+            if prepared.exhausted(index) {
+                payload.prepared_bytes = 0;
+                let live = native_owned_bytes
+                    + payload.bytes()
+                    + vec_bytes(&joined_layers)
+                    + vec_bytes(&demands)
+                    + vec_bytes(&original_bridge_roles)
+                    + anchors.retained_bytes();
+                prepared.fill(
+                    index,
+                    layers,
+                    &[],
+                    live,
+                    retained,
+                    LayerStep::DemandPreparation,
+                    &mut dag,
+                    cancel,
+                )?;
+            }
+            payload.prepared_bytes = prepared.bytes();
+            anchors.use_prepared(prepared.take(index));
             let demand_started = dag.start();
             check_cancel(cancel)?;
             payload.refresh(index - 1, &layers[index - 1]);
@@ -1349,6 +1374,8 @@ pub(super) fn realize(
             }
             dag.finish(LayerStep::Demand, index, demand_started);
         }
+        anchors.use_prepared(None);
+        drop(prepared);
         drop(split);
         drop(payload);
         if demands.is_empty() {
@@ -1981,6 +2008,7 @@ pub(super) fn realize(
             cancel,
             &mut anchor_work,
         )?;
+        let mut prepared_object = AnchorWindow::default();
         let mut outstanding_roles = original_bridge_roles.as_slice();
         let mut outstanding_demands = demands.as_slice();
         let mut unchanged_lower = true;
@@ -1991,6 +2019,30 @@ pub(super) fn realize(
         // ordered raster result, including its proposal-based trims.
         for next_raster in 0..=layers.len() {
             check_cancel(cancel)?;
+            anchors.use_prepared(None);
+            if let Some(index) = next_raster.checked_sub(1).filter(|&i| i != 0) {
+                if prepared_object.exhausted(index) {
+                    payload.prepared_bytes = 0;
+                    let live = native_owned_bytes
+                        + payload.bytes()
+                        + support_metadata_bytes
+                        + support_bytes
+                        + staged_bytes
+                        + donors.bytes()
+                        + anchors.retained_bytes();
+                    prepared_object.fill(
+                        index,
+                        layers,
+                        &prebuilt,
+                        live,
+                        retained + support_units + staged_units,
+                        LayerStep::ObjectPreparation,
+                        &mut dag,
+                        cancel,
+                    )?;
+                }
+                payload.prepared_bytes = prepared_object.bytes();
+            }
             if next_raster < layers.len() {
                 let t = dag.start();
                 let i = next_raster;
@@ -2097,6 +2149,7 @@ pub(super) fn realize(
                 }),
             );
             let support_metadata_bytes = pending_metadata_bytes.saturating_add(donors.bytes());
+            anchors.use_prepared(prepared_object.take(index));
             let object_started = dag.start();
             // Otherwise the same ordered support-only lower prefix already
             // admitted these roads in the raster pass, with no PART operands.
@@ -2467,6 +2520,8 @@ pub(super) fn realize(
             }
             dag.finish(LayerStep::Object, index, object_started);
         }
+        anchors.use_prepared(None);
+        drop(prepared_object);
         drop(dag);
         drop(donors);
         drop(prebuilt);
@@ -3819,6 +3874,7 @@ fn material_units(material: &MultiPolygon<f64>) -> usize {
 struct PayloadLedger {
     per_layer: Vec<usize>,
     total: usize,
+    prepared_bytes: usize,
 }
 
 impl PayloadLedger {
@@ -3836,7 +3892,11 @@ impl PayloadLedger {
                 .map(|layer| layer_payload_bytes(std::iter::once(layer))),
         );
         let total = per_layer.iter().copied().fold(0, usize::saturating_add);
-        Ok(Self { per_layer, total })
+        Ok(Self {
+            per_layer,
+            total,
+            prepared_bytes: 0,
+        })
     }
 
     /// Re-measure layer `index` and return every layer's payload.
@@ -3848,12 +3908,14 @@ impl PayloadLedger {
     }
 
     fn bytes(&self) -> usize {
-        self.total.saturating_add(vec_bytes(&self.per_layer))
+        self.total
+            .saturating_add(vec_bytes(&self.per_layer))
+            .saturating_add(self.prepared_bytes)
     }
 
     /// Every layer's payload except `index`, as last measured.
     fn others(&self, index: usize) -> usize {
-        (self.total - self.per_layer[index]).saturating_add(vec_bytes(&self.per_layer))
+        self.bytes() - self.per_layer[index]
     }
 }
 

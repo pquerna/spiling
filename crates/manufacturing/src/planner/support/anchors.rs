@@ -10,9 +10,11 @@ use std::sync::atomic::AtomicBool;
 
 mod batch;
 mod nominal;
+mod prepared;
 #[cfg(test)]
 mod projected;
 pub(super) use nominal::{InventoryStats, LowerFloor, NominalAnchorPaths};
+pub(super) use prepared::PreparedLayer;
 #[cfg(test)]
 pub(crate) use projected::ProjectedAnchorPaths;
 
@@ -251,6 +253,7 @@ pub(crate) struct AnchorWorkspace {
     intervals: Vec<(f64, f64, bool)>,
     uncovered: Vec<AnchorGap>,
     record_limit: usize,
+    prepared: Option<PreparedLayer>,
 }
 
 impl Default for AnchorWorkspace {
@@ -259,6 +262,7 @@ impl Default for AnchorWorkspace {
             intervals: Vec::new(),
             uncovered: Vec::new(),
             record_limit: crate::working_set::units(),
+            prepared: None,
         }
     }
 }
@@ -453,6 +457,10 @@ impl AnchorWorkspace {
             ));
         }
         let direction = [delta[0] / length, delta[1] / length];
+        let prepared = self
+            .prepared
+            .as_ref()
+            .and_then(|layer| layer.find(candidate));
         self.intervals.clear();
         self.uncovered.clear();
         let mut endpoints = [EndpointAnchor::default(), EndpointAnchor::default()];
@@ -493,13 +501,35 @@ impl AnchorWorkspace {
             {
                 continue;
             }
-            let capsule = SegmentCapsule::new(c, d, previous_radius)?;
+            let cached = prepared
+                .as_ref()
+                .and_then(|row| row.find(c, d, previous_width));
+            let capsule = if cached.is_none() {
+                Some(SegmentCapsule::new(c, d, previous_radius)?)
+            } else {
+                None
+            };
             let mut projected_segment = None;
-            for (endpoint, point) in endpoints.iter_mut().zip([[a[0], a[1]], [b[0], b[1]]]) {
+            for (endpoint_index, (endpoint, point)) in endpoints
+                .iter_mut()
+                .zip([[a[0], a[1]], [b[0], b[1]]])
+                .enumerate()
+            {
                 if endpoint.present && (!direct || endpoint.direct) {
                     continue;
                 }
-                if capsule.excludes_projected_endpoint(point, endpoint_reach) {
+                if let Some(cached) = &cached {
+                    if cached.endpoints & (1 << endpoint_index) != 0 {
+                        endpoint.present = true;
+                        endpoint.direct |= direct;
+                    }
+                    continue;
+                }
+                if capsule
+                    .as_ref()
+                    .expect("uncached edge")
+                    .excludes_projected_endpoint(point, endpoint_reach)
+                {
                     continue;
                 }
                 let projected_point = match endpoint.projected {
@@ -523,7 +553,14 @@ impl AnchorWorkspace {
                     endpoint.direct |= direct;
                 }
             }
-            if let Some((start, end)) = capsule.interval([a[0], a[1]], direction, length)? {
+            let interval = if let Some(cached) = cached {
+                cached.interval()
+            } else {
+                capsule
+                    .expect("uncached edge")
+                    .interval([a[0], a[1]], direction, length)?
+            };
+            if let Some((start, end)) = interval {
                 if self.intervals.len() >= self.record_limit {
                     return Err(error(
                         ManufacturingErrorCode::ResourceLimit,

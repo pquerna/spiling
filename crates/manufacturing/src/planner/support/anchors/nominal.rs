@@ -111,7 +111,7 @@ impl InventoryStats {
         }))
     }
 
-    fn records(&self) -> usize {
+    pub(super) fn records(&self) -> usize {
         self.count
             .saturating_mul(size_of::<NominalPath<'_>>())
             .saturating_add(self.block_count * size_of::<NominalBlock>())
@@ -280,6 +280,46 @@ impl<'a> NominalAnchorPaths<'a> {
             return Ok(());
         }
         self.grid = grid::EdgeGrid::new(self.paths.iter().map(|path| path.path), cancel)?;
+        Ok(())
+    }
+
+    pub(super) fn prepare_grid(
+        &mut self,
+        allowance: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let bytes = allowance.saturating_sub(self.retained_bytes());
+        self.grid = grid::EdgeGrid::new_bounded(
+            self.paths.iter().map(|path| path.path),
+            Some((self.stats.edges, bytes)),
+            cancel,
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn indexed_keys(&self) -> impl Iterator<Item = [u64; 5]> + '_ {
+        self.grid
+            .iter()
+            .flat_map(|grid| grid.edges.iter())
+            .map(|edge| [edge.c[0], edge.c[1], edge.d[0], edge.d[1], edge.width].map(f64::to_bits))
+    }
+
+    pub(super) fn visit_indexed(
+        &mut self,
+        candidate: AnchorCandidate,
+        floor: LowerFloor,
+        keys: &[[u64; 5]],
+        mut visit: impl FnMut(u32, [f64; 2], [f64; 2], f64) -> Result<(), ManufacturingError>,
+    ) -> Result<(), ManufacturingError> {
+        let Some(grid) = self.grid.as_mut() else {
+            return Ok(());
+        };
+        grid.collect(candidate, floor, &self.paths);
+        grid.hits.sort_unstable_by_key(|&hit| keys[hit as usize]);
+        for &hit in &grid.hits {
+            let edge = grid.edges[hit as usize];
+            visit(hit, edge.c, edge.d, edge.width)?;
+        }
         Ok(())
     }
 

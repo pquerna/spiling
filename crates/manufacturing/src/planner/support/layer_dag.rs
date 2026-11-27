@@ -5,37 +5,49 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
 pub(super) enum LayerStep {
+    DemandPreparation,
     Demand,
     RasterPreparation,
     RasterAdmission,
     DonorPreparation,
     Support,
+    ObjectPreparation,
     Object,
 }
 
 impl LayerStep {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
+        Self::DemandPreparation,
         Self::Demand,
         Self::RasterPreparation,
         Self::RasterAdmission,
         Self::DonorPreparation,
         Self::Support,
+        Self::ObjectPreparation,
         Self::Object,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::DemandPreparation => "demand_anchor_preparation",
             Self::Demand => "demand",
             Self::RasterPreparation => "raster_preparation",
             Self::RasterAdmission => "raster_admission",
             Self::DonorPreparation => "donor_preparation",
             Self::Support => "final_support",
+            Self::ObjectPreparation => "object_anchor_preparation",
             Self::Object => "final_object",
         }
     }
 
     fn preparation(self) -> bool {
-        matches!(self, Self::RasterPreparation | Self::DonorPreparation)
+        matches!(
+            self,
+            Self::DemandPreparation
+                | Self::ObjectPreparation
+                | Self::RasterPreparation
+                | Self::DonorPreparation
+        )
     }
 }
 
@@ -45,6 +57,8 @@ struct Stage {
     calls: usize,
     reordered: usize,
     elapsed: Duration,
+    prepared_pairs: usize,
+    peak_bytes: usize,
 }
 
 /// Stages publish in ascending layer order. A second evaluation of any
@@ -86,6 +100,12 @@ impl LayerDagTrace {
         }
     }
 
+    pub(super) fn prepared(&mut self, step: LayerStep, pairs: usize, bytes: usize) {
+        let stage = &mut self.stages[step as usize];
+        stage.prepared_pairs = stage.prepared_pairs.saturating_add(pairs);
+        stage.peak_bytes = stage.peak_bytes.max(bytes);
+    }
+
     pub(super) fn elapsed(&self, step: LayerStep) -> Duration {
         self.stages[step as usize].elapsed
     }
@@ -106,6 +126,8 @@ impl Drop for LayerDagTrace {
                         "calls": stage.calls,
                         "repeated_or_out_of_order": stage.reordered,
                         "seconds": stage.elapsed.as_secs_f64(),
+                        "prepared_pairs": stage.prepared_pairs,
+                        "peak_receipt_bytes": stage.peak_bytes,
                     })
                 );
             }
