@@ -539,12 +539,24 @@ struct SpanSource<'a> {
 /// raster stage holds each layer's fresh occupancy, then the clearance of
 /// the pieces that can trim each layer's entering seeds, built but not yet
 /// dispatched, so the next chunk's stage builds while this one's kernel runs.
+/// A chunk's loaded spans, in order, before its build.
+struct Loaded {
+    window: Window,
+    charged: usize,
+    load: std::time::Duration,
+}
+
+/// A built chunk: each layer's fresh occupancy and seed clearance, held.
 struct Prepared {
     window: Window,
-    stage: super::grid::OutwardStage,
+    fresh: Vec<Option<Bits>>,
+    near: Vec<Option<Bits>>,
+    /// Each seeded layer's section material cells, by section.
+    materials: Vec<(usize, Bits)>,
     charged: usize,
     load: std::time::Duration,
     rasterize: std::time::Duration,
+    dispatch: std::time::Duration,
 }
 
 /// The loaded spans of the descending pass, shared with the chunk that
@@ -934,15 +946,22 @@ impl Sweep<'_> {
                     potential.push(running.clone());
                 }
             }
+            // Seeds are final before the pass: the layers whose seed is trimmed
+            // by its section's material, so the build can rasterize it.
+            let seeded: Vec<bool> = (0..=max_top)
+                .map(|l| channels.iter().any(|channel| channel.seeds[l].is_some()))
+                .collect();
+            let sections = self.sections;
             let source = SpanSource {
                 sections: self.sections,
                 schedule: self.schedule,
                 owned_bytes: self.owned_bytes,
             };
-            // Wide part: a chunk's spans and its fresh occupancy read only the
-            // source pieces and the seed envelope, so the next chunk loads and
-            // builds its raster stage while this one dispatches and carries.
-            let prepare = |(lo, hi): (usize, usize)| -> Result<Prepared, ManufacturingError> {
+            // Wide part: a chunk's spans load in order, then its fresh
+            // occupancy, kernel batch included, reads only the loaded pieces
+            // and the seed envelope. Several chunks build at once, one per
+            // compute slot, while an earlier chunk carries.
+            let load = |(lo, hi): (usize, usize)| -> Result<Loaded, ManufacturingError> {
                 check_cancel(cancel)?;
                 let t0 = std::time::Instant::now();
                 let charged = Self::load_spans(
@@ -955,7 +974,21 @@ impl Sweep<'_> {
                     distance,
                     cancel,
                 )?;
-                let load = t0.elapsed();
+                Ok(Loaded {
+                    window: window.clone(),
+                    charged,
+                    load: t0.elapsed(),
+                })
+            };
+            let build = |(lo, hi): (usize, usize),
+                         loaded: Loaded|
+             -> Result<Prepared, ManufacturingError> {
+                check_cancel(cancel)?;
+                let Loaded {
+                    window,
+                    charged,
+                    load,
+                } = loaded;
                 // Each piece is rasterized once, in the batch of the layer where
                 // the carry first meets it; the chunk's batches are one raster
                 // stage.
@@ -999,36 +1032,68 @@ impl Sweep<'_> {
                     }
                     raster.outward_stage(&batches, distance)?
                 };
+                // Each seeded layer's section material, once per section in
+                // layer order, in one raster stage.
+                let mut material_spans: Vec<usize> = Vec::new();
+                for l in (lo..=hi).rev().filter(|&l| seeded[l]) {
+                    let span = span_at(sections, l as u32);
+                    if material_spans.last() != Some(&span) {
+                        reserve_owned(&mut material_spans, 1, owned_bytes)?;
+                        material_spans.push(span);
+                    }
+                }
+                let material_groups: Vec<Vec<&Polygon<f64>>> = material_spans
+                    .iter()
+                    .map(|&span| sections[span].material.0.iter().collect())
+                    .collect();
+                let material_stage = raster.outward_stage(&material_groups, 0.0)?;
+                drop(material_groups);
+                let rasterize = t0.elapsed();
+                let t0 = std::time::Instant::now();
+                let mut fresh = raster.finish_outward(stage)?;
+                let near = fresh.split_off(count);
+                for bits in fresh.iter().chain(&near).flatten() {
+                    hold(bits)?;
+                }
+                let mut materials = Vec::new();
+                reserve_owned(&mut materials, material_spans.len(), owned_bytes)?;
+                for (span, bits) in material_spans
+                    .into_iter()
+                    .zip(raster.finish_outward(material_stage)?)
+                {
+                    let bits = bits.unwrap_or_default();
+                    hold(&bits)?;
+                    materials.push((span, bits));
+                }
                 Ok(Prepared {
-                    window: window.clone(),
-                    stage,
+                    window,
+                    fresh,
+                    near,
+                    materials,
                     charged,
                     load,
-                    rasterize: t0.elapsed(),
+                    rasterize,
+                    dispatch: t0.elapsed(),
                 })
             };
-            // Thin part: the chunk's kernel batch, then the carry in layer
-            // order.
+            // Thin part: the carry in layer order.
             let consume = |(lo, hi): (usize, usize),
                            prepared: Prepared|
              -> Result<(), ManufacturingError> {
                 let Prepared {
                     window,
-                    stage,
+                    mut fresh,
+                    mut near,
+                    mut materials,
                     charged,
                     load,
                     rasterize,
+                    dispatch,
                 } = prepared;
                 charge_owned_work(work, self.foreign_work, charged, cancel)?;
                 down_load += load;
                 down_fresh += rasterize;
-                let t0 = std::time::Instant::now();
-                let mut fresh = raster.finish_outward(stage)?;
-                let mut near = fresh.split_off(hi - lo + 1);
-                for bits in fresh.iter().chain(&near).flatten() {
-                    hold(bits)?;
-                }
-                down_dispatch += t0.elapsed();
+                down_dispatch += dispatch;
                 for l in (lo..=hi).rev() {
                     check_cancel(cancel)?;
                     let fresh = fresh[l - lo].take();
@@ -1064,9 +1129,12 @@ impl Sweep<'_> {
                             if let Some((_, old)) = material_cells.take() {
                                 release(&old);
                             }
-                            let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
-                            hold(&bits)?;
-                            material_cells = Some((span, bits));
+                            // The build rasterized every seeded layer's material.
+                            let at = materials
+                                .iter()
+                                .position(|(at, _)| *at == span)
+                                .expect("the chunk build rasterized this section's material");
+                            material_cells = Some(materials.swap_remove(at));
                         }
                         let material = &material_cells.as_ref().expect("section material cells").1;
                         for seed in seeds.iter_mut().flatten() {
@@ -1289,9 +1357,22 @@ impl Sweep<'_> {
                     }
                     charge(work)?;
                 }
+                // A section already current from the chunk above was built
+                // again here; release the unused copy.
+                for (_, bits) in &materials {
+                    release(bits);
+                }
                 Ok(())
             };
-            super::super::pipeline::pipelined(chunks, prepare, consume)?;
+            // Building further ahead than the device has slots only holds
+            // more fresh occupancy without running sooner.
+            let ahead = spiling_compute::stage_slots().map_err(|failure| {
+                error(
+                    ManufacturingErrorCode::NativeConditioningFailure,
+                    format!("support compute slots: {failure}"),
+                )
+            })?;
+            super::super::pipeline::pipelined(chunks, ahead, load, build, consume)?;
             for bits in &potential {
                 release(bits);
             }

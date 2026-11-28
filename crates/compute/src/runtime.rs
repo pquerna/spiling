@@ -772,6 +772,13 @@ pub(crate) fn execute_capsule_masks(
 
 type SegmentMasks = Result<Vec<crate::CellMask>, ComputeError>;
 
+/// Device slots that take stage batches: how many stage batches can run at
+/// once. A caller that prepares independent batches ahead can keep this many
+/// in flight.
+pub fn stage_slots() -> Result<usize, ComputeError> {
+    slot_count()
+}
+
 /// Slots that take stage batches: how many segments can be in flight at once.
 fn slot_count() -> Result<usize, ComputeError> {
     let context = context()?;

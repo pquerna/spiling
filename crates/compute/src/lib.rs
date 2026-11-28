@@ -11,7 +11,7 @@ mod runtime;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use runtime::{configure, status};
+pub use runtime::{configure, stage_slots, status};
 pub use spiling_contracts::compute::{
     ComputeBackend, ComputeDevice, ComputeSettings, ComputeStatus,
 };
