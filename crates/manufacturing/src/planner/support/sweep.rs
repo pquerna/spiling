@@ -1689,7 +1689,7 @@ impl Sweep<'_> {
             .collect();
         let root_ledges = raster.inward_groups(&ledge_groups)?;
         drop(ledge_groups);
-        let roads: Vec<Result<Option<MultiPolygon<f64>>, ManufacturingError>> = roots
+        let built: Vec<Result<Option<Bits>, ManufacturingError>> = roots
             .par_iter()
             .zip(&root_ledges)
             .map(|(root, ledge)| {
@@ -1700,35 +1700,26 @@ impl Sweep<'_> {
                     if ledge.is_empty() {
                         return Ok(None);
                     }
-                    established::proposal_geometry(
+                    let landed = established::landing_over_roads(
                         raster,
+                        ledge,
                         layers[object_layer]
                             .paths
                             .iter()
                             .filter(|path| established::ordinary(path)),
                         radius,
                         ledge.bytes(),
-                    )
-                    .map(Some)
+                    )?;
+                    Ok((!landed.is_empty()).then_some(landed))
                 })
             })
             .collect();
-        let roads = roads.into_iter().collect::<Result<Vec<_>, _>>()?;
-        let (landing_ledges, landing_roads): (Vec<&Bits>, Vec<Vec<&Polygon<f64>>>) = root_ledges
-            .iter()
-            .zip(&roads)
-            .filter_map(|(ledge, roads)| Some((ledge, roads.as_ref()?.0.iter().collect())))
-            .unzip();
-        let mut landed = raster
-            .landing_groups(&landing_ledges, &landing_roads)?
-            .into_iter();
-        drop(landing_roads);
         drop(root_ledges);
+        let built = built.into_iter().collect::<Result<Vec<_>, _>>()?;
         let mut cells = Vec::new();
-        reserve_owned(&mut cells, roads.len(), owned_bytes)?;
+        reserve_owned(&mut cells, built.len(), owned_bytes)?;
         let mut cell_bytes = 0usize;
-        for roads in roads {
-            let root_cells = roads.and_then(|_| landed.next().filter(|cells| !cells.is_empty()));
+        for root_cells in built {
             cell_bytes = cell_bytes.saturating_add(root_cells.as_ref().map_or(0, Bits::bytes));
             (raster.admit)(cell_bytes)?;
             cells.push(root_cells);

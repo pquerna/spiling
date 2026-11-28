@@ -440,6 +440,16 @@ impl AnchorWorkspace {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
+        self.gaps_inputs_bridged(candidate, edges, [0.0, 1.0], work, cancel)
+    }
+    fn gaps_inputs_bridged(
+        &mut self,
+        candidate: AnchorCandidate,
+        edges: impl Iterator<Item = AnchorInput>,
+        bridges: [f64; 2],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
         let [a, b] = candidate.endpoints_mm;
         check_cancel(cancel)?;
         let delta = [b[0] - a[0], b[1] - a[1]];
@@ -575,6 +585,24 @@ impl AnchorWorkspace {
                 )?;
                 self.intervals.push((start / length, end / length, direct));
             }
+        }
+        if bridges[0] > 0.0 {
+            super::reserve_component_record(
+                &mut self.intervals,
+                1,
+                self.uncovered.capacity(),
+                self.record_limit,
+            )?;
+            self.intervals.push((0.0, bridges[0], false));
+        }
+        if bridges[1] < 1.0 {
+            super::reserve_component_record(
+                &mut self.intervals,
+                1,
+                self.uncovered.capacity(),
+                self.record_limit,
+            )?;
+            self.intervals.push((bridges[1], 1.0, false));
         }
         self.intervals
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));

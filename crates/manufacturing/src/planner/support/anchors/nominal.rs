@@ -525,15 +525,71 @@ impl AnchorWorkspace {
             && (a[0] != b[0] || a[1] != b[1]);
         let result = if indexed {
             let grid = paths.grid.as_mut().expect("checked edge grid");
-            let prefix = grid.prefix(floor, &paths.paths);
-            grid.collect(candidate, floor, &paths.paths);
-            let inputs =
-                NominalAnchorPaths::grid_inputs(&paths.paths, grid, grid.prefix_at(prefix), floor);
-            self.gaps_inputs(candidate, inputs, work, cancel)
+            match grid.prefix(floor, &paths.paths, cancel) {
+                Err(failure) => Err(failure),
+                Ok(prefix) => {
+                    let total_eligible = grid.prefix_at(prefix)[paths.paths.len()];
+                    let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+                    let can_use_cover = a[2].is_finite()
+                        && b[2].is_finite()
+                        && length.is_finite()
+                        && length > 0.0
+                        && [a[0], a[1], b[0], b[1]]
+                            .iter()
+                            .all(|x| x.abs() <= MAX_XYZ6_COORDINATE_MM)
+                        && total_eligible.saturating_add(2) <= self.record_limit
+                        && growth_capacity(
+                            self.intervals.capacity(),
+                            total_eligible.saturating_add(2),
+                        )
+                        .saturating_add(self.uncovered.capacity())
+                            <= self.record_limit;
+                    let cover = if can_use_cover {
+                        grid.inner_at(prefix)
+                            .map_or(grid::CoverResult::Uncovered, |inner| {
+                                inner.check_segment([a[0], a[1]], [b[0], b[1]])
+                            })
+                    } else {
+                        grid::CoverResult::Uncovered
+                    };
+                    match cover {
+                        grid::CoverResult::All => check_cancel(cancel).and_then(|()| {
+                            charge_pairs(work, total_eligible)?;
+                            self.intervals.clear();
+                            self.uncovered.clear();
+                            Ok(())
+                        }),
+                        grid::CoverResult::Partial { lo, hi } => {
+                            let p_lo = [a[0] + (b[0] - a[0]) * lo, a[1] + (b[1] - a[1]) * lo];
+                            let p_hi = [a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi];
+                            grid.collect_span(candidate, Some((p_lo, p_hi)), floor, &paths.paths);
+                            let inputs = NominalAnchorPaths::grid_inputs(
+                                &paths.paths,
+                                grid,
+                                grid.prefix_at(prefix),
+                                floor,
+                            );
+                            self.gaps_inputs_bridged(candidate, inputs, [lo, hi], work, cancel)
+                                .map(|_| ())
+                        }
+                        grid::CoverResult::Uncovered => {
+                            grid.collect(candidate, floor, &paths.paths);
+                            let inputs = NominalAnchorPaths::grid_inputs(
+                                &paths.paths,
+                                grid,
+                                grid.prefix_at(prefix),
+                                floor,
+                            );
+                            self.gaps_inputs(candidate, inputs, work, cancel)
+                                .map(|_| ())
+                        }
+                    }
+                }
+            }
         } else {
             self.gaps_inputs(candidate, paths.inputs(candidate, floor), work, cancel)
-        }
-        .map(|_| ());
+                .map(|_| ())
+        };
         self.record_limit = limit;
         result?;
         Ok(&self.uncovered)
@@ -1076,5 +1132,113 @@ mod tests {
             cursor = block.end;
         }
         assert_eq!(cursor, paths.len() * 2);
+    }
+
+    #[test]
+    fn inner_cover_matches_scalar_on_dense_axial_and_oblique_sheets() {
+        let cancel = AtomicBool::new(false);
+        // Dense horizontal solid-infill sheet (pitch 0.357mm, width 0.4mm) plus
+        // an oblique 45-degree sheet to exercise both All and Partial cover paths.
+        let mut previous = Vec::new();
+        for row in 0..40 {
+            let y = row as f64 * 0.357;
+            previous.push(DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::SolidFill,
+                owner: None,
+                width: WidthProfile::Constant { width_mm: 0.4 },
+                physical_z_mm: [0.0, 0.2],
+                points_mm: vec![[0.0, y, 0.2], [20.0, y, 0.2]],
+                arcs: Vec::new(),
+                exposed: false,
+                connectors: Vec::new(),
+            });
+        }
+        // A second dense band shifted in X to create an interior gap between X=20 and X=25.
+        for row in 0..40 {
+            let y = row as f64 * 0.357;
+            previous.push(DepositionPath {
+                material_domain: None,
+                kind: DepositionKind::SolidFill,
+                owner: None,
+                width: WidthProfile::Constant { width_mm: 0.4 },
+                physical_z_mm: [0.0, 0.2],
+                points_mm: vec![[25.0, y, 0.2], [35.0, y, 0.2]],
+                arcs: Vec::new(),
+                exposed: false,
+                connectors: Vec::new(),
+            });
+        }
+        let contacts = [DepositionPath {
+            material_domain: None,
+            kind: DepositionKind::SupportInterface,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 0.4 },
+            physical_z_mm: [0.0, 0.1],
+            points_mm: vec![[20.2, 5.0, 0.1], [21.2, 5.0, 0.1]],
+            arcs: Vec::new(),
+            exposed: false,
+            connectors: Vec::new(),
+        }];
+        let mut scalar = AnchorWorkspace::default();
+        let mut screened = AnchorWorkspace::default();
+        let mut prepared =
+            NominalAnchorPaths::new(previous.iter(), contacts.iter(), &screened, &cancel)
+                .unwrap()
+                .unwrap();
+        prepared.force_index(&cancel);
+        let candidates = [
+            // Fully covered horizontal, vertical, and oblique interior strokes (CoverResult::All)
+            ([[1.0, 5.0, 0.4], [19.0, 5.0, 0.4]], 0.4),
+            ([[10.0, 1.0, 0.4], [10.0, 12.0, 0.4]], 0.4),
+            ([[2.0, 2.0, 0.4], [18.0, 11.0, 0.4]], 0.4),
+            // Partially covered strokes crossing the gap [20..25] in both directions (CoverResult::Partial)
+            ([[2.0, 5.0, 0.4], [33.0, 5.0, 0.4]], 0.4),
+            ([[33.0, 5.0, 0.4], [2.0, 5.0, 0.4]], 0.4),
+            ([[5.0, 3.0, 0.4], [30.0, 10.0, 0.4]], 0.4),
+            // Extending past one side of the sheet
+            ([[-3.0, 5.0, 0.4], [15.0, 5.0, 0.4]], 0.4),
+            ([[15.0, 5.0, 0.4], [22.0, 5.0, 0.4]], 0.4),
+            ([[10.0, -2.0, 0.4], [10.0, 16.0, 0.4]], 0.4),
+        ];
+        let fields = |gaps: &[AnchorGap]| {
+            gaps.iter()
+                .map(|gap| {
+                    (
+                        gap.start.to_bits(),
+                        gap.end.to_bits(),
+                        gap.left,
+                        gap.right,
+                        gap.direct_ends,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (endpoints_mm, bead_width_mm) in candidates {
+            let candidate = AnchorCandidate {
+                endpoints_mm,
+                bead_width_mm,
+            };
+            let mut expected_work = 0;
+            let mut actual_work = 0;
+            let expected = fields(
+                scalar
+                    .gaps(
+                        candidate,
+                        previous.iter(),
+                        contacts.iter(),
+                        &mut expected_work,
+                        &cancel,
+                    )
+                    .unwrap(),
+            );
+            let actual = fields(
+                screened
+                    .gaps_nominal(candidate, 0.2, &mut prepared, &mut actual_work, &cancel)
+                    .unwrap(),
+            );
+            assert_eq!(actual, expected, "candidate={endpoints_mm:?}");
+            assert_eq!(actual_work, expected_work, "candidate={endpoints_mm:?}");
+        }
     }
 }

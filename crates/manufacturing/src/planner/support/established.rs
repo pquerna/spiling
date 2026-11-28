@@ -127,6 +127,56 @@ impl Donor {
     }
 }
 
+/// Direct landing cells over `ledge` from ordinary road capsules without
+/// polygonizing or unioning roads across the whole layer.
+pub(super) fn landing_over_roads<'p>(
+    raster: &Raster<'_>,
+    ledge: &Bits,
+    paths: impl Iterator<Item = &'p DepositionPath>,
+    max_radius: f64,
+    live_bytes: usize,
+) -> Result<Bits, ManufacturingError> {
+    let (Some(ex), Some(ey)) = (
+        ledge.extent(&raster.frame, 0),
+        ledge.extent(&raster.frame, 1),
+    ) else {
+        return Ok(Bits::default());
+    };
+    let ledge_bounds = [[ex[0], ey[0]], [ex[1], ey[1]]];
+    let mut capsules: Vec<super::grid::CapsuleInput> = Vec::new();
+    for path in paths {
+        check_cancel(raster.cancel)?;
+        let Ok(edges) = path.checked_edges() else {
+            continue;
+        };
+        for edge in edges {
+            let &[p, q] = edge.points_mm else {
+                continue;
+            };
+            let half = (edge.width_mm * 0.5).min(max_radius) + PROPOSAL_JOIN_MM;
+            let (a, b) = ([p[0], p[1]], [q[0], q[1]]);
+            let reach = [
+                [a[0].min(b[0]) - half, a[1].min(b[1]) - half],
+                [a[0].max(b[0]) + half, a[1].max(b[1]) + half],
+            ];
+            raster.charge(1);
+            if !rects_meet(reach, ledge_bounds) || half.is_nan() || half <= 0.0 {
+                continue;
+            }
+            (raster.admit)(live_bytes.saturating_add(
+                (capsules.len() + 1).saturating_mul(size_of::<super::grid::CapsuleInput>()),
+            ))?;
+            raster.reserve(&mut capsules, 1)?;
+            capsules.push(super::grid::CapsuleInput { a, b, radius: half });
+        }
+    }
+    if capsules.is_empty() {
+        return Ok(Bits::default());
+    }
+    raster.landing_capsules(ledge, &capsules)
+}
+
+#[cfg(test)]
 pub(super) fn proposal_geometry<'p>(
     raster: &Raster<'_>,
     paths: impl Iterator<Item = &'p DepositionPath>,
@@ -486,6 +536,143 @@ pub(super) fn inward_donors(
     raster.inward(&polygons)
 }
 
+/// Uniform 2D spatial index over `donors` so [`CellContacts::stroke`] checks
+/// only nearby donors rather than scanning every donor on the layer.
+struct DonorGrid {
+    origin: [f64; 2],
+    cell: f64,
+    dims: [usize; 2],
+    offsets: Vec<u32>,
+    entries: Vec<u32>,
+}
+
+impl DonorGrid {
+    fn build(raster: &Raster<'_>, donors: &[Donor]) -> Result<Option<Self>, ManufacturingError> {
+        if donors.len() < 32 || donors.len() >= u32::MAX as usize {
+            return Ok(None);
+        }
+        let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+        let mut max_radius = 0.0_f64;
+        for donor in donors {
+            let b = donor.bounds(donor.radius);
+            if !b.iter().flatten().all(|v| v.is_finite()) || !donor.radius.is_finite() {
+                return Ok(None);
+            }
+            max_radius = max_radius.max(donor.radius);
+            bounds[0][0] = bounds[0][0].min(b[0][0]);
+            bounds[0][1] = bounds[0][1].min(b[0][1]);
+            bounds[1][0] = bounds[1][0].max(b[1][0]);
+            bounds[1][1] = bounds[1][1].max(b[1][1]);
+        }
+        let extent = [bounds[1][0] - bounds[0][0], bounds[1][1] - bounds[0][1]];
+        if !(extent[0].is_finite() && extent[1].is_finite()) {
+            return Ok(None);
+        }
+        let mut cell = ((extent[0] * extent[1]) / donors.len() as f64)
+            .sqrt()
+            .max(2.0 * max_radius)
+            .max(0.5);
+        let dims_for = |cell: f64| {
+            [
+                ((extent[0] / cell).floor().max(0.0) as usize) + 1,
+                ((extent[1] / cell).floor().max(0.0) as usize) + 1,
+            ]
+        };
+        while {
+            let [gx, gy] = dims_for(cell);
+            gx.saturating_mul(gy) > 4 * donors.len() + 64
+        } {
+            cell *= 2.0;
+        }
+        let dims = dims_for(cell);
+        let cells = dims[0] * dims[1];
+        let mut offsets = Vec::new();
+        raster.reserve(&mut offsets, cells + 1)?;
+        offsets.resize(cells + 1, 0u32);
+        let origin = bounds[0];
+        let span = |lo: f64, hi: f64, axis: usize| -> (usize, usize) {
+            let first = ((lo - origin[axis]) / cell).floor().max(0.0) as usize;
+            let last = ((hi - origin[axis]) / cell).floor().max(0.0) as usize;
+            (first.min(dims[axis] - 1), last.min(dims[axis] - 1))
+        };
+        for donor in donors {
+            check_cancel(raster.cancel)?;
+            let b = donor.bounds(donor.radius);
+            let (x0, x1) = span(b[0][0], b[1][0], 0);
+            let (y0, y1) = span(b[0][1], b[1][1], 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    offsets[y * dims[0] + x + 1] = offsets[y * dims[0] + x + 1].saturating_add(1);
+                }
+            }
+        }
+        for i in 0..cells {
+            offsets[i + 1] = offsets[i + 1].checked_add(offsets[i]).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "support donor grid exceeds index range",
+                )
+            })?;
+        }
+        let total = offsets[cells] as usize;
+        let mut entries = Vec::new();
+        raster.reserve(&mut entries, total)?;
+        entries.resize(total, 0u32);
+        let mut fill = offsets.clone();
+        for (idx, donor) in donors.iter().enumerate() {
+            let b = donor.bounds(donor.radius);
+            let (x0, x1) = span(b[0][0], b[1][0], 0);
+            let (y0, y1) = span(b[0][1], b[1][1], 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let slot = &mut fill[y * dims[0] + x];
+                    entries[*slot as usize] = idx as u32;
+                    *slot += 1;
+                }
+            }
+        }
+        Ok(Some(Self {
+            origin,
+            cell,
+            dims,
+            offsets,
+            entries,
+        }))
+    }
+
+    fn collect(&self, reach: [[f64; 2]; 2], out: &mut Vec<u32>) {
+        out.clear();
+        let max_x = self.origin[0] + self.dims[0] as f64 * self.cell;
+        let max_y = self.origin[1] + self.dims[1] as f64 * self.cell;
+        if reach[1][0] < self.origin[0]
+            || reach[0][0] > max_x
+            || reach[1][1] < self.origin[1]
+            || reach[0][1] > max_y
+        {
+            return;
+        }
+        let span = |lo: f64, hi: f64, axis: usize| -> (usize, usize) {
+            let first = ((lo - self.origin[axis]) / self.cell).floor().max(0.0) as usize;
+            let last = ((hi - self.origin[axis]) / self.cell).floor().max(0.0) as usize;
+            (
+                first.min(self.dims[axis] - 1),
+                last.min(self.dims[axis] - 1),
+            )
+        };
+        let (x0, x1) = span(reach[0][0], reach[1][0], 0);
+        let (y0, y1) = span(reach[0][1], reach[1][1], 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let cell = y * self.dims[0] + x;
+                let range = self.offsets[cell] as usize..self.offsets[cell + 1] as usize;
+                out.extend_from_slice(&self.entries[range]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
 /// Support anchoring on eligible part cells: refines the gaps a stroke
 /// run left on deposited support by the run's centreline pieces inside
 /// `cells`. A gap end bounded by eligible cells is a contact end.
@@ -495,9 +682,26 @@ pub(super) struct CellContacts<'r, 'a> {
     pub donors: &'r [Donor],
     /// Records whether any anchoring query consulted these proposal cells.
     pub queried: Option<&'r AtomicBool>,
+    grid: Option<DonorGrid>,
 }
 
-impl CellContacts<'_, '_> {
+impl<'r, 'a> CellContacts<'r, 'a> {
+    pub(super) fn new(
+        raster: &'r Raster<'a>,
+        cells: &'r Bits,
+        donors: &'r [Donor],
+        queried: Option<&'r AtomicBool>,
+    ) -> Result<Self, ManufacturingError> {
+        let grid = DonorGrid::build(raster, donors)?;
+        Ok(Self {
+            raster,
+            cells,
+            donors,
+            queried,
+            grid,
+        })
+    }
+
     pub(super) fn stroke(
         &self,
         endpoints: [[f64; 3]; 2],
@@ -528,16 +732,35 @@ impl CellContacts<'_, '_> {
             [start[0].min(end[0]) - radius, start[1].min(end[1]) - radius],
             [start[0].max(end[0]) + radius, start[1].max(end[1]) + radius],
         ];
-        for donor in self.donors {
+        if let Some(grid) = &self.grid {
             check_cancel(self.raster.cancel)?;
-            self.raster.charge(1);
-            if rects_meet(donor.bounds(donor.radius), reach) {
-                if let Some(interval) = donor.interval(start, end) {
-                    self.raster.reserve(intervals, 1)?;
-                    intervals.push(interval);
+            self.raster.charge(self.donors.len());
+            let mut hits = Vec::new();
+            grid.collect(reach, &mut hits);
+            for idx in hits {
+                check_cancel(self.raster.cancel)?;
+                let donor = &self.donors[idx as usize];
+                if rects_meet(donor.bounds(donor.radius), reach) {
+                    if let Some(interval) = donor.interval(start, end) {
+                        self.raster.reserve(intervals, 1)?;
+                        intervals.push(interval);
+                    }
+                    ends[0] |= donor.touches(start, radius);
+                    ends[1] |= donor.touches(end, radius);
                 }
-                ends[0] |= donor.touches(start, radius);
-                ends[1] |= donor.touches(end, radius);
+            }
+        } else {
+            for donor in self.donors {
+                check_cancel(self.raster.cancel)?;
+                self.raster.charge(1);
+                if rects_meet(donor.bounds(donor.radius), reach) {
+                    if let Some(interval) = donor.interval(start, end) {
+                        self.raster.reserve(intervals, 1)?;
+                        intervals.push(interval);
+                    }
+                    ends[0] |= donor.touches(start, radius);
+                    ends[1] |= donor.touches(end, radius);
+                }
             }
         }
         intervals.sort_unstable_by(|left, right| left.0.total_cmp(&right.0));

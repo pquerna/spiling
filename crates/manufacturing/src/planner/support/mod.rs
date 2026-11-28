@@ -2720,12 +2720,10 @@ fn admit_raster_layer(
         let contacts = contact_raster
             .as_ref()
             .zip(part_contact)
-            .map(|(raster, proposal)| established::CellContacts {
-                raster,
-                cells: &proposal.cells,
-                donors: &[],
-                queried: Some(&queried),
-            });
+            .map(|(raster, proposal)| {
+                established::CellContacts::new(raster, &proposal.cells, &[], Some(&queried))
+            })
+            .transpose()?;
         let mut lower = strokes::LowerStrokes::new(
             previous.paths.iter().filter(|path| support_role(path.kind)),
             std::iter::empty(),
@@ -2948,16 +2946,11 @@ fn reconcile_layer_roots(
                 }
                 None => None,
             };
-            let contacts =
-                contact_raster
-                    .as_ref()
-                    .zip(contact_cells.as_ref())
-                    .map(|(raster, cells)| established::CellContacts {
-                        raster,
-                        cells,
-                        donors: &donors,
-                        queried: None,
-                    });
+            let contacts = contact_raster
+                .as_ref()
+                .zip(contact_cells.as_ref())
+                .map(|(raster, cells)| established::CellContacts::new(raster, cells, &donors, None))
+                .transpose()?;
             let old_segments = path_segments(&layer.paths);
             let kept = raster::retain_anchored(
                 &mut layer.paths,

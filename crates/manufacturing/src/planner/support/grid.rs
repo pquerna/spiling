@@ -875,31 +875,370 @@ impl Raster<'_> {
         self.landing_cells(ledge, inside, boundary)
     }
 
-    /// Landing proposals of each ledge over its roads, in one raster stage:
-    /// inward road cells, plus a one-cell donor seam between opposing inward
-    /// neighbours when the cell is wholly in the ledge and its centre is
-    /// inside the road footprint. Neither grants contact to the emitted
-    /// stroke.
-    pub(super) fn landing_groups<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+    /// Direct landing proposal over exact road capsules restricted to `ledge`'s
+    /// tight cell window: keeps closed cells wholly inside the union of road
+    /// capsules (proven by single-capsule cover or exact 2x2 quadrant convex
+    /// cover), plus a one-cell seam between opposing core neighbours whose
+    /// centre is inside a road capsule.
+    pub(super) fn landing_capsules(
         &self,
-        ledges: &[&Bits],
-        roads: &[G],
-    ) -> Result<Vec<Bits>, ManufacturingError> {
-        use rayon::prelude::*;
-        let working_set = crate::working_set::current();
-        let built: Vec<Result<Bits, ManufacturingError>> = self
-            .polygon_cell_groups(roads)?
-            .into_par_iter()
-            .zip(ledges)
-            .map(|((inside, boundary), ledge)| {
-                crate::working_set::scope(working_set, || {
-                    self.landing_cells(ledge, inside, boundary)
-                })
-            })
-            .collect();
-        built.into_iter().collect()
+        ledge: &Bits,
+        capsules: &[CapsuleInput],
+    ) -> Result<Bits, ManufacturingError> {
+        if ledge.is_empty() || capsules.is_empty() {
+            return Ok(Bits::default());
+        }
+        let rows = ledge.rows();
+        let width = ledge.width;
+        let words = ledge.data.len();
+        (self.admit)(ledge.bytes().saturating_mul(3))?;
+        let mut eligible_data = self.zeroed(words)?;
+        let mut core_data = self.zeroed(words)?;
+
+        let frame = &self.frame;
+        let cell = frame.cell;
+        let inv = 1.0 / cell;
+        let half_diag = cell * std::f64::consts::FRAC_1_SQRT_2;
+        let row0 = ledge.row0;
+        let row_last = row0 + rows - 1;
+        let col_origin = ledge.word0 * 64;
+        let col_last = (col_origin + width * 64).min(frame.cols) - 1;
+
+        let stamp_capsule = |data: &mut [u64], a: [f64; 2], b: [f64; 2], radius: f64| {
+            if radius <= 0.0 {
+                return;
+            }
+            let r_lo = ((a[1].min(b[1]) - radius - frame.origin[1]) * inv - 0.5).ceil();
+            let r_hi = ((a[1].max(b[1]) + radius - frame.origin[1]) * inv - 0.5).floor();
+            if r_lo > r_hi || r_hi < row0 as f64 || r_lo > row_last as f64 {
+                return;
+            }
+            let r_lo = (r_lo.max(row0 as f64) as usize).max(row0);
+            let r_hi = (r_hi.min(row_last as f64) as usize).min(row_last);
+            let cap = Capsule::new(a, b, radius);
+            for row in r_lo..=r_hi {
+                let my = frame.y(row as f64 + 0.5);
+                let Some((x_lo, x_hi)) = cap.band([my, my]) else {
+                    continue;
+                };
+                let c_lo = ((x_lo - frame.origin[0]) * inv - 0.5).ceil();
+                let c_hi = ((x_hi - frame.origin[0]) * inv - 0.5).floor();
+                if c_lo > c_hi || c_hi < col_origin as f64 || c_lo > col_last as f64 {
+                    continue;
+                }
+                let c_lo = (c_lo.max(col_origin as f64) as usize).max(col_origin);
+                let c_hi = (c_hi.min(col_last as f64) as usize).min(col_last);
+                if c_lo <= c_hi {
+                    let row_slice = &mut data[(row - row0) * width..(row - row0 + 1) * width];
+                    set_range(row_slice, c_lo - col_origin, c_hi - col_origin + 1);
+                }
+            }
+        };
+
+        let stamp_rect = |data: &mut [u64], x0: f64, y0: f64, x1: f64, y1: f64| {
+            if x1 <= x0 || y1 <= y0 {
+                return;
+            }
+            let r_lo = ((y0 - frame.origin[1]) * inv).ceil();
+            let r_hi = ((y1 - frame.origin[1]) * inv).floor() - 1.0;
+            let c_lo = ((x0 - frame.origin[0]) * inv).ceil();
+            let c_hi = ((x1 - frame.origin[0]) * inv).floor() - 1.0;
+            if r_lo > r_hi
+                || c_lo > c_hi
+                || r_hi < row0 as f64
+                || r_lo > row_last as f64
+                || c_hi < col_origin as f64
+                || c_lo > col_last as f64
+            {
+                return;
+            }
+            let r_lo = (r_lo.max(row0 as f64) as usize).max(row0);
+            let r_hi = (r_hi.min(row_last as f64) as usize).min(row_last);
+            let c_lo = (c_lo.max(col_origin as f64) as usize).max(col_origin);
+            let c_hi = (c_hi.min(col_last as f64) as usize).min(col_last);
+            if r_lo > r_hi || c_lo > c_hi {
+                return;
+            }
+            for row in r_lo..=r_hi {
+                let row_slice = &mut data[(row - row0) * width..(row - row0 + 1) * width];
+                set_range(row_slice, c_lo - col_origin, c_hi - col_origin + 1);
+            }
+        };
+
+        let mut max_radius = 0.0_f64;
+        for (idx, capsule) in capsules.iter().enumerate() {
+            if idx & 255 == 0 {
+                check_cancel(self.cancel)?;
+            }
+            let CapsuleInput { a, b, radius } = *capsule;
+            if !(a.iter().chain(&b).all(|v| v.is_finite()) && radius.is_finite() && radius > 0.0) {
+                continue;
+            }
+            max_radius = max_radius.max(radius);
+            stamp_capsule(&mut eligible_data, a, b, radius);
+            let r_axial = radius - GUARD_MM;
+            let r_core = radius - half_diag - GUARD_MM;
+            if a[1] == b[1] {
+                if r_axial > 0.0 {
+                    stamp_rect(
+                        &mut core_data,
+                        a[0].min(b[0]),
+                        a[1] - r_axial,
+                        a[0].max(b[0]),
+                        a[1] + r_axial,
+                    );
+                }
+                if r_core > 0.0 {
+                    stamp_capsule(&mut core_data, a, a, r_core);
+                    stamp_capsule(&mut core_data, b, b, r_core);
+                }
+            } else if a[0] == b[0] {
+                if r_axial > 0.0 {
+                    stamp_rect(
+                        &mut core_data,
+                        a[0] - r_axial,
+                        a[1].min(b[1]),
+                        a[0] + r_axial,
+                        a[1].max(b[1]),
+                    );
+                }
+                if r_core > 0.0 {
+                    stamp_capsule(&mut core_data, a, a, r_core);
+                    stamp_capsule(&mut core_data, b, b, r_core);
+                }
+            } else if r_core > 0.0 {
+                stamp_capsule(&mut core_data, a, b, r_core);
+            }
+        }
+        self.charge(capsules.len());
+
+        let mut any_eligible = false;
+        let mut any_boundary = false;
+        for i in 0..words {
+            let mask = ledge.data[i];
+            eligible_data[i] &= mask;
+            core_data[i] &= mask;
+            any_eligible |= eligible_data[i] != 0;
+            any_boundary |= (eligible_data[i] & !core_data[i]) != 0;
+        }
+        if !any_eligible {
+            return Ok(Bits::default());
+        }
+
+        // Exact 2x2 quadrant union-core upgrade for cells straddling the seam
+        // between multiple overlapping capsules (T-junctions, diagonal joins).
+        if any_boundary {
+            let ox = frame.x(col_origin as f64);
+            let oy = frame.y(row0 as f64);
+            let span_x = (col_last - col_origin + 1) as f64 * cell;
+            let span_y = rows as f64 * cell;
+            let mut bin = (max_radius * 2.0).max(0.5);
+            let mut gx = (span_x / bin).ceil().max(1.0) as usize;
+            let mut gy = (span_y / bin).ceil().max(1.0) as usize;
+            while gx.saturating_mul(gy) > 4 * capsules.len() + 64 {
+                bin *= 2.0;
+                gx = (span_x / bin).ceil().max(1.0) as usize;
+                gy = (span_y / bin).ceil().max(1.0) as usize;
+            }
+            let bins = gx * gy;
+            let mut offsets = Vec::new();
+            self.reserve(&mut offsets, bins + 1)?;
+            offsets.resize(bins + 1, 0u32);
+            let bin_span = |lo: f64, hi: f64, origin: f64, limit: usize| -> (usize, usize) {
+                let first = ((lo - origin) / bin).floor().max(0.0) as usize;
+                let last = ((hi - origin) / bin).floor().max(0.0) as usize;
+                (first.min(limit - 1), last.min(limit - 1))
+            };
+            for cap in capsules {
+                let r = cap.radius;
+                if !(r.is_finite() && r > 0.0) {
+                    continue;
+                }
+                let (bx0, bx1) = bin_span(
+                    cap.a[0].min(cap.b[0]) - r,
+                    cap.a[0].max(cap.b[0]) + r,
+                    ox,
+                    gx,
+                );
+                let (by0, by1) = bin_span(
+                    cap.a[1].min(cap.b[1]) - r,
+                    cap.a[1].max(cap.b[1]) + r,
+                    oy,
+                    gy,
+                );
+                for by in by0..=by1 {
+                    for bx in bx0..=bx1 {
+                        offsets[by * gx + bx + 1] = offsets[by * gx + bx + 1].saturating_add(1);
+                    }
+                }
+            }
+            for i in 0..bins {
+                offsets[i + 1] = offsets[i + 1].saturating_add(offsets[i]);
+            }
+            let total_entries = offsets[bins] as usize;
+            let mut entries = Vec::new();
+            self.reserve(&mut entries, total_entries)?;
+            entries.resize(total_entries, 0u32);
+            let mut fill = offsets.clone();
+            for (idx, cap) in capsules.iter().enumerate() {
+                let r = cap.radius;
+                if !(r.is_finite() && r > 0.0) {
+                    continue;
+                }
+                let (bx0, bx1) = bin_span(
+                    cap.a[0].min(cap.b[0]) - r,
+                    cap.a[0].max(cap.b[0]) + r,
+                    ox,
+                    gx,
+                );
+                let (by0, by1) = bin_span(
+                    cap.a[1].min(cap.b[1]) - r,
+                    cap.a[1].max(cap.b[1]) + r,
+                    oy,
+                    gy,
+                );
+                for by in by0..=by1 {
+                    for bx in bx0..=bx1 {
+                        let slot = &mut fill[by * gx + bx];
+                        entries[*slot as usize] = idx as u32;
+                        *slot += 1;
+                    }
+                }
+            }
+            drop(fill);
+
+            // Quadrant corner bitmasks over the 3x3 cell sample grid:
+            // 0:(x0,y0) 1:(xm,y0) 2:(x1,y0)
+            // 3:(x0,ym) 4:(xm,ym) 5:(x1,ym)
+            // 6:(x0,y1) 7:(xm,y1) 8:(x1,y1)
+            const Q00: u16 = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4);
+            const Q10: u16 = (1 << 1) | (1 << 2) | (1 << 4) | (1 << 5);
+            const Q01: u16 = (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7);
+            const Q11: u16 = (1 << 4) | (1 << 5) | (1 << 7) | (1 << 8);
+
+            for local_row in 0..rows {
+                check_cancel(self.cancel)?;
+                let row = row0 + local_row;
+                let y0 = frame.y(row as f64);
+                let ym = y0 + cell * 0.5;
+                let y1 = frame.y(row as f64 + 1.0);
+                let by = (((ym - oy) / bin).floor().max(0.0) as usize).min(gy - 1);
+                for local_word in 0..width {
+                    let idx = local_row * width + local_word;
+                    let mut diff = eligible_data[idx] & !core_data[idx];
+                    if diff == 0 {
+                        continue;
+                    }
+                    let mut promoted = 0u64;
+                    while diff != 0 {
+                        let bit = diff.trailing_zeros() as usize;
+                        diff &= diff - 1;
+                        let col = col_origin + local_word * 64 + bit;
+                        let x0 = frame.x(col as f64);
+                        let xm = x0 + cell * 0.5;
+                        let x1 = frame.x(col as f64 + 1.0);
+                        let bx = (((xm - ox) / bin).floor().max(0.0) as usize).min(gx - 1);
+                        let b = by * gx + bx;
+                        let range = offsets[b] as usize..offsets[b + 1] as usize;
+                        let pts = [
+                            [x0, y0],
+                            [xm, y0],
+                            [x1, y0],
+                            [x0, ym],
+                            [xm, ym],
+                            [x1, ym],
+                            [x0, y1],
+                            [xm, y1],
+                            [x1, y1],
+                        ];
+                        let mut quads = 0u8;
+                        for &cap_idx in &entries[range] {
+                            let cap = &capsules[cap_idx as usize];
+                            let r = cap.radius - GUARD_MM;
+                            if r <= 0.0 {
+                                continue;
+                            }
+                            if x1 < cap.a[0].min(cap.b[0]) - r
+                                || x0 > cap.a[0].max(cap.b[0]) + r
+                                || y1 < cap.a[1].min(cap.b[1]) - r
+                                || y0 > cap.a[1].max(cap.b[1]) + r
+                            {
+                                continue;
+                            }
+                            let r2 = r * r;
+                            let (dx, dy) = (cap.b[0] - cap.a[0], cap.b[1] - cap.a[1]);
+                            let len2 = dx * dx + dy * dy;
+                            let mut mask = 0u16;
+                            for (p_i, p) in pts.iter().enumerate() {
+                                let t = if len2 == 0.0 {
+                                    0.0
+                                } else {
+                                    (((p[0] - cap.a[0]) * dx + (p[1] - cap.a[1]) * dy) / len2)
+                                        .clamp(0.0, 1.0)
+                                };
+                                let ex = p[0] - cap.a[0] - t * dx;
+                                let ey = p[1] - cap.a[1] - t * dy;
+                                if ex * ex + ey * ey <= r2 {
+                                    mask |= 1 << p_i;
+                                }
+                            }
+                            if mask & Q00 == Q00 {
+                                quads |= 1;
+                            }
+                            if mask & Q10 == Q10 {
+                                quads |= 2;
+                            }
+                            if mask & Q01 == Q01 {
+                                quads |= 4;
+                            }
+                            if mask & Q11 == Q11 {
+                                quads |= 8;
+                            }
+                            if quads == 0b1111 {
+                                promoted |= 1u64 << bit;
+                                break;
+                            }
+                        }
+                    }
+                    core_data[idx] |= promoted;
+                }
+            }
+        }
+
+        let core = Bits {
+            row0,
+            word0: ledge.word0,
+            width,
+            data: core_data,
+        };
+        let mut eligible = Bits {
+            row0,
+            word0: ledge.word0,
+            width,
+            data: eligible_data,
+        };
+        self.charge(eligible.data.len().saturating_mul(7));
+        for (local, words) in eligible.data.chunks_mut(width.max(1)).enumerate() {
+            check_cancel(self.cancel)?;
+            let row = row0 + local;
+            for (offset, value) in words.iter_mut().enumerate() {
+                let word = ledge.word0 + offset;
+                let middle = core.word(row, word);
+                let left = middle << 1
+                    | word
+                        .checked_sub(1)
+                        .map_or(0, |left| core.word(row, left) >> 63);
+                let right = middle >> 1 | core.word(row, word + 1) << 63;
+                let below = row.checked_sub(1).map_or(0, |below| core.word(below, word));
+                let above = core.word(row + 1, word);
+                *value = middle | (*value & ((left & right) | (below & above)));
+            }
+        }
+        eligible.shrink();
+        Ok(eligible)
     }
 
+    #[cfg(test)]
     fn landing_cells(
         &self,
         ledge: &Bits,
