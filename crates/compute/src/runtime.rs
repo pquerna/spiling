@@ -379,24 +379,23 @@ fn probe(device: &ResolvedDevice) -> Result<(), ComputeError> {
     let stream = device.streams[0];
     let result = guarded(|| {
         stream.enter(|| {
-            device.client.memory_dedicated_allocation((), |_| {
-                guarded(|| {
-                    kernels::masks_dispatch(
-                        &device.client,
-                        device.description.backend == ComputeBackend::Cpu,
-                        0,
-                        &values,
-                        &queries,
-                        &[0, 0, 2, 1],
-                        &[0, 1],
-                    )
-                })
+            guarded(|| {
+                kernels::masks_dispatch(
+                    &device.client,
+                    device.description.backend == ComputeBackend::Cpu,
+                    0,
+                    &values,
+                    &queries,
+                    &[0, 0, 2, 1],
+                    &[0, 1],
+                )
             })
         })
     });
-    let drained = drain(device, stream);
+    if result.is_err() {
+        let _ = drain(device, stream);
+    }
     let words = result?;
-    drained?;
     if words != [1] {
         return Err(ComputeError::Initialization(
             "exact predicate initialization probe failed".into(),
@@ -638,19 +637,20 @@ fn round<T: Send>(
     let mut own = Err(ComputeError::Execution("round did not run".into()));
     let masks = guarded(|| {
         stream.enter(|| {
-            device.client.memory_dedicated_allocation((), |_| {
-                guarded(|| {
-                    let masks = run_masks(&device.client, cpu, queued);
-                    own = guarded(|| work(&device.client, cpu));
-                    masks
-                })
+            guarded(|| {
+                let masks = run_masks(&device.client, cpu, queued);
+                own = guarded(|| work(&device.client, cpu));
+                masks
             })
         })
     });
-    let drained = drain(device, stream);
-    let (masks, own) = match drained {
-        Err(error) => (Err(error.clone()), Err(error)),
-        Ok(()) => (masks, own),
+    let (masks, own) = if masks.is_err() || own.is_err() {
+        match drain(device, stream) {
+            Err(error) => (Err(error.clone()), Err(error)),
+            Ok(()) => (masks, own),
+        }
+    } else {
+        (masks, own)
     };
     for result in [masks.as_ref().err(), own.as_ref().err()] {
         if let Some(error @ ComputeError::Execution(_)) = result

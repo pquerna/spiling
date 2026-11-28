@@ -864,9 +864,11 @@ impl TolerantModel {
         // A tolerant point join at one height is not an all-height closure.
         // Require the derived facet complex itself to close, after exact
         // coordinate welding, before asserting complete hole inventory.
-        let mut edges = HashMap::<(u32, u32), u32>::new();
-        for triangle in self.triangles.iter() {
-            cancelled(cancel)?;
+        let mut packed_edges = Vec::with_capacity(self.triangles.len().saturating_mul(3));
+        for (idx, triangle) in self.triangles.iter().enumerate() {
+            if idx & 1023 == 0 {
+                cancelled(cancel)?;
+            }
             for [a, b] in [
                 [triangle[0], triangle[1]],
                 [triangle[1], triangle[2]],
@@ -877,12 +879,25 @@ impl TolerantModel {
                         "support projection has a collapsed source facet",
                     ));
                 }
-                *edges
-                    .entry(if a < b { (a, b) } else { (b, a) })
-                    .or_default() += 1;
+                let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                packed_edges.push((u64::from(lo) << 32) | u64::from(hi));
             }
         }
-        let open = edges.values().filter(|n| **n != 2).count();
+        use rayon::prelude::*;
+        packed_edges.par_sort_unstable();
+        let mut open = 0usize;
+        let mut idx = 0usize;
+        while idx < packed_edges.len() {
+            let key = packed_edges[idx];
+            let mut end = idx + 1;
+            while end < packed_edges.len() && packed_edges[end] == key {
+                end += 1;
+            }
+            if end - idx != 2 {
+                open += 1;
+            }
+            idx = end;
+        }
         if open > 0 {
             let mut faces: Vec<u32> = self
                 .open_edges()
@@ -897,7 +912,7 @@ impl TolerantModel {
                 "support projection requires a closed source facet boundary; sampled chain joins do not establish complete protected holes ({open} open mesh edges on source face ordinals {faces:?} and {more} more)",
             )));
         }
-        drop(edges);
+        drop(packed_edges);
         struct Record {
             triangle: usize,
             points: Vec<[f64; 2]>,
@@ -948,7 +963,41 @@ impl TolerantModel {
         let mut selected = vec![false; self.triangles.len()];
         let mut local = vec![usize::MAX; self.triangles.len()];
         let mut records = Vec::new();
-        for pair in critical.windows(2) {
+        // Precompute the pure read-only section holes for every critical
+        // interval in parallel, then merge in exact critical-height order.
+        let critical_slabs: Vec<Option<(usize, usize, f64, f64)>> = critical
+            .windows(2)
+            .map(|pair| {
+                let [lo, hi] = [pair[0], pair[1]];
+                let first = events.partition_point(|e| *e < lo);
+                let last = events.partition_point(|e| *e <= hi);
+                let low = (first..last.saturating_sub(1)).find(|k| sampled[k + 1] > sampled[*k])?;
+                let high = (first..last - 1)
+                    .rev()
+                    .find(|k| sampled[k + 1] > sampled[*k])
+                    .expect("a first sampled slab is also a last");
+                let mid = events[low] + (events[low + 1] - events[low]) * 0.5;
+                Some((low, high, mid, events[high + 1]))
+            })
+            .collect();
+        let interval_holes: Vec<Result<Vec<_>, GeometryError>> = critical_slabs
+            .par_iter()
+            .map(|slab| {
+                let Some(&(_, _, mid, _)) = slab.as_ref() else {
+                    return Ok(Vec::new());
+                };
+                cancelled(cancel)?;
+                Ok(self
+                    .section_with(mid, false, Some(cancel), None)?
+                    .loops
+                    .into_iter()
+                    .filter(|l| l.area < 0.0)
+                    .collect())
+            })
+            .collect();
+        let interval_holes: Vec<Vec<_>> =
+            interval_holes.into_iter().collect::<Result<Vec<_>, _>>()?;
+        for ((pair, slab), holes) in critical.windows(2).zip(critical_slabs).zip(interval_holes) {
             cancelled(cancel)?;
             let [lo, hi] = [pair[0], pair[1]];
             while next < order.len() && heights[order[next]][0] < hi {
@@ -956,26 +1005,10 @@ impl TolerantModel {
                 next += 1;
             }
             active.retain(|t| heights[*t][1] > lo);
-            // The first and last sampled vertex slabs bound what the
-            // per-slab sections would have seen.
-            let first = events.partition_point(|e| *e < lo);
-            let last = events.partition_point(|e| *e <= hi);
-            let Some(low) = (first..last.saturating_sub(1)).find(|k| sampled[k + 1] > sampled[*k])
-            else {
+            let Some((low, high, _, hi)) = slab else {
                 continue;
             };
-            let high = (first..last - 1)
-                .rev()
-                .find(|k| sampled[k + 1] > sampled[*k])
-                .expect("a first sampled slab is also a last");
-            let mid = events[low] + (events[low + 1] - events[low]) * 0.5;
-            let [lo, hi] = [events[low], events[high + 1]];
-            let holes: Vec<_> = self
-                .section_with(mid, false, Some(cancel), None)?
-                .loops
-                .into_iter()
-                .filter(|l| l.area < 0.0)
-                .collect();
+            let lo = events[low];
             if holes.is_empty() {
                 continue;
             }

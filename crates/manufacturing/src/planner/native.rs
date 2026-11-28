@@ -685,27 +685,56 @@ fn certify_support_clearance_traced(
         trace,
         cancel,
     )?;
-    for (polygon, scope) in protected.0.iter().zip(scopes) {
-        if scope.has_access() {
-            continue;
+    {
+        let non_relieved: Vec<(
+            &geo::Polygon<f64>,
+            spiling_geometry::ProtectedVoidHeightScope,
+        )> = protected
+            .0
+            .iter()
+            .zip(scopes)
+            .filter(|(_, scope)| !scope.has_access())
+            .map(|(polygon, scope)| (polygon, scope.height))
+            .collect();
+        let results: Vec<Result<(usize, u64), ManufacturingError>> = non_relieved
+            .par_iter()
+            .map(|&(polygon, height)| {
+                let mut local_work = 0usize;
+                let mut local_native = spiling_geometry::GeometryWorkBudget::monitored();
+                let range = scoped_support_layer_range(
+                    schedule,
+                    height,
+                    vertical,
+                    &mut local_work,
+                    cancel,
+                )?;
+                certify_polygon_escapes(
+                    &escaped,
+                    range,
+                    &ForbiddenPolygonScope {
+                        polygon,
+                        height,
+                        label: "projected protected native void",
+                    },
+                    xy_clearance_mm,
+                    &mut local_native,
+                    &mut local_work,
+                    &trace.void_tests,
+                    trace,
+                    cancel,
+                )?;
+                Ok((local_work, local_native.consumed()))
+            })
+            .collect();
+        for result in results {
+            let (local_work, local_native) = result?;
+            charge_support_clearance_range(support_work, local_work, cancel)?;
+            native_work
+                .charge(local_native, cancel)
+                .map_err(|failure| {
+                    super::native_error(failure, "projected protected native void")
+                })?;
         }
-        let range =
-            scoped_support_layer_range(schedule, scope.height, vertical, support_work, cancel)?;
-        certify_polygon_escapes(
-            &escaped,
-            range,
-            &ForbiddenPolygonScope {
-                polygon,
-                height: scope.height,
-                label: "projected protected native void",
-            },
-            xy_clearance_mm,
-            native_work,
-            support_work,
-            &trace.void_tests,
-            trace,
-            cancel,
-        )?;
     }
     trace.report("escaped_exclusions", started);
 
@@ -1086,70 +1115,85 @@ fn certify_escaped_occupancy(
         return Ok(());
     }
     let schedule = escaped.band.schedule;
-    for span in sections {
-        charge_support_clearance(work, cancel)?;
-        let interval = [
-            schedule[span.start as usize].lower_z,
-            schedule[(span.end - 1) as usize].z,
-        ];
-        let range = scoped_support_layer_range(
-            schedule,
-            spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                lower_mm: interval[0],
-                upper_mm: interval[1],
-            },
-            escaped.band.vertical,
-            work,
-            cancel,
-        )?;
-        let first = escaped.escapes.partition_point(|e| e.layer < range.start);
-        if escaped
-            .escapes
-            .get(first)
-            .is_none_or(|escape| escape.layer >= range.end)
-        {
-            continue;
-        }
-        let scoped = |piece: Option<[f64; 2]>| {
-            let height = piece.map_or(interval, |height| {
-                [interval[0].max(height[0]), interval[1].min(height[1])]
-            });
-            (height[0] <= height[1]).then_some(
+    let results: Vec<Result<(usize, u64), ManufacturingError>> = sections
+        .par_iter()
+        .map(|span| {
+            let mut local_work = 0usize;
+            let mut local_native = spiling_geometry::GeometryWorkBudget::monitored();
+            charge_support_clearance(&mut local_work, cancel)?;
+            let interval = [
+                schedule[span.start as usize].lower_z,
+                schedule[(span.end - 1) as usize].z,
+            ];
+            let range = scoped_support_layer_range(
+                schedule,
                 spiling_geometry::ProtectedVoidHeightScope::Bounded {
-                    lower_mm: height[0],
-                    upper_mm: height[1],
+                    lower_mm: interval[0],
+                    upper_mm: interval[1],
                 },
-            )
-        };
-        let mut charged = 0usize;
-        span.visit_occupied_screened(
-            cancel,
-            |bounds, height| {
-                Ok(scoped(height).is_some() && escaped.any_near(range.clone(), bounds, gap))
-            },
-            |polygon, height| {
-                let Some(scope) = scoped(height) else {
-                    return Ok(true);
-                };
-                certify_polygon_escapes(
-                    escaped,
-                    range.clone(),
-                    &ForbiddenPolygonScope {
-                        polygon,
-                        height: scope,
-                        label: "continuous native/finish outer occupancy",
+                escaped.band.vertical,
+                &mut local_work,
+                cancel,
+            )?;
+            let first = escaped.escapes.partition_point(|e| e.layer < range.start);
+            if escaped
+                .escapes
+                .get(first)
+                .is_none_or(|escape| escape.layer >= range.end)
+            {
+                return Ok((local_work, local_native.consumed()));
+            }
+            let scoped = |piece: Option<[f64; 2]>| {
+                let height = piece.map_or(interval, |height| {
+                    [interval[0].max(height[0]), interval[1].min(height[1])]
+                });
+                (height[0] <= height[1]).then_some(
+                    spiling_geometry::ProtectedVoidHeightScope::Bounded {
+                        lower_mm: height[0],
+                        upper_mm: height[1],
                     },
-                    gap,
-                    native_work,
-                    &mut charged,
-                    &trace.occupancy_tests,
-                    trace,
-                    cancel,
-                )?;
-                Ok(true)
-            },
-        )?;
-        charge_support_clearance_range(work, charged, cancel)?;
+                )
+            };
+            let mut charged = 0usize;
+            span.visit_occupied_screened(
+                cancel,
+                |bounds, height| {
+                    Ok(scoped(height).is_some() && escaped.any_near(range.clone(), bounds, gap))
+                },
+                |polygon, height| {
+                    let Some(scope) = scoped(height) else {
+                        return Ok(true);
+                    };
+                    certify_polygon_escapes(
+                        escaped,
+                        range.clone(),
+                        &ForbiddenPolygonScope {
+                            polygon,
+                            height: scope,
+                            label: "continuous native/finish outer occupancy",
+                        },
+                        gap,
+                        &mut local_native,
+                        &mut charged,
+                        &trace.occupancy_tests,
+                        trace,
+                        cancel,
+                    )?;
+                    Ok(true)
+                },
+            )?;
+            charge_support_clearance_range(&mut local_work, charged, cancel)?;
+            Ok((local_work, local_native.consumed()))
+        })
+        .collect();
+    for result in results {
+        let (local_work, local_native) = result?;
+        charge_support_clearance_range(work, local_work, cancel)?;
+        native_work
+            .charge(local_native, cancel)
+            .map_err(|failure| {
+                super::native_error(failure, "continuous native/finish outer occupancy")
+            })?;
     }
     Ok(())
 }
@@ -1280,72 +1324,91 @@ fn certify_escaped_objects(
     trace: &ClearanceTrace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let mut support_layers = Vec::new();
     let mut at = 0;
     while at < escaped.escapes.len() {
         let support_ordinal = escaped.escapes[at].layer;
+        support_layers.push(support_ordinal);
         at += escaped.escapes[at..].partition_point(|e| e.layer == support_ordinal);
-        let elevation = &escaped.band.schedule[support_ordinal];
-        let applicable = gap_layer_range(
-            &escaped.band,
-            [
-                (elevation.lower_z - escaped.band.vertical[0]).next_down(),
-                (elevation.z + escaped.band.vertical[1]).next_up(),
-            ],
-            z_gap,
-            work,
-            cancel,
-        )?;
-        for object_ordinal in applicable {
-            let object_layer = &escaped.layers[object_ordinal];
-            charge_support_clearance(work, cancel)?;
-            for object in &object_layer.paths {
-                charge_support_clearance(work, cancel)?;
-                if object.kind.is_support() {
-                    continue;
-                }
-                let object_edges = object.checked_edges()?;
-                let query = path_xy_bounds(object);
-                escaped.visit_near(
-                    support_ordinal..support_ordinal + 1,
-                    query.map(|(bounds, _)| bounds),
-                    query.map_or(0.0, |(_, width)| {
-                        (width * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up()
-                    }),
-                    xy_gap,
-                    work,
-                    cancel,
-                    |escape, work| {
-                        let (support_layer, support) = escaped.edge(escape)?;
-                        for local in object_edges {
-                            charge_support_clearance(work, cancel)?;
-                            if spiling_geometry::planar_bounds_clear(
-                                escape.bounds,
-                                edge_xy_bounds(local.points_mm),
-                                (local.width_mm * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up(),
-                                xy_gap,
-                            ) {
-                                continue;
+    }
+    let results: Vec<Result<(usize, u64), ManufacturingError>> = support_layers
+        .par_iter()
+        .map(|&support_ordinal| {
+            let mut local_work = 0usize;
+            let mut local_native = spiling_geometry::GeometryWorkBudget::monitored();
+            let elevation = &escaped.band.schedule[support_ordinal];
+            let applicable = gap_layer_range(
+                &escaped.band,
+                [
+                    (elevation.lower_z - escaped.band.vertical[0]).next_down(),
+                    (elevation.z + escaped.band.vertical[1]).next_up(),
+                ],
+                z_gap,
+                &mut local_work,
+                cancel,
+            )?;
+            for object_ordinal in applicable {
+                let object_layer = &escaped.layers[object_ordinal];
+                charge_support_clearance(&mut local_work, cancel)?;
+                for object in &object_layer.paths {
+                    charge_support_clearance(&mut local_work, cancel)?;
+                    if object.kind.is_support() {
+                        continue;
+                    }
+                    let object_edges = object.checked_edges()?;
+                    let query = path_xy_bounds(object);
+                    escaped.visit_near(
+                        support_ordinal..support_ordinal + 1,
+                        query.map(|(bounds, _)| bounds),
+                        query.map_or(0.0, |(_, width)| {
+                            (width * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up()
+                        }),
+                        xy_gap,
+                        &mut local_work,
+                        cancel,
+                        |escape, local_work| {
+                            let (support_layer, support) = escaped.edge(escape)?;
+                            for local in object_edges {
+                                charge_support_clearance(local_work, cancel)?;
+                                if spiling_geometry::planar_bounds_clear(
+                                    escape.bounds,
+                                    edge_xy_bounds(local.points_mm),
+                                    (local.width_mm * 0.5 + XYZ6_SCREEN_SLACK_MM).next_up(),
+                                    xy_gap,
+                                ) {
+                                    continue;
+                                }
+                                certify_capsule_pair(
+                                    &support,
+                                    &emitted_edge(object, local)?,
+                                    [xy_gap, z_gap],
+                                    &mut local_native,
+                                    trace,
+                                    cancel,
+                                    || {
+                                        format!(
+                                            "actual emitted support layer {} versus deposited object/bridge layer {}",
+                                            support_layer.index, object_layer.index
+                                        )
+                                    },
+                                )?;
                             }
-                            certify_capsule_pair(
-                                &support,
-                                &emitted_edge(object, local)?,
-                                [xy_gap, z_gap],
-                                native_work,
-                                trace,
-                                cancel,
-                                || {
-                                    format!(
-                                        "actual emitted support layer {} versus deposited object/bridge layer {}",
-                                        support_layer.index, object_layer.index
-                                    )
-                                },
-                            )?;
-                        }
-                        Ok(())
-                    },
-                )?;
+                            Ok(())
+                        },
+                    )?;
+                }
             }
-        }
+            Ok((local_work, local_native.consumed()))
+        })
+        .collect();
+    for result in results {
+        let (local_work, local_native) = result?;
+        charge_support_clearance_range(work, local_work, cancel)?;
+        native_work
+            .charge(local_native, cancel)
+            .map_err(|failure| {
+                super::native_error(failure, "actual emitted support versus deposited object")
+            })?;
     }
     Ok(())
 }

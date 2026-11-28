@@ -652,6 +652,56 @@ impl Raster<'_> {
         self.finish_outward(stage)
     }
 
+    /// Like [`Self::outward_stage`], allowing each group to specify its own
+    /// dilation distance so mixed-distance work (clearance + zero-radius
+    /// section masks + per-void clearances) shares a single kernel batch.
+    pub(super) fn outward_stage_weighted<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[(G, f64)],
+    ) -> Result<OutwardStage, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let prepared: Vec<Result<(Vec<Span>, KernelPieces), ManufacturingError>> = groups
+            .par_iter()
+            .map(|(group, radius)| {
+                crate::working_set::scope(working_set, || {
+                    let mut spans = Vec::new();
+                    let mut crossings = Vec::new();
+                    let mut batch = Vec::new();
+                    for polygon in group.as_ref() {
+                        check_cancel(self.cancel)?;
+                        self.interior(polygon, &mut crossings, &mut spans)?;
+                        self.reserve(&mut batch, polygon.exterior().0.len())?;
+                        for [a, b] in edges(polygon) {
+                            self.reserve(&mut batch, 1)?;
+                            batch.push(CapsuleInput {
+                                a,
+                                b,
+                                radius: *radius,
+                            });
+                        }
+                    }
+                    let pieces = self.capsule_pieces(&batch)?;
+                    Ok((spans, pieces))
+                })
+            })
+            .collect();
+        Ok(OutwardStage {
+            empty: groups.iter().map(|(g, _)| g.as_ref().is_empty()).collect(),
+            groups: prepared.into_iter().collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    /// Like [`Self::outward_groups`], with a dilation distance per group in one
+    /// raster stage.
+    pub(super) fn outward_groups_weighted<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[(G, f64)],
+    ) -> Result<Vec<Option<Bits>>, ManufacturingError> {
+        let stage = self.outward_stage_weighted(groups)?;
+        self.finish_outward(stage)
+    }
+
     /// The host half of [`Self::outward_groups`]: each group's interior
     /// spans and kernel-ready capsules. It reads only its inputs, so a
     /// caller may build the next stage while this one's kernel runs.
@@ -1549,10 +1599,49 @@ impl Raster<'_> {
                     .div_euclid(CAPSULE_TICKS)
                     .min(last_row);
                 if low <= high {
-                    self.reserve(&mut pieces, 1)?;
-                    self.reserve(&mut rows, 1)?;
-                    pieces.push([from[0], from[1], to[0], to[1], radius]);
-                    rows.push([low as u32, (high - low + 1) as u32]);
+                    // Merge consecutive strictly collinear snapped segments of
+                    // the same radius when they stay within MAX_CAPSULE_SEGMENT_TICKS.
+                    let merged = if let Some(prev) = pieces.last_mut()
+                        && prev[4] == radius
+                        && prev[2] == from[0]
+                        && prev[3] == from[1]
+                    {
+                        let (dx1, dy1) = (prev[2] - prev[0], prev[3] - prev[1]);
+                        let (dx2, dy2) = (to[0] - from[0], to[1] - from[1]);
+                        let collinear =
+                            i128::from(dx1) * i128::from(dy2) == i128::from(dy1) * i128::from(dx2);
+                        let forward = i128::from(dx1) * i128::from(dx2)
+                            + i128::from(dy1) * i128::from(dy2)
+                            >= 0;
+                        let combined_span = (to[0] - prev[0]).abs().max((to[1] - prev[1]).abs());
+                        if collinear
+                            && forward
+                            && combined_span <= spiling_compute::MAX_CAPSULE_SEGMENT_TICKS
+                        {
+                            prev[2] = to[0];
+                            prev[3] = to[1];
+                            let new_low = (prev[1].min(prev[3]) - radius - 1)
+                                .div_euclid(CAPSULE_TICKS)
+                                .max(0);
+                            let new_high = (prev[1].max(prev[3]) + radius)
+                                .div_euclid(CAPSULE_TICKS)
+                                .min(last_row);
+                            if let Some(row_slot) = rows.last_mut() {
+                                *row_slot = [new_low as u32, (new_high - new_low + 1) as u32];
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !merged {
+                        self.reserve(&mut pieces, 1)?;
+                        self.reserve(&mut rows, 1)?;
+                        pieces.push([from[0], from[1], to[0], to[1], radius]);
+                        rows.push([low as u32, (high - low + 1) as u32]);
+                    }
                 }
                 from = to;
             }

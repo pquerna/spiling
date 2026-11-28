@@ -542,6 +542,7 @@ struct SpanSource<'a> {
 struct Prepared {
     window: Window,
     stage: super::grid::OutwardStage,
+    material_spans: Vec<usize>,
     charged: usize,
     load: std::time::Duration,
     rasterize: std::time::Duration,
@@ -910,6 +911,38 @@ impl Sweep<'_> {
             for layer in &layers[..=max_top] {
                 slabs.push(bead_slab(layer)?);
             }
+            // Pre-batch every protected void that reaches the swept Z range in
+            // one raster stage instead of stalling serially per void during
+            // the down pass.
+            if !self.protected.0.is_empty() && !slabs.is_empty() {
+                let sweep_lo = slabs.iter().map(|s| s[0]).fold(f64::INFINITY, f64::min);
+                let sweep_hi = slabs.iter().map(|s| s[1]).fold(f64::NEG_INFINITY, f64::max);
+                let mut void_ordinals = Vec::new();
+                let mut void_groups: Vec<([&Polygon<f64>; 1], f64)> = Vec::new();
+                for (ordinal, (mask, scope)) in self.protected.0.iter().zip(scopes).enumerate() {
+                    if !void_reaches_corridor(&scope.height, sweep_lo, sweep_hi) {
+                        continue;
+                    }
+                    match projection::void_placement_distance(mask, cell_bounds, self.requested)? {
+                        Some(dist) => {
+                            void_ordinals.push(ordinal);
+                            void_groups.push(([mask], dist));
+                        }
+                        None => {
+                            voids[ordinal] = Some(None);
+                        }
+                    }
+                }
+                if !void_groups.is_empty() {
+                    let built = raster.outward_groups_weighted(&void_groups)?;
+                    for (ordinal, bits) in void_ordinals.into_iter().zip(built) {
+                        if let Some(bits) = &bits {
+                            hold(bits)?;
+                        }
+                        voids[ordinal] = Some(bits);
+                    }
+                }
+            }
             const CHUNK: usize = 32;
             let chunks = std::iter::successors(Some(max_top), |&hi| {
                 hi.saturating_sub(CHUNK - 1).checked_sub(1)
@@ -961,16 +994,18 @@ impl Sweep<'_> {
                 // stage.
                 let t0 = std::time::Instant::now();
                 let count = hi - lo + 1;
+                let mut material_spans = Vec::new();
                 let stage = {
-                    let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); 2 * count];
+                    let mut batches: Vec<(Vec<&Polygon<f64>>, f64)> =
+                        (0..2 * count).map(|_| (Vec::new(), distance)).collect();
                     for piece in window.iter().flat_map(|(_, pieces)| pieces.iter()) {
                         if let Some(first) = piece.first
                             && (lo..=hi).contains(&first)
                             && envelope[first].is_some_and(|reach| rects_meet(piece.reach, reach))
                             && potential[(max_top - hi) / CHUNK].meets_rect(&cells, piece.reach)
                         {
-                            raster.reserve(&mut batches[first - lo], 1)?;
-                            batches[first - lo].push(&piece.polygon);
+                            raster.reserve(&mut batches[first - lo].0, 1)?;
+                            batches[first - lo].0.push(&piece.polygon);
                         }
                     }
                     // An entering seed needs every piece of its slab whose
@@ -981,6 +1016,10 @@ impl Sweep<'_> {
                         let Some(reach) = seed_reach[l] else {
                             continue;
                         };
+                        let span = span_at(source.sections, l as u32);
+                        if !material_spans.contains(&span) {
+                            material_spans.push(span);
+                        }
                         let slab = slabs[l];
                         let spans = slab_spans(source.sections, l);
                         for piece in window
@@ -992,16 +1031,20 @@ impl Sweep<'_> {
                                 && piece.scope[1] >= slab[0]
                                 && rects_meet(piece.reach, reach)
                             {
-                                raster.reserve(&mut batches[count + l - lo], 1)?;
-                                batches[count + l - lo].push(&piece.polygon);
+                                raster.reserve(&mut batches[count + l - lo].0, 1)?;
+                                batches[count + l - lo].0.push(&piece.polygon);
                             }
                         }
                     }
-                    raster.outward_stage(&batches, distance)?
+                    for &span in &material_spans {
+                        batches.push((source.sections[span].material.0.iter().collect(), 0.0));
+                    }
+                    raster.outward_stage_weighted(&batches)?
                 };
                 Ok(Prepared {
                     window: window.clone(),
                     stage,
+                    material_spans,
                     charged,
                     load,
                     rasterize: t0.elapsed(),
@@ -1015,6 +1058,7 @@ impl Sweep<'_> {
                 let Prepared {
                     window,
                     stage,
+                    material_spans,
                     charged,
                     load,
                     rasterize,
@@ -1023,9 +1067,11 @@ impl Sweep<'_> {
                 down_load += load;
                 down_fresh += rasterize;
                 let t0 = std::time::Instant::now();
+                let count = hi - lo + 1;
                 let mut fresh = raster.finish_outward(stage)?;
-                let mut near = fresh.split_off(hi - lo + 1);
-                for bits in fresh.iter().chain(&near).flatten() {
+                let mut chunk_materials = fresh.split_off(2 * count);
+                let mut near = fresh.split_off(count);
+                for bits in fresh.iter().chain(&near).chain(&chunk_materials).flatten() {
                     hold(bits)?;
                 }
                 down_dispatch += t0.elapsed();
@@ -1064,8 +1110,16 @@ impl Sweep<'_> {
                             if let Some((_, old)) = material_cells.take() {
                                 release(&old);
                             }
-                            let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
-                            hold(&bits)?;
+                            let bits = if let Some(pos) =
+                                material_spans.iter().position(|&s| s == span)
+                                && let Some(pre) = chunk_materials[pos].take()
+                            {
+                                pre
+                            } else {
+                                let bits = raster.outward(&self.sections[span].material.0, 0.0)?;
+                                hold(&bits)?;
+                                bits
+                            };
                             material_cells = Some((span, bits));
                         }
                         let material = &material_cells.as_ref().expect("section material cells").1;
@@ -1288,6 +1342,9 @@ impl Sweep<'_> {
                         }
                     }
                     charge(work)?;
+                }
+                for bits in chunk_materials.into_iter().flatten() {
+                    release(&bits);
                 }
                 Ok(())
             };

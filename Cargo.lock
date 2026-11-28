@@ -7121,6 +7121,7 @@ name = "spiling-geometry"
 version = "0.1.0"
 dependencies = [
  "boolmesh",
+ "rayon",
  "serde",
  "serde_json",
  "sha2 0.10.9",

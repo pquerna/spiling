@@ -529,7 +529,7 @@ fn row_span<N: Int>(
 /// up; a job finds its capsule by bisection, so no per-job input exists.
 /// Window `w` is `windows[5w..5w + 5]`: its first output word, first row,
 /// rows, first word column and width, in 32-cell words. A hit outside its
-/// window sets `overflow` instead of being written.
+/// window sets `output[overflow_index]` instead of being written.
 #[cube(launch)]
 fn capsule_masks(
     capsules: &[i64],
@@ -538,7 +538,7 @@ fn capsule_masks(
     capsule_windows: &[u32],
     windows: &[u32],
     output: &mut [Atomic<u32>],
-    overflow: &mut [Atomic<u32>],
+    overflow_index: u32,
     cell: i64,
     shift: i64,
     columns: i64,
@@ -617,7 +617,7 @@ fn capsule_masks(
             let last_word = hi / 32;
             if row < row0 || row - row0 >= rows || first_word < word0 || last_word >= word0 + width
             {
-                overflow[0].fetch_or(1u32);
+                output[overflow_index as usize].fetch_or(1u32);
             } else {
                 let line = base + (row - row0) * width - word0;
                 let mut word = first_word;
@@ -689,19 +689,21 @@ pub(crate) fn capsule_masks_dispatch(
             "capsule output is not whole 64-bit words".into(),
         ));
     }
-    let output_handle = client.empty(words * size_of::<u32>());
+    let overflow_index = u32::try_from(words)
+        .map_err(|_| ComputeError::Execution("capsule output exceeds u32 index".into()))?;
+    let total_words = words + 1;
+    let output_handle = client.empty(total_words * size_of::<u32>());
     {
-        let (cubes, units) = launch_shape(client, cpu, words);
+        let (cubes, units) = launch_shape(client, cpu, total_words);
         unsafe {
             clear::launch(
                 client,
                 cubes,
                 units,
-                BufferArg::from_raw_parts(output_handle.clone(), words),
+                BufferArg::from_raw_parts(output_handle.clone(), total_words),
             );
         }
     }
-    let overflow_handle = client.create_from_slice(u32::as_bytes(&[0u32]));
     let mut offset = 0usize;
     while offset < job_count {
         crate::check_cancel(cancel)?;
@@ -723,8 +725,8 @@ pub(crate) fn capsule_masks_dispatch(
                 BufferArg::from_raw_parts(row_handle.clone(), first_rows.len()),
                 BufferArg::from_raw_parts(capsule_window_handle.clone(), capsule_windows.len()),
                 BufferArg::from_raw_parts(window_handle.clone(), windows.len()),
-                BufferArg::from_raw_parts(output_handle.clone(), words),
-                BufferArg::from_raw_parts(overflow_handle.clone(), 1),
+                BufferArg::from_raw_parts(output_handle.clone(), total_words),
+                overflow_index,
                 cell,
                 i64::from(cell.trailing_zeros()),
                 columns,
@@ -736,32 +738,36 @@ pub(crate) fn capsule_masks_dispatch(
         }
         offset += tile;
     }
-    let read = |handle, length: usize| -> Result<cubecl::bytes::Bytes, ComputeError> {
-        let bytes = client
-            .read_one(handle)
-            .map_err(|error| ComputeError::Execution(crate::runtime::bounded_message(error)))?;
-        if bytes.len() != length * size_of::<u32>() {
-            return Err(ComputeError::Execution(
-                "readback length differs from the dispatch".into(),
-            ));
-        }
-        Ok(bytes)
-    };
-    if read(overflow_handle, 1)?[..] != 0u32.to_ne_bytes() {
+    let bytes = client
+        .read_one(output_handle)
+        .map_err(|error| ComputeError::Execution(crate::runtime::bounded_message(error)))?;
+    let expected_bytes = total_words * size_of::<u32>();
+    if bytes.len() != expected_bytes {
+        return Err(ComputeError::Execution(
+            "readback length differs from the dispatch".into(),
+        ));
+    }
+    let payload_bytes = words * size_of::<u32>();
+    if bytes[payload_bytes..] != 0u32.to_ne_bytes() {
         return Err(ComputeError::Execution(
             "a capsule hit fell outside its window".into(),
         ));
     }
-    let bytes = read(output_handle, words)?;
     let mut values = Vec::new();
     values
         .try_reserve_exact(words / 2)
         .map_err(|_| ComputeError::Allocation)?;
-    values.extend(bytes.as_chunks::<8>().0.iter().map(|pair| {
-        let low = u32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]);
-        let high = u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]);
-        u64::from(low) | u64::from(high) << 32
-    }));
+    values.extend(
+        bytes[..payload_bytes]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|pair| {
+                let low = u32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]);
+                let high = u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]);
+                u64::from(low) | u64::from(high) << 32
+            }),
+    );
     Ok(values)
 }
 
