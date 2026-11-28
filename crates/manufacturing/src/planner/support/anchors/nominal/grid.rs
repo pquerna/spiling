@@ -31,7 +31,7 @@ const INNER_QUERY_EPS_MM: f64 = 1e-7;
 const INNER_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum CoverResult {
+pub(in super::super) enum CoverResult {
     /// Every closed cell touched by the candidate segment is strictly covered
     /// by eligible lower capsules, so the candidate has zero gaps.
     All,
@@ -68,9 +68,11 @@ impl InnerCover {
         nominal: &[super::NominalPath<'_>],
         floor: super::LowerFloor,
         whole: &[u32],
+        max_bytes: usize,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, ManufacturingError> {
-        if whole.iter().any(|&p| nominal[p as usize].eligible(floor)) {
+        let max_bytes = max_bytes.min(INNER_MAX_BYTES);
+        if max_bytes < 64 || whole.iter().any(|&p| nominal[p as usize].eligible(floor)) {
             return Ok(None);
         }
         let mut eligible = 0usize;
@@ -133,7 +135,7 @@ impl InnerCover {
             }
             if let Some((cols, rows, width)) = dims_for(cell) {
                 let bytes = rows.saturating_mul(width).saturating_mul(8);
-                if bytes <= INNER_MAX_BYTES {
+                if bytes <= max_bytes {
                     break (cols, rows, width);
                 }
             }
@@ -803,6 +805,16 @@ impl EdgeGrid {
         nominal: &[super::NominalPath<'_>],
         cancel: &AtomicBool,
     ) -> Result<usize, ManufacturingError> {
+        self.prefix_bounded(floor, nominal, INNER_MAX_BYTES, cancel)
+    }
+
+    pub(super) fn prefix_bounded(
+        &mut self,
+        floor: super::LowerFloor,
+        nominal: &[super::NominalPath<'_>],
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<usize, ManufacturingError> {
         let key = (floor.z.to_bits(), floor.contacts, floor.supplied);
         if let Some(position) = self.prefixes.iter().position(|entry| entry.key == key) {
             return Ok(position);
@@ -816,7 +828,7 @@ impl EdgeGrid {
             }
             prefix.push(total);
         }
-        let inner = InnerCover::build(&self.edges, nominal, floor, &self.whole, cancel)?;
+        let inner = InnerCover::build(&self.edges, nominal, floor, &self.whole, max_bytes, cancel)?;
         if self.prefixes.len() == 8 {
             self.prefixes.remove(0);
         }

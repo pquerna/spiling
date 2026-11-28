@@ -141,7 +141,15 @@ impl PreparedLayer {
                 if remaining <= 2 * std::mem::size_of::<QueryProof>() {
                     break;
                 }
-                lower.visit_indexed(candidate, floor, &keys, |edge, c, d, width| {
+                let span = match lower.cover_segment(candidate, floor, remaining / 2, cancel)? {
+                    super::nominal::CoverResult::All => continue,
+                    super::nominal::CoverResult::Partial { lo, hi } => Some((
+                        [a[0] + (b[0] - a[0]) * lo, a[1] + (b[1] - a[1]) * lo],
+                        [a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi],
+                    )),
+                    super::nominal::CoverResult::Uncovered => None,
+                };
+                lower.visit_indexed_span(candidate, span, floor, &keys, |edge, c, d, width| {
                     check_cancel(cancel)?;
                     if remaining
                         < 4 * (size_of::<u32>() + size_of::<(f64, f64)>() + size_of::<QueryProof>())

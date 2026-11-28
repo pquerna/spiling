@@ -5,6 +5,7 @@ use super::*;
 use std::mem::size_of;
 
 mod grid;
+pub(super) use grid::CoverResult;
 
 pub(in crate::planner::support) struct NominalAnchorPaths<'a> {
     paths: Vec<NominalPath<'a>>,
@@ -304,9 +305,29 @@ impl<'a> NominalAnchorPaths<'a> {
             .map(|edge| [edge.c[0], edge.c[1], edge.d[0], edge.d[1], edge.width].map(f64::to_bits))
     }
 
-    pub(super) fn visit_indexed(
+    pub(super) fn cover_segment(
         &mut self,
         candidate: AnchorCandidate,
+        floor: LowerFloor,
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<grid::CoverResult, ManufacturingError> {
+        let Some(grid) = self.grid.as_mut() else {
+            return Ok(grid::CoverResult::Uncovered);
+        };
+        let position = grid.prefix_bounded(floor, &self.paths, max_bytes, cancel)?;
+        let [a, b] = candidate.endpoints_mm;
+        Ok(grid
+            .inner_at(position)
+            .map_or(grid::CoverResult::Uncovered, |inner| {
+                inner.check_segment([a[0], a[1]], [b[0], b[1]])
+            }))
+    }
+
+    pub(super) fn visit_indexed_span(
+        &mut self,
+        candidate: AnchorCandidate,
+        span: Option<([f64; 2], [f64; 2])>,
         floor: LowerFloor,
         keys: &[[u64; 5]],
         mut visit: impl FnMut(u32, [f64; 2], [f64; 2], f64) -> Result<(), ManufacturingError>,
@@ -314,7 +335,7 @@ impl<'a> NominalAnchorPaths<'a> {
         let Some(grid) = self.grid.as_mut() else {
             return Ok(());
         };
-        grid.collect(candidate, floor, &self.paths);
+        grid.collect_span(candidate, span, floor, &self.paths);
         grid.hits.sort_unstable_by_key(|&hit| keys[hit as usize]);
         for &hit in &grid.hits {
             let edge = grid.edges[hit as usize];

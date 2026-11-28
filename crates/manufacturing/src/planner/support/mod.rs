@@ -1004,6 +1004,7 @@ pub(super) fn realize(
                     index,
                     layers,
                     &[],
+                    |_| false,
                     live,
                     retained,
                     LayerStep::DemandPreparation,
@@ -1045,15 +1046,14 @@ pub(super) fn realize(
             let authored_axis =
                 region::HatchAxis::for_policy(recipe.rectilinear_axis, super::hatch_key(index));
             let previous = prior[index - 1].paths.iter();
+            let mut layer_lower = strokes::LowerStrokes::new(previous.clone(), std::iter::empty());
             anchors.set_budget(workspace_budget(
                 retained,
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
             )?);
             let t = split.start();
-            let mut admission = strokes::analyze(
+            let mut admission = layer_lower.analyze(
                 &layer.paths,
-                previous.clone(),
-                std::iter::empty(),
                 recipe,
                 &mut anchors,
                 &mut anchor_work,
@@ -1065,9 +1065,6 @@ pub(super) fn realize(
                 // Preserve ordinary authored hatch; only a finite demanded role
                 // component may acquire an independently proved Bridge construction.
                 let without_old = *segments - path_segments(&layer.paths);
-                // One lower set for every component checked on this layer.
-                let mut layer_lower =
-                    strokes::LowerStrokes::new(previous.clone(), std::iter::empty());
                 for recover_components in [false, true] {
                     let axis = authored_axis;
                     let mut staged_segments = without_old;
@@ -1133,7 +1130,7 @@ pub(super) fn realize(
                         t2,
                     );
                     let t2 = split.start();
-                    let joined = coalesce_bridge_rows(
+                    let joined = coalesce_bridge_rows_with(
                         &mut candidate,
                         BridgeRowContext {
                             axis,
@@ -1144,6 +1141,7 @@ pub(super) fn realize(
                         },
                         previous.clone(),
                         std::iter::empty(),
+                        &mut layer_lower,
                         &mut anchors,
                         &mut anchor_work,
                         cancel,
@@ -1221,20 +1219,18 @@ pub(super) fn realize(
                     } else {
                         let mut failed = admission.unanchored.iter().copied().peekable();
                         let mut bridges = admission.bridges.iter().copied().peekable();
-                        strokes::LowerStrokes::new(previous.clone(), std::iter::empty())
-                            .analyze_reusing(
-                                &candidate.paths,
-                                recipe,
-                                &mut anchors,
-                                &mut anchor_work,
-                                cancel,
-                                |index, path| {
-                                    let failed = failed.next_if_eq(&index).is_some();
-                                    let bridge = bridges.next_if_eq(&index).is_some();
-                                    (!failed && layer.paths.get(index) == Some(path))
-                                        .then_some(bridge)
-                                },
-                            )?
+                        layer_lower.analyze_reusing(
+                            &candidate.paths,
+                            recipe,
+                            &mut anchors,
+                            &mut anchor_work,
+                            cancel,
+                            |index, path| {
+                                let failed = failed.next_if_eq(&index).is_some();
+                                let bridge = bridges.next_if_eq(&index).is_some();
+                                (!failed && layer.paths.get(index) == Some(path)).then_some(bridge)
+                            },
+                        )?
                     };
                     split.stop(
                         if recover_components {
@@ -2012,6 +2008,7 @@ pub(super) fn realize(
         let mut outstanding_roles = original_bridge_roles.as_slice();
         let mut outstanding_demands = demands.as_slice();
         let mut unchanged_lower = true;
+        let mut unchanged_object_lower = true;
         let mut lower_support_unchanged = true; // Layer zero is bed-rooted.
         let mut split = crate::timing::Split::new("support.regeneration");
         // R[L+1] is R[L]'s last reader. Admit it before S[L] and O[L]
@@ -2030,10 +2027,31 @@ pub(super) fn realize(
                         + staged_bytes
                         + donors.bytes()
                         + anchors.retained_bytes();
+                    // Layers in the prefix whose object lower layer cannot have
+                    // changed and that had zero demand, zero bridges and no
+                    // join are skipped monotonically without analyzing strokes.
+                    let first_mutable = if !unchanged_object_lower {
+                        index
+                    } else {
+                        let mut cursor = index;
+                        while cursor < layers.len()
+                            && !joined_layers[cursor]
+                            && outstanding_demands
+                                .binary_search_by_key(&cursor, |demand| demand.target)
+                                .is_err()
+                            && outstanding_roles
+                                .binary_search_by_key(&cursor, |&(layer, _, _)| layer)
+                                .is_err()
+                        {
+                            cursor += 1;
+                        }
+                        cursor
+                    };
                     prepared_object.fill(
                         index,
                         layers,
                         &prebuilt,
+                        |layer| layer < first_mutable,
                         live,
                         retained + support_units + staged_units,
                         LayerStep::ObjectPreparation,
@@ -2083,6 +2101,7 @@ pub(super) fn realize(
                 used_contact_proposals[i] = receipt.used_part_proposal;
                 payload.refresh(i, layer);
                 if i == 0 {
+                    unchanged_object_lower = true;
                     unchanged_lower = receipt.first_object == 0;
                 }
                 dag.finish(LayerStep::RasterAdmission, i, t);
@@ -2167,16 +2186,30 @@ pub(super) fn realize(
                 .map(|top| prior[top].paths.as_slice())
                 .unwrap_or(&[]);
             let contact = contact_paths.iter().filter(|path| support_role(path.kind));
-            let mut replaced_object = joined_layers[index];
-            if unchanged_lower && !replaced_object && contact.clone().next().is_none() {
-                // Demand analysis already judged and tried to recover these
-                // same object paths against this same lower layer without
-                // contact; repeating it reproduces its result. A layer whose
-                // recovery had succeeded has no demand, and one it replaced
-                // is joined.
+            let mut replaced_object = false;
+            if unchanged_lower && contact.clone().next().is_none() {
+                // Demand analysis already judged and recovered these exact
+                // object paths against this exact lower layer without contact.
                 for demand in original_demands {
                     layer.region_coverage.unsupported_overhang_mm = demand.worst_unanchored_mm;
                 }
+                unchanged_object_lower = true;
+                unchanged_lower = begin == 0;
+                dag.finish(LayerStep::Object, index, object_started);
+                continue;
+            }
+            if unchanged_object_lower
+                && !joined_layers[index]
+                && original_demands.is_empty()
+                && original_roles.is_empty()
+            {
+                // Every stroke on this layer was already fully anchored with
+                // zero bridges and zero demand against the unchanged lower
+                // object paths alone; adding lower support or contact paths is
+                // strictly monotone and cannot introduce gaps, bridges or
+                // unanchored demand.
+                layer.region_coverage.unsupported_overhang_mm = 0.0;
+                unchanged_object_lower = true;
                 unchanged_lower = begin == 0;
                 dag.finish(LayerStep::Object, index, object_started);
                 continue;
@@ -2191,6 +2224,7 @@ pub(super) fn realize(
             let authored_axis =
                 region::HatchAxis::for_policy(recipe.rectilinear_axis, super::hatch_key(index));
             let previous = prior[index - 1].paths.iter();
+            let mut layer_lower = strokes::LowerStrokes::new(previous.clone(), contact.clone());
             let t = split.start();
             if joined_layers[index] {
                 // Other support demands can change the eventual previous footprints.
@@ -2202,7 +2236,6 @@ pub(super) fn realize(
                     payload.refresh(index, layer) + support_metadata_bytes + support_bytes;
                 let staged_anchor_bytes = anchors.retained_bytes();
                 let course = super::hatch_key(index);
-                let mut lower = strokes::LowerStrokes::new(previous.clone(), contact.clone());
                 let mut check_component =
                     |candidate: &mut RasterCandidate,
                      axis,
@@ -2218,7 +2251,7 @@ pub(super) fn realize(
                         )?;
                         component_admission_with(
                             (candidate, axis, budget, contact_bridge),
-                            &mut lower,
+                            &mut layer_lower,
                             recipe,
                             &mut anchors,
                             &mut anchor_work,
@@ -2236,10 +2269,9 @@ pub(super) fn realize(
                     &mut work,
                     Some(&mut check_component),
                 );
-                drop(lower);
                 exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                 let mut candidate = candidate?;
-                coalesce_bridge_rows(
+                coalesce_bridge_rows_with(
                     &mut candidate,
                     BridgeRowContext {
                         axis: authored_axis,
@@ -2250,6 +2282,7 @@ pub(super) fn realize(
                     },
                     previous.clone(),
                     contact.clone(),
+                    &mut layer_lower,
                     &mut anchors,
                     &mut anchor_work,
                     cancel,
@@ -2269,6 +2302,7 @@ pub(super) fn realize(
                     };
                     return Err(super::bonds::unresolved(layer));
                 }
+                replaced_object = candidate.paths != layer.paths[begin..];
                 *segments = without_old + path_segments(&candidate.paths);
                 layer.paths.truncate(begin);
                 let live_bytes = native_owned_bytes
@@ -2308,10 +2342,8 @@ pub(super) fn realize(
                 owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
             )?);
             let t = split.start();
-            let mut admission = strokes::analyze(
+            let mut admission = layer_lower.analyze(
                 &layer.paths[begin..],
-                previous.clone(),
-                contact.clone(),
                 recipe,
                 &mut anchors,
                 &mut anchor_work,
@@ -2338,7 +2370,6 @@ pub(super) fn realize(
                     owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
                     let staged_anchor_bytes = anchors.retained_bytes();
                     let course = super::hatch_key(index);
-                    let mut lower = strokes::LowerStrokes::new(previous.clone(), contact.clone());
                     let mut check_component =
                         |candidate: &mut RasterCandidate,
                          axis,
@@ -2355,7 +2386,7 @@ pub(super) fn realize(
                             )?;
                             component_admission_with(
                                 (candidate, axis, budget, contact_bridge),
-                                &mut lower,
+                                &mut layer_lower,
                                 recipe,
                                 &mut anchors,
                                 &mut anchor_work,
@@ -2380,7 +2411,6 @@ pub(super) fn realize(
                         &mut work,
                         recovery,
                     );
-                    drop(lower);
                     exclude_object_raster_work(&mut foreign_work, raster_before, work)?;
                     let mut candidate = candidate?;
                     split.stop(
@@ -2392,7 +2422,7 @@ pub(super) fn realize(
                         t2,
                     );
                     let t2 = split.start();
-                    coalesce_bridge_rows(
+                    coalesce_bridge_rows_with(
                         &mut candidate,
                         BridgeRowContext {
                             axis,
@@ -2403,6 +2433,7 @@ pub(super) fn realize(
                         },
                         previous.clone(),
                         contact.clone(),
+                        &mut layer_lower,
                         &mut anchors,
                         &mut anchor_work,
                         cancel,
@@ -2449,10 +2480,8 @@ pub(super) fn realize(
                     let other = if candidate.paths == layer.paths[begin..] {
                         admission.clone()
                     } else {
-                        strokes::analyze(
+                        layer_lower.analyze(
                             &candidate.paths,
-                            previous.clone(),
-                            contact.clone(),
                             recipe,
                             &mut anchors,
                             &mut anchor_work,
@@ -2508,13 +2537,14 @@ pub(super) fn realize(
             }
             split.stop("recovery", t);
             layer.region_coverage.unsupported_overhang_mm = admission.worst_unanchored_mm;
-            unchanged_lower = begin == 0
-                && !replaced_object
+            let object_unchanged = !replaced_object
                 && admission
                     .bridges
                     .iter()
                     .copied()
                     .eq(original_roles.iter().map(|&(_, path, _)| path));
+            unchanged_object_lower = object_unchanged;
+            unchanged_lower = begin == 0 && object_unchanged;
             for path in admission.bridges {
                 layer.paths[begin + path].kind = DepositionKind::Bridge;
             }
@@ -3237,6 +3267,7 @@ fn matches_skin_witness(path: &DepositionPath, bond: &ProcessEndpointBond) -> bo
     [a, b] == *skin_segment_mm || [b, a] == *skin_segment_mm
 }
 
+#[cfg(test)]
 fn coalesce_bridge_rows<'a>(
     candidate: &mut RasterCandidate,
     context: BridgeRowContext<'_>,

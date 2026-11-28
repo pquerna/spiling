@@ -44,6 +44,7 @@ impl AnchorWindow {
         first: usize,
         layers: &[PrintLayer],
         staged: &[Option<(Vec<DepositionPath>, raster::WallReceipt)>],
+        skip: impl Fn(usize) -> bool + Sync,
         bytes: usize,
         units: usize,
         step: LayerStep,
@@ -60,14 +61,23 @@ impl AnchorWindow {
         let started = trace.start();
         let working_set = crate::working_set::current();
         let slot_bytes = (end - first) * size_of::<Option<anchors::PreparedLayer>>();
+        let active_layers = (first..end).filter(|&index| !skip(index)).count();
+        if active_layers == 0 {
+            self.layers.resize_with(end - first, || None);
+            trace.finish(step, first, started);
+            return Ok(());
+        }
         let allowance =
-            wave_allowance(bytes, units).saturating_sub(slot_bytes) / (end - first).max(1);
+            wave_allowance(bytes, units).saturating_sub(slot_bytes) / active_layers.max(1);
         if allowance < size_of::<Option<anchors::PreparedLayer>>() {
             return Ok(());
         }
         self.layers = (first..end)
             .into_par_iter()
             .map(|index| {
+                if skip(index) {
+                    return Ok(None);
+                }
                 crate::working_set::scope(working_set, || {
                     let support = staged
                         .get(index - 1)
