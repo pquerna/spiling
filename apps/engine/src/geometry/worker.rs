@@ -1518,96 +1518,134 @@ fn open(
             capacity.charge_source(bytes)?;
         }
     }
-    let mut pending = BTreeMap::new();
-    let mut imports = Vec::with_capacity(loaded.sources.len());
-    let mut prepared_step: Option<spiling_geometry::PreparedStepSource<'_>> = None;
-    for (id, source) in &loaded.sources {
-        check_cancel(cancel)?;
-        if prepared_step
-            .as_ref()
-            .is_some_and(|prepared| !prepared.matches_bytes(&source.bytes))
-        {
-            drop(prepared_step.take());
-        }
-        if allowed_reuse.contains(id)
-            && let Some(resident) = definitions.get(id)
-        {
-            validate_provenance(&resident.definition, source)?;
-            validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&resident.definition, &loaded, cancel)?;
-            let (display, replacement) =
-                capacity.reuse_display(resident, source, cancel, work, progress)?;
-            if let Some(replacement) = replacement {
-                pending.insert(id.clone(), replacement);
-            }
-            imports.push(imported(&resident.definition, source.clone(), display));
-        } else {
-            progress("preparing_native_geometry".into());
-            let native = crate::performance::span("open_native");
-            let definition = match &source.normalized {
-                Some(bytes) => capacity.retain_definition(
-                    Definition::restore(source.record.provenance.clone(), bytes, cancel)?,
-                    cancel,
-                )?,
-                None => {
-                    if prepared_step
-                        .as_ref()
-                        .is_none_or(|prepared| !prepared.matches_bytes(&source.bytes))
-                    {
-                        drop(prepared_step.take());
-                        prepared_step = Some(spiling_geometry::PreparedStepSource::new(
-                            &source.bytes,
-                            capacity.source_bytes,
-                            cancel,
-                        )?);
+    let manufacturing_assets: Vec<Arc<ManufacturingAsset>> = loaded
+        .layouts
+        .iter()
+        .filter_map(|layout| layout.manufacturing_artifact.clone())
+        .collect();
+    let (native_result, replay_results) = std::thread::scope(|scope| {
+        let replay_handle = (!manufacturing_assets.is_empty()).then(|| {
+            scope.spawn(|| {
+                let mut results = Vec::with_capacity(manufacturing_assets.len());
+                for asset in &manufacturing_assets {
+                    let _replay = crate::performance::span("open_replay");
+                    let result = (|| -> Result<CompileVerification, JobError> {
+                        let bundle = asset.validate()?;
+                        let working_set = crate::resources::manufacturing_working_set()?;
+                        let inspection =
+                            spiling_manufacturing::working_set::scope(working_set, || {
+                                spiling_manufacturing::inspect_decoded_bundle(
+                                    &bundle,
+                                    &asset.program,
+                                    &asset.record.hash,
+                                    VerificationOutput::ReportOnly,
+                                    cancel,
+                                )
+                            })?;
+                        let inspection =
+                            assess_inspection(inspection, &bundle.provenance.occurrences, cancel)?;
+                        Ok(CompileVerification::from_fresh_inspection(
+                            &asset.bundle,
+                            &asset.program,
+                            inspection.report,
+                            inspection.provenance,
+                            bundle.provenance.occurrences.clone(),
+                        ))
+                    })();
+                    let failed = result.is_err();
+                    results.push(result);
+                    if failed {
+                        break;
                     }
-                    capacity.admit(
-                        prepared_step.as_ref().expect("source prepared above"),
-                        source.record.provenance.source_solid.as_ref(),
-                        cancel,
-                        None,
-                        false,
-                    )?
                 }
-            };
-            validate_provenance(&definition, source)?;
-            validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
-            validate_analysis_targets(&definition, &loaded, cancel)?;
-            drop(native);
-            let tessellation = (display == SourceDisplayDemand::Preview)
-                .then(|| crate::performance::span("open_tessellate"));
-            let display = capacity.display(&definition, cancel, work, progress)?;
-            drop(tessellation);
-            let resident = resident(definition, source, &display);
-            imports.push(imported(&resident.definition, source.clone(), display));
-            pending.insert(id.clone(), resident);
-        }
-    }
-    drop(prepared_step);
+                results
+            })
+        });
+        let native_result = (|| -> Result<_, JobError> {
+            let mut pending = BTreeMap::new();
+            let mut imports = Vec::with_capacity(loaded.sources.len());
+            let mut prepared_step: Option<spiling_geometry::PreparedStepSource<'_>> = None;
+            for (id, source) in &loaded.sources {
+                check_cancel(cancel)?;
+                if prepared_step
+                    .as_ref()
+                    .is_some_and(|prepared| !prepared.matches_bytes(&source.bytes))
+                {
+                    drop(prepared_step.take());
+                }
+                if allowed_reuse.contains(id)
+                    && let Some(resident) = definitions.get(id)
+                {
+                    validate_provenance(&resident.definition, source)?;
+                    validate_surface_targets(
+                        &resident.definition,
+                        &loaded.manifest.surface_overlays,
+                    )?;
+                    validate_analysis_targets(&resident.definition, &loaded, cancel)?;
+                    let (display, replacement) =
+                        capacity.reuse_display(resident, source, cancel, work, progress)?;
+                    if let Some(replacement) = replacement {
+                        pending.insert(id.clone(), replacement);
+                    }
+                    imports.push(imported(&resident.definition, source.clone(), display));
+                } else {
+                    progress("preparing_native_geometry".into());
+                    let native = crate::performance::span("open_native");
+                    let definition = match &source.normalized {
+                        Some(bytes) => capacity.retain_definition(
+                            Definition::restore(source.record.provenance.clone(), bytes, cancel)?,
+                            cancel,
+                        )?,
+                        None => {
+                            if prepared_step
+                                .as_ref()
+                                .is_none_or(|prepared| !prepared.matches_bytes(&source.bytes))
+                            {
+                                drop(prepared_step.take());
+                                prepared_step = Some(spiling_geometry::PreparedStepSource::new(
+                                    &source.bytes,
+                                    capacity.source_bytes,
+                                    cancel,
+                                )?);
+                            }
+                            capacity.admit(
+                                prepared_step.as_ref().expect("source prepared above"),
+                                source.record.provenance.source_solid.as_ref(),
+                                cancel,
+                                None,
+                                false,
+                            )?
+                        }
+                    };
+                    validate_provenance(&definition, source)?;
+                    validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
+                    validate_analysis_targets(&definition, &loaded, cancel)?;
+                    drop(native);
+                    let tessellation = (display == SourceDisplayDemand::Preview)
+                        .then(|| crate::performance::span("open_tessellate"));
+                    let display = capacity.display(&definition, cancel, work, progress)?;
+                    drop(tessellation);
+                    let resident = resident(definition, source, &display);
+                    imports.push(imported(&resident.definition, source.clone(), display));
+                    pending.insert(id.clone(), resident);
+                }
+            }
+            drop(prepared_step);
+            Ok((imports, pending))
+        })();
+        let replay_results = match replay_handle {
+            Some(handle) => handle.join().expect("open_replay worker thread"),
+            None => Vec::new(),
+        };
+        (native_result, replay_results)
+    });
+    let (imports, pending) = native_result?;
     check_cancel(cancel)?;
-    let mut receipts = Vec::new();
-    let project = Project::from_loaded_with_manufacturing_check(loaded, |asset, bundle| {
-        let _replay = crate::performance::span("open_replay");
-        let working_set = crate::resources::manufacturing_working_set()?;
-        let inspection = spiling_manufacturing::working_set::scope(working_set, || {
-            spiling_manufacturing::inspect_decoded_bundle(
-                bundle,
-                &asset.program,
-                &asset.record.hash,
-                VerificationOutput::ReportOnly,
-                cancel,
-            )
-        })?;
-        let inspection = assess_inspection(inspection, &bundle.provenance.occurrences, cancel)?;
-        receipts.push(CompileVerification::from_fresh_inspection(
-            &asset.bundle,
-            &asset.program,
-            inspection.report,
-            inspection.provenance,
-            bundle.provenance.occurrences.clone(),
-        ));
-        Ok::<_, JobError>(())
-    })?;
+    let project = Project::from_loaded(loaded)?;
+    let mut receipts = Vec::with_capacity(replay_results.len());
+    for receipt in replay_results {
+        receipts.push(receipt?);
+    }
     let project = crate::resources::observed_project(project);
     check_cancel(cancel)?;
     crate::performance::mark("open_prepared");

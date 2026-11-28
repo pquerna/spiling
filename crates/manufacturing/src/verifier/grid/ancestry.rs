@@ -1,4 +1,4 @@
-use super::clearance::{Admission, Road, Rows, debit};
+use super::clearance::{Admission, Road, Rows, debit, exhausted};
 use super::{Chord, MAX_XYZ6_TICKS, Parameter, delta, failed, overflow};
 use crate::planner::{OFFSET_TOLERANCE_MM, support::StrokeRuns};
 use rayon::prelude::*;
@@ -348,6 +348,111 @@ fn include(result: &mut Option<Span>, span: Span) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SeenSlot {
+    key: (usize, usize),
+    stamp: u64,
+}
+
+/// Byte-admitted, generation-stamped open-addressed set for per-query donor
+/// deduplication in O(1) without per-query zeroing or randomized hashing.
+struct SeenSet {
+    slots: Vec<SeenSlot>,
+    len: usize,
+    stamp: u64,
+}
+
+impl SeenSet {
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            len: 0,
+            stamp: 1,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+        if let Some(next) = self.stamp.checked_add(1) {
+            self.stamp = next;
+        } else {
+            for slot in &mut self.slots {
+                slot.stamp = 0;
+            }
+            self.stamp = 1;
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: (usize, usize),
+        admission: &mut Admission,
+    ) -> Result<bool, ManufacturingError> {
+        if (self.len + 1) * 2 > self.slots.len() {
+            self.grow(admission)?;
+        }
+        let mask = self.slots.len() - 1;
+        let mut index = seen_hash(key) & mask;
+        loop {
+            let slot = &mut self.slots[index];
+            if slot.stamp != self.stamp {
+                *slot = SeenSlot {
+                    key,
+                    stamp: self.stamp,
+                };
+                self.len += 1;
+                return Ok(true);
+            }
+            if slot.key == key {
+                return Ok(false);
+            }
+            index = (index + 1) & mask;
+        }
+    }
+
+    fn grow(&mut self, admission: &mut Admission) -> Result<(), ManufacturingError> {
+        let new_len = if self.slots.is_empty() {
+            16
+        } else {
+            self.slots.len().checked_mul(2).ok_or_else(exhausted)?
+        };
+        let mut next = Vec::new();
+        admission.reserve(&mut next, new_len)?;
+        next.resize(
+            new_len,
+            SeenSlot {
+                key: (0, 0),
+                stamp: 0,
+            },
+        );
+        let mask = new_len - 1;
+        for slot in &self.slots {
+            if slot.stamp == self.stamp {
+                let mut index = seen_hash(slot.key) & mask;
+                while next[index].stamp == self.stamp {
+                    index = (index + 1) & mask;
+                }
+                next[index] = *slot;
+            }
+        }
+        let old = std::mem::replace(&mut self.slots, next);
+        admission.release(old);
+        Ok(())
+    }
+
+    fn allocated_bytes(&self) -> usize {
+        self.slots.capacity() * size_of::<SeenSlot>()
+    }
+}
+
+fn seen_hash((inventory, road): (usize, usize)) -> usize {
+    let mut x = (inventory as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (road as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    (x ^ (x >> 31)) as usize
+}
+
 struct Replay<'a> {
     admission: Admission,
     work: &'a mut usize,
@@ -356,7 +461,7 @@ struct Replay<'a> {
     run: Vec<Span>,
     unsupported: Vec<Span>,
     /// Donors already measured by the current query, by inventory and ordinal.
-    seen: Vec<(usize, usize)>,
+    seen: SeenSet,
 }
 
 /// One support or landing stroke run: `count` edges of the path whose roads
@@ -386,7 +491,7 @@ impl<'a> Replay<'a> {
             covered: Vec::new(),
             run: Vec::new(),
             unsupported: Vec::new(),
-            seen: Vec::new(),
+            seen: SeenSet::new(),
         }
     }
 
@@ -454,10 +559,9 @@ impl<'a> Replay<'a> {
                             continue;
                         }
                         let key = (std::ptr::from_ref(inventory).addr(), entry.road);
-                        if self.seen.contains(&key) {
+                        if !self.seen.insert(key, &mut self.admission)? {
                             continue;
                         }
-                        self.admission.push(&mut self.seen, key)?;
                         if let Some(capsule) = LocalCapsule::for_pair(receiver, donor) {
                             if let Some(span) = capsule.interval() {
                                 self.admission.push(&mut self.covered, span)?;
@@ -970,6 +1074,7 @@ pub(super) fn verify(
                         .then(Inventory::empty);
                     let mut landing = (index == 0 && index != last_support && window.reads_landing)
                         .then(Inventory::empty);
+                    let mut shared_rows = Vec::<[i64; 3]>::new();
                     let mut start = 0;
                     'paths: for path_roads in
                         current.chunk_by(|left, right| left.path == right.path)
@@ -978,26 +1083,49 @@ pub(super) fn verify(
                         start += path_roads.len();
                         for &road in path_roads {
                             let result = (|| {
-                                if let Some(inventory) = &mut deposited
-                                    && window.deposited_read.reads(road.role)
-                                {
-                                    let mut rows = Vec::new();
-                                    let radius = outside_ticks(road.inner_radius_mm)?;
-                                    let mut scratch = Admission(replay.admission.0);
-                                    road.chord.outer_rows(
-                                        radius,
-                                        &mut 0,
-                                        cancel,
-                                        |row, left, right| {
-                                            scratch.push(&mut rows, [row, left, right])
-                                        },
-                                    )?;
-                                    replay.insert_rows(inventory, road, Ok(&rows))?;
-                                }
-                                if let Some(inventory) = &mut landing
-                                    && can_land(index, road.role)
-                                {
-                                    replay.insert(inventory, road, Span::FULL)?;
+                                let into_deposited =
+                                    deposited.is_some() && window.deposited_read.reads(road.role);
+                                let into_landing = landing.is_some() && can_land(index, road.role);
+                                match (into_deposited, into_landing) {
+                                    (true, true) => {
+                                        shared_rows.clear();
+                                        let radius = outside_ticks(road.inner_radius_mm)?;
+                                        road.chord.outer_rows(
+                                            radius,
+                                            replay.work,
+                                            cancel,
+                                            |row, left, right| {
+                                                replay
+                                                    .admission
+                                                    .push(&mut shared_rows, [row, left, right])
+                                            },
+                                        )?;
+                                        if let Some(inventory) = &mut deposited {
+                                            replay.insert_rows(
+                                                inventory,
+                                                road,
+                                                Ok(&shared_rows),
+                                            )?;
+                                        }
+                                        if let Some(inventory) = &mut landing {
+                                            replay.insert_rows(
+                                                inventory,
+                                                road,
+                                                Ok(&shared_rows),
+                                            )?;
+                                        }
+                                    }
+                                    (true, false) => {
+                                        if let Some(inventory) = &mut deposited {
+                                            replay.insert(inventory, road, Span::FULL)?;
+                                        }
+                                    }
+                                    (false, true) => {
+                                        if let Some(inventory) = &mut landing {
+                                            replay.insert(inventory, road, Span::FULL)?;
+                                        }
+                                    }
+                                    (false, false) => {}
                                 }
                                 Ok::<_, ManufacturingError>(())
                             })();
@@ -1007,6 +1135,7 @@ pub(super) fn verify(
                             }
                         }
                     }
+                    replay.admission.release(shared_rows);
                     for inventory in [&mut deposited, &mut landing].into_iter().flatten() {
                         if let Err(error) = inventory.rows.finish_ancestry(
                             &mut replay.admission,
@@ -1105,7 +1234,7 @@ pub(super) fn verify(
                     let scratch = (replay.covered.capacity() * size_of::<Span>())
                         + (replay.run.capacity() * size_of::<Span>())
                         + (replay.unsupported.capacity() * size_of::<Span>())
-                        + (replay.seen.capacity() * size_of::<(usize, usize)>());
+                        + replay.seen.allocated_bytes();
                     let bytes = replay
                         .admission
                         .0
@@ -1602,5 +1731,25 @@ mod tests {
             .unwrap_err()
         });
         assert_eq!(refusal.code, ManufacturingErrorCode::ResourceLimit);
+    }
+
+    #[test]
+    fn seen_set_deduplicates_across_growth_and_clears_by_stamp() {
+        let mut admission = Admission::default();
+        let mut seen = SeenSet::new();
+        for i in 0..200 {
+            assert!(seen.insert((0x1000, i), &mut admission).unwrap());
+            assert!(!seen.insert((0x1000, i), &mut admission).unwrap());
+            assert!(seen.insert((0x2000, i), &mut admission).unwrap());
+        }
+        assert_eq!(admission.0, seen.allocated_bytes());
+        let capacity_before_clear = seen.allocated_bytes();
+        seen.clear();
+        assert_eq!(seen.allocated_bytes(), capacity_before_clear);
+        for i in 0..200 {
+            assert!(seen.insert((0x1000, i), &mut admission).unwrap());
+            assert!(!seen.insert((0x1000, i), &mut admission).unwrap());
+        }
+        assert_eq!(admission.0, seen.allocated_bytes());
     }
 }

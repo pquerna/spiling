@@ -302,7 +302,7 @@ impl ManufacturingAsset {
     pub(crate) fn same_content(&self, other: &Self) -> bool {
         self.record == other.record && self.bundle == other.bundle && self.program == other.program
     }
-    pub(crate) fn validate(&self) -> Result<ManufacturingBundle, ProjectError> {
+    pub fn validate(&self) -> Result<ManufacturingBundle, ProjectError> {
         self.validate_identity()?;
         let bundle = self.decode().map_err(manufacturing_error)?;
         if bundle.provenance.input_hash != self.record.input_hash
