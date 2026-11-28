@@ -855,7 +855,7 @@ pub(crate) fn verify_streamed(
 /// Parsed line batches the reader may run ahead of the replay.
 const PARSE_AHEAD_BATCHES: usize = 8;
 /// Lines per parsed batch.
-const PARSE_BATCH_LINES: usize = 4_096;
+const PARSE_BATCH_LINES: usize = 2_048;
 
 /// One read program line: its text range and its pure, context-free decode.
 struct ParsedLine {
@@ -874,27 +874,47 @@ struct LineBatch {
     failure: Option<ManufacturingError>,
 }
 
-/// Read raw line batches in order and decode each batch in parallel across
-/// workers. Decoding is a pure function of the line and fixed dialect flags.
+/// Read and decode every program line in order, in batches, on the dedicated
+/// reader thread so parsing overlaps replay without waking the Rayon pool.
 fn parse_ahead(
     program: impl BufRead,
     routed: bool,
     with_ticks: bool,
     sender: std::sync::mpsc::SyncSender<LineBatch>,
 ) {
-    use rayon::prelude::*;
     let mut lines = ProgramLines::new(program);
-    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(PARSE_BATCH_LINES);
     loop {
-        let mut batch = LineBatch::default();
-        spans.clear();
+        let mut batch = LineBatch {
+            text: String::with_capacity(PARSE_BATCH_LINES * 40),
+            lines: Vec::with_capacity(PARSE_BATCH_LINES),
+            failure: None,
+        };
         let mut finished = false;
-        while spans.len() < PARSE_BATCH_LINES {
+        while batch.lines.len() < PARSE_BATCH_LINES {
             match lines.next() {
                 Ok(Some((index, line))) => {
                     let start = batch.text.len();
                     batch.text.push_str(line);
-                    spans.push((index, start, batch.text.len()));
+                    let mut ticks = [None; 3];
+                    let decoded = if with_ticks {
+                        decode_with_xyz6(line, routed, |axis, word, fast_ticks| {
+                            let resolved = match fast_ticks {
+                                Some(t) => t,
+                                None => grid::xyz6_ticks(word)?,
+                            };
+                            ticks[axis] = Some(resolved);
+                            Ok(())
+                        })
+                    } else {
+                        decode(line, routed)
+                    };
+                    batch.lines.push(ParsedLine {
+                        index,
+                        start,
+                        end: batch.text.len(),
+                        decoded,
+                        ticks,
+                    });
                 }
                 Ok(None) => {
                     finished = true;
@@ -907,33 +927,6 @@ fn parse_ahead(
                 }
             }
         }
-        let text = batch.text.as_str();
-        batch.lines = spans
-            .par_iter()
-            .map(|&(index, start, end)| {
-                let line = &text[start..end];
-                let mut ticks = [None; 3];
-                let decoded = if with_ticks {
-                    decode_with_xyz6(line, routed, |axis, word, fast_ticks| {
-                        let resolved = match fast_ticks {
-                            Some(t) => t,
-                            None => grid::xyz6_ticks(word)?,
-                        };
-                        ticks[axis] = Some(resolved);
-                        Ok(())
-                    })
-                } else {
-                    decode(line, routed)
-                };
-                ParsedLine {
-                    index,
-                    start,
-                    end,
-                    decoded,
-                    ticks,
-                }
-            })
-            .collect();
         if sender.send(batch).is_err() || finished {
             return;
         }

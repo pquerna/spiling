@@ -3943,17 +3943,20 @@ fn prefill_walls(
         wanted.push((index, current, native_index, key));
     }
     // Rayon workers do not inherit the operation's working-set scope, and
-    // concurrent tasks are live together: bound wave concurrency so each task
-    // keeps enough headroom and complex sections are not dropped to serial retry.
-    let wave = wanted.len().min(rayon::current_num_threads()).clamp(1, 8);
-    let working_set = {
-        let unit = std::mem::size_of::<geo::Coord<f64>>();
-        let retained_bytes = retained_points.saturating_mul(unit);
-        let growth = crate::working_set::bytes().saturating_sub(retained_bytes) / wave;
-        crate::working_set::WorkingSet::new(retained_bytes.saturating_add(growth).max(1))?
-    };
-    for batch in wanted.chunks(wave) {
-        let planned: Vec<_> = batch
+    // concurrent tasks are live together: each admits an equal share of the
+    // growth beyond the already-retained geometry. Any complex section refused
+    // for its 1/threads share retries in a smaller wave with larger headroom.
+    let threads = rayon::current_num_threads().max(1);
+    let unit = std::mem::size_of::<geo::Coord<f64>>();
+    let retained_bytes = retained_points.saturating_mul(unit);
+    let total_growth = crate::working_set::bytes().saturating_sub(retained_bytes);
+    let run_pass = |items: &[(u32, usize, usize, [u64; 3])],
+                    concurrency: usize|
+     -> Result<Vec<_>, ManufacturingError> {
+        let growth = total_growth / concurrency.max(1);
+        let working_set =
+            crate::working_set::WorkingSet::new(retained_bytes.saturating_add(growth).max(1))?;
+        Ok(items
             .par_iter()
             .map(|&(index, current, native_index, key)| {
                 crate::working_set::scope(working_set, || {
@@ -3985,14 +3988,28 @@ fn prefill_walls(
                             cancel,
                         )
                     });
-                    (current, key, plan.ok(), work)
+                    ((index, current, native_index, key), plan.ok(), work)
                 })
             })
-            .collect();
-        for (current, key, plan, spent) in planned {
-            *work = work.saturating_add(spent);
-            if let Some(plan) = plan {
-                wall_memo.insert(&sections[current].material, key, &Arc::new(plan));
+            .collect())
+    };
+    let mut missed = Vec::new();
+    for (item, plan, spent) in run_pass(&wanted, threads)? {
+        *work = work.saturating_add(spent);
+        if let Some(plan) = plan {
+            wall_memo.insert(&sections[item.1].material, item.3, &Arc::new(plan));
+        } else if threads > 4 {
+            missed.push(item);
+        }
+    }
+    if !missed.is_empty() {
+        let retry_wave = missed.len().clamp(1, 4);
+        for batch in missed.chunks(retry_wave) {
+            for (item, plan, spent) in run_pass(batch, retry_wave)? {
+                *work = work.saturating_add(spent);
+                if let Some(plan) = plan {
+                    wall_memo.insert(&sections[item.1].material, item.3, &Arc::new(plan));
+                }
             }
         }
     }
