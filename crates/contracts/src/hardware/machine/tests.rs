@@ -315,24 +315,37 @@ fn bambu_p1_x1_setups_carry_the_cutter_corner_and_their_series_start() {
         let probe = at(&|s| *s == LifecycleStep::ProbeMesh);
         assert!(home < wipe && wipe < probe);
     }
-    // The A1 keeps its own trim and no chute purge.
-    let a1 = described()
-        .into_iter()
-        .find(|s| s.id == "bambulab.a1.04")
-        .unwrap();
-    let JobWorkflow::CompleteMarlin { job } = &a1.printer.workflow else {
-        panic!()
-    };
-    assert!(
-        job.lifecycle
+    // A1 and A1 mini carry their own textured-plate trim and model-specific wiper purge.
+    for (id, wiper) in [
+        ("bambulab.a1.04", "G1 X-48.2 Y0 F18000"),
+        ("bambulab.a1-mini.04", "G1 X-13.5 Y0 F18000"),
+    ] {
+        let a1 = described().into_iter().find(|s| s.id == id).unwrap();
+        let JobWorkflow::CompleteMarlin { job } = &a1.printer.workflow else {
+            panic!()
+        };
+        assert!(
+            job.lifecycle
+                .blocks()
+                .any(|(_, b)| b.lines == ["G29.1 Z-0.02"]),
+            "{id}"
+        );
+        let purge = job
+            .lifecycle
             .blocks()
-            .any(|(_, b)| b.lines == ["G29.1 Z-0.02"])
-    );
-    assert!(
-        !job.lifecycle
-            .blocks()
-            .any(|(_, b)| b.label.contains("purge"))
-    );
+            .map(|(_, b)| b)
+            .find(|b| b.label.contains("purge"))
+            .expect("A1 series purge and wipe");
+        assert_eq!(purge.effects.nozzle, ThermalEffect::Standby, "{id}");
+        assert!(purge.lines.iter().any(|l| l == wiper), "{id}");
+        let at =
+            |f: &dyn Fn(&LifecycleStep) -> bool| job.lifecycle.start.iter().position(f).unwrap();
+        let home = at(&|s| *s == LifecycleStep::Home);
+        let wipe =
+            at(&|s| matches!(s, LifecycleStep::Block { block } if block.label.contains("purge")));
+        let probe = at(&|s| *s == LifecycleStep::ProbeMesh);
+        assert!(home < wipe && wipe < probe, "{id}");
+    }
 }
 
 #[test]

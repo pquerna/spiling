@@ -667,11 +667,16 @@ impl MachineDescription {
         use LifecycleStep as S;
         let prusa = self.firmware == FirmwareFamily::PrusaBuddy;
         let bambu = self.firmware == FirmwareFamily::BambuLab;
-        let bambu_package = self
-            .delivery
-            .as_ref()
-            .map(|DeliveryPackage::BambuGcode3mf { series, plate, .. }| (*series, *plate));
-        let p1x1 = matches!(bambu_package, Some((BambuSeries::P1X1, _)));
+        let bambu_package = self.delivery.as_ref().map(
+            |DeliveryPackage::BambuGcode3mf {
+                 printer_model_id,
+                 series,
+                 plate,
+                 ..
+             }| (printer_model_id.as_str(), *series, *plate),
+        );
+        let p1x1 = matches!(bambu_package, Some((_, BambuSeries::P1X1, _)));
+        let bambu_purges = bambu_package.is_some();
         let stage = |action, label| S::Block {
             block: LifecycleBlock::bambu_stage(action, label),
         };
@@ -742,9 +747,12 @@ impl MachineDescription {
         if heated && begin.bed != ThermalEffect::Wait {
             start.push(S::BedWait);
         }
-        if p1x1 {
+        if let Some((model_id, series, _)) = bambu_package {
             start.push(S::Block {
-                block: LifecycleBlock::bambu_p1x1_purge_and_wipe(),
+                block: match series {
+                    BambuSeries::P1X1 => LifecycleBlock::bambu_p1x1_purge_and_wipe(),
+                    BambuSeries::A1 => LifecycleBlock::bambu_a1_purge_and_wipe(model_id == "N1"),
+                },
             });
             start.push(S::RestoreModes);
         }
@@ -760,10 +768,10 @@ impl MachineDescription {
         if begin.nozzle != ThermalEffect::Wait {
             start.push(S::NozzleWait { standby_c: None });
         }
-        if begin.extrusion == ExtrusionEffect::Unknown || p1x1 {
+        if begin.extrusion == ExtrusionEffect::Unknown || bambu_purges {
             start.push(S::ResetExtrusion);
         }
-        if let Some((series, plate)) = bambu_package {
+        if let Some((_, series, plate)) = bambu_package {
             if plate == BambuPlate::TexturedPeiPlate {
                 start.push(S::Block {
                     block: LifecycleBlock::bambu_z_trim(

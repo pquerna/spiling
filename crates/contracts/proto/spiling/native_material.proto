@@ -128,6 +128,7 @@ message MaterialProfileSelection {
   MaterialProcessProfile profile = 1;
   MaterialToolSetup setup = 2;
   MaterialProfileOverrides overrides = 3;
+  optional uint32 display_srgb = 4;
 }
 
 message ResolvedMaterialProfile {

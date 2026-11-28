@@ -1940,15 +1940,6 @@ fn posed_mesh(
             Err(e) => failure = Some(e),
         }
     }
-    let mesh = mesh.ok_or_else(|| {
-        let e = failure.expect("a display level was attempted");
-        JobError::from(GeometryError::new(
-            e.code,
-            format!("no display mesh for the delivery package: {}", e.message),
-        ))
-    })?;
-    let session = spiling_contracts::geometry::SessionId::new();
-    let artifact = spiling_contracts::geometry::ArtifactId::new(1).expect("nonzero");
     let pose = occurrence.pose;
     let [x, y, z, w] = pose.rotation_xyzw;
     let rotate = |v: [f64; 3]| {
@@ -1964,6 +1955,41 @@ fn posed_mesh(
             v[2] + w * t[2] + (x * t[1] - y * t[0]),
         ]
     };
+    let Some(mesh) = mesh else {
+        // When coarse display chunks hit their candidate work budget (e.g. dense
+        // STEP parts like Part 26), fall back to the already-admitted tolerant
+        // model used by the slicer so Bambu Studio still receives a 3D model.
+        let additional = crate::resources::source_growth(0)?;
+        let (model, _) = definition
+            .prepare_with_budget(
+                spiling_geometry::tolerant::TolerantPolicy::default(),
+                additional,
+                cancel,
+            )
+            .map_err(|_| {
+                let e = failure.expect("a display level was attempted");
+                JobError::from(GeometryError::new(
+                    e.code,
+                    format!("no display mesh for the delivery package: {}", e.message),
+                ))
+            })?;
+        let vertices = model
+            .positions()
+            .iter()
+            .map(|&local| {
+                let r = rotate(local);
+                std::array::from_fn(|a| (r[a] + pose.translation_mm[a]) as f32)
+            })
+            .collect();
+        let triangles = model.triangles().to_vec();
+        return Ok(spiling_manufacturing::delivery::PackageObject {
+            name: format!("occurrence {}", occurrence.occurrence_id.get()),
+            vertices,
+            triangles,
+        });
+    };
+    let session = spiling_contracts::geometry::SessionId::new();
+    let artifact = spiling_contracts::geometry::ArtifactId::new(1).expect("nonzero");
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     for (index, chunk) in mesh.chunks.iter().enumerate() {

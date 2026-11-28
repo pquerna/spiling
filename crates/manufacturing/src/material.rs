@@ -359,12 +359,13 @@ pub fn filament_selection(
             )));
         }
     };
-    tool_selection(setup, profile)
+    tool_selection(setup, profile, filament.declared_display_srgb())
 }
 
 fn tool_selection(
     setup: &spiling_contracts::hardware::HardwareSetupDefinition,
     profile: MaterialProcessProfile,
+    display_srgb: Option<[u8; 3]>,
 ) -> Result<MaterialProfileSelection, ManufacturingError> {
     let selection = MaterialProfileSelection {
         setup: MaterialToolSetup {
@@ -387,6 +388,7 @@ fn tool_selection(
             first_layer_nozzle_temperature_c: None,
             first_layer_bed_temperature_c: None,
         },
+        display_srgb,
     };
     selection.validate()?;
     Ok(selection)
@@ -435,7 +437,7 @@ pub fn generic_selection(
                 "no generic {family} profile for a {nozzle} mm nozzle"
             ))
         })?;
-    tool_selection(setup, profile)
+    tool_selection(setup, profile, None)
 }
 
 #[cfg(test)]

@@ -481,6 +481,10 @@ impl Actor {
                             .into(),
                     ));
                 }
+                let display_srgb = selection
+                    .selected
+                    .as_ref()
+                    .and_then(|(_, selected)| selected.definition.declared_display_srgb());
                 let setup = self
                     .state
                     .manufacturing
@@ -521,6 +525,7 @@ impl Actor {
                                 first_layer_nozzle_temperature_c: None,
                                 first_layer_bed_temperature_c: None,
                             },
+                            display_srgb,
                         },
                     }));
                 self.state.message =

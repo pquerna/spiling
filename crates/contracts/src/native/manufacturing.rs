@@ -4514,11 +4514,25 @@ impl TryFrom<MaterialProfileOverrides> for rpc::MaterialProfileOverrides {
 impl TryFrom<rpc::MaterialProfileSelection> for MaterialProfileSelection {
     type Error = String;
     fn try_from(value: rpc::MaterialProfileSelection) -> Result<Self, String> {
+        let display_srgb = value
+            .display_srgb
+            .map(|packed| {
+                if packed > 0x00FF_FFFF {
+                    return Err("display_srgb exceeds 24-bit RGB range".to_string());
+                }
+                Ok([
+                    ((packed >> 16) & 0xFF) as u8,
+                    ((packed >> 8) & 0xFF) as u8,
+                    (packed & 0xFF) as u8,
+                ])
+            })
+            .transpose()?;
         valid(
             Self {
                 profile: required(value.profile, "profile")?.try_into()?,
                 setup: required(value.setup, "setup")?.try_into()?,
                 overrides: required(value.overrides, "overrides")?.try_into()?,
+                display_srgb,
             },
             Self::validate,
         )
@@ -4532,6 +4546,9 @@ impl TryFrom<MaterialProfileSelection> for rpc::MaterialProfileSelection {
             profile: Some(value.profile.try_into()?),
             setup: Some(value.setup.try_into()?),
             overrides: Some(value.overrides.try_into()?),
+            display_srgb: value
+                .display_srgb
+                .map(|[r, g, b]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)),
         })
     }
 }
@@ -4815,6 +4832,7 @@ impl TryFrom<rpc::MaterialCandidateReview> for MaterialCandidateReview {
                 profile: required(value.profile, "candidate profile")?.try_into()?,
                 setup: required(value.setup, "candidate setup")?.try_into()?,
                 overrides: required(value.overrides, "candidate overrides")?.try_into()?,
+                display_srgb: None,
             },
             issues: value
                 .issues

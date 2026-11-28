@@ -177,7 +177,8 @@
                   "process": null,
                   "first_layer_nozzle_temperature_c": null,
                   "first_layer_bed_temperature_c": null
-                }
+                },
+                "display_srgb": null
               }
             },
             "feeder_id": "direct-feeder-0",
@@ -297,7 +298,8 @@
                   "process": null,
                   "first_layer_nozzle_temperature_c": null,
                   "first_layer_bed_temperature_c": null
-                }
+                },
+                "display_srgb": null
               }
             },
             "feeder_id": "direct-feeder-1",

@@ -4822,7 +4822,7 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
         .unwrap();
     assert_eq!(lines.last(), Some(&"; EXECUTABLE_BLOCK_END"));
     assert_eq!(
-        lines[exec + 1..exec + 31],
+        lines[exec + 1..exec + 58],
         [
             "G21",
             "G90",
@@ -4842,6 +4842,33 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
             "M1002 gcode_claim_action : 13",
             "G28 T145",
             "M190 S60",
+            // A1 purge over the left-side wiper, cool to 140 °C while flicking, restore modes.
+            "M1002 gcode_claim_action : 14",
+            "G90",
+            "M83",
+            "G1 Z10 F1200",
+            "G1 X-48.2 Y0 F18000",
+            "M109 S200",
+            "G1 E40 F200",
+            "M400",
+            "M106 S255",
+            "G1 E-0.5 F300",
+            "M104 S140",
+            "G1 X-28.5 F18000",
+            "G1 X-48.2 F3000",
+            "G1 X-28.5 F18000",
+            "G1 X-48.2 F3000",
+            "M109 S140",
+            "G1 X-28.5 F12000",
+            "G1 X-48.2 F3000",
+            "G1 X-28.5 F12000",
+            "G1 X-48.2 F3000",
+            "M106 S0",
+            "G1 Z10 F1200",
+            "G1 X128 Y128 F18000",
+            "G21",
+            "G90",
+            "M83",
             "M104 S140",
             "M109 S140",
             "G29.2 S1",
@@ -4852,6 +4879,7 @@ fn bambu_lifecycle_probes_at_standby_and_marks_every_layer() {
             "M400",
             "M623",
             "M109 S200",
+            "G92 E0",
             // Textured PEI: the A1 references lower the nozzle 0.02 mm.
             "G29.1 Z-0.02",
             "M1002 gcode_claim_action : 0",
@@ -4950,6 +4978,61 @@ fn bambu_p1_x1_lifecycle_purges_and_wipes_before_probing_with_its_own_form() {
         let mutated = program.replacen(from, to, 1);
         assert_ne!(mutated, program, "{from}");
         assert!(verify(&mutated, &plan, &intent, &cancel).is_err(), "{from}");
+    }
+}
+
+#[test]
+fn bambu_a1_and_a1_mini_lifecycle_purge_and_wipe_at_model_wiper() {
+    let catalog = spiling_contracts::hardware::builtin_catalog().unwrap();
+    let (_, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    for (setup_id, wiper_move, center_move) in [
+        (
+            "bambulab.a1.04",
+            "G1 X-48.2 Y0 F18000\n",
+            "G1 X128 Y128 F18000\n",
+        ),
+        (
+            "bambulab.a1-mini.04",
+            "G1 X-13.5 Y0 F18000\n",
+            "G1 X90 Y90 F18000\n",
+        ),
+    ] {
+        let setup = catalog.setups.iter().find(|s| s.id == setup_id).unwrap();
+        let intent = shipped_dialect(setup);
+        let program = emit_text(&plan, &intent, &cancel).unwrap();
+        let at = |needle: &str| {
+            program
+                .find(needle)
+                .unwrap_or_else(|| panic!("{setup_id}: missing {needle} in:\n{program}"))
+        };
+        let order = [
+            "M1002 gcode_claim_action : 2\n",
+            "G28 T145\n",
+            "M1002 gcode_claim_action : 14\n",
+            wiper_move,
+            "G1 E40 F200\n",
+            center_move,
+            "G29 A1 X1 Y1 I5 J4\n",
+            "M109 S200\nG92 E0\nG29.1 Z-0.02\nM1002 gcode_claim_action : 0\n",
+        ];
+        for pair in order.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{setup_id}: {pair:?}");
+        }
+        let report = verify(&program, &plan, &intent, &cancel).unwrap();
+        assert!(
+            report
+                .limitations
+                .iter()
+                .any(|l| l.contains("purge over the wiper")),
+            "{setup_id}: {:?}",
+            report.limitations
+        );
+        let mutated = program.replacen("G1 E40 F200\n", "G1 E80 F200\n", 1);
+        assert!(
+            verify(&mutated, &plan, &intent, &cancel).is_err(),
+            "{setup_id}"
+        );
     }
 }
 

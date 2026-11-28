@@ -45,8 +45,12 @@ pub(crate) fn bambu_filament(family: &str) -> Option<(&'static str, &'static str
         _ => return None,
     })
 }
-/// Filament colour shown by the printer; no Spiling material declares one.
+/// Fallback filament colour shown by the printer when the material declares none.
 pub(crate) const BAMBU_UNDECLARED_COLOUR: &str = "#FFFFFF";
+
+fn format_srgb_hex(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+}
 
 /// The thumbnails a package carries, by member name and pixel size.
 pub(crate) const BAMBU_THUMBNAILS: [(&str, u32); 3] = [
@@ -63,6 +67,7 @@ pub(crate) struct PlateFacts {
     pub nozzle_mm: f64,
     pub filament_diameter_mm: f64,
     pub filament_type: String,
+    pub filament_colour: String,
     pub filament_id: Option<&'static str>,
     pub density: Option<f64>,
     pub filament_mm: f64,
@@ -128,6 +133,11 @@ impl PlateFacts {
                 "a delivery package needs deposited paths",
             ));
         }
+        let filament_colour = intent
+            .material_profile
+            .as_ref()
+            .and_then(|p| p.selection.display_srgb)
+            .map_or_else(|| BAMBU_UNDECLARED_COLOUR.to_string(), format_srgb_hex);
         Ok(Self {
             printer_model_id: printer_model_id.clone(),
             printer_model: printer_model.clone(),
@@ -135,6 +145,7 @@ impl PlateFacts {
             nozzle_mm: intent.printer.nozzle_diameter_mm,
             filament_diameter_mm: intent.recipe.filament_diameter_mm,
             filament_type,
+            filament_colour,
             filament_id: known.map(|(id, _, _)| id),
             density: known.map(|(_, _, d)| d),
             filament_mm: report.filament_length_mm
@@ -316,7 +327,7 @@ fn slice_info(f: &PlateFacts) -> String {
     <metadata key="support_used" value="{support}"/>
     <metadata key="label_object_enabled" value="false"/>
     <metadata key="filament_maps" value="1"/>
-    <filament id="1" tray_info_idx="{tray}" type="{kind}" color="{colour}" used_m="{used_m}" used_g="{weight}" nozzle_diameter="{nozzle_mm:.2}" volume_type="Standard" used_for_object="true" used_for_support="{support}"/>
+    <filament id="1" tray_info_idx="{tray}" type="{kind}" color="{colour}" used_m="{used_m}" used_g="{weight}" group_id="0" nozzle_diameter="{nozzle_mm:.2}" volume_type="Standard" used_for_object="true" used_for_support="{support}" directly_used="true"/>
     <nozzle id="0" extruder_id="1" nozzle_diameter="{nozzle}" volume_type="Standard"/>
     <layer_filament_lists>
       <layer_filament_list filament_list="0" layer_ranges="0 {last}" />
@@ -332,7 +343,7 @@ fn slice_info(f: &PlateFacts) -> String {
         weight = r2(f.weight_g()),
         support = f.support_used,
         kind = f.filament_type,
-        colour = BAMBU_UNDECLARED_COLOUR,
+        colour = f.filament_colour,
         used_m = r2(f.filament_mm / 1000.0),
         last = f.layers.saturating_sub(1),
     )
@@ -350,7 +361,7 @@ fn plate_json(f: &PlateFacts) -> String {
         area = number(area),
         lh = number(f.layer_height_mm),
         bed = f.bed_type,
-        colour = BAMBU_UNDECLARED_COLOUR,
+        colour = f.filament_colour,
         nozzle = number(f.nozzle_mm),
     )
 }
@@ -369,7 +380,7 @@ fn project_settings(f: &PlateFacts) -> String {
         "nozzle_diameter": [number(f.nozzle_mm)],
         "curr_bed_type": bed_label(f.bed_type),
         "filament_type": [f.filament_type.clone()],
-        "filament_colour": [BAMBU_UNDECLARED_COLOUR],
+        "filament_colour": [f.filament_colour.clone()],
         "filament_diameter": [number(f.filament_diameter_mm)],
         "filament_density": [f.density.map_or("0".to_string(), number)],
         "filament_ids": [f.filament_id.unwrap_or("")],

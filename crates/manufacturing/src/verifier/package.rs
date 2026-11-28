@@ -398,9 +398,18 @@ pub fn verify_bambu_package(
     let used_m = float(filament.get("used_m").map_or("", String::as_str), "used_m")?;
     let used_g = float(filament.get("used_g").map_or("", String::as_str), "used_g")?;
     let weight = float(&metadata(&slice_meta, "weight")?, "weight")?;
+    let expected_colour = intent
+        .material_profile
+        .as_ref()
+        .and_then(|p| p.selection.display_srgb)
+        .map_or_else(
+            || "#FFFFFF".to_string(),
+            |[r, g, b]| format!("#{r:02X}{g:02X}{b:02X}"),
+        );
     let area = std::f64::consts::PI * (intent.recipe.filament_diameter_mm * 0.5).powi(2);
     let expected_g = known.map_or(0.0, |(_, _, d)| filament_mm * area * d / 1000.0);
     if filament.get("id").map(String::as_str) != Some("1")
+        || filament.get("color").map(String::as_str) != Some(expected_colour.as_str())
         || !close(used_m, filament_mm / 1000.0, 0.0051)
         || !close(used_g, expected_g, 0.0051)
         || !close(weight, used_g, 0.0)
@@ -442,6 +451,7 @@ pub fn verify_bambu_package(
         .and_then(|a| a.iter().map(serde_json::Value::as_f64).collect());
     let bed = intent.printer.build_envelope;
     if plate_json["bed_type"].as_str() != Some(plate.identifier())
+        || plate_json["filament_colors"][0].as_str() != Some(expected_colour.as_str())
         || !plate_json["nozzle_diameter"]
             .as_f64()
             .is_some_and(|n| close(n, nozzle, 1e-9))
@@ -457,7 +467,7 @@ pub fn verify_bambu_package(
         })
     {
         return Err(bad(
-            "plate_1.json disagrees with the plate, nozzle or plan bounds",
+            "plate_1.json disagrees with the plate, nozzle, filament colour or plan bounds",
         ));
     }
     checks.push(format!(
@@ -468,12 +478,15 @@ pub fn verify_bambu_package(
         serde_json::from_str(&text["Metadata/project_settings.config"])
             .map_err(|e| bad(format!("project_settings.config: {e}")))?;
     if project["printer_model"].as_str() != Some(printer_model.as_str())
+        || project["filament_colour"][0].as_str() != Some(expected_colour.as_str())
         || !project["nozzle_diameter"][0]
             .as_str()
             .and_then(|n| n.parse::<f64>().ok())
             .is_some_and(|n| close(n, nozzle, 1e-9))
     {
-        return Err(bad("project settings name another printer or nozzle"));
+        return Err(bad(
+            "project settings name another printer, nozzle or filament colour",
+        ));
     }
     checks.push(format!("project settings: {printer_model}"));
 

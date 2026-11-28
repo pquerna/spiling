@@ -794,7 +794,13 @@ process: ProcessPolicy, bowden_retraction: RetractionPolicy, source: MaterialPro
 
 export type MaterialProfileOverrides = { nozzle_temperature_c: number | null, bed_temperature_c: number | null, print_speed_mm_s: number | null, flow_multiplier: number | null, process: ProcessPolicy | null, first_layer_nozzle_temperature_c: number | null, first_layer_bed_temperature_c: number | null, };
 
-export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup: MaterialToolSetup, overrides: MaterialProfileOverrides, };
+export type MaterialProfileSelection = { profile: MaterialProcessProfile, setup: MaterialToolSetup, overrides: MaterialProfileOverrides,
+/**
+ * Optional declared 8-bit sRGB filament swatch (carried from a project
+ * filament's explicit sRGB appearance for delivery metadata; never
+ * influences manufacturing geometry or optical calibration).
+ */
+display_srgb: [number, number, number] | null, };
 
 export type MaterialProfileSource = { kind: MaterialProfileSourceKind, source_id: string, source_revision: string, };
 

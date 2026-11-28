@@ -2044,6 +2044,7 @@ async fn execute(
                 else {
                     return Err("expected project filament".into());
                 };
+                let display_srgb = revision.definition.declared_display_srgb();
                 let profile = revision
                     .definition
                     .profiles
@@ -2062,6 +2063,7 @@ async fn execute(
                         first_layer_nozzle_temperature_c: None,
                         first_layer_bed_temperature_c: None,
                     },
+                    display_srgb,
                 };
                 match client
                     .manufacturing(ManufacturingCommand::ApplyMaterialProfile {

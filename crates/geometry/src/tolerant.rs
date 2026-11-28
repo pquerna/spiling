@@ -210,6 +210,17 @@ pub struct TolerantModel {
     pub conformed: Conformed,
 }
 
+impl TolerantModel {
+    /// Model-space (or placed) vertex positions in millimetres.
+    pub fn positions(&self) -> &[[f64; 3]] {
+        &self.positions
+    }
+    /// Triangle index triples into [`Self::positions`].
+    pub fn triangles(&self) -> &[[u32; 3]] {
+        &self.triangles
+    }
+}
+
 /// Exact coordinate welding restores shared mesh-edge identity without
 /// moving geometry or applying an unrecorded repair tolerance. Reuses the
 /// position allocation in place.

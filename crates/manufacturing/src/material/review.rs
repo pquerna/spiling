@@ -28,6 +28,7 @@ pub fn review_materials(
                     first_layer_nozzle_temperature_c: None,
                     first_layer_bed_temperature_c: None,
                 },
+                display_srgb: None,
             })
             .collect::<Vec<_>>()
     } else {

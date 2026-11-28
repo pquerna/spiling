@@ -133,6 +133,17 @@ pub struct FilamentDefinition {
     pub source: DefinitionSource,
 }
 impl FilamentDefinition {
+    /// Declared 8-bit sRGB swatch when the filament explicitly specifies sRGB appearance.
+    pub fn declared_display_srgb(&self) -> Option<[u8; 3]> {
+        match self.appearance.as_ref()?.color {
+            AppearanceColor::Srgb { channels } => Some([
+                (channels[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (channels[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (channels[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            ]),
+            _ => None,
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         self.declaration.validate()?;
         if let Some(origin) = &self.catalog_origin {

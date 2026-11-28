@@ -264,6 +264,74 @@ impl LifecycleBlock {
             },
         }
     }
+    /// Bambu A1 / A1 mini purge and wiper flick, re-authored for this producer
+    /// from the facts Bambu Studio 02.09.01.70's A1 (`N2S`) and A1 mini (`N1`)
+    /// machine start sequences show: the left-side filament purge wiper sits at
+    /// X -48.2 mm (shake to -28.5 mm) on A1 and X -13.5 mm (shake to 0 mm) on
+    /// A1 mini, reachable at Y 0, Z 10 after homing. Heats to the first-layer
+    /// nozzle temperature, purges 40 mm, retracts 0.5 mm, cools toward 140 °C
+    /// while flicking across the wiper, waits at 140 °C, flicks again, turns
+    /// off the part fan and returns to bed center. Omitted from the reference:
+    /// AMS loading/flush volumes, 250 °C flush, and disabling soft endstops.
+    pub fn bambu_a1_purge_and_wipe(mini: bool) -> Self {
+        let (wiper_x, flick_x, center_xy, label) = if mini {
+            (
+                "-13.5",
+                "0",
+                "X90 Y90",
+                "Bambu A1 mini purge over the wiper and nozzle flick",
+            )
+        } else {
+            (
+                "-48.2",
+                "-28.5",
+                "X128 Y128",
+                "Bambu A1 purge over the wiper and nozzle flick",
+            )
+        };
+        let mut lines: Vec<String> = vec![
+            "M1002 gcode_claim_action : 14".into(),
+            "G90".into(),
+            "M83".into(),
+            "G1 Z10 F1200".into(),
+            format!("G1 X{wiper_x} Y0 F18000"),
+            "M109 S{nozzle_temperature_c}".into(),
+            "G1 E40 F200".into(),
+            "M400".into(),
+            "M106 S255".into(),
+            "G1 E-0.5 F300".into(),
+            "M104 S140".into(),
+        ];
+        for _ in 0..2 {
+            lines.push(format!("G1 X{flick_x} F18000"));
+            lines.push(format!("G1 X{wiper_x} F3000"));
+        }
+        lines.push("M109 S140".into());
+        for _ in 0..2 {
+            lines.push(format!("G1 X{flick_x} F12000"));
+            lines.push(format!("G1 X{wiper_x} F3000"));
+        }
+        lines.extend([
+            "M106 S0".into(),
+            "G1 Z10 F1200".into(),
+            format!("G1 {center_xy} F18000"),
+        ]);
+        Self {
+            label: label.into(),
+            lines,
+            effects: BlockEffects {
+                homes: false,
+                position: PositionEffect::Unknown,
+                levelling: LevellingEffect::Unchanged,
+                bed: ThermalEffect::Unchanged,
+                nozzle: ThermalEffect::Standby,
+                extrusion: ExtrusionEffect::Unknown,
+                modes: ModeEffect::Unknown,
+                fan_off: true,
+                motors_off: false,
+            },
+        }
+    }
     /// The conventional Klipper end macro: heaters, fan and motors off.
     pub fn klipper_end_print() -> Self {
         Self {

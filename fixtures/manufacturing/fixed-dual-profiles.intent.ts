@@ -68,6 +68,7 @@ const selection = (tool: FixedDualTool, index: number): MaterialProfileSelection
     first_layer_nozzle_temperature_c: null,
     first_layer_bed_temperature_c: null,
   },
+  display_srgb: null,
 });
 const tools = job.tools.map((tool, index) => ({
   ...tool,

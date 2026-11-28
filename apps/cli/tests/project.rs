@@ -1438,8 +1438,7 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
     sub_lattice["recipe"]["layer_height_mm"] = serde_json::json!(0.001);
     // A printer finer than the 0.001 mm command lattice: compilation refuses it.
     sub_lattice["printer"]["motion_resolution"]["z_mm"] = serde_json::json!(0.000001);
-    sub_lattice["printer"]["deposition_limits"]["min_bead_height_mm"] =
-        serde_json::json!(0.000001);
+    sub_lattice["printer"]["deposition_limits"]["min_bead_height_mm"] = serde_json::json!(0.000001);
     let refused_intent_path = root.join("sub-lattice-intent.json");
     std::fs::write(
         &refused_intent_path,

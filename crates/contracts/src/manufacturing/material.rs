@@ -116,6 +116,10 @@ pub struct MaterialProfileSelection {
     pub profile: MaterialProcessProfile,
     pub setup: MaterialToolSetup,
     pub overrides: MaterialProfileOverrides,
+    /// Optional declared 8-bit sRGB filament swatch (carried from a project
+    /// filament's explicit sRGB appearance for delivery metadata; never
+    /// influences manufacturing geometry or optical calibration).
+    pub display_srgb: Option<[u8; 3]>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]

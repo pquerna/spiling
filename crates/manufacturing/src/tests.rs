@@ -3928,7 +3928,8 @@ fn bambu_inspection_writes_and_independently_rereads_a_deterministic_package() {
     use spiling_contracts::hardware::builtin_catalog;
     let catalog = builtin_catalog().unwrap();
     let setup = catalog.find_setup("bambulab.a1-mini.04").unwrap();
-    let selection = crate::generic_selection(setup, "pla").unwrap();
+    let mut selection = crate::generic_selection(setup, "pla").unwrap();
+    selection.display_srgb = Some([0x1A, 0x73, 0xE8]);
     let hardware = std::sync::Arc::new(catalog.stock_capture(setup).unwrap());
     let requested = crate::create_default_intent(
         hardware,
@@ -4031,6 +4032,18 @@ fn bambu_inspection_writes_and_independently_rereads_a_deterministic_package() {
         (
             "Metadata/model_settings.config",
             &replace("plate_1.gcode", "plate_2.gcode"),
+        ),
+        (
+            "Metadata/slice_info.config",
+            &replace("color=\"#1A73E8\"", "color=\"#FFFFFF\""),
+        ),
+        (
+            "Metadata/plate_1.json",
+            &replace("\"#1A73E8\"", "\"#FFFFFF\""),
+        ),
+        (
+            "Metadata/project_settings.config",
+            &replace("\"#1A73E8\"", "\"#FFFFFF\""),
         ),
         ("3D/3dmodel.model", &replace("v3=\"1\"", "v3=\"9\"")),
         ("3D/3dmodel.model", &replace("x=\"90\"", "x=\"900\"")),
