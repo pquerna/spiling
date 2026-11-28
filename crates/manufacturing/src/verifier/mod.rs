@@ -422,13 +422,13 @@ struct Decoded {
 // Deliberately not a general firmware parser. Only the declared inert dialect
 // has meaning here; omitted axes/feeds, checksums and firmware extensions do not.
 fn decode(line: &str, routed: bool) -> Result<Option<Decoded>, &'static str> {
-    decode_with_xyz6(line, routed, |_, _| Ok(()))
+    decode_with_xyz6(line, routed, |_, _, _| Ok(()))
 }
 
 fn decode_with_xyz6(
     line: &str,
     routed: bool,
-    mut xyz6: impl FnMut(usize, &str) -> Result<(), &'static str>,
+    mut xyz6: impl FnMut(usize, &str, Option<i64>) -> Result<(), &'static str>,
 ) -> Result<Option<Decoded>, &'static str> {
     let code = line.split_once(';').map_or(line, |(code, _)| code);
     if !code.is_ascii()
@@ -482,7 +482,7 @@ fn decode_with_xyz6(
         }));
     }
     let mut fields = [None; 11];
-    let mut coordinates = [None; 3];
+    let mut coordinates: [Option<(&str, Option<i64>)>; 3] = [None; 3];
     for word in words {
         let (index, precision) = match word.as_bytes().first() {
             Some(b'X') => (0, program_coordinates::PROGRAM_XYZ_DECIMALS),
@@ -506,9 +506,12 @@ fn decode_with_xyz6(
             return Err("duplicate command field");
         }
         let number = &word[1..];
-        fields[index] = Some(decimal(number, precision)?);
         if index < coordinates.len() {
-            coordinates[index] = Some(number);
+            let (value, ticks) = decimal_with_xyz6(number, precision)?;
+            fields[index] = Some(value);
+            coordinates[index] = Some((number, ticks));
+        } else {
+            fields[index] = Some(decimal(number, precision)?);
         }
     }
     let command = if command == Command::Deposit && fields[0..3].iter().all(Option::is_none) {
@@ -567,9 +570,9 @@ fn decode_with_xyz6(
     if matches!(command, Command::SelectTool(_)) && fields[5] != Some(1.0) {
         return Err("tool selection requires the no-move S1 contract");
     }
-    for (axis, number) in coordinates.into_iter().enumerate() {
-        if let Some(number) = number {
-            xyz6(axis, number)?;
+    for (axis, entry) in coordinates.into_iter().enumerate() {
+        if let Some((number, ticks)) = entry {
+            xyz6(axis, number, ticks)?;
         }
     }
     Ok(Some(Decoded { command, fields }))
@@ -593,6 +596,13 @@ fn relative_e8(position: f64, delta: f64) -> Result<f64, ManufacturingError> {
 }
 
 fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
+    Ok(decimal_with_xyz6(text, precision)?.0)
+}
+
+/// Parse an ASCII decimal into `f64`, and when `precision == 6` and the digit
+/// count fits in the fast `u64` path, simultaneously compute its exact XYZ6
+/// integer tick count without re-parsing the string.
+fn decimal_with_xyz6(text: &str, precision: usize) -> Result<(f64, Option<i64>), &'static str> {
     let unsigned = text
         .strip_prefix('+')
         .or_else(|| text.strip_prefix('-'))
@@ -613,6 +623,7 @@ fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
         1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
         1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
     ];
+    const INT_POWERS: [u64; 7] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000];
     if integer.len() + fractional.len() <= 15
         && let Some(&power) = POWERS.get(fractional.len())
     {
@@ -620,18 +631,27 @@ fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
             .bytes()
             .chain(fractional.bytes())
             .fold(0u64, |units, digit| units * 10 + u64::from(digit - b'0'));
+        let negative = text.starts_with('-');
         let magnitude = units as f64 / power;
-        return Ok(if text.starts_with('-') {
-            -magnitude
+        let value = if negative { -magnitude } else { magnitude };
+        let ticks = if precision == 6 {
+            units
+                .checked_mul(INT_POWERS[6 - fractional.len()])
+                .filter(|&mag| mag <= (1u64 << 52))
+                .map(|mag| {
+                    let mag = mag as i64;
+                    if negative { -mag } else { mag }
+                })
         } else {
-            magnitude
-        });
+            None
+        };
+        return Ok((value, ticks));
     }
     let value = text.parse::<f64>().map_err(|_| "malformed number")?;
     if !value.is_finite() {
         return Err("nonfinite number");
     }
-    Ok(value)
+    Ok((value, None))
 }
 
 enum Lifecycle {
@@ -835,7 +855,7 @@ pub(crate) fn verify_streamed(
 /// Parsed line batches the reader may run ahead of the replay.
 const PARSE_AHEAD_BATCHES: usize = 8;
 /// Lines per parsed batch.
-const PARSE_BATCH_LINES: usize = 2_048;
+const PARSE_BATCH_LINES: usize = 4_096;
 
 /// One read program line: its text range and its pure, context-free decode.
 struct ParsedLine {
@@ -854,39 +874,27 @@ struct LineBatch {
     failure: Option<ManufacturingError>,
 }
 
-/// Read and decode every program line in order, in batches. A decode
-/// depends only on the line and the program's fixed dialect flags.
+/// Read raw line batches in order and decode each batch in parallel across
+/// workers. Decoding is a pure function of the line and fixed dialect flags.
 fn parse_ahead(
     program: impl BufRead,
     routed: bool,
     with_ticks: bool,
     sender: std::sync::mpsc::SyncSender<LineBatch>,
 ) {
+    use rayon::prelude::*;
     let mut lines = ProgramLines::new(program);
+    let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(PARSE_BATCH_LINES);
     loop {
         let mut batch = LineBatch::default();
+        spans.clear();
         let mut finished = false;
-        while batch.lines.len() < PARSE_BATCH_LINES {
+        while spans.len() < PARSE_BATCH_LINES {
             match lines.next() {
                 Ok(Some((index, line))) => {
                     let start = batch.text.len();
                     batch.text.push_str(line);
-                    let mut ticks = [None; 3];
-                    let decoded = if with_ticks {
-                        decode_with_xyz6(line, routed, |axis, word| {
-                            ticks[axis] = Some(grid::xyz6_ticks(word)?);
-                            Ok(())
-                        })
-                    } else {
-                        decode(line, routed)
-                    };
-                    batch.lines.push(ParsedLine {
-                        index,
-                        start,
-                        end: batch.text.len(),
-                        decoded,
-                        ticks,
-                    });
+                    spans.push((index, start, batch.text.len()));
                 }
                 Ok(None) => {
                     finished = true;
@@ -899,6 +907,33 @@ fn parse_ahead(
                 }
             }
         }
+        let text = batch.text.as_str();
+        batch.lines = spans
+            .par_iter()
+            .map(|&(index, start, end)| {
+                let line = &text[start..end];
+                let mut ticks = [None; 3];
+                let decoded = if with_ticks {
+                    decode_with_xyz6(line, routed, |axis, word, fast_ticks| {
+                        let resolved = match fast_ticks {
+                            Some(t) => t,
+                            None => grid::xyz6_ticks(word)?,
+                        };
+                        ticks[axis] = Some(resolved);
+                        Ok(())
+                    })
+                } else {
+                    decode(line, routed)
+                };
+                ParsedLine {
+                    index,
+                    start,
+                    end,
+                    decoded,
+                    ticks,
+                }
+            })
+            .collect();
         if sender.send(batch).is_err() || finished {
             return;
         }

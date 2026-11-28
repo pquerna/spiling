@@ -147,7 +147,15 @@ pub(crate) fn solve(context: &mut Context<'_, '_>) -> Result<(Vec<Visit>, Groups
         .into_par_iter()
         .map(
             |l| match l.checked_sub(1).and_then(|below| first[below].0.2) {
-                Some(start) if Some(start) != machine.start => {
+                Some(start)
+                    if Some(start) != machine.start
+                        && layers[l].clone().any(|b| {
+                            orders[b].iter().any(|&tool| {
+                                !buckets.members[b][tool as usize].is_empty()
+                                    && machine.change.stations_xy[tool as usize].is_none()
+                            })
+                        }) =>
+                {
                     route(layers[l].clone(), Some(start)).map(Some)
                 }
                 _ => Ok(None),

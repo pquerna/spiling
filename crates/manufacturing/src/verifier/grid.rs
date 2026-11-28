@@ -586,8 +586,11 @@ mod tests {
 
     fn decoded_ticks(line: &str) -> (super::super::Decoded, [Option<i64>; 3]) {
         let mut ticks = [None; 3];
-        let command = super::super::decode_with_xyz6(line, false, |axis, word| {
-            ticks[axis] = Some(xyz6_ticks(word)?);
+        let command = super::super::decode_with_xyz6(line, false, |axis, word, fast_ticks| {
+            ticks[axis] = Some(match fast_ticks {
+                Some(t) => t,
+                None => xyz6_ticks(word)?,
+            });
             Ok(())
         })
         .unwrap()

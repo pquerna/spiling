@@ -312,104 +312,207 @@ impl Clearance {
         if screen {
             self.screen_disjoint(&bands, &mut marks, work, cancel)?;
         }
-        let mut selected = Vec::new();
-        let mut overlaps = Vec::new();
         let mut receipt = ClearanceReceipt::default();
-        let mut native_work = spiling_geometry::GeometryWorkBudget::compile();
         let mut discard_before = 0;
-        for ordinal in 0..bands.len() {
-            debit(work, 1, cancel)?;
-            let [floor, top] = bands[ordinal].support;
-            if !floor.is_finite() {
-                continue;
-            }
-            let window = model_window(&bands, [floor, top], self.z_gap);
-            let windows = &mut bands[window.clone()];
-            for band in &mut *windows {
+        let working_set = crate::working_set::current();
+        const BAND_WAVE: usize = 32;
+        use rayon::prelude::*;
+        let mut wave_start = 0;
+        while wave_start < bands.len() {
+            let wave_end = (wave_start + BAND_WAVE).min(bands.len());
+            // Collect all distinct model bands needed by any support band in this wave.
+            let mut needed_rows = Vec::new();
+            for ordinal in wave_start..wave_end {
                 debit(work, 1, cancel)?;
-                if band.rows.is_none()
-                    && band.model[0].is_finite()
-                    && !separated([floor, top], band.model, self.z_gap)?
-                {
-                    band.rows = Some(Rows::build(
-                        &self.roads,
-                        band.roads.clone(),
-                        self.xy_gap,
-                        &marks,
-                        &mut self.admission,
-                        work,
-                        cancel,
-                    )?);
-                }
-            }
-            let roads = bands[ordinal].roads.clone();
-            let windows = &bands[window];
-            for support_index in roads.filter(|index| self.roads[*index].support) {
-                debit(work, 1, cancel)?;
-                if marks[support_index] == DISJOINT {
+                let [floor, top] = bands[ordinal].support;
+                if !floor.is_finite() {
                     continue;
                 }
-                let support = self.roads[support_index];
-                selected.clear();
-                let mut raster_work = 0;
-                support.chord.outer_rows(
-                    support.outer_radius(0.0)?,
-                    &mut raster_work,
-                    cancel,
-                    |row, left, right| {
-                        overlaps.clear();
-                        for band in windows {
-                            debit(work, 1, cancel)?;
-                            if let Some(rows) = &band.rows {
-                                for entry in rows.intersect(row, left, right) {
-                                    debit(work, 1, cancel)?;
-                                    if entry.right < left
-                                        || separated(
-                                            support.height,
-                                            self.roads[entry.road].height,
-                                            self.z_gap,
-                                        )?
-                                    {
-                                        continue;
-                                    }
-                                    self.admission.push(
-                                        &mut overlaps,
-                                        (left.max(entry.left), right.min(entry.right)),
-                                    )?;
-                                    if marks[entry.road] != support_index {
-                                        marks[entry.road] = support_index;
-                                        self.admission.push(&mut selected, entry.road)?;
-                                    }
-                                }
-                            }
-                        }
-                        count_union(&mut overlaps, &mut receipt.shared_edge_cells, work, cancel)
-                    },
-                )?;
-                debit(work, raster_work, cancel)?;
-                sort_by_key(&mut selected, |index| *index, work, cancel)?;
-                let capsule = support
-                    .chord
-                    .clearance_capsule(support.radius_mm, support.arc_deviation_mm)?;
-                for &index in &selected {
+                let window = model_window(&bands, [floor, top], self.z_gap);
+                for b in window {
                     debit(work, 1, cancel)?;
-                    debit(&mut receipt.checked_pairs, 1, cancel)?;
-                    let model = self.roads[index];
-                    let model_capsule = model
-                        .chord
-                        .clearance_capsule(model.radius_mm, model.arc_deviation_mm)?;
-                    spiling_geometry::certify_planar_capsule_pair_clearance([capsule, model_capsule], self.xy_gap, &mut native_work, cancel)
-                        .map_err(|error| {
-                            match error.code {
-                                GeometryErrorCode::Cancelled => return ManufacturingError::new(ManufacturingErrorCode::Cancelled, error.message),
-                                GeometryErrorCode::ResourceLimit => return ManufacturingError::new(ManufacturingErrorCode::ResourceLimit, error.message),
-                                _ => {}
-                            }
-                            failed(format!("actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}; support {:?} r={} e={}, model {:?} r={} e={}, gap {}", support.layer, support.line, model.layer, model.line, capsule.segment_xy_mm, capsule.radius_mm, capsule.endpoint_error_mm, model_capsule.segment_xy_mm, model_capsule.radius_mm, model_capsule.endpoint_error_mm, self.xy_gap))
-                        })?;
+                    if bands[b].rows.is_none()
+                        && bands[b].model[0].is_finite()
+                        && !separated([floor, top], bands[b].model, self.z_gap)?
+                        && !needed_rows.contains(&b)
+                    {
+                        needed_rows.push(b);
+                    }
                 }
             }
-            let future_low = bands[ordinal].future_support_low;
+            if !needed_rows.is_empty() {
+                let base_admission = self.admission.0;
+                let roads = &self.roads;
+                let xy_gap = self.xy_gap;
+                let marks_ref = &marks;
+                let spans: Vec<(usize, Range<usize>)> = needed_rows
+                    .iter()
+                    .map(|&b| (b, bands[b].roads.clone()))
+                    .collect();
+                let built: Vec<Result<(usize, Rows, usize, usize), ManufacturingError>> = spans
+                    .par_iter()
+                    .map(|&(b, ref span)| {
+                        crate::working_set::scope(working_set, || {
+                            let mut local_admission = Admission(base_admission);
+                            let mut local_work = 0usize;
+                            let rows = Rows::build(
+                                roads,
+                                span.clone(),
+                                xy_gap,
+                                marks_ref,
+                                &mut local_admission,
+                                &mut local_work,
+                                cancel,
+                            )?;
+                            Ok((b, rows, local_admission.0 - base_admission, local_work))
+                        })
+                    })
+                    .collect();
+                for result in built {
+                    let (b, rows, added_bytes, local_work) = result?;
+                    debit(work, local_work, cancel)?;
+                    self.admission.absorb(added_bytes)?;
+                    bands[b].rows = Some(rows);
+                }
+            }
+            // Verify every support band in the wave in parallel, then reduce in band order.
+            let base_admission = self.admission.0;
+            let roads = &self.roads;
+            let bands_ref = &bands;
+            let marks_ref = &marks;
+            let z_gap = self.z_gap;
+            let xy_gap = self.xy_gap;
+            let wave_results: Vec<Result<(usize, usize, usize), ManufacturingError>> = (wave_start
+                ..wave_end)
+                .into_par_iter()
+                .map(|ordinal| {
+                    crate::working_set::scope(working_set, || {
+                        let [floor, top] = bands_ref[ordinal].support;
+                        if !floor.is_finite() {
+                            return Ok((0, 0, 0));
+                        }
+                        let window = model_window(bands_ref, [floor, top], z_gap);
+                        let windows = &bands_ref[window];
+                        let mut local_admission = Admission(base_admission);
+                        let mut local_work = 0usize;
+                        let mut shared_edge_cells = 0usize;
+                        let mut checked_pairs = 0usize;
+                        let mut selected = Vec::new();
+                        let mut overlaps = Vec::new();
+                        let mut native_work = spiling_geometry::GeometryWorkBudget::compile();
+                        for support_index in bands_ref[ordinal]
+                            .roads
+                            .clone()
+                            .filter(|index| roads[*index].support)
+                        {
+                            debit(&mut local_work, 1, cancel)?;
+                            if marks_ref[support_index] == DISJOINT {
+                                continue;
+                            }
+                            let support = roads[support_index];
+                            selected.clear();
+                            let mut raster_work = 0;
+                            support.chord.outer_rows(
+                                support.outer_radius(0.0)?,
+                                &mut raster_work,
+                                cancel,
+                                |row, left, right| {
+                                    overlaps.clear();
+                                    for band in windows {
+                                        debit(&mut local_work, 1, cancel)?;
+                                        if let Some(rows) = &band.rows {
+                                            for entry in rows.intersect(row, left, right) {
+                                                debit(&mut local_work, 1, cancel)?;
+                                                if entry.right < left
+                                                    || separated(
+                                                        support.height,
+                                                        roads[entry.road].height,
+                                                        z_gap,
+                                                    )?
+                                                {
+                                                    continue;
+                                                }
+                                                local_admission.push(
+                                                    &mut overlaps,
+                                                    (left.max(entry.left), right.min(entry.right)),
+                                                )?;
+                                                if !selected.contains(&entry.road) {
+                                                    local_admission
+                                                        .push(&mut selected, entry.road)?;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    count_union(
+                                        &mut overlaps,
+                                        &mut shared_edge_cells,
+                                        &mut local_work,
+                                        cancel,
+                                    )
+                                },
+                            )?;
+                            debit(&mut local_work, raster_work, cancel)?;
+                            sort_by_key(&mut selected, |index| *index, &mut local_work, cancel)?;
+                            let capsule = support
+                                .chord
+                                .clearance_capsule(support.radius_mm, support.arc_deviation_mm)?;
+                            for &index in &selected {
+                                debit(&mut local_work, 1, cancel)?;
+                                debit(&mut checked_pairs, 1, cancel)?;
+                                let model = roads[index];
+                                let model_capsule = model
+                                    .chord
+                                    .clearance_capsule(model.radius_mm, model.arc_deviation_mm)?;
+                                spiling_geometry::certify_planar_capsule_pair_clearance(
+                                    [capsule, model_capsule],
+                                    xy_gap,
+                                    &mut native_work,
+                                    cancel,
+                                )
+                                .map_err(|error| {
+                                    match error.code {
+                                        GeometryErrorCode::Cancelled => {
+                                            return ManufacturingError::new(
+                                                ManufacturingErrorCode::Cancelled,
+                                                error.message,
+                                            );
+                                        }
+                                        GeometryErrorCode::ResourceLimit => {
+                                            return ManufacturingError::new(
+                                                ManufacturingErrorCode::ResourceLimit,
+                                                error.message,
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                    failed(format!(
+                                        "actual support layer {} (line {}) violates object XY/Z clearance at model layer {} (line {}): {error:?}; support {:?} r={} e={}, model {:?} r={} e={}, gap {}",
+                                        support.layer,
+                                        support.line,
+                                        model.layer,
+                                        model.line,
+                                        capsule.segment_xy_mm,
+                                        capsule.radius_mm,
+                                        capsule.endpoint_error_mm,
+                                        model_capsule.segment_xy_mm,
+                                        model_capsule.radius_mm,
+                                        model_capsule.endpoint_error_mm,
+                                        xy_gap
+                                    ))
+                                })?;
+                            }
+                        }
+                        Ok((shared_edge_cells, checked_pairs, local_work))
+                    })
+                })
+                .collect();
+            for result in wave_results {
+                let (shared, pairs, local_work) = result?;
+                debit(work, local_work, cancel)?;
+                debit(&mut receipt.shared_edge_cells, shared, cancel)?;
+                debit(&mut receipt.checked_pairs, pairs, cancel)?;
+            }
+            let future_low = bands[wave_end - 1].future_support_low;
             let next = bands
                 .partition_point(|band| band.prefix_high < (future_low - self.z_gap).next_down());
             for band in &mut bands[discard_before..next] {
@@ -419,6 +522,7 @@ impl Clearance {
                 }
             }
             discard_before = next;
+            wave_start = wave_end;
         }
         Ok(receipt)
     }
@@ -430,30 +534,58 @@ impl Clearance {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
+        use rayon::prelude::*;
         let Some(forest) = ChordForest::build(self, bands, work, cancel)? else {
             return Ok(());
         };
         marks.fill(DISJOINT);
-        for band in bands.iter().filter(|band| band.support[0].is_finite()) {
-            debit(work, 1, cancel)?;
-            let roots = &forest.roots[model_window(bands, band.support, self.z_gap)];
-            for index in band
-                .roads
-                .clone()
-                .filter(|index| self.roads[*index].support)
-            {
-                debit(work, 1, cancel)?;
-                let Ok(bounds) = CellBounds::for_road(self.roads[index], 0.0) else {
-                    marks.fill(UNSEEN);
-                    return Ok(());
-                };
-                let mut hits = false;
-                for &root in roots.iter().flatten() {
-                    hits |= forest.mark_hits(root, bounds, marks, work, cancel)?;
+        let support_bands: Vec<usize> = bands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, band)| band.support[0].is_finite().then_some(i))
+            .collect();
+        type ScreenResult = Result<Option<(Vec<usize>, usize)>, ManufacturingError>;
+        let results: Vec<ScreenResult> = support_bands
+            .par_iter()
+            .map(|&band_idx| {
+                let band = &bands[band_idx];
+                let mut local_work = 1usize;
+                let mut touched = Vec::new();
+                let roots = &forest.roots[model_window(bands, band.support, self.z_gap)];
+                for index in band
+                    .roads
+                    .clone()
+                    .filter(|index| self.roads[*index].support)
+                {
+                    debit(&mut local_work, 1, cancel)?;
+                    let Ok(bounds) = CellBounds::for_road(self.roads[index], 0.0) else {
+                        return Ok(None);
+                    };
+                    let mut hits = false;
+                    for &root in roots.iter().flatten() {
+                        hits |= forest.collect_hits(
+                            root,
+                            bounds,
+                            &mut touched,
+                            &mut local_work,
+                            cancel,
+                        )?;
+                    }
+                    if hits {
+                        touched.push(index);
+                    }
                 }
-                if hits {
-                    marks[index] = UNSEEN;
-                }
+                Ok(Some((touched, local_work)))
+            })
+            .collect();
+        for result in results {
+            let Some((touched, local_work)) = result? else {
+                marks.fill(UNSEEN);
+                return Ok(());
+            };
+            debit(work, local_work, cancel)?;
+            for idx in touched {
+                marks[idx] = UNSEEN;
             }
         }
         Ok(())
@@ -544,31 +676,52 @@ impl ChordForest {
         {
             return Ok(None);
         }
-        for band in bands {
-            debit(work, 1, cancel)?;
-            let first = forest.nodes.len();
-            for index in band.roads.clone() {
-                debit(work, 1, cancel)?;
-                let road = clearance.roads[index];
-                if road.support {
-                    continue;
+        use rayon::prelude::*;
+        type BandForest =
+            Result<Option<(Vec<ChordNode>, Option<usize>, usize)>, ManufacturingError>;
+        let built: Vec<BandForest> = bands
+            .par_iter()
+            .map(|band| {
+                let mut local = Self::default();
+                let mut local_work = 1usize;
+                for index in band.roads.clone() {
+                    debit(&mut local_work, 1, cancel)?;
+                    let road = clearance.roads[index];
+                    if road.support {
+                        continue;
+                    }
+                    let Ok(bounds) = CellBounds::for_road(road, clearance.xy_gap) else {
+                        return Ok(None);
+                    };
+                    local.nodes.push(ChordNode {
+                        bounds,
+                        first: index,
+                        second: UNSEEN,
+                    });
                 }
-                let Ok(bounds) = CellBounds::for_road(road, clearance.xy_gap) else {
-                    return Ok(None);
+                let end = local.nodes.len();
+                let root = if end == 0 {
+                    None
+                } else {
+                    Some(local.group(0..end, &mut local_work, cancel)?)
                 };
-                forest.nodes.push(ChordNode {
-                    bounds,
-                    first: index,
-                    second: UNSEEN,
-                });
-            }
-            let end = forest.nodes.len();
-            let root = if first == end {
-                None
-            } else {
-                Some(forest.group(first..end, work, cancel)?)
+                Ok(Some((local.nodes, root, local_work)))
+            })
+            .collect();
+        for result in built {
+            let Some((local_nodes, local_root, local_work)) = result? else {
+                return Ok(None);
             };
-            forest.roots.push(root);
+            debit(work, local_work, cancel)?;
+            let base = forest.nodes.len();
+            for mut node in local_nodes {
+                if node.second != UNSEEN {
+                    node.first += base;
+                    node.second += base;
+                }
+                forest.nodes.push(node);
+            }
+            forest.roots.push(local_root.map(|r| r + base));
         }
         Ok(Some(forest))
     }
@@ -611,11 +764,11 @@ impl ChordForest {
         Ok(root)
     }
 
-    fn mark_hits(
+    fn collect_hits(
         &self,
         root: usize,
         bounds: CellBounds,
-        marks: &mut [usize],
+        touched: &mut Vec<usize>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<bool, ManufacturingError> {
@@ -625,11 +778,11 @@ impl ChordForest {
             return Ok(false);
         }
         if node.second == UNSEEN {
-            marks[node.first] = UNSEEN;
+            touched.push(node.first);
             return Ok(true);
         }
-        let first = self.mark_hits(node.first, bounds, marks, work, cancel)?;
-        let second = self.mark_hits(node.second, bounds, marks, work, cancel)?;
+        let first = self.collect_hits(node.first, bounds, touched, work, cancel)?;
+        let second = self.collect_hits(node.second, bounds, touched, work, cancel)?;
         Ok(first || second)
     }
 }

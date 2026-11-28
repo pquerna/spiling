@@ -280,7 +280,8 @@ fn relabel_supported_sparse_bridges(
     if previous.paths.iter().all(|p| p.connectors.is_empty()) || previous.z_mm != layer.lower_z_mm {
         return Ok(false);
     }
-    let mut projected = None;
+    let mut projected: Option<Option<CachedLowerEdges>> = None;
+    let mut hits = Vec::new();
     let mut changed = false;
     for path_index in 0..layer.paths.len() {
         check_cancel(cancel)?;
@@ -310,14 +311,37 @@ fn relabel_supported_sparse_bridges(
                     bead_width_mm: width_mm,
                 };
                 let gaps = match &projected {
-                    Some(Some(edges)) => anchors.gaps_edges(
-                        candidate,
-                        edges
-                            .iter()
-                            .map(|&(points, width)| (Ok(points), true, width)),
-                        work,
-                        cancel,
-                    ),
+                    Some(Some(cached)) => {
+                        if let Some(grid) = &cached.grid {
+                            grid.collect(ends, width_mm * 0.5, &mut hits);
+                            let skipped = cached.edges.len().saturating_sub(hits.len());
+                            *work = work.checked_add(skipped).ok_or_else(|| {
+                                crate::error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "cumulative deposited-stroke anchor work counter overflow",
+                                )
+                            })?;
+                            anchors.gaps_edges(
+                                candidate,
+                                hits.iter().map(|&idx| {
+                                    let (points, width) = cached.edges[idx as usize];
+                                    (Ok(points), true, width)
+                                }),
+                                work,
+                                cancel,
+                            )
+                        } else {
+                            anchors.gaps_edges(
+                                candidate,
+                                cached
+                                    .edges
+                                    .iter()
+                                    .map(|&(points, width)| (Ok(points), true, width)),
+                                work,
+                                cancel,
+                            )
+                        }
+                    }
                     _ => anchors.gaps_edges(
                         candidate,
                         projected_edges(previous.paths.iter(), true),
@@ -349,13 +373,195 @@ fn relabel_supported_sparse_bridges(
 
 type LowerEdge = ([[f64; 3]; 2], f64);
 
+struct LowerEdgeGrid {
+    origin: [f64; 2],
+    cell: f64,
+    dims: [usize; 2],
+    max_radius: f64,
+    offsets: Vec<u32>,
+    entries: Vec<u32>,
+}
+
+impl LowerEdgeGrid {
+    fn build(
+        edges: &[LowerEdge],
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, ManufacturingError> {
+        if edges.len() < 32 || edges.len() >= u32::MAX as usize {
+            return Ok(None);
+        }
+        let mut bounds = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+        let mut max_radius = 0.0_f64;
+        for &(pts, width) in edges {
+            let r = width * 0.5;
+            if !r.is_finite() || r <= 0.0 || pts.iter().flatten().any(|v| !v.is_finite()) {
+                return Ok(None);
+            }
+            max_radius = max_radius.max(r);
+            for p in pts {
+                bounds[0][0] = bounds[0][0].min(p[0]);
+                bounds[0][1] = bounds[0][1].min(p[1]);
+                bounds[1][0] = bounds[1][0].max(p[0]);
+                bounds[1][1] = bounds[1][1].max(p[1]);
+            }
+        }
+        let extent = [bounds[1][0] - bounds[0][0], bounds[1][1] - bounds[0][1]];
+        if !(extent[0].is_finite() && extent[1].is_finite()) {
+            return Ok(None);
+        }
+        let mut cell = ((extent[0] * extent[1]) / edges.len() as f64)
+            .sqrt()
+            .max(2.0 * max_radius)
+            .max(0.5);
+        let dims_for = |cell: f64| {
+            [
+                ((extent[0] / cell).floor().max(0.0) as usize) + 1,
+                ((extent[1] / cell).floor().max(0.0) as usize) + 1,
+            ]
+        };
+        while {
+            let [gx, gy] = dims_for(cell);
+            gx.saturating_mul(gy) > 4 * edges.len() + 64
+        } {
+            cell *= 2.0;
+        }
+        let dims = dims_for(cell);
+        let cells = dims[0] * dims[1];
+        let offset_bytes = (cells + 1).saturating_mul(size_of::<u32>());
+        if offset_bytes.saturating_mul(2) > max_bytes {
+            return Ok(None);
+        }
+        let mut offsets = Vec::new();
+        if offsets.try_reserve_exact(cells + 1).is_err() {
+            return Ok(None);
+        }
+        offsets.resize(cells + 1, 0u32);
+        let origin = bounds[0];
+        let span = |lo: f64, hi: f64, axis: usize| -> (usize, usize) {
+            let first = ((lo - origin[axis]) / cell).floor().max(0.0) as usize;
+            let last = ((hi - origin[axis]) / cell).floor().max(0.0) as usize;
+            (first.min(dims[axis] - 1), last.min(dims[axis] - 1))
+        };
+        for &(pts, width) in edges {
+            check_cancel(cancel)?;
+            let r = width * 0.5;
+            let (x0, x1) = span(
+                pts[0][0].min(pts[1][0]) - r,
+                pts[0][0].max(pts[1][0]) + r,
+                0,
+            );
+            let (y0, y1) = span(
+                pts[0][1].min(pts[1][1]) - r,
+                pts[0][1].max(pts[1][1]) + r,
+                1,
+            );
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    offsets[y * dims[0] + x + 1] = offsets[y * dims[0] + x + 1].saturating_add(1);
+                }
+            }
+        }
+        for i in 0..cells {
+            let Some(sum) = offsets[i + 1].checked_add(offsets[i]) else {
+                return Ok(None);
+            };
+            offsets[i + 1] = sum;
+        }
+        let total = offsets[cells] as usize;
+        if offset_bytes
+            .saturating_mul(2)
+            .saturating_add(total.saturating_mul(size_of::<u32>()))
+            > max_bytes
+        {
+            return Ok(None);
+        }
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(total).is_err() {
+            return Ok(None);
+        }
+        entries.resize(total, 0u32);
+        let mut fill = offsets.clone();
+        for (idx, &(pts, width)) in edges.iter().enumerate() {
+            let r = width * 0.5;
+            let (x0, x1) = span(
+                pts[0][0].min(pts[1][0]) - r,
+                pts[0][0].max(pts[1][0]) + r,
+                0,
+            );
+            let (y0, y1) = span(
+                pts[0][1].min(pts[1][1]) - r,
+                pts[0][1].max(pts[1][1]) + r,
+                1,
+            );
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let slot = &mut fill[y * dims[0] + x];
+                    entries[*slot as usize] = idx as u32;
+                    *slot += 1;
+                }
+            }
+        }
+        Ok(Some(Self {
+            origin,
+            cell,
+            dims,
+            max_radius,
+            offsets,
+            entries,
+        }))
+    }
+
+    fn collect(&self, ends: [[f64; 3]; 2], radius: f64, out: &mut Vec<u32>) {
+        out.clear();
+        let pad = radius + 1e-6;
+        let lo_x = ends[0][0].min(ends[1][0]) - pad;
+        let hi_x = ends[0][0].max(ends[1][0]) + pad;
+        let lo_y = ends[0][1].min(ends[1][1]) - pad;
+        let hi_y = ends[0][1].max(ends[1][1]) + pad;
+        let max_x = self.origin[0] + self.dims[0] as f64 * self.cell + self.max_radius;
+        let max_y = self.origin[1] + self.dims[1] as f64 * self.cell + self.max_radius;
+        if hi_x < self.origin[0] - self.max_radius
+            || lo_x > max_x
+            || hi_y < self.origin[1] - self.max_radius
+            || lo_y > max_y
+        {
+            return;
+        }
+        let span = |lo: f64, hi: f64, axis: usize| -> (usize, usize) {
+            let first = ((lo - self.origin[axis]) / self.cell).floor().max(0.0) as usize;
+            let last = ((hi - self.origin[axis]) / self.cell).floor().max(0.0) as usize;
+            (
+                first.min(self.dims[axis] - 1),
+                last.min(self.dims[axis] - 1),
+            )
+        };
+        let (x0, x1) = span(lo_x, hi_x, 0);
+        let (y0, y1) = span(lo_y, hi_y, 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let cell = y * self.dims[0] + x;
+                let range = self.offsets[cell] as usize..self.offsets[cell + 1] as usize;
+                out.extend_from_slice(&self.entries[range]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+struct CachedLowerEdges {
+    edges: Vec<LowerEdge>,
+    grid: Option<LowerEdgeGrid>,
+}
+
 /// Optional layer-local cache. A failed projection stays on the original
 /// checked query path, preserving its refusal and operand order.
 fn cache_lower_edges(
     previous: &PrintLayer,
     cache_bytes: usize,
     cancel: &AtomicBool,
-) -> Result<Option<Vec<LowerEdge>>, ManufacturingError> {
+) -> Result<Option<CachedLowerEdges>, ManufacturingError> {
     let count = previous.paths.iter().try_fold(0usize, |count, path| {
         count.checked_add(path.points_mm.len().saturating_sub(1))
     });
@@ -374,7 +580,9 @@ fn cache_lower_edges(
         let Ok(points) = points else { return Ok(None) };
         edges.push((points, width));
     }
-    Ok(Some(edges))
+    let remaining = cache_bytes.saturating_sub(edges.capacity() * size_of::<LowerEdge>());
+    let grid = LowerEdgeGrid::build(&edges, remaining, cancel)?;
+    Ok(Some(CachedLowerEdges { edges, grid }))
 }
 
 fn on_sparse_axis(path: &DepositionPath, recipe: &PlanarPrintRecipe, course: u32) -> bool {

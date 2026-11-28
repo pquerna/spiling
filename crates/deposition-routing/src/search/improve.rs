@@ -18,7 +18,7 @@ mod simd_tests;
 
 /// Consecutive kicks that fail to shorten the order before kicking stops.
 /// A stall rule on measured benefit, not a work limit.
-const STALL_KICKS: usize = 48;
+const STALL_KICKS: usize = 12;
 
 /// Longest relocated segment: Or-opt's 3, growing with the group's size so a
 /// large layer is not searched with a small layer's neighbourhood.
