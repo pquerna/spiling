@@ -155,3 +155,33 @@ fn capsule_masks_match_the_exact_reference_on_the_cpu() {
     assert!(set > 1_000);
     assert_eq!(masks[0], crate::CellMask::default());
 }
+
+#[test]
+fn wide_and_far_capsules_match_the_exact_reference_on_the_cpu() {
+    crate::configure(crate::ComputeSettings {
+        default_backend: crate::ComputeBackend::Cpu,
+        fea_backend: None,
+    })
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    for (capsules, rows, columns) in [
+        {
+            let (capsules, rows) = crate::capsule_cases::wide_capsule_cases(3, 40);
+            (capsules, rows, 300)
+        },
+        crate::capsule_cases::far_capsule_cases(5, 200),
+    ] {
+        let group_ends = [capsules.len() / 2, capsules.len()];
+        let masks =
+            crate::capsule_masks(&capsules, &rows, &group_ends, 128, columns, &cancel).unwrap();
+        let set = crate::capsule_cases::assert_masks_match_reference(
+            &capsules,
+            &rows,
+            &group_ends,
+            &masks,
+            128,
+            columns,
+        );
+        assert!(set > 1_000);
+    }
+}

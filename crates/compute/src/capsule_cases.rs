@@ -20,9 +20,11 @@ pub fn capsule_cases(seed: u64, count: usize) -> (Vec<[i64; 5]>, Vec<[u32; 2]>) 
         let ay = next(200 * cell);
         let bx = (ax + next(8193) - 4096).max(0);
         let by = (ay + next(8193) - 4096).max(0);
-        let radius = match next(4) {
+        let radius = match next(5) {
             0 => 0,
             1 => next(4),
+            // The narrow kernel path's largest radius.
+            2 => 1 << 13,
             _ => next(3000),
         };
         capsules.push([ax, ay, bx, by, radius]);
@@ -31,6 +33,41 @@ pub fn capsule_cases(seed: u64, count: usize) -> (Vec<[i64; 5]>, Vec<[u32; 2]>) 
         rows.push([low, high - low + 1]);
     }
     (capsules, rows)
+}
+
+/// Capsules past the narrow kernel path, in batches of their own: radii
+/// above 2^13 ticks, so the 64-bit path decides them.
+pub fn wide_capsule_cases(seed: u64, count: usize) -> (Vec<[i64; 5]>, Vec<[u32; 2]>) {
+    let (mut capsules, _) = capsule_cases(seed, count);
+    let cell = 128;
+    let mut rows = Vec::new();
+    for (index, capsule) in capsules.iter_mut().enumerate() {
+        capsule[4] = (1 << 13) + 1 + (index as i64 * 7_919) % 40_000;
+        let [_, ay, _, by, radius] = *capsule;
+        let low = ((ay.min(by) - radius - 1).max(0) / cell) as u32;
+        let high = ((ay.max(by) + radius) / cell + 1) as u32;
+        rows.push([low, high - low + 1]);
+    }
+    (capsules, rows)
+}
+
+/// Narrow-path capsules at the far edge of the coordinate range, where
+/// absolute ticks approach 2^30, on a grid wide enough to hold them.
+pub fn far_capsule_cases(seed: u64, count: usize) -> (Vec<[i64; 5]>, Vec<[u32; 2]>, i64) {
+    let (mut capsules, _) = capsule_cases(seed, count);
+    let cell = 128;
+    let far = crate::MAX_CAPSULE_TICKS - 300 * cell;
+    let mut rows = Vec::new();
+    for capsule in &mut capsules {
+        for value in &mut capsule[..4] {
+            *value += far;
+        }
+        let [_, ay, _, by, radius] = *capsule;
+        let low = ((ay.min(by) - radius - 1).max(0) / cell) as u32;
+        let high = ((ay.max(by) + radius) / cell + 1) as u32;
+        rows.push([low, high - low + 1]);
+    }
+    (capsules, rows, crate::MAX_CAPSULE_TICKS / cell + 1)
 }
 
 /// Asserts that `masks` hold exactly the exact host reference's cells for

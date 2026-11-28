@@ -535,12 +535,13 @@ struct SpanSource<'a> {
     owned_bytes: usize,
 }
 
-/// One descending chunk's wide part, ready for its ordered carry.
+/// One descending chunk's wide part, ready for its ordered carry: its
+/// raster stage holds each layer's fresh occupancy, then the clearance of
+/// the pieces that can trim each layer's entering seeds, built but not yet
+/// dispatched, so the next chunk's stage builds while this one's kernel runs.
 struct Prepared {
     window: Window,
-    /// Clearance of the pieces that can trim each layer's entering seeds.
-    near: Vec<Option<Bits>>,
-    fresh: Vec<Option<Bits>>,
+    stage: super::grid::OutwardStage,
     charged: usize,
     load: std::time::Duration,
     rasterize: std::time::Duration,
@@ -880,7 +881,8 @@ impl Sweep<'_> {
             radius: self.recipe.bead_width_mm * 0.5,
             owned_bytes: self.owned_bytes,
         };
-        let (mut down_load, mut down_fresh, mut down_seed, mut down_rest): (
+        let (mut down_load, mut down_fresh, mut down_dispatch, mut down_seed, mut down_rest): (
+            std::time::Duration,
             std::time::Duration,
             std::time::Duration,
             std::time::Duration,
@@ -939,7 +941,7 @@ impl Sweep<'_> {
             };
             // Wide part: a chunk's spans and its fresh occupancy read only the
             // source pieces and the seed envelope, so the next chunk loads and
-            // rasterizes while this one carries.
+            // builds its raster stage while this one dispatches and carries.
             let prepare = |(lo, hi): (usize, usize)| -> Result<Prepared, ManufacturingError> {
                 check_cancel(cancel)?;
                 let t0 = std::time::Instant::now();
@@ -959,7 +961,7 @@ impl Sweep<'_> {
                 // stage.
                 let t0 = std::time::Instant::now();
                 let count = hi - lo + 1;
-                let (fresh, near): (Vec<Option<Bits>>, Vec<Option<Bits>>) = {
+                let stage = {
                     let mut batches: Vec<Vec<&Polygon<f64>>> = vec![Vec::new(); 2 * count];
                     for piece in window.iter().flat_map(|(_, pieces)| pieces.iter()) {
                         if let Some(first) = piece.first
@@ -995,30 +997,24 @@ impl Sweep<'_> {
                             }
                         }
                     }
-                    let mut built = raster.outward_groups(&batches, distance)?;
-                    let near = built.split_off(count);
-                    (built, near)
+                    raster.outward_stage(&batches, distance)?
                 };
-                for bits in fresh.iter().chain(&near).flatten() {
-                    hold(bits)?;
-                }
                 Ok(Prepared {
                     window: window.clone(),
-                    near,
-                    fresh,
+                    stage,
                     charged,
                     load,
                     rasterize: t0.elapsed(),
                 })
             };
-            // Thin part: the carry, in layer order.
+            // Thin part: the chunk's kernel batch, then the carry in layer
+            // order.
             let consume = |(lo, hi): (usize, usize),
                            prepared: Prepared|
              -> Result<(), ManufacturingError> {
                 let Prepared {
                     window,
-                    mut near,
-                    mut fresh,
+                    stage,
                     charged,
                     load,
                     rasterize,
@@ -1026,6 +1022,13 @@ impl Sweep<'_> {
                 charge_owned_work(work, self.foreign_work, charged, cancel)?;
                 down_load += load;
                 down_fresh += rasterize;
+                let t0 = std::time::Instant::now();
+                let mut fresh = raster.finish_outward(stage)?;
+                let mut near = fresh.split_off(hi - lo + 1);
+                for bits in fresh.iter().chain(&near).flatten() {
+                    hold(bits)?;
+                }
+                down_dispatch += t0.elapsed();
                 for l in (lo..=hi).rev() {
                     check_cancel(cancel)?;
                     let fresh = fresh[l - lo].take();
@@ -1320,7 +1323,7 @@ impl Sweep<'_> {
         if std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some() {
             eprintln!(
                 "{}",
-                serde_json::json!({"event": "support_down_detail", "tree_descend": tree_time[0].as_secs_f64(), "tree_slice": tree_time[1].as_secs_f64(), "tree_clip": tree_time[2].as_secs_f64(), "load": down_load.as_secs_f64(), "fresh": down_fresh.as_secs_f64(), "seed": down_seed.as_secs_f64(), "rest": down_rest.as_secs_f64()})
+                serde_json::json!({"event": "support_down_detail", "tree_descend": tree_time[0].as_secs_f64(), "tree_slice": tree_time[1].as_secs_f64(), "tree_clip": tree_time[2].as_secs_f64(), "load": down_load.as_secs_f64(), "fresh": down_fresh.as_secs_f64(), "dispatch": down_dispatch.as_secs_f64(), "seed": down_seed.as_secs_f64(), "rest": down_rest.as_secs_f64()})
             );
         }
 

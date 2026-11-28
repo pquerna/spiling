@@ -229,13 +229,13 @@ pub(crate) fn masks_dispatch(
 
 /// Distance from `value` to the closed interval `[low, high]`.
 #[cube]
-fn interval_gap(value: i64, low: i64, high: i64) -> i64 {
-    (low - value).max(value - high).max(i64::new(0))
+fn interval_gap<N: Int>(value: N, low: N, high: N) -> N {
+    (low - value).max(value - high).max(N::new(0))
 }
 
 /// Whether `(px, py)` is within `sqrt(r2)` of segment `a`–`b`, exactly.
 #[cube]
-fn point_within(ax: i64, ay: i64, bx: i64, by: i64, px: i64, py: i64, r2: i64) -> bool {
+fn point_within<N: Int>(ax: N, ay: N, bx: N, by: N, px: N, py: N, r2: N) -> bool {
     let dx = bx - ax;
     let dy = by - ay;
     let wx = px - ax;
@@ -245,30 +245,25 @@ fn point_within(ax: i64, ay: i64, bx: i64, by: i64, px: i64, py: i64, r2: i64) -
     let ex = px - bx;
     let ey = py - by;
     let cross = dx * wy - dy * wx;
-    let before = along <= 0 && wx * wx + wy * wy <= r2;
-    let after = along > 0 && along >= length2 && ex * ex + ey * ey <= r2;
-    let beside = along > 0 && along < length2 && cross * cross <= r2 * length2;
+    let zero = N::new(0);
+    let before = along <= zero && wx * wx + wy * wy <= r2;
+    let after = along > zero && along >= length2 && ex * ex + ey * ey <= r2;
+    // The only products wider than 32 bits on the narrow path.
+    let wide_cross = i64::cast_from(cross);
+    let beside = along > zero
+        && along < length2
+        && wide_cross * wide_cross <= i64::cast_from(r2) * i64::cast_from(length2);
     before || after || beside
 }
 
 /// Whether the closed square `[x0, x1] × [y0, y1]` meets the closed capsule
 /// of squared radius `r2` around segment `a`–`b`, exactly in integers.
 #[cube]
-fn cell_meets(
-    ax: i64,
-    ay: i64,
-    bx: i64,
-    by: i64,
-    r2: i64,
-    x0: i64,
-    y0: i64,
-    x1: i64,
-    y1: i64,
-) -> bool {
-    let gax = interval_gap(ax, x0, x1);
-    let gay = interval_gap(ay, y0, y1);
-    let gbx = interval_gap(bx, x0, x1);
-    let gby = interval_gap(by, y0, y1);
+fn cell_meets<N: Int>(ax: N, ay: N, bx: N, by: N, r2: N, x0: N, y0: N, x1: N, y1: N) -> bool {
+    let gax = interval_gap::<N>(ax, x0, x1);
+    let gay = interval_gap::<N>(ay, y0, y1);
+    let gbx = interval_gap::<N>(bx, x0, x1);
+    let gby = interval_gap::<N>(by, y0, y1);
     let mut meets = gax * gax + gay * gay <= r2 || gbx * gbx + gby * gby <= r2;
     if !meets {
         let overlaps = ax.max(bx) >= x0 && ax.min(bx) <= x1 && ay.max(by) >= y0 && ay.min(by) <= y1;
@@ -279,16 +274,17 @@ fn cell_meets(
             let s1 = dx * (y0 - ay) - dy * (x1 - ax);
             let s2 = dx * (y1 - ay) - dy * (x0 - ax);
             let s3 = dx * (y1 - ay) - dy * (x1 - ax);
-            let above = s0 > 0 && s1 > 0 && s2 > 0 && s3 > 0;
-            let below = s0 < 0 && s1 < 0 && s2 < 0 && s3 < 0;
+            let zero = N::new(0);
+            let above = s0 > zero && s1 > zero && s2 > zero && s3 > zero;
+            let below = s0 < zero && s1 < zero && s2 < zero && s3 < zero;
             meets = !above && !below;
         }
     }
     if !meets {
-        meets = point_within(ax, ay, bx, by, x0, y0, r2)
-            || point_within(ax, ay, bx, by, x1, y0, r2)
-            || point_within(ax, ay, bx, by, x0, y1, r2)
-            || point_within(ax, ay, bx, by, x1, y1, r2);
+        meets = point_within::<N>(ax, ay, bx, by, x0, y0, r2)
+            || point_within::<N>(ax, ay, bx, by, x1, y0, r2)
+            || point_within::<N>(ax, ay, bx, by, x0, y1, r2)
+            || point_within::<N>(ax, ay, bx, by, x1, y1, r2);
     }
     meets
 }
@@ -349,13 +345,11 @@ fn section(dx: f32, dy: f32, radius: f32, y: f32) -> (f32, f32) {
 /// The column holding relative position `offset` from absolute tick
 /// `origin`, without losing the origin's precision.
 #[cube]
-fn column_of(origin: i64, offset: f32, cell: i64) -> i64 {
-    let mut base = origin / cell;
-    if base * cell > origin {
-        base -= 1;
-    }
+fn column_of<N: Int>(origin: N, offset: f32, cell: N, shift: N) -> N {
+    // An arithmetic shift is floor division by the power-of-two cell.
+    let base = origin >> shift;
     let rest = f32::cast_from(origin - base * cell) + offset;
-    base + i64::cast_from((rest / f32::cast_from(cell)).floor())
+    base + N::cast_from((rest / f32::cast_from(cell)).floor())
 }
 
 /// The last capsule whose first job is at or before `job`.
@@ -381,19 +375,27 @@ fn capsule_of(starts: &[u32], capsule_count: u32, job: u32) -> u32 {
 /// a missed guess falls back to bisection from the capsule's seed column,
 /// which is a hit whenever the row is.
 #[cube]
-fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -> (i64, i64) {
+fn row_span<N: Int>(
+    capsules: &[i64],
+    index: usize,
+    row: N,
+    cell: N,
+    shift: N,
+    columns: N,
+) -> (N, N) {
     let capsule = index * 5;
-    let ax = capsules[capsule];
-    let ay = capsules[capsule + 1];
-    let bx = capsules[capsule + 2];
-    let by = capsules[capsule + 3];
-    let radius = capsules[capsule + 4];
+    let ax = N::cast_from(capsules[capsule]);
+    let ay = N::cast_from(capsules[capsule + 1]);
+    let bx = N::cast_from(capsules[capsule + 2]);
+    let by = N::cast_from(capsules[capsule + 3]);
+    let radius = N::cast_from(capsules[capsule + 4]);
+    let one = N::new(1);
     let r2 = radius * radius;
     let y0 = row * cell;
     let y1 = y0 + cell;
     // The capsule's axis point nearest the row: on the segment where it
     // crosses the row's middle, else its endpoint nearest the row.
-    let middle = y0 + cell / 2;
+    let middle = y0 + (cell >> one);
     let low_y = ay.min(by);
     let high_y = ay.max(by);
     let mut seed_x = ax;
@@ -408,11 +410,14 @@ fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -
     } else {
         seed_x = ax + (middle - ay) * (bx - ax) / (by - ay);
     }
-    let first_column = ((ax.min(bx) - radius - 1).max(0) / cell).min(columns - 1);
-    let last_column = ((ax.max(bx) + radius).max(0) / cell).min(columns - 1);
-    let seed = (seed_x.max(0) / cell).max(first_column).min(last_column);
-    let mut low = i64::new(-1);
-    let mut high = i64::new(-2);
+    let zero = N::new(0);
+    let first_column = ((ax.min(bx) - radius - one).max(zero) >> shift).min(columns - one);
+    let last_column = ((ax.max(bx) + radius).max(zero) >> shift).min(columns - one);
+    let seed = (seed_x.max(zero) >> shift)
+        .max(first_column)
+        .min(last_column);
+    let mut low = N::new(-1);
+    let mut high = N::new(-2);
     // A single-precision guess of the row's interval, settled by exact
     // tests at its two ends: usually four tests in all. The cells that
     // meet form one interval, so walking from any hit is exact.
@@ -436,9 +441,13 @@ fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -
         let left = section(fdx, fdy, fr, left_y.max(band_low).min(band_high)).0;
         let right = section(fdx, fdy, fr, right_y.max(band_low).min(band_high)).1;
         if left <= right {
-            let guess_low = column_of(ax, left, cell).max(first_column).min(last_column);
-            let guess_high = column_of(ax, right, cell).max(guess_low).min(last_column);
-            if cell_meets(
+            let guess_low = column_of::<N>(ax, left, cell, shift)
+                .max(first_column)
+                .min(last_column);
+            let guess_high = column_of::<N>(ax, right, cell, shift)
+                .max(guess_low)
+                .min(last_column);
+            if cell_meets::<N>(
                 ax,
                 ay,
                 bx,
@@ -452,15 +461,15 @@ fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -
                 guessed = true;
                 let mut lo = guess_low;
                 while lo > first_column
-                    && cell_meets(ax, ay, bx, by, r2, lo * cell - cell, y0, lo * cell, y1)
+                    && cell_meets::<N>(ax, ay, bx, by, r2, lo * cell - cell, y0, lo * cell, y1)
                 {
-                    lo -= 1;
+                    lo -= one;
                 }
                 low = lo;
                 let mut hi = guess_high;
-                if cell_meets(ax, ay, bx, by, r2, hi * cell, y0, hi * cell + cell, y1) {
+                if cell_meets::<N>(ax, ay, bx, by, r2, hi * cell, y0, hi * cell + cell, y1) {
                     while hi < last_column
-                        && cell_meets(
+                        && cell_meets::<N>(
                             ax,
                             ay,
                             bx,
@@ -472,28 +481,29 @@ fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -
                             y1,
                         )
                     {
-                        hi += 1;
+                        hi += one;
                     }
                 } else {
-                    hi -= 1;
-                    while !cell_meets(ax, ay, bx, by, r2, hi * cell, y0, hi * cell + cell, y1) {
-                        hi -= 1;
+                    hi -= one;
+                    while !cell_meets::<N>(ax, ay, bx, by, r2, hi * cell, y0, hi * cell + cell, y1)
+                    {
+                        hi -= one;
                     }
                 }
                 high = hi;
             }
         }
     }
-    if !guessed && cell_meets(ax, ay, bx, by, r2, seed * cell, y0, seed * cell + cell, y1) {
+    if !guessed && cell_meets::<N>(ax, ay, bx, by, r2, seed * cell, y0, seed * cell + cell, y1) {
         // First hit in [first_column, seed].
         let mut lo = first_column;
         let mut hi = seed;
         while lo < hi {
-            let mid = (lo + hi) / 2;
-            if cell_meets(ax, ay, bx, by, r2, mid * cell, y0, mid * cell + cell, y1) {
+            let mid = (lo + hi) >> one;
+            if cell_meets::<N>(ax, ay, bx, by, r2, mid * cell, y0, mid * cell + cell, y1) {
                 hi = mid;
             } else {
-                lo = mid + 1;
+                lo = mid + one;
             }
         }
         low = lo;
@@ -501,11 +511,11 @@ fn row_span(capsules: &[i64], index: usize, row: i64, cell: i64, columns: i64) -
         lo = seed;
         hi = last_column;
         while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            if cell_meets(ax, ay, bx, by, r2, mid * cell, y0, mid * cell + cell, y1) {
+            let mid = (lo + hi + one) >> one;
+            if cell_meets::<N>(ax, ay, bx, by, r2, mid * cell, y0, mid * cell + cell, y1) {
                 lo = mid;
             } else {
-                hi = mid - 1;
+                hi = mid - one;
             }
         }
         high = lo;
@@ -530,10 +540,12 @@ fn capsule_masks(
     output: &mut [Atomic<u32>],
     overflow: &mut [Atomic<u32>],
     cell: i64,
+    shift: i64,
     columns: i64,
     job_offset: u32,
     job_count: u32,
     #[comptime] contiguous: bool,
+    #[comptime] narrow: bool,
 ) {
     let capsule_count = first_rows.len() as u32;
     let count = job_count as usize;
@@ -565,7 +577,33 @@ fn capsule_masks(
         }
         let index = first as usize;
         let row = first_rows[index] + (job - starts[index]);
-        let (low, high) = row_span(capsules, index, row as i64, cell, columns);
+        // A row beyond the capsule's reach meets no cell; skipping it also
+        // bounds every operand of the narrow path.
+        let ay = capsules[index * 5 + 1];
+        let by = capsules[index * 5 + 3];
+        let radius = capsules[index * 5 + 4];
+        let y0 = i64::cast_from(row) * cell;
+        let mut low = i64::new(-1);
+        let mut high = i64::new(-2);
+        if y0 + cell >= ay.min(by) - radius && y0 <= ay.max(by) + radius {
+            if narrow {
+                let (l, h) = row_span::<i32>(
+                    capsules,
+                    index,
+                    i32::cast_from(row),
+                    i32::cast_from(cell),
+                    i32::cast_from(shift),
+                    i32::cast_from(columns),
+                );
+                low = i64::cast_from(l);
+                high = i64::cast_from(h);
+            } else {
+                let (l, h) =
+                    row_span::<i64>(capsules, index, i64::cast_from(row), cell, shift, columns);
+                low = l;
+                high = h;
+            }
+        }
         if low >= 0 {
             let window = capsule_windows[index] as usize * 5;
             let base = windows[window];
@@ -633,6 +671,13 @@ pub(crate) fn capsule_masks_dispatch(
             "invalid internal capsule batch".into(),
         ));
     }
+    // Radii up to NARROW_RADIUS_TICKS keep every operand but one product
+    // within 32 bits (see `row_span`), which the GPU runs natively.
+    let narrow = capsules
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .all(|capsule| capsule[4] <= NARROW_RADIUS_TICKS);
     let cpu_units = cpu_units(client);
     let capsule_handle = client.create_from_slice(i64::as_bytes(capsules));
     let start_handle = client.create_from_slice(u32::as_bytes(starts));
@@ -681,10 +726,12 @@ pub(crate) fn capsule_masks_dispatch(
                 BufferArg::from_raw_parts(output_handle.clone(), words),
                 BufferArg::from_raw_parts(overflow_handle.clone(), 1),
                 cell,
+                i64::from(cell.trailing_zeros()),
                 columns,
                 tile_offset,
                 tile_jobs,
                 cpu,
+                narrow,
             );
         }
         offset += tile;
@@ -717,6 +764,13 @@ pub(crate) fn capsule_masks_dispatch(
     }));
     Ok(values)
 }
+
+/// Largest radius the 32-bit kernel path takes. Coordinates are within
+/// `MAX_CAPSULE_TICKS` (2^30) and segments within 2^12 ticks, so with
+/// radius at most 2^13 every offset a reachable cell has from either end
+/// stays under 2^14 and each product under 2^29; only the side test's
+/// squared cross product and `r2 * length2` take 64 bits.
+const NARROW_RADIUS_TICKS: i64 = 1 << 13;
 
 /// Jobs per capsule dispatch tile.
 const CAPSULE_TILE_JOBS: usize = 1 << 21;

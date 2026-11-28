@@ -456,8 +456,12 @@ struct Span {
     to: u32,
 }
 
-/// One group's interior spans and edge capsules, before its kernel batch.
-type GroupInput = (Vec<Span>, Vec<CapsuleInput>);
+/// The host half of an outward raster stage, ready for its kernel batch:
+/// each group's interior spans and capsules, and which groups are empty.
+pub(super) struct OutwardStage {
+    empty: Vec<bool>,
+    groups: Vec<(Vec<Span>, KernelPieces)>,
+}
 /// One group's capsules in kernel ticks and the rows `[first, count]` each
 /// can reach.
 type KernelPieces = (Vec<[i64; 5]>, Vec<[u32; 2]>);
@@ -644,15 +648,40 @@ impl Raster<'_> {
         groups: &[G],
         distance: f64,
     ) -> Result<Vec<Option<Bits>>, ManufacturingError> {
+        let stage = self.outward_stage(groups, distance)?;
+        self.finish_outward(stage)
+    }
+
+    /// The host half of [`Self::outward_groups`]: each group's interior
+    /// spans and kernel-ready capsules. It reads only its inputs, so a
+    /// caller may build the next stage while this one's kernel runs.
+    pub(super) fn outward_stage<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[G],
+        distance: f64,
+    ) -> Result<OutwardStage, ManufacturingError> {
+        Ok(OutwardStage {
+            empty: groups.iter().map(|g| g.as_ref().is_empty()).collect(),
+            groups: self.group_inputs(groups, distance)?,
+        })
+    }
+
+    /// The kernel half of [`Self::outward_groups`]: one batch for every
+    /// group's capsules, then each group's interior added.
+    pub(super) fn finish_outward(
+        &self,
+        stage: OutwardStage,
+    ) -> Result<Vec<Option<Bits>>, ManufacturingError> {
         use rayon::prelude::*;
         let working_set = crate::working_set::current();
+        let OutwardStage { empty, groups } = stage;
         let built: Vec<Result<Option<Bits>, ManufacturingError>> = self
-            .raster_groups(groups, distance)?
+            .dispatch(groups)?
             .into_par_iter()
-            .zip(groups)
-            .map(|((inside, boundary), group)| {
+            .zip(empty)
+            .map(|((inside, boundary), empty)| {
                 crate::working_set::scope(working_set, || {
-                    if group.as_ref().is_empty() {
+                    if empty {
                         return Ok(None);
                     }
                     self.with_spans(boundary, &inside).map(Some)
@@ -672,9 +701,20 @@ impl Raster<'_> {
         groups: &[G],
         radius: f64,
     ) -> Result<Vec<(Vec<Span>, Bits)>, ManufacturingError> {
+        let inputs = self.group_inputs(groups, radius)?;
+        self.dispatch(inputs)
+    }
+
+    /// Each group's interior spans and its edge capsules of `radius` in
+    /// kernel ticks, built in parallel per group.
+    fn group_inputs<'p, G: AsRef<[&'p Polygon<f64>]> + Sync>(
+        &self,
+        groups: &[G],
+        radius: f64,
+    ) -> Result<Vec<(Vec<Span>, KernelPieces)>, ManufacturingError> {
         use rayon::prelude::*;
         let working_set = crate::working_set::current();
-        let prepared: Vec<Result<GroupInput, ManufacturingError>> = groups
+        let prepared: Vec<Result<(Vec<Span>, KernelPieces), ManufacturingError>> = groups
             .par_iter()
             .map(|group| {
                 crate::working_set::scope(working_set, || {
@@ -690,20 +730,29 @@ impl Raster<'_> {
                             batch.push(CapsuleInput { a, b, radius });
                         }
                     }
-                    Ok((spans, batch))
+                    let pieces = self.capsule_pieces(&batch)?;
+                    Ok((spans, pieces))
                 })
             })
             .collect();
-        let prepared = prepared.into_iter().collect::<Result<Vec<_>, _>>()?;
-        let batches: Vec<&[CapsuleInput]> =
-            prepared.iter().map(|(_, batch)| batch.as_slice()).collect();
-        let boundaries = self.capsule_groups(&batches)?;
-        drop(batches);
-        Ok(prepared
-            .into_iter()
-            .map(|(inside, _)| inside)
-            .zip(boundaries)
-            .collect())
+        prepared.into_iter().collect()
+    }
+
+    /// Run every group's kernel pieces as one batch, keeping each group's
+    /// spans beside its cells.
+    fn dispatch(
+        &self,
+        groups: Vec<(Vec<Span>, KernelPieces)>,
+    ) -> Result<Vec<(Vec<Span>, Bits)>, ManufacturingError> {
+        let mut spans = Vec::new();
+        let mut pieces = Vec::new();
+        self.reserve(&mut spans, groups.len())?;
+        self.reserve(&mut pieces, groups.len())?;
+        for (group_spans, group_pieces) in groups {
+            spans.push(group_spans);
+            pieces.push(group_pieces);
+        }
+        Ok(spans.into_iter().zip(self.mask_groups(pieces)?).collect())
     }
 
     /// `bits` with every span's cells added: in place when they fit its
@@ -1046,13 +1095,21 @@ impl Raster<'_> {
             })
             .collect();
         let prepared = prepared.into_iter().collect::<Result<Vec<_>, _>>()?;
+        self.mask_groups(prepared)
+    }
+
+    /// Each group's cells from its kernel pieces, in one batch.
+    fn mask_groups(&self, prepared: Vec<KernelPieces>) -> Result<Vec<Bits>, ManufacturingError> {
+        use rayon::prelude::*;
+        let working_set = crate::working_set::current();
+        let groups = prepared.len();
         let count: usize = prepared.iter().map(|(pieces, _)| pieces.len()).sum();
         let mut pieces = Vec::new();
         let mut rows = Vec::new();
         let mut ends = Vec::new();
         self.reserve(&mut pieces, count)?;
         self.reserve(&mut rows, count)?;
-        self.reserve(&mut ends, groups.len())?;
+        self.reserve(&mut ends, groups)?;
         for (group_pieces, group_rows) in prepared {
             pieces.extend_from_slice(&group_pieces);
             rows.extend_from_slice(&group_rows);

@@ -264,7 +264,7 @@ pub struct CellMask {
 }
 
 /// Every cell whose closed square meets a closed capsule `[ax, ay, bx, by,
-/// radius]` (integer ticks, `cell` ticks per grid cell, columns
+/// radius]` (integer ticks, `cell` ticks per grid cell, a power of two; columns
 /// `0..columns`), per group. Capsule `i` reaches `rows[i][1]` rows from
 /// `rows[i][0]`; group `g` holds capsules `group_ends[g - 1]..group_ends[g]`.
 /// Exact integer decisions: identical on every backend. Any batch size runs;
@@ -278,7 +278,11 @@ pub fn capsule_masks(
     cancel: &AtomicBool,
 ) -> Result<Vec<CellMask>, ComputeError> {
     check_cancel(cancel)?;
-    if !(1..=1 << 16).contains(&cell) || !(1..=i64::from(i32::MAX)).contains(&columns) {
+    // A power-of-two cell lets the kernel divide by shifting.
+    if !(1..=1 << 16).contains(&cell)
+        || cell.count_ones() != 1
+        || !(1..=i64::from(i32::MAX)).contains(&columns)
+    {
         return Err(ComputeError::InvalidInput("capsule grid shape"));
     }
     if rows.len() != capsules.len()
@@ -382,7 +386,11 @@ pub fn capsule_rows_reference(capsule: [i64; 5], row: u32, cell: i64, columns: i
         }
         within(x0, y0) || within(x1, y0) || within(x0, y1) || within(x1, y1)
     };
-    let hits: Vec<i64> = (0..columns).filter(|&column| meets(column)).collect();
+    // A column outside the capsule's bounding box, widened by two cells,
+    // cannot meet it; the scan covers every other column.
+    let first = ((ax.min(bx) - radius).div_euclid(cell) - 2).max(0);
+    let last = ((ax.max(bx) + radius).div_euclid(cell) + 2).min(columns - 1);
+    let hits: Vec<i64> = (first..=last).filter(|&column| meets(column)).collect();
     match (hits.first(), hits.last()) {
         (Some(&first), Some(&last)) => [first as i32, last as i32],
         _ => [-1, -2],

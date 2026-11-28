@@ -95,9 +95,14 @@ Only three predicate specializations are compiled; initialization exercises
 the crossing specialization.
 
 `capsule_masks` rasterizes groups of closed capsules (integer ticks) into
-each group's dense window of 64-cell words. Decisions are exact i64 tests, so
-every backend sets the same cells; a single-precision guess of each row's
-interval only chooses where the exact walk starts. The crate derives each
+each group's dense window of 64-cell words. Decisions are exact integer
+tests, so every backend sets the same cells; a single-precision guess of each
+row's interval only chooses where the exact walk starts. The cell is a power
+of two, so column division is a shift. A segment whose radii are all at most
+2^13 ticks runs the 32-bit path (every operand of a reachable cell fits, and
+only the side test's squared products widen to i64); any other runs in i64.
+Rows beyond a capsule's reach are skipped before either path. Host packing and
+upload, not the integer tests, are most of a call's cost on an integrated GPU. The crate derives each
 group's window from the kernel's own row and column bounds, and a hit outside
 it refuses. A capsule owns a contiguous job range found by bisection, so no
 per-job input is uploaded; batches of any size run as segments of whole

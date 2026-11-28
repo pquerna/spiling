@@ -33,4 +33,25 @@ fn capsule_masks_match_the_exact_reference_on_vulkan() {
         128,
         columns,
     );
+    // The 64-bit path, and the narrow one at the far edge of the range.
+    for (capsules, rows, columns) in [
+        {
+            let (capsules, rows) = spiling_compute::capsule_cases::wide_capsule_cases(3, 40);
+            (capsules, rows, 300)
+        },
+        spiling_compute::capsule_cases::far_capsule_cases(5, 200),
+    ] {
+        let group_ends = [capsules.len() / 2, capsules.len()];
+        let masks =
+            spiling_compute::capsule_masks(&capsules, &rows, &group_ends, 128, columns, &cancel)
+                .unwrap();
+        spiling_compute::capsule_cases::assert_masks_match_reference(
+            &capsules,
+            &rows,
+            &group_ends,
+            &masks,
+            128,
+            columns,
+        );
+    }
 }
