@@ -335,31 +335,43 @@ impl Workbench {
             && self.display_current();
         let reason = (!ready).then_some("Open a writable project and wait for pending operations");
         // The engine's one placement rule, the same as the CLI's
-        // --place-on-bed / --center-on-bed (selected part) and
-        // --place-all-on-bed / --center-all-on-bed (no selection): rest on the
-        // bed, keep XY when the printer admits it there, else centre; one
-        // undo step.
-        let place = |center_xy| GeometryCommand::PlaceOnBed {
+        // --place-on-bed / --center-on-bed / --auto-orient (selected part) and
+        // --place-all-on-bed / --center-all-on-bed / --auto-orient-all (no
+        // selection): rest on the bed, optionally choose a lower-overhang
+        // resting orientation, keep XY when the printer admits it there, else
+        // centre; one undo step.
+        let place = |center_xy, auto_orient| GeometryCommand::PlaceOnBed {
             session_id: hello.session_id.clone(),
             base_revision: scene.summary.revision,
             project_revision: project.revision,
             occurrence_id: occurrence.map(|o| o.occurrence_id),
             center_xy,
+            auto_orient,
         };
-        let (place_label, centre_label) = if occurrence.is_some() {
-            ("Place on bed", "Centre on bed")
+        let (place_label, centre_label, orient_label) = if occurrence.is_some() {
+            ("Place on bed", "Centre on bed", "Auto-orient")
         } else {
-            ("Place all on bed", "Centre all on bed")
+            ("Place all on bed", "Centre all on bed", "Auto-orient all")
         };
         if ui::primary(ui, place_label, reason) {
-            self.queued_geometry = Some(place(false));
+            self.queued_geometry = Some(place(false, false));
         }
         if ui
             .add_enabled(reason.is_none(), egui::Button::new(centre_label))
             .on_disabled_hover_text(reason.unwrap_or_default())
             .clicked()
         {
-            self.queued_geometry = Some(place(true));
+            self.queued_geometry = Some(place(true, false));
+        }
+        if ui
+            .add_enabled(reason.is_none(), egui::Button::new(orient_label))
+            .on_hover_text(
+                "Choose a resting orientation that reduces overhang and improves bed contact, then rest on the bed",
+            )
+            .on_disabled_hover_text(reason.unwrap_or_default())
+            .clicked()
+        {
+            self.queued_geometry = Some(place(false, true));
         }
     }
     pub(super) fn manufacturing_ui(&mut self, ui: &mut egui::Ui) {

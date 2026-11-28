@@ -49,6 +49,7 @@ message PlaceOnBedRequest {
   uint32 project_revision = 4;
   bool center_xy = 5;
   optional uint32 occurrence_id = 6;
+  bool auto_orient = 7;
 }
 enum BedGroupOutcome {
   BED_GROUP_OUTCOME_UNSPECIFIED = 0;

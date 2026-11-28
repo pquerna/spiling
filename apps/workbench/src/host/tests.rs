@@ -954,6 +954,7 @@ fn manufacturing_review_export_stale_edit_and_source_independent_reopen() {
         project_revision: s.project.as_ref().unwrap().revision,
         occurrence_id: Some(o.occurrence_id),
         center_xy: true,
+        auto_orient: false,
     })
     .unwrap();
     let s = idle_after(&host, serial);
@@ -2319,6 +2320,7 @@ fn place_on_bed(host: &Host) -> Snapshot {
         project_revision: s.project.as_ref().unwrap().revision,
         occurrence_id: Some(o.occurrence_id),
         center_xy: true,
+        auto_orient: false,
     })
     .unwrap();
     idle_after(host, serial)

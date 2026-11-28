@@ -4,6 +4,7 @@
 
 mod analysis;
 mod appearance;
+mod auto_orient;
 mod bed_group;
 mod bed_pose;
 mod execution;
@@ -1720,6 +1721,7 @@ impl Runtime {
                 project_revision,
                 occurrence_id,
                 center_xy,
+                auto_orient,
             } => {
                 self.base(&session_id, base_revision)?;
                 if project_revision != self.project.info().revision {
@@ -1785,6 +1787,7 @@ impl Runtime {
                     printer,
                     hardware,
                     center_xy,
+                    auto_orient,
                 })
             }
             GeometryCommand::AddInstance {

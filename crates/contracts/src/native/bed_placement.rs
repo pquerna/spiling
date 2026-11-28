@@ -20,6 +20,7 @@ impl TryFrom<rpc::PlaceOnBedRequest> for GeometryCommand {
                 .transpose()
                 .map_err(|error| error.to_string())?,
             center_xy: value.center_xy,
+            auto_orient: value.auto_orient,
         })
     }
 }

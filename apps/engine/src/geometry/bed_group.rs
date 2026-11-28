@@ -22,6 +22,8 @@ pub(super) struct Member {
     pub upper_mm: [f64; 3],
     /// Z translation that rests this member on the bed.
     pub drop_mm: f64,
+    /// True when auto-orient changed this member's rotation.
+    pub rotated: bool,
 }
 
 pub(super) struct Decision {
@@ -90,7 +92,8 @@ pub(super) fn decide(
     if !printer.envelope_admits(&placed_bounds_mm) {
         return result(BedGroupOutcome::DoesNotFit, placed_bounds_mm, vec![]);
     }
-    if !centre && lift.abs() <= printer.motion_resolution.z_mm {
+    let any_rotated = members.iter().any(|member| member.rotated);
+    if !centre && !any_rotated && lift.abs() <= printer.motion_resolution.z_mm {
         return result(BedGroupOutcome::Unchanged, placed([0.0; 3]), vec![]);
     }
     let moves = members
@@ -149,6 +152,7 @@ mod tests {
             lower_mm: [x, y, z],
             upper_mm: [x + size[0], y + size[1], z + size[2]],
             drop_mm: -z,
+            rotated: false,
         }
     }
 

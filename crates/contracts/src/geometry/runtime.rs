@@ -111,6 +111,7 @@ pub enum GeometryCommand {
         project_revision: crate::project::ProjectRevision,
         occurrence_id: Option<OccurrenceId>,
         center_xy: bool,
+        auto_orient: bool,
     },
     GetArtifactPage {
         session_id: SessionId,

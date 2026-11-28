@@ -118,8 +118,8 @@ enum Operation {
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
     /// The engine's one placement rule: the named part, or every part of
-    /// the plate as one rigid group; `true` always centres.
-    PlaceOnBed(Option<OccurrenceId>, bool),
+    /// the plate as one rigid group; `(center_xy, auto_orient)`.
+    PlaceOnBed(Option<OccurrenceId>, bool, bool),
     PrepareLayout(LayoutRequest),
     ApplyLayout,
     Remove(OccurrenceId),
@@ -897,14 +897,20 @@ pub fn parse(
                 };
             }
             Some("--apply-layout") => operations.push(Operation::ApplyLayout),
-            Some("--place-all-on-bed" | "--center-all-on-bed") => {
-                operations.push(Operation::PlaceOnBed(None, arg == "--center-all-on-bed"));
+            Some("--place-all-on-bed" | "--center-all-on-bed" | "--auto-orient-all") => {
+                operations.push(Operation::PlaceOnBed(
+                    None,
+                    arg == "--center-all-on-bed",
+                    arg == "--auto-orient-all",
+                ));
             }
-            Some("--place-on-bed" | "--center-on-bed") => {
+            Some("--place-on-bed" | "--center-on-bed" | "--auto-orient") => {
                 let center = arg == "--center-on-bed";
-                let id =
-                    OccurrenceId::new(text(&mut args, "--place-on-bed/--center-on-bed")?.parse()?)?;
-                operations.push(Operation::PlaceOnBed(Some(id), center));
+                let auto_orient = arg == "--auto-orient";
+                let id = OccurrenceId::new(
+                    text(&mut args, "--place-on-bed/--center-on-bed/--auto-orient")?.parse()?,
+                )?;
+                operations.push(Operation::PlaceOnBed(Some(id), center, auto_orient));
             }
             Some("--compile") => operations.push(Operation::Compile),
             Some("--verify") => operations.push(Operation::Verify),
@@ -3121,20 +3127,28 @@ async fn execute(
                 Box::pin(layout::apply(client, p)).await?;
                 layout_proposal = None;
             }
-            Operation::PlaceOnBed(occurrence_id, center) => {
-                label = match (occurrence_id, center) {
-                    (Some(_), false) => "place_on_bed",
-                    (Some(_), true) => "center_on_bed",
-                    (None, false) => "place_all_on_bed",
-                    (None, true) => "center_all_on_bed",
+            Operation::PlaceOnBed(occurrence_id, center, auto_orient) => {
+                label = match (occurrence_id, center, auto_orient) {
+                    (Some(_), _, true) => "auto_orient",
+                    (None, _, true) => "auto_orient_all",
+                    (Some(_), false, false) => "place_on_bed",
+                    (Some(_), true, false) => "center_on_bed",
+                    (None, false, false) => "place_all_on_bed",
+                    (None, true, false) => "center_all_on_bed",
                 };
-                // One engine rule for both clients: rest the part (or the
-                // plate as a group), keep XY when admitted there, else centre
-                // on the usable region.
+                // One engine rule for both clients: optionally pick a better
+                // resting orientation, rest the part (or the plate as a group),
+                // keep XY when admitted there, else centre on the usable region.
                 let summary = geometry::scene(client, &session).await?;
                 let project_revision = info(client).await?.revision;
                 let (_, placement) = client
-                    .place_on_bed(&summary, project_revision, occurrence_id, center)
+                    .place_on_bed_oriented(
+                        &summary,
+                        project_revision,
+                        occurrence_id,
+                        center,
+                        auto_orient,
+                    )
                     .await?;
                 if placement.outcome == BedGroupOutcome::DoesNotFit {
                     return Err(BuildEnvelopeExceeded {
@@ -4216,11 +4230,12 @@ mod tests {
             workflow.operations.as_slice(),
             [Operation::Preflight]
         ));
-        for flag in ["--place-on-bed", "--center-on-bed"] {
+        for flag in ["--place-on-bed", "--center-on-bed", "--auto-orient"] {
             assert!(parse_args(&["inspect", "project", flag, "1"]).is_err());
             assert!(parse_args(&["open", "project", flag, "0"]).is_err());
             assert!(parse_args(&["open", "project", flag]).is_err());
         }
+        assert!(parse_args(&["inspect", "project", "--auto-orient-all"]).is_err());
         let options = parse_args(&[
             "edit",
             "project",
@@ -4228,6 +4243,9 @@ mod tests {
             "1",
             "--center-on-bed",
             "2",
+            "--auto-orient",
+            "3",
+            "--auto-orient-all",
             "--preflight",
             "--compile",
             "--verify",
@@ -4240,8 +4258,10 @@ mod tests {
         assert!(matches!(
             workflow.operations.as_slice(),
             [
-                Operation::PlaceOnBed(Some(_), false),
-                Operation::PlaceOnBed(Some(_), true),
+                Operation::PlaceOnBed(Some(_), false, false),
+                Operation::PlaceOnBed(Some(_), true, false),
+                Operation::PlaceOnBed(Some(_), false, true),
+                Operation::PlaceOnBed(None, false, true),
                 Operation::Preflight,
                 Operation::Compile,
                 Operation::Verify,

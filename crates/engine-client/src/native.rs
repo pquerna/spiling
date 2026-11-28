@@ -861,6 +861,18 @@ impl EngineRpc {
         occurrence_id: Option<OccurrenceId>,
         center_xy: bool,
     ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
+        self.place_on_bed_oriented(scene, project_revision, occurrence_id, center_xy, false)
+            .await
+    }
+    /// Same bed placement rule with optional engine-owned automatic print orientation.
+    pub async fn place_on_bed_oriented(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        occurrence_id: Option<OccurrenceId>,
+        center_xy: bool,
+        auto_orient: bool,
+    ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
         let response = self
             .geometry(GeometryCommand::PlaceOnBed {
                 session_id: scene.session_id.clone(),
@@ -868,6 +880,7 @@ impl EngineRpc {
                 project_revision,
                 occurrence_id,
                 center_xy,
+                auto_orient,
             })
             .await?;
         let GeometryResponse::OperationAccepted { operation } = response else {
@@ -1366,6 +1379,24 @@ impl EngineClient {
     ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
         self.rpc
             .place_on_bed(scene, project_revision, occurrence_id, center_xy)
+            .await
+    }
+    pub async fn place_on_bed_oriented(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        occurrence_id: Option<OccurrenceId>,
+        center_xy: bool,
+        auto_orient: bool,
+    ) -> Result<(SceneSummary, BedGroupPlacement), ClientError> {
+        self.rpc
+            .place_on_bed_oriented(
+                scene,
+                project_revision,
+                occurrence_id,
+                center_xy,
+                auto_orient,
+            )
             .await
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {

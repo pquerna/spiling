@@ -1288,6 +1288,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
             project_revision,
             occurrence_id,
             center_xy,
+            auto_orient,
         } => {
             return Ok(GeometryCall::PlaceOnBed(rpc::PlaceOnBedRequest {
                 parent: format!("sessions/{}", session_id.as_str()),
@@ -1296,6 +1297,7 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
                 project_revision: project_revision.0,
                 center_xy,
                 occurrence_id: occurrence_id.map(OccurrenceId::get),
+                auto_orient,
             }));
         }
         GeometryCommand::AddInstance {
@@ -2049,6 +2051,7 @@ mod tests {
                 project_revision: crate::project::ProjectRevision(9),
                 occurrence_id: None,
                 center_xy: true,
+                auto_orient: false,
             },
             GeometryCommand::PlaceOnBed {
                 session_id: session,
@@ -2056,6 +2059,7 @@ mod tests {
                 project_revision: crate::project::ProjectRevision(9),
                 occurrence_id: Some(OccurrenceId::new(2).unwrap()),
                 center_xy: false,
+                auto_orient: true,
             },
         ];
         let id = SessionId::new();

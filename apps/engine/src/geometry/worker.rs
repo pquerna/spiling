@@ -200,6 +200,7 @@ pub enum Work {
         printer: Box<PrinterSpecification>,
         hardware: Option<Arc<ProjectHardwareCapture>>,
         center_xy: bool,
+        auto_orient: bool,
     },
     PrepareLayout(super::layout::Request),
 }
@@ -704,13 +705,14 @@ fn run(
                 printer,
                 hardware,
                 center_xy,
+                auto_orient,
             } => (|| {
                 let additional = crate::resources::source_growth(source_retention(
                     retained_source_bytes,
                     &definitions,
                 )?)?;
                 let mut members = Vec::with_capacity(requests.len());
-                for request in requests {
+                for mut request in requests {
                     let resident = definitions.get(&request.definition_id).ok_or_else(|| {
                         error(
                             GeometryErrorCode::StaleRevision,
@@ -718,6 +720,18 @@ fn run(
                         )
                     })?;
                     let occurrence_id = request.occurrence_id;
+                    let mut rotated = false;
+                    if auto_orient {
+                        let oriented = super::auto_orient::choose_pose(
+                            &resident.definition,
+                            request.pose,
+                            &printer,
+                            additional,
+                            &cancel,
+                        )?;
+                        rotated = oriented.rotation_xyzw != request.pose.rotation_xyzw;
+                        request.pose = oriented;
+                    }
                     let preparation = super::bed_pose::prepare_with_budget(
                         &resident.definition,
                         request,
@@ -731,6 +745,7 @@ fn run(
                         upper_mm: preparation.maximum_upper_mm,
                         drop_mm: preparation.pose.translation_mm[2]
                             - preparation.original_pose.translation_mm[2],
+                        rotated,
                     });
                 }
                 let decision =
