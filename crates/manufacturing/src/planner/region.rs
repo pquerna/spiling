@@ -796,6 +796,7 @@ impl<'a> HatchBatch<'a> {
 }
 
 /// Prepared lattice shared by retention admission and actual component hatch.
+#[derive(Clone, Copy)]
 pub(super) struct HatchRows {
     count: usize,
     start: f64,
@@ -949,13 +950,168 @@ pub(super) fn hatch_polygon(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    hatch_polygon_with_mask(polygon, kind, rows, layer, paths, segments, None, cancel)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Recovery can reuse a crossing mask without changing path admission"
+)]
+pub(super) fn hatch_polygon_with_mask(
+    polygon: &Polygon<f64>,
+    kind: DepositionKind,
+    rows: &HatchRows,
+    layer: &HatchLayer<'_>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    staged: Option<&RecoveryHatch>,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
     check_cancel(cancel)?;
     if rows.count == 0 {
         return Ok(false);
     }
+    if let Some(staged) = staged {
+        return emit_rows(
+            &staged.edges,
+            &staged.mask,
+            kind,
+            rows,
+            layer,
+            paths,
+            segments,
+            cancel,
+        );
+    }
     let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
     let mask = prepared.mask(0, rows.count, rows, cancel)?;
     emit_rows(&prepared, &mask, kind, rows, layer, paths, segments, cancel)
+}
+
+pub(super) struct RecoveryHatch {
+    rows: HatchRows,
+    edges: hatch::PreparedHatch,
+    mask: spiling_compute::MaskRows,
+}
+
+impl RecoveryHatch {
+    pub(super) fn rows(&self) -> HatchRows {
+        self.rows
+    }
+}
+
+/// Crossing masks for immutable authored and alternate row lattices.
+pub(super) struct RecoveryMasks {
+    slots: Vec<Option<RecoveryHatch>>,
+    bytes: usize,
+}
+
+impl RecoveryMasks {
+    pub(super) fn build<'a>(
+        rows: impl Iterator<Item = Option<(&'a Polygon<f64>, HatchAxis, HatchRows)>>,
+        count: usize,
+        mut admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        let slots_bytes =
+            count.saturating_mul(size_of::<Option<RecoveryHatch>>() + 4 * size_of::<usize>());
+        admit(slots_bytes)?;
+        let mut jobs = Vec::new();
+        let mut bytes = slots_bytes;
+        for (slot, group) in rows.enumerate() {
+            check_cancel(cancel)?;
+            let Some((polygon, axis, rows)) = group.filter(|(_, _, rows)| rows.count != 0) else {
+                continue;
+            };
+            // Leave an invalid optional lattice to its ordered consumer.
+            if rows.point_bound().is_err()
+                || u32::try_from(rows.edges).is_err()
+                || !rows.start.is_finite()
+                || !(rows.start + (rows.count - 1) as f64 * rows.spacing).is_finite()
+            {
+                continue;
+            }
+            // Edges, ranges, coordinates, packed device input and output,
+            // and overlapping buffer growth while the groups are assembled.
+            bytes = bytes
+                .saturating_add(rows.edges.saturating_mul(128))
+                .saturating_add(rows.count.saturating_mul(32))
+                .saturating_add(
+                    rows.count
+                        .saturating_mul(rows.edges.div_ceil(32))
+                        .saturating_mul(12),
+                )
+                .saturating_add(
+                    4 * size_of::<(usize, HatchRows, hatch::PreparedHatch, Vec<f64>)>(),
+                );
+            admit(bytes)?;
+            let prepared = hatch::PreparedHatch::for_polygon(polygon, axis, cancel)?;
+            if prepared
+                .ranges()
+                .iter()
+                .flatten()
+                .any(|coordinate| !coordinate.is_finite())
+            {
+                continue;
+            }
+            let mut coordinates = Vec::new();
+            coordinates
+                .try_reserve_exact(rows.count)
+                .map_err(|_| resource("recovery hatch coordinates allocation refused"))?;
+            coordinates.extend((0..rows.count).map(|row| rows.start + row as f64 * rows.spacing));
+            jobs.try_reserve(1)
+                .map_err(|_| resource("recovery hatch groups allocation refused"))?;
+            jobs.push((slot, rows, prepared, coordinates));
+        }
+        let queries: Vec<_> = jobs
+            .iter()
+            .map(|(_, _, edges, rows)| (edges.ranges(), rows.as_slice()))
+            .collect();
+        let masks = if queries.is_empty() {
+            Vec::new()
+        } else {
+            spiling_compute::row_crossings_groups(&queries, cancel).map_err(crate::compute_error)?
+        };
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(count)
+            .map_err(|_| resource("recovery hatch masks allocation refused"))?;
+        slots.resize_with(count, || None);
+        if masks.len() != jobs.len() {
+            return Err(unsupported("recovery hatch masks differ from the plan"));
+        }
+        for ((slot, rows, edges, _), mask) in jobs.into_iter().zip(masks) {
+            slots[slot] = Some(RecoveryHatch { rows, edges, mask });
+        }
+        let bytes = slots
+            .capacity()
+            .saturating_mul(size_of::<Option<RecoveryHatch>>())
+            + slots
+                .iter()
+                .flatten()
+                .map(|group| {
+                    group.edges.bytes()
+                        + group
+                            .mask
+                            .rows()
+                            .saturating_mul(group.mask.columns().div_ceil(32))
+                            .saturating_mul(size_of::<u32>())
+                })
+                .sum::<usize>();
+        Ok(Self { slots, bytes })
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub(super) fn groups(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    pub(super) fn take(&mut self, slot: usize) -> Option<RecoveryHatch> {
+        self.slots.get_mut(slot)?.take()
+    }
 }
 
 /// Emit every row of one polygon's hatch from its crossing mask; whether any
@@ -1001,15 +1157,54 @@ fn emit_rows(
     Ok(had_clips)
 }
 
+pub(super) struct RecoveryBridgeRows<'a> {
+    pub polygon: &'a Polygon<f64>,
+    pub axis: HatchAxis,
+    pub hatch: &'a RecoveryHatch,
+    pub reused: &'a std::cell::Cell<usize>,
+}
+
+impl RecoveryHatch {
+    fn row_at(&self, coordinate: f64) -> Option<usize> {
+        let rows = self.rows;
+        let row = if rows.count <= 1 {
+            0
+        } else {
+            ((coordinate - rows.start) / rows.spacing).round() as usize
+        };
+        (row < rows.count
+            && (rows.start + row as f64 * rows.spacing).to_bits() == coordinate.to_bits())
+        .then_some(row)
+    }
+}
+
+enum BridgeCrossing<'a> {
+    New(hatch::PreparedHatch),
+    Reuse(&'a RecoveryHatch),
+}
+
 /// Clip the positive perimeter-owned fill at actual classified hatch rows.
 /// Classification islands and densities may have different centered lattices;
 /// bridge ownership must follow emitted rows, not invent a second lattice.
+#[cfg(test)]
 pub(super) fn bridge_rows<'a>(
     fill: &MultiPolygon<f64>,
     exclusions: &[MultiPolygon<f64>],
     required: impl IntoIterator<Item = &'a DepositionPath>,
     layer: &HatchLayer<'_>,
     segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<DepositionPath>, ManufacturingError> {
+    bridge_rows_using_hatch(fill, exclusions, required, layer, segments, None, cancel)
+}
+
+pub(super) fn bridge_rows_using_hatch<'a>(
+    fill: &MultiPolygon<f64>,
+    exclusions: &[MultiPolygon<f64>],
+    required: impl IntoIterator<Item = &'a DepositionPath>,
+    layer: &HatchLayer<'_>,
+    segments: &mut usize,
+    staged: Option<&RecoveryBridgeRows<'_>>,
     cancel: &AtomicBool,
 ) -> Result<Vec<DepositionPath>, ManufacturingError> {
     let fixed = if layer.axis == HatchAxis::X { 1 } else { 0 };
@@ -1096,7 +1291,6 @@ pub(super) fn bridge_rows<'a>(
             continue;
         }
         stored += local.len();
-        let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
         // One query row per distinct row key, in key order.
         let mut coordinates = Vec::new();
         let mut at = 0;
@@ -1112,22 +1306,46 @@ pub(super) fn bridge_rows<'a>(
         planned
             .try_reserve(1)
             .map_err(|_| resource("bridge row plan allocation refused"))?;
-        planned.push((polygon, local, prepared, coordinates));
+        let crossing = if let Some(staged) = staged.filter(|staged| {
+            staged.axis == layer.axis
+                && std::ptr::eq(staged.polygon, polygon)
+                && coordinates
+                    .iter()
+                    .all(|&row| staged.hatch.row_at(row).is_some())
+        }) {
+            staged.reused.set(staged.reused.get() + 1);
+            BridgeCrossing::Reuse(staged.hatch)
+        } else {
+            BridgeCrossing::New(hatch::PreparedHatch::for_polygon(
+                polygon, layer.axis, cancel,
+            )?)
+        };
+        planned.push((polygon, local, crossing, coordinates));
     }
     let queries: Vec<(&[[f64; 2]], &[f64])> = planned
         .iter()
-        .map(|(_, _, prepared, coordinates)| (prepared.ranges(), coordinates.as_slice()))
+        .filter_map(|(_, _, crossing, coordinates)| match crossing {
+            BridgeCrossing::New(prepared) => Some((prepared.ranges(), coordinates.as_slice())),
+            BridgeCrossing::Reuse(_) => None,
+        })
         .collect();
     let masks = if queries.is_empty() {
         Vec::new()
     } else {
         spiling_compute::row_crossings_groups(&queries, cancel).map_err(crate::compute_error)?
     };
-    drop(queries);
-    if masks.len() != planned.len() {
+    if masks.len() != queries.len() {
         return Err(unsupported("bridge row masks differ from the plan"));
     }
-    for ((polygon, local, prepared, _), mask) in planned.iter().zip(&masks) {
+    drop(queries);
+    let mut masks = masks.iter();
+    for (polygon, local, crossing, _) in &planned {
+        let (prepared, mask, staged) = match crossing {
+            BridgeCrossing::New(prepared) => {
+                (prepared, masks.next().expect("counted bridge masks"), None)
+            }
+            BridgeCrossing::Reuse(staged) => (&staged.edges, &staged.mask, Some(*staged)),
+        };
         let polygon = *polygon;
         let local = local.as_slice();
         let mut mask_row = 0;
@@ -1146,7 +1364,10 @@ pub(super) fn bridge_rows<'a>(
                     .map(|ring| ring.0.len())
                     .sum::<usize>();
             charge_bridge_rows(&mut work, edges + owners.len())?;
-            prepared.intersections(mask, mask_row, coordinate, &mut hits, cancel)?;
+            let row = staged.map_or(mask_row, |staged| {
+                staged.row_at(coordinate).expect("checked exact bridge row")
+            });
+            prepared.intersections(mask, row, coordinate, &mut hits, cancel)?;
             mask_row += 1;
             excluded.clear();
             charge_bridge_rows(&mut work, exclusion_edges)?;

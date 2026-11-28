@@ -41,6 +41,13 @@ pub(super) struct InteriorRegion {
     pub(super) frame_origin_mm: Option<[f64; 2]>,
 }
 
+type RecoveryRole<'a> = (
+    &'a MultiPolygon<f64>,
+    DepositionKind,
+    f64,
+    Option<(u16, &'a InteriorRegion)>,
+);
+
 pub(super) struct ComponentAnchorAdmission {
     pub(super) supported: bool,
     /// Strictly ascending indices into this exact component proposal.
@@ -1548,6 +1555,27 @@ impl ClassifiedRegions {
         Ok(candidate.paths)
     }
 
+    fn recovery_roles(&self) -> impl Iterator<Item = RecoveryRole<'_>> {
+        [
+            (&self.bottom, DepositionKind::BottomSkin, 1.0, None),
+            (&self.top, DepositionKind::TopSkin, 1.0, None),
+        ]
+        .into_iter()
+        .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
+            let fraction = interior.coverage.fraction;
+            (
+                &interior.domain,
+                if fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                },
+                fraction,
+                Some((index as u16, interior)),
+            )
+        }))
+    }
+
     /// Preserve authored role lattices outside demand-bound bridge cells and
     /// their actual anchor corridors. All ownership stays in this same fill.
     #[expect(
@@ -1688,36 +1716,87 @@ impl ClassifiedRegions {
                 "role owner allocation refused",
             )
         })?;
-        for (domain, kind, fraction, owner) in [
-            (&self.bottom, DepositionKind::BottomSkin, 1.0, None),
-            (&self.top, DepositionKind::TopSkin, 1.0, None),
-        ]
-        .into_iter()
-        .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
-            let fraction = interior.coverage.fraction;
-            (
-                &interior.domain,
-                if fraction == 1.0 {
-                    DepositionKind::SolidFill
-                } else {
-                    DepositionKind::SparseFill
-                },
-                fraction,
-                Some((index as u16, interior)),
-            )
-        })) {
-            let role_layer = region::HatchLayer {
-                roof: None,
-                width_mm: owner
-                    .and_then(|(_, region)| region.bead_width_mm)
-                    .unwrap_or(layer.width_mm),
-                axis: if kind == DepositionKind::TopSkin {
-                    layer.top_axis
-                } else {
-                    layer.axis
-                },
-                ..*layer
-            };
+        // Both crossing lattices are immutable. The anchor verdict decides
+        // whether the alternate will be emitted and which rows may bridge.
+        let planned = self
+            .recovery_roles()
+            .flat_map(|(domain, kind, fraction, owner)| {
+                let role_layer = recovery_role_layer(layer, kind, owner);
+                let alternate = region::HatchLayer {
+                    axis: role_layer.axis.orthogonal(),
+                    ..role_layer
+                };
+                let frame = owner.and_then(|(_, region)| region.frame_origin_mm);
+                domain.0.iter().flat_map(move |polygon| {
+                    let authored = recovery_authored_rows(
+                        polygon,
+                        fraction,
+                        &role_layer,
+                        frame,
+                        owner.is_some(),
+                        phase,
+                    );
+                    let other = recovery_alternate_rows(
+                        polygon,
+                        fraction,
+                        &role_layer,
+                        &alternate,
+                        owner,
+                        frame,
+                        &self.coverage.process_interfaces,
+                    );
+                    [
+                        authored.ok().map(|rows| (polygon, role_layer.axis, rows)),
+                        other.ok().map(|rows| (polygon, alternate.axis, rows)),
+                    ]
+                })
+            });
+        let prepared_base =
+            recovery_bytes(classified_owned_bytes, &normal, &bridge, &owners, &patches);
+        let prepared_points = recovery_points(
+            class_points,
+            normal_points,
+            bridge_points,
+            owners.capacity(),
+            patches.capacity(),
+        )?;
+        let trace = std::env::var_os("SPILING_TRACE_SLICE_PHASES").is_some();
+        let started = trace.then(std::time::Instant::now);
+        let mut masks = match region::RecoveryMasks::build(
+            planned,
+            owner_count.saturating_mul(2),
+            |bytes| {
+                admit(
+                    point_sum(
+                        prepared_points + workspace,
+                        bytes.div_ceil(size_of::<geo::Coord<f64>>()),
+                    )?,
+                    byte_sum(byte_sum(prepared_base, workspace_bytes)?, bytes)?,
+                    0,
+                )
+            },
+            cancel,
+        ) {
+            Ok(masks) => Some(masks),
+            Err(failure) if failure.code == ManufacturingErrorCode::ResourceLimit => None,
+            Err(failure) => return Err(failure),
+        };
+        let batch_wall = started.map(|started| started.elapsed());
+        let prepared_groups =
+            trace.then(|| masks.as_ref().map_or(0, region::RecoveryMasks::groups));
+        let mut authored_used = 0;
+        let mut alternate_used = 0;
+        let mut dependent = 0;
+        let reused_bridge_groups = std::cell::Cell::new(0);
+        let mask_bytes = masks.as_ref().map_or(0, region::RecoveryMasks::bytes);
+        let classified_owned_bytes = byte_sum(classified_owned_bytes, mask_bytes)?;
+        let class_points = point_sum(
+            class_points,
+            mask_bytes.div_ceil(size_of::<geo::Coord<f64>>()),
+        )?;
+        let mut mask_slot = 0;
+        for (domain, kind, fraction, owner) in self.recovery_roles() {
+            let role_layer = recovery_role_layer(layer, kind, owner);
             let layer = &role_layer;
             let alternate_layer = region::HatchLayer {
                 axis: layer.axis.orthogonal(),
@@ -1727,6 +1806,10 @@ impl ClassifiedRegions {
             let normal_fixed = 1 - normal_along;
             let frame = owner.and_then(|(_, owner)| owner.frame_origin_mm);
             for polygon in &domain.0 {
+                let authored_mask = masks.as_mut().and_then(|masks| masks.take(mask_slot));
+                authored_used += usize::from(authored_mask.is_some());
+                let alternate_mask = masks.as_mut().and_then(|masks| masks.take(mask_slot + 1));
+                mask_slot += 2;
                 check_cancel(cancel)?;
                 let base = recovery_points(
                     class_points,
@@ -1741,19 +1824,16 @@ impl ClassifiedRegions {
                 let workspace = workspace_receipt.workspace_points;
                 let workspace_bytes = workspace_receipt.workspace_bytes;
                 drop(workspace_receipt);
-                let rows = if let Some(origin) = frame {
-                    region::HatchRows::common(polygon, fraction, layer, origin)?
-                } else if owner.is_some() {
-                    region::HatchRows::centered_phase(polygon, fraction, layer, phase)?.ok_or_else(
-                        || {
-                            error(
-                                ManufacturingErrorCode::UnsupportedGeometry,
-                                "frozen ordinary hatch phase changed the polygon lattice count",
-                            )
-                        },
-                    )?
-                } else {
-                    region::HatchRows::new(polygon, fraction, layer)?
+                let rows = match &authored_mask {
+                    Some(staged) => staged.rows(),
+                    None => recovery_authored_rows(
+                        polygon,
+                        fraction,
+                        layer,
+                        frame,
+                        owner.is_some(),
+                        phase,
+                    )?,
                 };
                 let bound = rows.point_bound()?;
                 admit(
@@ -1768,15 +1848,17 @@ impl ClassifiedRegions {
                     whole_rows: Vec::new(),
                     process_interfaces: Vec::new(),
                 };
-                let had_clips = region::hatch_polygon(
+                let had_clips = region::hatch_polygon_with_mask(
                     polygon,
                     kind,
                     &rows,
                     layer,
                     &mut component.paths,
                     segments,
+                    authored_mask.as_ref(),
                     cancel,
                 )?;
+                drop(authored_mask);
                 let omitted_sparse_clips = kind == DepositionKind::SparseFill && had_clips;
                 if owner.is_some()
                     && frame.is_none()
@@ -1898,46 +1980,19 @@ impl ClassifiedRegions {
                     }
                 }
                 if !original.supported && !original.demands.is_empty() {
-                    let alternate_rows = if let Some(mut origin) = frame {
-                        let fixed = usize::from(alternate_layer.axis == region::HatchAxis::X);
-                        if let Some(interface) =
-                            self.coverage.process_interfaces.iter().find(|interface| {
-                                usize::from(interface.axis) == fixed
-                                    && owner.is_some_and(|(_, owner)| {
-                                        owner.coverage.contributions.iter().any(|c| {
-                                            c.occurrence_id == interface.occurrence_id
-                                                && c.definition_id == interface.definition_id
-                                        })
-                                    })
-                            })
-                        {
-                            let coordinates = || {
-                                polygon
-                                    .exterior()
-                                    .0
-                                    .iter()
-                                    .map(|p| if fixed == 0 { p.x } else { p.y })
-                            };
-                            let side = if coordinates().all(|value| value < interface.coordinate_mm)
-                            {
-                                -1.
-                            } else if coordinates().all(|value| value > interface.coordinate_mm) {
-                                1.
-                            } else {
-                                return Err(error(
-                                    ManufacturingErrorCode::InvalidSpecification,
-                                    "UnsupportedInterface: recovery owner crosses its separator",
-                                ));
-                            };
-                            // One shared interface frame, mirrored outward into
-                            // each owner. Quarter-bead physical overlap leaves
-                            // representation margin within half-bead permission.
-                            origin[fixed] = interface.coordinate_mm
-                                + side * (layer.width_mm - interface.bonding_overlap_mm * 0.5);
-                        }
-                        region::HatchRows::common(polygon, fraction, &alternate_layer, origin)?
-                    } else {
-                        region::HatchRows::new(polygon, fraction, &alternate_layer)?
+                    dependent += 1;
+                    alternate_used += usize::from(alternate_mask.is_some());
+                    let alternate_rows = match &alternate_mask {
+                        Some(staged) => staged.rows(),
+                        None => recovery_alternate_rows(
+                            polygon,
+                            fraction,
+                            layer,
+                            &alternate_layer,
+                            owner,
+                            frame,
+                            &self.coverage.process_interfaces,
+                        )?,
                     };
                     let bound = alternate_rows.point_bound()?;
                     let live = point_sum(live, original.retained_points())?;
@@ -1961,13 +2016,14 @@ impl ClassifiedRegions {
                         process_interfaces: Vec::new(),
                     };
                     let mut staged_segments = *segments;
-                    region::hatch_polygon(
+                    region::hatch_polygon_with_mask(
                         polygon,
                         kind,
                         &alternate_rows,
                         &alternate_layer,
                         &mut alternative.paths,
                         &mut staged_segments,
+                        alternate_mask.as_ref(),
                         cancel,
                     )?;
                     if let Some((index, _)) = owner {
@@ -1990,10 +2046,20 @@ impl ClassifiedRegions {
                     )?;
                     let whole_base_bytes =
                         live_bytes + anchor_workspace_bytes + candidate_bytes(&alternative);
-                    alternative.whole_rows = self.whole_rows(
+                    let staged_bridge =
+                        alternate_mask
+                            .as_ref()
+                            .map(|hatch| region::RecoveryBridgeRows {
+                                polygon,
+                                axis: alternate_layer.axis,
+                                hatch,
+                                reused: &reused_bridge_groups,
+                            });
+                    alternative.whole_rows = self.whole_rows_using_hatch(
                         &alternative.paths,
                         &alternate_layer,
                         &mut staged_segments,
+                        staged_bridge.as_ref(),
                         cancel,
                         |units, bytes| {
                             admit(
@@ -2003,6 +2069,7 @@ impl ClassifiedRegions {
                             )
                         },
                     )?;
+                    drop(alternate_mask);
                     let mut proof = anchors(
                         &mut alternative,
                         alternate_layer.axis,
@@ -2203,6 +2270,24 @@ impl ClassifiedRegions {
                 )?;
             }
         }
+        if let (Some(groups), Some(wall)) = (prepared_groups, batch_wall) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "recovery_hatch_batch",
+                    "seconds": wall.as_secs_f64(),
+                    "groups": groups,
+                    "authored_used": authored_used,
+                    "alternate_used": alternate_used,
+                    "dependent_whole_rows": dependent,
+                "reused_bridge_groups": reused_bridge_groups.get(),
+                    "receipt_bytes": mask_bytes,
+                })
+            );
+        }
+        drop(masks);
+        let classified_owned_bytes = classified_owned_bytes - mask_bytes;
+        let class_points = class_points - mask_bytes.div_ceil(size_of::<geo::Coord<f64>>());
         let mut anchor_workspace_bytes;
         let mut skin_construction_used = false;
         if bridge.paths.is_empty() {
@@ -3538,6 +3623,18 @@ impl ClassifiedRegions {
         layer: &region::HatchLayer<'_>,
         segments: &mut usize,
         cancel: &AtomicBool,
+        admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
+    ) -> Result<Vec<DepositionPath>, ManufacturingError> {
+        self.whole_rows_using_hatch(required, layer, segments, None, cancel, admit)
+    }
+
+    fn whole_rows_using_hatch(
+        &self,
+        required: &[DepositionPath],
+        layer: &region::HatchLayer<'_>,
+        segments: &mut usize,
+        staged: Option<&region::RecoveryBridgeRows<'_>>,
+        cancel: &AtomicBool,
         mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         let mut rows = Vec::new();
@@ -3622,7 +3719,7 @@ impl ClassifiedRegions {
                         )?,
                     )?,
                 )?;
-                let owned = region::bridge_rows(
+                let owned = region::bridge_rows_using_hatch(
                     corridor,
                     excluded,
                     required.iter().filter(|path| {
@@ -3633,6 +3730,7 @@ impl ClassifiedRegions {
                     }),
                     &row_layer,
                     segments,
+                    staged,
                     cancel,
                 )?;
                 let target = record_target(&rows, owned.len());
@@ -3648,6 +3746,96 @@ impl ClassifiedRegions {
             }
         }
         Ok(rows)
+    }
+}
+
+fn recovery_role_layer<'a>(
+    layer: &region::HatchLayer<'a>,
+    kind: DepositionKind,
+    owner: Option<(u16, &InteriorRegion)>,
+) -> region::HatchLayer<'a> {
+    region::HatchLayer {
+        roof: None,
+        width_mm: owner
+            .and_then(|(_, region)| region.bead_width_mm)
+            .unwrap_or(layer.width_mm),
+        axis: if kind == DepositionKind::TopSkin {
+            layer.top_axis
+        } else {
+            layer.axis
+        },
+        ..*layer
+    }
+}
+
+fn recovery_authored_rows(
+    polygon: &Polygon<f64>,
+    fraction: f64,
+    layer: &region::HatchLayer<'_>,
+    frame: Option<[f64; 2]>,
+    regional: bool,
+    phase: region::OrdinaryHatchPhase,
+) -> Result<region::HatchRows, ManufacturingError> {
+    if let Some(origin) = frame {
+        region::HatchRows::common(polygon, fraction, layer, origin)
+    } else if regional {
+        region::HatchRows::centered_phase(polygon, fraction, layer, phase)?.ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "frozen ordinary hatch phase changed the polygon lattice count",
+            )
+        })
+    } else {
+        region::HatchRows::new(polygon, fraction, layer)
+    }
+}
+
+fn recovery_alternate_rows(
+    polygon: &Polygon<f64>,
+    fraction: f64,
+    layer: &region::HatchLayer<'_>,
+    alternate_layer: &region::HatchLayer<'_>,
+    owner: Option<(u16, &InteriorRegion)>,
+    frame: Option<[f64; 2]>,
+    interfaces: &[spiling_contracts::manufacturing::ProcessInterfaceCoverage],
+) -> Result<region::HatchRows, ManufacturingError> {
+    if let Some(mut origin) = frame {
+        let fixed = usize::from(alternate_layer.axis == region::HatchAxis::X);
+        if let Some(interface) = interfaces.iter().find(|interface| {
+            usize::from(interface.axis) == fixed
+                && owner.is_some_and(|(_, owner)| {
+                    owner.coverage.contributions.iter().any(|c| {
+                        c.occurrence_id == interface.occurrence_id
+                            && c.definition_id == interface.definition_id
+                    })
+                })
+        }) {
+            let coordinates = || {
+                polygon
+                    .exterior()
+                    .0
+                    .iter()
+                    .map(|p| if fixed == 0 { p.x } else { p.y })
+            };
+            let side = if coordinates().all(|value| value < interface.coordinate_mm) {
+                -1.
+            } else if coordinates().all(|value| value > interface.coordinate_mm) {
+                1.
+            } else {
+                return Err(error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "UnsupportedInterface: recovery owner crosses its separator",
+                ));
+            };
+            // One shared interface frame, mirrored outward into
+            // each owner. Quarter-bead physical overlap leaves
+            // representation margin within half-bead permission.
+            origin[fixed] = interface.coordinate_mm
+                + side * (layer.width_mm - interface.bonding_overlap_mm * 0.5);
+        }
+        region::HatchRows::common(polygon, fraction, alternate_layer, origin)
+    } else {
+        region::HatchRows::new(polygon, fraction, alternate_layer)
     }
 }
 

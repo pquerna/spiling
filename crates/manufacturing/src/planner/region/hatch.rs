@@ -52,6 +52,11 @@ impl PreparedHatch {
         Ok(Self { edges, ranges })
     }
 
+    pub(super) fn bytes(&self) -> usize {
+        self.edges.capacity() * size_of::<[[f64; 2]; 2]>()
+            + self.ranges.capacity() * size_of::<[f64; 2]>()
+    }
+
     pub(super) fn ranges(&self) -> &[[f64; 2]] {
         &self.ranges
     }
@@ -335,10 +340,11 @@ mod tests {
                 )
                 .unwrap();
             }
+            let exclusions = [MultiPolygon::new(vec![exclusion])];
             let mut actual_segments = 0;
             let actual = bridge_rows(
                 &fill,
-                &[MultiPolygon::new(vec![exclusion])],
+                &exclusions,
                 &required,
                 &layer,
                 &mut actual_segments,
@@ -347,9 +353,45 @@ mod tests {
             .unwrap();
             assert_eq!(actual_segments, expected_segments);
             assert_eq!(
-                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(&actual).unwrap(),
                 serde_json::to_value(expected).unwrap()
             );
+            let polygon = &fill.0[0];
+            let rows = HatchRows {
+                count: 300,
+                start: -18.75,
+                spacing: 0.125,
+                edges: polygon.exterior().0.len() + polygon.interiors()[0].0.len() - 2,
+            };
+            let mut masks = RecoveryMasks::build(
+                std::iter::once(Some((polygon, axis, rows))),
+                1,
+                |_| Ok(()),
+                &cancel,
+            )
+            .unwrap();
+            let hatch = masks.take(0).unwrap();
+            let reused = std::cell::Cell::new(0);
+            let staged = RecoveryBridgeRows {
+                polygon,
+                axis,
+                hatch: &hatch,
+                reused: &reused,
+            };
+            let mut staged_segments = 0;
+            let staged = bridge_rows_using_hatch(
+                &fill,
+                &exclusions,
+                &required,
+                &layer,
+                &mut staged_segments,
+                Some(&staged),
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(reused.get(), 1);
+            assert_eq!(actual_segments, staged_segments);
+            assert_eq!(actual, staged);
         }
     }
 }
