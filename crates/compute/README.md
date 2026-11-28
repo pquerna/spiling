@@ -34,12 +34,18 @@ not with how often code asks. Every kernel follows three layers:
    (`capsule_masks` takes a whole support stage; a layer's skins and
    interiors, its bridge rows and its gyroid curves each make one request).
 
-Rounds lead on any free device. Auto with a hardware GPU adds the CPU
-runtime as a helper device, so a request that would wait behind a GPU round
-runs on the CPU instead; explicit backends use one device. Exclusive work
-(whole-stage batches) takes device turns first come, first served, one
-capsule segment per turn, so a short request on a serial chain waits behind
-at most one segment of someone else's batch.
+Each device has a fixed set of slots, one stream each: four on a hardware
+GPU, one on the CPU runtime (whose one round already runs a worker per core).
+Rounds on different slots are in flight together, so one round uploads or
+reads back while another computes. Rounds fill every GPU slot before the
+next device: Auto with a hardware GPU adds the CPU runtime as a helper, so
+mask requests queued beyond what the GPU holds run on the CPU; explicit
+backends use one device. Exclusive work (whole-stage batches) runs on the
+default device only, since a stage segment on the CPU helper runs many
+times slower and finishes last. It takes slots first come, first served,
+one capsule segment per turn, so a short request on a serial chain waits
+behind at most one segment of someone else's batch; one batch's segments
+run on up to every slot at once, packed and unpacked by their own workers.
 
 The planner's side of the same rule is `planner::pipeline::pipelined`: a
 chunked stage prepares chunk k+1 (its batches included) on the pool while
@@ -86,8 +92,8 @@ cubes. Dedicated device allocations bypass adaptive pool growth.
 Runtime/compiler/driver overhead is additional to these buffers, not a
 claimed total memory ceiling.
 
-One fixed stream per selected device prevents per-caller stream
-accumulation. Every round synchronously drains before the next begins. The
+The fixed slot streams prevent per-caller stream accumulation. Every round
+synchronously drains its own stream before its slot frees. The
 first execution failure is retained and refuses every later round. A waiter
 that is cancelled leaves the queue, or abandons its result if its round has
 started; a running segment is not interrupted. Kernels have no barriers.

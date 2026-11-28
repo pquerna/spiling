@@ -28,21 +28,26 @@ pub(crate) struct Context {
     /// Devices that lead rounds: the default first, then helpers. Auto
     /// with a hardware GPU adds the CPU runtime as a helper; every kernel is
     /// exact, so a request's result is the same on whichever device runs it.
+    /// Rounds fill every slot of an earlier device before a later one.
     devices: Vec<ResolvedDevice>,
     _fea: ResolvedDevice,
+    /// How many devices, from the first, take exclusive stage batches. The
+    /// CPU helper beside a hardware GPU takes queued mask requests only: a
+    /// whole stage segment runs many times slower there and finishes last.
+    stage_devices: usize,
     /// The first execution failure; every later round refuses with it.
     failure: Mutex<Option<ComputeError>>,
     pending: Mutex<Pending>,
     wake: Condvar,
 }
 
-/// Queued mask requests and the device's leader. Requests from every thread
-/// wait here; whoever finds no leader takes everything queued and runs it as
-/// one round (group commit), so launches scale with device time, not calls.
+/// Queued mask requests and the devices' leaders. Requests from every thread
+/// wait here; whoever finds a free slot takes everything queued and runs it
+/// as one round (group commit), so launches scale with device time, not calls.
 #[derive(Default)]
 struct Pending {
-    /// Whether each device is leading a round.
-    leaders: Vec<bool>,
+    /// Whether each slot of each device is leading a round.
+    leaders: Vec<Vec<bool>>,
     next: u64,
     queue: Vec<(u64, Vec<MaskGroup>)>,
     /// Exclusive callers waiting for the device, served first come first
@@ -64,9 +69,16 @@ pub(crate) struct MaskGroup {
 #[derive(Clone)]
 struct ResolvedDevice {
     client: Client,
-    stream: Stream,
+    /// One fixed stream per slot: rounds on different slots are in flight
+    /// together (one uploads while another computes or reads back), and the
+    /// pool never grows with callers.
+    streams: Vec<Stream>,
     description: ComputeDevice,
 }
+
+/// Rounds in flight on a hardware GPU. One CPU runtime round already runs a
+/// worker per core, so the CPU runtime has one slot.
+const GPU_SLOTS: usize = 4;
 
 /// Configure once, before native workers. Repeating the same settings is idempotent;
 /// changing any preference after initialization refuses, including after failed initialization.
@@ -136,11 +148,15 @@ fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
             devices.push(cpu);
         }
         let pending = Pending {
-            leaders: vec![false; devices.len()],
+            leaders: devices
+                .iter()
+                .map(|device| vec![false; device.streams.len()])
+                .collect(),
             ..Pending::default()
         };
         Ok(Context {
             status,
+            stage_devices: 1,
             devices,
             _fea: fea,
             failure: Mutex::new(None),
@@ -200,7 +216,6 @@ fn resolve(
             return Ok(previous.clone());
         }
     }
-    let stream = Stream::new();
     let resolved = if let Some(kind) = selected {
         let device = WgpuDevice::new(kind).on(WgpuBackend::Vulkan);
         let setup = cubecl::wgpu::try_init_setup::<Vulkan>(
@@ -215,9 +230,10 @@ fn resolve(
             cubecl::wgpu::wgpu::DeviceType::DiscreteGpu
                 | cubecl::wgpu::wgpu::DeviceType::IntegratedGpu
         );
+        let slots = if hardware_accelerated { GPU_SLOTS } else { 1 };
         ResolvedDevice {
             client: cubecl::Device::Wgpu(device).client(),
-            stream,
+            streams: (0..slots).map(|_| Stream::new()).collect(),
             description: ComputeDevice {
                 backend: ComputeBackend::Vulkan,
                 name: device_name(&info.name),
@@ -229,7 +245,7 @@ fn resolve(
         let name = device_name(&client.properties().identity.name);
         ResolvedDevice {
             client,
-            stream,
+            streams: vec![Stream::new()],
             description: ComputeDevice {
                 backend: ComputeBackend::Cpu,
                 name,
@@ -261,8 +277,9 @@ fn probe(device: &ResolvedDevice) -> Result<(), ComputeError> {
     let cancel = AtomicBool::new(false);
     let values = encode_values(&[[-1.0, 1.0], [1.0, 2.0]], 32, &cancel)?;
     let queries = encode_queries(&[[0.0]], &cancel)?;
+    let stream = device.streams[0];
     let result = guarded(|| {
-        device.stream.enter(|| {
+        stream.enter(|| {
             device.client.memory_dedicated_allocation((), |_| {
                 guarded(|| {
                     kernels::masks_dispatch(
@@ -278,7 +295,7 @@ fn probe(device: &ResolvedDevice) -> Result<(), ComputeError> {
             })
         })
     });
-    let drained = drain(device);
+    let drained = drain(device, stream);
     let words = result?;
     drained?;
     if words != [1] {
@@ -304,9 +321,9 @@ fn guarded<T>(operation: impl FnOnce() -> Result<T, ComputeError>) -> Result<T, 
     })
 }
 
-fn drain(device: &ResolvedDevice) -> Result<(), ComputeError> {
+fn drain(device: &ResolvedDevice, stream: Stream) -> Result<(), ComputeError> {
     guarded(|| {
-        device.stream.enter(|| {
+        stream.enter(|| {
             cubecl::future::block_on(device.client.sync())
                 .map_err(|error| ComputeError::Execution(bounded_message(error)))
         })
@@ -393,8 +410,8 @@ fn masks_in(
             }
             return Err(ComputeError::Cancelled);
         }
-        if let Some(device) = pending.leaders.iter().position(|busy| !busy) {
-            pending = lead(context, pending, device, |_, _| Ok(()))?.0;
+        if let Some(slot) = free_slot(&pending, context.devices.len()) {
+            pending = lead(context, pending, slot, |_, _| Ok(()))?.0;
             continue;
         }
         pending = context
@@ -405,7 +422,21 @@ fn masks_in(
     }
 }
 
-/// Run `work` on the first free device in turn order, after every queued
+/// The first free slot among the first `devices`, earlier devices first: a
+/// helper leads only while every slot ahead of it is busy.
+fn free_slot(pending: &Pending, devices: usize) -> Option<(usize, usize)> {
+    pending.leaders[..devices]
+        .iter()
+        .enumerate()
+        .find_map(|(device, slots)| {
+            slots
+                .iter()
+                .position(|busy| !busy)
+                .map(|slot| (device, slot))
+        })
+}
+
+/// Run `work` on the first free slot in turn order, after every queued
 /// request; `work` may borrow the caller's data.
 pub(crate) fn execute_exclusive<T: Send>(
     cancel: &AtomicBool,
@@ -430,10 +461,12 @@ fn exclusive_in<T: Send>(
             return Err(error);
         }
         if pending.turns.front() == Some(&id)
-            && let Some(device) = pending.leaders.iter().position(|busy| !busy)
+            && let Some(slot) = free_slot(&pending, context.stage_devices)
         {
             pending.turns.pop_front();
-            let (_pending, result) = lead(context, pending, device, work)?;
+            // The next turn may take another free slot now.
+            context.wake.notify_all();
+            let (_pending, result) = lead(context, pending, slot, work)?;
             return result;
         }
         pending = context
@@ -449,16 +482,16 @@ fn exclusive_in<T: Send>(
 fn lead<'context, T: Send>(
     context: &'context Context,
     mut pending: MutexGuard<'context, Pending>,
-    device: usize,
+    (device, slot): (usize, usize),
     work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
 ) -> Result<(MutexGuard<'context, Pending>, Result<T, ComputeError>), ComputeError> {
-    pending.leaders[device] = true;
+    pending.leaders[device][slot] = true;
     let queued = std::mem::take(&mut pending.queue);
     drop(pending);
     let ids: Vec<u64> = queued.iter().map(|(id, _)| *id).collect();
-    let (masks, own) = round(context, device, queued, work);
+    let (masks, own) = round(context, (device, slot), queued, work);
     let mut pending = lock_pending(context)?;
-    pending.leaders[device] = false;
+    pending.leaders[device][slot] = false;
     let masks: Vec<Result<Vec<MaskRows>, ComputeError>> = match masks {
         Ok(masks) => masks.into_iter().map(Ok).collect(),
         Err(error) => ids.iter().map(|_| Err(error.clone())).collect(),
@@ -481,7 +514,7 @@ type RoundResult<T> = (
 
 fn round<T: Send>(
     context: &Context,
-    device: usize,
+    (device, slot): (usize, usize),
     queued: Vec<(u64, Vec<MaskGroup>)>,
     work: impl FnOnce(&Client, bool) -> Result<T, ComputeError> + Send,
 ) -> RoundResult<T> {
@@ -495,10 +528,11 @@ fn round<T: Send>(
         Err(_) => return (Err(ComputeError::Poisoned), Err(ComputeError::Poisoned)),
     }
     let device = &context.devices[device];
+    let stream = device.streams[slot];
     let cpu = device.description.backend == ComputeBackend::Cpu;
     let mut own = Err(ComputeError::Execution("round did not run".into()));
     let masks = guarded(|| {
-        device.stream.enter(|| {
+        stream.enter(|| {
             device.client.memory_dedicated_allocation((), |_| {
                 guarded(|| {
                     let masks = run_masks(&device.client, cpu, queued);
@@ -508,7 +542,7 @@ fn round<T: Send>(
             })
         })
     });
-    let drained = drain(device);
+    let drained = drain(device, stream);
     let (masks, own) = match drained {
         Err(error) => (Err(error.clone()), Err(error)),
         Ok(()) => (masks, own),
@@ -635,6 +669,10 @@ const CAPSULE_SEGMENT_JOBS: usize = 1 << 22;
 const CAPSULE_SEGMENT_WORDS: usize = 1 << 24;
 
 /// Group windows are `[row0, rows, word0, width]` in 64-cell words.
+///
+/// Segments are independent device turns: up to one worker per device slot
+/// packs, runs and unpacks them at once, so one large stage batch keeps every
+/// GPU slot (and then the CPU helper) busy. Results return in group order.
 pub(crate) fn execute_capsule_masks(
     capsules: &[[i64; 5]],
     rows: &[[u32; 2]],
@@ -644,10 +682,6 @@ pub(crate) fn execute_capsule_masks(
     columns: i64,
     cancel: &AtomicBool,
 ) -> Result<Vec<crate::CellMask>, ComputeError> {
-    let mut masks = Vec::new();
-    masks
-        .try_reserve_exact(group_ends.len())
-        .map_err(|_| ComputeError::Allocation)?;
     let group_jobs = |group: usize| -> usize {
         let first = if group == 0 { 0 } else { group_ends[group - 1] };
         rows[first..group_ends[group]]
@@ -656,106 +690,196 @@ pub(crate) fn execute_capsule_masks(
             .sum()
     };
     let group_words = |group: usize| windows[group][1] as usize * windows[group][3] as usize * 2;
-    {
-        let mut group = 0usize;
-        while group < group_ends.len() {
-            check_cancel(cancel)?;
-            // Whole groups, up to the segment's bounds.
-            let first_group = group;
-            let (mut jobs, mut words) = (0usize, 0usize);
-            while group < group_ends.len()
-                && (group == first_group
-                    || (jobs + group_jobs(group) <= CAPSULE_SEGMENT_JOBS
-                        && words + group_words(group) <= CAPSULE_SEGMENT_WORDS))
-            {
-                jobs += group_jobs(group);
-                words += group_words(group);
-                group += 1;
-            }
-            let capsule_first = if first_group == 0 {
-                0
-            } else {
-                group_ends[first_group - 1]
-            };
-            let capsule_end = group_ends[group - 1];
-            let mut segment_windows = Vec::new();
-            let mut capsule_windows = Vec::new();
-            let mut starts = vec![0u32];
-            let mut first_rows = Vec::new();
-            let (mut base, mut total) = (0u32, 0u32);
-            let mut previous = capsule_first;
-            for (local, at) in (first_group..group).enumerate() {
-                let [row0, rows_in, word0, width] = windows[at];
-                segment_windows.extend_from_slice(&[base, row0, rows_in, word0 * 2, width * 2]);
-                base = rows_in
-                    .checked_mul(width)
-                    .and_then(|cells| cells.checked_mul(2))
-                    .and_then(|cells| cells.checked_add(base))
-                    .ok_or(ComputeError::Allocation)?;
-                for &[row, count] in &rows[previous..group_ends[at]] {
-                    if count == 0 {
-                        continue;
+    // Whole groups per segment, up to the segment's bounds.
+    let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+    let mut group = 0usize;
+    while group < group_ends.len() {
+        check_cancel(cancel)?;
+        let first_group = group;
+        let (mut jobs, mut words) = (0usize, 0usize);
+        while group < group_ends.len()
+            && (group == first_group
+                || (jobs + group_jobs(group) <= CAPSULE_SEGMENT_JOBS
+                    && words + group_words(group) <= CAPSULE_SEGMENT_WORDS))
+        {
+            jobs += group_jobs(group);
+            words += group_words(group);
+            group += 1;
+        }
+        segments.push((first_group, group, words));
+    }
+    let run = |&(first_group, end_group, words): &(usize, usize, usize)| {
+        capsule_segment(
+            capsules,
+            rows,
+            group_ends,
+            windows,
+            (first_group, end_group, words),
+            cell,
+            columns,
+            cancel,
+        )
+    };
+    let workers = segments.len().min(slot_count()?);
+    let results: Vec<SegmentMasks> = if workers <= 1 {
+        segments.iter().map(run).collect()
+    } else {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let slots: Vec<Mutex<Option<SegmentMasks>>> =
+            segments.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if at >= segments.len() || failed.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            return;
+                        }
+                        let result = run(&segments[at]);
+                        if result.is_err() {
+                            failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        if let Ok(mut slot) = slots[at].lock() {
+                            *slot = Some(result);
+                        }
                     }
-                    total = total.checked_add(count).ok_or(ComputeError::Allocation)?;
-                    starts.push(total);
-                    first_rows.push(row);
-                    capsule_windows.push(local as u32);
-                }
-                previous = group_ends[at];
-            }
-            let output = if first_rows.is_empty() {
-                Vec::new()
-            } else {
-                let kept: Vec<i64> = capsules[capsule_first..capsule_end]
-                    .iter()
-                    .zip(&rows[capsule_first..capsule_end])
-                    .filter(|(_, row)| row[1] > 0)
-                    .flat_map(|(capsule, _)| *capsule)
-                    .collect();
-                // Each segment is its own device turn: packing and
-                // unpacking stay on this thread, and a short request queued
-                // behind a long batch waits at most one segment.
-                execute_exclusive(cancel, |client, cpu| {
-                    kernels::capsule_masks_dispatch(
-                        client,
-                        cpu,
-                        &kept,
-                        &starts,
-                        &first_rows,
-                        &capsule_windows,
-                        &segment_windows,
-                        words,
-                        cell,
-                        columns,
-                        cancel,
-                    )
-                })?
-            };
-            for (local, at) in (first_group..group).enumerate() {
-                let [row0, rows_in, word0, width] = windows[at];
-                let base = segment_windows[local * 5] as usize;
-                let length = rows_in as usize * width as usize;
-                let mut words = Vec::new();
-                words
-                    .try_reserve_exact(length)
-                    .map_err(|_| ComputeError::Allocation)?;
-                // Windows start on whole 64-bit words: `base` counts 32-bit ones.
-                let window = output.get(base / 2..base / 2 + length).ok_or_else(|| {
-                    ComputeError::Execution("capsule readback is shorter than its windows".into())
-                })?;
-                words.extend_from_slice(window);
-                masks.push(crate::CellMask {
-                    row0,
-                    rows: rows_in,
-                    word0,
-                    width,
-                    words,
                 });
             }
-        }
-        check_cancel(cancel)?;
-        Ok(masks)
+        });
+        slots
+            .into_iter()
+            .map(|slot| {
+                slot.into_inner()
+                    .map_err(|_| ComputeError::Poisoned)?
+                    .unwrap_or(Err(ComputeError::Cancelled))
+            })
+            .collect()
+    };
+    let mut masks = Vec::new();
+    masks
+        .try_reserve_exact(group_ends.len())
+        .map_err(|_| ComputeError::Allocation)?;
+    // Workers take segments in order, so any segment skipped after a
+    // failure comes after it: the first failure in order is the one reported.
+    for result in results {
+        masks.extend(result?);
     }
+    check_cancel(cancel)?;
+    Ok(masks)
+}
+
+type SegmentMasks = Result<Vec<crate::CellMask>, ComputeError>;
+
+/// Slots that take stage batches: how many segments can be in flight at once.
+fn slot_count() -> Result<usize, ComputeError> {
+    let context = context()?;
+    Ok(context.devices[..context.stage_devices]
+        .iter()
+        .map(|device| device.streams.len())
+        .sum())
+}
+
+/// Pack, run and unpack the capsule groups `first_group..end_group` as one
+/// device turn.
+#[allow(clippy::too_many_arguments)]
+fn capsule_segment(
+    capsules: &[[i64; 5]],
+    rows: &[[u32; 2]],
+    group_ends: &[usize],
+    windows: &[[u32; 4]],
+    (first_group, group, words): (usize, usize, usize),
+    cell: i64,
+    columns: i64,
+    cancel: &AtomicBool,
+) -> SegmentMasks {
+    check_cancel(cancel)?;
+    let capsule_first = if first_group == 0 {
+        0
+    } else {
+        group_ends[first_group - 1]
+    };
+    let capsule_end = group_ends[group - 1];
+    let mut segment_windows = Vec::new();
+    let mut capsule_windows = Vec::new();
+    let mut starts = vec![0u32];
+    let mut first_rows = Vec::new();
+    let (mut base, mut total) = (0u32, 0u32);
+    let mut previous = capsule_first;
+    for (local, at) in (first_group..group).enumerate() {
+        let [row0, rows_in, word0, width] = windows[at];
+        segment_windows.extend_from_slice(&[base, row0, rows_in, word0 * 2, width * 2]);
+        base = rows_in
+            .checked_mul(width)
+            .and_then(|cells| cells.checked_mul(2))
+            .and_then(|cells| cells.checked_add(base))
+            .ok_or(ComputeError::Allocation)?;
+        for &[row, count] in &rows[previous..group_ends[at]] {
+            if count == 0 {
+                continue;
+            }
+            total = total.checked_add(count).ok_or(ComputeError::Allocation)?;
+            starts.push(total);
+            first_rows.push(row);
+            capsule_windows.push(local as u32);
+        }
+        previous = group_ends[at];
+    }
+    let output = if first_rows.is_empty() {
+        Vec::new()
+    } else {
+        let kept: Vec<i64> = capsules[capsule_first..capsule_end]
+            .iter()
+            .zip(&rows[capsule_first..capsule_end])
+            .filter(|(_, row)| row[1] > 0)
+            .flat_map(|(capsule, _)| *capsule)
+            .collect();
+        // Each segment is its own device turn: packing and
+        // unpacking stay on this thread, and a short request queued
+        // behind a long batch waits at most one segment.
+        execute_exclusive(cancel, |client, cpu| {
+            kernels::capsule_masks_dispatch(
+                client,
+                cpu,
+                &kept,
+                &starts,
+                &first_rows,
+                &capsule_windows,
+                &segment_windows,
+                words,
+                cell,
+                columns,
+                cancel,
+            )
+        })?
+    };
+    let mut masks = Vec::new();
+    masks
+        .try_reserve_exact(group - first_group)
+        .map_err(|_| ComputeError::Allocation)?;
+    for (local, at) in (first_group..group).enumerate() {
+        let [row0, rows_in, word0, width] = windows[at];
+        let base = segment_windows[local * 5] as usize;
+        let length = rows_in as usize * width as usize;
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(length)
+            .map_err(|_| ComputeError::Allocation)?;
+        // Windows start on whole 64-bit words: `base` counts 32-bit ones.
+        let window = output.get(base / 2..base / 2 + length).ok_or_else(|| {
+            ComputeError::Execution("capsule readback is shorter than its windows".into())
+        })?;
+        words.extend_from_slice(window);
+        masks.push(crate::CellMask {
+            row0,
+            rows: rows_in,
+            word0,
+            width,
+            words,
+        });
+    }
+    Ok(masks)
 }
 
 fn encode_values<const FIELDS: usize>(
@@ -810,13 +934,19 @@ mod tests {
         let context = context().unwrap();
         // Take the leader role the way a round does, so no real round resets it.
         // Every device, so the waiter cannot lead a round of its own.
-        let mut taken = vec![false; context.devices.len()];
-        while taken.iter().any(|taken| !taken) {
+        let mut taken: Vec<Vec<bool>> = context
+            .devices
+            .iter()
+            .map(|device| vec![false; device.streams.len()])
+            .collect();
+        while taken.iter().flatten().any(|taken| !taken) {
             let mut pending = lock_pending(context).unwrap();
-            for (device, taken) in taken.iter_mut().enumerate() {
-                if !*taken && !pending.leaders[device] {
-                    pending.leaders[device] = true;
-                    *taken = true;
+            for (device, slots) in taken.iter_mut().enumerate() {
+                for (slot, taken) in slots.iter_mut().enumerate() {
+                    if !*taken && !pending.leaders[device][slot] {
+                        pending.leaders[device][slot] = true;
+                        *taken = true;
+                    }
                 }
             }
         }
@@ -834,12 +964,16 @@ mod tests {
         assert_eq!(worker.join().unwrap(), ComputeError::Cancelled);
         let mut pending = lock_pending(context).unwrap();
         assert!(pending.abandoned.is_empty());
-        pending.leaders.iter_mut().for_each(|busy| *busy = false);
+        pending
+            .leaders
+            .iter_mut()
+            .flatten()
+            .for_each(|busy| *busy = false);
         context.wake.notify_all();
     }
 
     #[test]
-    fn caller_threads_share_one_stream_and_complete_serially() {
+    fn caller_threads_share_the_slot_streams() {
         configure(ComputeSettings {
             default_backend: ComputeBackend::Cpu,
             fea_backend: None,
@@ -948,9 +1082,10 @@ mod tests {
             status,
             _fea: first.clone(),
             devices: vec![first, cpu()],
+            stage_devices: 2,
             failure: Mutex::new(None),
             pending: Mutex::new(Pending {
-                leaders: vec![false, false],
+                leaders: vec![vec![false], vec![false]],
                 ..Pending::default()
             }),
             wake: Condvar::new(),
@@ -972,7 +1107,7 @@ mod tests {
         };
         let free = masks_in(&context, vec![group()], &cancel).unwrap();
         // Device 0 stays busy, so both kinds of work must lead on device 1.
-        lock_pending(&context).unwrap().leaders[0] = true;
+        lock_pending(&context).unwrap().leaders[0][0] = true;
         let handed = masks_in(&context, vec![group()], &cancel).unwrap();
         assert_eq!(handed, free);
         let second = &context.devices[1].client as *const Client as usize;
@@ -981,6 +1116,6 @@ mod tests {
         })
         .unwrap();
         assert!(device, "exclusive work ran on the free device");
-        lock_pending(&context).unwrap().leaders[0] = false;
+        lock_pending(&context).unwrap().leaders[0][0] = false;
     }
 }
