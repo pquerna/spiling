@@ -100,6 +100,18 @@ impl Workbench {
         &mut self,
         option: Option<&crate::manufacture::InspectedOption>,
     ) {
+        self.begin_alternative_inner(option, None);
+    }
+
+    pub(super) fn begin_alternative_preset(&mut self, name: String, value: ManufacturingIntent) {
+        self.begin_alternative_inner(None, Some((name, value)));
+    }
+
+    fn begin_alternative_inner(
+        &mut self,
+        option: Option<&crate::manufacture::InspectedOption>,
+        preset: Option<(String, ManufacturingIntent)>,
+    ) {
         let (Some(project), Some(hello), Some(intent), Some(context)) = (
             &self.state.project,
             &self.state.hello,
@@ -131,6 +143,11 @@ impl Workbench {
         self.queued_host = Some(Command::PinAlternativeReference {
             nonce: reference_nonce,
         });
+        let (name, value) = match (option, preset) {
+            (Some(option), _) => (option.option.name.clone(), (*option.option.intent).clone()),
+            (None, Some((name, value))) => (name, value),
+            (None, None) => ("Alternative".into(), (**intent).clone()),
+        };
         self.manufacturing.trial = Some(Trial {
             project: project.project_id.clone(),
             session: hello.session_id.clone(),
@@ -147,12 +164,9 @@ impl Workbench {
                 .alternative_review
                 .as_ref()
                 .map_or(0, |review| review.capture.nonce),
-            value: option.map_or_else(
-                || (**intent).clone(),
-                |option| (*option.option.intent).clone(),
-            ),
+            value,
             option: option.map(|option| option.option.id.clone()),
-            name: option.map_or_else(|| "Alternative".into(), |option| option.option.name.clone()),
+            name,
             candidate: false,
             editing: true,
             keeping: false,

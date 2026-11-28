@@ -523,12 +523,56 @@ impl Workbench {
                     &mut self.manufacturing.replay,
                     &mut self.manufacturing.support_inspection,
                 );
-                super::review::unsupported_layers(
+                let can_try_alternative = ready
+                    && self.manufacturing_current()
+                    && self.state.manufacturing.review.is_some();
+                if let Some(action) = super::review::findings(
                     ui,
-                    &review.bundle.plan.layers,
+                    &review,
                     review.display.as_deref(),
                     &mut self.manufacturing.replay,
-                );
+                    can_try_alternative,
+                ) {
+                    match action {
+                        super::review::ReviewAction::InspectLayer {
+                            layer: index,
+                            compare_section,
+                        } => {
+                            self.manufacturing.replay.layer = Some(index);
+                            self.manufacturing.replay.layer_end = None;
+                            if compare_section {
+                                self.analysis.open = true;
+                                self.analysis.follow_layer = true;
+                                self.analysis.view.enabled = true;
+                                self.analysis.view.representation =
+                                    crate::analysis::Representation::Compare;
+                            }
+                            self.manufacturing.replay.events = review
+                                .display
+                                .as_ref()
+                                .and_then(|display| {
+                                    display
+                                        .layer_windows
+                                        .get(index as usize)
+                                        .map(|window| window.end)
+                                })
+                                .unwrap_or(u32::MAX);
+                            self.manufacturing.replay.visible = true;
+                            self.manufacturing.replay.source = false;
+                            self.manufacturing.replay.role = None;
+                            self.manufacturing.replay.tool = None;
+                        }
+                        super::review::ReviewAction::TryAlternative { name, intent } => {
+                            self.begin_alternative_preset(name, *intent);
+                        }
+                        super::review::ReviewAction::OpenPosition => {
+                            self.show_prepare(3);
+                        }
+                        super::review::ReviewAction::OpenSettings => {
+                            self.show_prepare(2);
+                        }
+                    }
+                }
                 if let Some(label) = &m.last_export {
                     ui.add_space(4.0);
                     ui.label("Exported");
