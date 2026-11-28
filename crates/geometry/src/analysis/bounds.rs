@@ -221,6 +221,235 @@ pub(super) fn native_chart_enclosure_support(
         .then_some(bounds))
 }
 
+/// Multi-direction form of [`native_enclosure_support`]: traverses the BREP
+/// vertices and edge curves once for all `N` directions.
+pub(super) fn native_enclosure_supports<const N: usize>(
+    definition: &Definition,
+    directions: [[f64; 3]; N],
+    policies: [BoundsPolicy; N],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Option<ProjectedBounds>; N], GeometryError> {
+    work.charge(1, cancel)?;
+    let mut dirs = [[Interval::point(0.0); 3]; N];
+    let mut outers = [Interval::point(0.0); N];
+    let enclosure = definition.bounds;
+    let box_intervals = std::array::from_fn(|axis| Interval {
+        lo: enclosure.min[axis],
+        hi: enclosure.max[axis],
+    });
+    for i in 0..N {
+        dirs[i] = validate_query(directions[i], policies[i])?;
+        outers[i] = project(box_intervals, dirs[i])?;
+    }
+    let mut witnesses: [Option<ProjectedBounds>; N] = [None; N];
+    let brep = definition.brep();
+    for &face in definition.face_ids() {
+        work.charge(1, cancel)?;
+        let face = brep
+            .face(face)
+            .map_err(|cause| error(GeometryErrorCode::InvalidGeometry, &cause.to_string()))?;
+        for &wire in &face.loops {
+            work.charge(1, cancel)?;
+            let wire = brep
+                .loop_(wire)
+                .map_err(|cause| error(GeometryErrorCode::InvalidGeometry, &cause.to_string()))?;
+            for entry in &wire.edges {
+                work.charge(1, cancel)?;
+                let edge = brep.edge(entry.edge).map_err(|cause| {
+                    error(GeometryErrorCode::InvalidGeometry, &cause.to_string())
+                })?;
+                for vertex in edge.vertices {
+                    work.charge(1, cancel)?;
+                    let point = brep
+                        .vertex(vertex)
+                        .map_err(|cause| {
+                            error(GeometryErrorCode::InvalidGeometry, &cause.to_string())
+                        })?
+                        .point;
+                    let p = [point.x, point.y, point.z].map(Interval::point);
+                    for i in 0..N {
+                        include_witness(&mut witnesses[i], project(p, dirs[i])?);
+                    }
+                }
+                if let Some(curve) = &edge.curve {
+                    for fraction in [0.25, 0.5, 0.75] {
+                        let parameter = edge.interval.evaluate(fraction);
+                        let point = parametric::CurveEvaluator::tensor(
+                            curve,
+                            [parameter, parameter],
+                            0,
+                            work,
+                            cancel,
+                        )?[0];
+                        for i in 0..N {
+                            include_witness(&mut witnesses[i], project(point, dirs[i])?);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut results = [None; N];
+    for i in 0..N {
+        let Some(witness) = witnesses[i] else {
+            continue;
+        };
+        let mut bounds = ProjectedBounds {
+            minimum: [outers[i].lo, witness.minimum[1]],
+            maximum: [witness.maximum[0], outers[i].hi],
+            achieved_uncertainty_mm: 0.0,
+        };
+        bounds.achieved_uncertainty_mm = uncertainty(&bounds);
+        results[i] = (bounds.minimum[0] <= bounds.minimum[1]
+            && bounds.maximum[0] <= bounds.maximum[1]
+            && bounds.achieved_uncertainty_mm <= policies[i].maximum_endpoint_uncertainty_mm)
+            .then_some(bounds);
+    }
+    Ok(results)
+}
+
+/// Multi-direction form of [`native_chart_enclosure_support`]: evaluates each
+/// face's UV cover, Cartesian enclosure, and coedge curves once across all `N`
+/// requested directions.
+pub(super) fn native_chart_enclosure_supports<const N: usize>(
+    source: MaterialSourceView<'_, '_>,
+    directions: [[f64; 3]; N],
+    policies: [BoundsPolicy; N],
+    needed: [bool; N],
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Option<ProjectedBounds>; N], GeometryError> {
+    let mut dirs = [[Interval::point(0.0); 3]; N];
+    for i in 0..N {
+        dirs[i] = if needed[i] {
+            validate_query(directions[i], policies[i])?
+        } else {
+            [1.0, 0.0, 0.0].map(Interval::point)
+        };
+    }
+    let mut outers: [Option<Interval>; N] = [None; N];
+    let mut witnesses: [Option<ProjectedBounds>; N] = [None; N];
+    let functionals: [_; N] = std::array::from_fn(|i| parametric::SurfaceFunctional {
+        direction: dirs[i],
+        origin: [Interval::point(0.0); 3],
+        offset: Interval::point(0.0),
+    });
+    let trims = source.trim_source();
+    for ordinal in 0..source.definition().face_ids().len() {
+        work.charge(1, cancel)?;
+        let trim = trims.face_domain(ordinal).ok_or_else(|| {
+            error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "native support omitted a trim domain",
+            )
+        })?;
+        if !trim.is_native_material() || trim.coedges().is_empty() {
+            return Ok([None; N]);
+        }
+        let PreparedTrimSurface::Native(surface) = trim.surface_operand() else {
+            return Ok([None; N]);
+        };
+        let uv = trim.support_uv_cover(work, cancel)?;
+        let evaluated =
+            parametric::surface_functional_enclosures(surface, uv, &functionals, work, cancel)?;
+        let cartesian = parametric::surface_position_enclosure(surface, uv, work, cancel)?;
+        for i in 0..N {
+            if !needed[i] {
+                continue;
+            }
+            let height = intersect(evaluated[i].position, project(cartesian, dirs[i])?)?;
+            outers[i] = Some(outers[i].map_or(height, |previous| previous.hull(height)));
+        }
+        for (index, coedge) in trim.coedges().iter().enumerate() {
+            for vertex in coedge.vertices {
+                let point = trims
+                    .native_vertex_point(vertex, work, cancel)?
+                    .map(Interval::point);
+                for i in 0..N {
+                    if !needed[i] {
+                        continue;
+                    }
+                    let height = project(point, dirs[i])?;
+                    outers[i] = Some(outers[i].map_or(height, |previous| previous.hull(height)));
+                    include_witness(&mut witnesses[i], height);
+                }
+            }
+            let range = coedge.oriented_native_range();
+            let range = [range[0].min(range[1]), range[0].max(range[1])];
+            trim.with_native_spatial_curve(
+                index,
+                remaining_bytes,
+                work,
+                cancel,
+                |curve, work, cancel| {
+                    let mut range_tensor: Option<[Interval; 3]> = None;
+                    for i in 0..N {
+                        if !needed[i] {
+                            continue;
+                        }
+                        let height = match parametric::native_curve_functional_control_bounds(
+                            curve,
+                            range,
+                            dirs[i],
+                            Interval::point(0.0),
+                            work,
+                            cancel,
+                        )? {
+                            Some(height) => height,
+                            None => {
+                                let box3 = match range_tensor {
+                                    Some(box3) => box3,
+                                    None => {
+                                        let b = curve.tensor(range, 0, work, cancel)?[0];
+                                        range_tensor = Some(b);
+                                        b
+                                    }
+                                };
+                                project(box3, dirs[i])?
+                            }
+                        };
+                        outers[i] =
+                            Some(outers[i].map_or(height, |previous| previous.hull(height)));
+                    }
+                    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                        let parameter = range[0] + (range[1] - range[0]) * fraction;
+                        let point = curve.tensor([parameter, parameter], 0, work, cancel)?[0];
+                        for i in 0..N {
+                            if !needed[i] {
+                                continue;
+                            }
+                            include_witness(&mut witnesses[i], project(point, dirs[i])?);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    let mut results = [None; N];
+    for i in 0..N {
+        if !needed[i] {
+            continue;
+        }
+        let (Some(outer), Some(witness)) = (outers[i], witnesses[i]) else {
+            continue;
+        };
+        let mut bounds = ProjectedBounds {
+            minimum: [outer.lo, witness.minimum[1]],
+            maximum: [witness.maximum[0], outer.hi],
+            achieved_uncertainty_mm: 0.0,
+        };
+        bounds.achieved_uncertainty_mm = uncertainty(&bounds);
+        results[i] = (bounds.minimum[0] <= bounds.minimum[1]
+            && bounds.maximum[0] <= bounds.maximum[1]
+            && bounds.achieved_uncertainty_mm <= policies[i].maximum_endpoint_uncertainty_mm)
+            .then_some(bounds);
+    }
+    Ok(results)
+}
+
 fn include_exclusion(aggregate: &mut ProjectedBounds, height: Interval) {
     aggregate.minimum[0] = aggregate.minimum[0].min(height.lo);
     aggregate.maximum[1] = aggregate.maximum[1].max(height.hi);

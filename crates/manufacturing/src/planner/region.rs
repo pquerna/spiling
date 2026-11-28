@@ -568,7 +568,8 @@ pub(super) fn hatch_with_phase(
         None,
         cancel,
     )?;
-    batch.run(paths, segments, cancel)
+    batch.run(paths, segments, cancel)?;
+    Ok(())
 }
 
 /// Every hatch of one pass (a layer's skins and interiors), planned first,
@@ -577,11 +578,13 @@ pub(super) fn hatch_with_phase(
 #[derive(Default)]
 pub(super) struct HatchBatch<'a> {
     jobs: Vec<HatchJob<'a>>,
+    ordinary_regional_incomplete: bool,
 }
 
 struct HatchJob<'a> {
     work: HatchWork<'a>,
     owner: Option<DepositionOwner>,
+    ordinary_regional: bool,
 }
 
 enum HatchWork<'a> {
@@ -638,6 +641,7 @@ impl<'a> HatchBatch<'a> {
                     layer,
                 },
                 owner,
+                false,
             );
         }
         if kind == DepositionKind::SparseFill
@@ -650,6 +654,7 @@ impl<'a> HatchBatch<'a> {
                     layer,
                 },
                 owner,
+                false,
             );
         }
         if kind == DepositionKind::SparseFill
@@ -665,11 +670,14 @@ impl<'a> HatchBatch<'a> {
                 for polygon in &fill.0 {
                     check_cancel(cancel)?;
                     let rows = HatchRows::new(polygon, fraction * 0.5, &grid_layer)?;
-                    self.rows(polygon, kind, rows, grid_layer, owner, cancel)?;
+                    self.rows(polygon, kind, rows, grid_layer, owner, false, cancel)?;
                 }
             }
             return Ok(());
         }
+        let ordinary_regional = common_phase.is_none()
+            && matches!(owner, Some(DepositionOwner::Regional { .. }))
+            && matches!(kind, DepositionKind::SolidFill | DepositionKind::SparseFill);
         for polygon in &fill.0 {
             let rows = if let Some(origin) = common_phase {
                 HatchRows::common(polygon, fraction, &layer, origin)?
@@ -680,11 +688,15 @@ impl<'a> HatchBatch<'a> {
                     )
                 })?
             };
-            self.rows(polygon, kind, rows, layer, owner, cancel)?;
+            self.rows(polygon, kind, rows, layer, owner, ordinary_regional, cancel)?;
         }
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Row batching carries policy, owner and ordinary-completeness tracking"
+    )]
     fn rows(
         &mut self,
         polygon: &'a Polygon<f64>,
@@ -692,9 +704,13 @@ impl<'a> HatchBatch<'a> {
         rows: HatchRows,
         layer: HatchLayer<'a>,
         owner: Option<DepositionOwner>,
+        ordinary_regional: bool,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
         if rows.count == 0 {
+            if ordinary_regional {
+                self.ordinary_regional_incomplete = true;
+            }
             return Ok(());
         }
         let prepared = hatch::PreparedHatch::for_polygon(polygon, layer.axis, cancel)?;
@@ -706,6 +722,7 @@ impl<'a> HatchBatch<'a> {
                 prepared,
             },
             owner,
+            ordinary_regional,
         )
     }
 
@@ -713,21 +730,29 @@ impl<'a> HatchBatch<'a> {
         &mut self,
         work: HatchWork<'a>,
         owner: Option<DepositionOwner>,
+        ordinary_regional: bool,
     ) -> Result<(), ManufacturingError> {
         self.jobs
             .try_reserve(1)
             .map_err(|_| resource("hatch batch allocation refused"))?;
-        self.jobs.push(HatchJob { work, owner });
+        self.jobs.push(HatchJob {
+            work,
+            owner,
+            ordinary_regional,
+        });
         Ok(())
     }
 
     /// Mask every planned row in one request, then emit each job in order.
+    /// Returns whether every ordinary (unframed) regional polygon emitted at
+    /// least one row path.
     pub(super) fn run(
         self,
         paths: &mut Vec<DepositionPath>,
         segments: &mut usize,
         cancel: &AtomicBool,
-    ) -> Result<(), ManufacturingError> {
+    ) -> Result<bool, ManufacturingError> {
+        let mut ordinary_complete = !self.ordinary_regional_incomplete;
         let mut coordinates = Vec::new();
         for job in &self.jobs {
             if let HatchWork::Rows { rows, .. } = &job.work {
@@ -785,13 +810,16 @@ impl<'a> HatchBatch<'a> {
                     layer,
                 } => gyroid::hatch(fill, fraction, &layer, paths, segments, cancel)?,
             }
+            if job.ordinary_regional && paths.len() == begin {
+                ordinary_complete = false;
+            }
             if let Some(owner) = job.owner {
                 for path in &mut paths[begin..] {
                     path.owner = Some(owner);
                 }
             }
         }
-        Ok(())
+        Ok(ordinary_complete)
     }
 }
 

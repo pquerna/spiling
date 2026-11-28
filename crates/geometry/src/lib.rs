@@ -46,8 +46,8 @@ pub use analysis::{
     certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
     certify_planar_capsule_clearance, certify_planar_capsule_clearance_prepared,
     certify_planar_capsule_pair_clearance, material_projected_bounds, placed_bounds,
-    placed_material_bounds, placed_native_support, planar_bounds_clear, prepare_planar_forbidden,
-    prepare_solid, projected_bounds, projected_protected_void_envelopes,
+    placed_material_bounds, placed_native_support, placed_native_support_axes, planar_bounds_clear,
+    prepare_planar_forbidden, prepare_solid, projected_bounds, projected_protected_void_envelopes,
     prove_planar_capsule_clearance_prepared,
 };
 pub use compute::{

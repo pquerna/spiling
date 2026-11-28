@@ -323,10 +323,28 @@ pub struct CapturedInspection {
 pub struct CompileVerification {
     bundle_digest: [u8; 32],
     program_digest: [u8; 32],
+    /// Fresh report computed during in-process verification (e.g. project open),
+    /// never loaded from a persisted bundle field.
+    fresh_report: Option<VerificationReport>,
 }
 
 impl CompileVerification {
-    /// Inspect exact bytes covered at compile, never a caller-supplied decoded document.
+    /// Bind an ephemeral verification receipt to a freshly computed report from
+    /// independent replay of these exact immutable bytes in the current process.
+    pub fn from_fresh_inspection(
+        encoded: &ChunkSource,
+        program: &ChunkSource,
+        report: VerificationReport,
+    ) -> Self {
+        Self {
+            bundle_digest: *encoded.digest(),
+            program_digest: *program.digest(),
+            fresh_report: Some(report),
+        }
+    }
+
+    /// Inspect exact bytes covered at compile or fresh open replay, never a caller-supplied
+    /// decoded document or unverified persisted report.
     pub fn inspect_report(
         &self,
         encoded: &ChunkSource,
@@ -338,7 +356,10 @@ impl CompileVerification {
             return Ok(None);
         }
         let bundle = decode_bundle_from(encoded.len(), || encoded.reader())?;
-        let report = bundle.verification.clone();
+        let report = self
+            .fresh_report
+            .clone()
+            .unwrap_or_else(|| bundle.verification.clone());
         let inspection = finish_inspection(
             &bundle,
             &SourceHash::from_digest(encoded.digest()),
@@ -395,6 +416,7 @@ fn seal_compiled_artifact(
     let receipt = CompileVerification {
         bundle_digest: *encoded.digest(),
         program_digest: *program.digest(),
+        fresh_report: None,
     };
     let inspection = replay
         .map(|sink| {

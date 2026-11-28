@@ -1067,6 +1067,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let _ = input.read(&mut byte);
         eof.send_replace(true);
     });
+    let compute_task =
+        tokio::task::spawn_blocking(move || spiling_compute::configure(compute_settings));
     let capability = tokio::time::timeout(Duration::from_secs(5), startup_rx).await???;
     if capability.len() != 65
         || capability.last() != Some(&b'\n')
@@ -1075,8 +1077,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("invalid startup capability".into());
     }
     let capability = String::from_utf8(capability[..64].to_vec())?;
-    let compute =
-        tokio::task::spawn_blocking(move || spiling_compute::configure(compute_settings)).await??;
+    let jobs = Jobs::open(&store)?;
+    let native = NativeHost::with_library(
+        jobs.clone(),
+        ProjectFault::from_env()?,
+        Some(library.location()),
+    );
+    let (session_id, _, _) = native.capture().await?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let compute = compute_task.await??;
     diagnostic(
         "info",
         "compute_selected",
@@ -1088,14 +1097,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             compute.fea_device.name,
         ),
     );
-    let jobs = Jobs::open(&store)?;
-    let native = NativeHost::with_library(
-        jobs.clone(),
-        ProjectFault::from_env()?,
-        Some(library.location()),
-    );
-    let (session_id, _, _) = native.capture().await?;
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let instance_id = Uuid::new_v4().to_string();
     let info = EngineInfo {
         compute: Some((&compute).try_into().map_err(jobs::internal)?),

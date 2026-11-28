@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, atomic::AtomicBool};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, atomic::AtomicBool};
 use std::time::Duration;
 
 use cubecl::prelude::Client;
@@ -25,11 +25,11 @@ struct Session {
 
 pub(crate) struct Context {
     status: ComputeStatus,
-    /// Devices that lead rounds: the default first, then helpers. Auto
-    /// with a hardware GPU adds the CPU runtime as a helper; every kernel is
-    /// exact, so a request's result is the same on whichever device runs it.
-    /// Rounds fill every slot of an earlier device before a later one.
+    /// Primary devices initialized synchronously.
     devices: Vec<ResolvedDevice>,
+    /// Optional CPU helper resolved on a background thread when `Auto` picks a
+    /// hardware GPU, so engine startup never blocks on CPU kernel JIT.
+    helper: Arc<OnceLock<ResolvedDevice>>,
     _fea: ResolvedDevice,
     /// How many devices, from the first, take exclusive stage batches. The
     /// CPU helper beside a hardware GPU takes queued mask requests only: a
@@ -39,6 +39,60 @@ pub(crate) struct Context {
     failure: Mutex<Option<ComputeError>>,
     pending: Mutex<Pending>,
     wake: Condvar,
+}
+
+impl Context {
+    fn total_devices(&self) -> usize {
+        self.devices.len() + usize::from(self.helper.get().is_some())
+    }
+
+    fn device(&self, index: usize) -> &ResolvedDevice {
+        if index < self.devices.len() {
+            &self.devices[index]
+        } else {
+            self.helper
+                .get()
+                .expect("helper device slot only selected once initialized")
+        }
+    }
+}
+
+struct ProbeGate {
+    state: Mutex<Option<Result<(), ComputeError>>>,
+    ready: Condvar,
+}
+
+impl ProbeGate {
+    fn pending() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(None),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn completed(result: Result<(), ComputeError>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Some(result)),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn finish(&self, result: Result<(), ComputeError>) {
+        if let Ok(mut guard) = self.state.lock() {
+            *guard = Some(result);
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait(&self) -> Result<(), ComputeError> {
+        let mut guard = self.state.lock().map_err(|_| ComputeError::Poisoned)?;
+        loop {
+            if let Some(result) = guard.as_ref() {
+                return result.clone();
+            }
+            guard = self.ready.wait(guard).map_err(|_| ComputeError::Poisoned)?;
+        }
+    }
 }
 
 /// Queued mask requests and the devices' leaders. Requests from every thread
@@ -74,6 +128,14 @@ struct ResolvedDevice {
     /// pool never grows with callers.
     streams: Vec<Stream>,
     description: ComputeDevice,
+    /// Background startup probe gate; awaited before the device runs a round.
+    probe_gate: Arc<ProbeGate>,
+}
+
+impl ResolvedDevice {
+    fn ensure_probed(&self) -> Result<(), ComputeError> {
+        self.probe_gate.wait()
+    }
 }
 
 /// Rounds in flight on a hardware GPU. One CPU runtime round already runs a
@@ -127,10 +189,10 @@ fn context() -> Result<&'static Context, ComputeError> {
 
 fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
     guarded(|| {
-        let default = resolve(settings.default_backend, None)?;
+        let default = resolve(settings.default_backend, None, false)?;
         let fea = match settings.fea_backend {
             None => default.clone(),
-            Some(backend) => resolve(backend, Some(&default))?,
+            Some(backend) => resolve(backend, Some(&default), false)?,
         };
         let status = ComputeStatus {
             settings,
@@ -138,26 +200,49 @@ fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
             fea_device: fea.description.clone(),
         };
         status.validate().map_err(ComputeError::Initialization)?;
-        let mut devices = vec![default];
-        if settings.default_backend == ComputeBackend::Auto
-            && devices[0].description.backend == ComputeBackend::Vulkan
-            && devices[0].description.hardware_accelerated
-            && let Ok(cpu) = resolve(ComputeBackend::Cpu, None)
-        {
-            // Extra capacity only: a helper that cannot start changes no result.
-            devices.push(cpu);
+        let want_cpu_helper = settings.default_backend == ComputeBackend::Auto
+            && default.description.backend == ComputeBackend::Vulkan
+            && default.description.hardware_accelerated;
+        let helper = Arc::new(OnceLock::new());
+        let mut leaders = vec![vec![false; default.streams.len()]];
+        if want_cpu_helper {
+            leaders.push(vec![false; 1]);
         }
+        // Run exact-predicate probes (and optional CPU helper JIT warmup) on a
+        // background thread so engine startup overlaps shader compilation with
+        // RPC/SQLite/STEP work and read-only return jobs never pay GPU warmup.
+        let default_warm = default.clone();
+        let fea_warm = if std::ptr::eq(
+            Arc::as_ptr(&fea.probe_gate),
+            Arc::as_ptr(&default.probe_gate),
+        ) {
+            None
+        } else {
+            Some(fea.clone())
+        };
+        let helper_slot = Arc::clone(&helper);
+        let _ = std::thread::Builder::new()
+            .name("spiling-compute-warmup".into())
+            .spawn(move || {
+                let result = probe(&default_warm);
+                default_warm.probe_gate.finish(result);
+                if let Some(fea_dev) = fea_warm {
+                    let result = probe(&fea_dev);
+                    fea_dev.probe_gate.finish(result);
+                }
+                if want_cpu_helper && let Ok(cpu) = resolve(ComputeBackend::Cpu, None, true) {
+                    let _ = helper_slot.set(cpu);
+                }
+            });
         let pending = Pending {
-            leaders: devices
-                .iter()
-                .map(|device| vec![false; device.streams.len()])
-                .collect(),
+            leaders,
             ..Pending::default()
         };
         Ok(Context {
             status,
             stage_devices: 1,
-            devices,
+            devices: vec![default],
+            helper,
             _fea: fea,
             failure: Mutex::new(None),
             pending: Mutex::new(pending),
@@ -173,57 +258,59 @@ fn initialize(settings: ComputeSettings) -> Result<Context, ComputeError> {
 fn resolve(
     backend: ComputeBackend,
     previous: Option<&ResolvedDevice>,
+    probe_now: bool,
 ) -> Result<ResolvedDevice, ComputeError> {
     let hardware = [
         WgpuDeviceKind::DiscreteGpu(0),
         WgpuDeviceKind::IntegratedGpu(0),
     ];
-    let selected = if backend == ComputeBackend::Cpu {
-        None
-    } else {
-        let software = [
-            WgpuDeviceKind::VirtualGpu(0),
-            WgpuDeviceKind::Other(0),
-            WgpuDeviceKind::Cpu,
-        ];
-        let mut choices = hardware.into_iter().chain(software.into_iter().take(
+    let software = [
+        WgpuDeviceKind::VirtualGpu(0),
+        WgpuDeviceKind::Other(0),
+        WgpuDeviceKind::Cpu,
+    ];
+    let mut selected_setup = None;
+    if backend != ComputeBackend::Cpu {
+        let choices = hardware.into_iter().chain(software.into_iter().take(
             if backend == ComputeBackend::Vulkan {
                 3
             } else {
                 0
             },
         ));
-        choices.find(|kind| cubecl::Device::vulkan(kind.clone()).is_ok())
-    };
-    if backend == ComputeBackend::Vulkan && selected.is_none() {
+        for kind in choices {
+            if let Some(previous) = previous
+                && previous.description.backend == ComputeBackend::Vulkan
+                && previous.description.hardware_accelerated
+                    == matches!(
+                        kind,
+                        WgpuDeviceKind::DiscreteGpu(_) | WgpuDeviceKind::IntegratedGpu(_)
+                    )
+                && cubecl::Device::vulkan(kind.clone()).is_ok()
+            {
+                return Ok(previous.clone());
+            }
+            let device = WgpuDevice::new(kind).on(WgpuBackend::Vulkan);
+            let options = RuntimeOptions::with_tasks_max(Some(1))
+                .map_err(|error| ComputeError::Initialization(bounded_message(error)))?;
+            if let Ok(setup) = cubecl::wgpu::try_init_setup::<Vulkan>(&device, options) {
+                selected_setup = Some((device, setup));
+                break;
+            }
+        }
+    }
+    if backend == ComputeBackend::Vulkan && selected_setup.is_none() {
         return Err(ComputeError::Initialization(
             "no Vulkan adapter is available".into(),
         ));
     }
-    if let Some(previous) = previous {
-        let same = match &selected {
-            None => previous.description.backend == ComputeBackend::Cpu,
-            Some(kind) => {
-                previous.description.backend == ComputeBackend::Vulkan
-                    && previous.description.hardware_accelerated
-                        == matches!(
-                            kind,
-                            WgpuDeviceKind::DiscreteGpu(_) | WgpuDeviceKind::IntegratedGpu(_)
-                        )
-            }
-        };
-        if same {
-            return Ok(previous.clone());
-        }
+    if selected_setup.is_none()
+        && let Some(previous) = previous
+        && previous.description.backend == ComputeBackend::Cpu
+    {
+        return Ok(previous.clone());
     }
-    let resolved = if let Some(kind) = selected {
-        let device = WgpuDevice::new(kind).on(WgpuBackend::Vulkan);
-        let setup = cubecl::wgpu::try_init_setup::<Vulkan>(
-            &device,
-            RuntimeOptions::with_tasks_max(Some(1))
-                .map_err(|error| ComputeError::Initialization(bounded_message(error)))?,
-        )
-        .map_err(|error| ComputeError::Initialization(bounded_message(error)))?;
+    let resolved = if let Some((device, setup)) = selected_setup {
         let info = setup.adapter.get_info();
         let hardware_accelerated = matches!(
             info.device_type,
@@ -239,6 +326,11 @@ fn resolve(
                 name: device_name(&info.name),
                 hardware_accelerated,
             },
+            probe_gate: if probe_now {
+                ProbeGate::completed(Ok(()))
+            } else {
+                ProbeGate::pending()
+            },
         }
     } else {
         let client = cubecl::Device::Cpu(Default::default()).client();
@@ -251,9 +343,16 @@ fn resolve(
                 name,
                 hardware_accelerated: false,
             },
+            probe_gate: if probe_now {
+                ProbeGate::completed(Ok(()))
+            } else {
+                ProbeGate::pending()
+            },
         }
     };
-    probe(&resolved)?;
+    if probe_now {
+        probe(&resolved)?;
+    }
     Ok(resolved)
 }
 
@@ -410,7 +509,7 @@ fn masks_in(
             }
             return Err(ComputeError::Cancelled);
         }
-        if let Some(slot) = free_slot(&pending, context.devices.len()) {
+        if let Some(slot) = free_slot(&pending, context.total_devices()) {
             pending = lead(context, pending, slot, |_, _| Ok(()))?.0;
             continue;
         }
@@ -527,7 +626,13 @@ fn round<T: Send>(
         }
         Err(_) => return (Err(ComputeError::Poisoned), Err(ComputeError::Poisoned)),
     }
-    let device = &context.devices[device];
+    let device = context.device(device);
+    if let Err(error) = device.ensure_probed() {
+        if let Ok(mut failure) = context.failure.lock() {
+            failure.get_or_insert_with(|| error.clone());
+        }
+        return (Err(error.clone()), Err(error));
+    }
     let stream = device.streams[slot];
     let cpu = device.description.backend == ComputeBackend::Cpu;
     let mut own = Err(ComputeError::Execution("round did not run".into()));
@@ -1068,7 +1173,7 @@ mod tests {
 
     #[test]
     fn a_busy_device_hands_rounds_to_the_next_with_identical_results() {
-        let cpu = || resolve(ComputeBackend::Cpu, None).unwrap();
+        let cpu = || resolve(ComputeBackend::Cpu, None, true).unwrap();
         let first = cpu();
         let status = ComputeStatus {
             settings: ComputeSettings {
@@ -1082,6 +1187,7 @@ mod tests {
             status,
             _fea: first.clone(),
             devices: vec![first, cpu()],
+            helper: Arc::new(OnceLock::new()),
             stage_devices: 2,
             failure: Mutex::new(None),
             pending: Mutex::new(Pending {

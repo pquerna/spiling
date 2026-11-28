@@ -447,6 +447,7 @@ struct OrdinaryTemplate {
     paths: Vec<DepositionPath>,
     coverage: PlanarRegionCoverage,
     fits: Vec<SkinCommandFitDomain>,
+    ordinary_centered_complete: bool,
 }
 
 // Successful tentative sections/D owners move into final admission unchanged.
@@ -1527,7 +1528,8 @@ fn admit_schedule<'model>(
                                     template_points,
                                     template_bytes,
                                 );
-                                let (paths, proposed, fits) = regions.paths(
+                                let (paths, proposed, fits, ordinary_centered_complete) = regions
+                                    .paths_tracking_ordinary(
                                     elevation.z,
                                     elevation.lower_z,
                                     axis,
@@ -1551,6 +1553,7 @@ fn admit_schedule<'model>(
                                         paths,
                                         coverage: proposed.clone(),
                                         fits,
+                                        ordinary_centered_complete,
                                     },
                                     work,
                                 ))
@@ -2019,17 +2022,37 @@ fn admit_schedule<'model>(
                 recipe,
             };
             let phase_started = object_split.start();
+            let prebuilt_centered = templates[axis_slot]
+                .as_ref()
+                .filter(|template| {
+                    template.phase == region::OrdinaryHatchPhase::Centered
+                        && template.ordinary_centered_complete
+                })
+                .or_else(|| {
+                    let run = pre_run
+                        .get(index as usize - chunk_start)
+                        .copied()
+                        .flatten()?;
+                    pre_templates
+                        .iter()
+                        .find(|(want, _)| *want == (run, axis_slot, top_axis))
+                        .and_then(|(_, result)| result.as_ref().ok())
+                        .map(|(template, _)| template)
+                        .filter(|template| template.ordinary_centered_complete)
+                })
+                .map(|template| template.paths.as_slice());
             let phase = loop {
                 let revocable = neighborhoods.has_prefetch();
                 let proposed = classified
                     .as_ref()
                     .expect("region classification initialized")
-                    .choose_initial_ordinary_phase(
+                    .choose_initial_ordinary_phase_reusing(
                         &hatch_layer,
                         layers
                             .last()
                             .into_iter()
                             .flat_map(|layer| layer.paths.iter()),
+                        prebuilt_centered,
                         &mut phase_anchors,
                         &mut support_work.anchors,
                         classified_owned_bytes,
@@ -2123,31 +2146,32 @@ fn admit_schedule<'model>(
                 let classified = classified
                     .as_ref()
                     .expect("region classification initialized");
-                let (paths, proposed, fits) = classified.paths(
-                    z,
-                    elevation.lower_z,
-                    axis,
-                    top_axis,
-                    recipe,
-                    web_roof.as_ref().map(|field| field.roof()),
-                    phase,
-                    classified_owned_bytes,
-                    &sections[current].process_domains,
-                    &mut template_segments,
-                    |scratch, scratch_bytes, work| {
-                        boolean::charge(neighborhoods.work_mut(), work)?;
-                        admit_skin_scratch(
-                            retained_points,
-                            outside_skin_bytes,
-                            &mut neighborhoods,
-                            &[],
-                            scratch,
-                            scratch_bytes,
-                            cancel,
-                        )
-                    },
-                    cancel,
-                )?;
+                let (paths, proposed, fits, ordinary_complete) = classified
+                    .paths_tracking_ordinary(
+                        z,
+                        elevation.lower_z,
+                        axis,
+                        top_axis,
+                        recipe,
+                        web_roof.as_ref().map(|field| field.roof()),
+                        phase,
+                        classified_owned_bytes,
+                        &sections[current].process_domains,
+                        &mut template_segments,
+                        |scratch, scratch_bytes, work| {
+                            boolean::charge(neighborhoods.work_mut(), work)?;
+                            admit_skin_scratch(
+                                retained_points,
+                                outside_skin_bytes,
+                                &mut neighborhoods,
+                                &[],
+                                scratch,
+                                scratch_bytes,
+                                cancel,
+                            )
+                        },
+                        cancel,
+                    )?;
                 let base = retained_points
                     + classified.retained_points()
                     + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
@@ -2171,6 +2195,8 @@ fn admit_schedule<'model>(
                     paths,
                     coverage,
                     fits,
+                    ordinary_centered_complete: phase == region::OrdinaryHatchPhase::Centered
+                        && ordinary_complete,
                 });
             }
             object_split.stop("template", template_started);

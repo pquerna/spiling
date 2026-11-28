@@ -98,6 +98,7 @@ struct Opened {
     project: Project,
     imports: Vec<Imported>,
     residents: BTreeMap<DefinitionId, Resident>,
+    receipts: Vec<CompileVerification>,
 }
 #[derive(Clone)]
 pub struct CompileRequest {
@@ -380,7 +381,7 @@ fn run(
 ) {
     let mut definitions = BTreeMap::<DefinitionId, Resident>::new();
     let mut analysis_operator: Option<spiling_analysis::run::CachedOperator> = None;
-    let mut compile_receipt: Option<CompileVerification> = None;
+    let mut verified_receipts: Vec<CompileVerification> = Vec::new();
     let mut epoch = 0;
     loop {
         reclaim(&mut definitions, &live, &mut epoch);
@@ -556,12 +557,13 @@ fn run(
                 })
             }
             Work::Open(request) => {
-                compile_receipt = None;
+                verified_receipts.clear();
                 open(request, &definitions, &cancel, &mut display_work, &report).map(
                     |Opened {
                          project,
                          imports,
                          residents,
+                         receipts,
                      }| {
                         for imported in &imports {
                             if matches!(imported.display, ImportedDisplay::Reused) {
@@ -572,6 +574,7 @@ fn run(
                             }
                         }
                         pending = residents;
+                        verified_receipts = receipts;
                         Product::Open { project, imports }
                     },
                 )
@@ -591,7 +594,8 @@ fn run(
                 .map(Product::Saved),
             Work::Compile(request) => {
                 compile(&request, &definitions, false, &cancel).map(|compiled| {
-                    compile_receipt = Some(compiled.receipt);
+                    verified_receipts.clear();
+                    verified_receipts.push(compiled.receipt);
                     Product::Compiled(compiled.asset)
                 })
             }
@@ -675,7 +679,7 @@ fn run(
                     .map_err(|message| {
                         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, message)
                     })?;
-                    compile_receipt = Some(compiled.receipt);
+                    verified_receipts.push(compiled.receipt);
                     Ok(Product::AlternativeEvaluated {
                         evaluation,
                         asset,
@@ -738,20 +742,18 @@ fn run(
             })()
             .map_err(|error: GeometryError| JobError::from(error)),
             Work::Verify { asset, output } => {
-                inspect_asset(&asset, output, compile_receipt.as_ref(), &cancel).and_then(
-                    |inspection| {
-                        let package = if output.delivery_package() {
-                            package_asset(&asset, &inspection.report, &definitions, &cancel)?
-                        } else {
-                            None
-                        };
-                        Ok(Product::Verified {
-                            record: asset.record.clone(),
-                            inspection,
-                            package,
-                        })
-                    },
-                )
+                inspect_asset(&asset, output, &verified_receipts, &cancel).and_then(|inspection| {
+                    let package = if output.delivery_package() {
+                        package_asset(&asset, &inspection.report, &definitions, &cancel)?
+                    } else {
+                        None
+                    };
+                    Ok(Product::Verified {
+                        record: asset.record.clone(),
+                        inspection,
+                        package,
+                    })
+                })
             }
             Work::Section {
                 session,
@@ -1563,6 +1565,7 @@ fn open(
     }
     drop(prepared_step);
     check_cancel(cancel)?;
+    let mut receipts = Vec::new();
     let project = Project::from_loaded_with_manufacturing_check(loaded, |asset, bundle| {
         let _replay = crate::performance::span("open_replay");
         let working_set = crate::resources::manufacturing_working_set()?;
@@ -1575,7 +1578,12 @@ fn open(
                 cancel,
             )
         })?;
-        assess_inspection(inspection, &bundle.provenance.occurrences, cancel)?;
+        let inspection = assess_inspection(inspection, &bundle.provenance.occurrences, cancel)?;
+        receipts.push(CompileVerification::from_fresh_inspection(
+            &asset.bundle,
+            &asset.program,
+            inspection.report,
+        ));
         Ok::<_, JobError>(())
     })?;
     let project = crate::resources::observed_project(project);
@@ -1585,6 +1593,7 @@ fn open(
         project,
         imports,
         residents: pending,
+        receipts,
     })
 }
 fn validate_analysis_targets(
@@ -1992,15 +2001,17 @@ fn posed_mesh(
 fn inspect_asset(
     asset: &ManufacturingAsset,
     output: VerificationOutput,
-    receipt: Option<&CompileVerification>,
+    receipts: &[CompileVerification],
     cancel: &AtomicBool,
 ) -> Result<ManufacturingInspection, JobError> {
-    if output == VerificationOutput::ReportOnly
-        && let Some(receipt) = receipt
-        && let Some((inspection, occurrences)) =
-            receipt.inspect_report(&asset.bundle, &asset.program, cancel)?
-    {
-        return assess_inspection(inspection, &occurrences, cancel);
+    if output == VerificationOutput::ReportOnly {
+        for receipt in receipts {
+            if let Some((inspection, occurrences)) =
+                receipt.inspect_report(&asset.bundle, &asset.program, cancel)?
+            {
+                return assess_inspection(inspection, &occurrences, cancel);
+            }
+        }
     }
     let bundle = asset.decode().map_err(JobError::from)?;
     let result = spiling_manufacturing::ManufacturingResult::new(bundle, asset.program.clone())

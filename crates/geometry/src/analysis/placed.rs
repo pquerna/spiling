@@ -603,6 +603,99 @@ pub fn placed_native_support<'d>(
     }))
 }
 
+/// Multi-axis form of [`placed_native_support`]: shares BREP traversal and, when
+/// chart enclosures are needed, prepares the native solid once across all `N`
+/// directional queries.
+pub fn placed_native_support_axes<'d, const N: usize>(
+    definition: &'d Definition,
+    queries: [(RigidPoseMm, [f64; 3], BoundsPolicy); N],
+    query_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Option<PlacedNativeSupport<'d>>; N], GeometryError> {
+    work.charge(1, cancel)?;
+    let scratch_bytes = std::mem::size_of::<[PlacedBoundsFrame; N]>()
+        + std::mem::size_of::<[Option<PlacedNativeSupport<'_>>; N]>()
+        + std::mem::size_of::<[Option<ProjectedBounds>; N]>()
+        + 16 * std::mem::size_of::<Interval>()
+        + std::mem::size_of::<crate::parametric::nurbs_eval::SurfaceTensor>()
+        + crate::parametric::PreparedValidatedCurve::scratch_bytes();
+    if scratch_bytes > query_byte_limit {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "native enclosure support exhausts query scratch capacity",
+        ));
+    }
+    let mut frames = Vec::with_capacity(N);
+    for &(pose, world_direction, policy) in &queries {
+        frames.push(PlacedBoundsFrame::new(
+            pose,
+            world_direction,
+            policy,
+            work,
+            cancel,
+        )?);
+    }
+    let directions: [_; N] = std::array::from_fn(|i| frames[i].nominal);
+    let policies: [_; N] = std::array::from_fn(|i| frames[i].source_policy);
+    let mut sources =
+        super::bounds::native_enclosure_supports(definition, directions, policies, work, cancel)?;
+    let needed: [_; N] = std::array::from_fn(|i| sources[i].is_none());
+    if needed.iter().any(|&flag| flag) {
+        let preparation_bytes = query_byte_limit.checked_sub(scratch_bytes).ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "native support frame exceeds coexisting storage",
+            )
+        })?;
+        let prepared = super::prepare_solid(definition, preparation_bytes, work, cancel)?;
+        let remaining = preparation_bytes
+            .checked_sub(prepared.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native boundary support exceeds coexisting storage",
+                )
+            })?;
+        let chart_sources = super::bounds::native_chart_enclosure_supports(
+            prepared.source_view()?,
+            directions,
+            policies,
+            needed,
+            remaining,
+            work,
+            cancel,
+        )?;
+        for i in 0..N {
+            if needed[i] {
+                sources[i] = chart_sources[i];
+            }
+        }
+    }
+    let extent = source_extent(definition);
+    let mut results: [Option<PlacedNativeSupport<'d>>; N] = std::array::from_fn(|_| None);
+    for i in 0..N {
+        let Some(source) = sources[i] else {
+            continue;
+        };
+        let bounds = match frames[i].finish(source, extent) {
+            Ok(bounds) => bounds,
+            Err(failure) if failure.code == GeometryErrorCode::ConditioningFailure => continue,
+            Err(failure) => return Err(failure),
+        };
+        work.charge(1, cancel)?;
+        let (pose, world_direction, policy) = queries[i];
+        results[i] = Some(PlacedNativeSupport {
+            definition,
+            pose,
+            world_direction,
+            policy,
+            bounds,
+        });
+    }
+    Ok(results)
+}
+
 /// Complete native material support for one exact definition, material policy,
 /// pose and directional query. Terminal brackets are global native extrema.
 #[derive(Debug)]

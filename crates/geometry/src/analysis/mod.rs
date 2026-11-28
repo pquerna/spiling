@@ -45,7 +45,7 @@ pub(crate) use material_source::MaterialSourceView;
 pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
     PlacedMaterialProjectedBounds, PlacedNativeSupport, analyze_placed_height_domain,
-    placed_bounds, placed_material_bounds, placed_native_support,
+    placed_bounds, placed_material_bounds, placed_native_support, placed_native_support_axes,
 };
 pub(crate) use placed::{analyze_placed_slab, section_placed_with_work};
 pub use planar::{

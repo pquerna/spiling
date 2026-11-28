@@ -245,8 +245,7 @@ fn native_brackets(
     // The old Z translation is removed by placement. Query without it so its
     // binary64 spacing cannot make native-scale support unrepresentable, then
     // transport closed brackets back for the original-pose contact evidence.
-    for axis in 0..3 {
-        check_cancel(cancel)?;
+    let queries: [_; 3] = std::array::from_fn(|axis| {
         let mut direction = [0.0; 3];
         direction[axis] = 1.0;
         let mut query_pose = request.pose;
@@ -260,16 +259,18 @@ fn native_brackets(
                 request.contact_tolerance_mm
             },
         };
-        let Some(support) = spiling_geometry::placed_native_support(
-            native,
-            query_pose,
-            direction,
-            policy,
-            spiling_geometry::MAX_DIRECTIONAL_SCRATCH_BYTES,
-            &mut work,
-            cancel,
-        )?
-        else {
+        (query_pose, direction, policy)
+    });
+    let supports = spiling_geometry::placed_native_support_axes(
+        native,
+        queries,
+        spiling_geometry::MAX_DIRECTIONAL_SCRATCH_BYTES,
+        &mut work,
+        cancel,
+    )?;
+    for axis in 0..3 {
+        let (query_pose, direction, policy) = queries[axis];
+        let Some(support) = &supports[axis] else {
             return Ok(None);
         };
         if support.definition_id() != &request.definition_id

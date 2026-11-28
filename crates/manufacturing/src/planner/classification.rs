@@ -1130,6 +1130,7 @@ impl ClassifiedRegions {
 
     /// Propose one shared ordinary phase without granting final stroke support
     /// or changing any source-framed or mandatory-skin construction.
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "Phase selection borrows prior strokes and separately accounts classified, external and anchor ownership"
@@ -1138,6 +1139,37 @@ impl ClassifiedRegions {
         &self,
         layer: &region::HatchLayer<'_>,
         previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+        anchors: &mut super::support::AnchorWorkspace,
+        anchor_work: &mut usize,
+        classified_owned_bytes: usize,
+        outside_retained_points: usize,
+        outside_owned_bytes: usize,
+        admit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<region::OrdinaryHatchPhase, ManufacturingError> {
+        self.choose_initial_ordinary_phase_reusing(
+            layer,
+            previous,
+            None,
+            anchors,
+            anchor_work,
+            classified_owned_bytes,
+            outside_retained_points,
+            outside_owned_bytes,
+            admit,
+            cancel,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Phase selection borrows prior strokes, optional prebuilt centered paths and admission accounts"
+    )]
+    pub(super) fn choose_initial_ordinary_phase_reusing<'a>(
+        &self,
+        layer: &region::HatchLayer<'_>,
+        previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+        prebuilt_centered: Option<&[DepositionPath]>,
         anchors: &mut super::support::AnchorWorkspace,
         anchor_work: &mut usize,
         classified_owned_bytes: usize,
@@ -1183,6 +1215,80 @@ impl ClassifiedRegions {
         }
         'proposal: for phase in region::OrdinaryHatchPhase::CANDIDATES {
             check_cancel(cancel)?;
+            if phase == region::OrdinaryHatchPhase::Centered
+                && let Some(template_paths) = prebuilt_centered
+            {
+                let mut candidate = super::support::RasterCandidate {
+                    paths: Vec::new(),
+                    whole_rows: Vec::new(),
+                    process_interfaces: Vec::new(),
+                    skin_bridge_domains: Vec::new(),
+                    skin_command_fits: Vec::new(),
+                };
+                for path in template_paths {
+                    check_cancel(cancel)?;
+                    let Some(DepositionOwner::Regional { region_index }) = path.owner else {
+                        continue;
+                    };
+                    if !matches!(
+                        path.kind,
+                        DepositionKind::SolidFill | DepositionKind::SparseFill
+                    ) || self
+                        .interiors
+                        .get(usize::from(region_index))
+                        .is_none_or(|interior| interior.frame_origin_mm.is_some())
+                    {
+                        continue;
+                    }
+                    let mut cloned = path.clone();
+                    cloned.physical_z_mm = [layer.lower_z, layer.z];
+                    for point in &mut cloned.points_mm {
+                        point[2] = layer.z;
+                    }
+                    candidate.paths.push(cloned);
+                }
+                let candidate_points = path_points(&candidate.paths);
+                let live = point_sum(class_points, candidate_points)?;
+                let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+                admit(
+                    point_sum(live, anchors.retained_records())?,
+                    byte_sum(live_bytes, anchors.retained_bytes())?,
+                    0,
+                )?;
+                let budget = super::support::component_budget(
+                    outside_retained_points,
+                    outside_owned_bytes,
+                    live,
+                    live_bytes,
+                )?;
+                let proof = super::support::component_admission(
+                    (&mut candidate, layer.axis, budget, false),
+                    previous.clone(),
+                    std::iter::empty(),
+                    layer.recipe,
+                    anchors,
+                    anchor_work,
+                    cancel,
+                )?;
+                admit(
+                    point_sum(
+                        point_sum(live, anchors.retained_records())?,
+                        proof.retained_points(),
+                    )?,
+                    byte_sum(
+                        byte_sum(live_bytes, anchors.retained_bytes())?,
+                        proof.retained_bytes(),
+                    )?,
+                    0,
+                )?;
+                let supported = proof.supported;
+                drop(proof);
+                drop(candidate);
+                if supported {
+                    return Ok(phase);
+                }
+                continue 'proposal;
+            }
             // Wide: plan every polygon's rows, up to the first that ends this
             // proposal, and mask them in one request. The ordered pass below
             // admits, emits and charges each exactly as hatching one polygon
@@ -1444,6 +1550,50 @@ impl ClassifiedRegions {
         classified_owned_bytes: usize,
         source_domains: &[super::ProcessDomain],
         segments: &mut usize,
+        admit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
+        cancel: &AtomicBool,
+    ) -> Result<
+        (
+            Vec<DepositionPath>,
+            &PlanarRegionCoverage,
+            Vec<SkinCommandFitDomain>,
+        ),
+        ManufacturingError,
+    > {
+        let (paths, coverage, fits, _) = self.paths_tracking_ordinary(
+            z,
+            lower_z,
+            axis,
+            top_axis,
+            recipe,
+            roof,
+            phase,
+            classified_owned_bytes,
+            source_domains,
+            segments,
+            admit,
+            cancel,
+        )?;
+        Ok((paths, coverage, fits))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::type_complexity,
+        reason = "Physical interval, authored axes and source ownership are explicit path construction inputs"
+    )]
+    pub(super) fn paths_tracking_ordinary(
+        &self,
+        z: f64,
+        lower_z: f64,
+        axis: region::HatchAxis,
+        top_axis: region::HatchAxis,
+        recipe: &PlanarPrintRecipe,
+        roof: Option<region::Roof>,
+        phase: region::OrdinaryHatchPhase,
+        classified_owned_bytes: usize,
+        source_domains: &[super::ProcessDomain],
+        segments: &mut usize,
         mut admit: impl FnMut(usize, usize, usize) -> Result<(), ManufacturingError>,
         cancel: &AtomicBool,
     ) -> Result<
@@ -1451,6 +1601,7 @@ impl ClassifiedRegions {
             Vec<DepositionPath>,
             &PlanarRegionCoverage,
             Vec<SkinCommandFitDomain>,
+            bool,
         ),
         ManufacturingError,
     > {
@@ -1517,7 +1668,7 @@ impl ClassifiedRegions {
                 cancel,
             )?;
         }
-        batch.run(&mut paths, segments, cancel)?;
+        let ordinary_complete = batch.run(&mut paths, segments, cancel)?;
         // A section thinner than the minimum feature everywhere deposits
         // nothing; its walls proved no printable material was left and
         // reported the omitted area.
@@ -1531,7 +1682,7 @@ impl ClassifiedRegions {
             &mut admit,
             cancel,
         )?;
-        Ok((paths, &self.coverage, fits))
+        Ok((paths, &self.coverage, fits, ordinary_complete))
     }
 
     #[expect(
