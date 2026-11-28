@@ -85,9 +85,9 @@ impl OutputDirectory {
             captured: &'a spiling_contracts::manufacturing::ManufacturingProvenance,
             inspection: &'a spiling_contracts::manufacturing::ManufacturingInspectionProvenance,
         }
-        // Stream pretty JSON into the file; a large plan is never one string.
+        // Stream compact JSON into the file; a large plan is never one string.
         self.write_with("plan.json", |file| {
-            serde_json::to_writer_pretty(file, &bundle.plan).map_err(io::Error::other)
+            serde_json::to_writer(file, &bundle.plan).map_err(io::Error::other)
         })?;
         self.write_from("program.gcode", &mut program.reader())?;
         self.write(

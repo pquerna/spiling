@@ -1573,7 +1573,8 @@ async fn reopen_rejects_hash_corruption_and_hashed_program_tampering_without_rep
         hash: SourceHash::from_bytes(&program),
         byte_count: program.len() as u64,
     };
-    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let mut bytes = Vec::new();
+    spiling_contracts::manufacturing::encode_bundle(&bundle, &mut bytes).unwrap();
     let hash = SourceHash::from_bytes(&bytes);
     let mut manifest = support::manifest(&checkpoint);
     let artifact = manifest.layouts[0].manufacturing_artifact.as_mut().unwrap();

@@ -37,6 +37,11 @@ fn reserve_slot<T, E: Error>(
 // inline Vec/String headers) is charged before its nested payload is decoded.
 trait FitElement: Sized {
     const LIMIT: usize;
+    /// Stored bundles write a run of these as its length (see `columns`).
+    const PACKED: bool = false;
+    fn take<E: Error>() -> Result<Self, E> {
+        Err(E::custom("skin fitting element is not packed"))
+    }
     fn admit<E: Error>(_: &mut SegmentBudget, _: &mut u32) -> Result<(), E> {
         Ok(())
     }
@@ -63,7 +68,11 @@ impl<'a, T> FitVecSeed<'a, T> {
 impl<'de, T: FitElement> DeserializeSeed<'de> for FitVecSeed<'_, T> {
     type Value = Vec<T>;
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_seq(self)
+        if T::PACKED && super::columns::packed() {
+            d.deserialize_u64(self)
+        } else {
+            d.deserialize_seq(self)
+        }
     }
 }
 impl<'de, T: FitElement> Visitor<'de> for FitVecSeed<'_, T> {
@@ -89,6 +98,19 @@ impl<'de, T: FitElement> Visitor<'de> for FitVecSeed<'_, T> {
         }
         Ok(values)
     }
+    /// A packed run's length; each element is admitted as in a sequence.
+    fn visit_u64<E: Error>(self, count: u64) -> Result<Self::Value, E> {
+        if count > T::LIMIT as u64 {
+            return Err(E::custom("skin fitting array limit exceeded"));
+        }
+        let mut values = Vec::new();
+        for _ in 0..count {
+            T::admit::<E>(self.budget, self.points)?;
+            reserve_slot::<T, E>(&mut values, T::LIMIT, self.budget)?;
+            values.push(T::take()?);
+        }
+        Ok(values)
+    }
 }
 struct FitSlotSeed<'a, T> {
     values: &'a mut Vec<T>,
@@ -105,6 +127,10 @@ impl<'de, T: FitElement> DeserializeSeed<'de> for FitSlotSeed<'_, T> {
 }
 impl FitElement for [f64; 2] {
     const LIMIT: usize = MAX_PLAN_COUNT;
+    const PACKED: bool = true;
+    fn take<E: Error>() -> Result<Self, E> {
+        super::columns::take_xy()
+    }
     fn admit<E: Error>(_: &mut SegmentBudget, points: &mut u32) -> Result<(), E> {
         *points = points
             .checked_sub(1)

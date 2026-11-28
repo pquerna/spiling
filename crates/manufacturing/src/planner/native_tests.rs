@@ -11,7 +11,9 @@ mod direct_bed;
 
 /// Bundle document bytes as persisted beside the program artifact.
 fn encode(result: &ManufacturingResult) -> Vec<u8> {
-    serde_json::to_vec(&result.bundle).unwrap()
+    let mut bytes = Vec::new();
+    spiling_contracts::manufacturing::encode_bundle(&result.bundle, &mut bytes).unwrap();
+    bytes
 }
 /// Saved-return pairing: a freshly decoded bundle with the retained program.
 fn reload(bytes: &[u8], program: &ChunkSource) -> ManufacturingResult {

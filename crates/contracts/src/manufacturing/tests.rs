@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// A bundle as stored (see [`encode_bundle`]).
+fn stored(bundle: &ManufacturingBundle) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    encode_bundle(bundle, &mut bytes).unwrap();
+    bytes
+}
+
 fn functional_job() -> FixedDualJob {
     let captured: ManufacturingIntent = serde_json::from_str(include_str!(
         "../../../../fixtures/manufacturing/fixed-dual.intent.json"
@@ -1345,10 +1352,7 @@ fn regional_bundle() -> ManufacturingBundle {
 fn regional_accounting_consumes_heterogeneous_fractions_without_global_averaging() {
     let captured = regional_bundle();
     captured.plan.validate(&captured.provenance.intent).unwrap();
-    assert_eq!(
-        decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap(),
-        captured
-    );
+    assert_eq!(decode_bundle(&stored(&captured)).unwrap(), captured);
     assert_eq!(captured.provenance.intent.recipe.infill_fraction, 1.0);
     let coverage = &captured.plan.layers[0].region_coverage;
     assert_eq!(coverage.intentional_void_area_mm2, 10.0 * 0.8 + 15.0 * 0.4);
@@ -1454,7 +1458,7 @@ fn regional_bundle_binds_every_contributor_to_captured_occurrence_and_winner() {
             _ => regions[2].contributions.clear(),
         }
         changed.verification.verified = true;
-        let decoded = decode_bundle(&serde_json::to_vec(&changed).unwrap());
+        let decoded = decode_bundle(&stored(&changed));
         if case == 5 {
             let decoded = decoded.unwrap();
             assert!(decoded.plan.validate(&decoded.provenance.intent).is_err());
@@ -1467,7 +1471,7 @@ fn regional_bundle_binds_every_contributor_to_captured_occurrence_and_winner() {
     coverage.process_regions[0].fraction = 0.4;
     coverage.intentional_void_area_mm2 = 12.0;
     forged.plan.validate(&forged.provenance.intent).unwrap();
-    assert!(decode_bundle(&serde_json::to_vec(&forged).unwrap()).is_err());
+    assert!(decode_bundle(&stored(&forged)).is_err());
     for superseded in [false, true] {
         let mut stale = captured.clone();
         if superseded {
@@ -1488,7 +1492,7 @@ fn regional_bundle_binds_every_contributor_to_captured_occurrence_and_winner() {
         )
         .unwrap();
         stale.provenance.validate().unwrap();
-        assert!(decode_bundle(&serde_json::to_vec(&stale).unwrap()).is_err());
+        assert!(decode_bundle(&stored(&stale)).is_err());
     }
 }
 
@@ -1515,7 +1519,7 @@ fn regional_bundle_accepts_compatible_contributors_and_global_no_override_record
         .contributions
         .extend(second.contributions);
     coverage.intentional_void_area_mm2 = 20.0;
-    decode_bundle(&serde_json::to_vec(&compatible).unwrap()).unwrap();
+    decode_bundle(&stored(&compatible)).unwrap();
 
     let mut global = bundle();
     let coverage = &mut global.plan.layers[0].region_coverage;
@@ -1528,7 +1532,7 @@ fn regional_bundle_accepts_compatible_contributors_and_global_no_override_record
         fraction: 1.0,
         contributions: vec![],
     }];
-    decode_bundle(&serde_json::to_vec(&global).unwrap()).unwrap();
+    decode_bundle(&stored(&global)).unwrap();
     global.provenance.intent.recipe.infill_fraction = 0.6;
     assert!(global.plan.validate(&global.provenance.intent).is_err());
 }
@@ -2068,14 +2072,14 @@ fn native_shape_error_follows_the_recorded_profile_tolerance() {
     old.printer.schema_version = MANUFACTURING_SCHEMA_VERSION - 1;
     assert!(old.validate().is_err());
     let captured = bundle();
-    let restored = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    let restored = decode_bundle(&stored(&captured)).unwrap();
     assert_eq!(restored.provenance.intent, intent);
     let mut forged = captured.clone();
     forged.plan.native_geometry.requested_shape_error_mm = 0.1;
     assert!(forged.plan.validate(&forged.provenance.intent).is_err());
-    let mut old = serde_json::to_value(&captured).unwrap();
+    let (prefix, mut old) = columns::packed_value(&captured);
     old["schema_version"] = serde_json::json!(MANUFACTURING_SCHEMA_VERSION - 1);
-    assert!(decode_bundle(&serde_json::to_vec(&old).unwrap()).is_err());
+    assert!(decode_bundle(&[prefix, serde_json::to_vec(&old).unwrap()].concat()).is_err());
 }
 
 #[test]
@@ -2428,7 +2432,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
 fn decoded_plan_with_rehashed_axis_mismatch_still_fails_semantic_validation() {
     let mut captured = bundle();
     captured.plan = segmented_plan(&[&[3]]);
-    decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    decode_bundle(&stored(&captured)).unwrap();
     captured.provenance.intent.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
     let provenance = &mut captured.provenance;
     provenance.input_hash = input_fingerprint(
@@ -2442,7 +2446,7 @@ fn decoded_plan_with_rehashed_axis_mismatch_still_fails_semantic_validation() {
     .unwrap();
     provenance.validate().unwrap();
     captured.verification.verified = true;
-    let decoded = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    let decoded = decode_bundle(&stored(&captured)).unwrap();
     let error = decoded
         .plan
         .validate(&decoded.provenance.intent)
@@ -2568,7 +2572,7 @@ fn bundle_schema_validation_never_confers_replay_trust_and_rejects_tampered_reco
     let valid = bundle();
     valid.validate().unwrap();
     assert!(!valid.verification.verified);
-    let bytes = serde_json::to_vec(&valid).unwrap();
+    let bytes = stored(&valid);
     assert_eq!(decode_bundle(&bytes).unwrap(), valid);
     let mut record = ManufacturingArtifactRecord {
         hash: SourceHash::from_bytes(&bytes),
@@ -2611,7 +2615,7 @@ fn bundle_schema_validation_never_confers_replay_trust_and_rejects_tampered_reco
 fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let bundle = bundle();
     let p = &bundle.provenance;
-    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let bytes = stored(&bundle);
     let mut manifest = ProjectManifest {
         next_process_layer: 1,
         next_process_operation: 1,
@@ -2811,7 +2815,7 @@ fn missing_object_deposition_is_rejected_at_whole_plan_admission() {
         let mut artifact = bundle();
         artifact.plan = empty_layer;
         artifact.verification.deposition_segments = 2;
-        assert!(decode_bundle(&serde_json::to_vec(&artifact).unwrap()).is_err());
+        assert!(decode_bundle(&stored(&artifact)).is_err());
     }
 }
 
@@ -2843,7 +2847,7 @@ fn plan_json_admits_exact_cumulative_segment_budget_across_paths_and_layers() {
             LayerHeightAssessment::from_plan(&artifact.provenance.intent, &artifact.plan.layers)
                 .unwrap();
         artifact.verification.deposition_segments = 100_000;
-        let decoded = decode_bundle(&serde_json::to_vec(&artifact).unwrap()).unwrap();
+        let decoded = decode_bundle(&stored(&artifact)).unwrap();
         assert_eq!(decoded, artifact);
         assert_eq!(decoded.summary().deposition_segments, 100_000);
     }
@@ -3569,7 +3573,7 @@ fn image_bundle_is_self_contained_and_inspection_never_carries_pixels() {
         &bundle.provenance.surface_images[0].bytes,
         &cloned.provenance.surface_images[0].bytes
     ));
-    let decoded = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let decoded = decode_bundle(&stored(&bundle)).unwrap();
     assert_eq!(decoded, bundle);
     assert_eq!(
         bundle.summary().surface_resolution,
@@ -3612,7 +3616,7 @@ fn image_bundle_is_self_contained_and_inspection_never_carries_pixels() {
     let mut unknown = bundle.clone();
     unknown.provenance.surface_images[0].image_hash = SourceHash::from_bytes(b"unknown");
     assert!(unknown.validate().is_err());
-    let mut old = serde_json::to_value(&bundle).unwrap();
+    let (prefix, mut old) = columns::packed_value(&bundle);
     old["schema_version"] = serde_json::json!(4);
     old["provenance"]
         .as_object_mut()
@@ -3623,7 +3627,7 @@ fn image_bundle_is_self_contained_and_inspection_never_carries_pixels() {
         .unwrap()
         .remove("surface_resolution");
     assert_eq!(
-        decode_bundle(&serde_json::to_vec(&old).unwrap())
+        decode_bundle(&[prefix, serde_json::to_vec(&old).unwrap()].concat())
             .unwrap_err()
             .code,
         ManufacturingErrorCode::InvalidSpecification
@@ -5203,21 +5207,81 @@ fn capped_role_speeds_keep_their_order_under_a_slow_print_feed() {
 #[test]
 fn bundle_provenance_reads_the_canonical_head_and_falls_back_on_any_other_layout() {
     let bundle = bundle();
-    let canonical = serde_json::to_vec(&bundle).unwrap();
-    let pretty = serde_json::to_vec_pretty(&bundle).unwrap();
+    let canonical = stored(&bundle);
+    let (prefix, value) = columns::packed_value(&bundle);
+    let pretty = [prefix.clone(), serde_json::to_vec_pretty(&value).unwrap()].concat();
     for bytes in [&canonical, &pretty] {
         let provenance =
             decode_bundle_provenance_from(bytes.len() as u64, || bytes.as_slice()).unwrap();
         assert_eq!(provenance, bundle.provenance);
     }
     assert_eq!(
-        bundle_head_provenance(canonical.as_slice()),
+        bundle_head_provenance(&canonical[prefix.len()..]),
         Some(bundle.provenance.clone())
     );
-    assert_eq!(bundle_head_provenance(pretty.as_slice()), None);
+    assert_eq!(bundle_head_provenance(&pretty[prefix.len()..]), None);
     let mut stale = bundle.clone();
     stale.schema_version += 1;
-    let stale = serde_json::to_vec(&stale).unwrap();
-    assert_eq!(bundle_head_provenance(stale.as_slice()), None);
+    let stale = stored(&stale);
+    assert_eq!(bundle_head_provenance(&stale[prefix.len()..]), None);
     assert!(decode_bundle_provenance_from(stale.len() as u64, || stale.as_slice()).is_err());
+}
+
+#[test]
+fn stored_bundles_pack_coordinates_exactly_and_refuse_damaged_columns() {
+    let bundle = bundle();
+    let bytes = stored(&bundle);
+    assert_eq!(&bytes[..4], b"SPMB");
+    assert_eq!(decode_bundle(&bytes).unwrap(), bundle);
+    // Outside the stored encoding the coordinates stay inline.
+    let inline = serde_json::to_value(&bundle).unwrap();
+    assert!(inline["plan"]["layers"][0]["paths"][0]["points_mm"].is_array());
+    let (prefix, packed) = columns::packed_value(&bundle);
+    let points = bundle.plan.layers[0].paths[0].points_mm.len() as u64;
+    assert_eq!(
+        packed["plan"]["layers"][0]["paths"][0]["points_mm"],
+        serde_json::json!(points)
+    );
+    // The old document form is corrupt; another revision is unsupported.
+    let json = serde_json::to_vec(&bundle).unwrap();
+    assert_eq!(
+        decode_bundle(&json).unwrap_err().code,
+        ManufacturingErrorCode::CorruptArtifact
+    );
+    let mut revision = bytes.clone();
+    revision[4] = 9;
+    assert_eq!(
+        decode_bundle(&revision).unwrap_err().code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    // A count beyond the bundle, a truncated column and a non-finite value.
+    let mut oversized = bytes.clone();
+    oversized[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        decode_bundle(&oversized).unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+    assert!(decode_bundle(&bytes[..prefix.len() - 1]).is_err());
+    let mut infinite = bytes.clone();
+    infinite[24..32].copy_from_slice(&f64::INFINITY.to_le_bytes());
+    assert!(decode_bundle(&infinite).is_err());
+    // An envelope that claims more or fewer points than the columns hold.
+    for delta in [-1i64, 1] {
+        let mut value = packed.clone();
+        value["plan"]["layers"][0]["paths"][0]["points_mm"] =
+            serde_json::json!(points as i64 + delta);
+        let bytes = [prefix.clone(), serde_json::to_vec(&value).unwrap()].concat();
+        assert!(decode_bundle(&bytes).is_err(), "{delta}");
+    }
+    // A changed coordinate decodes to exactly that coordinate.
+    let mut moved = bytes.clone();
+    let x = f64::from_le_bytes(moved[24..32].try_into().unwrap());
+    moved[24..32].copy_from_slice(&(x + 0.25).to_le_bytes());
+    let decoded = decode_bundle(&moved);
+    if let Ok(decoded) = decoded {
+        assert_eq!(
+            decoded.plan.layers[0].paths[0].points_mm[0][0],
+            bundle.plan.layers[0].paths[0].points_mm[0][0] + 0.25
+        );
+    }
 }

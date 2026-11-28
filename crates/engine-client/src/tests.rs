@@ -123,14 +123,28 @@ fn every_manufacturing_error_code_is_typed_and_nonfatal() {
 
 #[test]
 fn fully_received_corrupt_bundle_hash_utf8_and_schema_are_nonfatal() {
-    let malformed_current_schema = format!(
-        r#"{{"schema_version":{},"unknown":true}}"#,
-        spiling_contracts::manufacturing::MANUFACTURING_SCHEMA_VERSION
+    // A stored bundle with no coordinates: its header, then the envelope.
+    let stored = |envelope: &[u8]| {
+        let mut bytes = b"SPMB".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(envelope);
+        bytes
+    };
+    let malformed_current_schema = stored(
+        format!(
+            r#"{{"schema_version":{},"unknown":true}}"#,
+            spiling_contracts::manufacturing::MANUFACTURING_SCHEMA_VERSION
+        )
+        .as_bytes(),
     );
+    let not_json = stored(b"not JSON");
+    let not_utf8 = stored(b"\xff");
     for bytes in [
-        b"not JSON".as_slice(),
-        b"\xff".as_slice(),
-        malformed_current_schema.as_bytes(),
+        b"not stored".as_slice(),
+        not_json.as_slice(),
+        not_utf8.as_slice(),
+        malformed_current_schema.as_slice(),
     ] {
         let record = manufacturing_record(bytes);
         let error = decode_manufacturing_artifact(bytes, &record).unwrap_err();
@@ -143,9 +157,9 @@ fn fully_received_corrupt_bundle_hash_utf8_and_schema_are_nonfatal() {
         ));
         assert!(!error.is_fatal());
     }
-    let unsupported = br#"{"schema_version":0}"#;
-    let record = manufacturing_record(unsupported);
-    let error = decode_manufacturing_artifact(unsupported, &record).unwrap_err();
+    let unsupported = stored(br#"{"schema_version":0}"#);
+    let record = manufacturing_record(&unsupported);
+    let error = decode_manufacturing_artifact(&unsupported, &record).unwrap_err();
     assert!(matches!(
         &error,
         ClientError::Manufacturing(ManufacturingError {

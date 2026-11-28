@@ -748,7 +748,8 @@ pub(crate) fn bundle_asset_with(
     let mut bundle = bundle.clone();
     bundle.program = fixture_program_descriptor(program);
     let bundle = &bundle;
-    let mut bytes = serde_json::to_vec(bundle).unwrap();
+    let mut bytes = Vec::new();
+    spiling_contracts::manufacturing::encode_bundle(bundle, &mut bytes).unwrap();
     // Model exact-length file capture, not serde's geometric spare capacity.
     bytes.shrink_to_fit();
     let digest: [u8; 32] = Sha256::digest(&bytes).into();

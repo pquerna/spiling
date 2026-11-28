@@ -12,7 +12,9 @@ use spiling_contracts::surface::SurfaceScope;
 
 /// Bundle document bytes as persisted beside the program artifact.
 fn encode(result: &ManufacturingResult) -> Vec<u8> {
-    serde_json::to_vec(&result.bundle).unwrap()
+    let mut bytes = Vec::new();
+    spiling_contracts::manufacturing::encode_bundle(&result.bundle, &mut bytes).unwrap();
+    bytes
 }
 /// Saved-return pairing: a freshly decoded bundle with the retained program.
 fn reload(bytes: &[u8], program: &ChunkSource) -> ManufacturingResult {
@@ -3565,7 +3567,7 @@ fn cathedral_rooms_are_closed_loops_with_roof_teeth_and_replay_rejects_damage() 
     assert!(points(high) > points(low), "roof teeth grow under the roof");
     verify_bundle(&bundle, &AtomicBool::new(false)).unwrap();
     let restored = ManufacturingResult::new(
-        serde_json::from_slice::<ManufacturingBundle>(&encode(&bundle)).unwrap(),
+        decode_bundle(&encode(&bundle)).unwrap(),
         bundle.program.clone(),
     )
     .unwrap();

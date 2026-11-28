@@ -7,13 +7,23 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DiaphragmPolygonMm {
-    #[serde(deserialize_with = "diaphragm_ring")]
+    #[serde(
+        serialize_with = "super::columns::xy",
+        deserialize_with = "diaphragm_ring"
+    )]
     pub outer: Vec<[f64; 2]>,
-    #[serde(deserialize_with = "diaphragm_holes")]
+    #[serde(
+        serialize_with = "super::columns::xy_rings",
+        deserialize_with = "diaphragm_holes"
+    )]
     pub holes: Vec<Vec<[f64; 2]>>,
 }
 fn diaphragm_ring<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[f64; 2]>, D::Error> {
-    bounded_vec::<D, _, { MAX_PLAN_COUNT }>(d)
+    if super::columns::packed() {
+        super::columns::packed_ring(d, MAX_PLAN_COUNT)
+    } else {
+        bounded_vec::<D, _, { MAX_PLAN_COUNT }>(d)
+    }
 }
 fn diaphragm_holes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Vec<[f64; 2]>>, D::Error> {
     #[derive(Deserialize)]

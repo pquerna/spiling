@@ -411,7 +411,6 @@ fn main() -> Result<()> {
     if ![
         "compile",
         "encode",
-        "parse",
         "decode",
         "validate",
         "verify",
@@ -477,15 +476,12 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let encoded = prepared
-        .as_ref()
-        .map(|r| serde_json::to_vec(&r.bundle))
-        .transpose()?;
+    let encoded = prepared.as_ref().map(|r| stored(&r.bundle)).transpose()?;
     let program = prepared.as_ref().map(|r| r.program.clone());
     let encoded_hash = encoded.as_deref().map(SourceHash::from_bytes);
     let mut expected = prepared.as_ref().map(|b| b.bundle.program.hash.clone());
     for sample in 0..warmup + samples {
-        if matches!(phase.as_str(), "compile" | "parse" | "decode") {
+        if matches!(phase.as_str(), "compile" | "decode") {
             drop(prepared.take());
         }
         let started = Instant::now();
@@ -495,13 +491,7 @@ fn main() -> Result<()> {
                 result = Some(compile(scene.as_ref().unwrap().input(), &cancel)?);
             }
             "encode" => {
-                black_box(serde_json::to_vec(&prepared.as_ref().unwrap().bundle)?);
-            }
-            "parse" => {
-                result = Some(ManufacturingResult::new(
-                    serde_json::from_slice::<ManufacturingBundle>(encoded.as_ref().unwrap())?,
-                    program.clone().unwrap(),
-                )?);
+                black_box(stored(&prepared.as_ref().unwrap().bundle)?);
             }
             "decode" => {
                 result = Some(ManufacturingResult::new(
@@ -562,7 +552,7 @@ fn main() -> Result<()> {
     }
     if !save.is_empty() {
         let result = prepared.as_ref().unwrap();
-        let bytes = serde_json::to_vec(&result.bundle)?;
+        let bytes = stored(&result.bundle)?;
         if bytes.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err("encoded result exceeds production byte limit".into());
         }
@@ -597,7 +587,7 @@ fn residency(spec: &SceneSpec, file: &str) -> Result<()> {
     } else {
         (read_result(file)?, None, 0)
     };
-    let (encoded, encode_peak) = peak_above(|| Ok(serde_json::to_vec(&bundle.bundle)?))?;
+    let (encoded, encode_peak) = peak_above(|| Ok(stored(&bundle.bundle)?))?;
     let encoded_hash = SourceHash::from_bytes(&encoded);
     let (decoded, decode_peak) = peak_above(|| Ok(decode_bundle(&encoded)?))?;
     let frames = ChunkSource::from_slice(&encoded, u64::MAX)?;
@@ -697,4 +687,13 @@ fn residency(spec: &SceneSpec, file: &str) -> Result<()> {
         })
     );
     Ok(())
+}
+
+/// The bundle as production stores it.
+fn stored(
+    bundle: &spiling_contracts::manufacturing::ManufacturingBundle,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    spiling_contracts::manufacturing::encode_bundle(bundle, &mut bytes)?;
+    Ok(bytes)
 }

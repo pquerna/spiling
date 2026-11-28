@@ -44,6 +44,8 @@ pub mod program_coordinates;
 pub use process::*;
 mod resolution;
 pub use resolution::*;
+mod columns;
+pub use columns::encode_bundle;
 mod diaphragm;
 mod web_roof;
 pub use diaphragm::*;
@@ -309,7 +311,11 @@ struct PointsSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PointsSeed<'_> {
     type Value = Vec<[f64; 3]>;
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_seq(self)
+        if columns::packed() {
+            d.deserialize_u64(self)
+        } else {
+            d.deserialize_seq(self)
+        }
     }
 }
 impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
@@ -334,6 +340,28 @@ impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
             return Err(serde::de::Error::custom(
                 "deposition path requires at least two points",
             ));
+        }
+        Ok(points)
+    }
+    /// A packed path's point count; its points come from the xyz columns.
+    fn visit_u64<E: serde::de::Error>(self, count: u64) -> Result<Self::Value, E> {
+        if count < 2 {
+            return Err(E::custom("deposition path requires at least two points"));
+        }
+        let segments = u32::try_from(count - 1)
+            .ok()
+            .filter(|segments| *segments <= self.0.remaining_segments)
+            .ok_or_else(|| E::custom("deposition segment limit exceeded"))?;
+        self.0.remaining_segments -= segments;
+        if count > columns::xyz_remaining() {
+            return Err(E::custom("bundle coordinate columns are exhausted"));
+        }
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(count as usize)
+            .map_err(|_| E::custom("deposition point allocation refused"))?;
+        for _ in 0..count {
+            points.push(columns::take_xyz()?);
         }
         Ok(points)
     }
@@ -2238,6 +2266,7 @@ pub struct DepositionPath {
     pub width: WidthProfile,
     /// Explicit occupied interval; upper endpoint belongs to the owning layer.
     pub physical_z_mm: [f64; 2],
+    #[serde(serialize_with = "columns::xyz")]
     pub points_mm: Vec<[f64; 3]>,
     /// Runs of points that lie on one circle, in point order. The points stay
     /// the path's geometry for every planar check; an arc-capable printer
@@ -5687,27 +5716,12 @@ pub fn decode_intent(bytes: &[u8]) -> Result<ManufacturingIntent, ManufacturingE
     Ok(intent)
 }
 pub fn decode_bundle(bytes: &[u8]) -> Result<ManufacturingBundle, ManufacturingError> {
-    if bytes.is_empty() || bytes.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
-        return Err(resource("bundle byte limit exceeded"));
-    }
-    #[derive(Deserialize)]
-    struct BundleVersion {
-        schema_version: u32,
-    }
-    let corrupt = |e: serde_json::Error| {
-        ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
-    };
-    let version: BundleVersion = serde_json::from_slice(bytes).map_err(corrupt)?;
-    if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
-        return Err(invalid("unsupported manufacturing bundle schema"));
-    }
-    let bundle: ManufacturingBundle = serde_json::from_slice(bytes).map_err(corrupt)?;
-    bundle.validate()?;
-    Ok(bundle)
+    decode_bundle_from(bytes.len() as u64, || bytes)
 }
-/// Decode a bundle of `len` bytes from fresh sequential readers of the same
-/// content, without a raw buffer. The schema version is checked in a first pass
-/// so a different schema refuses before the strict typed parse.
+/// Decode a stored bundle of `len` bytes (see [`encode_bundle`]) from fresh
+/// sequential readers of the same content, without a raw buffer. Only a bundle
+/// that fails the typed parse is read again, to tell an unsupported schema from
+/// corruption.
 pub fn decode_bundle_from<R: std::io::Read>(
     len: u64,
     mut open: impl FnMut() -> R,
@@ -5722,14 +5736,18 @@ pub fn decode_bundle_from<R: std::io::Read>(
     let corrupt = |e: serde_json::Error| {
         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
     };
-    // One full parse; only a bundle that fails it is read again to tell an
-    // unsupported schema from corruption.
-    let bundle: ManufacturingBundle = match serde_json::from_reader(std::io::BufReader::new(open()))
-    {
+    let parsed = columns::with_columns(std::io::BufReader::new(open()), len, |reader| {
+        let mut json = serde_json::Deserializer::from_reader(reader);
+        let bundle = ManufacturingBundle::deserialize(&mut json)?;
+        json.end()?;
+        Ok::<_, serde_json::Error>(bundle)
+    })?;
+    let bundle = match parsed {
         Ok(bundle) => bundle,
         Err(failure) => {
-            let version: BundleVersion =
-                serde_json::from_reader(std::io::BufReader::new(open())).map_err(corrupt)?;
+            let mut reader = std::io::BufReader::new(open());
+            columns::skip_columns(&mut reader, len)?;
+            let version: BundleVersion = serde_json::from_reader(reader).map_err(corrupt)?;
             if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
                 return Err(invalid("unsupported manufacturing bundle schema"));
             }
@@ -5743,7 +5761,7 @@ pub fn decode_bundle_from<R: std::io::Read>(
     Ok(bundle)
 }
 
-/// The provenance of an encoded bundle, read in one pass that skips the
+/// The provenance of a stored bundle, read in one pass that skips the
 /// plan and report rather than building them.
 pub fn decode_bundle_provenance_from<R: std::io::Read>(
     len: u64,
@@ -5752,10 +5770,14 @@ pub fn decode_bundle_provenance_from<R: std::io::Read>(
     if len == 0 || len > u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) {
         return Err(resource("bundle byte limit exceeded"));
     }
+    let envelope = || {
+        let mut reader = std::io::BufReader::new(open());
+        columns::skip_columns(&mut reader, len).map(|()| reader)
+    };
     // The bundle writer's compact field order puts the schema version and the
     // provenance first, so a canonical bundle needs only that prefix read.
     // Anything else takes the whole-document parse below.
-    if let Some(provenance) = bundle_head_provenance(std::io::BufReader::new(open())) {
+    if let Some(provenance) = bundle_head_provenance(envelope()?) {
         return Ok(provenance);
     }
     #[derive(Deserialize)]
@@ -5763,10 +5785,9 @@ pub fn decode_bundle_provenance_from<R: std::io::Read>(
         schema_version: u32,
         provenance: ManufacturingProvenance,
     }
-    let head: BundleHead =
-        serde_json::from_reader(std::io::BufReader::new(open())).map_err(|e| {
-            ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
-        })?;
+    let head: BundleHead = serde_json::from_reader(envelope()?).map_err(|e| {
+        ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
+    })?;
     if head.schema_version != MANUFACTURING_SCHEMA_VERSION {
         return Err(invalid("unsupported manufacturing bundle schema"));
     }

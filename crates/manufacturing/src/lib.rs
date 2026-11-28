@@ -378,7 +378,8 @@ fn seal_compiled_artifact(
         )
     };
     let mut writer = spiling_chunks::ChunkWriter::new(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES));
-    serde_json::to_writer(&mut writer, &bundle).map_err(|_| exceeded())?;
+    spiling_contracts::manufacturing::encode_bundle(&bundle, &mut writer)
+        .map_err(|_| exceeded())?;
     let encoded = writer.finish().map_err(|_| exceeded())?;
     if (encoded.retained_bytes() + program.retained_bytes()) as u64 > u64::from(byte_budget) {
         return Err(exceeded());
