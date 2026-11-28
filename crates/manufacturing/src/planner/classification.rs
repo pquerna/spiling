@@ -1183,6 +1183,67 @@ impl ClassifiedRegions {
         }
         'proposal: for phase in region::OrdinaryHatchPhase::CANDIDATES {
             check_cancel(cancel)?;
+            // Wide: plan every polygon's rows, up to the first that ends this
+            // proposal, and mask them in one request. The ordered pass below
+            // admits, emits and charges each exactly as hatching one polygon
+            // at a time did, and stops at the same polygon. Refused staging
+            // leaves each polygon to mask itself in that pass.
+            let mut planned = Vec::new();
+            let mut planned_polygons = Vec::new();
+            'plan: for interior in &self.interiors {
+                if interior.frame_origin_mm.is_some() {
+                    continue;
+                }
+                let layer = &region::HatchLayer {
+                    width_mm: interior.bead_width_mm.unwrap_or(layer.width_mm),
+                    ..*layer
+                };
+                for polygon in &interior.domain.0 {
+                    check_cancel(cancel)?;
+                    let rows = region::HatchRows::centered_phase(
+                        polygon,
+                        interior.coverage.fraction,
+                        layer,
+                        phase,
+                    );
+                    let stop = !matches!(rows, Ok(Some(_)));
+                    planned_polygons.push(polygon);
+                    planned.push(rows);
+                    if stop {
+                        break 'plan;
+                    }
+                }
+            }
+            let mut masks = match region::RecoveryMasks::build(
+                planned
+                    .iter()
+                    .zip(&planned_polygons)
+                    .map(|(rows, polygon)| match rows {
+                        Ok(Some(rows)) => Some((*polygon, layer.axis, *rows)),
+                        _ => None,
+                    }),
+                planned.len(),
+                |bytes| {
+                    admit(
+                        point_sum(
+                            point_sum(class_points, anchors.retained_records())?,
+                            bytes.div_ceil(size_of::<geo::Coord<f64>>()),
+                        )?,
+                        byte_sum(
+                            byte_sum(classified_owned_bytes, anchors.retained_bytes())?,
+                            bytes,
+                        )?,
+                        0,
+                    )
+                },
+                cancel,
+            ) {
+                Ok(masks) => Some(masks),
+                Err(failure) if failure.code == ManufacturingErrorCode::ResourceLimit => None,
+                Err(failure) => return Err(failure),
+            };
+            let staged_bytes = masks.as_ref().map_or(0, region::RecoveryMasks::bytes);
+            let mut planned = planned.into_iter().enumerate();
             let mut candidate = super::support::RasterCandidate {
                 paths: Vec::new(),
                 whole_rows: Vec::new(),
@@ -1208,14 +1269,21 @@ impl ClassifiedRegions {
                 };
                 for polygon in &interior.domain.0 {
                     check_cancel(cancel)?;
-                    let Some(rows) =
-                        region::HatchRows::centered_phase(polygon, fraction, layer, phase)?
-                    else {
+                    let (slot, rows) = planned.next().ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::UnsupportedGeometry,
+                            "ordinary phase plan ended early",
+                        )
+                    })?;
+                    let Some(rows) = rows? else {
                         continue 'proposal;
                     };
                     let bound = rows.point_bound()?;
                     let live = point_sum(class_points, candidate_points)?;
-                    let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
+                    let live_bytes = byte_sum(
+                        byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?,
+                        staged_bytes,
+                    )?;
                     // Work is a delta consumed by the caller's cumulative
                     // ledger, including rows from subsequently refused trials.
                     admit(
@@ -1227,13 +1295,15 @@ impl ClassifiedRegions {
                         bound,
                     )?;
                     let mut paths = Vec::new();
-                    match region::hatch_polygon(
+                    let staged = masks.as_mut().and_then(|masks| masks.take(slot));
+                    match region::hatch_polygon_with_mask(
                         polygon,
                         kind,
                         &rows,
                         layer,
                         &mut paths,
                         &mut segments,
+                        staged.as_ref(),
                         cancel,
                     ) {
                         Ok(_) => {}
@@ -1297,7 +1367,10 @@ impl ClassifiedRegions {
                         )?,
                         byte_sum(
                             byte_sum(
-                                byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?,
+                                byte_sum(
+                                    byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?,
+                                    staged_bytes,
+                                )?,
                                 super::bonds::path_bytes(&paths),
                             )?,
                             anchors.retained_bytes(),
@@ -1306,6 +1379,7 @@ impl ClassifiedRegions {
                     )?;
                 }
             }
+            drop(masks);
             let live = point_sum(class_points, candidate_points)?;
             let live_bytes = byte_sum(classified_owned_bytes, candidate_bytes(&candidate))?;
             // The outside baseline excludes this classifier and workspace.

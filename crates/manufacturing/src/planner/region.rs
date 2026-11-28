@@ -941,6 +941,7 @@ impl HatchRows {
 }
 
 /// The borrowed component is the same classified owner for both axis proposals.
+#[cfg(test)]
 pub(super) fn hatch_polygon(
     polygon: &Polygon<f64>,
     kind: DepositionKind,
