@@ -5,7 +5,7 @@ use super::*;
 use std::mem::size_of;
 
 mod grid;
-pub(super) use grid::CoverResult;
+pub(super) use grid::GridEdge;
 
 pub(in crate::planner::support) struct NominalAnchorPaths<'a> {
     paths: Vec<NominalPath<'a>>,
@@ -30,9 +30,9 @@ struct NominalBlock {
     direct: bool,
 }
 
-struct NominalPath<'a> {
+pub(super) struct NominalPath<'a> {
     path: &'a DepositionPath,
-    direct: bool,
+    pub(super) direct: bool,
     bounds: [[f64; 2]; 2],
     radius: f64,
     edges: usize,
@@ -305,41 +305,20 @@ impl<'a> NominalAnchorPaths<'a> {
             .map(|edge| [edge.c[0], edge.c[1], edge.d[0], edge.d[1], edge.width].map(f64::to_bits))
     }
 
-    pub(super) fn cover_segment(
+    pub(super) fn visit_indexed(
         &mut self,
         candidate: AnchorCandidate,
-        floor: LowerFloor,
-        max_bytes: usize,
-        cancel: &AtomicBool,
-    ) -> Result<grid::CoverResult, ManufacturingError> {
-        let Some(grid) = self.grid.as_mut() else {
-            return Ok(grid::CoverResult::Uncovered);
-        };
-        let position = grid.prefix_bounded(floor, &self.paths, max_bytes, cancel)?;
-        let [a, b] = candidate.endpoints_mm;
-        Ok(grid
-            .inner_at(position)
-            .map_or(grid::CoverResult::Uncovered, |inner| {
-                inner.check_segment([a[0], a[1]], [b[0], b[1]])
-            }))
-    }
-
-    pub(super) fn visit_indexed_span(
-        &mut self,
-        candidate: AnchorCandidate,
-        span: Option<([f64; 2], [f64; 2])>,
         floor: LowerFloor,
         keys: &[[u64; 5]],
-        mut visit: impl FnMut(u32, [f64; 2], [f64; 2], f64) -> Result<(), ManufacturingError>,
+        mut visit: impl FnMut(u32, GridEdge) -> Result<(), ManufacturingError>,
     ) -> Result<(), ManufacturingError> {
         let Some(grid) = self.grid.as_mut() else {
             return Ok(());
         };
-        grid.collect_span(candidate, span, floor, &self.paths);
+        grid.collect_unsorted(candidate, floor, &self.paths);
         grid.hits.sort_unstable_by_key(|&hit| keys[hit as usize]);
         for &hit in &grid.hits {
-            let edge = grid.edges[hit as usize];
-            visit(hit, edge.c, edge.d, edge.width)?;
+            visit(hit, grid.edges[hit as usize])?;
         }
         Ok(())
     }
@@ -546,66 +525,44 @@ impl AnchorWorkspace {
             && (a[0] != b[0] || a[1] != b[1]);
         let result = if indexed {
             let grid = paths.grid.as_mut().expect("checked edge grid");
-            match grid.prefix(floor, &paths.paths, cancel) {
-                Err(failure) => Err(failure),
-                Ok(prefix) => {
-                    let total_eligible = grid.prefix_at(prefix)[paths.paths.len()];
-                    let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-                    let can_use_cover = a[2].is_finite()
-                        && b[2].is_finite()
-                        && length.is_finite()
-                        && length > 0.0
-                        && [a[0], a[1], b[0], b[1]]
-                            .iter()
-                            .all(|x| x.abs() <= MAX_XYZ6_COORDINATE_MM)
-                        && total_eligible.saturating_add(2) <= self.record_limit
-                        && growth_capacity(
-                            self.intervals.capacity(),
-                            total_eligible.saturating_add(2),
-                        )
-                        .saturating_add(self.uncovered.capacity())
-                            <= self.record_limit;
-                    let cover = if can_use_cover {
-                        grid.inner_at(prefix)
-                            .map_or(grid::CoverResult::Uncovered, |inner| {
-                                inner.check_segment([a[0], a[1]], [b[0], b[1]])
-                            })
-                    } else {
-                        grid::CoverResult::Uncovered
-                    };
-                    match cover {
-                        grid::CoverResult::All => check_cancel(cancel).and_then(|()| {
-                            charge_pairs(work, total_eligible)?;
-                            self.intervals.clear();
-                            self.uncovered.clear();
-                            Ok(())
-                        }),
-                        grid::CoverResult::Partial { lo, hi } => {
-                            let p_lo = [a[0] + (b[0] - a[0]) * lo, a[1] + (b[1] - a[1]) * lo];
-                            let p_hi = [a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi];
-                            grid.collect_span(candidate, Some((p_lo, p_hi)), floor, &paths.paths);
-                            let inputs = NominalAnchorPaths::grid_inputs(
-                                &paths.paths,
-                                grid,
-                                grid.prefix_at(prefix),
-                                floor,
-                            );
-                            self.gaps_inputs_bridged(candidate, inputs, [lo, hi], work, cancel)
-                                .map(|_| ())
-                        }
-                        grid::CoverResult::Uncovered => {
-                            grid.collect(candidate, floor, &paths.paths);
-                            let inputs = NominalAnchorPaths::grid_inputs(
-                                &paths.paths,
-                                grid,
-                                grid.prefix_at(prefix),
-                                floor,
-                            );
-                            self.gaps_inputs(candidate, inputs, work, cancel)
-                                .map(|_| ())
-                        }
-                    }
-                }
+            let (floor_pos, total_eligible, has_whole) = grid.floor_info(floor, &paths.paths);
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let can_fast = grid.all_xyz6_safe
+                && !has_whole
+                && a[2].is_finite()
+                && b[2].is_finite()
+                && length.is_finite()
+                && length > 0.0
+                && [a[0], a[1], b[0], b[1]]
+                    .iter()
+                    .all(|x| x.abs() <= MAX_XYZ6_COORDINATE_MM)
+                && total_eligible <= self.record_limit
+                && growth_capacity(self.intervals.capacity(), total_eligible)
+                    .saturating_add(self.uncovered.capacity())
+                    <= self.record_limit;
+            if can_fast {
+                grid.collect_unsorted(candidate, floor, &paths.paths);
+                self.gaps_grid_fast(
+                    candidate,
+                    length,
+                    &grid.hits,
+                    &grid.edges,
+                    &paths.paths,
+                    total_eligible,
+                    work,
+                    cancel,
+                )
+            } else {
+                grid.ensure_prefix(floor_pos, floor, &paths.paths);
+                grid.collect(candidate, floor, &paths.paths);
+                let inputs = NominalAnchorPaths::grid_inputs(
+                    &paths.paths,
+                    grid,
+                    grid.prefix_at(floor_pos),
+                    floor,
+                );
+                self.gaps_inputs(candidate, inputs, work, cancel)
+                    .map(|_| ())
             }
         } else {
             self.gaps_inputs(candidate, paths.inputs(candidate, floor), work, cancel)

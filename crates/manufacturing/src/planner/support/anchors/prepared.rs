@@ -141,16 +141,9 @@ impl PreparedLayer {
                 if remaining <= 2 * std::mem::size_of::<QueryProof>() {
                     break;
                 }
-                let span = match lower.cover_segment(candidate, floor, remaining / 2, cancel)? {
-                    super::nominal::CoverResult::All => continue,
-                    super::nominal::CoverResult::Partial { lo, hi } => Some((
-                        [a[0] + (b[0] - a[0]) * lo, a[1] + (b[1] - a[1]) * lo],
-                        [a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi],
-                    )),
-                    super::nominal::CoverResult::Uncovered => None,
-                };
-                lower.visit_indexed_span(candidate, span, floor, &keys, |edge, c, d, width| {
+                lower.visit_indexed(candidate, floor, &keys, |edge, grid_edge| {
                     check_cancel(cancel)?;
+                    let (c, d, width) = (grid_edge.c, grid_edge.d, grid_edge.width);
                     if remaining
                         < 4 * (size_of::<u32>() + size_of::<(f64, f64)>() + size_of::<QueryProof>())
                         || edge > EDGE_ID_MASK
@@ -159,7 +152,13 @@ impl PreparedLayer {
                     {
                         return Ok(());
                     }
-                    let capsule = SegmentCapsule::new(c, d, width * 0.5)?;
+                    let capsule = SegmentCapsule {
+                        c,
+                        d,
+                        unit: grid_edge.unit,
+                        length: grid_edge.length,
+                        radius: width * 0.5,
+                    };
                     let reach = radius + capsule.radius;
                     let mut endpoints = 0;
                     let mut segment = None;

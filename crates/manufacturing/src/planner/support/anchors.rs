@@ -440,16 +440,6 @@ impl AnchorWorkspace {
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
-        self.gaps_inputs_bridged(candidate, edges, [0.0, 1.0], work, cancel)
-    }
-    fn gaps_inputs_bridged(
-        &mut self,
-        candidate: AnchorCandidate,
-        edges: impl Iterator<Item = AnchorInput>,
-        bridges: [f64; 2],
-        work: &mut usize,
-        cancel: &AtomicBool,
-    ) -> Result<&[AnchorGap], ManufacturingError> {
         let [a, b] = candidate.endpoints_mm;
         check_cancel(cancel)?;
         let delta = [b[0] - a[0], b[1] - a[1]];
@@ -586,24 +576,6 @@ impl AnchorWorkspace {
                 self.intervals.push((start / length, end / length, direct));
             }
         }
-        if bridges[0] > 0.0 {
-            super::reserve_component_record(
-                &mut self.intervals,
-                1,
-                self.uncovered.capacity(),
-                self.record_limit,
-            )?;
-            self.intervals.push((0.0, bridges[0], false));
-        }
-        if bridges[1] < 1.0 {
-            super::reserve_component_record(
-                &mut self.intervals,
-                1,
-                self.uncovered.capacity(),
-                self.record_limit,
-            )?;
-            self.intervals.push((bridges[1], 1.0, false));
-        }
         self.intervals
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
         let mut covered_until: f64 = 0.0;
@@ -649,6 +621,158 @@ impl AnchorWorkspace {
             })?;
         }
         Ok(&self.uncovered)
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn gaps_grid_fast(
+        &mut self,
+        candidate: AnchorCandidate,
+        length: f64,
+        hits: &[u32],
+        edges: &[nominal::GridEdge],
+        paths: &[nominal::NominalPath<'_>],
+        total_eligible: usize,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        charge_pairs(work, total_eligible)?;
+        let [a, b] = candidate.endpoints_mm;
+        let radius = candidate.bead_width_mm * 0.5;
+        let direction = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
+        self.intervals.clear();
+        self.uncovered.clear();
+        let mut covered_from_zero = 0.0_f64;
+        let mut covered_to_one = 1.0_f64;
+        for (idx, &hit) in hits.iter().enumerate() {
+            if idx & 63 == 0 {
+                check_cancel(cancel)?;
+            }
+            let edge = &edges[hit as usize];
+            let capsule = SegmentCapsule {
+                c: edge.c,
+                d: edge.d,
+                unit: edge.unit,
+                length: edge.length,
+                radius: edge.width * 0.5,
+            };
+            if let Some((start, end)) = capsule.interval([a[0], a[1]], direction, length)? {
+                let s = start / length;
+                let e = end / length;
+                if s <= covered_from_zero {
+                    covered_from_zero = covered_from_zero.max(e);
+                }
+                if e >= covered_to_one {
+                    covered_to_one = covered_to_one.min(s);
+                }
+                if covered_from_zero >= covered_to_one {
+                    self.intervals.clear();
+                    return Ok(());
+                }
+                super::reserve_component_record(
+                    &mut self.intervals,
+                    1,
+                    self.uncovered.capacity(),
+                    self.record_limit,
+                )?;
+                self.intervals
+                    .push((s, e, paths[edge.path as usize].direct));
+            }
+        }
+        self.intervals
+            .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let need_left = self.intervals.first().is_none_or(|iv| iv.0 > 0.0);
+        let mut endpoints = [EndpointAnchor::default(), EndpointAnchor::default()];
+        let check_endpoint =
+            |endpoint: &mut EndpointAnchor, point: [f64; 2]| -> Result<(), ManufacturingError> {
+                for &hit in hits {
+                    if endpoint.present && endpoint.direct {
+                        break;
+                    }
+                    let edge = &edges[hit as usize];
+                    let direct = paths[edge.path as usize].direct;
+                    if endpoint.present && !direct {
+                        continue;
+                    }
+                    let previous_radius = edge.width * 0.5;
+                    let endpoint_reach = radius + previous_radius;
+                    let capsule = SegmentCapsule {
+                        c: edge.c,
+                        d: edge.d,
+                        unit: edge.unit,
+                        length: edge.length,
+                        radius: previous_radius,
+                    };
+                    if capsule.excludes_projected_endpoint(point, endpoint_reach) {
+                        continue;
+                    }
+                    let projected_point = match endpoint.projected {
+                        Some(projected) => projected,
+                        None => {
+                            let projected = ProjectedAnchorPoint::new([point[0], point[1], 0.0])?;
+                            endpoint.projected = Some(projected);
+                            projected
+                        }
+                    };
+                    let segment = ProjectedAnchorSegment::new([
+                        [edge.c[0], edge.c[1], 0.0],
+                        [edge.d[0], edge.d[1], 0.0],
+                    ])?;
+                    let (distance, enclosure) = segment.distance_enclosed(projected_point)?;
+                    if (distance + enclosure).next_up() < endpoint_reach {
+                        endpoint.present = true;
+                        endpoint.direct |= direct;
+                    }
+                }
+                Ok(())
+            };
+        if need_left {
+            check_endpoint(&mut endpoints[0], [a[0], a[1]])?;
+        }
+        let mut covered_until: f64 = 0.0;
+        let mut direct_until: f64 = 0.0;
+        for index in 0..self.intervals.len() {
+            let (start, end, direct) = self.intervals[index];
+            check_cancel(cancel)?;
+            if start > covered_until {
+                let direct_right = self.intervals[index..]
+                    .iter()
+                    .take_while(|interval| interval.0 == start)
+                    .any(|interval| interval.2);
+                let left_direct = if covered_until > 0.0 {
+                    direct_until >= covered_until
+                } else {
+                    endpoints[0].direct
+                };
+                self.push_gap(AnchorGap {
+                    start: covered_until,
+                    end: start,
+                    left: covered_until > 0.0 || endpoints[0].present,
+                    right: true,
+                    direct_ends: left_direct && direct_right,
+                })?;
+            }
+            covered_until = covered_until.max(end);
+            if direct {
+                direct_until = direct_until.max(end);
+            }
+        }
+        if covered_until < 1.0 {
+            check_endpoint(&mut endpoints[1], [b[0], b[1]])?;
+            let left_direct = if covered_until > 0.0 {
+                direct_until >= covered_until
+            } else {
+                endpoints[0].direct
+            };
+            self.push_gap(AnchorGap {
+                start: covered_until,
+                end: 1.0,
+                left: covered_until > 0.0 || endpoints[0].present,
+                right: endpoints[1].present,
+                direct_ends: left_direct && endpoints[1].direct,
+            })?;
+        }
+        Ok(())
     }
 
     fn push_gap(&mut self, gap: AnchorGap) -> Result<(), ManufacturingError> {
