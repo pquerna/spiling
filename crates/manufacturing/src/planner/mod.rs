@@ -3943,52 +3943,57 @@ fn prefill_walls(
         wanted.push((index, current, native_index, key));
     }
     // Rayon workers do not inherit the operation's working-set scope, and
-    // concurrent tasks are live together: each admits an equal share of the
-    // growth beyond the already-retained geometry. A task refused for its share
-    // only misses this memo; the serial layer pass retries with the whole set.
+    // concurrent tasks are live together: bound wave concurrency so each task
+    // keeps enough headroom and complex sections are not dropped to serial retry.
+    let wave = wanted.len().min(rayon::current_num_threads()).clamp(1, 8);
     let working_set = {
         let unit = std::mem::size_of::<geo::Coord<f64>>();
         let retained_bytes = retained_points.saturating_mul(unit);
-        let growth = crate::working_set::bytes().saturating_sub(retained_bytes)
-            / rayon::current_num_threads().max(1);
+        let growth = crate::working_set::bytes().saturating_sub(retained_bytes) / wave;
         crate::working_set::WorkingSet::new(retained_bytes.saturating_add(growth).max(1))?
     };
-    let planned: Vec<_> = wanted
-        .par_iter()
-        .map(|&(index, current, native_index, key)| {
-            crate::working_set::scope(working_set, || {
-                let elevation = &schedule[index as usize];
-                let native_span = native_surfaces
-                    .get(native_index)
-                    .filter(|span| span.start <= index);
-                let mut work = 0usize;
-                let plan =
-                    required_material(&sections[current].material, native_span, &mut work, cancel)
-                        .and_then(|required| {
-                            construction.walls(
-                                walls::WallRequest {
-                                    material: &sections[current].material,
-                                    required: &required,
-                                    recipe: &input.intent.recipe,
-                                    limits: &limits,
-                                    nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
-                                    lower_z: elevation.lower_z,
-                                    upper_z: elevation.z,
-                                    retained_points,
-                                    owned_bytes: 0,
-                                },
-                                &mut work,
-                                cancel,
-                            )
-                        });
-                (current, key, plan.ok(), work)
+    for batch in wanted.chunks(wave) {
+        let planned: Vec<_> = batch
+            .par_iter()
+            .map(|&(index, current, native_index, key)| {
+                crate::working_set::scope(working_set, || {
+                    let elevation = &schedule[index as usize];
+                    let native_span = native_surfaces
+                        .get(native_index)
+                        .filter(|span| span.start <= index);
+                    let mut work = 0usize;
+                    let plan = required_material(
+                        &sections[current].material,
+                        native_span,
+                        &mut work,
+                        cancel,
+                    )
+                    .and_then(|required| {
+                        construction.walls(
+                            walls::WallRequest {
+                                material: &sections[current].material,
+                                required: &required,
+                                recipe: &input.intent.recipe,
+                                limits: &limits,
+                                nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
+                                lower_z: elevation.lower_z,
+                                upper_z: elevation.z,
+                                retained_points,
+                                owned_bytes: 0,
+                            },
+                            &mut work,
+                            cancel,
+                        )
+                    });
+                    (current, key, plan.ok(), work)
+                })
             })
-        })
-        .collect();
-    for (current, key, plan, spent) in planned {
-        *work = work.saturating_add(spent);
-        if let Some(plan) = plan {
-            wall_memo.insert(&sections[current].material, key, &Arc::new(plan));
+            .collect();
+        for (current, key, plan, spent) in planned {
+            *work = work.saturating_add(spent);
+            if let Some(plan) = plan {
+                wall_memo.insert(&sections[current].material, key, &Arc::new(plan));
+            }
         }
     }
     check_cancel(cancel)

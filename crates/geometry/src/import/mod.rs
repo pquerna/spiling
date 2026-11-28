@@ -1113,6 +1113,7 @@ fn within_hull(
 const BOUNDS_SLACK_MM: [f64; 3] = [1e-2, 1e-2, 1e-3];
 
 /// The running box, grown only by sound enclosures.
+#[derive(Clone, Copy)]
 struct Box3 {
     minimum: [f64; 3],
     maximum: [f64; 3],
@@ -1187,8 +1188,7 @@ fn native_enclosure_bounds(
     cancel: &AtomicBool,
 ) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
     use crate::parametric::{self, CurveEvaluator, Interval};
-    let mut work = crate::GeometryWorkBudget::query();
-    let kernel = crate::kernel::make_kernel_context();
+    let work = crate::GeometryWorkBudget::query();
     let mut bounds = Box3 {
         minimum: [f64::INFINITY; 3],
         maximum: [f64::NEG_INFINITY; 3],
@@ -1201,80 +1201,127 @@ fn native_enclosure_bounds(
             Interval::new(vertex.point.z, vertex.point.z)?,
         ])?;
     }
-    for (edge_id, edge) in brep.edges().iter() {
-        work.charge(1, cancel)?;
-        let Some(curve) = &edge.curve else {
-            return Err(invalid("native edge has no coefficient curve"));
-        };
-        // A spline edge lies in the hull of its control points active on a piece of it.
-        let net = match curve.kind() {
-            solidcore::curve::curve::CurveKind::BSpline(b) => b.gw_nurb(),
-            _ => None,
-        };
-        let domain = [[edge.interval.min(), edge.interval.max()]];
-        refine_bounds(&mut bounds, domain, &mut work, cancel, |[range], work| {
-            let before = work.consumed();
-            let position = curve.tensor(range, 0, work, cancel).map_err(|failure| {
-                work.annotate_error(
-                    failure,
-                    before,
-                    format_args!("native import edge enclosure; edge={edge_id:?}"),
-                )
-            })?[0];
-            let hull = net.and_then(|n| {
-                let rows = active_controls(n.knots(), n.degree(), n.cpts().len(), range)?;
-                control_hull(n.cpts().get(rows)?.iter(), n.is_rational())
-            });
-            within_hull(position, hull)
-        })?;
-    }
-    for (face_id, face) in brep.faces().iter() {
-        work.charge(1, cancel)?;
-        let surface = face
-            .surface
-            .as_ref()
-            .ok_or_else(|| invalid("native face has no coefficient carrier"))?;
-        // A plane face's coordinates are linear on it, so their extremes lie on its boundary,
-        // whose edges are enclosed above; its parameter box reaches past its trims.
-        if is_plane(surface) {
-            continue;
+    use rayon::prelude::*;
+    let edge_list: Vec<_> = brep.edges().iter().collect();
+    let vertex_bounds = bounds;
+    let edge_results: Vec<Result<(Box3, u64), GeometryError>> = edge_list
+        .par_iter()
+        .map(|&(edge_id, edge)| {
+            let mut local_work = crate::GeometryWorkBudget::query();
+            local_work.charge(1, cancel)?;
+            let Some(curve) = &edge.curve else {
+                return Err(invalid("native edge has no coefficient curve"));
+            };
+            // A spline edge lies in the hull of its control points active on a piece of it.
+            let net = match curve.kind() {
+                solidcore::curve::curve::CurveKind::BSpline(b) => b.gw_nurb(),
+                _ => None,
+            };
+            let domain = [[edge.interval.min(), edge.interval.max()]];
+            let mut local_bounds = vertex_bounds;
+            refine_bounds(
+                &mut local_bounds,
+                domain,
+                &mut local_work,
+                cancel,
+                |[range], work| {
+                    let before = work.consumed();
+                    let position = curve.tensor(range, 0, work, cancel).map_err(|failure| {
+                        work.annotate_error(
+                            failure,
+                            before,
+                            format_args!("native import edge enclosure; edge={edge_id:?}"),
+                        )
+                    })?[0];
+                    let hull = net.and_then(|n| {
+                        let rows = active_controls(n.knots(), n.degree(), n.cpts().len(), range)?;
+                        control_hull(n.cpts().get(rows)?.iter(), n.is_rational())
+                    });
+                    within_hull(position, hull)
+                },
+            )?;
+            Ok((local_bounds, local_work.consumed()))
+        })
+        .collect();
+    for result in edge_results {
+        let (local_bounds, consumed) = result?;
+        work.charge(consumed, cancel)?;
+        for d in 0..3 {
+            bounds.minimum[d] = bounds.minimum[d].min(local_bounds.minimum[d]);
+            bounds.maximum[d] = bounds.maximum[d].max(local_bounds.maximum[d]);
         }
-        let low = face.uv_domain.min();
-        let high = face.uv_domain.max();
-        let mut chart = [[low.x, high.x], [low.y, high.y]];
-        // A face whose trims wind past one period of a closed direction (a
-        // thread flank's helical band) lies within one whole turn there.
-        let natural = surface
-            .natural_uv_domain_with_nurb(&kernel)
-            .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
-        let natural = [
-            [natural.u_min(), natural.u_max()],
-            [natural.v_min(), natural.v_max()],
-        ];
-        let beyond = [0, 1].map(|d| chart[d][0] < natural[d][0] || chart[d][1] > natural[d][1]);
-        if beyond.contains(&true) {
-            let periods = surface_periods(&kernel, surface)
+    }
+    let face_list: Vec<_> = brep.faces().iter().collect();
+    let edge_bounds = bounds;
+    let face_results: Vec<Result<(Box3, u64), GeometryError>> = face_list
+        .par_iter()
+        .map(|&(face_id, face)| {
+            let mut local_work = crate::GeometryWorkBudget::query();
+            local_work.charge(1, cancel)?;
+            let surface = face
+                .surface
+                .as_ref()
+                .ok_or_else(|| invalid("native face has no coefficient carrier"))?;
+            // A plane face's coordinates are linear on it, so their extremes lie on its boundary,
+            // whose edges are enclosed above; its parameter box reaches past its trims.
+            if is_plane(surface) {
+                return Ok((edge_bounds, local_work.consumed()));
+            }
+            let kernel = crate::kernel::make_kernel_context();
+            let low = face.uv_domain.min();
+            let high = face.uv_domain.max();
+            let mut chart = [[low.x, high.x], [low.y, high.y]];
+            // A face whose trims wind past one period of a closed direction (a
+            // thread flank's helical band) lies within one whole turn there.
+            let natural = surface
+                .natural_uv_domain_with_nurb(&kernel)
                 .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
-            for d in 0..2 {
-                if beyond[d] && periods[d].is_some() {
-                    chart[d] = natural[d];
+            let natural = [
+                [natural.u_min(), natural.u_max()],
+                [natural.v_min(), natural.v_max()],
+            ];
+            let beyond = [0, 1].map(|d| chart[d][0] < natural[d][0] || chart[d][1] > natural[d][1]);
+            if beyond.contains(&true) {
+                let periods = surface_periods(&kernel, surface)
+                    .map_err(|cause| self::kernel(&format!("native face chart: {cause}")))?;
+                for d in 0..2 {
+                    if beyond[d] && periods[d].is_some() {
+                        chart[d] = natural[d];
+                    }
                 }
             }
+            // A spline, or a kernel cylinder/cone/sphere/torus on its NURBS form (whose parameters
+            // the face's chart is in), lies in the hull of its control points active on a piece.
+            let mut local_bounds = edge_bounds;
+            refine_bounds(
+                &mut local_bounds,
+                chart,
+                &mut local_work,
+                cancel,
+                |piece, work| {
+                    let before = work.consumed();
+                    let position =
+                        parametric::surface_position_enclosure(surface, piece, work, cancel)
+                            .map_err(|failure| {
+                                work.annotate_error(
+                                    failure,
+                                    before,
+                                    format_args!("native import face enclosure; face={face_id:?}"),
+                                )
+                            })?;
+                    within_hull(position, surface_hull(surface, piece)?)
+                },
+            )?;
+            Ok((local_bounds, local_work.consumed()))
+        })
+        .collect();
+    for result in face_results {
+        let (local_bounds, consumed) = result?;
+        work.charge(consumed, cancel)?;
+        for d in 0..3 {
+            bounds.minimum[d] = bounds.minimum[d].min(local_bounds.minimum[d]);
+            bounds.maximum[d] = bounds.maximum[d].max(local_bounds.maximum[d]);
         }
-        // A spline, or a kernel cylinder/cone/sphere/torus on its NURBS form (whose parameters
-        // the face's chart is in), lies in the hull of its control points active on a piece.
-        refine_bounds(&mut bounds, chart, &mut work, cancel, |piece, work| {
-            let before = work.consumed();
-            let position = parametric::surface_position_enclosure(surface, piece, work, cancel)
-                .map_err(|failure| {
-                    work.annotate_error(
-                        failure,
-                        before,
-                        format_args!("native import face enclosure; face={face_id:?}"),
-                    )
-                })?;
-            within_hull(position, surface_hull(surface, piece)?)
-        })?;
     }
     spiling_contracts::geometry::AabbMm::new(bounds.minimum, bounds.maximum)
 }

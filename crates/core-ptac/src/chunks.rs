@@ -3,6 +3,12 @@
 // Licensed under the Open Software License version 3.0
 
 use crate::{CHUNK_BYTES, Result, invalid, limit, model::hash};
+use std::cell::RefCell;
+
+thread_local! {
+    static COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> = const { RefCell::new(None) };
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { RefCell::new(None) };
+}
 
 pub(crate) struct Encoded {
     pub codec: u8,
@@ -13,7 +19,14 @@ pub(crate) fn encode(raw: &[u8]) -> Result<Encoded> {
     if raw.is_empty() || raw.len() > CHUNK_BYTES {
         return Err(limit("chunk length"));
     }
-    let compressed = zstd::bulk::compress(raw, 3)?;
+    let compressed = COMPRESSOR.with(|cell| -> Result<Vec<u8>> {
+        let mut slot = cell.borrow_mut();
+        let compressor = match slot.as_mut() {
+            Some(c) => c,
+            None => slot.insert(zstd::bulk::Compressor::new(3)?),
+        };
+        Ok(compressor.compress(raw)?)
+    })?;
     let (codec, data) = if compressed
         .len()
         .checked_add(64)
@@ -62,11 +75,20 @@ pub(crate) fn decode(
             {
                 return Err(invalid("ZSTD frame profile/length/dictionary mismatch"));
             }
-            let mut decoder = zstd::bulk::Decompressor::new()?;
-            decoder.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(18))?;
-            decoder
-                .decompress(data, raw_length)
-                .map_err(|_| invalid("invalid or oversized ZSTD frame"))?
+            DECOMPRESSOR.with(|cell| -> Result<Vec<u8>> {
+                let mut slot = cell.borrow_mut();
+                let decoder = match slot.as_mut() {
+                    Some(d) => d,
+                    None => {
+                        let mut d = zstd::bulk::Decompressor::new()?;
+                        d.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(18))?;
+                        slot.insert(d)
+                    }
+                };
+                decoder
+                    .decompress(data, raw_length)
+                    .map_err(|_| invalid("invalid or oversized ZSTD frame"))
+            })?
         }
         _ => return Err(invalid("unsupported chunk codec/RAW length")),
     };

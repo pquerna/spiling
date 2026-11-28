@@ -1257,43 +1257,85 @@ impl Staged {
             objects: BTreeMap::new(),
         };
         let mut offset = 0u64;
+        const ENCODE_BATCH: usize = 32;
+        let mut pending_raw: Vec<([u8; 32], Vec<u8>)> = Vec::with_capacity(ENCODE_BATCH);
+        let flush_raw = |pending: &mut Vec<([u8; 32], Vec<u8>)>,
+                         staged: &mut Self,
+                         offset: &mut u64|
+         -> Result<()> {
+            if pending.is_empty() {
+                return Ok(());
+            }
+            use rayon::prelude::*;
+            let encoded: Vec<Result<([u8; 32], usize, chunks::Encoded)>> = pending
+                .par_iter()
+                .map(|(chunk_id, raw)| Ok((*chunk_id, raw.len(), chunks::encode(raw)?)))
+                .collect();
+            pending.clear();
+            for item in encoded {
+                let (chunk_id, raw_length, enc) = item?;
+                if staged.chunks.contains_key(&chunk_id) {
+                    continue;
+                }
+                if *offset + enc.data.len() as u64 > MAX_SCRATCH_BYTES {
+                    return Err(limit("staged encoded bytes"));
+                }
+                staged.spool.append(&enc.data)?;
+                staged.chunks.insert(
+                    chunk_id,
+                    ChunkPosition {
+                        offset: *offset,
+                        length: enc.data.len(),
+                        raw_length,
+                        codec: enc.codec,
+                    },
+                );
+                *offset += enc.data.len() as u64;
+            }
+            Ok(())
+        };
         for (id, bytes) in &candidate.objects {
             let mut mapping = Vec::new();
-            bytes.for_each_chunk(cancel, |id, payload| {
-                mapping.push(id);
-                if staged.chunks.contains_key(&id) {
+            bytes.for_each_chunk(cancel, |chunk_id, payload| {
+                mapping.push(chunk_id);
+                if staged.chunks.contains_key(&chunk_id)
+                    || pending_raw.iter().any(|(seen, _)| *seen == chunk_id)
+                {
                     return Ok(());
                 }
-                let encoded;
-                let (raw_length, codec, data) = match payload {
+                match payload {
                     ChunkPayload::Raw(raw) => {
-                        encoded = chunks::encode(raw)?;
-                        (raw.len(), encoded.codec, encoded.data.as_slice())
+                        pending_raw.push((chunk_id, raw.to_vec()));
+                        if pending_raw.len() >= ENCODE_BATCH {
+                            flush_raw(&mut pending_raw, &mut staged, &mut offset)?;
+                        }
                     }
                     ChunkPayload::Encoded {
                         raw_length,
                         codec,
                         data,
-                    } => (raw_length, codec, data),
-                };
-                if offset + data.len() as u64 > MAX_SCRATCH_BYTES {
-                    return Err(limit("staged encoded bytes"));
+                    } => {
+                        if offset + data.len() as u64 > MAX_SCRATCH_BYTES {
+                            return Err(limit("staged encoded bytes"));
+                        }
+                        staged.spool.append(data)?;
+                        staged.chunks.insert(
+                            chunk_id,
+                            ChunkPosition {
+                                offset,
+                                length: data.len(),
+                                raw_length,
+                                codec,
+                            },
+                        );
+                        offset += data.len() as u64;
+                    }
                 }
-                staged.spool.append(data)?;
-                staged.chunks.insert(
-                    id,
-                    ChunkPosition {
-                        offset,
-                        length: data.len(),
-                        raw_length,
-                        codec,
-                    },
-                );
-                offset += data.len() as u64;
                 Ok(())
             })?;
             staged.objects.insert(*id, mapping);
         }
+        flush_raw(&mut pending_raw, &mut staged, &mut offset)?;
         Ok(staged)
     }
 }

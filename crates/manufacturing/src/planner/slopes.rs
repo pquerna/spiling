@@ -764,7 +764,7 @@ impl Analysis for Steps<'_> {
         }
         let below = self.at(lower)?;
         let above = self.at(upper)?;
-        let area = if above.region.0.is_empty() {
+        let area = if above.region.0.is_empty() || below.region.0 == above.region.0 {
             0.0
         } else {
             let cancel = self.cancel;
@@ -820,17 +820,87 @@ impl Analysis for Steps<'_> {
         }
         let (models, width, noise, cancel) = (self.models, self.width, self.noise_mm2, self.cancel);
         let working_set = crate::working_set::current();
-        let areas: Vec<Result<f64, ManufacturingError>> = wanted
+        // Sample each distinct Z height referenced by `wanted` once (reusing
+        // cached sections when available) instead of sampling every interior
+        // layer twice across adjacent pairs.
+        let mut unique_z: Vec<f64> = wanted
+            .iter()
+            .flat_map(|&(lower, upper)| [lower, upper])
+            .collect();
+        unique_z.sort_unstable_by_key(|a| a.to_bits());
+        unique_z.dedup_by_key(|z| z.to_bits());
+        let mut cached_sections: std::collections::HashMap<u64, MultiPolygon<f64>> =
+            std::collections::HashMap::with_capacity(unique_z.len());
+        let mut missing_z = Vec::new();
+        for &z in &unique_z {
+            let bits = z.to_bits();
+            if let Ok(pos) = self.cached.binary_search_by_key(&bits, |(k, _)| *k) {
+                cached_sections.insert(bits, self.cached[pos].1.region.clone());
+            } else {
+                missing_z.push(z);
+            }
+        }
+        let sampled: Vec<(u64, Result<MultiPolygon<f64>, ManufacturingError>)> = missing_z
+            .par_iter()
+            .map(|&z| {
+                let res = crate::working_set::scope(working_set, || {
+                    let row = super::tolerant::sample_row(
+                        models,
+                        z,
+                        crate::working_set::bytes(),
+                        cancel,
+                    )?;
+                    let mut section = MultiPolygon(Vec::new());
+                    for placed in &row.sections {
+                        check_cancel(cancel)?;
+                        section = if section.0.is_empty() {
+                            placed.clone()
+                        } else {
+                            section.union(placed)
+                        };
+                    }
+                    region::canonicalize(&mut section);
+                    Ok(section)
+                });
+                (z.to_bits(), res)
+            })
+            .collect();
+        for (bits, res) in sampled {
+            match res {
+                Ok(section) => {
+                    cached_sections.insert(bits, section);
+                }
+                Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
+                    return Err(failure);
+                }
+                Err(_) => {}
+            }
+        }
+        let areas: Vec<Result<Option<f64>, ManufacturingError>> = wanted
             .par_iter()
             .map(|&(lower, upper)| {
+                let (Some(below), Some(above)) = (
+                    cached_sections.get(&lower.to_bits()),
+                    cached_sections.get(&upper.to_bits()),
+                ) else {
+                    return Ok(None);
+                };
                 crate::working_set::scope(working_set, || {
-                    parallel_excess(models, lower, upper, width, noise, cancel)
+                    let area = if above.0.is_empty() || below.0 == above.0 {
+                        0.0
+                    } else {
+                        let carried =
+                            region::offset_admitted(below, width * 0.5, |_, _, _| Ok(()), cancel)?;
+                        above.difference(&carried).unsigned_area()
+                    };
+                    Ok(Some(if area > noise { area } else { 0.0 }))
                 })
             })
             .collect();
         for (&(lower, upper), area) in wanted.iter().zip(areas) {
             match area {
-                Ok(area) => self.cache_excess((lower.to_bits(), upper.to_bits()), area)?,
+                Ok(Some(area)) => self.cache_excess((lower.to_bits(), upper.to_bits()), area)?,
+                Ok(None) => {}
                 Err(failure) if failure.code == ManufacturingErrorCode::Cancelled => {
                     return Err(failure);
                 }
@@ -840,44 +910,6 @@ impl Analysis for Steps<'_> {
         }
         Ok(())
     }
-}
-
-/// [`Steps::excess`] for one pair, without the shared caches: the same
-/// sampled rows, union order, canonical form, carried offset and threshold.
-fn parallel_excess(
-    models: &std::collections::BTreeMap<
-        spiling_contracts::geometry::OccurrenceId,
-        std::sync::Arc<spiling_geometry::tolerant::TolerantModel>,
-    >,
-    lower: f64,
-    upper: f64,
-    width: f64,
-    noise_mm2: f64,
-    cancel: &AtomicBool,
-) -> Result<f64, ManufacturingError> {
-    let at = |z: f64| -> Result<MultiPolygon<f64>, ManufacturingError> {
-        let row = super::tolerant::sample_row(models, z, crate::working_set::bytes(), cancel)?;
-        let mut section = MultiPolygon(Vec::new());
-        for placed in &row.sections {
-            check_cancel(cancel)?;
-            section = if section.0.is_empty() {
-                placed.clone()
-            } else {
-                section.union(placed)
-            };
-        }
-        region::canonicalize(&mut section);
-        Ok(section)
-    };
-    let below = at(lower)?;
-    let above = at(upper)?;
-    let area = if above.0.is_empty() {
-        0.0
-    } else {
-        let carried = region::offset_admitted(&below, width * 0.5, |_, _, _| Ok(()), cancel)?;
-        above.difference(&carried).unsigned_area()
-    };
-    Ok(if area > noise_mm2 { area } else { 0.0 })
 }
 
 #[cfg(test)]

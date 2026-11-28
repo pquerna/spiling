@@ -593,8 +593,6 @@ impl std::hash::Hasher for StitchHasher {
 }
 
 type StitchHash = std::hash::BuildHasherDefault<StitchHasher>;
-type OffsetFn<'a> = dyn FnMut(&MultiPolygon<f64>, f64, &mut usize) -> Result<MultiPolygon<f64>, ManufacturingError>
-    + 'a;
 
 /// Join pieces of one lane whose ends coincide. Pieces of adjacent cells
 /// meet at one point in exact arithmetic, but the two cells of a segment and
@@ -855,14 +853,13 @@ fn cover(
     // Narrower than the narrowest bead is not printable by anything: not the
     // material's tips, and not a sliver left between beads.
     let reach_radius = 0.5 * admitted_width_range(request)?[0] - super::super::OFFSET_TOLERANCE_MM;
-    let open = |region: &MultiPolygon<f64>,
-                work: &mut usize,
-                offset: &mut OffsetFn<'_>|
-     -> Result<MultiPolygon<f64>, ManufacturingError> {
-        let eroded = offset(region, -reach_radius, work)?;
-        offset(&eroded, reach_radius, work)
-    };
-    let mut fill = open(&unbeaded, work, offset)?;
+    let eroded_unbeaded = offset(&unbeaded, -reach_radius, work)?;
+    if eroded_unbeaded.0.is_empty() {
+        // Opening of unbeaded is empty, so fill is empty and missing == unbeaded
+        // already has an empty erosion at -reach_radius.
+        return Ok(MultiPolygon(Vec::new()));
+    }
+    let mut fill = offset(&eroded_unbeaded, reach_radius, work)?;
     // The fill boundary inherits every bead cap's arc vertices; it only
     // clips infill rows, so half the profile tolerance is its precision.
     fill = geo::Simplify::simplify(&fill, 0.5 * super::super::OFFSET_TOLERANCE_MM);
@@ -876,7 +873,22 @@ fn cover(
     // material lies inside the material's own opening, so opening the
     // unprinted material equals opening its printable part. The opening is
     // empty exactly when the erosion is; dilate only to measure a void.
-    let missing = unbeaded.difference(&fill);
+    let mut missing = unbeaded.difference(&fill);
+    // Only pieces large enough to hold a disk of radius `reach_radius` (with
+    // conservative tolerance margin) can survive erosion by `-reach_radius`.
+    let min_radius = (reach_radius - super::super::OFFSET_TOLERANCE_MM).max(0.0);
+    let min_dim = 2.0 * min_radius;
+    let min_area = 0.5 * std::f64::consts::PI * min_radius * min_radius;
+    missing.0.retain(|polygon| {
+        geo::BoundingRect::bounding_rect(polygon).is_some_and(|rect| {
+            rect.width() >= min_dim
+                && rect.height() >= min_dim
+                && polygon.unsigned_area() >= min_area
+        })
+    });
+    if missing.0.is_empty() {
+        return Ok(fill);
+    }
     let eroded = offset(&missing, -reach_radius, work)?;
     if eroded.0.is_empty() {
         return Ok(fill);
