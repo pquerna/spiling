@@ -319,27 +319,41 @@ pub struct CapturedInspection {
     pub interior_selection: Option<Arc<InteriorSelection>>,
 }
 
+/// Fresh report and metadata captured from an in-process independent replay
+/// (no plan layers, contours, or program bytes are retained).
+struct FreshInspectionReceipt {
+    report: VerificationReport,
+    provenance: ManufacturingInspectionProvenance,
+    occurrences: Vec<OccurrenceRecord>,
+}
+
 /// One ephemeral proof of an exact bundle/program pair. No bytes or parsed plan are retained.
 pub struct CompileVerification {
     bundle_digest: [u8; 32],
     program_digest: [u8; 32],
-    /// Fresh report computed during in-process verification (e.g. project open),
+    /// Fresh inspection computed during in-process verification (e.g. project open),
     /// never loaded from a persisted bundle field.
-    fresh_report: Option<VerificationReport>,
+    fresh: Option<FreshInspectionReceipt>,
 }
 
 impl CompileVerification {
-    /// Bind an ephemeral verification receipt to a freshly computed report from
+    /// Bind an ephemeral verification receipt to a freshly computed inspection from
     /// independent replay of these exact immutable bytes in the current process.
     pub fn from_fresh_inspection(
         encoded: &ChunkSource,
         program: &ChunkSource,
         report: VerificationReport,
+        provenance: ManufacturingInspectionProvenance,
+        occurrences: Vec<OccurrenceRecord>,
     ) -> Self {
         Self {
             bundle_digest: *encoded.digest(),
             program_digest: *program.digest(),
-            fresh_report: Some(report),
+            fresh: Some(FreshInspectionReceipt {
+                report,
+                provenance,
+                occurrences,
+            }),
         }
     }
 
@@ -355,11 +369,18 @@ impl CompileVerification {
         if encoded.digest() != &self.bundle_digest || program.digest() != &self.program_digest {
             return Ok(None);
         }
+        if let Some(fresh) = &self.fresh {
+            return Ok(Some((
+                ManufacturingInspection {
+                    report: fresh.report.clone(),
+                    provenance: fresh.provenance.clone(),
+                    replay: None,
+                },
+                fresh.occurrences.clone(),
+            )));
+        }
         let bundle = decode_bundle_from(encoded.len(), || encoded.reader())?;
-        let report = self
-            .fresh_report
-            .clone()
-            .unwrap_or_else(|| bundle.verification.clone());
+        let report = bundle.verification.clone();
         let inspection = finish_inspection(
             &bundle,
             &SourceHash::from_digest(encoded.digest()),
@@ -416,7 +437,7 @@ fn seal_compiled_artifact(
     let receipt = CompileVerification {
         bundle_digest: *encoded.digest(),
         program_digest: *program.digest(),
-        fresh_report: None,
+        fresh: None,
     };
     let inspection = replay
         .map(|sink| {

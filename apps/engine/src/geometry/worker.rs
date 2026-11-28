@@ -743,7 +743,12 @@ fn run(
             .map_err(|error: GeometryError| JobError::from(error)),
             Work::Verify { asset, output } => {
                 inspect_asset(&asset, output, &verified_receipts, &cancel).and_then(|inspection| {
-                    let package = if output.delivery_package() {
+                    let package = if output.delivery_package()
+                        && spiling_manufacturing::delivery::package_format_for_workflow(
+                            &inspection.provenance.workflow,
+                        )
+                        .is_some()
+                    {
                         package_asset(&asset, &inspection.report, &definitions, &cancel)?
                     } else {
                         None
@@ -1583,6 +1588,8 @@ fn open(
             &asset.bundle,
             &asset.program,
             inspection.report,
+            inspection.provenance,
+            bundle.provenance.occurrences.clone(),
         ));
         Ok::<_, JobError>(())
     })?;
@@ -2004,7 +2011,7 @@ fn inspect_asset(
     receipts: &[CompileVerification],
     cancel: &AtomicBool,
 ) -> Result<ManufacturingInspection, JobError> {
-    if output == VerificationOutput::ReportOnly {
+    if !output.motion() {
         for receipt in receipts {
             if let Some((inspection, occurrences)) =
                 receipt.inspect_report(&asset.bundle, &asset.program, cancel)?

@@ -169,14 +169,18 @@ fn unsupported() -> ManufacturingError {
 }
 
 /// Whether the printer's firmware takes a delivery package.
-pub fn package_format(intent: &ManufacturingIntent) -> Option<DeliveryPackageFormat> {
-    match &intent.printer.workflow {
+pub fn package_format_for_workflow(workflow: &JobWorkflow) -> Option<DeliveryPackageFormat> {
+    match workflow {
         JobWorkflow::CompleteMarlin { job } => job
             .delivery
             .as_ref()
             .map(|DeliveryPackage::BambuGcode3mf { .. }| DeliveryPackageFormat::BambuGcode3mfV1),
         _ => None,
     }
+}
+
+pub fn package_format(intent: &ManufacturingIntent) -> Option<DeliveryPackageFormat> {
+    package_format_for_workflow(&intent.printer.workflow)
 }
 
 fn r2(v: f64) -> String {
