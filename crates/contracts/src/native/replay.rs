@@ -326,6 +326,7 @@ mod tests {
             printer_model: "Bambu Lab A1".into(),
             plate: BambuPlate::TexturedPeiPlate,
             series: BambuSeries::A1,
+            ams: None,
         };
         let wire = super::super::manufacturing::delivery_to_rpc(package.clone());
         assert_eq!(
@@ -338,6 +339,100 @@ mod tests {
         };
         p.plate = 0;
         assert!(super::super::manufacturing::delivery_from_rpc(bad).is_err());
+
+        // Single-nozzle Bambu AMS delivery and verification wire round-trip.
+        let ams_package = DeliveryPackage::BambuGcode3mf {
+            printer_model_id: "N2S".into(),
+            printer_model: "Bambu Lab A1".into(),
+            plate: BambuPlate::TexturedPeiPlate,
+            series: BambuSeries::A1,
+            ams: Some(BambuAms {
+                slots: vec![
+                    AmsSlot {
+                        polymer_family: "PLA".into(),
+                        display_srgb: Some([0x1F, 0x4E, 0x79]),
+                        filament_diameter_mm: 1.75,
+                        nozzle_temperature_c: 220.0,
+                        first_layer_nozzle_temperature_c: 220.0,
+                        flush_temperature_c: 220.0,
+                        flush_volumetric_speed_mm3_s: 12.0,
+                    },
+                    AmsSlot {
+                        polymer_family: "PETG".into(),
+                        display_srgb: Some([0xFF, 0x66, 0x00]),
+                        filament_diameter_mm: 1.75,
+                        nozzle_temperature_c: 245.0,
+                        first_layer_nozzle_temperature_c: 245.0,
+                        flush_temperature_c: 245.0,
+                        flush_volumetric_speed_mm3_s: 10.0,
+                    },
+                ],
+                support_slot: None,
+                support_interface_slot: Some(1),
+                flush_volumes_mm3: vec![0.0, 500.0, 500.0, 0.0],
+                prime_tower: Some(AmsPrimeTower {
+                    origin_xy_mm: [10.0, 200.0],
+                    size_xy_mm: [35.0, 35.0],
+                    bead_width_mm: 0.44,
+                    prime_volume_mm3: 20.0,
+                    print_speed_mm_s: 100.0,
+                }),
+            }),
+        };
+        let wire_ams = super::super::manufacturing::delivery_to_rpc(ams_package.clone());
+        assert_eq!(
+            super::super::manufacturing::delivery_from_rpc(wire_ams.clone()).unwrap(),
+            ams_package
+        );
+        let mut bad_ams = wire_ams;
+        let Some(rpc::delivery_package::Package::BambuGcode3mf(p)) = bad_ams.package.as_mut()
+        else {
+            unreachable!()
+        };
+        p.ams.as_mut().unwrap().flush_volumes_mm3[0] = 25.0;
+        assert!(super::super::manufacturing::delivery_from_rpc(bad_ams).is_err());
+
+        let ams_ver = AmsVerification {
+            slots: vec![
+                AmsSlotAccounting {
+                    slot: 0,
+                    model_filament_length_mm: 500.0,
+                    support_filament_length_mm: 20.0,
+                    adhesion_filament_length_mm: 15.0,
+                    priming_filament_length_mm: 25.0,
+                    flush_filament_length_mm: 208.0,
+                    tower_filament_length_mm: 60.0,
+                    used_for_object: true,
+                    used_for_support: true,
+                },
+                AmsSlotAccounting {
+                    slot: 1,
+                    model_filament_length_mm: 0.0,
+                    support_filament_length_mm: 30.0,
+                    adhesion_filament_length_mm: 0.0,
+                    priming_filament_length_mm: 0.0,
+                    flush_filament_length_mm: 208.0,
+                    tower_filament_length_mm: 12.0,
+                    used_for_object: false,
+                    used_for_support: true,
+                },
+            ],
+            change_count: 2,
+            sequence: vec![0, 1, 0],
+            tower_deposition_segments: 16,
+            tower_travel_segments: 4,
+            tower_layers: 3,
+            total_flush_filament_length_mm: 416.0,
+            total_tower_filament_length_mm: 72.0,
+        };
+        let wire_ver = super::super::manufacturing::ams_verification_to_rpc(ams_ver.clone());
+        assert_eq!(
+            super::super::manufacturing::ams_verification_from_rpc(wire_ver.clone()).unwrap(),
+            ams_ver
+        );
+        let mut bad_ver = wire_ver;
+        bad_ver.sequence = vec![0, 0, 1];
+        assert!(super::super::manufacturing::ams_verification_from_rpc(bad_ver).is_err());
     }
 
     fn display() -> ReplayDisplayDescriptor {
@@ -556,6 +651,7 @@ mod tests {
                 cooling_slowed_layers: 0,
                 minimum_cooling_scale: 1.0,
                 estimated_seconds: None,
+                ams: None,
             },
             resource: crate::ArtifactView {
                 name: format!("artifacts/{}", record.hash.as_str()),

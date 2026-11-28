@@ -1140,6 +1140,93 @@ const BAMBU_PLATES: [(rpc::BambuPlate, BambuPlate); 4] = [
     (rpc::BambuPlate::HighTemp, BambuPlate::HighTempPlate),
     (rpc::BambuPlate::TexturedPei, BambuPlate::TexturedPeiPlate),
 ];
+fn ams_slot_from_rpc(value: rpc::AmsSlot) -> Result<AmsSlot, String> {
+    let display_srgb = value
+        .display_srgb
+        .map(|packed| {
+            if packed > 0x00FF_FFFF {
+                return Err("AMS slot display_srgb exceeds 24-bit RGB range".to_string());
+            }
+            Ok([
+                ((packed >> 16) & 0xFF) as u8,
+                ((packed >> 8) & 0xFF) as u8,
+                (packed & 0xFF) as u8,
+            ])
+        })
+        .transpose()?;
+    Ok(AmsSlot {
+        polymer_family: value.polymer_family,
+        display_srgb,
+        filament_diameter_mm: value.filament_diameter_mm,
+        nozzle_temperature_c: value.nozzle_temperature_c,
+        first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+        flush_temperature_c: value.flush_temperature_c,
+        flush_volumetric_speed_mm3_s: value.flush_volumetric_speed_mm3_s,
+    })
+}
+fn ams_slot_to_rpc(value: AmsSlot) -> rpc::AmsSlot {
+    rpc::AmsSlot {
+        polymer_family: value.polymer_family,
+        display_srgb: value
+            .display_srgb
+            .map(|[r, g, b]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)),
+        filament_diameter_mm: value.filament_diameter_mm,
+        nozzle_temperature_c: value.nozzle_temperature_c,
+        first_layer_nozzle_temperature_c: value.first_layer_nozzle_temperature_c,
+        flush_temperature_c: value.flush_temperature_c,
+        flush_volumetric_speed_mm3_s: value.flush_volumetric_speed_mm3_s,
+    }
+}
+fn ams_tower_from_rpc(value: rpc::AmsPrimeTower) -> Result<AmsPrimeTower, String> {
+    let pair = |v: Vec<f64>, what: &str| -> Result<[f64; 2], String> {
+        v.try_into()
+            .map_err(|_| format!("AMS prime tower {what} needs two values"))
+    };
+    Ok(AmsPrimeTower {
+        origin_xy_mm: pair(value.origin_xy_mm, "origin")?,
+        size_xy_mm: pair(value.size_xy_mm, "size")?,
+        bead_width_mm: value.bead_width_mm,
+        prime_volume_mm3: value.prime_volume_mm3,
+        print_speed_mm_s: value.print_speed_mm_s,
+    })
+}
+fn ams_tower_to_rpc(value: AmsPrimeTower) -> rpc::AmsPrimeTower {
+    rpc::AmsPrimeTower {
+        origin_xy_mm: value.origin_xy_mm.to_vec(),
+        size_xy_mm: value.size_xy_mm.to_vec(),
+        bead_width_mm: value.bead_width_mm,
+        prime_volume_mm3: value.prime_volume_mm3,
+        print_speed_mm_s: value.print_speed_mm_s,
+    }
+}
+fn ams_from_rpc(value: rpc::BambuAms) -> Result<BambuAms, String> {
+    let slot_opt = |v: Option<u32>, what: &str| -> Result<Option<u8>, String> {
+        v.map(|s| u8::try_from(s).map_err(|_| format!("AMS {what} exceeds u8")))
+            .transpose()
+    };
+    let ams = BambuAms {
+        slots: value
+            .slots
+            .into_iter()
+            .map(ams_slot_from_rpc)
+            .collect::<Result<_, _>>()?,
+        support_slot: slot_opt(value.support_slot, "support_slot")?,
+        support_interface_slot: slot_opt(value.support_interface_slot, "support_interface_slot")?,
+        flush_volumes_mm3: value.flush_volumes_mm3,
+        prime_tower: value.prime_tower.map(ams_tower_from_rpc).transpose()?,
+    };
+    ams.validate_declaration().map_err(|e| e.to_string())?;
+    Ok(ams)
+}
+fn ams_to_rpc(value: BambuAms) -> rpc::BambuAms {
+    rpc::BambuAms {
+        slots: value.slots.into_iter().map(ams_slot_to_rpc).collect(),
+        support_slot: value.support_slot.map(u32::from),
+        support_interface_slot: value.support_interface_slot.map(u32::from),
+        flush_volumes_mm3: value.flush_volumes_mm3,
+        prime_tower: value.prime_tower.map(ams_tower_to_rpc),
+    }
+}
 pub(super) fn delivery_from_rpc(value: rpc::DeliveryPackage) -> Result<DeliveryPackage, String> {
     use rpc::delivery_package::Package;
     let package = match required(value.package, "delivery package")? {
@@ -1158,6 +1245,7 @@ pub(super) fn delivery_from_rpc(value: rpc::DeliveryPackage) -> Result<DeliveryP
                     rpc::BambuSeries::P1X1 => BambuSeries::P1X1,
                     rpc::BambuSeries::Unspecified => return Err("unspecified Bambu series".into()),
                 },
+                ams: p.ams.map(ams_from_rpc).transpose()?,
             }
         }
     };
@@ -1172,6 +1260,7 @@ pub(super) fn delivery_to_rpc(value: DeliveryPackage) -> rpc::DeliveryPackage {
             printer_model,
             plate,
             series,
+            ams,
         } => rpc::DeliveryPackage {
             package: Some(Package::BambuGcode3mf(rpc::BambuGcode3mfPackage {
                 printer_model_id,
@@ -1184,6 +1273,7 @@ pub(super) fn delivery_to_rpc(value: DeliveryPackage) -> rpc::DeliveryPackage {
                     BambuSeries::A1 => rpc::BambuSeries::A1,
                     BambuSeries::P1X1 => rpc::BambuSeries::P1X1,
                 } as i32,
+                ams: ams.map(ams_to_rpc),
             })),
         },
     }
@@ -1919,6 +2009,70 @@ impl TryFrom<ManufacturingArtifactRecord> for rpc::ManufacturingArtifactRecord {
         })
     }
 }
+pub(super) fn ams_verification_from_rpc(
+    value: rpc::AmsVerification,
+) -> Result<AmsVerification, String> {
+    let slots = value
+        .slots
+        .into_iter()
+        .map(|s| {
+            Ok(AmsSlotAccounting {
+                slot: u8::try_from(s.slot).map_err(|_| "AMS slot index exceeds u8".to_string())?,
+                model_filament_length_mm: s.model_filament_length_mm,
+                support_filament_length_mm: s.support_filament_length_mm,
+                adhesion_filament_length_mm: s.adhesion_filament_length_mm,
+                priming_filament_length_mm: s.priming_filament_length_mm,
+                flush_filament_length_mm: s.flush_filament_length_mm,
+                tower_filament_length_mm: s.tower_filament_length_mm,
+                used_for_object: s.used_for_object,
+                used_for_support: s.used_for_support,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let sequence = value
+        .sequence
+        .into_iter()
+        .map(|s| u8::try_from(s).map_err(|_| "AMS sequence slot exceeds u8".to_string()))
+        .collect::<Result<Vec<_>, String>>()?;
+    let ams = AmsVerification {
+        slots,
+        change_count: value.change_count,
+        sequence,
+        tower_deposition_segments: value.tower_deposition_segments,
+        tower_travel_segments: value.tower_travel_segments,
+        tower_layers: value.tower_layers,
+        total_flush_filament_length_mm: value.total_flush_filament_length_mm,
+        total_tower_filament_length_mm: value.total_tower_filament_length_mm,
+    };
+    ams.validate().map_err(|e| e.to_string())?;
+    Ok(ams)
+}
+pub(super) fn ams_verification_to_rpc(value: AmsVerification) -> rpc::AmsVerification {
+    rpc::AmsVerification {
+        slots: value
+            .slots
+            .into_iter()
+            .map(|s| rpc::AmsSlotAccounting {
+                slot: u32::from(s.slot),
+                model_filament_length_mm: s.model_filament_length_mm,
+                support_filament_length_mm: s.support_filament_length_mm,
+                adhesion_filament_length_mm: s.adhesion_filament_length_mm,
+                priming_filament_length_mm: s.priming_filament_length_mm,
+                flush_filament_length_mm: s.flush_filament_length_mm,
+                tower_filament_length_mm: s.tower_filament_length_mm,
+                used_for_object: s.used_for_object,
+                used_for_support: s.used_for_support,
+            })
+            .collect(),
+        change_count: value.change_count,
+        sequence: value.sequence.into_iter().map(u32::from).collect(),
+        tower_deposition_segments: value.tower_deposition_segments,
+        tower_travel_segments: value.tower_travel_segments,
+        tower_layers: value.tower_layers,
+        total_flush_filament_length_mm: value.total_flush_filament_length_mm,
+        total_tower_filament_length_mm: value.total_tower_filament_length_mm,
+    }
+}
 impl TryFrom<rpc::VerificationReport> for VerificationReport {
     type Error = String;
     fn try_from(value: rpc::VerificationReport) -> Result<Self, String> {
@@ -1950,6 +2104,7 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
                 cooling_slowed_layers: value.cooling_slowed_layers,
                 minimum_cooling_scale: value.minimum_cooling_scale,
                 estimated_seconds: value.estimated_seconds,
+                ams: value.ams.map(ams_verification_from_rpc).transpose()?,
             },
             Self::validate,
         )
@@ -1985,6 +2140,7 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
             cooling_slowed_layers: value.cooling_slowed_layers,
             minimum_cooling_scale: value.minimum_cooling_scale,
             estimated_seconds: value.estimated_seconds,
+            ams: value.ams.map(ams_verification_to_rpc),
         })
     }
 }
@@ -2659,6 +2815,7 @@ mod tests {
             cooling_slowed_layers: 0,
             minimum_cooling_scale: 1.0,
             estimated_seconds: None,
+            ams: None,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);
@@ -4106,6 +4263,7 @@ mod routed_report_wire_tests {
             cooling_slowed_layers: 0,
             minimum_cooling_scale: 1.0,
             estimated_seconds: None,
+            ams: None,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);

@@ -29,6 +29,8 @@ pub use replay::*;
 pub use replay_index::*;
 mod job;
 pub use job::*;
+mod ams;
+pub use ams::*;
 mod delivery;
 pub use delivery::*;
 mod lifecycle;
@@ -1789,6 +1791,14 @@ impl ManufacturingIntent {
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
+        if let JobWorkflow::CompleteMarlin { job } = &p.workflow
+            && let Some(ams) = job.bambu_ams()
+            && ams.slots[0].filament_diameter_mm != r.filament_diameter_mm
+        {
+            return Err(invalid(
+                "Bambu AMS slot 0 filament diameter must match recipe.filament_diameter_mm",
+            ));
+        }
         if let Some(speeds) = &r.role_speeds {
             speeds.validate(p.max_print_feed_mm_s)?;
         }
@@ -4970,6 +4980,10 @@ pub struct VerificationReport {
     /// declared print-time model; null without one. Not a measurement.
     #[serde(deserialize_with = "required_option")]
     pub estimated_seconds: Option<f64>,
+    /// Independently decoded single-nozzle Bambu AMS accounting, when AMS is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ams: Option<AmsVerification>,
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -5013,6 +5027,14 @@ impl VerificationReport {
             }
         }
         self.layer_height.validate()?;
+        if let Some(ams) = &self.ams {
+            if self.routing.is_some() {
+                return Err(invalid(
+                    "single-nozzle AMS and fixed-dual routing are mutually exclusive",
+                ));
+            }
+            ams.validate()?;
+        }
         let waste_segments = validate_routing_totals(
             self.routing.as_ref(),
             self.deposition_segments,

@@ -192,6 +192,15 @@ pub(super) fn render(
         S::MotorsOff if bambu => one("M18 X Y Z"),
         // Holding Z keeps the gantry from settling onto the part.
         S::MotorsOff => one("M84 X Y E"),
+        // Single-nozzle Bambu AMS initial load and final unload, matching the
+        // command forms observed in Bambu Studio 02.09.01.70 A1/A1M/P1S/X1C profiles.
+        S::AmsLoad { slot } => Emit::Lines(vec![
+            "M620 M".into(),
+            format!("M620 S{slot}A"),
+            format!("T{slot}"),
+            format!("M621 S{slot}A"),
+        ]),
+        S::AmsUnload => Emit::Lines(vec!["M620 S255".into(), "T255".into(), "M621 S255".into()]),
         S::Block { block } => Emit::Lines(
             block
                 .lines

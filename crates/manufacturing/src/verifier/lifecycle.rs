@@ -62,6 +62,8 @@ pub(super) struct Lifecycle<'a> {
     nozzle_print: bool,
     fan_off: bool,
     motors_off: bool,
+    ams_loaded: bool,
+    ams_unloaded: bool,
     /// Vertical lift height, fixed when the lift is decoded.
     pub lift_z: Option<f64>,
     pub levelling: Levelling,
@@ -91,6 +93,8 @@ impl<'a> Lifecycle<'a> {
             nozzle_print: false,
             fan_off: false,
             motors_off: false,
+            ams_loaded: false,
+            ams_unloaded: false,
             lift_z: None,
             levelling: Levelling::FirmwareDefault,
         }
@@ -240,6 +244,13 @@ impl<'a> Lifecycle<'a> {
             S::MotorsOff if klipper => vec!["M84".into()],
             S::MotorsOff if bambu => vec!["M18 X Y Z".into()],
             S::MotorsOff => vec!["M84 X Y E".into()],
+            S::AmsLoad { slot } => vec![
+                "M620 M".into(),
+                format!("M620 S{slot}A"),
+                format!("T{slot}"),
+                format!("M621 S{slot}A"),
+            ],
+            S::AmsUnload => vec!["M620 S255".into(), "T255".into(), "M621 S255".into()],
             S::Block { block } => block
                 .lines
                 .iter()
@@ -306,6 +317,12 @@ impl<'a> Lifecycle<'a> {
             S::MotorsOff => {
                 self.motors_off = true;
                 self.homed = false;
+            }
+            S::AmsLoad { .. } => {
+                self.ams_loaded = true;
+            }
+            S::AmsUnload => {
+                self.ams_unloaded = true;
             }
             S::Block { block } => {
                 let e = block.effects;
@@ -406,6 +423,11 @@ impl<'a> Lifecycle<'a> {
         if self.bed != Heat::Off || self.nozzle != Heat::Off || !self.fan_off || !self.motors_off {
             return Err(failed(
                 "program ends without heater, fan and motor shutdown",
+            ));
+        }
+        if self.job.bambu_ams().is_some() && (!self.ams_loaded || !self.ams_unloaded) {
+            return Err(failed(
+                "Bambu AMS program must load initial slot at start and unload (M620/T/M621 S255) at end",
             ));
         }
         Ok(())

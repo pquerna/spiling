@@ -11,8 +11,9 @@ mod material;
 mod selection;
 mod timing;
 pub use material::{
-    create_default_intent, create_material_intent, create_requested_intent, filament_selection,
-    generic_selection, resolve_material_profile, resolve_tool_material_profile, review_materials,
+    ams_slot_from_selection, configure_bambu_ams_support_interface, create_default_intent,
+    create_material_intent, create_requested_intent, filament_selection, generic_selection,
+    resolve_material_profile, resolve_tool_material_profile, review_materials,
 };
 pub use spiling_contracts::manufacturing::{QualityPreset, SupportChoice};
 pub mod planner;

@@ -12,6 +12,7 @@ use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
 use std::sync::atomic::AtomicBool;
 
+pub(crate) mod ams;
 mod bambu;
 mod lifecycle;
 
@@ -79,6 +80,18 @@ fn emit_body(
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
+    let bambu_ams = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => {
+            if let Some(ams) = job.bambu_ams() {
+                ams::validate_ams_plan(plan, intent, job, ams, cancel)?;
+                Some((job, ams))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let mut tower_state = ams::TowerLayerState::default();
     let dialect = intent.printer.capabilities.output_dialect;
     // Bambu programs carry header, executable-block and layer markers.
     let bambu = match &intent.printer.workflow {
@@ -257,6 +270,64 @@ fn emit_body(
                 Event::BedTarget(temperature) => {
                     writeln!(program, "M140 S{temperature:.0}").map_err(limit)?
                 }
+                Event::AmsTowerFrame {
+                    layer,
+                    slot,
+                    z_mm,
+                    height_mm,
+                } => {
+                    let (_, ams) = bambu_ams.ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "AMS prime tower outside Bambu AMS workflow",
+                        )
+                    })?;
+                    ams::emit_tower_frame(
+                        &mut program,
+                        intent,
+                        ams,
+                        slot,
+                        layer,
+                        z_mm,
+                        height_mm,
+                        travel_feed,
+                        &mut tower_state,
+                    )?;
+                    position = None;
+                    emitted_extrusion = 0.0;
+                    top_z = top_z.max(z_mm);
+                }
+                Event::AmsSwitch {
+                    from,
+                    to,
+                    layer,
+                    z_mm,
+                    height_mm,
+                } => {
+                    let (job, ams) = bambu_ams.ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "AMS filament change outside Bambu AMS workflow",
+                        )
+                    })?;
+                    ams::emit_switch(
+                        &mut program,
+                        intent,
+                        job,
+                        ams,
+                        from,
+                        to,
+                        layer,
+                        z_mm,
+                        height_mm,
+                        travel_feed,
+                        &mut tower_state,
+                    )?;
+                    active_tool = to;
+                    position = None;
+                    emitted_extrusion = 0.0;
+                    top_z = top_z.max(z_mm);
+                }
                 Event::ResetExtrusion => {
                     program.write_str("G92 E0\n").map_err(limit)?;
                     emitted_extrusion = 0.0;
@@ -357,10 +428,18 @@ fn emit_body(
                             "arc deposition collapses at serialized precision",
                         ));
                     }
+                    let active_filament_area = bambu_ams.map_or(filament_area, |(_, ams)| {
+                        ams.slots[usize::from(active_tool)].filament_area_mm2()
+                    });
                     let flow_limit = intent.process_for_tool(None)?.max_volumetric_flow_mm3_s;
-                    let flow = delta * filament_area * feed / 60.0 / arc.length_mm;
-                    let rounding_slack =
-                        emitted_flow_slack(flow_limit, filament_area, speed, feed, arc.length_mm);
+                    let flow = delta * active_filament_area * feed / 60.0 / arc.length_mm;
+                    let rounding_slack = emitted_flow_slack(
+                        flow_limit,
+                        active_filament_area,
+                        speed,
+                        feed,
+                        arc.length_mm,
+                    );
                     if !flow.is_finite() || flow > flow_limit + rounding_slack {
                         return Err(error(
                             ManufacturingErrorCode::InvalidSpecification,
@@ -438,11 +517,19 @@ fn emit_body(
                                 ),
                             ));
                         }
-                        let filament_area = routed.map_or(filament_area, |job| {
-                            std::f64::consts::PI
-                                * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
-                                    .powi(2)
-                        });
+                        let filament_area = routed.map_or_else(
+                            || {
+                                bambu_ams.map_or(filament_area, |(_, ams)| {
+                                    ams.slots[usize::from(active_tool)].filament_area_mm2()
+                                })
+                            },
+                            |job| {
+                                std::f64::consts::PI
+                                    * (job.tools[usize::from(active_tool)].filament_diameter_mm
+                                        * 0.5)
+                                        .powi(2)
+                            },
+                        );
                         if let (Some(job), Event::Waste(..)) = (routed, event)
                             && delta * filament_area
                                 < job.tools[usize::from(active_tool)].minimum_reprime_volume_mm3

@@ -264,6 +264,30 @@ message BambuGcode3mfPackage {
   string printer_model = 2;
   BambuPlate plate = 3;
   BambuSeries series = 4;
+  BambuAms ams = 5;
+}
+message AmsSlot {
+  string polymer_family = 1;
+  optional uint32 display_srgb = 2;
+  double filament_diameter_mm = 3;
+  double nozzle_temperature_c = 4;
+  double first_layer_nozzle_temperature_c = 5;
+  double flush_temperature_c = 6;
+  double flush_volumetric_speed_mm3_s = 7;
+}
+message AmsPrimeTower {
+  repeated double origin_xy_mm = 1;
+  repeated double size_xy_mm = 2;
+  double bead_width_mm = 3;
+  double prime_volume_mm3 = 4;
+  double print_speed_mm_s = 5;
+}
+message BambuAms {
+  repeated AmsSlot slots = 1;
+  optional uint32 support_slot = 2;
+  optional uint32 support_interface_slot = 3;
+  repeated double flush_volumes_mm3 = 4;
+  AmsPrimeTower prime_tower = 5;
 }
 enum BambuSeries {
   BAMBU_SERIES_UNSPECIFIED = 0;
@@ -357,6 +381,8 @@ message LifecycleStep {
     google.protobuf.Empty bed_off = 22;
     google.protobuf.Empty motors_off = 23;
     LifecycleBlock block = 24;
+    uint32 ams_load = 25;
+    google.protobuf.Empty ams_unload = 26;
   }
 }
 message FirmwareLifecycle {

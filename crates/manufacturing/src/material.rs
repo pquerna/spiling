@@ -440,6 +440,133 @@ pub fn generic_selection(
     tool_selection(setup, profile, None)
 }
 
+/// Derive a single-nozzle Bambu AMS filament slot from a material selection,
+/// clamped to the printer's declared thermal and volumetric limits.
+pub fn ams_slot_from_selection(
+    selection: MaterialProfileSelection,
+    printer: &PrinterSpecification,
+) -> Result<AmsSlot, ManufacturingError> {
+    let selection = fit_selection(selection, printer)?;
+    let nozzle = selection.nozzle_temperature_c().round();
+    let first = selection.first_layer_nozzle_temperature_c().round();
+    let flush_temp = nozzle.max(first);
+    let flush_flow = selection
+        .profile
+        .max_volumetric_flow_mm3_s
+        .min(printer.max_volumetric_flow_mm3_s)
+        .clamp(0.5, 12.0);
+    let slot = AmsSlot {
+        polymer_family: selection.profile.material.polymer_family.clone(),
+        display_srgb: selection.display_srgb,
+        filament_diameter_mm: selection.profile.material.filament_diameter_mm,
+        nozzle_temperature_c: nozzle,
+        first_layer_nozzle_temperature_c: first,
+        flush_temperature_c: flush_temp,
+        flush_volumetric_speed_mm3_s: flush_flow,
+    };
+    slot.validate_declaration()?;
+    Ok(slot)
+}
+
+/// Enable single-nozzle Bambu Lab AMS with a dedicated support-interface
+/// material in slot 1 (primary job material stays in slot 0) and place a
+/// bed-rooted prime tower clear of `occupied_xy`, the prime line and printer
+/// bed exclusions.
+pub fn configure_bambu_ams_support_interface(
+    current: &ManufacturingIntent,
+    interface_selection: MaterialProfileSelection,
+    occupied_xy: &[([f64; 2], [f64; 2])],
+) -> Result<ManufacturingIntent, ManufacturingError> {
+    current.validate()?;
+    let mut resolved = current.clone();
+    if matches!(resolved.recipe.supports, SupportPolicy::Disabled) {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::InvalidSpecification,
+            "AMS support-interface material requires supports to be enabled",
+        ));
+    }
+    let JobWorkflow::CompleteMarlin { job } = &resolved.printer.workflow else {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::UnsupportedCapability,
+            "single-nozzle Bambu AMS requires a complete Bambu single-extruder job",
+        ));
+    };
+    if job.bambu_series().is_none() {
+        return Err(ManufacturingError::new(
+            ManufacturingErrorCode::UnsupportedCapability,
+            "single-nozzle Bambu AMS requires a Bambu Lab .gcode.3mf delivery setup",
+        ));
+    }
+    let primary_family = resolved.material_profile.as_ref().map_or_else(
+        || "pla".to_string(),
+        |p| p.selection.profile.material.polymer_family.clone(),
+    );
+    let primary_colour = resolved
+        .material_profile
+        .as_ref()
+        .and_then(|p| p.selection.display_srgb);
+    let primary_flush_flow = resolved
+        .effective_max_volumetric_flow_mm3_s()
+        .clamp(0.5, 12.0);
+    let slot0 = AmsSlot {
+        polymer_family: primary_family,
+        display_srgb: primary_colour,
+        filament_diameter_mm: resolved.recipe.filament_diameter_mm,
+        nozzle_temperature_c: job.nozzle_temperature_c,
+        first_layer_nozzle_temperature_c: job.first_layer_nozzle_temperature_c,
+        flush_temperature_c: job
+            .nozzle_temperature_c
+            .max(job.first_layer_nozzle_temperature_c),
+        flush_volumetric_speed_mm3_s: primary_flush_flow,
+    };
+    let slot1 = ams_slot_from_selection(interface_selection, &resolved.printer)?;
+    let slots = vec![slot0, slot1];
+    let flush_volumes_mm3 = BambuAms::default_flush_matrix(&slots);
+    let mut obstacles = occupied_xy.to_vec();
+    obstacles.push((
+        [
+            job.prime_start_mm[0].min(job.prime_end_mm[0]),
+            job.prime_start_mm[1].min(job.prime_end_mm[1]),
+        ],
+        [
+            job.prime_start_mm[0].max(job.prime_end_mm[0]),
+            job.prime_start_mm[1].max(job.prime_end_mm[1]),
+        ],
+    ));
+    let tower_speed = resolved
+        .recipe
+        .print_speed_mm_s
+        .min(resolved.printer.max_print_feed_mm_s);
+    let prime_tower = BambuAms::place_prime_tower(
+        &resolved.printer,
+        &obstacles,
+        [35.0, 35.0],
+        resolved.recipe.bead_width_mm,
+        20.0,
+        tower_speed,
+        5.0,
+    )
+    .ok_or_else(|| {
+        ManufacturingError::new(
+            ManufacturingErrorCode::InvalidSpecification,
+            "no free build-plate corner fits the AMS prime tower clear of parts and bed exclusions",
+        )
+    })?;
+    let ams = BambuAms {
+        slots,
+        support_slot: None,
+        support_interface_slot: Some(1),
+        flush_volumes_mm3,
+        prime_tower: Some(prime_tower),
+    };
+    let JobWorkflow::CompleteMarlin { job } = &mut resolved.printer.workflow else {
+        unreachable!()
+    };
+    job.enable_bambu_ams(ams)?;
+    resolved.validate()?;
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

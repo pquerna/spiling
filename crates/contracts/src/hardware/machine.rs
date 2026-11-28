@@ -672,10 +672,12 @@ impl MachineDescription {
                  printer_model_id,
                  series,
                  plate,
+                 ams,
                  ..
-             }| (printer_model_id.as_str(), *series, *plate),
+             }| (printer_model_id.as_str(), *series, *plate, ams.is_some()),
         );
-        let p1x1 = matches!(bambu_package, Some((_, BambuSeries::P1X1, _)));
+        let p1x1 = matches!(bambu_package, Some((_, BambuSeries::P1X1, _, _)));
+        let bambu_ams = matches!(bambu_package, Some((_, _, _, true)));
         let bambu_purges = bambu_package.is_some();
         let stage = |action, label| S::Block {
             block: LifecycleBlock::bambu_stage(action, label),
@@ -747,7 +749,10 @@ impl MachineDescription {
         if heated && begin.bed != ThermalEffect::Wait {
             start.push(S::BedWait);
         }
-        if let Some((model_id, series, _)) = bambu_package {
+        if let Some((model_id, series, _, has_ams)) = bambu_package {
+            if has_ams {
+                start.push(S::AmsLoad { slot: 0 });
+            }
             start.push(S::Block {
                 block: match series {
                     BambuSeries::P1X1 => LifecycleBlock::bambu_p1x1_purge_and_wipe(),
@@ -771,7 +776,7 @@ impl MachineDescription {
         if begin.extrusion == ExtrusionEffect::Unknown || bambu_purges {
             start.push(S::ResetExtrusion);
         }
-        if let Some((_, series, plate)) = bambu_package {
+        if let Some((_, series, plate, _)) = bambu_package {
             if plate == BambuPlate::TexturedPeiPlate {
                 start.push(S::Block {
                     block: LifecycleBlock::bambu_z_trim(
@@ -787,6 +792,9 @@ impl MachineDescription {
         }
         start.push(S::Prime);
         let mut end = vec![S::Barrier, S::Park, S::Barrier];
+        if bambu_ams {
+            end.push(S::AmsUnload);
+        }
         let finish = self.end_block.as_ref().map_or(none, |b| b.effects);
         if let Some(block) = &self.end_block {
             end.push(S::Block {

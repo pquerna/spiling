@@ -145,6 +145,17 @@ pub(super) enum Action {
     /// Single-extruder later-layer nozzle/bed targets (no wait).
     NozzleTarget(f64),
     BedTarget(f64),
+    /// Single-nozzle Bambu AMS support frame on a non-switch layer <= last change.
+    AmsTowerFrame {
+        layer: u32,
+        slot: u8,
+    },
+    /// Single-nozzle Bambu AMS mid-print switch + flush + optional tower prime.
+    AmsSwitch {
+        from: u8,
+        to: u8,
+        layer: u32,
+    },
     Move {
         target: [f64; 3],
         tool: Option<u8>,
@@ -174,10 +185,15 @@ pub(super) struct Expected<'a> {
     /// The current layer's declared cooling decision, recomputed here.
     cooling: Option<(usize, speeds::LayerCooling)>,
     /// The later-layer temperature targets have been expected.
-    later_targets: bool,
+    later_nozzle_done: bool,
+    later_bed_done: bool,
+    bambu_ams: Option<&'a BambuAms>,
+    last_ams_change: Option<u32>,
+    ams_active_slot: u8,
+    ams_frame_checked_layer: Option<usize>,
     layer: usize,
     path: usize,
-    prefix: [Option<Action>; 10],
+    prefix: [Option<Action>; 12],
     prefix_index: usize,
     edge: usize,
     edges: Option<DepositionEdges<'a>>,
@@ -196,15 +212,25 @@ impl<'a> Expected<'a> {
         position: Option<[f64; 3]>,
         routing: Option<&'a FixedDualRouter<'a>>,
     ) -> Self {
+        let bambu_ams = match &intent.printer.workflow {
+            JobWorkflow::CompleteMarlin { job } => job.bambu_ams(),
+            _ => None,
+        };
+        let last_ams_change = bambu_ams.and_then(|ams| super::ams::last_change_layer(plan, ams));
         Self {
             plan,
             intent,
             recipe: &intent.recipe,
             cooling: None,
-            later_targets: false,
+            later_nozzle_done: false,
+            later_bed_done: false,
+            bambu_ams,
+            last_ams_change,
+            ams_active_slot: 0,
+            ams_frame_checked_layer: None,
             layer: 0,
             path: 0,
-            prefix: [None; 10],
+            prefix: [None; 12],
             prefix_index: 0,
             edge: 0,
             edges: None,
@@ -241,7 +267,7 @@ impl<'a> Expected<'a> {
                 connector: false,
             })
         };
-        self.prefix = [None; 10];
+        self.prefix = [None; 12];
         self.prefix_index = 0;
         self.edge = 1;
         self.edges = Some(p.checked_edges()?);
@@ -258,20 +284,51 @@ impl<'a> Expected<'a> {
             });
         let pwm = speeds::path_fan_pwm(policy, speed_role, layer, short);
         let mut n = 0;
+        if let Some(ams) = self.bambu_ams {
+            let needed = ams.slot_for_kind(p.kind);
+            if needed != self.ams_active_slot {
+                self.prefix[n] = Some(Action::AmsSwitch {
+                    from: self.ams_active_slot,
+                    to: needed,
+                    layer,
+                });
+                n += 1;
+                self.ams_active_slot = needed;
+                self.fan = Some(0);
+                self.position = None;
+                if self.layer > 0 {
+                    self.later_nozzle_done = true;
+                }
+            }
+        }
         // The second layer's first path is preceded by the later-layer
         // targets when they differ from the first-layer ones.
         if let JobWorkflow::CompleteMarlin { job } = &self.intent.printer.workflow
             && self.layer > 0
-            && !self.later_targets
         {
-            self.later_targets = true;
-            if job.nozzle_temperature_c != job.first_layer_nozzle_temperature_c {
-                self.prefix[n] = Some(Action::NozzleTarget(job.nozzle_temperature_c));
-                n += 1;
+            if !self.later_nozzle_done {
+                self.later_nozzle_done = true;
+                let (nozzle_c, first_nozzle_c) = match self.bambu_ams {
+                    Some(ams) => {
+                        let s = &ams.slots[usize::from(self.ams_active_slot)];
+                        (s.nozzle_temperature_c, s.first_layer_nozzle_temperature_c)
+                    }
+                    None => (
+                        job.nozzle_temperature_c,
+                        job.first_layer_nozzle_temperature_c,
+                    ),
+                };
+                if nozzle_c != first_nozzle_c {
+                    self.prefix[n] = Some(Action::NozzleTarget(nozzle_c));
+                    n += 1;
+                }
             }
-            if job.bed_temperature_c != job.first_layer_bed_temperature_c {
-                self.prefix[n] = Some(Action::BedTarget(job.bed_temperature_c));
-                n += 1;
+            if !self.later_bed_done {
+                self.later_bed_done = true;
+                if job.bed_temperature_c != job.first_layer_bed_temperature_c {
+                    self.prefix[n] = Some(Action::BedTarget(job.bed_temperature_c));
+                    n += 1;
+                }
             }
         }
         if let Some(job) = self.routing {
@@ -345,6 +402,22 @@ impl Iterator for Expected<'_> {
         loop {
             if self.layer == self.plan.layers.len() {
                 return None;
+            }
+            if let Some(ams) = self.bambu_ams
+                && self.ams_frame_checked_layer != Some(self.layer)
+            {
+                self.ams_frame_checked_layer = Some(self.layer);
+                let layer = &self.plan.layers[self.layer];
+                if ams.prime_tower.is_some()
+                    && self.last_ams_change.is_some_and(|lc| layer.index <= lc)
+                    && !super::ams::layer_has_switch(layer, ams, self.ams_active_slot)
+                {
+                    self.position = None;
+                    return Some(Ok(Action::AmsTowerFrame {
+                        layer: layer.index,
+                        slot: self.ams_active_slot,
+                    }));
+                }
             }
             if let Some(job) = self.routing
                 && !self.loaded

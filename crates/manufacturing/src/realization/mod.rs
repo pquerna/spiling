@@ -36,6 +36,21 @@ pub(crate) enum Event {
     /// first-layer to later-layer change).
     NozzleTarget(f64),
     BedTarget(f64),
+    /// Single-nozzle Bambu AMS support frame on a non-switch layer <= last change.
+    AmsTowerFrame {
+        layer: u32,
+        slot: u8,
+        z_mm: f64,
+        height_mm: f64,
+    },
+    /// Single-nozzle Bambu AMS mid-print filament change + flush + optional tower prime.
+    AmsSwitch {
+        from: u8,
+        to: u8,
+        layer: u32,
+        z_mm: f64,
+        height_mm: f64,
+    },
 }
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
@@ -49,6 +64,8 @@ pub(crate) struct BambuEstimate {
     pub total_s: f64,
     pub filament_mm: f64,
     pub max_z_mm: f64,
+    #[serde(default)]
+    pub slot_filament_mm: Vec<f64>,
 }
 
 #[cfg(test)]
@@ -231,7 +248,15 @@ fn lower_arcs(
                 let edges = path.checked_edges()?;
                 let process = intent.process_for_path(path)?;
                 let flow = speeds::flow_factor(&process, path.kind, layer.index);
-                let area = filament_area(intent.recipe.filament_diameter_mm);
+                let bambu_ams = match &intent.printer.workflow {
+                    JobWorkflow::CompleteMarlin { job } => job.bambu_ams(),
+                    _ => None,
+                };
+                let slot = bambu_ams.map_or(0u8, |ams| ams.slot_for_kind(path.kind));
+                let area = bambu_ams.map_or_else(
+                    || filament_area(intent.recipe.filament_diameter_mm),
+                    |ams| ams.slots[usize::from(slot)].filament_area_mm2(),
+                );
                 for run in &path.arcs {
                     check_cancel(cancel)?;
                     let (_, arc) = commanded_arc(points, run)?;
@@ -244,9 +269,13 @@ fn lower_arcs(
                             project_xyz6_point_mm(edge.points_mm[1])?,
                         );
                     }
-                    estimate.filament_mm += (arc.length_mm - chord_length)
+                    let delta = (arc.length_mm - chord_length)
                         * bead_area(width, path.height_mm(), flow)
                         / area;
+                    estimate.filament_mm += delta;
+                    if let Some(entry) = estimate.slot_filament_mm.get_mut(usize::from(slot)) {
+                        *entry += delta;
+                    }
                 }
             }
         }
@@ -279,6 +308,12 @@ pub(crate) fn stream(
         JobWorkflow::FixedDualMarlin { job } => Some(job),
         _ => None,
     };
+    let bambu_ams = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => job.bambu_ams(),
+        _ => None,
+    };
+    let last_ams_change =
+        bambu_ams.and_then(|ams| crate::backend::ams::last_change_layer(plan, ams));
     let safe_z = routed
         .map(|job| crate::routing::safe_z(plan, job))
         .transpose()?;
@@ -290,13 +325,29 @@ pub(crate) fn stream(
     let mut process_events = 0u32;
     // Later-layer temperature targets are set before the first path above
     // the first layer.
-    let mut later_targets = match &intent.printer.workflow {
+    let single_job = match &intent.printer.workflow {
         JobWorkflow::CompleteMarlin { job } => Some(job),
         _ => None,
     };
+    let mut later_nozzle_done = false;
+    let mut later_bed_done = false;
     for layer in &plan.layers {
         check_cancel(cancel)?;
         emit(Event::Layer(layer.index))?;
+        if let Some(ams) = bambu_ams
+            && ams.prime_tower.is_some()
+            && last_ams_change.is_some_and(|lc| layer.index <= lc)
+            && !crate::backend::ams::layer_has_switch(layer, ams, active_tool)
+        {
+            emit(Event::AmsTowerFrame {
+                layer: layer.index,
+                slot: active_tool,
+                z_mm: layer.z_mm,
+                height_mm: layer.z_mm - layer.lower_z_mm,
+            })?;
+            position = None;
+            extrusion = 0.0;
+        }
         // The declared speed rule's cooling decision for this layer.
         let cooling = speeds::layer_cooling(intent, layer, layer.index)?;
         let order: &[u8] = if routed.is_some() {
@@ -403,14 +454,50 @@ pub(crate) fn stream(
                 {
                     continue;
                 }
-                if layer.index > 0
-                    && let Some(job) = later_targets.take()
-                {
-                    if job.nozzle_temperature_c != job.first_layer_nozzle_temperature_c {
-                        emit(Event::NozzleTarget(job.nozzle_temperature_c))?;
+                if let Some(ams) = bambu_ams {
+                    let needed = ams.slot_for_kind(path.kind);
+                    if needed != active_tool {
+                        emit(Event::AmsSwitch {
+                            from: active_tool,
+                            to: needed,
+                            layer: layer.index,
+                            z_mm: layer.z_mm,
+                            height_mm: layer.z_mm - layer.lower_z_mm,
+                        })?;
+                        active_tool = needed;
+                        fan = Some(0);
+                        position = None;
+                        extrusion = 0.0;
+                        if layer.index > 0 {
+                            // Switch already settled M109 to later-layer target for `needed`.
+                            later_nozzle_done = true;
+                        }
                     }
-                    if job.bed_temperature_c != job.first_layer_bed_temperature_c {
-                        emit(Event::BedTarget(job.bed_temperature_c))?;
+                }
+                if layer.index > 0
+                    && let Some(job) = single_job
+                {
+                    if !later_nozzle_done {
+                        later_nozzle_done = true;
+                        let (nozzle_c, first_nozzle_c) = match bambu_ams {
+                            Some(ams) => {
+                                let s = &ams.slots[usize::from(active_tool)];
+                                (s.nozzle_temperature_c, s.first_layer_nozzle_temperature_c)
+                            }
+                            None => (
+                                job.nozzle_temperature_c,
+                                job.first_layer_nozzle_temperature_c,
+                            ),
+                        };
+                        if nozzle_c != first_nozzle_c {
+                            emit(Event::NozzleTarget(nozzle_c))?;
+                        }
+                    }
+                    if !later_bed_done {
+                        later_bed_done = true;
+                        if job.bed_temperature_c != job.first_layer_bed_temperature_c {
+                            emit(Event::BedTarget(job.bed_temperature_c))?;
+                        }
                     }
                 }
                 let process = intent.process_for_path(path)?;
@@ -523,9 +610,12 @@ pub(crate) fn stream(
                         let last = run.last as usize;
                         let (center, arc) = commanded_arc(&path.points_mm, run)?;
                         let area = bead_area(edge.width_mm, height, flow);
+                        let active_filament_area = bambu_ams.map_or(filament_area, |ams| {
+                            ams.slots[usize::from(active_tool)].filament_area_mm2()
+                        });
                         // The bead follows the commanded arc, so its length
                         // owns the extrusion.
-                        extrusion += arc.length_mm * area / filament_area;
+                        extrusion += arc.length_mm * area / active_filament_area;
                         emit(Event::Arc(
                             path.points_mm[last],
                             center,
@@ -555,11 +645,18 @@ pub(crate) fn stream(
                     // Constant-section G1 deposits along the actual XYZ6 chord,
                     // not its unrounded source proposal. Otherwise a circular bead
                     // can become wholly sub-circular merely through XY rounding.
-                    let filament_area = routed.map_or(filament_area, |job| {
-                        std::f64::consts::PI
-                            * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
-                                .powi(2)
-                    });
+                    let filament_area = routed.map_or_else(
+                        || {
+                            bambu_ams.map_or(filament_area, |ams| {
+                                ams.slots[usize::from(active_tool)].filament_area_mm2()
+                            })
+                        },
+                        |job| {
+                            std::f64::consts::PI
+                                * (job.tools[usize::from(active_tool)].filament_diameter_mm * 0.5)
+                                    .powi(2)
+                        },
+                    );
                     extrusion += command_length * area / filament_area;
                     emit(Event::Deposit(
                         edge.points_mm[1],

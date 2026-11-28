@@ -59,6 +59,9 @@ impl ReplaySink {
             omitted: false,
         })
     }
+    pub(super) fn set_active_tool(&mut self, tool: u8) {
+        self.active_tool = u32::from(tool);
+    }
     pub(super) fn push_epoch(
         &mut self,
         position: [f64; 3],

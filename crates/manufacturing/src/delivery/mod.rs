@@ -36,7 +36,7 @@ pub struct EncodedDeliveryPackage {
 /// Bambu Studio 02.09.01.70's `Generic <family>` filament profiles declare
 /// them (`filament_id`, `filament_density`, `filament_type`).
 pub(crate) fn bambu_filament(family: &str) -> Option<(&'static str, &'static str, f64)> {
-    Some(match family {
+    Some(match family.to_ascii_lowercase().as_str() {
         "pla" => ("GFL99", "PLA", 1.24),
         "petg" => ("GFG99", "PETG", 1.27),
         "abs" => ("GFB99", "ABS", 1.04),
@@ -59,27 +59,121 @@ pub(crate) const BAMBU_THUMBNAILS: [(&str, u32); 3] = [
     ("Metadata/plate_no_light_1.png", 512),
 ];
 
-/// Package facts derived from the bundle and its fresh verification report.
-pub(crate) struct PlateFacts {
-    pub printer_model_id: String,
-    pub printer_model: String,
-    pub bed_type: &'static str,
-    pub nozzle_mm: f64,
+/// Per-filament facts in a Bambu sliced-plate package.
+pub(crate) struct PlateFilamentFact {
+    /// 0-based slot/extruder index (`0` for single-spool).
+    pub slot: u8,
     pub filament_diameter_mm: f64,
     pub filament_type: String,
     pub filament_colour: String,
     pub filament_id: Option<&'static str>,
     pub density: Option<f64>,
     pub filament_mm: f64,
+    pub nozzle_c: f64,
+    pub first_layer_nozzle_c: f64,
+    pub used_for_object: bool,
+    pub used_for_support: bool,
+}
+
+impl PlateFilamentFact {
+    pub(crate) fn weight_g(&self) -> f64 {
+        let area = std::f64::consts::PI * (self.filament_diameter_mm * 0.5).powi(2);
+        self.density
+            .map_or(0.0, |d| self.filament_mm * area * d / 1000.0)
+    }
+}
+
+/// Grouped `(sorted 0-based slot IDs, contiguous layer ranges)` for `slice_info.config`.
+type LayerFilamentLists = Vec<(Vec<u8>, Vec<(usize, usize)>)>;
+
+/// Package facts derived from the bundle and its fresh verification report.
+pub(crate) struct PlateFacts {
+    pub printer_model_id: String,
+    pub printer_model: String,
+    pub bed_type: &'static str,
+    pub nozzle_mm: f64,
+    pub filaments: Vec<PlateFilamentFact>,
+    /// True when single-nozzle AMS is declared on the job.
+    pub ams_enabled: bool,
+    /// Ordered 0-based slot load/switch sequence (present when AMS is active).
+    pub ams_sequence: Vec<u8>,
+    /// Per-layer filament lists grouped into contiguous `[first, last]` layer ranges.
+    pub layer_filament_lists: LayerFilamentLists,
+    /// Prime tower `[min_x, min_y, max_x, max_y]` when printed on the plate.
+    pub prime_tower_bbox: Option<[f64; 4]>,
     pub prediction_s: u64,
-    pub layers: usize,
     pub layer_height_mm: f64,
+    pub part_bbox: [f64; 4],
     pub bbox: [f64; 4],
     pub support_used: bool,
-    pub nozzle_c: f64,
     pub bed_c: f64,
-    pub first_layer_nozzle_c: f64,
     pub first_layer_bed_c: f64,
+}
+
+fn filament_identity(family: Option<&str>) -> (String, Option<&'static str>, Option<f64>) {
+    let lower = family.map(str::to_ascii_lowercase);
+    let known = lower
+        .as_deref()
+        .and_then(generic_polymer_family)
+        .and_then(bambu_filament);
+    let filament_type = match (&known, &lower) {
+        (Some((_, kind, _)), _) => (*kind).to_string(),
+        (None, Some(f)) => f.to_ascii_uppercase(),
+        (None, None) => "UNSPECIFIED".to_string(),
+    };
+    (
+        filament_type,
+        known.map(|(id, _, _)| id),
+        known.map(|(_, _, d)| d),
+    )
+}
+
+fn layer_filament_lists(
+    plan: &NormalizedPrintPlan,
+    ams: Option<&BambuAms>,
+    tower_layers: u32,
+) -> LayerFilamentLists {
+    let Some(ams) = ams else {
+        return vec![(vec![0], vec![(0, plan.layers.len().saturating_sub(1))])];
+    };
+    let mut grouped: std::collections::BTreeMap<Vec<u8>, Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    let mut active = 0u8;
+    for (idx, layer) in plan.layers.iter().enumerate() {
+        let mut used = Vec::new();
+        let has_switch = {
+            let mut cur = active;
+            layer.paths.iter().any(|p| {
+                let s = ams.slot_for_kind(p.kind);
+                let changed = s != cur;
+                cur = s;
+                changed
+            })
+        };
+        if !has_switch && tower_layers > 0 && (idx as u32) < tower_layers {
+            used.push(active);
+        }
+        for path in &layer.paths {
+            let slot = ams.slot_for_kind(path.kind);
+            if !used.contains(&slot) {
+                used.push(slot);
+            }
+            active = slot;
+        }
+        if used.is_empty() {
+            used.push(active);
+        }
+        used.sort_unstable();
+        let ranges = grouped.entry(used).or_default();
+        if let Some(last) = ranges.last_mut()
+            && last.1 + 1 == idx
+        {
+            last.1 = idx;
+        } else {
+            ranges.push((idx, idx));
+        }
+    }
+    grouped.into_iter().collect()
 }
 
 impl PlateFacts {
@@ -95,26 +189,11 @@ impl PlateFacts {
             printer_model_id,
             printer_model,
             plate,
+            ams,
             ..
         }) = &job.delivery
         else {
             return Err(unsupported());
-        };
-        let family = intent.material_profile.as_ref().map(|p| {
-            p.selection
-                .profile
-                .material
-                .polymer_family
-                .to_ascii_lowercase()
-        });
-        let known = family
-            .as_deref()
-            .and_then(generic_polymer_family)
-            .and_then(bambu_filament);
-        let filament_type = match (&known, &family) {
-            (Some((_, kind, _)), _) => (*kind).to_string(),
-            (None, Some(f)) => f.to_ascii_uppercase(),
-            (None, None) => "UNSPECIFIED".to_string(),
         };
         let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
         for p in bundle
@@ -133,42 +212,144 @@ impl PlateFacts {
                 "a delivery package needs deposited paths",
             ));
         }
-        let filament_colour = intent
-            .material_profile
-            .as_ref()
-            .and_then(|p| p.selection.display_srgb)
-            .map_or_else(|| BAMBU_UNDECLARED_COLOUR.to_string(), format_srgb_hex);
+        let part_bbox = [lo[0], lo[1], hi[0], hi[1]];
+        let (filaments, ams_enabled, ams_sequence, prime_tower_bbox, tower_layers) =
+            if let Some(ams) = ams {
+                let ams_report = report.ams.as_ref().ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::VerificationFailed,
+                        "Bambu AMS delivery package requires verified AMS accounting",
+                    )
+                })?;
+                let mut facts = Vec::new();
+                for (slot_idx, slot) in ams.slots.iter().enumerate() {
+                    let Some(acct) = ams_report.slots.get(slot_idx) else {
+                        return Err(error(
+                            ManufacturingErrorCode::VerificationFailed,
+                            "AMS verification slot count disagrees with declared slots",
+                        ));
+                    };
+                    let total_mm = acct.total_filament_length_mm();
+                    if slot_idx != 0 && total_mm <= 0.0 {
+                        continue;
+                    }
+                    let (filament_type, filament_id, density) =
+                        filament_identity(Some(&slot.polymer_family));
+                    let colour = slot
+                        .display_srgb
+                        .or_else(|| {
+                            (slot_idx == 0)
+                                .then(|| {
+                                    intent
+                                        .material_profile
+                                        .as_ref()
+                                        .and_then(|p| p.selection.display_srgb)
+                                })
+                                .flatten()
+                        })
+                        .map_or_else(|| BAMBU_UNDECLARED_COLOUR.to_string(), format_srgb_hex);
+                    facts.push(PlateFilamentFact {
+                        slot: slot_idx as u8,
+                        filament_diameter_mm: slot.filament_diameter_mm,
+                        filament_type,
+                        filament_colour: colour,
+                        filament_id,
+                        density,
+                        filament_mm: total_mm,
+                        nozzle_c: slot.nozzle_temperature_c,
+                        first_layer_nozzle_c: slot.first_layer_nozzle_temperature_c,
+                        used_for_object: acct.used_for_object,
+                        used_for_support: acct.used_for_support,
+                    });
+                }
+                let tower_bbox = ams
+                    .prime_tower
+                    .as_ref()
+                    .filter(|_| ams_report.tower_layers > 0)
+                    .map(|t| {
+                        let min = t.min_xy_mm();
+                        let max = t.max_xy_mm();
+                        [min[0], min[1], max[0], max[1]]
+                    });
+                (
+                    facts,
+                    true,
+                    ams_report.sequence.clone(),
+                    tower_bbox,
+                    ams_report.tower_layers,
+                )
+            } else {
+                let family = intent
+                    .material_profile
+                    .as_ref()
+                    .map(|p| p.selection.profile.material.polymer_family.as_str());
+                let (filament_type, filament_id, density) = filament_identity(family);
+                let filament_colour = intent
+                    .material_profile
+                    .as_ref()
+                    .and_then(|p| p.selection.display_srgb)
+                    .map_or_else(|| BAMBU_UNDECLARED_COLOUR.to_string(), format_srgb_hex);
+                let filament_mm = report.filament_length_mm
+                    + report.support_filament_length_mm
+                    + report.priming_filament_length_mm
+                    + report.adhesion_filament_length_mm;
+                (
+                    vec![PlateFilamentFact {
+                        slot: 0,
+                        filament_diameter_mm: intent.recipe.filament_diameter_mm,
+                        filament_type,
+                        filament_colour,
+                        filament_id,
+                        density,
+                        filament_mm,
+                        nozzle_c: job.nozzle_temperature_c,
+                        first_layer_nozzle_c: job.first_layer_nozzle_temperature_c,
+                        used_for_object: true,
+                        used_for_support: report.support_deposition_segments > 0,
+                    }],
+                    false,
+                    Vec::new(),
+                    None,
+                    0,
+                )
+            };
+        let bbox = match prime_tower_bbox {
+            Some(tb) => [
+                part_bbox[0].min(tb[0]),
+                part_bbox[1].min(tb[1]),
+                part_bbox[2].max(tb[2]),
+                part_bbox[3].max(tb[3]),
+            ],
+            None => part_bbox,
+        };
+        let lists = layer_filament_lists(&bundle.plan, ams.as_ref(), tower_layers);
         Ok(Self {
             printer_model_id: printer_model_id.clone(),
             printer_model: printer_model.clone(),
             bed_type: plate.identifier(),
             nozzle_mm: intent.printer.nozzle_diameter_mm,
-            filament_diameter_mm: intent.recipe.filament_diameter_mm,
-            filament_type,
-            filament_colour,
-            filament_id: known.map(|(id, _, _)| id),
-            density: known.map(|(_, _, d)| d),
-            filament_mm: report.filament_length_mm
-                + report.support_filament_length_mm
-                + report.priming_filament_length_mm
-                + report.adhesion_filament_length_mm,
+            filaments,
+            ams_enabled,
+            ams_sequence,
+            layer_filament_lists: lists,
+            prime_tower_bbox,
             prediction_s: report
                 .estimated_seconds
                 .map_or(0, |s| s.max(0.0).round() as u64),
-            layers: bundle.plan.layers.len(),
             layer_height_mm: intent.recipe.layer_height_mm,
-            bbox: [lo[0], lo[1], hi[0], hi[1]],
+            part_bbox,
+            bbox,
             support_used: report.support_deposition_segments > 0,
-            nozzle_c: job.nozzle_temperature_c,
             bed_c: job.bed_temperature_c,
-            first_layer_nozzle_c: job.first_layer_nozzle_temperature_c,
             first_layer_bed_c: job.first_layer_bed_temperature_c,
         })
     }
-    pub(crate) fn weight_g(&self) -> f64 {
-        let area = std::f64::consts::PI * (self.filament_diameter_mm * 0.5).powi(2);
-        self.density
-            .map_or(0.0, |d| self.filament_mm * area * d / 1000.0)
+
+    pub(crate) fn total_weight_g(&self) -> f64 {
+        self.filaments
+            .iter()
+            .map(|f| (f.weight_g() * 100.0).round() / 100.0)
+            .sum()
     }
 }
 
@@ -305,8 +486,9 @@ fn model_settings() -> &'static str {
 }
 
 fn slice_info(f: &PlateFacts) -> String {
-    let tray = f.filament_id.unwrap_or("");
-    format!(
+    use std::fmt::Write as _;
+    let filament_maps = vec!["1"; f.filaments.len()].join(" ");
+    let mut out = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <config>
   <header>
@@ -326,73 +508,151 @@ fn slice_info(f: &PlateFacts) -> String {
     <metadata key="outside" value="false"/>
     <metadata key="support_used" value="{support}"/>
     <metadata key="label_object_enabled" value="false"/>
-    <metadata key="filament_maps" value="1"/>
-    <filament id="1" tray_info_idx="{tray}" type="{kind}" color="{colour}" used_m="{used_m}" used_g="{weight}" group_id="0" nozzle_diameter="{nozzle_mm:.2}" volume_type="Standard" used_for_object="true" used_for_support="{support}" directly_used="true"/>
-    <nozzle id="0" extruder_id="1" nozzle_diameter="{nozzle}" volume_type="Standard"/>
-    <layer_filament_lists>
-      <layer_filament_list filament_list="0" layer_ranges="0 {last}" />
-    </layer_filament_lists>
-  </plate>
-</config>
+    <metadata key="filament_maps" value="{filament_maps}"/>
 "#,
         emitter = crate::EMITTER_VERSION,
         model = f.printer_model_id,
         nozzle = number(f.nozzle_mm),
-        nozzle_mm = f.nozzle_mm,
         prediction = f.prediction_s,
-        weight = r2(f.weight_g()),
+        weight = r2(f.total_weight_g()),
         support = f.support_used,
-        kind = f.filament_type,
-        colour = f.filament_colour,
-        used_m = r2(f.filament_mm / 1000.0),
-        last = f.layers.saturating_sub(1),
-    )
+    );
+    for fil in &f.filaments {
+        let tray = fil.filament_id.unwrap_or("");
+        let _ = writeln!(
+            out,
+            r#"    <filament id="{id}" tray_info_idx="{tray}" type="{kind}" color="{colour}" used_m="{used_m}" used_g="{used_g}" group_id="0" nozzle_diameter="{nozzle_mm:.2}" volume_type="Standard" used_for_object="{obj}" used_for_support="{sup}" directly_used="true"/>"#,
+            id = usize::from(fil.slot) + 1,
+            kind = fil.filament_type,
+            colour = fil.filament_colour,
+            used_m = r2(fil.filament_mm / 1000.0),
+            used_g = r2(fil.weight_g()),
+            nozzle_mm = f.nozzle_mm,
+            obj = fil.used_for_object,
+            sup = fil.used_for_support,
+        );
+    }
+    let _ = writeln!(
+        out,
+        r#"    <nozzle id="0" extruder_id="1" nozzle_diameter="{nozzle}" volume_type="Standard"/>"#,
+        nozzle = number(f.nozzle_mm),
+    );
+    out.push_str("    <layer_filament_lists>\n");
+    for (slots, ranges) in &f.layer_filament_lists {
+        let list: Vec<String> = slots.iter().map(|s| s.to_string()).collect();
+        let range_text: Vec<String> = ranges.iter().map(|(a, b)| format!("{a} {b}")).collect();
+        let _ = writeln!(
+            out,
+            r#"      <layer_filament_list filament_list="{}" layer_ranges="{}" />"#,
+            list.join(" "),
+            range_text.join(","),
+        );
+    }
+    out.push_str("    </layer_filament_lists>\n  </plate>\n</config>\n");
+    out
 }
 
 fn plate_json(f: &PlateFacts) -> String {
     let b = f.bbox.map(number);
-    let area = (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]);
+    let pb = f.part_bbox.map(number);
+    let part_area = (f.part_bbox[2] - f.part_bbox[0]) * (f.part_bbox[3] - f.part_bbox[1]);
+    let mut objects = format!(
+        r#"{{"area":{area},"bbox":[{p0},{p1},{p2},{p3}],"id":1,"layer_height":{lh},"name":"Spiling plate"}}"#,
+        area = number(part_area),
+        p0 = pb[0],
+        p1 = pb[1],
+        p2 = pb[2],
+        p3 = pb[3],
+        lh = number(f.layer_height_mm),
+    );
+    if let Some(tb) = f.prime_tower_bbox {
+        let t = tb.map(number);
+        let tower_area = (tb[2] - tb[0]) * (tb[3] - tb[1]);
+        objects.push_str(&format!(
+            r#",{{"area":{area},"bbox":[{t0},{t1},{t2},{t3}],"id":1000,"layer_height":0,"name":"wipe_tower"}}"#,
+            area = number(tower_area),
+            t0 = t[0],
+            t1 = t[1],
+            t2 = t[2],
+            t3 = t[3],
+        ));
+    }
+    let colours: Vec<String> = f
+        .filaments
+        .iter()
+        .map(|fil| format!(r#""{}""#, fil.filament_colour))
+        .collect();
+    let ids: Vec<String> = f.filaments.iter().map(|fil| fil.slot.to_string()).collect();
+    let first_extruder = f.ams_sequence.first().copied().unwrap_or(0);
     format!(
-        r#"{{"bbox_all":[{b0},{b1},{b2},{b3}],"bbox_objects":[{{"area":{area},"bbox":[{b0},{b1},{b2},{b3}],"id":1,"layer_height":{lh},"name":"Spiling plate"}}],"bed_type":"{bed}","filament_colors":["{colour}"],"filament_ids":[0],"first_extruder":0,"is_seq_print":false,"nozzle_diameter":{nozzle},"version":2}}"#,
+        r#"{{"bbox_all":[{b0},{b1},{b2},{b3}],"bbox_objects":[{objects}],"bed_type":"{bed}","filament_colors":[{colours}],"filament_ids":[{ids}],"first_extruder":{first_extruder},"is_seq_print":false,"nozzle_diameter":{nozzle},"version":2}}"#,
         b0 = b[0],
         b1 = b[1],
         b2 = b[2],
         b3 = b[3],
-        area = number(area),
-        lh = number(f.layer_height_mm),
         bed = f.bed_type,
-        colour = f.filament_colour,
+        colours = colours.join(","),
+        ids = ids.join(","),
         nozzle = number(f.nozzle_mm),
     )
+}
+
+fn filament_sequence_json(f: &PlateFacts) -> String {
+    let seq: Vec<u32> = f.ams_sequence.iter().map(|&s| u32::from(s) + 1).collect();
+    let nozzle_seq = vec![0u32; seq.len()];
+    let optimal = vec![0u32; f.filaments.len()];
+    serde_json::json!({
+        "plate_1": {
+            "nozzle_sequence": nozzle_seq,
+            "optimal_assignment": optimal,
+            "sequence": seq,
+        }
+    })
+    .to_string()
 }
 
 /// The project settings Bambu Studio loads with the plate: printer identity,
 /// nozzle, plate, filament and temperatures, as strings in its keys.
 fn project_settings(f: &PlateFacts) -> String {
-    let settings = serde_json::json!({
+    let count = f.filaments.len();
+    let mut settings = serde_json::json!({
         "from": "project",
         "name": "project_settings",
         "version": "02.00.00.00",
         "printer_model": f.printer_model,
         "printer_settings_id": format!("Spiling {}", f.printer_model),
         "print_settings_id": "Spiling",
-        "filament_settings_id": [format!("Spiling {}", f.filament_type)],
+        "filament_settings_id": f.filaments.iter().map(|fil| format!("Spiling {}", fil.filament_type)).collect::<Vec<_>>(),
         "nozzle_diameter": [number(f.nozzle_mm)],
         "curr_bed_type": bed_label(f.bed_type),
-        "filament_type": [f.filament_type.clone()],
-        "filament_colour": [f.filament_colour.clone()],
-        "filament_diameter": [number(f.filament_diameter_mm)],
-        "filament_density": [f.density.map_or("0".to_string(), number)],
-        "filament_ids": [f.filament_id.unwrap_or("")],
-        "nozzle_temperature": [number(f.nozzle_c)],
-        "nozzle_temperature_initial_layer": [number(f.first_layer_nozzle_c)],
-        "hot_plate_temp": [number(f.bed_c)],
-        "hot_plate_temp_initial_layer": [number(f.first_layer_bed_c)],
-        "textured_plate_temp": [number(f.bed_c)],
-        "textured_plate_temp_initial_layer": [number(f.first_layer_bed_c)],
+        "filament_type": f.filaments.iter().map(|fil| fil.filament_type.clone()).collect::<Vec<_>>(),
+        "filament_colour": f.filaments.iter().map(|fil| fil.filament_colour.clone()).collect::<Vec<_>>(),
+        "filament_diameter": f.filaments.iter().map(|fil| number(fil.filament_diameter_mm)).collect::<Vec<_>>(),
+        "filament_density": f.filaments.iter().map(|fil| fil.density.map_or("0".to_string(), number)).collect::<Vec<_>>(),
+        "filament_ids": f.filaments.iter().map(|fil| fil.filament_id.unwrap_or("")).collect::<Vec<_>>(),
+        "nozzle_temperature": f.filaments.iter().map(|fil| number(fil.nozzle_c)).collect::<Vec<_>>(),
+        "nozzle_temperature_initial_layer": f.filaments.iter().map(|fil| number(fil.first_layer_nozzle_c)).collect::<Vec<_>>(),
+        "hot_plate_temp": vec![number(f.bed_c); count],
+        "hot_plate_temp_initial_layer": vec![number(f.first_layer_bed_c); count],
+        "textured_plate_temp": vec![number(f.bed_c); count],
+        "textured_plate_temp_initial_layer": vec![number(f.first_layer_bed_c); count],
         "layer_height": number(f.layer_height_mm),
         "enable_support": if f.support_used { "1" } else { "0" },
     });
+    if f.ams_enabled
+        && let Some(obj) = settings.as_object_mut()
+    {
+        obj.insert("single_extruder_multi_material".into(), "1".into());
+        obj.insert(
+            "enable_prime_tower".into(),
+            if f.prime_tower_bbox.is_some() {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        );
+    }
     serde_json::to_string_pretty(&settings).expect("JSON value") + "\n"
 }
 fn bed_label(identifier: &str) -> &'static str {
@@ -512,6 +772,13 @@ pub fn write_bambu_package(
         "Metadata/project_settings.config",
         &mut project_settings(&facts).as_bytes(),
     )?;
+    if facts.ams_enabled {
+        add(
+            &mut zip,
+            "Metadata/filament_sequence.json",
+            &mut filament_sequence_json(&facts).as_bytes(),
+        )?;
+    }
     for (name, size) in BAMBU_THUMBNAILS {
         let png = thumbnail::render(&bundle.plan, size, cancel)?;
         add(&mut zip, name, &mut png.as_slice())?;

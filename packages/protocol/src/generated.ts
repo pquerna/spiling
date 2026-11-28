@@ -20,6 +20,66 @@ export type AdhesionSummary = { skirt_paths: number, skirt_loops_outside_envelop
  */
 brim_islands: number, brim_paths: number, brim_loops_outside_envelope: number, };
 
+export type AmsPrimeTower = {
+/**
+ * Minimum XY corner on the build plate (mm).
+ */
+origin_xy_mm: [number, number],
+/**
+ * Width (X) and depth (Y) of the tower footprint (mm).
+ */
+size_xy_mm: [number, number],
+/**
+ * Nominal deposited bead width on the tower (mm).
+ */
+bead_width_mm: number,
+/**
+ * Minimum priming volume deposited on the tower after each mid-print switch (mm³).
+ */
+prime_volume_mm3: number,
+/**
+ * Linear deposition speed on the prime tower (mm/s).
+ */
+print_speed_mm_s: number, };
+
+export type AmsSlot = {
+/**
+ * Polymer family identifier (e.g. `"pla"`, `"petg"`, `"abs"`, `"asa"`, `"tpu"`).
+ */
+polymer_family: string,
+/**
+ * Optional declared display sRGB colour (`#RRGGBB` in `.gcode.3mf`).
+ */
+display_srgb?: [number, number, number], filament_diameter_mm: number,
+/**
+ * Integral Celsius printing temperature for later layers.
+ */
+nozzle_temperature_c: number,
+/**
+ * Integral Celsius printing temperature for the first layer.
+ */
+first_layer_nozzle_temperature_c: number,
+/**
+ * Integral Celsius chute-flush temperature (>= printing temperatures).
+ */
+flush_temperature_c: number,
+/**
+ * Declared volumetric flow rate during chute flushing (mm³/s).
+ */
+flush_volumetric_speed_mm3_s: number, };
+
+export type AmsSlotAccounting = { slot: number, model_filament_length_mm: number, support_filament_length_mm: number, adhesion_filament_length_mm: number, priming_filament_length_mm: number, flush_filament_length_mm: number, tower_filament_length_mm: number, used_for_object: boolean, used_for_support: boolean, };
+
+export type AmsVerification = { slots: Array<AmsSlotAccounting>,
+/**
+ * Number of mid-print `M620..M621` filament transitions executed.
+ */
+change_count: number,
+/**
+ * Ordered 0-based slot sequence loaded by the program (initial load + each switch).
+ */
+sequence: Array<number>, tower_deposition_segments: number, tower_travel_segments: number, tower_layers: number, total_flush_filament_length_mm: number, total_tower_filament_length_mm: number, };
+
 export type AnalysisAccuracyEvidence = "unqualified";
 
 export type AnalysisBoreProfile = { hole: AnalysisHole, outer_xy_mm: [[number, number], [number, number]], outer_faces: [FaceId, FaceId, FaceId, FaceId], };
@@ -126,6 +186,29 @@ export type ArtifactView = { name: string, size_bytes: string, sha256: string, m
 export type AssessedEvidence = "c" | "m";
 
 export type AssumedPrintedLaws = { name: string, justification: string, compatible_recipe: PlanarPrintRecipe, wall_mpa: [[number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number]], skin_mpa: [[number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number]], effective_core_mpa: [[number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number], [number, number, number, number, number, number]], };
+
+export type BambuAms = {
+/**
+ * Loaded AMS filament slots (`2..=16`). Slot 0 is the primary job material.
+ */
+slots: Array<AmsSlot>,
+/**
+ * Optional dedicated AMS slot for ordinary support paths (`DepositionKind::Support`).
+ */
+support_slot?: number,
+/**
+ * Optional dedicated AMS slot for support interface paths (`DepositionKind::SupportInterface`).
+ */
+support_interface_slot?: number,
+/**
+ * Row-major `N × N` flush volume matrix (mm³): entry `from * N + to` is the
+ * minimum chute flush volume when switching from slot `from` to slot `to`.
+ */
+flush_volumes_mm3: Array<number>,
+/**
+ * Optional bed-rooted rectangular prime tower.
+ */
+prime_tower?: AmsPrimeTower, };
 
 export type BambuPlate = "cool_plate" | "engineering_plate" | "high_temp_plate" | "textured_pei_plate";
 
@@ -247,7 +330,11 @@ plate: BambuPlate,
 /**
  * The firmware generation whose start conventions the program follows.
  */
-series: BambuSeries, };
+series: BambuSeries,
+/**
+ * Optional single-nozzle AMS filament-switching configuration.
+ */
+ams?: BambuAms, };
 
 export type DeliveryPackageDescriptor = { info: DeliveryPackageInfo, resource: ArtifactView, };
 
@@ -622,7 +709,7 @@ export type LibraryWriteReceipt = { identity: LibraryIdentity, request_id: strin
 
 export type LifecycleBlock = { label: string, lines: Array<string>, effects: BlockEffects, };
 
-export type LifecycleStep = { "kind": "celsius_units" } | { "kind": "volumetric_off" } | { "kind": "feed_scale_reset" } | { "kind": "flow_scale_reset" } | { "kind": "fan_off" } | { "kind": "nozzle_check" } | { "kind": "model_check", model: string, } | { "kind": "bed_target" } | { "kind": "bed_wait" } | { "kind": "nozzle_target", standby_c: number | null, } | { "kind": "nozzle_wait", standby_c: number | null, } | { "kind": "home" } | { "kind": "probe_mesh" } | { "kind": "restore_mesh" } | { "kind": "levelling_off" } | { "kind": "restore_modes" } | { "kind": "reset_extrusion" } | { "kind": "prime" } | { "kind": "barrier" } | { "kind": "park" } | { "kind": "nozzle_off" } | { "kind": "bed_off" } | { "kind": "motors_off" } | { "kind": "block", block: LifecycleBlock, };
+export type LifecycleStep = { "kind": "celsius_units" } | { "kind": "volumetric_off" } | { "kind": "feed_scale_reset" } | { "kind": "flow_scale_reset" } | { "kind": "fan_off" } | { "kind": "nozzle_check" } | { "kind": "model_check", model: string, } | { "kind": "bed_target" } | { "kind": "bed_wait" } | { "kind": "nozzle_target", standby_c: number | null, } | { "kind": "nozzle_wait", standby_c: number | null, } | { "kind": "home" } | { "kind": "probe_mesh" } | { "kind": "restore_mesh" } | { "kind": "levelling_off" } | { "kind": "restore_modes" } | { "kind": "reset_extrusion" } | { "kind": "prime" } | { "kind": "barrier" } | { "kind": "park" } | { "kind": "nozzle_off" } | { "kind": "bed_off" } | { "kind": "motors_off" } | { "kind": "ams_load", slot: number, } | { "kind": "ams_unload" } | { "kind": "block", block: LifecycleBlock, };
 
 export type LoadedMaterial = { id: string, revision: string, polymer_family: string, };
 
@@ -1498,7 +1585,11 @@ cooling_slowed_layers: number, minimum_cooling_scale: number,
  * Print time estimated from the decoded commands under the job's
  * declared print-time model; null without one. Not a measurement.
  */
-estimated_seconds: number | null, };
+estimated_seconds: number | null,
+/**
+ * Independently decoded single-nozzle Bambu AMS accounting, when AMS is active.
+ */
+ams?: AmsVerification, };
 
 export type WebRoofDomain = { region_index: number, extent: Array<DiaphragmPolygonMm>,
 /**

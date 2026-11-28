@@ -13,14 +13,19 @@ fn closed(path: &DepositionPath) -> bool {
 fn machine(
     intent: &ManufacturingIntent,
     routed: Option<&FixedDualJob>,
+    bambu_ams: Option<&BambuAms>,
     start: Option<[f64; 3]>,
 ) -> Result<routing::Machine, ManufacturingError> {
     let recipe = &intent.recipe;
     let Some(job) = routed else {
+        let (tools, swap_s, stations_xy) = match bambu_ams {
+            Some(ams) => (ams.slots.len() as u32, 60.0, vec![None; ams.slots.len()]),
+            None => (1, 0.0, vec![None]),
+        };
         return Ok(routing::Machine {
             start,
             initial_tool: Some(0),
-            tools: 1,
+            tools,
             travel: routing::Travel {
                 speed_mm_s: recipe.travel_speed_mm_s,
                 lift_mm: 0.0,
@@ -39,11 +44,11 @@ fn machine(
                 },
             },
             change: routing::ToolChange {
-                swap_s: 0.0,
+                swap_s,
                 prewarm_lead_s: None,
                 service_s: 0.0,
                 service: routing::Service::WhenUsed,
-                stations_xy: vec![None],
+                stations_xy,
             },
         });
     };
@@ -90,7 +95,11 @@ pub(super) fn apply(
     cancel: &AtomicBool,
     order: routing::ToolOrder,
 ) -> Result<(Option<BambuEstimate>, u64), ManufacturingError> {
-    let machine = machine(intent, routed, start)?;
+    let bambu_ams = match &intent.printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => job.bambu_ams(),
+        _ => None,
+    };
+    let machine = machine(intent, routed, bambu_ams, start)?;
     let router = routed.map(FixedDualJob::router).transpose()?;
     let count: usize = plan.layers.iter().map(|layer| layer.paths.len()).sum();
     let mut tasks = Vec::new();
@@ -108,11 +117,14 @@ pub(super) fn apply(
         JobWorkflow::CompleteMarlin { job }
             if intent.printer.capabilities.output_dialect == OutputDialect::BambuLabGcode3mfV1 =>
         {
+            let mut slot_filament_mm = vec![0.0; bambu_ams.map_or(1, |a| a.slots.len())];
+            slot_filament_mm[0] = job.prime_filament_length_mm;
             Some(BambuEstimate {
                 starts_s: Vec::with_capacity(plan.layers.len()),
                 total_s: 0.0,
                 filament_mm: job.prime_filament_length_mm,
                 max_z_mm: job.prime_end_mm[2].max(job.prime_start_mm[2]),
+                slot_filament_mm,
             })
         }
         _ => None,
@@ -135,6 +147,10 @@ pub(super) fn apply(
                 };
             let points = &path.points_mm;
             let process = intent.process_for_path(path)?;
+            let ams_slot = bambu_ams.map_or(0u8, |ams| ams.slot_for_kind(path.kind));
+            let slot_area = bambu_ams.map_or(filament_area, |ams| {
+                ams.slots[usize::from(ams_slot)].filament_area_mm2()
+            });
             let length = if let Some(estimate) = &mut estimate {
                 let flow = speeds::flow_factor(&process, path.kind, layer.index);
                 let height = path.height_mm();
@@ -143,8 +159,9 @@ pub(super) fn apply(
                     let [a, b] = [edge.points_mm[0], edge.points_mm[1]];
                     length += distance(a, b);
                     let [a, b] = [project_xyz6_point_mm(a)?, project_xyz6_point_mm(b)?];
-                    estimate.filament_mm +=
-                        distance(a, b) * bead_area(edge.width_mm, height, flow) / filament_area;
+                    let add = distance(a, b) * bead_area(edge.width_mm, height, flow) / slot_area;
+                    estimate.filament_mm += add;
+                    estimate.slot_filament_mm[usize::from(ams_slot)] += add;
                     estimate.max_z_mm = estimate.max_z_mm.max(a[2]).max(b[2]);
                 }
                 length
@@ -165,7 +182,7 @@ pub(super) fn apply(
                 },
                 tool: router
                     .as_ref()
-                    .map_or(Ok(0), |job| job.tool_for_path(path))?
+                    .map_or_else(|| Ok(ams_slot), |job| job.tool_for_path(path))?
                     .into(),
                 barrier,
                 layer: layer.index,
@@ -257,6 +274,13 @@ pub(super) fn apply(
             ));
         }
         offset += n;
+    }
+    if let (Some(estimate), Some(ams)) = (&mut estimate, bambu_ams) {
+        let extra = crate::backend::ams::estimate_ams_additions(plan, ams)?;
+        for (slot, add) in estimate.slot_filament_mm.iter_mut().zip(extra) {
+            *slot += add;
+            estimate.filament_mm += add;
+        }
     }
     Ok((estimate, scheduled.work))
 }

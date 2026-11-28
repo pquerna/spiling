@@ -439,6 +439,28 @@ message VerificationReport {
   optional double estimated_seconds = 23;
   uint32 adhesion_deposition_segments = 24;
   double adhesion_filament_length_mm = 25;
+  AmsVerification ams = 26;
+}
+message AmsSlotAccounting {
+  uint32 slot = 1;
+  double model_filament_length_mm = 2;
+  double support_filament_length_mm = 3;
+  double adhesion_filament_length_mm = 4;
+  double priming_filament_length_mm = 5;
+  double flush_filament_length_mm = 6;
+  double tower_filament_length_mm = 7;
+  bool used_for_object = 8;
+  bool used_for_support = 9;
+}
+message AmsVerification {
+  repeated AmsSlotAccounting slots = 1;
+  uint32 change_count = 2;
+  repeated uint32 sequence = 3;
+  uint32 tower_deposition_segments = 4;
+  uint32 tower_travel_segments = 5;
+  uint32 tower_layers = 6;
+  double total_flush_filament_length_mm = 7;
+  double total_tower_filament_length_mm = 8;
 }
 
 // Actual replay qualifies nominal layer/owner associations; no measured optics.

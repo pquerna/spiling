@@ -85,6 +85,10 @@ pub enum DeliveryPackage {
         plate: BambuPlate,
         /// The firmware generation whose start conventions the program follows.
         series: BambuSeries,
+        /// Optional single-nozzle AMS filament-switching configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        ams: Option<BambuAms>,
     },
 }
 /// Bambu firmware generations with distinct start conventions, as Bambu
@@ -124,6 +128,7 @@ impl DeliveryPackage {
             Self::BambuGcode3mf {
                 printer_model_id,
                 printer_model,
+                ams,
                 ..
             } => {
                 let token = |t: &str| {
@@ -136,6 +141,9 @@ impl DeliveryPackage {
                     return Err(invalid(
                         "Bambu package model identity must be short printable identifiers",
                     ));
+                }
+                if let Some(ams) = ams {
+                    ams.validate_declaration()?;
                 }
                 Ok(())
             }
@@ -164,6 +172,72 @@ impl PrintTimeModel {
     }
 }
 impl SingleExtruderJob {
+    /// Declared single-nozzle Bambu AMS configuration, if any.
+    pub fn bambu_ams(&self) -> Option<&BambuAms> {
+        self.delivery
+            .as_ref()
+            .and_then(|DeliveryPackage::BambuGcode3mf { ams, .. }| ams.as_ref())
+    }
+    /// Bambu firmware series, if this job targets a Bambu package.
+    pub fn bambu_series(&self) -> Option<BambuSeries> {
+        self.delivery
+            .as_ref()
+            .map(|DeliveryPackage::BambuGcode3mf { series, .. }| *series)
+    }
+    /// Bambu model id (`N2S`, `N1`, `C12`, etc.), if this job targets a Bambu package.
+    pub fn bambu_model_id(&self) -> Option<&str> {
+        self.delivery.as_ref().map(
+            |DeliveryPackage::BambuGcode3mf {
+                 printer_model_id, ..
+             }| printer_model_id.as_str(),
+        )
+    }
+    /// Attach a Bambu single-nozzle AMS configuration and wire its typed
+    /// `AmsLoad` / `AmsUnload` lifecycle steps atomically into `self.lifecycle`.
+    pub fn enable_bambu_ams(&mut self, config: BambuAms) -> Result<(), ManufacturingError> {
+        let Some(DeliveryPackage::BambuGcode3mf { ams, .. }) = &mut self.delivery else {
+            return Err(invalid(
+                "Bambu AMS can only be enabled on a BambuGcode3mf job",
+            ));
+        };
+        config.validate_declaration()?;
+        *ams = Some(config);
+        // Strip any prior AMS steps so repeated calls stay idempotent.
+        self.lifecycle
+            .start
+            .retain(|s| !matches!(s, LifecycleStep::AmsLoad { .. }));
+        self.lifecycle
+            .end
+            .retain(|s| !matches!(s, LifecycleStep::AmsUnload));
+        // Insert AmsLoad right after BedWait (or Home if unheated) so initial
+        // filament loads before the start purge/wipe block.
+        let load_at = self
+            .lifecycle
+            .start
+            .iter()
+            .position(|s| matches!(s, LifecycleStep::BedWait))
+            .or_else(|| {
+                self.lifecycle
+                    .start
+                    .iter()
+                    .position(|s| matches!(s, LifecycleStep::Home))
+            })
+            .map_or(self.lifecycle.start.len(), |i| i + 1);
+        self.lifecycle
+            .start
+            .insert(load_at, LifecycleStep::AmsLoad { slot: 0 });
+        // Insert AmsUnload right before NozzleOff (after Park and Barrier).
+        let unload_at = self
+            .lifecycle
+            .end
+            .iter()
+            .position(|s| matches!(s, LifecycleStep::NozzleOff))
+            .unwrap_or(self.lifecycle.end.len());
+        self.lifecycle
+            .end
+            .insert(unload_at, LifecycleStep::AmsUnload);
+        Ok(())
+    }
     pub fn validate_declaration(&self) -> Result<(), ManufacturingError> {
         label(&self.machine_id)?;
         // Names the declared firmware; the program dialect is the printer's
@@ -288,7 +362,12 @@ impl SingleExtruderJob {
             OutputDialect::BambuLabGcode3mfV1
         );
         match (&self.delivery, packaged) {
-            (Some(DeliveryPackage::BambuGcode3mf { .. }), true) | (None, false) => {}
+            (Some(DeliveryPackage::BambuGcode3mf { ams, .. }), true) => {
+                if let Some(ams) = ams {
+                    ams.validate(printer, self)?;
+                }
+            }
+            (None, false) => {}
             _ => {
                 return Err(invalid(
                     "a Bambu Lab program requires its .gcode.3mf delivery package and no other dialect declares one",

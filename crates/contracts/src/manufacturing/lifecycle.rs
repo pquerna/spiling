@@ -431,6 +431,14 @@ pub enum LifecycleStep {
     /// Release steppers (`M84 X Y E` holding Z on Marlin/Prusa, Klipper `M84`,
     /// Bambu `M18 X Y Z`).
     MotorsOff,
+    /// Bambu single-nozzle AMS initial load (`M620 M`, `M620 S<slot>A`,
+    /// `T<slot>`, `M621 S<slot>A`). Start sequence only, when AMS is declared.
+    AmsLoad {
+        slot: u8,
+    },
+    /// Bambu single-nozzle AMS final unload (`M620 S255`, `T255`, `M621 S255`).
+    /// End sequence only, after park and before nozzle heater off.
+    AmsUnload,
     Block {
         block: LifecycleBlock,
     },
@@ -520,11 +528,24 @@ impl FirmwareLifecycle {
         let Some(LifecycleStep::Prime) = self.start.last() else {
             return refuse("the start sequence must end with the prime");
         };
+        let mut ams_loads = 0usize;
         for (index, step) in self.start.iter().enumerate() {
             if !dialect.admits(step) {
                 return refuse("lifecycle step is not in the output dialect's command set");
             }
             match step {
+                LifecycleStep::AmsLoad { slot } => {
+                    let Some(ams) = job.bambu_ams() else {
+                        return refuse("AMS load requires a declared Bambu AMS configuration");
+                    };
+                    if usize::from(*slot) >= ams.slots.len() {
+                        return refuse("AMS initial load slot exceeds declared AMS slots");
+                    }
+                    if !s.homed {
+                        return refuse("AMS initial load requires a homed printer");
+                    }
+                    ams_loads += 1;
+                }
                 LifecycleStep::Prime if index + 1 == self.start.len() => {
                     if !s.homed {
                         return refuse("lifecycle motion before homing");
@@ -545,11 +566,15 @@ impl FirmwareLifecycle {
                 | LifecycleStep::Park
                 | LifecycleStep::NozzleOff
                 | LifecycleStep::BedOff
-                | LifecycleStep::MotorsOff => {
+                | LifecycleStep::MotorsOff
+                | LifecycleStep::AmsUnload => {
                     return refuse("start sequence contains a priming, park or shutdown step");
                 }
                 _ => apply(step, &mut s, job, dialect)?,
             }
+        }
+        if job.bambu_ams().is_some() && ams_loads != 1 {
+            return refuse("Bambu AMS start sequence must load the initial slot exactly once");
         }
         if !s.homed || !s.position {
             return refuse("the body requires a homed, known position");
@@ -564,6 +589,8 @@ impl FirmwareLifecycle {
         if parks != 1 {
             return refuse("the end sequence must park exactly once");
         }
+        let mut parked = false;
+        let mut ams_unloads = 0usize;
         for step in &self.end {
             if !dialect.admits(step) {
                 return refuse("lifecycle step is not in the output dialect's command set");
@@ -573,6 +600,18 @@ impl FirmwareLifecycle {
                     if !s.homed || !s.position || !s.modes {
                         return refuse("park requires a homed, known position and modes");
                     }
+                    parked = true;
+                }
+                LifecycleStep::AmsUnload => {
+                    if job.bambu_ams().is_none() {
+                        return refuse("AMS unload requires a declared Bambu AMS configuration");
+                    }
+                    if !parked || s.nozzle == Nozzle::Off {
+                        return refuse(
+                            "AMS unload must occur after parking and while the nozzle is still heated",
+                        );
+                    }
+                    ams_unloads += 1;
                 }
                 LifecycleStep::Prime
                 | LifecycleStep::Home
@@ -581,14 +620,18 @@ impl FirmwareLifecycle {
                 | LifecycleStep::BedTarget
                 | LifecycleStep::BedWait
                 | LifecycleStep::NozzleTarget { .. }
-                | LifecycleStep::NozzleWait { .. } => {
-                    return refuse("end sequence may not home, probe, prime or heat");
+                | LifecycleStep::NozzleWait { .. }
+                | LifecycleStep::AmsLoad { .. } => {
+                    return refuse("end sequence may not home, probe, prime, load AMS or heat");
                 }
                 LifecycleStep::Block { block } if block.effects.homes => {
                     return refuse("end sequence may not home");
                 }
                 _ => apply(step, &mut s, job, dialect)?,
             }
+        }
+        if job.bambu_ams().is_some() && ams_unloads != 1 {
+            return refuse("Bambu AMS end sequence must unload exactly once");
         }
         if s.bed != Heat::Off || s.nozzle != Nozzle::Off || !s.fan_off || !s.motors_off {
             return refuse("the end sequence must turn off heaters, fan and motors");
@@ -739,7 +782,9 @@ fn apply(
         | LifecycleStep::NozzleCheck
         | LifecycleStep::Barrier
         | LifecycleStep::Prime
-        | LifecycleStep::Park => {}
+        | LifecycleStep::Park
+        | LifecycleStep::AmsLoad { .. }
+        | LifecycleStep::AmsUnload => {}
     }
     Ok(())
 }
@@ -817,6 +862,7 @@ impl OutputDialect {
             S::CelsiusUnits | S::VolumetricOff => marlin,
             S::NozzleCheck | S::ModelCheck { .. } => prusa,
             S::RestoreMesh | S::LevellingOff => marlin || klipper || bambu,
+            S::AmsLoad { .. } | S::AmsUnload => bambu,
             _ => true,
         }
     }

@@ -300,6 +300,19 @@ impl ProjectHardwareCapture {
                 }
             }
         }
+        // Per-job single-nozzle Bambu AMS declarations (slots, flush matrix,
+        // prime tower) attach to the installed Bambu printer without altering
+        // its physical geometry, exclusions, or base lifecycle.
+        if let (
+            crate::manufacturing::JobWorkflow::CompleteMarlin { job: installed_job },
+            crate::manufacturing::JobWorkflow::CompleteMarlin { job: intent_job },
+        ) = (&mut installed.workflow, &intent.printer.workflow)
+            && let Some(ams) = intent_job.bambu_ams()
+        {
+            installed_job
+                .enable_bambu_ams(ams.clone())
+                .map_err(|e| e.to_string())?;
+        }
         if installed != intent.printer {
             return Err("manufacturing printer differs from portable hardware capture".into());
         }

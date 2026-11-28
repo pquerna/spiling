@@ -15,6 +15,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 use spiling_contracts::manufacturing::*;
 
 mod adhesion;
+mod ams;
 mod bambu;
 mod bed_exclusion;
 mod bridge_split;
@@ -1037,6 +1038,13 @@ fn verify_reader(
         JobWorkflow::CompleteMarlin { job } => Some(job),
     };
     let mut lifecycle = job.map(|job| lifecycle::Lifecycle::new(job, printer, plan));
+    let mut ams_verifier = match job {
+        Some(job) => match job.bambu_ams() {
+            Some(ams) => Some(ams::AmsVerifier::new(plan, printer, job, ams, cancel)?),
+            None => None,
+        },
+        None => None,
+    };
     let mut estimate = job
         .and_then(|job| job.timing_model.as_ref())
         .map(cost::PrintTimeEstimate::new)
@@ -1140,6 +1148,53 @@ fn verify_reader(
                     )));
                 }
             }
+            // Single-nozzle Bambu AMS switch and prime-tower sequences are
+            // independently decoded by `ams_verifier` before body motion parsing.
+            if let Some(ams) = ams_verifier.as_mut()
+                && setup_index == setup_len
+                && lifecycle.as_mut().is_none_or(|lc| !lc.in_start())
+            {
+                if !ams.pending() {
+                    let pending_ams = match expected.peek() {
+                        Some(Ok(expected::Action::AmsTowerFrame { layer, slot })) => {
+                            let (layer, slot) = (*layer, *slot);
+                            bambu
+                                .as_ref()
+                                .is_none_or(|m| m.before_layer_motion(layer).is_ok())
+                                .then_some((true, 0u8, slot, layer))
+                        }
+                        Some(Ok(expected::Action::AmsSwitch { from, to, layer })) => {
+                            let (from, to, layer) = (*from, *to, *layer);
+                            bambu
+                                .as_ref()
+                                .is_none_or(|m| m.before_layer_motion(layer).is_ok())
+                                .then_some((false, from, to, layer))
+                        }
+                        _ => None,
+                    };
+                    if let Some((is_frame, from, to, layer)) = pending_ams {
+                        let _ = expected.next();
+                        let z_mm = plan.layers[layer as usize].z_mm;
+                        if is_frame {
+                            ams.begin_tower_frame(layer, to, z_mm)?;
+                        } else {
+                            ams.begin_switch(from, to, layer, z_mm)?;
+                        }
+                    }
+                }
+                if ams.pending() {
+                    ams.consume_line(line, line_index + 1, &mut state, &mut fan_state, &mut max_z)?;
+                    if !ams.pending() {
+                        expected_e = 0.0;
+                        first_wall_edge = None;
+                        previous_wall_edge = None;
+                        if let Some(sink) = replay.as_deref_mut() {
+                            sink.set_active_tool(ams.active_slot());
+                        }
+                    }
+                    continue;
+                }
+            }
             let coordinate_ticks = parsed.ticks;
             let decoded = parsed.decoded.map_err(|reason| {
                 let shown: String = line.chars().take(96).collect();
@@ -1212,9 +1267,14 @@ fn verify_reader(
                     continue;
                 }
             }
-            let filament_area = route
-                .as_ref()
-                .map_or(filament_area, routing::RouteState::filament_area);
+            let filament_area = route.as_ref().map_or_else(
+                || {
+                    ams_verifier
+                        .as_ref()
+                        .map_or(filament_area, ams::AmsVerifier::active_filament_area)
+                },
+                routing::RouteState::filament_area,
+            );
             if let (Some(job), Some(lc)) = (job, lifecycle.as_mut()) {
                 let item = if lc.in_start() {
                     lc.next_start()
@@ -1293,6 +1353,9 @@ fn verify_reader(
                     if kind == 1 {
                         priming_filament_length_mm = state.extrusion;
                         expected_e = job.prime_filament_length_mm;
+                        if let Some(ams) = ams_verifier.as_mut() {
+                            ams.record_prime(priming_filament_length_mm);
+                        }
                     }
                     if command_ticks.is_some() {
                         prior_grid_position = command_ticks;
@@ -1324,6 +1387,11 @@ fn verify_reader(
                 ) = match action? {
                     expected::Action::BeginTool { .. } => {
                         return Err(failed("unconsumed routed tool boundary"));
+                    }
+                    expected::Action::AmsTowerFrame { .. } | expected::Action::AmsSwitch { .. } => {
+                        return Err(failed(
+                            "unconsumed Bambu AMS switch or prime-tower boundary",
+                        ));
                     }
                     expected::Action::Fan(pwm) => {
                         if decoded.command != Command::Fan
@@ -1907,6 +1975,9 @@ fn verify_reader(
                         )?;
                     }
                     state.extrusion = next_e;
+                    if let Some(ams) = ams_verifier.as_mut() {
+                        ams.record_deposition(deposition_kind, delta_e);
+                    }
                     if support {
                         support_deposition_segments = count_event(support_deposition_segments)?;
                         support_filament += delta_e;
@@ -2154,12 +2225,34 @@ fn verify_reader(
     } else {
         None
     };
-    let deposited_volume_mm3 = routing
-        .as_ref()
-        .map_or(object_filament * filament_area, |report| {
-            report.tools.iter().map(|tool| tool.model_volume_mm3).sum()
-        });
-    if !deposited_volume_mm3.is_finite() {
+    let ams = ams_verifier.map(ams::AmsVerifier::finish).transpose()?;
+    let deposited_volume_mm3 = if let Some(routed) = routing.as_ref() {
+        routed.tools.iter().map(|tool| tool.model_volume_mm3).sum()
+    } else if let (Some(ams_rep), Some(job_ams)) =
+        (ams.as_ref(), job.and_then(SingleExtruderJob::bambu_ams))
+    {
+        ams_rep
+            .slots
+            .iter()
+            .zip(&job_ams.slots)
+            .map(|(a, s)| a.model_filament_length_mm * s.filament_area_mm2())
+            .sum()
+    } else {
+        object_filament * filament_area
+    };
+    let support_deposited_volume_mm3 = if let (Some(ams_rep), Some(job_ams)) =
+        (ams.as_ref(), job.and_then(SingleExtruderJob::bambu_ams))
+    {
+        ams_rep
+            .slots
+            .iter()
+            .zip(&job_ams.slots)
+            .map(|(a, s)| a.support_filament_length_mm * s.filament_area_mm2())
+            .sum()
+    } else {
+        support_filament * filament_area
+    };
+    if !deposited_volume_mm3.is_finite() || !support_deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
     }
     let mut report = VerificationReport {
@@ -2215,7 +2308,7 @@ fn verify_reader(
         lifecycle_motion_count: if routing.is_some() { 2 } else if job.is_some() { 4 } else { 0 },
         priming_filament_length_mm,
         support_deposition_segments,
-        support_deposited_volume_mm3: support_filament * filament_area,
+        support_deposited_volume_mm3,
         support_filament_length_mm: support_filament,
         adhesion_deposition_segments,
         adhesion_filament_length_mm: adhesion_filament,
@@ -2226,9 +2319,20 @@ fn verify_reader(
         cooling_slowed_layers,
         minimum_cooling_scale,
         estimated_seconds: estimate.map(cost::PrintTimeEstimate::finish).transpose()?,
+        ams,
     };
     if let Some(clearance) = clearance_receipt {
         report.coverage.push(format!("Independent decoded support clearance: conservative 0.05 mm XYZ6 cells and symmetric Z gaps; {} shared support-edge cells, {} distinct local capsule pairs", clearance.shared_edge_cells, clearance.checked_pairs));
+    }
+    if let Some(ams_rep) = &report.ams {
+        report.coverage.push(format!(
+            "Single-nozzle Bambu AMS independently decoded: {} declared slots, {} mid-print M620/M621 switches, {:.2} mm chute flush, {} prime-tower layers ({:.2} mm)",
+            ams_rep.slots.len(),
+            ams_rep.change_count,
+            ams_rep.total_flush_filament_length_mm,
+            ams_rep.tower_layers,
+            ams_rep.total_tower_filament_length_mm,
+        ));
     }
     let mut unsupported_layers = 0usize;
     let mut largest_recorded_span = 0.0_f64;

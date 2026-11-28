@@ -1990,6 +1990,7 @@ fn bundle() -> ManufacturingBundle {
             cooling_slowed_layers: 0,
             minimum_cooling_scale: 1.0,
             estimated_seconds: None,
+            ams: None,
         },
     }
 }

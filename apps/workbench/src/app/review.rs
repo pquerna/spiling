@@ -1099,6 +1099,7 @@ mod findings_tests {
             cooling_slowed_layers: 0,
             minimum_cooling_scale: 1.0,
             estimated_seconds: Some(12.0),
+            ams: None,
             job_time: None,
             routing: None,
             layer_height: LayerHeightAssessment {

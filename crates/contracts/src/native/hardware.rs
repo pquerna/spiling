@@ -865,6 +865,10 @@ fn step_from_rpc(v: rpc::LifecycleStep) -> Result<LifecycleStep, String> {
         R::NozzleOff(()) => S::NozzleOff,
         R::BedOff(()) => S::BedOff,
         R::MotorsOff(()) => S::MotorsOff,
+        R::AmsLoad(slot) => S::AmsLoad {
+            slot: u8::try_from(slot).map_err(|_| "AMS load slot exceeds u8".to_string())?,
+        },
+        R::AmsUnload(()) => S::AmsUnload,
         R::Block(block) => S::Block {
             block: block_from_rpc(block)?,
         },
@@ -897,6 +901,8 @@ fn step_to_rpc(v: LifecycleStep) -> rpc::LifecycleStep {
         S::NozzleOff => R::NozzleOff(()),
         S::BedOff => R::BedOff(()),
         S::MotorsOff => R::MotorsOff(()),
+        S::AmsLoad { slot } => R::AmsLoad(u32::from(slot)),
+        S::AmsUnload => R::AmsUnload(()),
         S::Block { block } => R::Block(block_to_rpc(block)),
     };
     rpc::LifecycleStep { step: Some(step) }

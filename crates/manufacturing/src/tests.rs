@@ -4207,3 +4207,254 @@ fn clipped_roads_connect_along_walls_and_replay_checks_every_connector() {
     let error = crate::verifier::connectors_for_tests(&moved.bundle.plan).unwrap_err();
     assert!(error.message.contains("connector"), "{}", error.message);
 }
+
+#[test]
+fn bambu_ams_support_interface_compiles_verifies_packages_and_rejects_tampering() {
+    use spiling_contracts::hardware::builtin_catalog;
+    let catalog = builtin_catalog().unwrap();
+    let cancel = AtomicBool::new(false);
+    // Two-box cantilever: box 1 on bed [80..90, 80..100, 0..8], box 2 cantilevered
+    // at [90..100, 80..100, 8..16], generating real Breakaway supports + SupportInterface.
+    let scene = Scene::new(BOX, &[pose(80.0, 80.0, 0.0), pose(90.0, 80.0, 8.0)]);
+    let cube = delivery::PackageObject {
+        name: "cantilever".into(),
+        vertices: vec![
+            [80.0, 80.0, 0.0],
+            [100.0, 80.0, 0.0],
+            [80.0, 100.0, 0.0],
+            [80.0, 80.0, 16.0],
+        ],
+        triangles: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    };
+    let objects = [cube];
+
+    for (setup_id, series_staging) in [
+        ("bambulab.a1.04", "G1 X267 F18000\nG1 X-48.2 F18000\n"),
+        (
+            "bambulab.p1s.04",
+            "G1 X70 F21000\nG1 Y245 F18000\nG1 Y265 F3000\n",
+        ),
+    ] {
+        let setup = catalog.find_setup(setup_id).unwrap();
+        let mut pla = crate::generic_selection(setup, "pla").unwrap();
+        pla.display_srgb = Some([0x1F, 0x4E, 0x79]);
+        let mut petg = crate::generic_selection(setup, "petg").unwrap();
+        petg.display_srgb = Some([0xFF, 0x66, 0x00]);
+        let hardware = Arc::new(catalog.stock_capture(setup).unwrap());
+        let base = crate::create_default_intent(
+            hardware,
+            pla,
+            crate::QualityPreset::Draft,
+            crate::SupportChoice::Automatic,
+        )
+        .unwrap();
+        let intent = crate::configure_bambu_ams_support_interface(
+            &base,
+            petg,
+            &[([80.0, 80.0], [100.0, 100.0])],
+        )
+        .unwrap();
+        intent.validate().unwrap();
+
+        let built = scene.compile(&intent).unwrap();
+        let program = built.program_text().unwrap();
+        assert!(
+            program.contains("M620 M\nM620 S0A\nT0\nM621 S0A\n"),
+            "{setup_id}"
+        );
+        assert!(program.contains("M620 S1A\n"), "{setup_id}");
+        assert!(program.contains(series_staging), "{setup_id}");
+        assert!(program.contains("; FLUSH_START\n"), "{setup_id}");
+        assert!(program.contains("; FLUSH_END\n"), "{setup_id}");
+        assert!(program.contains("M621 S1A\n"), "{setup_id}");
+        assert!(program.contains("; WIPE_TOWER_START\n"), "{setup_id}");
+        assert!(program.contains("; WIPE_TOWER_END\n"), "{setup_id}");
+        assert!(
+            program.contains("M620 S255\nT255\nM621 S255\n"),
+            "{setup_id}"
+        );
+        assert!(program.contains("; filament: 1,2\n"), "{setup_id}");
+
+        let bytes = encode(&built);
+        let hash = SourceHash::from_bytes(&bytes);
+        let report = inspect_bundle(&built, &hash, VerificationOutput::ReportOnly, &cancel)
+            .unwrap()
+            .report;
+        assert!(report.verified);
+        let ams_rep = report.ams.as_ref().expect("AMS verification report");
+        assert!(
+            ams_rep.change_count >= 2,
+            "{setup_id}: expected >= 2 switches, got {}",
+            ams_rep.change_count
+        );
+        assert_eq!(ams_rep.sequence.first(), Some(&0));
+        assert!(ams_rep.slots[0].used_for_object);
+        assert!(ams_rep.slots[1].used_for_support);
+        assert!(ams_rep.slots[1].support_filament_length_mm > 0.0);
+        assert!(ams_rep.slots[1].flush_filament_length_mm > 0.0);
+        assert!(ams_rep.total_flush_filament_length_mm > 0.0);
+        assert!(ams_rep.tower_layers > 0);
+        assert!(ams_rep.total_tower_filament_length_mm > 0.0);
+
+        // Delivery package writes 14 deterministic members and passes independent re-read.
+        let pkg = delivery_package(&built, &hash, &report, &objects, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pkg.info.members.len(), 14, "{setup_id}");
+        assert!(
+            pkg.info
+                .members
+                .contains(&"Metadata/filament_sequence.json".to_string())
+        );
+        let pkg2 = delivery_package(&built, &hash, &report, &objects, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pkg.bytes, pkg2.bytes, "{setup_id}: deterministic 3MF bytes");
+        {
+            let mut archive =
+                zip::ZipArchive::new(std::io::Cursor::new(pkg.bytes.to_vec().unwrap())).unwrap();
+            let mut slice_xml = String::new();
+            std::io::Read::read_to_string(
+                &mut archive.by_name("Metadata/slice_info.config").unwrap(),
+                &mut slice_xml,
+            )
+            .unwrap();
+            assert!(
+                slice_xml.contains(r#"tray_info_idx="GFL99" type="PLA""#),
+                "{setup_id}: {slice_xml}"
+            );
+            assert!(
+                slice_xml.contains(r#"tray_info_idx="GFG99" type="PETG""#),
+                "{setup_id}: {slice_xml}"
+            );
+            assert!(
+                !slice_xml.contains(r#"used_g="0.00""#),
+                "{setup_id}: expected positive gram weights: {slice_xml}"
+            );
+        }
+
+        // Independent program tamper rejections.
+        if setup_id == "bambulab.a1.04" {
+            for (label, tampered) in [
+                (
+                    "shortened flush",
+                    program.replacen("G1 E50.000000 ", "G1 E1.000000 ", 1),
+                ),
+                ("missing M621", program.replacen("M621 S1A\n", "", 1)),
+                (
+                    "wrong switch slot",
+                    program.replacen("M620 S1A\n", "M620 S0A\n", 1),
+                ),
+                ("missing end unload", program.replacen("M620 S255\n", "", 1)),
+                ("empty wipe tower", {
+                    let start = program.find("; WIPE_TOWER_START\n").unwrap();
+                    let end = program[start..].find("; WIPE_TOWER_END\n").unwrap() + start;
+                    format!(
+                        "{}; WIPE_TOWER_START\nG92 E0\n{}",
+                        &program[..start],
+                        &program[end..]
+                    )
+                }),
+            ] {
+                assert_ne!(tampered, program, "{label}");
+                assert!(
+                    verify_bundle(&with_program(&built, &tampered), &cancel).is_err(),
+                    "tampered AMS program ({label}) must be rejected"
+                );
+            }
+
+            // Independent 3MF package tamper rejections.
+            let original = pkg.bytes.to_vec().unwrap();
+            let rewrite = |name: &str, drop_member: bool, edit: &dyn Fn(Vec<u8>) -> Vec<u8>| {
+                let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&original)).unwrap();
+                let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i).unwrap();
+                    let member = file.name().to_string();
+                    if drop_member && member == name {
+                        continue;
+                    }
+                    let mut data = Vec::new();
+                    std::io::Read::read_to_end(&mut file, &mut data).unwrap();
+                    if member == name {
+                        data = edit(data);
+                    }
+                    out.start_file(member, zip::write::SimpleFileOptions::default())
+                        .unwrap();
+                    std::io::Write::write_all(&mut out, &data).unwrap();
+                }
+                let raw = out.finish().unwrap().into_inner();
+                ChunkSource::from_slice(&raw, MAX_DELIVERY_PACKAGE_BYTES).unwrap()
+            };
+            let replace = |from: &'static str, to: &'static str| {
+                move |d: Vec<u8>| {
+                    String::from_utf8(d)
+                        .unwrap()
+                        .replacen(from, to, 1)
+                        .into_bytes()
+                }
+            };
+            for (label, member, drop_member, edit) in [
+                (
+                    "missing filament_sequence.json",
+                    "Metadata/filament_sequence.json",
+                    true,
+                    &(|d| d) as &dyn Fn(Vec<u8>) -> Vec<u8>,
+                ),
+                (
+                    "mutated filament_sequence",
+                    "Metadata/filament_sequence.json",
+                    false,
+                    &replace("[1,2", "[1,1"),
+                ),
+                (
+                    "mutated slot2 colour",
+                    "Metadata/slice_info.config",
+                    false,
+                    &replace("color=\"#FF6600\"", "color=\"#000000\""),
+                ),
+                (
+                    "mutated multi-material flag",
+                    "Metadata/project_settings.config",
+                    false,
+                    &replace(
+                        "\"single_extruder_multi_material\": \"1\"",
+                        "\"single_extruder_multi_material\": \"0\"",
+                    ),
+                ),
+                (
+                    "mutated wipe_tower bbox",
+                    "Metadata/plate_1.json",
+                    false,
+                    &replace("\"wipe_tower\"", "\"other_tower\""),
+                ),
+            ] {
+                let mutated = rewrite(member, drop_member, edit);
+                assert!(
+                    verifier::package::verify_bambu_package(
+                        &mutated,
+                        &built.program,
+                        &built.bundle,
+                        &hash,
+                        &report,
+                        1,
+                        &cancel,
+                    )
+                    .is_err(),
+                    "tampered AMS package ({label}) must be rejected"
+                );
+            }
+
+            // Prime tower overlapping part geometry is refused before emitting.
+            let mut colliding = intent.clone();
+            if let JobWorkflow::CompleteMarlin { job } = &mut colliding.printer.workflow
+                && let Some(DeliveryPackage::BambuGcode3mf { ams: Some(ams), .. }) =
+                    &mut job.delivery
+            {
+                ams.prime_tower.as_mut().unwrap().origin_xy_mm = [75.0, 75.0];
+            }
+            colliding.hardware = None;
+            assert!(scene.compile(&colliding).is_err());
+        }
+    }
+}
